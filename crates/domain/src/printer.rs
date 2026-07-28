@@ -15,6 +15,10 @@ pub enum PrinterState {
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(default)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "mirrors independent driver capability flags"
+)]
 pub struct PrinterCapabilities {
     pub bins: Vec<String>,
     pub collate: bool,

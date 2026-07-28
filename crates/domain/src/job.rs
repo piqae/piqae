@@ -108,7 +108,7 @@ impl JobState {
     }
 
     #[must_use]
-    pub fn can_transition_to(self, next: Self) -> bool {
+    pub const fn can_transition_to(self, next: Self) -> bool {
         use JobState::{
             AcceptedBySpooler, AgentAccepted, AgentDownloading, Blocked, CancelRequested,
             Cancelled, CompletedReported, ContentPending, DeliveryUncertain, Expired,
@@ -227,7 +227,12 @@ pub struct StateTransitionError {
     pub to: JobState,
 }
 
-pub fn validate_transition(from: JobState, to: JobState) -> Result<(), StateTransitionError> {
+/// Confirms that a state change is permitted by the canonical state machine.
+///
+/// # Errors
+///
+/// Returns [`StateTransitionError`] when the transition is not permitted.
+pub const fn validate_transition(from: JobState, to: JobState) -> Result<(), StateTransitionError> {
     if from.can_transition_to(to) {
         Ok(())
     } else {

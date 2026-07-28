@@ -84,6 +84,12 @@ pub enum VerificationError {
 }
 
 impl SignedMetadata {
+    /// Verifies trust, expiry, rollback protection, target policy, and the
+    /// Ed25519 signature.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VerificationError`] when any trust or policy check fails.
     pub fn verify(
         &self,
         trusted_key: &VerifyingKey,
