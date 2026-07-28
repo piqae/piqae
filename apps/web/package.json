@@ -1,0 +1,36 @@
+{
+  "name": "@spool/web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite dev",
+    "build": "vite build",
+    "build:vercel": "SPOOL_DEPLOYMENT_TARGET=vercel vite build",
+    "build:self-host": "SPOOL_DEPLOYMENT_TARGET=node vite build",
+    "preview": "vite preview",
+    "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:e2e": "playwright test"
+  },
+  "dependencies": {
+    "@spool/sdk": "file:../../sdk/typescript",
+    "@sveltejs/kit": "^2.22.5",
+    "@workos/authkit-sveltekit": "0.3.0",
+    "svelte": "^5.35.2"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.54.1",
+    "@sveltejs/adapter-node": "^5.2.13",
+    "@sveltejs/adapter-vercel": "^5.8.2",
+    "@sveltejs/vite-plugin-svelte": "^5.1.0",
+    "@testing-library/jest-dom": "^6.6.3",
+    "@testing-library/svelte": "^5.2.8",
+    "jsdom": "^26.1.0",
+    "svelte-check": "^4.2.2",
+    "typescript": "^5.8.3",
+    "vite": "^6.3.5",
+    "vitest": "^3.2.4"
+  }
+}
