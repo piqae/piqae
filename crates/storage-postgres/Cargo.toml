@@ -6,11 +6,14 @@ license = "AGPL-3.0-only"
 
 [dependencies]
 chrono.workspace = true
+base64.workspace = true
+rand.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 sqlx = { workspace = true, features = ["macros"] }
 thiserror.workspace = true
+uuid.workspace = true
 spool-domain.workspace = true
 
 [dev-dependencies]

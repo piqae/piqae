@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 license = "AGPL-3.0-only"
 
+[[bin]]
+name = "spool-server"
+path = "src/main.rs"
+
 [dependencies]
 async-trait.workspace = true
 async-stream = "0.3"
@@ -12,8 +16,12 @@ axum.workspace = true
 base64.workspace = true
 bytes.workspace = true
 chrono.workspace = true
+ed25519-dalek.workspace = true
 futures.workspace = true
 http.workspace = true
+hex.workspace = true
+rand.workspace = true
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_urlencoded = "0.7"
@@ -27,10 +35,14 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 ulid.workspace = true
 url.workspace = true
+uuid.workspace = true
 
 spool-domain.workspace = true
+spool-object-store = { path = "../object-store" }
 spool-protocol.workspace = true
+spool-auth = { path = "../auth" }
 spool-storage-postgres = { path = "../storage-postgres" }
+spool-webhooks = { path = "../webhooks" }
 
 [dev-dependencies]
 http-body-util = "0.1"

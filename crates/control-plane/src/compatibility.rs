@@ -385,12 +385,111 @@ pub(crate) async fn get_print_job_states(
     ))
 }
 
-pub(crate) async fn empty_list(
+#[derive(Debug, Serialize)]
+pub(crate) struct CompatibilityComputer {
+    id: i64,
+    name: String,
+    state: &'static str,
+    version: String,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct CompatibilityPrinter {
+    id: i64,
+    name: String,
+    computer: CompatibilityComputerReference,
+    #[serde(rename = "default")]
+    is_default: bool,
+    state: &'static str,
+    capabilities: spool_domain::PrinterCapabilities,
+}
+
+#[derive(Debug, Serialize)]
+struct CompatibilityComputerReference {
+    id: i64,
+}
+
+pub(crate) async fn list_computers(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Result<Json<Vec<serde_json::Value>>, AppError> {
-    authenticate_compatibility(&state, &headers).await?;
-    Ok(Json(Vec::new()))
+) -> Result<Json<Vec<CompatibilityComputer>>, AppError> {
+    let tenant = authenticate_compatibility(&state, &headers).await?;
+    let mut response = Vec::new();
+    for agent in state
+        .repository
+        .list_agents(tenant.workspace_id, tenant.environment_id)
+        .await
+        .map_err(|error| AppError::from(error).compatibility())?
+    {
+        let id = state
+            .repository
+            .compatibility_id(
+                tenant.workspace_id,
+                tenant.environment_id,
+                "computer",
+                &agent.id.to_string(),
+            )
+            .await
+            .map_err(|error| AppError::from(error).compatibility())?;
+        response.push(CompatibilityComputer {
+            id,
+            name: agent.name,
+            state: if agent.state == "connected" {
+                "connected"
+            } else {
+                "disconnected"
+            },
+            version: agent.version,
+        });
+    }
+    Ok(Json(response))
+}
+
+pub(crate) async fn list_printers(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<CompatibilityPrinter>>, AppError> {
+    let tenant = authenticate_compatibility(&state, &headers).await?;
+    let mut response = Vec::new();
+    for printer in state
+        .repository
+        .list_printers(tenant.workspace_id, tenant.environment_id, 500)
+        .await
+        .map_err(|error| AppError::from(error).compatibility())?
+    {
+        let id = state
+            .repository
+            .compatibility_id(
+                tenant.workspace_id,
+                tenant.environment_id,
+                "printer",
+                &printer.id.to_string(),
+            )
+            .await
+            .map_err(|error| AppError::from(error).compatibility())?;
+        let computer_id = state
+            .repository
+            .compatibility_id(
+                tenant.workspace_id,
+                tenant.environment_id,
+                "computer",
+                &printer.agent_id.to_string(),
+            )
+            .await
+            .map_err(|error| AppError::from(error).compatibility())?;
+        response.push(CompatibilityPrinter {
+            id,
+            name: printer.name,
+            computer: CompatibilityComputerReference { id: computer_id },
+            is_default: false,
+            state: match printer.state {
+                spool_domain::PrinterState::Online | spool_domain::PrinterState::Busy => "online",
+                _ => "offline",
+            },
+            capabilities: printer.capabilities,
+        });
+    }
+    Ok(Json(response))
 }
 
 fn decode_request(headers: &HeaderMap, body: &[u8]) -> Result<PrintJobRequest, AppError> {

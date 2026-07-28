@@ -1,5 +1,8 @@
 //! Content-addressed object storage used by the hosted and self-hosted control plane.
 
+use apache_object_store::{
+    ObjectStore as ApacheObjectStore, aws::AmazonS3Builder, path::Path as ObjectPath,
+};
 use async_trait::async_trait;
 use bytes::Bytes;
 use sha2::{Digest, Sha256};
@@ -24,6 +27,99 @@ pub enum ObjectStoreError {
     InvalidKey,
     #[error("object store I/O failed: {0}")]
     Io(#[from] std::io::Error),
+    #[error("S3-compatible object operation failed: {0}")]
+    S3(String),
+}
+
+#[derive(Debug, Clone)]
+pub struct S3ObjectStore {
+    inner: Arc<dyn ApacheObjectStore>,
+}
+
+#[derive(Debug, Clone)]
+pub struct S3Configuration {
+    pub bucket: String,
+    pub region: String,
+    pub endpoint: Option<String>,
+    pub access_key_id: String,
+    pub secret_access_key: String,
+    pub allow_http: bool,
+    pub virtual_hosted_style: bool,
+}
+
+impl S3ObjectStore {
+    pub fn new(configuration: S3Configuration) -> Result<Self, ObjectStoreError> {
+        let mut builder = AmazonS3Builder::new()
+            .with_bucket_name(configuration.bucket)
+            .with_region(configuration.region)
+            .with_access_key_id(configuration.access_key_id)
+            .with_secret_access_key(configuration.secret_access_key)
+            .with_allow_http(configuration.allow_http)
+            .with_virtual_hosted_style_request(configuration.virtual_hosted_style);
+        if let Some(endpoint) = configuration.endpoint {
+            builder = builder.with_endpoint(endpoint);
+        }
+        let inner = builder
+            .build()
+            .map_err(|error| ObjectStoreError::S3(error.to_string()))?;
+        Ok(Self {
+            inner: Arc::new(inner),
+        })
+    }
+}
+
+#[async_trait]
+impl ObjectStore for S3ObjectStore {
+    async fn put(
+        &self,
+        key: &str,
+        content: Bytes,
+        expected_sha256: Option<&str>,
+    ) -> Result<StoredObject, ObjectStoreError> {
+        validate_key(key)?;
+        let sha256 = digest_hex(&content);
+        if expected_sha256.is_some_and(|expected| !expected.eq_ignore_ascii_case(&sha256)) {
+            return Err(ObjectStoreError::DigestMismatch);
+        }
+        let bytes = content.len() as u64;
+        self.inner
+            .put(&ObjectPath::from(key), content.into())
+            .await
+            .map_err(|error| ObjectStoreError::S3(error.to_string()))?;
+        Ok(StoredObject {
+            key: key.to_owned(),
+            sha256,
+            bytes,
+        })
+    }
+
+    async fn get(&self, key: &str) -> Result<Bytes, ObjectStoreError> {
+        validate_key(key)?;
+        self.inner
+            .get(&ObjectPath::from(key))
+            .await
+            .map_err(|error| ObjectStoreError::S3(error.to_string()))?
+            .bytes()
+            .await
+            .map_err(|error| ObjectStoreError::S3(error.to_string()))
+    }
+
+    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+        validate_key(key)?;
+        self.inner
+            .delete(&ObjectPath::from(key))
+            .await
+            .map_err(|error| ObjectStoreError::S3(error.to_string()))
+    }
+
+    async fn exists(&self, key: &str) -> Result<bool, ObjectStoreError> {
+        validate_key(key)?;
+        match self.inner.head(&ObjectPath::from(key)).await {
+            Ok(_) => Ok(true),
+            Err(apache_object_store::Error::NotFound { .. }) => Ok(false),
+            Err(error) => Err(ObjectStoreError::S3(error.to_string())),
+        }
+    }
 }
 
 #[async_trait]

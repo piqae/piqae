@@ -68,6 +68,28 @@ impl AppError {
     }
 
     #[must_use]
+    pub fn service_unavailable(code: &'static str) -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code,
+            message: "A required service is temporarily unavailable.".into(),
+            retryable: true,
+            compatibility: false,
+        }
+    }
+
+    #[must_use]
+    pub fn device_unauthorized(code: &'static str) -> Self {
+        Self {
+            status: StatusCode::UNAUTHORIZED,
+            code,
+            message: "Agent request authentication failed.".into(),
+            retryable: false,
+            compatibility: false,
+        }
+    }
+
+    #[must_use]
     pub const fn compatibility(mut self) -> Self {
         self.compatibility = true;
         self

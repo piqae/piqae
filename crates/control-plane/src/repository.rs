@@ -7,15 +7,18 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use spool_domain::{
-    AgentId, EnvironmentId, EventId, Job, JobEvent, JobFailureReason, JobId, JobState, PrinterId,
-    WorkspaceId, validate_transition,
+    AgentId, EnvironmentId, EventId, Job, JobEvent, JobFailureReason, JobId, JobState,
+    PrinterCapabilities, PrinterId, PrinterState, WorkspaceId, validate_transition,
 };
 use spool_storage_postgres::{
-    CreateJobResult as PgCreateJobResult, JobLease, PostgresStore, StorageError,
+    AgentAuthenticationRecord, CreateJobResult as PgCreateJobResult, EnrolledAgent, JobLease,
+    PostgresStore, StorageError, StoredAgent, StoredPrinter, StoredUpload, StoredWebhook,
+    StoredWebhookDelivery,
 };
 use std::{collections::HashMap, sync::Arc};
 use thiserror::Error;
 use tokio::sync::RwLock;
+use uuid::Uuid;
 
 #[derive(Clone, Debug)]
 pub enum CreateResult {
@@ -52,6 +55,98 @@ impl From<StorageError> for RepositoryError {
 #[async_trait]
 pub trait Repository: Send + Sync + 'static {
     async fn ready(&self) -> Result<(), RepositoryError>;
+    async fn agent_for_authentication(
+        &self,
+        agent_id: AgentId,
+    ) -> Result<AgentAuthenticationRecord, RepositoryError>;
+    async fn reserve_agent_nonce(
+        &self,
+        agent_id: AgentId,
+        nonce: &str,
+        expires_at: DateTime<Utc>,
+    ) -> Result<(), RepositoryError>;
+    async fn list_agents(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+    ) -> Result<Vec<StoredAgent>, RepositoryError>;
+    async fn list_printers(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        limit: i64,
+    ) -> Result<Vec<StoredPrinter>, RepositoryError>;
+    async fn create_enrolment(
+        &self,
+        id: &str,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        secret_hash: &str,
+        expires_at: DateTime<Utc>,
+    ) -> Result<(), RepositoryError>;
+    async fn enrol_agent(
+        &self,
+        secret_hash: &str,
+        public_key: &[u8],
+        name: &str,
+        hostname: &str,
+        platform: &str,
+        architecture: &str,
+        version: &str,
+        protocol_version: u16,
+    ) -> Result<EnrolledAgent, RepositoryError>;
+    async fn list_webhooks(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+    ) -> Result<Vec<StoredWebhook>, RepositoryError>;
+    async fn create_webhook(
+        &self,
+        id: &str,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        url: &str,
+        events: &[String],
+        secret_ciphertext: &[u8],
+    ) -> Result<StoredWebhook, RepositoryError>;
+    async fn delete_webhook(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        id: &str,
+    ) -> Result<(), RepositoryError>;
+    async fn list_webhook_deliveries(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        webhook_id: &str,
+    ) -> Result<Vec<StoredWebhookDelivery>, RepositoryError>;
+    async fn replay_webhook_delivery(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        delivery_id: &str,
+    ) -> Result<(), RepositoryError>;
+    async fn create_upload(
+        &self,
+        upload: &StoredUpload,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+    ) -> Result<(), RepositoryError>;
+    async fn get_upload(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        upload_id: &str,
+    ) -> Result<StoredUpload, RepositoryError>;
+    async fn complete_upload(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        upload_id: &str,
+        actual_sha256: &str,
+        actual_bytes: i64,
+    ) -> Result<StoredUpload, RepositoryError>;
     async fn resolve_printer_agent(
         &self,
         workspace_id: WorkspaceId,
@@ -107,6 +202,35 @@ pub trait Repository: Send + Sync + 'static {
         job_id: JobId,
         owner: &str,
     ) -> Result<DateTime<Utc>, RepositoryError>;
+    async fn renew_agent_lease(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        job_id: JobId,
+        lease_id: Uuid,
+        lease_token: &str,
+    ) -> Result<DateTime<Utc>, RepositoryError>;
+    async fn release_agent_lease(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        job_id: JobId,
+        lease_id: Uuid,
+        lease_token: &str,
+    ) -> Result<(), RepositoryError>;
+    async fn accept_agent_job(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        job_id: JobId,
+        lease_id: Uuid,
+        lease_token: &str,
+        content_sha256: Option<&str>,
+        local_sequence: u64,
+    ) -> Result<Job, RepositoryError>;
     async fn compatibility_id(
         &self,
         workspace_id: WorkspaceId,
@@ -129,6 +253,67 @@ impl Repository for PostgresStore {
         self.readiness().await.map_err(Into::into)
     }
 
+    async fn agent_for_authentication(
+        &self,
+        agent_id: AgentId,
+    ) -> Result<AgentAuthenticationRecord, RepositoryError> {
+        Self::agent_for_authentication(self, agent_id)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn reserve_agent_nonce(
+        &self,
+        agent_id: AgentId,
+        nonce: &str,
+        expires_at: DateTime<Utc>,
+    ) -> Result<(), RepositoryError> {
+        Self::reserve_agent_nonce(self, agent_id, nonce, expires_at)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn list_agents(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+    ) -> Result<Vec<StoredAgent>, RepositoryError> {
+        Self::list_agents(self, workspace_id, environment_id)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn list_printers(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        limit: i64,
+    ) -> Result<Vec<StoredPrinter>, RepositoryError> {
+        Self::list_printers(self, workspace_id, environment_id, limit)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn create_enrolment(
+        &self,
+        id: &str,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        secret_hash: &str,
+        expires_at: DateTime<Utc>,
+    ) -> Result<(), RepositoryError> {
+        Self::create_enrolment(
+            self,
+            id,
+            workspace_id,
+            environment_id,
+            secret_hash,
+            expires_at,
+        )
+        .await
+        .map_err(Into::into)
+    }
+
     async fn resolve_printer_agent(
         &self,
         workspace_id: WorkspaceId,
@@ -138,6 +323,139 @@ impl Repository for PostgresStore {
         PostgresStore::resolve_printer_agent(self, workspace_id, environment_id, printer_id)
             .await
             .map_err(Into::into)
+    }
+
+    async fn enrol_agent(
+        &self,
+        secret_hash: &str,
+        public_key: &[u8],
+        name: &str,
+        hostname: &str,
+        platform: &str,
+        architecture: &str,
+        version: &str,
+        protocol_version: u16,
+    ) -> Result<EnrolledAgent, RepositoryError> {
+        Self::enrol_agent(
+            self,
+            secret_hash,
+            public_key,
+            name,
+            hostname,
+            platform,
+            architecture,
+            version,
+            protocol_version,
+        )
+        .await
+        .map_err(Into::into)
+    }
+
+    async fn list_webhooks(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+    ) -> Result<Vec<StoredWebhook>, RepositoryError> {
+        Self::list_webhooks(self, workspace_id, environment_id)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn create_webhook(
+        &self,
+        id: &str,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        url: &str,
+        events: &[String],
+        secret_ciphertext: &[u8],
+    ) -> Result<StoredWebhook, RepositoryError> {
+        Self::create_webhook(
+            self,
+            id,
+            workspace_id,
+            environment_id,
+            url,
+            events,
+            secret_ciphertext,
+        )
+        .await
+        .map_err(Into::into)
+    }
+
+    async fn delete_webhook(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        id: &str,
+    ) -> Result<(), RepositoryError> {
+        Self::delete_webhook(self, workspace_id, environment_id, id)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn list_webhook_deliveries(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        webhook_id: &str,
+    ) -> Result<Vec<StoredWebhookDelivery>, RepositoryError> {
+        Self::list_webhook_deliveries(self, workspace_id, environment_id, webhook_id)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn replay_webhook_delivery(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        delivery_id: &str,
+    ) -> Result<(), RepositoryError> {
+        Self::replay_webhook_delivery(self, workspace_id, environment_id, delivery_id)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn create_upload(
+        &self,
+        upload: &StoredUpload,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+    ) -> Result<(), RepositoryError> {
+        Self::create_upload(self, upload, workspace_id, environment_id)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn get_upload(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        upload_id: &str,
+    ) -> Result<StoredUpload, RepositoryError> {
+        Self::get_upload(self, workspace_id, environment_id, upload_id)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn complete_upload(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        upload_id: &str,
+        actual_sha256: &str,
+        actual_bytes: i64,
+    ) -> Result<StoredUpload, RepositoryError> {
+        Self::complete_upload(
+            self,
+            workspace_id,
+            environment_id,
+            upload_id,
+            actual_sha256,
+            actual_bytes,
+        )
+        .await
+        .map_err(Into::into)
     }
 
     async fn create_job(
@@ -241,6 +559,76 @@ impl Repository for PostgresStore {
             .map_err(Into::into)
     }
 
+    async fn renew_agent_lease(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        job_id: JobId,
+        lease_id: Uuid,
+        lease_token: &str,
+    ) -> Result<DateTime<Utc>, RepositoryError> {
+        Self::renew_agent_lease(
+            self,
+            workspace_id,
+            environment_id,
+            agent_id,
+            job_id,
+            lease_id,
+            lease_token,
+        )
+        .await
+        .map_err(Into::into)
+    }
+
+    async fn release_agent_lease(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        job_id: JobId,
+        lease_id: Uuid,
+        lease_token: &str,
+    ) -> Result<(), RepositoryError> {
+        Self::release_agent_lease(
+            self,
+            workspace_id,
+            environment_id,
+            agent_id,
+            job_id,
+            lease_id,
+            lease_token,
+        )
+        .await
+        .map_err(Into::into)
+    }
+
+    async fn accept_agent_job(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        job_id: JobId,
+        lease_id: Uuid,
+        lease_token: &str,
+        content_sha256: Option<&str>,
+        local_sequence: u64,
+    ) -> Result<Job, RepositoryError> {
+        Self::accept_agent_job(
+            self,
+            workspace_id,
+            environment_id,
+            agent_id,
+            job_id,
+            lease_id,
+            lease_token,
+            content_sha256,
+            local_sequence,
+        )
+        .await
+        .map_err(Into::into)
+    }
+
     async fn compatibility_id(
         &self,
         workspace_id: WorkspaceId,
@@ -289,7 +677,15 @@ struct MemoryJob {
 #[derive(Debug, Default)]
 struct MemoryState {
     jobs: HashMap<JobId, MemoryJob>,
-    printers: HashMap<PrinterId, (WorkspaceId, EnvironmentId, AgentId)>,
+    printers: HashMap<PrinterId, (WorkspaceId, EnvironmentId, StoredPrinter)>,
+    agents: HashMap<AgentId, (WorkspaceId, EnvironmentId, StoredAgent)>,
+    agent_public_keys: HashMap<AgentId, Vec<u8>>,
+    enrolments: HashMap<String, (WorkspaceId, EnvironmentId, String, DateTime<Utc>)>,
+    webhooks: HashMap<String, (WorkspaceId, EnvironmentId, StoredWebhook, Vec<u8>)>,
+    webhook_deliveries: HashMap<String, (WorkspaceId, EnvironmentId, StoredWebhookDelivery)>,
+    uploads: HashMap<String, (WorkspaceId, EnvironmentId, StoredUpload)>,
+    agent_nonces: HashMap<(AgentId, String), DateTime<Utc>>,
+    leases: HashMap<JobId, (AgentId, Uuid, String, DateTime<Utc>)>,
     idempotency: HashMap<(WorkspaceId, EnvironmentId, String), (Vec<u8>, JobId)>,
     compatibility: HashMap<(WorkspaceId, EnvironmentId, String, String), i64>,
     reverse_compatibility: HashMap<(WorkspaceId, EnvironmentId, String, i64), String>,
@@ -309,11 +705,44 @@ impl MemoryRepository {
         printer_id: PrinterId,
         agent_id: AgentId,
     ) {
+        self.state.write().await.printers.insert(
+            printer_id,
+            (
+                workspace_id,
+                environment_id,
+                StoredPrinter {
+                    id: printer_id,
+                    agent_id,
+                    name: "Test printer".into(),
+                    state: PrinterState::Online,
+                    capabilities: PrinterCapabilities::default(),
+                    updated_at: Utc::now(),
+                },
+            ),
+        );
+        self.state.write().await.agents.insert(
+            agent_id,
+            (
+                workspace_id,
+                environment_id,
+                StoredAgent {
+                    id: agent_id,
+                    name: "Test agent".into(),
+                    platform: "test".into(),
+                    state: "connected".into(),
+                    version: env!("CARGO_PKG_VERSION").into(),
+                    last_seen_at: Utc::now(),
+                },
+            ),
+        );
+    }
+
+    pub async fn set_agent_public_key(&self, agent_id: AgentId, public_key: Vec<u8>) {
         self.state
             .write()
             .await
-            .printers
-            .insert(printer_id, (workspace_id, environment_id, agent_id));
+            .agent_public_keys
+            .insert(agent_id, public_key);
     }
 }
 
@@ -321,6 +750,308 @@ impl MemoryRepository {
 impl Repository for MemoryRepository {
     async fn ready(&self) -> Result<(), RepositoryError> {
         Ok(())
+    }
+
+    async fn agent_for_authentication(
+        &self,
+        agent_id: AgentId,
+    ) -> Result<AgentAuthenticationRecord, RepositoryError> {
+        let state = self.state.read().await;
+        state
+            .agents
+            .get(&agent_id)
+            .map(|(workspace, environment, _)| AgentAuthenticationRecord {
+                workspace_id: *workspace,
+                environment_id: *environment,
+                public_key: state
+                    .agent_public_keys
+                    .get(&agent_id)
+                    .cloned()
+                    .unwrap_or_default(),
+            })
+            .ok_or(RepositoryError::NotFound)
+    }
+
+    async fn reserve_agent_nonce(
+        &self,
+        agent_id: AgentId,
+        nonce: &str,
+        expires_at: DateTime<Utc>,
+    ) -> Result<(), RepositoryError> {
+        let mut state = self.state.write().await;
+        if state
+            .agent_nonces
+            .insert((agent_id, nonce.to_owned()), expires_at)
+            .is_some()
+        {
+            return Err(RepositoryError::ConcurrentStateChange);
+        }
+        Ok(())
+    }
+
+    async fn list_agents(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+    ) -> Result<Vec<StoredAgent>, RepositoryError> {
+        Ok(self
+            .state
+            .read()
+            .await
+            .agents
+            .values()
+            .filter(|(workspace, environment, _)| {
+                *workspace == workspace_id && *environment == environment_id
+            })
+            .map(|(_, _, agent)| agent.clone())
+            .collect())
+    }
+
+    async fn list_printers(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        limit: i64,
+    ) -> Result<Vec<StoredPrinter>, RepositoryError> {
+        Ok(self
+            .state
+            .read()
+            .await
+            .printers
+            .values()
+            .filter(|(workspace, environment, _)| {
+                *workspace == workspace_id && *environment == environment_id
+            })
+            .map(|(_, _, printer)| printer.clone())
+            .take(usize::try_from(limit.clamp(1, 500)).unwrap_or(500))
+            .collect())
+    }
+
+    async fn create_enrolment(
+        &self,
+        id: &str,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        secret_hash: &str,
+        expires_at: DateTime<Utc>,
+    ) -> Result<(), RepositoryError> {
+        self.state.write().await.enrolments.insert(
+            id.to_owned(),
+            (
+                workspace_id,
+                environment_id,
+                secret_hash.to_owned(),
+                expires_at,
+            ),
+        );
+        Ok(())
+    }
+
+    async fn enrol_agent(
+        &self,
+        secret_hash: &str,
+        public_key: &[u8],
+        name: &str,
+        _hostname: &str,
+        platform: &str,
+        _architecture: &str,
+        version: &str,
+        _protocol_version: u16,
+    ) -> Result<EnrolledAgent, RepositoryError> {
+        let mut state = self.state.write().await;
+        let (token_id, (workspace_id, environment_id, _, _)) = state
+            .enrolments
+            .iter()
+            .find(|(_, (_, _, stored_hash, expires))| {
+                stored_hash == secret_hash && *expires > Utc::now()
+            })
+            .map(|(id, value)| (id.clone(), value.clone()))
+            .ok_or(RepositoryError::NotFound)?;
+        state.enrolments.remove(&token_id);
+        let agent_id = AgentId::new();
+        state.agents.insert(
+            agent_id,
+            (
+                workspace_id,
+                environment_id,
+                StoredAgent {
+                    id: agent_id,
+                    name: name.into(),
+                    platform: platform.into(),
+                    state: "connected".into(),
+                    version: version.into(),
+                    last_seen_at: Utc::now(),
+                },
+            ),
+        );
+        state
+            .agent_public_keys
+            .insert(agent_id, public_key.to_vec());
+        Ok(EnrolledAgent {
+            agent_id,
+            workspace_id,
+            environment_id,
+        })
+    }
+
+    async fn list_webhooks(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+    ) -> Result<Vec<StoredWebhook>, RepositoryError> {
+        Ok(self
+            .state
+            .read()
+            .await
+            .webhooks
+            .values()
+            .filter(|(workspace, environment, _, _)| {
+                *workspace == workspace_id && *environment == environment_id
+            })
+            .map(|(_, _, webhook, _)| webhook.clone())
+            .collect())
+    }
+
+    async fn create_webhook(
+        &self,
+        id: &str,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        url: &str,
+        events: &[String],
+        secret_ciphertext: &[u8],
+    ) -> Result<StoredWebhook, RepositoryError> {
+        let webhook = StoredWebhook {
+            id: id.to_owned(),
+            url: url.to_owned(),
+            events: events.to_vec(),
+            enabled: true,
+            created_at: Utc::now(),
+        };
+        self.state.write().await.webhooks.insert(
+            id.to_owned(),
+            (
+                workspace_id,
+                environment_id,
+                webhook.clone(),
+                secret_ciphertext.to_vec(),
+            ),
+        );
+        Ok(webhook)
+    }
+
+    async fn delete_webhook(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        id: &str,
+    ) -> Result<(), RepositoryError> {
+        let mut state = self.state.write().await;
+        match state.webhooks.get(id) {
+            Some((workspace, environment, _, _))
+                if *workspace == workspace_id && *environment == environment_id =>
+            {
+                state.webhooks.remove(id);
+                Ok(())
+            }
+            _ => Err(RepositoryError::NotFound),
+        }
+    }
+
+    async fn list_webhook_deliveries(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        _webhook_id: &str,
+    ) -> Result<Vec<StoredWebhookDelivery>, RepositoryError> {
+        Ok(self
+            .state
+            .read()
+            .await
+            .webhook_deliveries
+            .values()
+            .filter(|(workspace, environment, _)| {
+                *workspace == workspace_id && *environment == environment_id
+            })
+            .map(|(_, _, delivery)| delivery.clone())
+            .collect())
+    }
+
+    async fn replay_webhook_delivery(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        delivery_id: &str,
+    ) -> Result<(), RepositoryError> {
+        let mut state = self.state.write().await;
+        let (_, _, delivery) = state
+            .webhook_deliveries
+            .get_mut(delivery_id)
+            .filter(|(workspace, environment, _)| {
+                *workspace == workspace_id && *environment == environment_id
+            })
+            .ok_or(RepositoryError::NotFound)?;
+        delivery.next_attempt_at = Utc::now();
+        delivery.dead_lettered_at = None;
+        delivery.delivered_at = None;
+        delivery.response_status = None;
+        Ok(())
+    }
+
+    async fn create_upload(
+        &self,
+        upload: &StoredUpload,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+    ) -> Result<(), RepositoryError> {
+        self.state.write().await.uploads.insert(
+            upload.id.clone(),
+            (workspace_id, environment_id, upload.clone()),
+        );
+        Ok(())
+    }
+
+    async fn get_upload(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        upload_id: &str,
+    ) -> Result<StoredUpload, RepositoryError> {
+        self.state
+            .read()
+            .await
+            .uploads
+            .get(upload_id)
+            .filter(|(workspace, environment, _)| {
+                *workspace == workspace_id && *environment == environment_id
+            })
+            .map(|(_, _, upload)| upload.clone())
+            .ok_or(RepositoryError::NotFound)
+    }
+
+    async fn complete_upload(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        upload_id: &str,
+        actual_sha256: &str,
+        actual_bytes: i64,
+    ) -> Result<StoredUpload, RepositoryError> {
+        let mut state = self.state.write().await;
+        let (_, _, upload) = state
+            .uploads
+            .get_mut(upload_id)
+            .filter(|(workspace, environment, upload)| {
+                *workspace == workspace_id
+                    && *environment == environment_id
+                    && upload.state == "pending"
+                    && upload.expires_at > Utc::now()
+                    && upload.expected_sha256 == actual_sha256
+                    && upload.expected_bytes == actual_bytes
+            })
+            .ok_or(RepositoryError::NotFound)?;
+        upload.state = "complete".into();
+        Ok(upload.clone())
     }
 
     async fn resolve_printer_agent(
@@ -334,10 +1065,10 @@ impl Repository for MemoryRepository {
             .await
             .printers
             .get(&printer_id)
-            .filter(|(workspace, environment, _)| {
+            .filter(|(workspace, environment, _printer)| {
                 *workspace == workspace_id && *environment == environment_id
             })
-            .map(|(_, _, agent)| *agent)
+            .map(|(_, _, printer)| printer.agent_id)
             .ok_or(RepositoryError::NotFound)
     }
 
@@ -494,10 +1225,8 @@ impl Repository for MemoryRepository {
         limit: i64,
     ) -> Result<Vec<JobLease>, RepositoryError> {
         let lease_until = Utc::now() + chrono::Duration::seconds(30);
-        Ok(self
-            .state
-            .read()
-            .await
+        let mut state = self.state.write().await;
+        let jobs = state
             .jobs
             .values()
             .filter(|record| {
@@ -510,11 +1239,24 @@ impl Repository for MemoryRepository {
                     )
             })
             .take(usize::try_from(limit.clamp(1, 100)).unwrap_or(100))
-            .map(|record| JobLease {
-                job: record.job.clone(),
+            .map(|record| record.job.clone())
+            .collect::<Vec<_>>();
+        let mut leases = Vec::with_capacity(jobs.len());
+        for job in jobs {
+            let lease_id = Uuid::new_v4();
+            let lease_token = Uuid::new_v4().to_string();
+            state.leases.insert(
+                job.id,
+                (agent_id, lease_id, lease_token.clone(), lease_until),
+            );
+            leases.push(JobLease {
+                job,
+                lease_id,
+                lease_token,
                 lease_until,
-            })
-            .collect())
+            });
+        }
+        Ok(leases)
     }
 
     async fn renew_lease(
@@ -529,6 +1271,98 @@ impl Repository for MemoryRepository {
             .contains_key(&job_id)
             .then(|| Utc::now() + chrono::Duration::seconds(30))
             .ok_or(RepositoryError::NotFound)
+    }
+
+    async fn renew_agent_lease(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        job_id: JobId,
+        lease_id: Uuid,
+        lease_token: &str,
+    ) -> Result<DateTime<Utc>, RepositoryError> {
+        let mut state = self.state.write().await;
+        let record = state.jobs.get(&job_id).ok_or(RepositoryError::NotFound)?;
+        if record.job.workspace_id != workspace_id || record.job.environment_id != environment_id {
+            return Err(RepositoryError::NotFound);
+        }
+        let lease = state
+            .leases
+            .get_mut(&job_id)
+            .filter(|(stored_agent, stored_id, stored_token, expires)| {
+                *stored_agent == agent_id
+                    && *stored_id == lease_id
+                    && stored_token == lease_token
+                    && *expires > Utc::now()
+            })
+            .ok_or(RepositoryError::ConcurrentStateChange)?;
+        lease.3 = Utc::now() + chrono::Duration::seconds(30);
+        Ok(lease.3)
+    }
+
+    async fn release_agent_lease(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        job_id: JobId,
+        lease_id: Uuid,
+        lease_token: &str,
+    ) -> Result<(), RepositoryError> {
+        self.renew_agent_lease(
+            workspace_id,
+            environment_id,
+            agent_id,
+            job_id,
+            lease_id,
+            lease_token,
+        )
+        .await?;
+        self.state.write().await.leases.remove(&job_id);
+        Ok(())
+    }
+
+    async fn accept_agent_job(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        job_id: JobId,
+        lease_id: Uuid,
+        lease_token: &str,
+        _content_sha256: Option<&str>,
+        _local_sequence: u64,
+    ) -> Result<Job, RepositoryError> {
+        self.renew_agent_lease(
+            workspace_id,
+            environment_id,
+            agent_id,
+            job_id,
+            lease_id,
+            lease_token,
+        )
+        .await?;
+        let mut state = self.state.write().await;
+        state.leases.remove(&job_id);
+        let record = state
+            .jobs
+            .get_mut(&job_id)
+            .ok_or(RepositoryError::NotFound)?;
+        record.job.state = JobState::AgentAccepted;
+        record.sequence += 1;
+        record.events.push(JobEvent {
+            id: EventId::new(),
+            job_id,
+            sequence: record.sequence,
+            state: JobState::AgentAccepted,
+            reason: None,
+            message: Some("Agent durably accepted the job".into()),
+            agent_id: Some(agent_id),
+            native_job_id: None,
+            occurred_at: Utc::now(),
+        });
+        Ok(record.job.clone())
     }
 
     async fn compatibility_id(

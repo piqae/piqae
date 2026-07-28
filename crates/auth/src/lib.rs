@@ -106,6 +106,15 @@ pub fn verify_api_key(plaintext: &str, encoded_hash: &str) -> Result<(), AuthErr
         .map_err(|_| AuthError::InvalidKey)
 }
 
+pub fn api_key_lookup_prefix(plaintext: &str) -> Result<String, AuthError> {
+    if !(plaintext.starts_with("spl_test_") || plaintext.starts_with("spl_live_"))
+        || plaintext.len() < 17
+    {
+        return Err(AuthError::InvalidKey);
+    }
+    Ok(plaintext.chars().take(17).collect())
+}
+
 pub fn bearer_token(value: &str) -> Result<&str, AuthError> {
     value
         .strip_prefix("Bearer ")
@@ -138,5 +147,13 @@ mod tests {
             principal.require(Scope::JobsWrite),
             Err(AuthError::InsufficientScope)
         );
+    }
+
+    #[test]
+    fn lookup_prefix_never_contains_the_complete_secret() {
+        let key = generate_api_key(Environment::Test).unwrap();
+        let prefix = api_key_lookup_prefix(&key.plaintext).unwrap();
+        assert_eq!(prefix, key.lookup_prefix);
+        assert!(prefix.len() < key.plaintext.len());
     }
 }
