@@ -105,6 +105,17 @@ pub struct StoredUpload {
     pub expires_at: DateTime<Utc>,
 }
 
+#[derive(Clone, Debug)]
+pub struct WebhookDeliveryWork {
+    pub id: String,
+    pub event_id: String,
+    pub event_type: String,
+    pub url: String,
+    pub secret_ciphertext: Vec<u8>,
+    pub payload: serde_json::Value,
+    pub attempt: i32,
+}
+
 #[derive(Debug, Error)]
 pub enum StorageError {
     #[error("resource not found")]
@@ -531,6 +542,125 @@ impl PostgresStore {
         if result.rows_affected() == 0 {
             return Err(StorageError::NotFound);
         }
+        Ok(())
+    }
+
+    pub async fn enqueue_webhook_event(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        event_type: &str,
+        payload: &serde_json::Value,
+    ) -> Result<String, StorageError> {
+        let mut transaction = self.pool.begin().await?;
+        let event_id = EventId::new().to_string();
+        sqlx::query(
+            "INSERT INTO webhook_events (
+                id, workspace_id, environment_id, event_type, payload, occurred_at
+             ) VALUES ($1,$2,$3,$4,$5,now())",
+        )
+        .bind(&event_id)
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(event_type)
+        .bind(payload)
+        .execute(&mut *transaction)
+        .await?;
+        let endpoints = sqlx::query(
+            "SELECT id, url FROM webhook_endpoints
+             WHERE workspace_id = $1 AND environment_id = $2 AND enabled = true
+               AND $3 = ANY(subscribed_events)
+             FOR SHARE",
+        )
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(event_type)
+        .fetch_all(&mut *transaction)
+        .await?;
+        for endpoint in endpoints {
+            sqlx::query(
+                "INSERT INTO webhook_deliveries (
+                    id, endpoint_id, event_id, destination_url, next_attempt_at
+                 ) VALUES ($1,$2,$3,$4,now())",
+            )
+            .bind(format!("whd_{}", ulid::Ulid::new()))
+            .bind(endpoint.try_get::<String, _>("id")?)
+            .bind(&event_id)
+            .bind(endpoint.try_get::<String, _>("url")?)
+            .execute(&mut *transaction)
+            .await?;
+        }
+        transaction.commit().await?;
+        Ok(event_id)
+    }
+
+    pub async fn claim_webhook_deliveries(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<WebhookDeliveryWork>, StorageError> {
+        let rows = sqlx::query(
+            "WITH candidates AS (
+                SELECT id FROM webhook_deliveries
+                WHERE delivered_at IS NULL AND dead_lettered_at IS NULL
+                  AND next_attempt_at <= now()
+                  AND (claimed_until IS NULL OR claimed_until < now())
+                ORDER BY next_attempt_at, created_at
+                FOR UPDATE SKIP LOCKED LIMIT $1
+             )
+             UPDATE webhook_deliveries AS delivery
+             SET claimed_until = now() + interval '30 seconds'
+             FROM candidates, webhook_endpoints AS endpoint, webhook_events AS event
+             WHERE delivery.id = candidates.id
+               AND endpoint.id = delivery.endpoint_id
+               AND event.id = delivery.event_id
+             RETURNING delivery.id, delivery.event_id, delivery.destination_url,
+                       delivery.attempt, endpoint.secret_ciphertext,
+                       event.event_type, event.payload",
+        )
+        .bind(limit.clamp(1, 100))
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(WebhookDeliveryWork {
+                    id: row.try_get("id")?,
+                    event_id: row.try_get("event_id")?,
+                    event_type: row.try_get("event_type")?,
+                    url: row.try_get("destination_url")?,
+                    secret_ciphertext: row.try_get("secret_ciphertext")?,
+                    payload: row.try_get("payload")?,
+                    attempt: row.try_get("attempt")?,
+                })
+            })
+            .collect()
+    }
+
+    pub async fn record_webhook_attempt(
+        &self,
+        delivery_id: &str,
+        status: Option<i32>,
+        response_excerpt: Option<&str>,
+        next_attempt_at: Option<DateTime<Utc>>,
+        delivered: bool,
+    ) -> Result<(), StorageError> {
+        let dead_letter = !delivered && next_attempt_at.is_none();
+        sqlx::query(
+            "UPDATE webhook_deliveries
+             SET attempt = attempt + 1, response_status = $2, response_excerpt = $3,
+                 next_attempt_at = COALESCE($4, next_attempt_at),
+                 delivered_at = CASE WHEN $5 THEN now() ELSE delivered_at END,
+                 dead_lettered_at = CASE WHEN $6 THEN now() ELSE dead_lettered_at END,
+                 claimed_until = NULL
+             WHERE id = $1",
+        )
+        .bind(delivery_id)
+        .bind(status)
+        .bind(response_excerpt.map(|value| value.chars().take(2_048).collect::<String>()))
+        .bind(next_attempt_at)
+        .bind(delivered)
+        .bind(dead_letter)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 

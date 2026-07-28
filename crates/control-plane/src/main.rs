@@ -10,6 +10,7 @@ use spool_control_plane::{
     },
     repository::Repository,
     router,
+    webhook_worker::WebhookWorker,
 };
 use spool_domain::{EnvironmentId, WorkspaceId};
 use spool_object_store::{FileObjectStore, ObjectStore, S3Configuration, S3ObjectStore};
@@ -74,23 +75,34 @@ async fn main() -> Result<()> {
         None
     };
     let authenticator = CombinedAuthenticator::new(PostgresAuthenticator::new(store), bootstrap);
+    let application = AppState::new_with_resources(
+        repository,
+        Arc::new(authenticator),
+        webhook_key,
+        object_store,
+    );
+    let webhook_worker = WebhookWorker::new(application.clone());
+    let _webhook_worker = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_millis(500));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            match webhook_worker.run_once(25).await {
+                Ok(0) => {}
+                Ok(count) => tracing::debug!(count, "processed webhook deliveries"),
+                Err(error) => tracing::error!(%error, "webhook worker batch failed"),
+            }
+        }
+    });
     let address: SocketAddr = listen.parse().context("invalid SPOOL_LISTEN")?;
     let listener = tokio::net::TcpListener::bind(address)
         .await
         .context("bind HTTP listener")?;
     tracing::info!(%address, %workspace_id, %environment_id, "spool server listening");
-    axum::serve(
-        listener,
-        router(AppState::new_with_resources(
-            repository,
-            Arc::new(authenticator),
-            webhook_key,
-            object_store,
-        )),
-    )
-    .with_graceful_shutdown(shutdown_signal())
-    .await
-    .context("serve HTTP")
+    axum::serve(listener, router(application))
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+        .context("serve HTTP")
 }
 
 async fn build_object_store() -> Result<Arc<dyn ObjectStore>> {

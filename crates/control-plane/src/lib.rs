@@ -6,6 +6,7 @@ pub mod compatibility;
 pub mod device_auth;
 pub mod error;
 pub mod repository;
+pub mod webhook_worker;
 
 use authentication::{Authenticator, TenantContext};
 use axum::{
@@ -90,15 +91,34 @@ impl AppState {
         }
     }
 
-    pub fn publish(&self, tenant: TenantContext, event_type: &str, data: &impl Serialize) {
-        if let Ok(data) = serde_json::to_value(data) {
-            let _ = self.events.send(PublishedEvent {
-                id: format!("evt_{}", Ulid::new()),
-                tenant,
-                event_type: event_type.into(),
-                data,
-            });
-        }
+    /// Persists a tenant webhook event and broadcasts it to live subscribers.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the event cannot be serialized or persisted.
+    pub async fn publish(
+        &self,
+        tenant: TenantContext,
+        event_type: &str,
+        data: &(impl Serialize + Sync),
+    ) -> Result<(), repository::RepositoryError> {
+        let data = serde_json::to_value(data)
+            .map_err(|error| repository::RepositoryError::Persistence(error.to_string()))?;
+        self.repository
+            .enqueue_webhook_event(
+                tenant.workspace_id,
+                tenant.environment_id,
+                event_type,
+                &data,
+            )
+            .await?;
+        let _ = self.events.send(PublishedEvent {
+            id: format!("evt_{}", Ulid::new()),
+            tenant,
+            event_type: event_type.into(),
+            data,
+        });
+        Ok(())
     }
 }
 

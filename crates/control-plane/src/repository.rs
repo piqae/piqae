@@ -13,7 +13,7 @@ use spool_domain::{
 use spool_storage_postgres::{
     AgentAuthenticationRecord, CreateJobResult as PgCreateJobResult, EnrolledAgent, JobLease,
     PostgresStore, StorageError, StoredAgent, StoredPrinter, StoredUpload, StoredWebhook,
-    StoredWebhookDelivery,
+    StoredWebhookDelivery, WebhookDeliveryWork,
 };
 use std::{collections::HashMap, sync::Arc};
 use thiserror::Error;
@@ -126,6 +126,25 @@ pub trait Repository: Send + Sync + 'static {
         workspace_id: WorkspaceId,
         environment_id: EnvironmentId,
         delivery_id: &str,
+    ) -> Result<(), RepositoryError>;
+    async fn enqueue_webhook_event(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        event_type: &str,
+        payload: &serde_json::Value,
+    ) -> Result<String, RepositoryError>;
+    async fn claim_webhook_deliveries(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<WebhookDeliveryWork>, RepositoryError>;
+    async fn record_webhook_attempt(
+        &self,
+        delivery_id: &str,
+        status: Option<i32>,
+        response_excerpt: Option<&str>,
+        next_attempt_at: Option<DateTime<Utc>>,
+        delivered: bool,
     ) -> Result<(), RepositoryError>;
     async fn create_upload(
         &self,
@@ -416,6 +435,47 @@ impl Repository for PostgresStore {
             .map_err(Into::into)
     }
 
+    async fn enqueue_webhook_event(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        event_type: &str,
+        payload: &serde_json::Value,
+    ) -> Result<String, RepositoryError> {
+        Self::enqueue_webhook_event(self, workspace_id, environment_id, event_type, payload)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn claim_webhook_deliveries(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<WebhookDeliveryWork>, RepositoryError> {
+        Self::claim_webhook_deliveries(self, limit)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn record_webhook_attempt(
+        &self,
+        delivery_id: &str,
+        status: Option<i32>,
+        response_excerpt: Option<&str>,
+        next_attempt_at: Option<DateTime<Utc>>,
+        delivered: bool,
+    ) -> Result<(), RepositoryError> {
+        Self::record_webhook_attempt(
+            self,
+            delivery_id,
+            status,
+            response_excerpt,
+            next_attempt_at,
+            delivered,
+        )
+        .await
+        .map_err(Into::into)
+    }
+
     async fn create_upload(
         &self,
         upload: &StoredUpload,
@@ -683,6 +743,7 @@ struct MemoryState {
     enrolments: HashMap<String, (WorkspaceId, EnvironmentId, String, DateTime<Utc>)>,
     webhooks: HashMap<String, (WorkspaceId, EnvironmentId, StoredWebhook, Vec<u8>)>,
     webhook_deliveries: HashMap<String, (WorkspaceId, EnvironmentId, StoredWebhookDelivery)>,
+    webhook_work: HashMap<String, WebhookDeliveryWork>,
     uploads: HashMap<String, (WorkspaceId, EnvironmentId, StoredUpload)>,
     agent_nonces: HashMap<(AgentId, String), DateTime<Utc>>,
     leases: HashMap<JobId, (AgentId, Uuid, String, DateTime<Utc>)>,
@@ -995,6 +1056,83 @@ impl Repository for MemoryRepository {
         delivery.dead_lettered_at = None;
         delivery.delivered_at = None;
         delivery.response_status = None;
+        Ok(())
+    }
+
+    async fn enqueue_webhook_event(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        event_type: &str,
+        payload: &serde_json::Value,
+    ) -> Result<String, RepositoryError> {
+        let mut state = self.state.write().await;
+        let event_id = EventId::new().to_string();
+        let endpoints = state
+            .webhooks
+            .values()
+            .filter(|(workspace, environment, endpoint, _)| {
+                *workspace == workspace_id
+                    && *environment == environment_id
+                    && endpoint.enabled
+                    && endpoint.events.iter().any(|event| event == event_type)
+            })
+            .map(|(_, _, endpoint, secret)| (endpoint.url.clone(), secret.clone()))
+            .collect::<Vec<_>>();
+        for (url, secret_ciphertext) in endpoints {
+            let id = format!("whd_{}", ulid::Ulid::new());
+            state.webhook_work.insert(
+                id.clone(),
+                WebhookDeliveryWork {
+                    id,
+                    event_id: event_id.clone(),
+                    event_type: event_type.into(),
+                    url,
+                    secret_ciphertext,
+                    payload: payload.clone(),
+                    attempt: 0,
+                },
+            );
+        }
+        Ok(event_id)
+    }
+
+    async fn claim_webhook_deliveries(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<WebhookDeliveryWork>, RepositoryError> {
+        Ok(self
+            .state
+            .read()
+            .await
+            .webhook_work
+            .values()
+            .take(usize::try_from(limit.clamp(1, 100)).unwrap_or(100))
+            .cloned()
+            .collect())
+    }
+
+    async fn record_webhook_attempt(
+        &self,
+        delivery_id: &str,
+        _status: Option<i32>,
+        _response_excerpt: Option<&str>,
+        next_attempt_at: Option<DateTime<Utc>>,
+        delivered: bool,
+    ) -> Result<(), RepositoryError> {
+        let mut state = self.state.write().await;
+        if delivered || next_attempt_at.is_none() {
+            state
+                .webhook_work
+                .remove(delivery_id)
+                .ok_or(RepositoryError::NotFound)?;
+        } else {
+            state
+                .webhook_work
+                .get_mut(delivery_id)
+                .ok_or(RepositoryError::NotFound)?
+                .attempt += 1;
+        }
         Ok(())
     }
 

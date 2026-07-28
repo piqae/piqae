@@ -139,11 +139,13 @@ pub async fn create_agent_enrolment(
             expires_at,
         )
         .await?;
-    state.publish(
-        tenant,
-        "agent_enrolment.created",
-        &serde_json::json!({"id": id, "name": request.name, "expires_at": expires_at}),
-    );
+    state
+        .publish(
+            tenant,
+            "agent_enrolment.created",
+            &serde_json::json!({"id": id, "name": request.name, "expires_at": expires_at}),
+        )
+        .await?;
     Ok((
         StatusCode::CREATED,
         Json(EnrolmentResponse {
@@ -262,7 +264,7 @@ pub async fn create_webhook(
             &ciphertext,
         )
         .await?;
-    state.publish(tenant, "webhook.created", &webhook);
+    state.publish(tenant, "webhook.created", &webhook).await?;
     Ok((
         StatusCode::CREATED,
         Json(CreatedWebhookResponse { webhook, secret }),
@@ -280,11 +282,13 @@ pub async fn delete_webhook(
         .repository
         .delete_webhook(tenant.workspace_id, tenant.environment_id, &webhook_id)
         .await?;
-    state.publish(
-        tenant,
-        "webhook.deleted",
-        &serde_json::json!({"id": webhook_id}),
-    );
+    state
+        .publish(
+            tenant,
+            "webhook.deleted",
+            &serde_json::json!({"id": webhook_id}),
+        )
+        .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -628,7 +632,7 @@ pub async fn create_job(
                     None,
                 )
                 .await?;
-            state.publish(tenant, "job.updated", &queued);
+            state.publish(tenant, "job.updated", &queued).await?;
             Ok((StatusCode::CREATED, Json(JobResponse::from(created))).into_response())
         }
     }
@@ -707,7 +711,7 @@ pub async fn cancel_job(
             None,
         )
         .await?;
-    state.publish(tenant, "job.updated", &job);
+    state.publish(tenant, "job.updated", &job).await?;
     Ok((StatusCode::ACCEPTED, Json(JobResponse::from(job))).into_response())
 }
 
@@ -737,7 +741,7 @@ pub async fn agent_sync(
             )
             .await
         {
-            Ok(job) => state.publish(tenant, "job.updated", &job),
+            Ok(job) => state.publish(tenant, "job.updated", &job).await?,
             Err(RepositoryError::ConcurrentStateChange) => {}
             Err(error) => return Err(error.into()),
         }
@@ -832,7 +836,7 @@ pub async fn accept_agent_job(
             request.local_sequence,
         )
         .await?;
-    state.publish(identity.tenant, "job.updated", &job);
+    state.publish(identity.tenant, "job.updated", &job).await?;
     Ok(Json(AgentAcceptJobResponse {
         accepted_at: Utc::now(),
         state: job.state,
