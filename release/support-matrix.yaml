@@ -1,0 +1,17 @@
+version: 1
+platforms:
+  windows_10_11_x86_64:
+    tier: disabled
+    reason: physical PDF and RAW release gates have not run
+  macos_universal:
+    tier: preview
+    reason: packaging and physical printing gates have not run
+  ubuntu_22_04_24_04_x86_64:
+    tier: preview
+    reason: packaging and physical printing gates have not run
+  debian_12_x86_64:
+    tier: preview
+    reason: packaging and physical printing gates have not run
+  linux_aarch64:
+    tier: preview
+    reason: low-power hardware gates have not run

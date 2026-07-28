@@ -1,0 +1,31 @@
+version: 1
+product: spool
+release: v1.0.0
+required:
+  - id: contracts
+    command: cargo test -p spool-domain -p spool-protocol
+  - id: rust
+    command: cargo test --workspace
+  - id: clippy
+    command: cargo clippy --workspace --all-targets -- -D warnings
+  - id: web
+    command: pnpm check
+  - id: compatibility
+    command: cargo test --test printnode_compatibility
+  - id: restart_recovery
+    command: cargo test --test restart_recovery
+  - id: tenant_isolation
+    command: cargo test --test tenant_isolation
+platforms:
+  windows_x86_64:
+    required: true
+    default_tier: disabled
+  macos_universal:
+    required: false
+    default_tier: preview
+  linux_x86_64:
+    required: false
+    default_tier: preview
+  linux_aarch64:
+    required: false
+    default_tier: preview

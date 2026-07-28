@@ -1,0 +1,58 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/*",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+authors = ["Spool contributors"]
+repository = "https://github.com/C4CoffeeCo/spool"
+rust-version = "1.88"
+
+[workspace.dependencies]
+anyhow = "1.0.98"
+async-trait = "0.1.88"
+axum = { version = "0.8.4", features = ["http2", "macros", "multipart"] }
+base64 = "0.22.1"
+bytes = "1.10.1"
+chrono = { version = "0.4.41", features = ["serde"] }
+clap = { version = "4.5.40", features = ["derive", "env"] }
+ed25519-dalek = { version = "2.1.1", features = ["rand_core", "serde"] }
+futures = "0.3.31"
+hex = "0.4.3"
+http = "1.3.1"
+rand = "0.8.5"
+reqwest = { version = "0.12.20", default-features = false, features = ["json", "rustls-tls", "stream"] }
+rusqlite = { version = "0.32.1", features = ["bundled", "chrono", "uuid"] }
+secrecy = { version = "0.10.3", features = ["serde"] }
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.140"
+sha2 = "0.10.9"
+sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio-rustls", "postgres", "chrono", "uuid", "json", "migrate"] }
+thiserror = "2.0.12"
+tokio = { version = "1.45.1", features = ["full"] }
+tower = { version = "0.5.2", features = ["timeout", "limit", "util"] }
+tower-http = { version = "0.6.6", features = ["cors", "request-id", "trace", "compression-gzip", "limit"] }
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.19", features = ["env-filter", "json"] }
+ulid = { version = "1.2.1", features = ["serde"] }
+url = { version = "2.5.4", features = ["serde"] }
+uuid = { version = "1.16.0", features = ["v4", "v7", "serde"] }
+zeroize = { version = "1.8.1", features = ["derive"] }
+
+spool-domain = { path = "crates/domain" }
+spool-protocol = { path = "crates/protocol" }
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+all = "warn"
+pedantic = "warn"
+nursery = "warn"
+unwrap_used = "deny"
+expect_used = "deny"
