@@ -14,13 +14,19 @@ resource "google_project_service" "artifact_registry" {
   disable_on_destroy = false
 }
 
+resource "google_project_service" "secret_manager" {
+  service            = "secretmanager.googleapis.com"
+  disable_on_destroy = false
+}
+
 resource "google_service_account" "server" {
   account_id   = local.name
   display_name = "Spool ${var.environment} control plane"
 }
 
 resource "google_secret_manager_secret" "database_url" {
-  secret_id = "${local.name}-database-url"
+  secret_id  = "${local.name}-database-url"
+  depends_on = [google_project_service.secret_manager]
   replication {
     auto {}
   }
@@ -32,7 +38,8 @@ resource "google_secret_manager_secret_version" "database_url" {
 }
 
 resource "google_secret_manager_secret" "object_access_key" {
-  secret_id = "${local.name}-object-access-key"
+  secret_id  = "${local.name}-object-access-key"
+  depends_on = [google_project_service.secret_manager]
   replication {
     auto {}
   }
@@ -44,7 +51,8 @@ resource "google_secret_manager_secret_version" "object_access_key" {
 }
 
 resource "google_secret_manager_secret" "object_secret_key" {
-  secret_id = "${local.name}-object-secret-key"
+  secret_id  = "${local.name}-object-secret-key"
+  depends_on = [google_project_service.secret_manager]
   replication {
     auto {}
   }
@@ -55,11 +63,25 @@ resource "google_secret_manager_secret_version" "object_secret_key" {
   secret_data = var.object_store_secret_key_secret
 }
 
+resource "google_secret_manager_secret" "webhook_master_key" {
+  secret_id  = "${local.name}-webhook-master-key"
+  depends_on = [google_project_service.secret_manager]
+  replication {
+    auto {}
+  }
+}
+
+resource "google_secret_manager_secret_version" "webhook_master_key" {
+  secret      = google_secret_manager_secret.webhook_master_key.id
+  secret_data = var.webhook_master_key_secret
+}
+
 resource "google_secret_manager_secret_iam_member" "runtime_secrets" {
   for_each = toset([
     google_secret_manager_secret.database_url.id,
     google_secret_manager_secret.object_access_key.id,
     google_secret_manager_secret.object_secret_key.id,
+    google_secret_manager_secret.webhook_master_key.id,
   ])
   secret_id = each.value
   role      = "roles/secretmanager.secretAccessor"
@@ -80,8 +102,8 @@ resource "google_cloud_run_v2_service" "server" {
   }
 
   template {
-    service_account = google_service_account.server.email
-    timeout         = "60s"
+    service_account                  = google_service_account.server.email
+    timeout                          = "60s"
     max_instance_request_concurrency = 200
 
     containers {
@@ -113,12 +135,20 @@ resource "google_cloud_run_v2_service" "server" {
         value = var.public_api_origin
       }
       env {
-        name  = "SPOOL_OBJECT_STORE_ENDPOINT"
+        name  = "SPOOL_OBJECT_STORE"
+        value = "s3"
+      }
+      env {
+        name  = "SPOOL_S3_ENDPOINT"
         value = var.object_store_endpoint
       }
       env {
-        name  = "SPOOL_OBJECT_STORE_BUCKET"
+        name  = "SPOOL_S3_BUCKET"
         value = var.object_store_bucket
+      }
+      env {
+        name  = "SPOOL_S3_REGION"
+        value = "auto"
       }
       env {
         name = "SPOOL_DATABASE_URL"
@@ -130,7 +160,7 @@ resource "google_cloud_run_v2_service" "server" {
         }
       }
       env {
-        name = "SPOOL_OBJECT_STORE_ACCESS_KEY"
+        name = "SPOOL_S3_ACCESS_KEY_ID"
         value_source {
           secret_key_ref {
             secret  = google_secret_manager_secret.object_access_key.secret_id
@@ -139,10 +169,19 @@ resource "google_cloud_run_v2_service" "server" {
         }
       }
       env {
-        name = "SPOOL_OBJECT_STORE_SECRET_KEY"
+        name = "SPOOL_S3_SECRET_ACCESS_KEY"
         value_source {
           secret_key_ref {
             secret  = google_secret_manager_secret.object_secret_key.secret_id
+            version = "latest"
+          }
+        }
+      }
+      env {
+        name = "SPOOL_WEBHOOK_MASTER_KEY"
+        value_source {
+          secret_key_ref {
+            secret  = google_secret_manager_secret.webhook_master_key.secret_id
             version = "latest"
           }
         }

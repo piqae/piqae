@@ -35,7 +35,7 @@ variable "object_store_endpoint" {
 }
 
 variable "object_store_bucket" {
-  type        = string
+  type = string
 }
 
 variable "object_store_access_key_secret" {
@@ -46,6 +46,12 @@ variable "object_store_access_key_secret" {
 variable "object_store_secret_key_secret" {
   type      = string
   sensitive = true
+}
+
+variable "webhook_master_key_secret" {
+  type        = string
+  sensitive   = true
+  description = "Base64-encoded 32-byte key used to encrypt webhook signing secrets."
 }
 
 variable "public_api_origin" {
