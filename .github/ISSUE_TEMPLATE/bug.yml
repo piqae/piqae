@@ -1,0 +1,39 @@
+name: Bug
+description: Report reproducible incorrect behavior without private print data.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: Never attach credentials, customer documents, or unredacted support bundles.
+  - type: input
+    id: version
+    attributes:
+      label: Spool version
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - Server/API
+        - Windows agent
+        - macOS agent
+        - Linux agent
+        - Web dashboard
+        - Self-hosting
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Observed behavior and reproduction
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true

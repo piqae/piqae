@@ -1,0 +1,7 @@
+Spool is multi-licensed:
+
+- Agent, protocol, command-line, and SDK components: Apache-2.0.
+- Server and web application: AGPL-3.0-only.
+- Documentation: CC-BY-4.0.
+
+See LICENSES/ and component manifests for the applicable license.

@@ -1,0 +1,7 @@
+Creative Commons Attribution 4.0 International
+
+Documentation is licensed under CC BY 4.0. The complete canonical license is:
+
+https://creativecommons.org/licenses/by/4.0/legalcode
+
+SPDX-License-Identifier: CC-BY-4.0
