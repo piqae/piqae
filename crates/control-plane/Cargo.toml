@@ -1,0 +1,39 @@
+[package]
+name = "spool-control-plane"
+version.workspace = true
+edition.workspace = true
+license = "AGPL-3.0-only"
+
+[dependencies]
+async-trait.workspace = true
+async-stream = "0.3"
+anyhow.workspace = true
+axum.workspace = true
+base64.workspace = true
+bytes.workspace = true
+chrono.workspace = true
+futures.workspace = true
+http.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_urlencoded = "0.7"
+sha2.workspace = true
+subtle = "2.6"
+thiserror.workspace = true
+tokio.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+ulid.workspace = true
+url.workspace = true
+
+spool-domain.workspace = true
+spool-protocol.workspace = true
+spool-storage-postgres = { path = "../storage-postgres" }
+
+[dev-dependencies]
+http-body-util = "0.1"
+
+[lints]
+workspace = true
