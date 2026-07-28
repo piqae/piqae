@@ -60,3 +60,23 @@ jobs:
         with:
           tool: cargo-deny
       - run: cargo deny check
+
+  openapi:
+    name: API contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.4.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: pnpm dlx @redocly/cli@1.34.3 lint contracts/openapi/spool-v1.yaml
+
+  macos-shell:
+    name: macOS menu shell
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - run: swift build --package-path shells/macos

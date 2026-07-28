@@ -9,13 +9,22 @@ required:
   - id: clippy
     command: cargo clippy --workspace --all-targets -- -D warnings
   - id: web
-    command: pnpm check
+    command: pnpm check && pnpm test && pnpm build
+  - id: openapi
+    command: pnpm dlx @redocly/cli@1.34.3 lint contracts/openapi/spool-v1.yaml
+  - id: native_shell
+    command: swift build --package-path shells/macos
+manual:
   - id: compatibility
-    command: cargo test --test printnode_compatibility
+    evidence: PrintNode fixture suite and compatibility endpoint report
   - id: restart_recovery
-    command: cargo test --test restart_recovery
+    evidence: forced-restart and lease-expiry report
   - id: tenant_isolation
-    command: cargo test --test tenant_isolation
+    evidence: database and HTTP cross-tenant isolation report
+  - id: physical_windows
+    evidence: Windows 10/11 PDF and RAW runs on every advertised driver class
+  - id: code_signing
+    evidence: Windows Authenticode and macOS notarisation verification
 platforms:
   windows_x86_64:
     required: true
