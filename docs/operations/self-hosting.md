@@ -9,11 +9,22 @@ containers, PostgreSQL 16 or newer, and an S3-compatible object store.
 2. Replace every placeholder with randomly generated values.
 3. Set `SPOOL_PUBLIC_API_ORIGIN` to the HTTPS origin users and agents reach.
 4. Run `docker compose --env-file .env up -d`.
-5. Open the configured origin and consume the one-time owner bootstrap.
-6. Disable bootstrap mode by configuring OIDC before inviting other users.
+5. Use the bootstrap API key only from a trusted server-side integration.
 
-The bootstrap secret is single-use and is never printed again after an owner
-is created.
+The API-only topology has no identity-provider dependency. To include the
+optional dashboard, configure the `WORKOS_*` values and run:
+
+```sh
+docker compose --env-file .env --profile dashboard up -d
+```
+
+The dashboard's temporary API credential remains server-side. Until the
+generic OIDC/session exchange gate is complete, the dashboard profile requires
+WorkOS and is not a multi-tenant SaaS identity boundary.
+
+The current V1 bootstrap API key is a deployment credential, not a one-time
+owner token. Rotate or remove it after creating durable API keys. Do not expose
+it to browsers or native agents.
 
 ## Backups
 
