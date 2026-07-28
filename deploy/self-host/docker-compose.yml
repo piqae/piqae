@@ -49,7 +49,7 @@ services:
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD}
 
   server:
-    image: ${SPOOL_IMAGE:-ghcr.io/c4coffeeco/spool:latest}
+    image: ${SPOOL_IMAGE:-ghcr.io/c4coffeeco/spool/server:latest}
     restart: unless-stopped
     depends_on:
       postgres:
@@ -62,11 +62,15 @@ services:
       SPOOL_ENVIRONMENT: production
       SPOOL_BIND: 0.0.0.0:8080
       SPOOL_DATABASE_URL: postgres://spool:${POSTGRES_PASSWORD}@postgres:5432/spool
-      SPOOL_OBJECT_STORE_ENDPOINT: http://minio:9000
-      SPOOL_OBJECT_STORE_BUCKET: spool
-      SPOOL_OBJECT_STORE_REGION: us-east-1
-      SPOOL_OBJECT_STORE_ACCESS_KEY: ${MINIO_ROOT_USER:-spool}
-      SPOOL_OBJECT_STORE_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      SPOOL_OBJECT_STORE: s3
+      SPOOL_S3_ENDPOINT: http://minio:9000
+      SPOOL_S3_BUCKET: spool
+      SPOOL_S3_REGION: us-east-1
+      SPOOL_S3_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-spool}
+      SPOOL_S3_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+      SPOOL_S3_ALLOW_HTTP: "true"
+      SPOOL_WEBHOOK_MASTER_KEY: ${SPOOL_WEBHOOK_MASTER_KEY:?set SPOOL_WEBHOOK_MASTER_KEY}
+      SPOOL_BOOTSTRAP_API_KEY: ${SPOOL_BOOTSTRAP_API_KEY:-}
       SPOOL_PUBLIC_API_ORIGIN: ${SPOOL_PUBLIC_API_ORIGIN:?set SPOOL_PUBLIC_API_ORIGIN}
       SPOOL_AUTH_MODE: ${SPOOL_AUTH_MODE:-bootstrap}
       SPOOL_OIDC_ISSUER: ${SPOOL_OIDC_ISSUER:-}
