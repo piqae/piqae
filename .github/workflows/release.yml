@@ -25,18 +25,30 @@ jobs:
             target: x86_64-pc-windows-msvc
             artifact: spool-windows-x86_64
             extension: .exe
+            extra_packages: -p spool-executor-windows -p spool-shell-windows
+            executor_binary: spool-executor-windows
+            shell_binary: spool-shell-windows
           - os: macos-14
             target: aarch64-apple-darwin
             artifact: spool-macos-aarch64
             extension: ""
+            extra_packages: -p spool-executor-cups
+            executor_binary: spool-executor-cups
+            shell_binary: ""
           - os: macos-13
             target: x86_64-apple-darwin
             artifact: spool-macos-x86_64
             extension: ""
+            extra_packages: -p spool-executor-cups
+            executor_binary: spool-executor-cups
+            shell_binary: ""
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             artifact: spool-linux-x86_64
             extension: ""
+            extra_packages: -p spool-executor-cups -p spool-shell-linux
+            executor_binary: spool-executor-cups
+            shell_binary: spool-shell-linux
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read
@@ -53,13 +65,24 @@ jobs:
           key: release-${{ matrix.target }}
       - name: Build native binaries
         shell: bash
-        run: cargo build --locked --release --target "${{ matrix.target }}" -p spool-agent -p spoolctl
+        run: cargo build --locked --release --target "${{ matrix.target }}" -p spool-agent -p spoolctl ${{ matrix.extra_packages }}
+      - name: Build macOS menu shell
+        if: runner.os == 'macOS'
+        shell: bash
+        run: swift build --configuration release --package-path shells/macos
       - name: Stage native bundle
         shell: bash
         run: |
           mkdir -p "artifacts/${{ matrix.artifact }}"
           cp "target/${{ matrix.target }}/release/spool-agent${{ matrix.extension }}" "artifacts/${{ matrix.artifact }}/"
           cp "target/${{ matrix.target }}/release/spoolctl${{ matrix.extension }}" "artifacts/${{ matrix.artifact }}/"
+          cp "target/${{ matrix.target }}/release/${{ matrix.executor_binary }}${{ matrix.extension }}" "artifacts/${{ matrix.artifact }}/"
+          if [ -n "${{ matrix.shell_binary }}" ]; then
+            cp "target/${{ matrix.target }}/release/${{ matrix.shell_binary }}${{ matrix.extension }}" "artifacts/${{ matrix.artifact }}/"
+          fi
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            cp "shells/macos/.build/release/SpoolMenu" "artifacts/${{ matrix.artifact }}/"
+          fi
           cp README.md LICENSE "artifacts/${{ matrix.artifact }}/"
       - name: Archive Unix bundle
         if: runner.os != 'Windows'
