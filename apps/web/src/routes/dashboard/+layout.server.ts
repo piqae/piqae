@@ -2,10 +2,13 @@ import { authKit } from '@workos/authkit-sveltekit';
 import { redirect } from '@sveltejs/kit';
 import type { LayoutServerLoad } from './$types';
 import { authMode } from '$lib/server/auth-config';
+import { dashboardMode } from '$lib/server/dashboard-data';
 
 export const load: LayoutServerLoad = async (event) => {
+  const mode = dashboardMode();
   if (authMode === 'demo') {
     return {
+      dashboardMode: mode,
       viewer: {
         id: 'usr_demo',
         email: 'developer@spool.local',
@@ -22,6 +25,7 @@ export const load: LayoutServerLoad = async (event) => {
       redirect(302, signInUrl);
     }
     return {
+      dashboardMode: mode,
       viewer: {
         id: user.id,
         email: user.email,
@@ -33,5 +37,5 @@ export const load: LayoutServerLoad = async (event) => {
 
   // Local/self-host mode remains independent of WorkOS. The control plane or
   // reverse proxy can supply its own session boundary.
-  return { viewer: null };
+  return { dashboardMode: mode, viewer: null };
 };

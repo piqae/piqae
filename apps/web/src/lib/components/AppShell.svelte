@@ -3,7 +3,7 @@
   import type { Snippet } from 'svelte';
   import Icon from './Icon.svelte';
 
-  let { children }: { children: Snippet } = $props();
+  let { mode, children }: { mode: 'live' | 'demo'; children: Snippet } = $props();
   let sidebarOpen = $state(false);
   let theme = $state<'dark' | 'light'>('dark');
 
@@ -127,6 +127,12 @@
       </a>
       <span></span>
     </div>
+    {#if mode === 'demo'}
+      <div class="demo-banner" role="status">
+        <Icon name="warning" size={12} />
+        Demo data — no control-plane requests are being made.
+      </div>
+    {/if}
     <main>{@render children()}</main>
   </section>
 </div>
@@ -367,6 +373,20 @@
 
   .mobile-bar {
     display: none;
+  }
+
+  .demo-banner {
+    min-height: 28px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    padding: 5px 12px;
+    color: var(--warning);
+    background: var(--warning-soft);
+    border-bottom: 1px solid color-mix(in oklch, var(--warning), transparent 78%);
+    font-size: 9px;
+    font-weight: 500;
   }
 
   .scrim {

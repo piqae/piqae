@@ -1,9 +1,11 @@
 <script lang="ts">
   import Icon from '$lib/components/Icon.svelte';
+  import DataError from '$lib/components/DataError.svelte';
   import PageHeader from '$lib/components/PageHeader.svelte';
   import RelativeTime from '$lib/components/RelativeTime.svelte';
   import Status from '$lib/components/Status.svelte';
-  import { webhooks } from '$lib/demo-data';
+  let { data } = $props();
+  const webhooks = $derived(data.webhooks);
 </script>
 
 <svelte:head><title>Webhooks · Spool</title></svelte:head>
@@ -17,6 +19,8 @@
   description="Signed, durable event delivery with retries and replay."
   {actions}
 />
+
+{#if data.dataError}<DataError error={data.dataError} />{/if}
 
 <section class="notice">
   <Icon name="bolt" size={14} />
@@ -56,6 +60,9 @@
       <button aria-label={`Actions for ${webhook.description}`}><Icon name="more" size={14} /></button>
     </article>
   {/each}
+  {#if webhooks.length === 0 && !data.dataError}
+    <div class="empty-state">No webhook endpoints configured.</div>
+  {/if}
 </div>
 
 <section class="panel attempts">

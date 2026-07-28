@@ -1,12 +1,15 @@
 <script lang="ts">
   import Icon from '$lib/components/Icon.svelte';
+  import DataError from '$lib/components/DataError.svelte';
   import PageHeader from '$lib/components/PageHeader.svelte';
   import RelativeTime from '$lib/components/RelativeTime.svelte';
   import Status from '$lib/components/Status.svelte';
-  import { jobs, overview, printers } from '$lib/demo-data';
+  let { data } = $props();
 
-  const recentJobs = jobs.slice(0, 5);
-  const attentionPrinters = printers.filter((printer) => printer.state !== 'online');
+  const overview = $derived(data.overview);
+  const recentJobs = $derived(data.jobs);
+  const printers = $derived(data.printers);
+  const attentionPrinters = $derived(printers.filter((printer) => printer.state !== 'online'));
   const bars = [38, 42, 47, 44, 51, 58, 53, 65, 71, 63, 76, 82, 74, 88, 90, 86, 94, 78, 85, 92, 87, 96, 91, 76];
 </script>
 
@@ -28,6 +31,8 @@
   description="Live operational state across your agents, printers, and queues."
   {actions}
 />
+
+{#if data.dataError}<DataError error={data.dataError} />{/if}
 
 <section class="metrics" aria-label="Printing overview">
   <a class="metric" href="/dashboard/agents">
@@ -102,6 +107,9 @@
           <Icon name="arrow-right" size={13} />
         </a>
       {/each}
+      {#if attentionPrinters.length === 0}
+        <div class="empty-attention">No printer conditions require attention.</div>
+      {/if}
     </div>
     <a class="attention-footer" href="/dashboard/printers">
       Review printer fleet <Icon name="arrow-right" size={13} />
@@ -142,6 +150,8 @@
             <td class="muted">{job.source ?? '—'}</td>
             <td class="right muted numeric"><RelativeTime value={job.updatedAt} /></td>
           </tr>
+        {:else}
+          <tr><td colspan="5"><div class="empty-state">No recent jobs.</div></td></tr>
         {/each}
       </tbody>
     </table>
@@ -351,6 +361,16 @@
     gap: 8px;
     padding: 8px 12px;
     border-bottom: 1px solid var(--border-subtle);
+  }
+
+  .empty-attention {
+    min-height: 90px;
+    display: grid;
+    place-items: center;
+    padding: 12px;
+    color: var(--text-tertiary);
+    font-size: 10px;
+    text-align: center;
   }
 
   .attention-list a:hover {

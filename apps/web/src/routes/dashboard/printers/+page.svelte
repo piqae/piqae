@@ -1,9 +1,12 @@
 <script lang="ts">
   import Icon from '$lib/components/Icon.svelte';
+  import DataError from '$lib/components/DataError.svelte';
   import PageHeader from '$lib/components/PageHeader.svelte';
   import RelativeTime from '$lib/components/RelativeTime.svelte';
   import Status from '$lib/components/Status.svelte';
-  import { agents, printers } from '$lib/demo-data';
+  let { data } = $props();
+  const agents = $derived(data.agents);
+  const printers = $derived(data.printers);
 
   let query = $state('');
   let filterState = $state('all');
@@ -29,6 +32,8 @@
   description="Installed operating-system queues and driver-reported capabilities."
   {actions}
 />
+
+{#if data.dataError}<DataError error={data.dataError} />{/if}
 
 <div class="toolbar">
   <label class="search">

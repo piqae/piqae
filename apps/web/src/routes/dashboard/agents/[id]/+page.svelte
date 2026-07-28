@@ -1,13 +1,18 @@
 <script lang="ts">
   import Icon from '$lib/components/Icon.svelte';
+  import DataError from '$lib/components/DataError.svelte';
   import PageHeader from '$lib/components/PageHeader.svelte';
   import RelativeTime from '$lib/components/RelativeTime.svelte';
   import Status from '$lib/components/Status.svelte';
   let { data } = $props();
 </script>
 
-<svelte:head><title>{data.agent.name} · Spool</title></svelte:head>
+<svelte:head><title>{data.agent?.name ?? 'Agent unavailable'} · Spool</title></svelte:head>
 
+{#if data.dataError}
+  <PageHeader eyebrow="Agent" title="Agent unavailable" description={data.dataError.code} />
+  <DataError error={data.dataError} />
+{:else if data.agent}
 {#snippet actions()}
   <button class="button">Diagnostics</button>
   <button class="button">Check for update</button>
@@ -68,3 +73,4 @@
   dd { margin: 0; color: var(--text-secondary); font-size: 9px; text-transform: capitalize; }
   @media (max-width: 800px) { .grid { grid-template-columns: 1fr; } }
 </style>
+{/if}

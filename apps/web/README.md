@@ -16,6 +16,14 @@ The checked-in demo view model is deterministic and is used only when running
 the UI in mock mode. `src/lib/api.ts` contains the separate live adapter for
 the canonical `contracts/openapi/spool-v1.yaml` API.
 
+All dashboard pages load through SvelteKit server routes. Live mode is the
+default and never falls back to demo data after an error. To opt into clearly
+labelled local data, set `PUBLIC_SPOOL_DASHBOARD_MODE=demo`. Live mode reads
+`PUBLIC_SPOOL_API_URL` and the temporary server-only
+`SPOOL_DASHBOARD_API_KEY`; this credential is not included in page data or
+browser bundles. It will be removed when the control plane provides WorkOS to
+short-lived Spool token exchange.
+
 ## Deployment targets
 
 Vercel is the hosted default:

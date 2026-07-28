@@ -1,13 +1,18 @@
 <script lang="ts">
   import Icon from '$lib/components/Icon.svelte';
+  import DataError from '$lib/components/DataError.svelte';
   import PageHeader from '$lib/components/PageHeader.svelte';
   import RelativeTime from '$lib/components/RelativeTime.svelte';
   import Status from '$lib/components/Status.svelte';
   let { data } = $props();
 </script>
 
-<svelte:head><title>{data.printer.name} · Spool</title></svelte:head>
+<svelte:head><title>{data.printer?.name ?? 'Printer unavailable'} · Spool</title></svelte:head>
 
+{#if data.dataError}
+  <PageHeader eyebrow="Printer" title="Printer unavailable" description={data.dataError.code} />
+  <DataError error={data.dataError} />
+{:else if data.printer}
 {#snippet actions()}
   <button class="button"><Icon name="jobs" size={13} /> Test print</button>
   <button class="button">Pause queue</button>
@@ -79,3 +84,4 @@
   dd { margin: 0; overflow: hidden; color: var(--text-secondary); font-size: 9px; text-align: right; text-overflow: ellipsis; white-space: nowrap; }
   @media (max-width: 850px) { .grid { grid-template-columns: 1fr; } }
 </style>
+{/if}

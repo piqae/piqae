@@ -1,8 +1,10 @@
 <script lang="ts">
   import Icon from '$lib/components/Icon.svelte';
+  import DataError from '$lib/components/DataError.svelte';
   import PageHeader from '$lib/components/PageHeader.svelte';
   import RelativeTime from '$lib/components/RelativeTime.svelte';
-  import { apiKeys } from '$lib/demo-data';
+  let { data } = $props();
+  const apiKeys = $derived(data.apiKeys);
   let copied = $state<string | null>(null);
 
   async function copyPrefix(prefix: string) {
@@ -23,6 +25,8 @@
   description="Scoped credentials for applications that submit and inspect print jobs."
   {actions}
 />
+
+{#if data.dataError}<DataError error={data.dataError} />{/if}
 
 <section class="security-note">
   <Icon name="api" size={15} />
@@ -55,6 +59,9 @@
           <td class="action"><button aria-label={`Actions for ${key.name}`}><Icon name="more" size={14} /></button></td>
         </tr>
       {/each}
+      {#if apiKeys.length === 0 && !data.dataError}
+        <tr><td colspan="7"><div class="empty-state">No API keys created.</div></td></tr>
+      {/if}
     </tbody>
   </table>
 </div>

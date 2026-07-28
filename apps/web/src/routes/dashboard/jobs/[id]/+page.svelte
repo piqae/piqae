@@ -1,18 +1,23 @@
 <script lang="ts">
   import Icon from '$lib/components/Icon.svelte';
+  import DataError from '$lib/components/DataError.svelte';
   import PageHeader from '$lib/components/PageHeader.svelte';
   import RelativeTime from '$lib/components/RelativeTime.svelte';
   import Status from '$lib/components/Status.svelte';
-  import { agents, jobEvents, printers } from '$lib/demo-data';
 
   let { data } = $props();
   const job = $derived(data.job);
-  const printer = printers.find((candidate) => candidate.id === job.printerId);
-  const agent = agents.find((candidate) => candidate.id === job.agentId);
+  const printer = $derived(data.printer);
+  const agent = $derived(data.agent);
+  const jobEvents = $derived(data.jobEvents);
 </script>
 
-<svelte:head><title>{job.title} · Spool</title></svelte:head>
+<svelte:head><title>{job?.title ?? 'Job unavailable'} · Spool</title></svelte:head>
 
+{#if data.dataError}
+  <PageHeader eyebrow="Print job" title="Job unavailable" description={data.dataError.code} />
+  <DataError error={data.dataError} />
+{:else if job}
 {#snippet actions()}
   <button class="button">Cancel</button>
   <button class="button"><Icon name="copy" size={13} /> Reprint</button>
@@ -355,3 +360,4 @@
     }
   }
 </style>
+{/if}

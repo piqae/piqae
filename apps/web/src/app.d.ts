@@ -7,6 +7,7 @@ declare global {
 
     interface PageData {
       mode?: 'mock' | 'live';
+      dashboardMode?: 'live' | 'demo';
       viewer?: {
         id: string;
         email: string;

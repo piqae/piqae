@@ -44,10 +44,15 @@ export const mockApi: DashboardApi = {
  * diagnostics, usage, and API-key screens remain disabled until their public
  * admin endpoints are added.
  */
-export function createLiveApi(fetcher: typeof fetch, baseUrl: string): DashboardApi {
+export function createLiveApi(
+  fetcher: typeof fetch,
+  baseUrl: string,
+  apiKey?: string
+): DashboardApi {
   const client = new SpoolClient({
     baseUrl,
     fetch: fetcher,
+    ...(apiKey ? { apiKey } : {}),
     headers: { 'x-spool-dashboard': '1' }
   });
 
@@ -192,6 +197,8 @@ export function createLiveApi(fetcher: typeof fetch, baseUrl: string): Dashboard
           createdAt: webhook.created_at
         }))
       ),
-    apiKeys: async () => page([])
+    apiKeys: async () => {
+      throw new Error('API key management is not available in the current control-plane API.');
+    }
   };
 }

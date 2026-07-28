@@ -2,7 +2,7 @@
   import AppShell from '$lib/components/AppShell.svelte';
   import type { Snippet } from 'svelte';
 
-  let { children }: { children: Snippet } = $props();
+  let { data, children }: { data: App.PageData; children: Snippet } = $props();
 </script>
 
-<AppShell>{@render children()}</AppShell>
+<AppShell mode={data.dashboardMode ?? 'live'}>{@render children()}</AppShell>

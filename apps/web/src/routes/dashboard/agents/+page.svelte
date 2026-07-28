@@ -1,9 +1,11 @@
 <script lang="ts">
   import Icon from '$lib/components/Icon.svelte';
+  import DataError from '$lib/components/DataError.svelte';
   import PageHeader from '$lib/components/PageHeader.svelte';
   import RelativeTime from '$lib/components/RelativeTime.svelte';
   import Status from '$lib/components/Status.svelte';
-  import { agents } from '$lib/demo-data';
+  let { data } = $props();
+  const agents = $derived(data.agents);
 
   let query = $state('');
   const visible = $derived(
@@ -28,6 +30,8 @@
   description="Installed services that discover printers and own local durable queues."
   {actions}
 />
+
+{#if data.dataError}<DataError error={data.dataError} />{/if}
 
 <div class="toolbar">
   <label class="search">
