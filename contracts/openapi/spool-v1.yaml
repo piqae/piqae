@@ -1,0 +1,572 @@
+openapi: 3.1.0
+info:
+  title: Spool API
+  version: 1.0.0
+  description: Durable local and remote printing API.
+  license:
+    name: AGPL-3.0-only
+    identifier: AGPL-3.0-only
+servers:
+  - url: https://api.example.invalid
+    description: Replace with the deployment API origin.
+security:
+  - bearer: []
+tags:
+  - name: Jobs
+    description: Register and observe durable print jobs.
+  - name: Printers
+    description: Inspect installed printer queues and driver capabilities.
+  - name: Agents
+    description: Enrol and observe local Spool agents.
+  - name: Events
+    description: Consume immutable state changes.
+  - name: Webhooks
+    description: Deliver signed event notifications.
+paths:
+  /v1/health:
+    get:
+      summary: Check process health
+      security: []
+      operationId: health
+      responses:
+        "200":
+          description: Process is alive.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+  /v1/ready:
+    get:
+      summary: Check dependency readiness
+      security: []
+      operationId: ready
+      responses:
+        "200":
+          description: Required dependencies and migrations are ready.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+        "503":
+          $ref: "#/components/responses/Error"
+  /v1/jobs:
+    post:
+      summary: Register a print job
+      tags: [Jobs]
+      operationId: createJob
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateJob"
+      responses:
+        "201":
+          description: Job registered durably.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Job"
+        "400":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+    get:
+      summary: List print jobs
+      tags: [Jobs]
+      operationId: listJobs
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/After"
+      responses:
+        "200":
+          description: Cursor-paginated jobs.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobPage"
+  /v1/jobs/{job_id}:
+    parameters:
+      - $ref: "#/components/parameters/JobId"
+    get:
+      summary: Get a print job
+      tags: [Jobs]
+      operationId: getJob
+      responses:
+        "200":
+          description: Job.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Job"
+        "404":
+          $ref: "#/components/responses/Error"
+  /v1/jobs/{job_id}/events:
+    parameters:
+      - $ref: "#/components/parameters/JobId"
+    get:
+      summary: List immutable job events
+      tags: [Jobs, Events]
+      operationId: listJobEvents
+      responses:
+        "200":
+          description: Immutable event sequence.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/JobEvent"
+  /v1/jobs/{job_id}/cancel:
+    parameters:
+      - $ref: "#/components/parameters/JobId"
+    post:
+      summary: Request job cancellation
+      tags: [Jobs]
+      operationId: cancelJob
+      responses:
+        "202":
+          description: Cancellation requested.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Job"
+        "409":
+          $ref: "#/components/responses/Error"
+  /v1/printers:
+    get:
+      summary: List printers
+      tags: [Printers]
+      operationId: listPrinters
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/After"
+      responses:
+        "200":
+          description: Printers visible in the active environment.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, has_more]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Printer"
+                  next_cursor:
+                    type: [string, "null"]
+                  has_more:
+                    type: boolean
+  /v1/agents:
+    get:
+      summary: List agents
+      tags: [Agents]
+      operationId: listAgents
+      responses:
+        "200":
+          description: Agents visible in the active environment.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Agent"
+  /v1/agent-enrolments:
+    post:
+      summary: Create a single-use agent enrolment
+      tags: [Agents]
+      operationId: createAgentEnrolment
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:
+                  type: string
+                  maxLength: 120
+                expires_in_seconds:
+                  type: integer
+                  minimum: 60
+                  maximum: 3600
+                  default: 600
+      responses:
+        "201":
+          description: Single-use enrolment token. The token is shown once.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, token, expires_at]
+                properties:
+                  id:
+                    type: string
+                  token:
+                    type: string
+                    pattern: ^spl_enr_
+                  expires_at:
+                    type: string
+                    format: date-time
+  /v1/events/stream:
+    get:
+      summary: Stream environment events
+      tags: [Events]
+      operationId: streamEvents
+      parameters:
+        - name: Last-Event-ID
+          in: header
+          schema:
+            type: string
+      responses:
+        "200":
+          description: SSE stream with resumable event identifiers.
+          content:
+            text/event-stream:
+              schema:
+                type: string
+  /v1/webhooks:
+    get:
+      summary: List webhook endpoints
+      tags: [Webhooks]
+      operationId: listWebhooks
+      responses:
+        "200":
+          description: Webhook endpoints.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Webhook"
+    post:
+      summary: Create a webhook endpoint
+      tags: [Webhooks]
+      operationId: createWebhook
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [url, events]
+              properties:
+                url:
+                  type: string
+                  format: uri
+                events:
+                  type: array
+                  minItems: 1
+                  items:
+                    type: string
+      responses:
+        "201":
+          description: Created webhook. The signing secret is shown once.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Webhook"
+                  - type: object
+                    required: [secret]
+                    properties:
+                      secret:
+                        type: string
+components:
+  securitySchemes:
+    bearer:
+      type: http
+      scheme: bearer
+      bearerFormat: spl_live_…
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      schema:
+        type: string
+        minLength: 8
+        maxLength: 255
+    JobId:
+      name: job_id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: ^job_[0-9A-HJKMNP-TV-Z]{26}$
+    Limit:
+      name: limit
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 500
+        default: 100
+    After:
+      name: after
+      in: query
+      schema:
+        type: string
+  responses:
+    Error:
+      description: Request failed.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+  schemas:
+    Health:
+      type: object
+      required: [status, version]
+      properties:
+        status:
+          type: string
+          enum: [ok]
+        version:
+          type: string
+    CreateJob:
+      type: object
+      additionalProperties: false
+      required: [printer_id, title, content_type, content]
+      properties:
+        printer_id:
+          type: string
+        title:
+          type: string
+          minLength: 1
+          maxLength: 255
+        source:
+          type: [string, "null"]
+          maxLength: 255
+        content_type:
+          type: string
+          enum: [pdf, raw]
+        content:
+          oneOf:
+            - type: object
+              additionalProperties: false
+              required: [type, upload_id]
+              properties:
+                type:
+                  const: upload
+                upload_id:
+                  type: string
+            - type: object
+              additionalProperties: false
+              required: [type, data]
+              properties:
+                type:
+                  const: base64
+                data:
+                  type: string
+                  contentEncoding: base64
+            - type: object
+              additionalProperties: false
+              required: [type, uri]
+              properties:
+                type:
+                  const: uri
+                uri:
+                  type: string
+                  format: uri
+        options:
+          $ref: "#/components/schemas/JobOptions"
+        deliveries:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 1
+        expire_after_seconds:
+          type: integer
+          minimum: 1
+          maximum: 1209600
+          default: 1209600
+        metadata:
+          type: object
+          additionalProperties:
+            type: string
+    JobOptions:
+      type: object
+      additionalProperties: false
+      properties:
+        bin:
+          type: string
+        collate:
+          type: boolean
+        color:
+          type: boolean
+        copies:
+          type: integer
+          minimum: 1
+        dpi:
+          type: string
+        duplex:
+          enum: [one-sided, long-edge, short-edge]
+        fit_to_page:
+          type: boolean
+        media:
+          type: string
+        nup:
+          type: integer
+          minimum: 1
+        pages:
+          type: string
+        paper:
+          type: string
+        rotate:
+          type: integer
+          enum: [0, 90, 180, 270]
+    Job:
+      type: object
+      required:
+        [id, printer_id, title, content_type, deliveries, state, created_at, expires_at]
+      properties:
+        id:
+          type: string
+        printer_id:
+          type: string
+        title:
+          type: string
+        source:
+          type: [string, "null"]
+        content_type:
+          enum: [pdf, raw]
+        deliveries:
+          type: integer
+        state:
+          $ref: "#/components/schemas/JobState"
+        created_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+    JobPage:
+      type: object
+      required: [data, has_more]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/Job"
+        next_cursor:
+          type: [string, "null"]
+        has_more:
+          type: boolean
+    JobState:
+      type: string
+      enum:
+        - registered
+        - content_pending
+        - waiting_for_agent
+        - agent_downloading
+        - agent_accepted
+        - queued_local
+        - preparing
+        - rendering
+        - spool_intent
+        - accepted_by_spooler
+        - spooling
+        - printing
+        - blocked
+        - completed_reported
+        - delivery_uncertain
+        - cancel_requested
+        - cancelled
+        - expired
+        - failed_retryable
+        - failed_terminal
+    JobEvent:
+      type: object
+      required: [id, job_id, sequence, state, occurred_at]
+      properties:
+        id:
+          type: string
+        job_id:
+          type: string
+        sequence:
+          type: integer
+          minimum: 0
+        state:
+          $ref: "#/components/schemas/JobState"
+        reason:
+          type: [string, "null"]
+        message:
+          type: [string, "null"]
+        occurred_at:
+          type: string
+          format: date-time
+    Printer:
+      type: object
+      required: [id, agent_id, name, state, capabilities, updated_at]
+      properties:
+        id:
+          type: string
+        agent_id:
+          type: string
+        name:
+          type: string
+        state:
+          enum: [online, offline, paused, busy, paper_out, error, unknown]
+        capabilities:
+          type: object
+        updated_at:
+          type: string
+          format: date-time
+    Agent:
+      type: object
+      required: [id, name, platform, state, version, last_seen_at]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        platform:
+          type: string
+        state:
+          enum: [connected, disconnected, paused, degraded]
+        version:
+          type: string
+        last_seen_at:
+          type: string
+          format: date-time
+    Webhook:
+      type: object
+      required: [id, url, events, enabled, created_at]
+      properties:
+        id:
+          type: string
+        url:
+          type: string
+          format: uri
+        events:
+          type: array
+          items:
+            type: string
+        enabled:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+    ErrorEnvelope:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, request_id, retryable]
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+            request_id:
+              type: string
+            retryable:
+              type: boolean
+            details:
+              type: object
