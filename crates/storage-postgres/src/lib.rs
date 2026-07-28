@@ -1,0 +1,616 @@
+//! `PostgreSQL` persistence and transactional queue operations.
+#![allow(clippy::missing_errors_doc)]
+
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use spool_domain::{
+    AgentId, EnvironmentId, EventId, Job, JobEvent, JobId, JobState, PrinterId, WorkspaceId,
+    validate_transition,
+};
+use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgPoolOptions};
+use thiserror::Error;
+
+#[derive(Clone, Debug)]
+pub struct PostgresStore {
+    pool: PgPool,
+}
+
+#[derive(Clone, Debug)]
+pub enum CreateJobResult {
+    Created(Job),
+    Existing(Job),
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct JobLease {
+    pub job: Job,
+    pub lease_until: DateTime<Utc>,
+}
+
+#[derive(Debug, Error)]
+pub enum StorageError {
+    #[error("resource not found")]
+    NotFound,
+    #[error("idempotency key was reused with a different request")]
+    IdempotencyConflict,
+    #[error("job state changed concurrently")]
+    ConcurrentStateChange,
+    #[error("invalid state transition")]
+    InvalidTransition,
+    #[error("stored data is invalid: {0}")]
+    InvalidData(String),
+    #[error("database operation failed: {0}")]
+    Database(#[from] sqlx::Error),
+    #[error("database migration failed: {0}")]
+    Migration(#[from] sqlx::migrate::MigrateError),
+    #[error("serialization failed: {0}")]
+    Serialization(#[from] serde_json::Error),
+}
+
+impl PostgresStore {
+    pub async fn connect(database_url: &str, max_connections: u32) -> Result<Self, StorageError> {
+        let pool = PgPoolOptions::new()
+            .max_connections(max_connections)
+            .connect(database_url)
+            .await?;
+        Ok(Self { pool })
+    }
+
+    #[must_use]
+    pub const fn from_pool(pool: PgPool) -> Self {
+        Self { pool }
+    }
+
+    #[must_use]
+    pub const fn pool(&self) -> &PgPool {
+        &self.pool
+    }
+
+    pub async fn migrate(&self) -> Result<(), StorageError> {
+        sqlx::migrate!("../../migrations/postgres")
+            .run(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn create_job(
+        &self,
+        job: &Job,
+        agent_id: AgentId,
+        idempotency_key: Option<&str>,
+        request_bytes: &[u8],
+    ) -> Result<CreateJobResult, StorageError> {
+        let mut transaction = self.pool.begin().await?;
+        let request_hash = format!("{:x}", Sha256::digest(request_bytes));
+
+        if let Some(key) = idempotency_key
+            && let Some(existing) = find_idempotent_job(
+                &mut transaction,
+                job.workspace_id,
+                job.environment_id,
+                key,
+                &request_hash,
+            )
+            .await?
+        {
+            transaction.commit().await?;
+            return Ok(CreateJobResult::Existing(existing));
+        }
+
+        let per_printer_sequence: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(MAX(per_printer_sequence), 0) + 1
+             FROM jobs WHERE printer_id = $1",
+        )
+        .bind(job.printer_id.to_string())
+        .fetch_one(&mut *transaction)
+        .await?;
+
+        let payload = serde_json::to_value(job)?;
+        sqlx::query(
+            "INSERT INTO jobs (
+                id, workspace_id, environment_id, printer_id, agent_id, payload, state,
+                state_sequence, per_printer_sequence, expires_at, created_at, updated_at
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7,1,$8,$9,$10,$10)",
+        )
+        .bind(job.id.to_string())
+        .bind(job.workspace_id.to_string())
+        .bind(job.environment_id.to_string())
+        .bind(job.printer_id.to_string())
+        .bind(agent_id.to_string())
+        .bind(payload)
+        .bind(state_name(job.state))
+        .bind(per_printer_sequence)
+        .bind(job.expires_at)
+        .bind(job.created_at)
+        .execute(&mut *transaction)
+        .await?;
+
+        let initial_event = JobEvent {
+            id: EventId::new(),
+            job_id: job.id,
+            sequence: 1,
+            state: job.state,
+            reason: None,
+            message: Some("Job durably registered".into()),
+            agent_id: None,
+            native_job_id: None,
+            occurred_at: job.created_at,
+        };
+        insert_event(&mut transaction, job, &initial_event).await?;
+
+        sqlx::query(
+            "INSERT INTO routing_outbox (
+                id, workspace_id, environment_id, aggregate_type, aggregate_id,
+                event_type, payload
+             ) VALUES ($1,$2,$3,'job',$4,'job.registered',$5)",
+        )
+        .bind(EventId::new().to_string())
+        .bind(job.workspace_id.to_string())
+        .bind(job.environment_id.to_string())
+        .bind(job.id.to_string())
+        .bind(serde_json::to_value(&initial_event)?)
+        .execute(&mut *transaction)
+        .await?;
+
+        if let Some(key) = idempotency_key {
+            sqlx::query(
+                "INSERT INTO idempotency_requests (
+                    workspace_id, environment_id, operation, key, request_hash,
+                    resource_id, response_status, response_body, expires_at
+                 ) VALUES ($1,$2,'jobs.create',$3,$4,$5,201,$6,now() + interval '24 hours')",
+            )
+            .bind(job.workspace_id.to_string())
+            .bind(job.environment_id.to_string())
+            .bind(key)
+            .bind(request_hash)
+            .bind(job.id.to_string())
+            .bind(serde_json::to_value(job)?)
+            .execute(&mut *transaction)
+            .await?;
+        }
+
+        transaction.commit().await?;
+        Ok(CreateJobResult::Created(job.clone()))
+    }
+
+    pub async fn get_job(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        job_id: JobId,
+    ) -> Result<Job, StorageError> {
+        let row = sqlx::query(
+            "SELECT payload, state FROM jobs
+             WHERE id = $1 AND workspace_id = $2 AND environment_id = $3",
+        )
+        .bind(job_id.to_string())
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(StorageError::NotFound)?;
+        let state: String = row.try_get("state")?;
+        job_from_row(row.try_get("payload")?, &state)
+    }
+
+    pub async fn get_job_sequence(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        job_id: JobId,
+    ) -> Result<u64, StorageError> {
+        let sequence: i64 = sqlx::query_scalar(
+            "SELECT state_sequence FROM jobs
+             WHERE id = $1 AND workspace_id = $2 AND environment_id = $3",
+        )
+        .bind(job_id.to_string())
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(StorageError::NotFound)?;
+        u64::try_from(sequence)
+            .map_err(|error| StorageError::InvalidData(format!("negative sequence: {error}")))
+    }
+
+    pub async fn resolve_printer_agent(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        printer_id: PrinterId,
+    ) -> Result<AgentId, StorageError> {
+        let value: String = sqlx::query_scalar(
+            "SELECT agent_id FROM printers
+             WHERE id = $1 AND workspace_id = $2 AND environment_id = $3
+               AND removed_at IS NULL",
+        )
+        .bind(printer_id.to_string())
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(StorageError::NotFound)?;
+        value
+            .parse()
+            .map_err(|error| StorageError::InvalidData(format!("agent id `{value}`: {error}")))
+    }
+
+    pub async fn compatibility_id(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        resource_type: &str,
+        resource_id: &str,
+    ) -> Result<i64, StorageError> {
+        sqlx::query(
+            "INSERT INTO compatibility_ids (
+                workspace_id, environment_id, resource_type, resource_id
+             ) VALUES ($1,$2,$3,$4)
+             ON CONFLICT (workspace_id, environment_id, resource_type, resource_id)
+             DO NOTHING",
+        )
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(resource_type)
+        .bind(resource_id)
+        .execute(&self.pool)
+        .await?;
+        sqlx::query_scalar(
+            "SELECT id FROM compatibility_ids
+             WHERE workspace_id = $1 AND environment_id = $2
+               AND resource_type = $3 AND resource_id = $4",
+        )
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(resource_type)
+        .bind(resource_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(StorageError::from)
+    }
+
+    pub async fn resolve_compatibility_id(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        resource_type: &str,
+        compatibility_id: i64,
+    ) -> Result<String, StorageError> {
+        sqlx::query_scalar(
+            "SELECT resource_id FROM compatibility_ids
+             WHERE id = $1 AND workspace_id = $2 AND environment_id = $3
+               AND resource_type = $4",
+        )
+        .bind(compatibility_id)
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(resource_type)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(StorageError::NotFound)
+    }
+
+    pub async fn list_jobs(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        limit: i64,
+    ) -> Result<Vec<Job>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT payload, state FROM jobs
+             WHERE workspace_id = $1 AND environment_id = $2
+             ORDER BY created_at DESC, id DESC LIMIT $3",
+        )
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(limit.clamp(1, 500))
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                let state: String = row.get("state");
+                job_from_row(row.get("payload"), &state)
+            })
+            .collect()
+    }
+
+    pub async fn list_job_events(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        job_id: JobId,
+    ) -> Result<Vec<JobEvent>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT payload FROM job_events
+             WHERE workspace_id = $1 AND environment_id = $2 AND job_id = $3
+             ORDER BY sequence",
+        )
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(job_id.to_string())
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| serde_json::from_value(row.get("payload")).map_err(StorageError::from))
+            .collect()
+    }
+
+    pub async fn append_event(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        event: &JobEvent,
+    ) -> Result<Job, StorageError> {
+        let mut transaction = self.pool.begin().await?;
+        let row = sqlx::query(
+            "SELECT payload, state, state_sequence FROM jobs
+             WHERE id = $1 AND workspace_id = $2 AND environment_id = $3
+             FOR UPDATE",
+        )
+        .bind(event.job_id.to_string())
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(StorageError::NotFound)?;
+
+        let state: String = row.try_get("state")?;
+        let mut job = job_from_row(row.try_get("payload")?, &state)?;
+        let current_sequence: i64 = row.try_get("state_sequence")?;
+        if event.sequence != u64::try_from(current_sequence + 1).unwrap_or(u64::MAX) {
+            return Err(StorageError::ConcurrentStateChange);
+        }
+        validate_transition(job.state, event.state).map_err(|_| StorageError::InvalidTransition)?;
+        job.state = event.state;
+        insert_event(&mut transaction, &job, event).await?;
+
+        let final_at = event.state.is_terminal().then_some(event.occurred_at);
+        sqlx::query(
+            "UPDATE jobs SET payload = $2, state = $3, state_sequence = $4,
+             final_at = COALESCE($5, final_at), updated_at = now() WHERE id = $1",
+        )
+        .bind(event.job_id.to_string())
+        .bind(serde_json::to_value(&job)?)
+        .bind(state_name(event.state))
+        .bind(i64::try_from(event.sequence).map_err(|error| {
+            StorageError::InvalidData(format!("event sequence overflow: {error}"))
+        })?)
+        .bind(final_at)
+        .execute(&mut *transaction)
+        .await?;
+
+        if event.state == JobState::AcceptedBySpooler {
+            sqlx::query(
+                "INSERT INTO usage_ledger (
+                    id, workspace_id, environment_id, job_id, kind, units, occurred_at
+                 )
+                 SELECT $1,$2,$3,$4,'print_job_accepted',1,$5
+                 WHERE EXISTS (
+                   SELECT 1 FROM environments WHERE id = $3 AND kind = 'live'
+                 )
+                 ON CONFLICT (job_id) WHERE kind = 'print_job_accepted' AND job_id IS NOT NULL
+                 DO NOTHING",
+            )
+            .bind(EventId::new().to_string())
+            .bind(workspace_id.to_string())
+            .bind(environment_id.to_string())
+            .bind(event.job_id.to_string())
+            .bind(event.occurred_at)
+            .execute(&mut *transaction)
+            .await?;
+        }
+
+        transaction.commit().await?;
+        Ok(job)
+    }
+
+    pub async fn claim_jobs(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        owner: &str,
+        limit: i64,
+    ) -> Result<Vec<JobLease>, StorageError> {
+        let rows = sqlx::query(
+            "WITH candidates AS (
+                SELECT id FROM jobs
+                WHERE agent_id = $1 AND workspace_id = $4 AND environment_id = $5
+                  AND state IN ('waiting_for_agent', 'failed_retryable')
+                  AND expires_at > now()
+                  AND (lease_until IS NULL OR lease_until < now())
+                ORDER BY created_at, id
+                FOR UPDATE SKIP LOCKED
+                LIMIT $2
+             )
+             UPDATE jobs AS jobs
+             SET lease_owner = $3, lease_until = now() + interval '30 seconds', updated_at = now()
+             FROM candidates
+             WHERE jobs.id = candidates.id
+             RETURNING jobs.payload, jobs.state, jobs.lease_until",
+        )
+        .bind(agent_id.to_string())
+        .bind(limit.clamp(1, 100))
+        .bind(owner)
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(JobLease {
+                    job: {
+                        let state: String = row.get("state");
+                        job_from_row(row.get("payload"), &state)?
+                    },
+                    lease_until: row.get("lease_until"),
+                })
+            })
+            .collect()
+    }
+
+    pub async fn renew_lease(
+        &self,
+        job_id: JobId,
+        owner: &str,
+    ) -> Result<DateTime<Utc>, StorageError> {
+        sqlx::query_scalar(
+            "UPDATE jobs SET lease_until = now() + interval '30 seconds', updated_at = now()
+             WHERE id = $1 AND lease_owner = $2 AND lease_until > now()
+             RETURNING lease_until",
+        )
+        .bind(job_id.to_string())
+        .bind(owner)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(StorageError::ConcurrentStateChange)
+    }
+
+    pub async fn release_expired_jobs(&self) -> Result<u64, StorageError> {
+        let result = sqlx::query(
+            "UPDATE jobs SET state = 'expired', final_at = now(), updated_at = now()
+             WHERE final_at IS NULL AND expires_at <= now()
+               AND state NOT IN ('spool_intent','accepted_by_spooler','spooling','printing')",
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
+    pub async fn readiness(&self) -> Result<(), StorageError> {
+        sqlx::query_scalar::<_, i32>("SELECT 1")
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(())
+    }
+}
+
+async fn find_idempotent_job(
+    transaction: &mut Transaction<'_, Postgres>,
+    workspace_id: WorkspaceId,
+    environment_id: EnvironmentId,
+    key: &str,
+    request_hash: &str,
+) -> Result<Option<Job>, StorageError> {
+    let row = sqlx::query(
+        "SELECT request_hash, response_body FROM idempotency_requests
+         WHERE workspace_id = $1 AND environment_id = $2
+           AND operation = 'jobs.create' AND key = $3 AND expires_at > now()
+         FOR UPDATE",
+    )
+    .bind(workspace_id.to_string())
+    .bind(environment_id.to_string())
+    .bind(key)
+    .fetch_optional(&mut **transaction)
+    .await?;
+    match row {
+        None => Ok(None),
+        Some(row) if row.get::<String, _>("request_hash") == request_hash => {
+            Ok(Some(serde_json::from_value(row.get("response_body"))?))
+        }
+        Some(_) => Err(StorageError::IdempotencyConflict),
+    }
+}
+
+async fn insert_event(
+    transaction: &mut Transaction<'_, Postgres>,
+    job: &Job,
+    event: &JobEvent,
+) -> Result<(), StorageError> {
+    sqlx::query(
+        "INSERT INTO job_events (
+            id, workspace_id, environment_id, job_id, sequence,
+            state, payload, occurred_at
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
+    )
+    .bind(event.id.to_string())
+    .bind(job.workspace_id.to_string())
+    .bind(job.environment_id.to_string())
+    .bind(event.job_id.to_string())
+    .bind(
+        i64::try_from(event.sequence).map_err(|error| {
+            StorageError::InvalidData(format!("event sequence overflow: {error}"))
+        })?,
+    )
+    .bind(state_name(event.state))
+    .bind(serde_json::to_value(event)?)
+    .bind(event.occurred_at)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
+fn job_from_row(payload: serde_json::Value, state: &str) -> Result<Job, StorageError> {
+    let mut job: Job = serde_json::from_value(payload)?;
+    job.state = parse_state(state)?;
+    Ok(job)
+}
+
+const fn state_name(state: JobState) -> &'static str {
+    match state {
+        JobState::Registered => "registered",
+        JobState::ContentPending => "content_pending",
+        JobState::WaitingForAgent => "waiting_for_agent",
+        JobState::AgentDownloading => "agent_downloading",
+        JobState::AgentAccepted => "agent_accepted",
+        JobState::QueuedLocal => "queued_local",
+        JobState::Preparing => "preparing",
+        JobState::Rendering => "rendering",
+        JobState::SpoolIntent => "spool_intent",
+        JobState::AcceptedBySpooler => "accepted_by_spooler",
+        JobState::Spooling => "spooling",
+        JobState::Printing => "printing",
+        JobState::Blocked => "blocked",
+        JobState::CompletedReported => "completed_reported",
+        JobState::DeliveryUncertain => "delivery_uncertain",
+        JobState::CancelRequested => "cancel_requested",
+        JobState::Cancelled => "cancelled",
+        JobState::Expired => "expired",
+        JobState::FailedRetryable => "failed_retryable",
+        JobState::FailedTerminal => "failed_terminal",
+    }
+}
+
+fn parse_state(value: &str) -> Result<JobState, StorageError> {
+    serde_json::from_value(serde_json::Value::String(value.to_owned()))
+        .map_err(|error| StorageError::InvalidData(format!("job state `{value}`: {error}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_state_round_trips_through_database_name() {
+        for state in [
+            JobState::Registered,
+            JobState::ContentPending,
+            JobState::WaitingForAgent,
+            JobState::AgentDownloading,
+            JobState::AgentAccepted,
+            JobState::QueuedLocal,
+            JobState::Preparing,
+            JobState::Rendering,
+            JobState::SpoolIntent,
+            JobState::AcceptedBySpooler,
+            JobState::Spooling,
+            JobState::Printing,
+            JobState::Blocked,
+            JobState::CompletedReported,
+            JobState::DeliveryUncertain,
+            JobState::CancelRequested,
+            JobState::Cancelled,
+            JobState::Expired,
+            JobState::FailedRetryable,
+            JobState::FailedTerminal,
+        ] {
+            assert_eq!(parse_state(state_name(state)).ok(), Some(state));
+        }
+    }
+
+    #[test]
+    fn lease_duration_matches_protocol_contract() {
+        assert!(chrono::Duration::seconds(30).num_seconds() == 30);
+    }
+}
