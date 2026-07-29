@@ -25,6 +25,12 @@ pub struct TenantContext {
     permissions: Permissions,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlatformManagerContext {
+    pub service_account_id: String,
+    pub owner_workspace_id: WorkspaceId,
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 struct Permissions(u16);
 
@@ -128,6 +134,12 @@ pub trait Authenticator: Send + Sync + 'static {
         _required_scope: Scope,
         _request_id: &str,
     ) -> Result<TenantContext, AuthenticationError> {
+        Err(AuthenticationError)
+    }
+    async fn authenticate_platform_manager(
+        &self,
+        _authorization: &str,
+    ) -> Result<PlatformManagerContext, AuthenticationError> {
         Err(AuthenticationError)
     }
 }
@@ -342,6 +354,33 @@ impl Authenticator for PostgresAuthenticator {
             permissions,
         })
     }
+
+    async fn authenticate_platform_manager(
+        &self,
+        authorization: &str,
+    ) -> Result<PlatformManagerContext, AuthenticationError> {
+        let token = authorization
+            .strip_prefix("Bearer ")
+            .filter(|value| !value.is_empty())
+            .ok_or(AuthenticationError)?;
+        let id = platform_service_account_key_id(token).map_err(|_| AuthenticationError)?;
+        let record = self
+            .store
+            .platform_manager_for_authentication(&id.to_string())
+            .await
+            .map_err(|_| AuthenticationError)?;
+        let token = token.to_owned();
+        tokio::task::spawn_blocking(move || {
+            verify_platform_service_account_key(&token, &record.secret_hash)
+        })
+        .await
+        .map_err(|_| AuthenticationError)?
+        .map_err(|_| AuthenticationError)?;
+        Ok(PlatformManagerContext {
+            service_account_id: id.to_string(),
+            owner_workspace_id: record.owner_workspace_id,
+        })
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -425,6 +464,49 @@ impl Authenticator for CombinedAuthenticator {
                 request_id,
             )
             .await
+    }
+
+    async fn authenticate_platform_manager(
+        &self,
+        authorization: &str,
+    ) -> Result<PlatformManagerContext, AuthenticationError> {
+        let token = authorization
+            .strip_prefix("Bearer ")
+            .filter(|value| !value.is_empty())
+            .ok_or(AuthenticationError)?;
+        if token.starts_with("spl_platform_") {
+            return self
+                .postgres
+                .authenticate_platform_manager(authorization)
+                .await;
+        }
+        if token.starts_with("spl_test_") || token.starts_with("spl_live_") {
+            return Err(AuthenticationError);
+        }
+        let human = if let Some(local_session) = &self.local_session
+            && let Ok(tenant) = local_session.authenticate_bearer(authorization).await
+        {
+            tenant
+        } else if let Some(oidc) = &self.oidc
+            && let Ok(tenant) = oidc.authenticate_bearer(authorization).await
+        {
+            tenant
+        } else {
+            return Err(AuthenticationError);
+        };
+        if !human.allows(Scope::ApiKeysWrite) {
+            return Err(AuthenticationError);
+        }
+        let service_account_id = self
+            .postgres
+            .store
+            .platform_manager_for_owner_workspace(human.workspace_id)
+            .await
+            .map_err(|_| AuthenticationError)?;
+        Ok(PlatformManagerContext {
+            service_account_id,
+            owner_workspace_id: human.workspace_id,
+        })
     }
 }
 

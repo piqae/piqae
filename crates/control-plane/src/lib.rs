@@ -7,6 +7,7 @@ pub mod device_auth;
 pub mod error;
 pub mod identity;
 pub mod pairing;
+pub mod platform;
 pub mod repository;
 pub mod request_id;
 pub mod routing;
@@ -151,6 +152,7 @@ pub struct DeploymentCapabilities {
     pub auth: AuthCapabilities,
     pub billing: BillingCapabilities,
     pub updates: UpdateCapabilities,
+    pub platform: PlatformCapabilities,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -171,6 +173,11 @@ pub struct UpdateCapabilities {
     pub custom_feed: bool,
 }
 
+#[derive(Clone, Copy, Debug, Serialize)]
+pub struct PlatformCapabilities {
+    pub accounts: bool,
+}
+
 impl Default for DeploymentCapabilities {
     fn default() -> Self {
         Self {
@@ -186,6 +193,7 @@ impl Default for DeploymentCapabilities {
                 official_feed: true,
                 custom_feed: true,
             },
+            platform: PlatformCapabilities { accounts: true },
         }
     }
 }
@@ -201,6 +209,13 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/meta", get(api::meta))
         .merge(identity::router())
         .merge(pairing_router())
+        .route("/v1/platform/accounts", get(platform::list))
+        .route(
+            "/v1/platform/accounts/{external_id}",
+            get(platform::get)
+                .put(platform::upsert)
+                .delete(platform::archive),
+        )
         .route(
             "/v1/api-keys",
             get(api::list_api_keys).post(api::create_api_key),

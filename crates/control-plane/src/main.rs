@@ -6,7 +6,8 @@ use base64::{
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
 };
 use spool_control_plane::{
-    AppState, AuthCapabilities, BillingCapabilities, DeploymentCapabilities, UpdateCapabilities,
+    AppState, AuthCapabilities, BillingCapabilities, DeploymentCapabilities, PlatformCapabilities,
+    UpdateCapabilities,
     authentication::{
         CombinedAuthenticator, LocalSessionAuthenticator, OidcAuthenticator, OidcConfiguration,
         PostgresAuthenticator, StaticAuthenticator, TenantContext,
@@ -190,6 +191,7 @@ fn deployment_capabilities() -> DeploymentCapabilities {
             official_feed: env::var("SPOOL_OFFICIAL_UPDATE_FEED").as_deref() != Ok("false"),
             custom_feed: !cloud,
         },
+        platform: PlatformCapabilities { accounts: true },
     }
 }
 

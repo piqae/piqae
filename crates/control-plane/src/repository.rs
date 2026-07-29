@@ -15,9 +15,9 @@ use spool_storage_postgres::{
     AgentAuthenticationRecord, CreateJobResult as PgCreateJobResult, EnrolledAgent, JobLease,
     NewDeviceAuthorization, NodeUpdatePolicy, NodeUpdateState, PostgresStore, StorageError,
     StoredAgent, StoredAgentCommandBatch, StoredApiKey, StoredDeviceAuthorization,
-    StoredNodeUpdate, StoredPrinter, StoredStock, StoredTarget, StoredTargetBinding,
-    StoredTenantEvent, StoredUpload, StoredWebhook, StoredWebhookDelivery, SyncedPrinter,
-    WebhookDeliveryWork,
+    StoredNodeUpdate, StoredPlatformAccount, StoredPrinter, StoredStock, StoredTarget,
+    StoredTargetBinding, StoredTenantEvent, StoredUpload, StoredWebhook, StoredWebhookDelivery,
+    SyncedPrinter, UpsertedPlatformAccount, WebhookDeliveryWork,
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -68,6 +68,37 @@ impl From<StorageError> for RepositoryError {
 #[async_trait]
 pub trait Repository: Send + Sync + 'static {
     async fn ready(&self) -> Result<(), RepositoryError>;
+    async fn list_platform_accounts(
+        &self,
+        _service_account_id: &str,
+    ) -> Result<Vec<StoredPlatformAccount>, RepositoryError> {
+        Err(RepositoryError::NotFound)
+    }
+    async fn get_platform_account(
+        &self,
+        _service_account_id: &str,
+        _external_id: &str,
+    ) -> Result<StoredPlatformAccount, RepositoryError> {
+        Err(RepositoryError::NotFound)
+    }
+    async fn upsert_platform_account(
+        &self,
+        _service_account_id: &str,
+        _external_id: &str,
+        _name: &str,
+        _metadata: &std::collections::BTreeMap<String, String>,
+        _request_id: &str,
+    ) -> Result<UpsertedPlatformAccount, RepositoryError> {
+        Err(RepositoryError::NotFound)
+    }
+    async fn archive_platform_account(
+        &self,
+        _service_account_id: &str,
+        _external_id: &str,
+        _request_id: &str,
+    ) -> Result<(), RepositoryError> {
+        Err(RepositoryError::NotFound)
+    }
     async fn environment_kind(
         &self,
         workspace_id: WorkspaceId,
@@ -525,6 +556,56 @@ pub trait Repository: Send + Sync + 'static {
 impl Repository for PostgresStore {
     async fn ready(&self) -> Result<(), RepositoryError> {
         self.readiness().await.map_err(Into::into)
+    }
+
+    async fn list_platform_accounts(
+        &self,
+        service_account_id: &str,
+    ) -> Result<Vec<StoredPlatformAccount>, RepositoryError> {
+        PostgresStore::list_platform_accounts(self, service_account_id)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn get_platform_account(
+        &self,
+        service_account_id: &str,
+        external_id: &str,
+    ) -> Result<StoredPlatformAccount, RepositoryError> {
+        PostgresStore::get_platform_account(self, service_account_id, external_id)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn upsert_platform_account(
+        &self,
+        service_account_id: &str,
+        external_id: &str,
+        name: &str,
+        metadata: &std::collections::BTreeMap<String, String>,
+        request_id: &str,
+    ) -> Result<UpsertedPlatformAccount, RepositoryError> {
+        PostgresStore::upsert_platform_account(
+            self,
+            service_account_id,
+            external_id,
+            name,
+            metadata,
+            request_id,
+        )
+        .await
+        .map_err(Into::into)
+    }
+
+    async fn archive_platform_account(
+        &self,
+        service_account_id: &str,
+        external_id: &str,
+        request_id: &str,
+    ) -> Result<(), RepositoryError> {
+        PostgresStore::archive_platform_account(self, service_account_id, external_id, request_id)
+            .await
+            .map_err(Into::into)
     }
 
     async fn environment_kind(

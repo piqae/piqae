@@ -22,6 +22,8 @@ tags:
     description: Create and revoke environment-scoped developer credentials.
   - name: Identity
     description: Self-hosted local-owner sessions and tenant identity projections.
+  - name: Platform
+    description: Manage customer workspaces from a trusted platform backend or owner dashboard.
   - name: Jobs
     description: Register and observe durable print jobs.
   - name: Printers
@@ -525,12 +527,14 @@ paths:
     get:
       summary: List customer accounts owned by the platform service account
       description: |
-        Server-side platform operation. It uses only the platform bearer and
-        never accepts tenant-selection headers. Results include the Test and
-        Live environment IDs required to construct an account-scoped client.
+        Server-side platform operation. A platform service-account bearer or
+        authorised human owner-dashboard bearer may manage accounts; ordinary
+        Test and Live API keys are rejected. Tenant-selection headers are never
+        accepted. Results include the Test and Live environment IDs required to
+        construct an account-scoped client.
       tags: [Platform]
       operationId: listPlatformAccounts
-      security: [{ platformBearer: [] }]
+      security: [{ platformBearer: [] }, { bearer: [] }]
       responses:
         "200":
           description: Customer accounts owned by this platform identity.
@@ -540,6 +544,7 @@ paths:
                 type: array
                 items: { $ref: "#/components/schemas/PlatformAccount" }
         "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
   /v1/platform/accounts/{external_id}:
     parameters:
       - name: external_id
@@ -560,7 +565,7 @@ paths:
         creating another tenant.
       tags: [Platform]
       operationId: upsertPlatformAccount
-      security: [{ platformBearer: [] }]
+      security: [{ platformBearer: [] }, { bearer: [] }]
       requestBody:
         required: true
         content:
@@ -579,12 +584,13 @@ paths:
               schema: { $ref: "#/components/schemas/PlatformAccount" }
         "400": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
     get:
       summary: Retrieve one customer account by the platform's external ID
       tags: [Platform]
       operationId: getPlatformAccount
-      security: [{ platformBearer: [] }]
+      security: [{ platformBearer: [] }, { bearer: [] }]
       responses:
         "200":
           description: Platform-owned customer account.
@@ -592,6 +598,7 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/PlatformAccount" }
         "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
     delete:
       summary: Archive a customer account and revoke its platform grants
@@ -600,10 +607,11 @@ paths:
         print jobs remain available to workers for lifecycle completion.
       tags: [Platform]
       operationId: archivePlatformAccount
-      security: [{ platformBearer: [] }]
+      security: [{ platformBearer: [] }, { bearer: [] }]
       responses:
         "204": { description: Account archived or already archived. }
         "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
   /v1/device-authorizations:
     post:
@@ -2224,7 +2232,7 @@ components:
     DeploymentMeta:
       type: object
       additionalProperties: false
-      required: [deployment, version, auth, billing, updates]
+      required: [deployment, version, auth, billing, updates, platform]
       properties:
         deployment: { type: string, enum: [cloud, self_hosted, local] }
         version: { type: string }
@@ -2249,6 +2257,14 @@ components:
           properties:
             official_feed: { type: boolean }
             custom_feed: { type: boolean }
+        platform:
+          type: object
+          additionalProperties: false
+          required: [accounts]
+          properties:
+            accounts:
+              type: boolean
+              description: Whether platform-owned customer account management is available.
     CreateDeviceAuthorization:
       type: object
       additionalProperties: false

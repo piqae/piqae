@@ -56,6 +56,12 @@ pub struct PlatformGrantAuthenticationRecord {
 }
 
 #[derive(Clone, Debug)]
+pub struct PlatformManagerAuthenticationRecord {
+    pub secret_hash: String,
+    pub owner_workspace_id: WorkspaceId,
+}
+
+#[derive(Clone, Debug)]
 pub struct EnrolledAgent {
     pub agent_id: AgentId,
     pub workspace_id: WorkspaceId,
@@ -118,6 +124,36 @@ pub struct StoredWorkspace {
     pub status: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct StoredPlatformAccountEnvironment {
+    pub id: EnvironmentId,
+    pub kind: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct StoredPlatformAccountEnvironments {
+    pub test: StoredPlatformAccountEnvironment,
+    pub live: StoredPlatformAccountEnvironment,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct StoredPlatformAccount {
+    pub id: WorkspaceId,
+    pub external_id: String,
+    pub name: String,
+    pub status: String,
+    pub metadata: BTreeMap<String, String>,
+    pub environments: StoredPlatformAccountEnvironments,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug)]
+pub struct UpsertedPlatformAccount {
+    pub account: StoredPlatformAccount,
+    pub created: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -327,6 +363,20 @@ pub struct WebhookDeliveryWork {
 
 pub const WEBHOOK_MAX_CLAIM_BATCH: i64 = 100;
 pub const WEBHOOK_CLAIM_TTL_SECONDS: i64 = 300;
+const PLATFORM_ACCOUNT_SCOPES: &[&str] = &[
+    "api_keys_read",
+    "api_keys_write",
+    "agents_read",
+    "agents_write",
+    "printers_read",
+    "printers_write",
+    "jobs_read",
+    "jobs_write",
+    "webhooks_read",
+    "webhooks_write",
+    "usage_read",
+    "audit_read",
+];
 
 #[derive(Clone, Debug, Serialize)]
 pub struct StoredTenantEvent {
@@ -834,7 +884,10 @@ impl PostgresStore {
              FROM platform_service_accounts account
              JOIN platform_workspace_grants workspace_grant
                ON workspace_grant.service_account_id = account.id
+             JOIN workspaces workspace
+               ON workspace.id = workspace_grant.workspace_id
              WHERE account.id = $1 AND account.revoked_at IS NULL
+               AND workspace.status = 'active'
                AND workspace_grant.workspace_id = $2
                AND workspace_grant.environment_id = $3
                AND workspace_grant.revoked_at IS NULL
@@ -853,6 +906,311 @@ impl PostgresStore {
             secret_hash: row.try_get("secret_hash")?,
             scopes: row.try_get("scopes")?,
         })
+    }
+
+    pub async fn platform_manager_for_authentication(
+        &self,
+        service_account_id: &str,
+    ) -> Result<PlatformManagerAuthenticationRecord, StorageError> {
+        let row = sqlx::query(
+            "SELECT account.secret_hash, account.owner_workspace_id
+             FROM platform_service_accounts account
+             JOIN workspaces owner ON owner.id = account.owner_workspace_id
+             WHERE account.id = $1 AND account.revoked_at IS NULL
+               AND owner.status = 'active'",
+        )
+        .bind(service_account_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(StorageError::NotFound)?;
+        let owner_workspace: String = row.try_get("owner_workspace_id")?;
+        Ok(PlatformManagerAuthenticationRecord {
+            secret_hash: row.try_get("secret_hash")?,
+            owner_workspace_id: owner_workspace.parse().map_err(|error| {
+                StorageError::InvalidData(format!("workspace id `{owner_workspace}`: {error}"))
+            })?,
+        })
+    }
+
+    pub async fn platform_manager_for_owner_workspace(
+        &self,
+        owner_workspace_id: WorkspaceId,
+    ) -> Result<String, StorageError> {
+        sqlx::query_scalar(
+            "SELECT account.id FROM platform_service_accounts account
+             JOIN workspaces owner ON owner.id = account.owner_workspace_id
+             WHERE account.owner_workspace_id = $1 AND account.revoked_at IS NULL
+               AND owner.status = 'active'",
+        )
+        .bind(owner_workspace_id.to_string())
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(StorageError::NotFound)
+    }
+
+    pub async fn list_platform_accounts(
+        &self,
+        service_account_id: &str,
+    ) -> Result<Vec<StoredPlatformAccount>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT workspace.id, workspace.platform_external_id, workspace.name,
+                    workspace.status, workspace.platform_metadata,
+                    test.id AS test_environment_id, live.id AS live_environment_id,
+                    workspace.created_at, workspace.updated_at
+             FROM platform_service_accounts account
+             JOIN workspaces workspace
+               ON workspace.platform_service_account_id = account.id
+             JOIN environments test
+               ON test.workspace_id = workspace.id AND test.kind = 'test'
+             JOIN environments live
+               ON live.workspace_id = workspace.id AND live.kind = 'live'
+             WHERE account.id = $1 AND account.revoked_at IS NULL
+             ORDER BY workspace.created_at, workspace.id",
+        )
+        .bind(service_account_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(platform_account_from_row).collect()
+    }
+
+    pub async fn get_platform_account(
+        &self,
+        service_account_id: &str,
+        external_id: &str,
+    ) -> Result<StoredPlatformAccount, StorageError> {
+        let row = sqlx::query(
+            "SELECT workspace.id, workspace.platform_external_id, workspace.name,
+                    workspace.status, workspace.platform_metadata,
+                    test.id AS test_environment_id, live.id AS live_environment_id,
+                    workspace.created_at, workspace.updated_at
+             FROM platform_service_accounts account
+             JOIN workspaces workspace
+               ON workspace.platform_service_account_id = account.id
+             JOIN environments test
+               ON test.workspace_id = workspace.id AND test.kind = 'test'
+             JOIN environments live
+               ON live.workspace_id = workspace.id AND live.kind = 'live'
+             WHERE account.id = $1 AND account.revoked_at IS NULL
+               AND workspace.platform_external_id = $2",
+        )
+        .bind(service_account_id)
+        .bind(external_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(StorageError::NotFound)?;
+        platform_account_from_row(&row)
+    }
+
+    pub async fn upsert_platform_account(
+        &self,
+        service_account_id: &str,
+        external_id: &str,
+        name: &str,
+        metadata: &BTreeMap<String, String>,
+        request_id: &str,
+    ) -> Result<UpsertedPlatformAccount, StorageError> {
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query_scalar::<_, String>(
+            "SELECT id FROM platform_service_accounts
+             WHERE id = $1 AND revoked_at IS NULL FOR SHARE",
+        )
+        .bind(service_account_id)
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(StorageError::NotFound)?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(format!("{service_account_id}:{external_id}"))
+            .execute(&mut *transaction)
+            .await?;
+
+        let existing: Option<String> = sqlx::query_scalar(
+            "SELECT id FROM workspaces
+             WHERE platform_service_account_id = $1 AND platform_external_id = $2
+             FOR UPDATE",
+        )
+        .bind(service_account_id)
+        .bind(external_id)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let (workspace_id, created) = if let Some(value) = existing {
+            let workspace_id = value.parse().map_err(|error| {
+                StorageError::InvalidData(format!("workspace id `{value}`: {error}"))
+            })?;
+            sqlx::query(
+                "UPDATE workspaces SET name = $3, platform_metadata = $4, updated_at = now()
+                 WHERE id = $1 AND platform_service_account_id = $2",
+            )
+            .bind(value)
+            .bind(service_account_id)
+            .bind(name)
+            .bind(serde_json::to_value(metadata)?)
+            .execute(&mut *transaction)
+            .await?;
+            (workspace_id, false)
+        } else {
+            let workspace_id = WorkspaceId::new();
+            let test_environment = EnvironmentId::new();
+            let live_environment = EnvironmentId::new();
+            let slug = format!("{}-{}", slugify(name), ulid::Ulid::new())
+                .to_ascii_lowercase()
+                .chars()
+                .take(120)
+                .collect::<String>();
+            sqlx::query(
+                "INSERT INTO workspaces (
+                    id, name, slug, status, platform_service_account_id,
+                    platform_external_id, platform_metadata
+                 ) VALUES ($1,$2,$3,'active',$4,$5,$6)",
+            )
+            .bind(workspace_id.to_string())
+            .bind(name)
+            .bind(slug)
+            .bind(service_account_id)
+            .bind(external_id)
+            .bind(serde_json::to_value(metadata)?)
+            .execute(&mut *transaction)
+            .await?;
+            for (environment_id, kind, environment_name) in [
+                (test_environment, "test", "Test"),
+                (live_environment, "live", "Live"),
+            ] {
+                sqlx::query(
+                    "INSERT INTO environments (id, workspace_id, kind, name)
+                     VALUES ($1,$2,$3,$4)",
+                )
+                .bind(environment_id.to_string())
+                .bind(workspace_id.to_string())
+                .bind(kind)
+                .bind(environment_name)
+                .execute(&mut *transaction)
+                .await?;
+            }
+            (workspace_id, true)
+        };
+        let workspace_status: String =
+            sqlx::query_scalar("SELECT status FROM workspaces WHERE id = $1 FOR SHARE")
+                .bind(workspace_id.to_string())
+                .fetch_one(&mut *transaction)
+                .await?;
+        if workspace_status == "active" {
+            let environment_ids = sqlx::query_scalar::<_, String>(
+                "SELECT id FROM environments
+                 WHERE workspace_id = $1 AND kind IN ('test', 'live')
+                 ORDER BY kind",
+            )
+            .bind(workspace_id.to_string())
+            .fetch_all(&mut *transaction)
+            .await?;
+            if environment_ids.len() != 2 {
+                return Err(StorageError::InvalidData(
+                    "platform account does not have Test and Live environments".into(),
+                ));
+            }
+            let scopes = PLATFORM_ACCOUNT_SCOPES
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>();
+            for environment_id in environment_ids {
+                sqlx::query(
+                    "INSERT INTO platform_workspace_grants (
+                        id, service_account_id, workspace_id, environment_id, scopes
+                     ) VALUES ($1,$2,$3,$4,$5)
+                     ON CONFLICT (service_account_id, workspace_id, environment_id)
+                     DO UPDATE SET scopes = EXCLUDED.scopes, expires_at = NULL, revoked_at = NULL",
+                )
+                .bind(format!("pgr_{}", Uuid::now_v7()))
+                .bind(service_account_id)
+                .bind(workspace_id.to_string())
+                .bind(environment_id)
+                .bind(&scopes)
+                .execute(&mut *transaction)
+                .await?;
+            }
+        }
+        insert_platform_audit_event(
+            &mut transaction,
+            workspace_id,
+            None,
+            "platform_service_account",
+            Some(service_account_id),
+            if created {
+                "platform_account.created"
+            } else {
+                "platform_account.updated"
+            },
+            service_account_id,
+            serde_json::json!({"external_id": external_id}),
+            Some(request_id),
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(UpsertedPlatformAccount {
+            account: self
+                .get_platform_account(service_account_id, external_id)
+                .await?,
+            created,
+        })
+    }
+
+    pub async fn archive_platform_account(
+        &self,
+        service_account_id: &str,
+        external_id: &str,
+        request_id: &str,
+    ) -> Result<(), StorageError> {
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query_scalar::<_, String>(
+            "SELECT id FROM platform_service_accounts
+             WHERE id = $1 AND revoked_at IS NULL FOR SHARE",
+        )
+        .bind(service_account_id)
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(StorageError::NotFound)?;
+        let workspace: String = sqlx::query_scalar(
+            "SELECT id FROM workspaces
+             WHERE platform_service_account_id = $1 AND platform_external_id = $2
+             FOR UPDATE",
+        )
+        .bind(service_account_id)
+        .bind(external_id)
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(StorageError::NotFound)?;
+        let workspace_id = workspace.parse().map_err(|error| {
+            StorageError::InvalidData(format!("workspace id `{workspace}`: {error}"))
+        })?;
+        sqlx::query(
+            "UPDATE workspaces SET status = 'cancelled', updated_at = now()
+             WHERE id = $1 AND platform_service_account_id = $2",
+        )
+        .bind(&workspace)
+        .bind(service_account_id)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "UPDATE platform_workspace_grants
+             SET revoked_at = COALESCE(revoked_at, now())
+             WHERE service_account_id = $1 AND workspace_id = $2",
+        )
+        .bind(service_account_id)
+        .bind(&workspace)
+        .execute(&mut *transaction)
+        .await?;
+        insert_platform_audit_event(
+            &mut transaction,
+            workspace_id,
+            None,
+            "platform_service_account",
+            Some(service_account_id),
+            "platform_account.archived",
+            service_account_id,
+            serde_json::json!({"external_id": external_id}),
+            Some(request_id),
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(())
     }
 
     pub async fn record_platform_service_account_use(
@@ -907,12 +1265,14 @@ impl PostgresStore {
     ) -> Result<(), StorageError> {
         let mut transaction = self.pool.begin().await?;
         sqlx::query(
-            "INSERT INTO platform_service_accounts (id, name, secret_hash)
-             VALUES ($1,$2,$3)",
+            "INSERT INTO platform_service_accounts (
+                id, name, secret_hash, owner_workspace_id
+             ) VALUES ($1,$2,$3,$4)",
         )
         .bind(id)
         .bind(name)
         .bind(secret_hash)
+        .bind(workspace_id.to_string())
         .execute(&mut *transaction)
         .await?;
         sqlx::query(
@@ -4000,6 +4360,41 @@ fn workspace_from_row(row: &PgRow) -> Result<StoredWorkspace, StorageError> {
         name: row.try_get("name")?,
         slug: row.try_get("slug")?,
         status: row.try_get("status")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+    })
+}
+
+fn platform_account_from_row(row: &PgRow) -> Result<StoredPlatformAccount, StorageError> {
+    let workspace = row.try_get::<String, _>("id")?;
+    let test_environment = row.try_get::<String, _>("test_environment_id")?;
+    let live_environment = row.try_get::<String, _>("live_environment_id")?;
+    Ok(StoredPlatformAccount {
+        id: workspace.parse().map_err(|error| {
+            StorageError::InvalidData(format!("workspace id `{workspace}`: {error}"))
+        })?,
+        external_id: row.try_get("platform_external_id")?,
+        name: row.try_get("name")?,
+        status: row.try_get("status")?,
+        metadata: serde_json::from_value(row.try_get("platform_metadata")?)?,
+        environments: StoredPlatformAccountEnvironments {
+            test: StoredPlatformAccountEnvironment {
+                id: test_environment.parse().map_err(|error| {
+                    StorageError::InvalidData(format!(
+                        "environment id `{test_environment}`: {error}"
+                    ))
+                })?,
+                kind: "test".into(),
+            },
+            live: StoredPlatformAccountEnvironment {
+                id: live_environment.parse().map_err(|error| {
+                    StorageError::InvalidData(format!(
+                        "environment id `{live_environment}`: {error}"
+                    ))
+                })?,
+                kind: "live".into(),
+            },
+        },
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
     })
