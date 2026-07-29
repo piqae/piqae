@@ -12,7 +12,7 @@ function notFound(): Response {
   );
 }
 
-export function pathFor(method: string, path: string): string | null {
+export function _pathFor(method: string, path: string): string | null {
   const segments = path.split('/').filter(Boolean);
   if (segments.some((segment) => segment.length > 512)) return null;
   if (method === 'GET' && segments.length === 1 && ['status', 'printers'].includes(segments[0] ?? '')) {
@@ -100,7 +100,7 @@ function proxyError(error: unknown): Response {
 }
 
 export const GET: RequestHandler = async ({ params, fetch }) => {
-  const path = pathFor('GET', params.path);
+  const path = _pathFor('GET', params.path);
   if (!path) return notFound();
   try {
     return await relayLocalAgent(await localAgentRequest(fetch, path));
@@ -110,7 +110,7 @@ export const GET: RequestHandler = async ({ params, fetch }) => {
 };
 
 export const POST: RequestHandler = async ({ params, fetch, request }) => {
-  const path = pathFor('POST', params.path);
+  const path = _pathFor('POST', params.path);
   if (!path) return notFound();
   try {
     return await relayLocalAgent(
@@ -122,7 +122,7 @@ export const POST: RequestHandler = async ({ params, fetch, request }) => {
 };
 
 export const PUT: RequestHandler = async ({ params, fetch, request }) => {
-  const path = pathFor('PUT', params.path);
+  const path = _pathFor('PUT', params.path);
   if (!path) return notFound();
   try {
     return await relayLocalAgent(
@@ -134,7 +134,7 @@ export const PUT: RequestHandler = async ({ params, fetch, request }) => {
 };
 
 export const DELETE: RequestHandler = async ({ params, fetch, request, url }) => {
-  const basePath = pathFor('DELETE', params.path);
+  const basePath = _pathFor('DELETE', params.path);
   if (!basePath) return notFound();
   const expectedRevision = url.searchParams.get('expected_revision');
   const path =

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { pathFor } from './+server';
+import { _pathFor as pathFor } from './+server';
 
 describe('local agent browser proxy allowlist', () => {
   it('allows the profile and queue operations used by the dashboard', () => {
