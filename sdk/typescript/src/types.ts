@@ -43,6 +43,7 @@ export interface DeploymentMeta {
   };
   billing: { enabled: boolean };
   updates: { official_feed: boolean; custom_feed: boolean };
+  platform: { accounts: boolean };
 }
 
 export type UploadMediaType = 'application/pdf' | 'application/octet-stream';

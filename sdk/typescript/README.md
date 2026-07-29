@@ -3,6 +3,43 @@
 Typed, dependency-free TypeScript client for Spool's native API. It works in
 Node.js, browsers, serverless runtimes, and against a local-only agent.
 
+## SaaS platforms
+
+Use one server-only platform key and one immutable external ID for each
+customer:
+
+```ts
+import { readFile } from 'node:fs/promises';
+import { SpoolPlatform } from '@spool/sdk';
+
+const spool = new SpoolPlatform({
+  platformKey: process.env.SPOOL_PLATFORM_KEY!
+});
+
+const customer = await spool.accounts.getOrCreate('org_01JQ8K8M6Q', {
+  name: 'Northwind Foods'
+});
+
+const printer = (await customer.printers.list()).data[0];
+const job = await customer.printPdf({
+  printerId: printer.id,
+  title: 'Order 481 label',
+  pdf: await readFile('./label.pdf'),
+  idempotencyKey: 'northwind-order-481-label-v1'
+});
+```
+
+Customer calls use Live by default. Use `customer.test` for onboarding and
+automated checks. The account client exposes the normal `nodes`, `printers`,
+`stocks`, `targets`, `uploads`, `jobs`, `apiKeys`, and `webhooks` resources.
+
+Create, retrieve, list, or archive customer accounts through
+`spool.accounts`. Creating, rotating, and revoking the first platform key
+remains an operator or hosted account-setup action. Never expose it to browser,
+mobile, desktop, or node code.
+
+## One workspace
+
 ```ts
 import { SpoolClient } from '@spool/sdk';
 
@@ -51,8 +88,8 @@ await spool.jobs.create(
 summaries, safe overrides, and current target readiness. Vendor-native settings
 are display-only facts captured by the node.
 
-Trusted multi-workspace SaaS backends use a distinct platform key and an
-explicit grant context:
+Lower-level trusted integrations can also construct an explicit account grant
+context:
 
 ```ts
 const customerSpool = new SpoolClient({

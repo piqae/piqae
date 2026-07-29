@@ -110,6 +110,18 @@ export class SpoolAccount extends SpoolAccountEnvironment {
   get metadata(): Record<string, string> {
     return this.account.metadata;
   }
+
+  get environments(): PlatformAccount['environments'] {
+    return this.account.environments;
+  }
+
+  get createdAt(): string {
+    return this.account.created_at;
+  }
+
+  get updatedAt(): string {
+    return this.account.updated_at;
+  }
 }
 
 export class SpoolPlatform {
