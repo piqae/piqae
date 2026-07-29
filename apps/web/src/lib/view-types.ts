@@ -138,9 +138,20 @@ export interface DashboardApiKey {
   createdAt: string;
 }
 
+export interface DashboardMeta {
+  deployment: 'cloud' | 'self_hosted' | 'local';
+  version: string;
+  auth: {
+    provider: 'workos' | 'local_owner' | 'oidc' | 'hybrid' | 'none';
+    workspaceSwitching: boolean;
+    invitations: boolean;
+  };
+  billing: { enabled: boolean };
+  updates: { officialFeed: boolean; customFeed: boolean };
+}
+
 export interface DashboardOverview {
   agents: { total: number; online: number; degraded: number };
   printers: { total: number; online: number; attention: number };
-  jobs: { today: number; active: number; failed: number; uncertain: number };
-  pickupLatencyP95Ms: number;
+  jobs: { recent: number; active: number; failed: number; uncertain: number };
 }

@@ -69,6 +69,7 @@
 {/snippet}
 
 <PageHeader
+  eyebrow="Developers"
   title="API keys"
   description="Scoped credentials for applications that submit and inspect print jobs."
   {actions}
@@ -174,7 +175,7 @@
           <label><input type="checkbox" name="scopes" value="jobs_read" checked /> Read jobs</label>
           <label><input type="checkbox" name="scopes" value="jobs_write" checked /> Submit/cancel jobs</label>
           <label><input type="checkbox" name="scopes" value="printers_read" checked /> Read printers</label>
-          <label><input type="checkbox" name="scopes" value="agents_read" /> Read agents</label>
+          <label><input type="checkbox" name="scopes" value="agents_read" /> Read nodes</label>
           <label><input type="checkbox" name="scopes" value="webhooks_read" /> Read webhooks</label>
           <label><input type="checkbox" name="scopes" value="webhooks_write" /> Manage webhooks</label>
           <label><input type="checkbox" name="scopes" value="usage_read" /> Read usage</label>

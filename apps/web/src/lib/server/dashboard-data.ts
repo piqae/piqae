@@ -2,7 +2,8 @@ import { env as privateEnv } from '$env/dynamic/private';
 import { env as publicEnv } from '$env/dynamic/public';
 import type { RequestEvent } from '@sveltejs/kit';
 import { SpoolClient, SpoolError } from '@spool/sdk';
-import { createLiveApi, mockApi, type DashboardApi } from '$lib/api';
+import { createLiveApi, mockApi, parseDashboardMeta, type DashboardApi } from '$lib/api';
+import type { DashboardMeta } from '$lib/view-types';
 
 export type DashboardMode = 'live' | 'demo';
 
@@ -79,6 +80,33 @@ export function dashboardSdk(
 
 export function dashboardMode(): DashboardMode {
   return configuredMode();
+}
+
+export async function dashboardMeta(
+  event: Pick<RequestEvent, 'fetch' | 'url' | 'locals'>
+): Promise<DashboardMeta> {
+  if (configuredMode() === 'demo') return mockApi.meta();
+  const baseUrl = publicEnv.PUBLIC_SPOOL_API_URL || event.url.origin;
+  try {
+    const response = await event.fetch(`${baseUrl.replace(/\/$/, '')}/v1/meta`, {
+      headers: { accept: 'application/json' }
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return parseDashboardMeta(await response.json());
+  } catch {
+    const hosted = event.locals.authMode === 'workos';
+    return {
+      deployment: hosted ? 'cloud' : 'self_hosted',
+      version: 'unknown',
+      auth: {
+        provider: hosted ? 'workos' : 'local_owner',
+        workspaceSwitching: false,
+        invitations: false
+      },
+      billing: { enabled: false },
+      updates: { officialFeed: false, customFeed: !hosted }
+    };
+  }
 }
 
 export function presentDashboardError(error: unknown): DashboardLoadError {

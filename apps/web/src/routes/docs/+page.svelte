@@ -28,7 +28,7 @@
     <h1>Printing infrastructure<br />without the mystery.</h1>
     <p>
       Build reliable local and remote printing with durable queues, installed drivers, honest
-      state, and a small open-source agent.
+      state, and a small open-source node.
     </p>
     <div>
       <a class="button primary" href="/docs/quickstart">Start printing <Icon name="arrow-right" size={13} /></a>

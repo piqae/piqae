@@ -3,28 +3,47 @@
   import { invalidateAll } from '$app/navigation';
   import { onMount } from 'svelte';
   import type { Snippet } from 'svelte';
+  import type { DashboardMeta } from '$lib/view-types';
   import Icon from './Icon.svelte';
 
-  let { mode, children }: { mode: 'live' | 'demo'; children: Snippet } = $props();
+  let {
+    mode,
+    meta,
+    children
+  }: { mode: 'live' | 'demo'; meta: DashboardMeta; children: Snippet } = $props();
   let sidebarOpen = $state(false);
+  let interactive = $state(false);
   let theme = $state<'dark' | 'light'>('dark');
 
   const nav = [
     { href: '/dashboard', label: 'Overview', icon: 'activity' },
     { href: '/dashboard/jobs', label: 'Jobs', icon: 'jobs' },
-    { href: '/dashboard/agents', label: 'Agents', icon: 'agents' },
-    { href: '/dashboard/local', label: 'Local node', icon: 'printers' },
     { href: '/dashboard/printers', label: 'Printers', icon: 'printers' },
-    { href: '/dashboard/webhooks', label: 'Webhooks', icon: 'webhooks' },
-    { href: '/dashboard/api-keys', label: 'API keys', icon: 'api' }
+    { href: '/dashboard/nodes', label: 'Nodes', icon: 'agents' },
+    { href: '/dashboard/developers', label: 'Developers', icon: 'api' }
   ] as const;
 
   const utility = [
-    { href: '/docs', label: 'Documentation', icon: 'docs' },
     { href: '/dashboard/settings', label: 'Settings', icon: 'settings' }
   ] as const;
 
   function isActive(href: string): boolean {
+    if (
+      href === '/dashboard/nodes' &&
+      ['/dashboard/local', '/dashboard/agents'].some((route) =>
+        page.url.pathname.startsWith(route)
+      )
+    ) {
+      return true;
+    }
+    if (
+      href === '/dashboard/developers' &&
+      ['/dashboard/api-keys', '/dashboard/webhooks'].some((route) =>
+        page.url.pathname.startsWith(route)
+      )
+    ) {
+      return true;
+    }
     return href === '/dashboard'
       ? page.url.pathname === href
       : page.url.pathname.startsWith(`${href}/`) || page.url.pathname === href;
@@ -42,6 +61,7 @@
   }
 
   onMount(() => {
+    interactive = true;
     if (mode !== 'live') return;
     const source = new EventSource('/api/events');
     let refreshTimer: ReturnType<typeof setTimeout> | undefined;
@@ -84,17 +104,24 @@
 </svelte:head>
 
 <div class="shell">
-  <aside class:open={sidebarOpen}>
+  <aside id="primary-sidebar" class:open={sidebarOpen}>
     <div class="workspace">
       <a class="brand" href="/dashboard" onclick={closeSidebar} aria-label="Spool overview">
         <span class="logo"><Icon name="printers" size={14} strokeWidth={2} /></span>
         <span>Spool</span>
       </a>
-      <button class="workspace-switch" aria-label="Current workspace" disabled title="Workspace switching is not available yet">
-        <span class="avatar">C4</span>
+      <button
+        class="workspace-switch"
+        aria-label="Current workspace"
+        disabled
+        title={meta.auth.workspaceSwitching
+          ? 'Workspace switching is available in the account menu'
+          : 'This deployment has one workspace'}
+      >
+        <span class="avatar">SP</span>
         <span class="workspace-name">
-          <strong>C4 Coffee</strong>
-          <small>Production</small>
+          <strong>Spool</strong>
+          <small>{meta.deployment.replace('_', ' ')}</small>
         </span>
         <Icon name="chevron-down" size={13} />
       </button>
@@ -132,10 +159,9 @@
 
     <div class="sidebar-footer">
       <div class="service">
-        <span class="service-dot"></span>
         <div>
-          <strong>All systems operational</strong>
-          <small>Pickup p95 824 ms</small>
+          <strong>{meta.deployment.replace('_', ' ')}</strong>
+          <small>v{meta.version}</small>
         </div>
       </div>
       <button class="theme-button" onclick={toggleTheme} aria-label="Toggle color theme">
@@ -150,7 +176,13 @@
 
   <section class="main">
     <div class="mobile-bar">
-      <button onclick={() => (sidebarOpen = true)} aria-label="Open navigation">
+      <button
+        onclick={() => (sidebarOpen = true)}
+        aria-label="Open navigation"
+        aria-expanded={sidebarOpen}
+        aria-controls="primary-sidebar"
+        disabled={!interactive}
+      >
         <Icon name="menu" size={17} />
       </button>
       <a class="mobile-brand" href="/dashboard">
@@ -333,16 +365,6 @@
     display: flex;
     align-items: flex-start;
     gap: 7px;
-  }
-
-  .service-dot {
-    width: 6px;
-    height: 6px;
-    flex: 0 0 auto;
-    margin-top: 5px;
-    background: var(--success);
-    border-radius: 50%;
-    box-shadow: 0 0 0 2px var(--success-soft);
   }
 
   .service div {

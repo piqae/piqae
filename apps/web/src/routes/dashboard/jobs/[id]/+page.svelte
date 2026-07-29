@@ -66,7 +66,7 @@
     <div>
       <strong>Spool cannot safely determine whether this job printed</strong>
       <p>
-        The agent restarted between the OS handoff and recording its native job ID. Automatic retry
+        The node restarted between the OS handoff and recording its native job ID. Automatic retry
         is disabled to prevent a duplicate.
       </p>
     </div>
@@ -114,7 +114,7 @@
       <dl>
         <div><dt>Status</dt><dd><Status value={job.state} /></dd></div>
         <div><dt>Printer</dt><dd><a href={`/dashboard/printers/${job.printerId}`}>{printer?.name}</a></dd></div>
-        <div><dt>Agent</dt><dd><a href="/dashboard/agents">{agent?.name}</a></dd></div>
+        <div><dt>Node</dt><dd><a href="/dashboard/nodes">{agent?.name}</a></dd></div>
         <div><dt>Format</dt><dd>{job.contentFormat.toUpperCase()}</dd></div>
         <div><dt>Source</dt><dd>{job.source ?? '—'}</dd></div>
         <div><dt>Authority</dt><dd>{job.authority.replaceAll('_', ' ')}</dd></div>
@@ -128,7 +128,7 @@
       <dl>
         <div><dt>Job</dt><dd class="mono">{job.id}</dd></div>
         <div><dt>Printer</dt><dd class="mono">{job.printerId}</dd></div>
-        <div><dt>Agent</dt><dd class="mono">{job.agentId}</dd></div>
+        <div><dt>Node</dt><dd class="mono">{job.agentId}</dd></div>
       </dl>
     </section>
   </aside>
@@ -151,7 +151,7 @@
     <header class="dialog-header">
       <div>
         <h2 id="cancel-job-title">Cancel this print job?</h2>
-        <p>Spool will send a cancellation request to the agent’s durable local queue.</p>
+        <p>Spool will send a cancellation request to the node’s durable local queue.</p>
       </div>
       <button class="icon-button" type="button" aria-label="Close cancellation dialog" onclick={closeCancellation}>×</button>
     </header>

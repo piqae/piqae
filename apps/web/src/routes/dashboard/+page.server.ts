@@ -5,8 +5,7 @@ import type { DashboardOverview } from '$lib/view-types';
 const emptyOverview: DashboardOverview = {
   agents: { total: 0, online: 0, degraded: 0 },
   printers: { total: 0, online: 0, attention: 0 },
-  jobs: { today: 0, active: 0, failed: 0, uncertain: 0 },
-  pickupLatencyP95Ms: 0
+  jobs: { recent: 0, active: 0, failed: 0, uncertain: 0 }
 };
 
 export const load: PageServerLoad = async (event) => {

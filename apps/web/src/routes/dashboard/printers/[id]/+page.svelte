@@ -14,7 +14,7 @@
   <DataError error={data.dataError} />
 {:else if data.printer}
 {#snippet actions()}
-  <a class="button" href={`/dashboard/agents/${data.printer.agentId}`}>
+  <a class="button" href={`/dashboard/nodes/${data.printer.agentId}`}>
     <Icon name="agents" size={13} /> Open node
   </a>
 {/snippet}
@@ -104,7 +104,7 @@
     <section class="panel properties">
       <header><h2>Connection</h2></header>
       <dl>
-        <div><dt>Agent</dt><dd>{data.agent?.name}</dd></div>
+        <div><dt>Node</dt><dd>{data.agent?.name}</dd></div>
         <div><dt>Source</dt><dd>{data.printer.capabilities.source}</dd></div>
         <div><dt>Revision</dt><dd class="mono">{data.printer.capabilities.revision}</dd></div>
         <div><dt>Queue depth</dt><dd>{data.printer.queueDepth}</dd></div>

@@ -37,7 +37,7 @@
 
 <PageHeader
   title="Jobs"
-  description="Durable cloud, agent, and operating-system queue state."
+  description="Durable cloud, node, and operating-system queue state."
   {actions}
 />
 
@@ -66,7 +66,7 @@
         <th>Job</th>
         <th>Status</th>
         <th>Printer</th>
-        <th>Agent</th>
+        <th>Node</th>
         <th>Authority</th>
         <th class="right">Updated</th>
         <th><span class="sr-only">Actions</span></th>

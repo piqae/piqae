@@ -58,7 +58,7 @@
       <tr>
         <th>Printer</th>
         <th>Status</th>
-        <th>Agent</th>
+        <th>Node</th>
         <th>Profiles</th>
         <th>Readiness</th>
         <th>Queue</th>

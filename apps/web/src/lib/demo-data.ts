@@ -3,20 +3,12 @@ import type {
   DashboardApiKey,
   DashboardJob,
   DashboardJobEvent,
-  DashboardOverview,
   DashboardPrinter,
   DashboardWebhook
 } from './view-types';
 
 const now = new Date('2026-07-29T04:24:00.000Z');
 const ago = (minutes: number) => new Date(now.getTime() - minutes * 60_000).toISOString();
-
-export const overview: DashboardOverview = {
-  agents: { total: 4, online: 3, degraded: 1 },
-  printers: { total: 12, online: 10, attention: 2 },
-  jobs: { today: 1842, active: 7, failed: 2, uncertain: 1 },
-  pickupLatencyP95Ms: 824
-};
 
 export const agents: DashboardAgent[] = [
   {

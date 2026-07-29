@@ -20,11 +20,11 @@ export const docs: Doc[] = [
     slug: 'quickstart',
     group: 'Get started',
     title: 'Print in under ten minutes',
-    description: 'Create an API key, enrol an agent, choose a printer, and submit a durable PDF job.',
+    description: 'Create an API key, add a node, choose a printer, and submit a durable PDF job.',
     blocks: [
       {
         heading: '1. Start Spool',
-        body: 'Use Spool Cloud, run the self-hosted Docker Compose stack, or start an agent in local-only mode. Cloud and self-hosted agents need outbound HTTPS access only.'
+        body: 'Use Spool Cloud, run the self-hosted Docker Compose stack, or start a node in local-only mode. Cloud and self-hosted nodes need outbound HTTPS access only.'
       },
       {
         code: `# Local-only mode
@@ -78,11 +78,11 @@ spool-agent enrol \\
     slug: 'jobs',
     group: 'Core concepts',
     title: 'Jobs and delivery truth',
-    description: 'Understand durable registration, agent acceptance, operating-system handoff, and uncertain delivery.',
+    description: 'Understand durable registration, node acceptance, operating-system handoff, and uncertain delivery.',
     blocks: [
       {
         heading: 'Two durable queues',
-        body: 'The control plane retains responsibility while an agent is offline. The agent acknowledges a claim only after writing it to its local SQLite queue. This boundary prevents a successful API response from becoming a lost print.'
+        body: 'The control plane retains responsibility while a node is offline. The node acknowledges a claim only after writing it to its local SQLite queue. This boundary prevents a successful API response from becoming a lost print.'
       },
       {
         heading: 'Idempotency',
@@ -182,7 +182,7 @@ if (!timingSafeEqual(Buffer.from(expected), Buffer.from(signature))) {
     slug: 'sdk',
     group: 'Libraries',
     title: 'TypeScript SDK',
-    description: 'A dependency-free client for Node.js, browsers, serverless functions, and local-only agents.',
+    description: 'A dependency-free client for Node.js, browsers, serverless functions, and local-only nodes.',
     blocks: [
       {
         heading: 'Install',

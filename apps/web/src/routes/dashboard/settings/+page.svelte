@@ -1,5 +1,6 @@
 <script lang="ts">
   import PageHeader from '$lib/components/PageHeader.svelte';
+  let { data } = $props();
   let retention = $state('24');
   let raw = $state(true);
   let privateUris = $state(true);
@@ -17,20 +18,19 @@
     <a class="active" href="#general">General</a>
     <a href="#printing">Printing policy</a>
     <a href="#retention">Data retention</a>
-    <a href="#team">Team</a>
-    <a href="#audit">Audit log</a>
-    <a href="#usage">Usage</a>
+    {#if data.meta.auth.invitations}<a href="#team">Team</a>{/if}
+    {#if data.meta.billing.enabled}<a href="#usage">Usage</a>{/if}
   </nav>
 
   <div class="settings-content">
     <section class="panel" id="general">
-      <header><h2>Workspace</h2><p>The tenancy and environment boundary shown to your team.</p></header>
+      <header><h2>Deployment</h2><p>Capabilities reported by this Spool control plane.</p></header>
       <div class="form-body">
-        <label class="field"><span>Name</span><input class="input" value="C4 Coffee" disabled /></label>
-        <label class="field"><span>Slug</span><input class="input mono" value="c4-coffee" disabled /></label>
-        <label class="field"><span>Default region</span><input class="input" value="Sydney (syd1)" disabled /></label>
+        <label class="field"><span>Mode</span><input class="input" value={data.meta.deployment.replace('_', ' ')} disabled /></label>
+        <label class="field"><span>Authentication</span><input class="input" value={data.meta.auth.provider.replace('_', ' ')} disabled /></label>
+        <label class="field"><span>Version</span><input class="input mono" value={data.meta.version} disabled /></label>
       </div>
-      <footer><button class="button primary" disabled title="Workspace mutation is not implemented">Save changes</button></footer>
+      <footer><button class="button primary" disabled title="Deployment metadata is read-only">Save changes</button></footer>
     </section>
 
     <section class="panel" id="printing">
@@ -41,7 +41,7 @@
           <input type="checkbox" bind:checked={raw} disabled />
         </label>
         <label>
-          <span><strong>Allow private URI sources</strong><small>Agents may fetch documents from private network ranges.</small></span>
+          <span><strong>Allow private URI sources</strong><small>Nodes may fetch documents from private network ranges.</small></span>
           <input type="checkbox" bind:checked={privateUris} disabled />
         </label>
         <label>

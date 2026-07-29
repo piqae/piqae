@@ -4,6 +4,7 @@ import type {
   DashboardApiKey,
   DashboardJob,
   DashboardJobEvent,
+  DashboardMeta,
   DashboardOverview,
   DashboardPage,
   DashboardPrinter,
@@ -12,6 +13,7 @@ import type {
 import * as demo from './demo-data';
 
 export interface DashboardApi {
+  meta(): Promise<DashboardMeta>;
   overview(): Promise<DashboardOverview>;
   agents(): Promise<DashboardPage<DashboardAgent>>;
   printers(): Promise<DashboardPage<DashboardPrinter>>;
@@ -27,7 +29,44 @@ const delay = <T>(value: T): Promise<T> =>
   new Promise((resolve) => setTimeout(() => resolve(value), 60));
 
 export const mockApi: DashboardApi = {
-  overview: () => delay(demo.overview),
+  meta: () =>
+    delay({
+      deployment: 'local',
+      version: '0.1.0',
+      auth: { provider: 'none', workspaceSwitching: false, invitations: false },
+      billing: { enabled: false },
+      updates: { officialFeed: true, customFeed: true }
+    }),
+  overview: () =>
+    delay({
+      agents: {
+        total: demo.agents.length,
+        online: demo.agents.filter((node) => node.state === 'online').length,
+        degraded: demo.agents.filter((node) => node.state === 'degraded').length
+      },
+      printers: {
+        total: demo.printers.length,
+        online: demo.printers.filter((printer) => printer.state === 'online').length,
+        attention: demo.printers.filter((printer) => printer.state !== 'online').length
+      },
+      jobs: {
+        recent: demo.jobs.length,
+        active: demo.jobs.filter((job) =>
+          [
+            'created',
+            'content_pending',
+            'queued',
+            'waiting_for_agent',
+            'agent_accepted',
+            'queued_local',
+            'spooling',
+            'printing'
+          ].includes(job.state)
+        ).length,
+        failed: demo.jobs.filter((job) => job.state.startsWith('failed')).length,
+        uncertain: demo.jobs.filter((job) => job.state === 'delivery_uncertain').length
+      }
+    }),
   agents: () => delay(page(demo.agents)),
   printers: () => delay(page(demo.printers)),
   jobs: () => delay(page(demo.jobs)),
@@ -156,6 +195,15 @@ export function createLiveApi(
   });
 
   return {
+    meta: async () => {
+      const response = await fetcher(`${baseUrl.replace(/\/$/, '')}/v1/meta`, {
+        headers: { accept: 'application/json' }
+      });
+      if (!response.ok) {
+        throw new Error(`Spool metadata request failed with HTTP ${response.status}.`);
+      }
+      return parseDashboardMeta(await response.json());
+    },
     overview: async () => {
       const [agentList, printerPage, jobPage] = await Promise.all([
         client.agents.list(),
@@ -174,12 +222,22 @@ export function createLiveApi(
           attention: printerPage.data.filter((printer) => printer.state !== 'online').length
         },
         jobs: {
-          today: jobPage.data.length,
-          active: jobPage.data.filter((job) => !job.state.startsWith('failed')).length,
+          recent: jobPage.data.length,
+          active: jobPage.data.filter((job) =>
+            [
+              'created',
+              'content_pending',
+              'queued',
+              'waiting_for_agent',
+              'agent_accepted',
+              'queued_local',
+              'spooling',
+              'printing'
+            ].includes(job.state)
+          ).length,
           failed: jobPage.data.filter((job) => job.state.startsWith('failed')).length,
           uncertain: jobPage.data.filter((job) => job.state === 'delivery_uncertain').length
         },
-        pickupLatencyP95Ms: 0
       };
     },
     agents: async () => page((await client.agents.list()).map(toAgent)),
@@ -237,4 +295,37 @@ export function createLiveApi(
           }))
       )
   };
+}
+
+export function parseDashboardMeta(value: unknown): DashboardMeta {
+  const raw = isRecord(value) ? value : {};
+  const auth = isRecord(raw.auth) ? raw.auth : {};
+  const billing = isRecord(raw.billing) ? raw.billing : {};
+  const updates = isRecord(raw.updates) ? raw.updates : {};
+  const deployment = ['cloud', 'self_hosted', 'local'].includes(String(raw.deployment))
+    ? (raw.deployment as DashboardMeta['deployment'])
+    : 'self_hosted';
+  const provider = ['workos', 'local_owner', 'oidc', 'hybrid', 'none'].includes(
+    String(auth.provider)
+  )
+    ? (auth.provider as DashboardMeta['auth']['provider'])
+    : 'none';
+  return {
+    deployment,
+    version: typeof raw.version === 'string' && raw.version !== '' ? raw.version : 'unknown',
+    auth: {
+      provider,
+      workspaceSwitching: auth.workspace_switching === true,
+      invitations: auth.invitations === true
+    },
+    billing: { enabled: billing.enabled === true },
+    updates: {
+      officialFeed: updates.official_feed === true,
+      customFeed: updates.custom_feed === true
+    }
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }

@@ -53,11 +53,12 @@ test('credential and cancellation dialogs are accessible and non-mutating in dem
   page
 }) => {
   await page.goto('/dashboard/agents');
-  await page.getByRole('button', { name: 'Enrol agent' }).click();
-  const enrolment = page.getByRole('dialog', { name: 'Enrol an agent' });
+  await expect(page).toHaveURL(/\/dashboard\/nodes$/);
+  await page.getByRole('button', { name: 'Add node' }).click();
+  const enrolment = page.getByRole('dialog', { name: 'Add a node' });
   await expect(enrolment).toBeVisible();
   await expect(enrolment.getByText('Demo mode: preview only.')).toBeVisible();
-  await expect(enrolment.getByRole('button', { name: 'Create token' })).toBeDisabled();
+  await expect(enrolment.getByRole('button', { name: 'Create node token' })).toBeDisabled();
 
   await page.goto('/dashboard/api-keys');
   await page.getByRole('button', { name: 'Create secret key' }).click();

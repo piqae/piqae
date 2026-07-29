@@ -65,6 +65,7 @@
 {/snippet}
 
 <PageHeader
+  eyebrow="Developers"
   title="Webhooks"
   description="Signed, durable event delivery with retries and replay."
   {actions}
@@ -201,7 +202,7 @@
       <fieldset>
         <legend>Event families</legend>
         <label><input type="checkbox" name="events" value="job.*" checked /> Jobs</label>
-        <label><input type="checkbox" name="events" value="agent.*" /> Agents</label>
+        <label><input type="checkbox" name="events" value="agent.*" /> Nodes</label>
         <label><input type="checkbox" name="events" value="printer.*" /> Printers</label>
       </fieldset>
 

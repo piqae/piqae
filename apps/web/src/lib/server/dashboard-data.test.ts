@@ -8,7 +8,7 @@ const { publicEnvironment, privateEnvironment } = vi.hoisted(() => ({
 vi.mock('$env/dynamic/public', () => ({ env: publicEnvironment }));
 vi.mock('$env/dynamic/private', () => ({ env: privateEnvironment }));
 
-import { dashboardSource } from './dashboard-data';
+import { dashboardMeta, dashboardSource } from './dashboard-data';
 
 const fetcher = vi.fn<typeof fetch>();
 const baseEvent = {
@@ -43,6 +43,41 @@ describe('dashboard data source selection', () => {
     expect(String(url)).toBe('https://api.spool.test/v1/jobs?limit=100');
     expect(new Headers(init?.headers).get('authorization')).toBe(`Bearer ${oidcAccessToken}`);
     expect(JSON.stringify({ mode: source.mode })).not.toContain(oidcAccessToken);
+  });
+
+  it('loads public deployment capabilities without forwarding credentials', async () => {
+    fetcher.mockResolvedValueOnce(
+      Response.json({
+        deployment: 'self_hosted',
+        version: '1.2.3',
+        auth: {
+          provider: 'oidc',
+          workspace_switching: true,
+          invitations: false
+        },
+        billing: { enabled: false },
+        updates: { official_feed: false, custom_feed: true }
+      })
+    );
+
+    const meta = await dashboardMeta({
+      ...baseEvent,
+      locals: {
+        authMode: 'workos',
+        auth: { accessToken: oidcAccessToken }
+      } as never
+    });
+
+    expect(meta).toEqual({
+      deployment: 'self_hosted',
+      version: '1.2.3',
+      auth: { provider: 'oidc', workspaceSwitching: true, invitations: false },
+      billing: { enabled: false },
+      updates: { officialFeed: false, customFeed: true }
+    });
+    const [url, init] = fetcher.mock.calls[0] ?? [];
+    expect(String(url)).toBe('https://api.spool.test/v1/meta');
+    expect(new Headers(init?.headers).has('authorization')).toBe(false);
   });
 
   it('never falls back to a global service key for hosted users', () => {

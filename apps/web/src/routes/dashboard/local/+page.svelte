@@ -545,7 +545,7 @@
     <small>{status?.active_jobs ?? 0} active</small>
   </article>
   <article class="panel metric">
-    <span>Agent</span>
+    <span>Node</span>
     <strong class="mono">v{status?.version ?? '—'}</strong>
     <small>{status?.paused ? 'Pickup paused' : `${status?.printer_warnings ?? 0} warnings`}</small>
   </article>
