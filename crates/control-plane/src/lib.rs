@@ -1060,6 +1060,10 @@ mod tests {
         assert_eq!(readiness["status"], "ready");
         assert_eq!(readiness["bindings"][0]["status"], "ready");
 
+        application
+            .repository
+            .set_agent_offline(application.agent_id)
+            .await;
         let target_job_response = application
             .router
             .clone()
@@ -1110,6 +1114,62 @@ mod tests {
                 .get("spool.profile_revision")
                 .map(String::as_str),
             Some("4")
+        );
+
+        let reconnect_time = Utc::now();
+        let reconnect = AgentSyncRequest {
+            agent_id: application.agent_id,
+            protocol_version: 1,
+            agent_version: "test-routing".into(),
+            printer_revision: 2,
+            acknowledged_command_cursor: None,
+            event_cursor: None,
+            queue: QueueSnapshot {
+                queued_jobs: 0,
+                active_jobs: 0,
+                content_bytes: 0,
+                accepts_jobs: true,
+            },
+            health: AgentHealth {
+                started_at: reconnect_time,
+                observed_at: reconnect_time,
+                sqlite_integrity_ok: true,
+                executor_crashes: 0,
+                last_error_code: None,
+            },
+            printers: Some(vec![profiled_printer_snapshot(printer_id)]),
+            events: Vec::new(),
+        };
+        let reconnect_body = serde_json::to_vec(&reconnect).expect("reconnect JSON");
+        let reconnect_response = application
+            .router
+            .clone()
+            .oneshot(signed_request(
+                &application,
+                "POST",
+                "/v1/agent/sync",
+                reconnect_body,
+            ))
+            .await
+            .expect("reconnect response");
+        assert_eq!(reconnect_response.status(), StatusCode::OK);
+        let reconnect_sync: AgentSyncResponse = serde_json::from_slice(
+            &reconnect_response
+                .into_body()
+                .collect()
+                .await
+                .expect("reconnect body")
+                .to_bytes(),
+        )
+        .expect("reconnect response JSON");
+        assert_eq!(reconnect_sync.candidate_jobs.len(), 1);
+        assert_eq!(
+            reconnect_sync.candidate_jobs[0].job.id,
+            target_job["id"]
+                .as_str()
+                .expect("target job id")
+                .parse()
+                .expect("typed target job id")
         );
 
         let cross_tenant = application

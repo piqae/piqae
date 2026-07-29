@@ -1548,6 +1548,7 @@ struct MemoryState {
     next_agent_command_cursor: u64,
     leases: HashMap<JobId, (AgentId, Uuid, String, DateTime<Utc>)>,
     job_acceptances: HashMap<JobId, MemoryJobAcceptance>,
+    routing_attempts: Vec<(JobId, String, String)>,
     idempotency: HashMap<(WorkspaceId, EnvironmentId, String), (Vec<u8>, JobId)>,
     compatibility: HashMap<(WorkspaceId, EnvironmentId, String, String), i64>,
     reverse_compatibility: HashMap<(WorkspaceId, EnvironmentId, String, i64), String>,
@@ -1614,6 +1615,14 @@ impl MemoryRepository {
     pub async fn clear_acceptance_token(&self, job_id: JobId) {
         if let Some(acceptance) = self.state.write().await.job_acceptances.get_mut(&job_id) {
             acceptance.lease_token = None;
+        }
+    }
+
+    #[cfg(test)]
+    pub async fn set_agent_offline(&self, agent_id: AgentId) {
+        if let Some((_, _, agent)) = self.state.write().await.agents.get_mut(&agent_id) {
+            agent.state = "offline".into();
+            agent.last_seen_at = Utc::now() - chrono::Duration::minutes(5);
         }
     }
 }
@@ -2977,7 +2986,7 @@ impl Repository for MemoryRepository {
         if !profile_is_valid {
             return Ok(None);
         }
-        let job = {
+        let (job, from_binding_id) = {
             let record = state
                 .jobs
                 .get_mut(&job_id)
@@ -3000,6 +3009,12 @@ impl Repository for MemoryRepository {
             {
                 return Ok(None);
             }
+            let from_binding_id = record
+                .job
+                .metadata
+                .get("spool.binding_id")
+                .cloned()
+                .unwrap_or_default();
             record.agent_id = binding.agent_id;
             record.job.printer_id = binding.printer_id;
             record
@@ -3014,9 +3029,12 @@ impl Repository for MemoryRepository {
                 "spool.profile_revision".into(),
                 binding.profile_revision.to_string(),
             );
-            record.job.clone()
+            (record.job.clone(), from_binding_id)
         };
         state.leases.remove(&job_id);
+        state
+            .routing_attempts
+            .push((job_id, from_binding_id, binding.id.clone()));
         Ok(Some(job))
     }
 
@@ -3510,8 +3528,21 @@ impl Repository for MemoryRepository {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::too_many_lines)]
 mod routing_repository_tests {
     use super::*;
+    use spool_domain::JobOptions;
+    use spool_storage_postgres::PrinterProfileSnapshot;
+
+    struct RecoveryFixture {
+        repository: MemoryRepository,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        primary_agent: AgentId,
+        standby_printer: PrinterId,
+        standby_binding: StoredTargetBinding,
+        job_id: JobId,
+    }
 
     fn target(id: &str, name: &str) -> StoredTarget {
         let now = Utc::now();
@@ -3524,6 +3555,127 @@ mod routing_repository_tests {
             routing_policy: "primary_then_standby".into(),
             created_at: now,
             updated_at: now,
+        }
+    }
+
+    async fn recovery_fixture() -> RecoveryFixture {
+        let repository = MemoryRepository::default();
+        let workspace_id = WorkspaceId::new();
+        let environment_id = EnvironmentId::new();
+        let primary_agent = AgentId::new();
+        let standby_agent = AgentId::new();
+        let primary_printer = PrinterId::new();
+        let standby_printer = PrinterId::new();
+        repository
+            .add_printer(workspace_id, environment_id, primary_printer, primary_agent)
+            .await;
+        repository
+            .add_printer(workspace_id, environment_id, standby_printer, standby_agent)
+            .await;
+        {
+            let mut state = repository.state.write().await;
+            for printer_id in [primary_printer, standby_printer] {
+                state
+                    .printers
+                    .get_mut(&printer_id)
+                    .expect("fixture printer")
+                    .2
+                    .profiles = vec![PrinterProfileSnapshot {
+                    profile_id: "profile_shipping".into(),
+                    revision: 4,
+                    name: "Shipping".into(),
+                    is_default: true,
+                    options: JobOptions::default(),
+                    status: Some("ready".into()),
+                    native_kind: None,
+                    native_digest: Some("sha256:fixture".into()),
+                    driver_fingerprint: None,
+                    summary: None,
+                    stock_id: None,
+                    safe_overrides: Vec::new(),
+                    last_validated_at: None,
+                    last_test_job_id: None,
+                    published: true,
+                }];
+            }
+        }
+        repository
+            .create_target(
+                workspace_id,
+                environment_id,
+                &target("tgt_recovery", "Recovery target"),
+            )
+            .await
+            .expect("create target");
+        let now = Utc::now();
+        let primary_binding = StoredTargetBinding {
+            id: "tgb_primary".into(),
+            target_id: "tgt_recovery".into(),
+            printer_id: primary_printer,
+            agent_id: primary_agent,
+            profile_id: "profile_shipping".into(),
+            profile_revision: 4,
+            role: "primary".into(),
+            enabled: true,
+            created_at: now,
+            updated_at: now,
+        };
+        let standby_binding = StoredTargetBinding {
+            id: "tgb_standby".into(),
+            target_id: "tgt_recovery".into(),
+            printer_id: standby_printer,
+            agent_id: standby_agent,
+            profile_id: "profile_shipping".into(),
+            profile_revision: 4,
+            role: "standby".into(),
+            enabled: true,
+            created_at: now,
+            updated_at: now,
+        };
+        repository
+            .create_target_binding(workspace_id, environment_id, &primary_binding)
+            .await
+            .expect("create primary binding");
+        repository
+            .create_target_binding(workspace_id, environment_id, &standby_binding)
+            .await
+            .expect("create standby binding");
+        let job_id = JobId::new();
+        let job = Job {
+            id: job_id,
+            workspace_id,
+            environment_id,
+            printer_id: primary_printer,
+            title: "Recovery fixture".into(),
+            source: None,
+            content_kind: spool_domain::ContentKind::Pdf,
+            content: spool_domain::ContentSource::Base64 {
+                data: "JVBERi0=".into(),
+            },
+            options: JobOptions::default(),
+            metadata: std::collections::BTreeMap::from([
+                ("spool.target_id".into(), "tgt_recovery".into()),
+                ("spool.binding_id".into(), primary_binding.id),
+                ("spool.profile_id".into(), "profile_shipping".into()),
+                ("spool.profile_revision".into(), "4".into()),
+            ]),
+            deliveries: 1,
+            state: JobState::WaitingForAgent,
+            created_at: now,
+            expires_at: now + chrono::Duration::hours(1),
+        };
+        repository
+            .create_job(&job, primary_agent, None, b"recovery fixture")
+            .await
+            .expect("create recovery job");
+        RecoveryFixture {
+            repository,
+            workspace_id,
+            environment_id,
+            primary_agent,
+            standby_printer,
+            standby_binding,
+            job_id,
         }
     }
 
@@ -3575,5 +3727,159 @@ mod routing_repository_tests {
                 .await,
             Err(RepositoryError::NotFound)
         ));
+    }
+
+    #[tokio::test]
+    async fn concurrent_standby_recovery_routes_once_and_records_one_attempt() {
+        let fixture = recovery_fixture().await;
+        let first_repository = fixture.repository.clone();
+        let second_repository = fixture.repository.clone();
+        let first_binding = fixture.standby_binding.clone();
+        let second_binding = fixture.standby_binding.clone();
+        let first = first_repository.reroute_job_before_acceptance(
+            fixture.workspace_id,
+            fixture.environment_id,
+            fixture.job_id,
+            "tgt_recovery",
+            &first_binding,
+            "standby_recovery",
+        );
+        let second = second_repository.reroute_job_before_acceptance(
+            fixture.workspace_id,
+            fixture.environment_id,
+            fixture.job_id,
+            "tgt_recovery",
+            &second_binding,
+            "standby_recovery",
+        );
+        let (first, second) = tokio::join!(first, second);
+        assert_eq!(
+            usize::from(first.expect("first attempt").is_some())
+                + usize::from(second.expect("second attempt").is_some()),
+            1
+        );
+        let rerouted = fixture
+            .repository
+            .get_job(fixture.workspace_id, fixture.environment_id, fixture.job_id)
+            .await
+            .expect("rerouted job");
+        assert_eq!(rerouted.printer_id, fixture.standby_printer);
+        let state = fixture.repository.state.read().await;
+        assert_eq!(state.routing_attempts.len(), 1);
+        assert_eq!(
+            state.routing_attempts[0],
+            (fixture.job_id, "tgb_primary".into(), "tgb_standby".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn actively_leased_job_is_never_rerouted() {
+        let fixture = recovery_fixture().await;
+        let leases = fixture
+            .repository
+            .claim_jobs(
+                fixture.workspace_id,
+                fixture.environment_id,
+                fixture.primary_agent,
+                "test-owner",
+                1,
+            )
+            .await
+            .expect("claim job");
+        assert_eq!(leases.len(), 1);
+        let result = fixture
+            .repository
+            .reroute_job_before_acceptance(
+                fixture.workspace_id,
+                fixture.environment_id,
+                fixture.job_id,
+                "tgt_recovery",
+                &fixture.standby_binding,
+                "standby_recovery",
+            )
+            .await
+            .expect("reroute result");
+        assert!(result.is_none());
+        assert_eq!(
+            fixture
+                .repository
+                .get_job(fixture.workspace_id, fixture.environment_id, fixture.job_id)
+                .await
+                .expect("leased job")
+                .printer_id,
+            leases[0].job.printer_id
+        );
+        assert!(
+            fixture
+                .repository
+                .state
+                .read()
+                .await
+                .routing_attempts
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn durably_accepted_job_is_never_rerouted() {
+        let fixture = recovery_fixture().await;
+        let lease = fixture
+            .repository
+            .claim_jobs(
+                fixture.workspace_id,
+                fixture.environment_id,
+                fixture.primary_agent,
+                "test-owner",
+                1,
+            )
+            .await
+            .expect("claim job")
+            .pop()
+            .expect("job lease");
+        fixture
+            .repository
+            .accept_agent_job(
+                fixture.workspace_id,
+                fixture.environment_id,
+                fixture.primary_agent,
+                fixture.job_id,
+                lease.lease_id,
+                &lease.lease_token,
+                None,
+                1,
+            )
+            .await
+            .expect("durable acceptance");
+        let result = fixture
+            .repository
+            .reroute_job_before_acceptance(
+                fixture.workspace_id,
+                fixture.environment_id,
+                fixture.job_id,
+                "tgt_recovery",
+                &fixture.standby_binding,
+                "standby_recovery",
+            )
+            .await
+            .expect("reroute result");
+        assert!(result.is_none());
+        assert_eq!(
+            fixture
+                .repository
+                .get_job(fixture.workspace_id, fixture.environment_id, fixture.job_id)
+                .await
+                .expect("accepted job")
+                .state,
+            JobState::AgentAccepted
+        );
+        assert!(
+            fixture
+                .repository
+                .state
+                .read()
+                .await
+                .routing_attempts
+                .is_empty()
+        );
     }
 }
