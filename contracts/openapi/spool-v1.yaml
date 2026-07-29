@@ -521,6 +521,90 @@ paths:
                 type: array
                 items: { $ref: "#/components/schemas/WorkspaceMember" }
         "401": { $ref: "#/components/responses/Error" }
+  /v1/platform/accounts:
+    get:
+      summary: List customer accounts owned by the platform service account
+      description: |
+        Server-side platform operation. It uses only the platform bearer and
+        never accepts tenant-selection headers. Results include the Test and
+        Live environment IDs required to construct an account-scoped client.
+      tags: [Platform]
+      operationId: listPlatformAccounts
+      security: [{ platformBearer: [] }]
+      responses:
+        "200":
+          description: Customer accounts owned by this platform identity.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/PlatformAccount" }
+        "401": { $ref: "#/components/responses/Error" }
+  /v1/platform/accounts/{external_id}:
+    parameters:
+      - name: external_id
+        in: path
+        required: true
+        description: Stable customer identifier from the integrating platform.
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 120
+          pattern: '^[A-Za-z0-9][A-Za-z0-9_.:-]*$'
+    put:
+      summary: Idempotently create or update a customer account
+      description: |
+        The first request atomically creates a workspace, Test and Live
+        environments, and exact grants for this platform service account.
+        Repeating the same external ID updates safe account metadata without
+        creating another tenant.
+      tags: [Platform]
+      operationId: upsertPlatformAccount
+      security: [{ platformBearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpsertPlatformAccount" }
+      responses:
+        "200":
+          description: Existing account updated.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PlatformAccount" }
+        "201":
+          description: Account, environments, and grants created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PlatformAccount" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+    get:
+      summary: Retrieve one customer account by the platform's external ID
+      tags: [Platform]
+      operationId: getPlatformAccount
+      security: [{ platformBearer: [] }]
+      responses:
+        "200":
+          description: Platform-owned customer account.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PlatformAccount" }
+        "401": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+    delete:
+      summary: Archive a customer account and revoke its platform grants
+      description: |
+        Stops new platform requests for both environments. Existing durable
+        print jobs remain available to workers for lifecycle completion.
+      tags: [Platform]
+      operationId: archivePlatformAccount
+      security: [{ platformBearer: [] }]
+      responses:
+        "204": { description: Account archived or already archived. }
+        "401": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
   /v1/device-authorizations:
     post:
       summary: Start browser pairing for a node
@@ -1744,11 +1828,11 @@ components:
       scheme: bearer
       bearerFormat: Spool platform service-account key
       description: |
-        Operator-issued credential with explicit workspace/environment grants.
-        Tenant API requests must also send X-Spool-Workspace-Id and
-        X-Spool-Environment-Id. An ordinary API key cannot use these headers to
-        change tenant; the server ignores or rejects tenant selection unless
-        the verified credential is a platform service account.
+        Operator-issued credential. Platform account-management routes use the
+        bearer without tenant-selection headers. Account-scoped tenant routes
+        require X-Spool-Workspace-Id and X-Spool-Environment-Id matching an
+        active explicit grant. An ordinary API key cannot use these headers to
+        change tenant.
     compatibilityBasic:
       type: http
       scheme: basic
@@ -2007,6 +2091,56 @@ components:
         status: { type: string, enum: [pending, active, inactive] }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
+    PlatformAccountEnvironment:
+      type: object
+      additionalProperties: false
+      required: [id, kind]
+      properties:
+        id: { type: string }
+        kind: { type: string, enum: [test, live] }
+    PlatformAccountEnvironments:
+      type: object
+      additionalProperties: false
+      required: [test, live]
+      properties:
+        test: { $ref: "#/components/schemas/PlatformAccountEnvironment" }
+        live: { $ref: "#/components/schemas/PlatformAccountEnvironment" }
+    PlatformAccount:
+      type: object
+      additionalProperties: false
+      required:
+        [id, external_id, name, status, metadata, environments, created_at, updated_at]
+      properties:
+        id:
+          type: string
+          description: Spool workspace ID. It is not supplied by the caller.
+        external_id:
+          type: string
+          description: Stable platform-owned customer identifier.
+        name: { type: string, minLength: 1, maxLength: 120 }
+        status: { type: string, enum: [active, suspended, cancelled] }
+        metadata:
+          type: object
+          maxProperties: 20
+          additionalProperties:
+            type: string
+            maxLength: 500
+        environments:
+          $ref: "#/components/schemas/PlatformAccountEnvironments"
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    UpsertPlatformAccount:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 120 }
+        metadata:
+          type: object
+          maxProperties: 20
+          additionalProperties:
+            type: string
+            maxLength: 500
     CompatibilityWhoAmI:
       type: object
       required: [id, email, canCreateSubAccounts, credits, numComputers, totalPrints, versions]
