@@ -26,7 +26,12 @@ impl std::fmt::Debug for BillingUsageWorker {
 }
 
 impl BillingUsageWorker {
-    #[must_use]
+    /// Builds a worker whose Stripe requests have a finite transport timeout.
+    ///
+    /// # Errors
+    ///
+    /// Returns an HTTP client configuration error when the platform TLS or
+    /// connector configuration cannot be initialized.
     pub fn new(
         store: PostgresStore,
         stripe_secret_key: impl Into<String>,
