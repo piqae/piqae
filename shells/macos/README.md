@@ -57,3 +57,73 @@ and cancel send it in `X-Spool-Capture-Token`. Edit and clone sessions also
 return the current `native_configuration`, allowing the panel to begin with
 the exact saved native settings. Native configurations are capped at 1 MiB in
 the shell and must remain local to the agent.
+
+## Headless PrintCore replay
+
+`SpoolPrintCoreReplay` is the bounded, local-only PDF handoff helper used when
+a job pins a `macos_printcore` profile. It restores the captured
+`NSPrintInfo.printSettings`, `PMPrintSettings`, and `PMPageFormat`, binds the
+exact requested `NSPrinter`, applies only allowlisted stable job overrides, and
+runs a PDFKit `NSPrintOperation` with both the print and progress panels hidden.
+It works on a private `NSPrintInfo` copy and never changes the driver defaults.
+
+Build it directly with:
+
+```sh
+swift build --package-path shells/macos -c release --product SpoolPrintCoreReplay
+```
+
+The helper reads exactly one JSON value from stdin (maximum 2 MiB):
+
+```json
+{
+  "printer_native_id": "HP_LaserJet",
+  "pdf_path": "/absolute/spool/content/job.pdf",
+  "job_title": "Packing slip 1234",
+  "native_profile": {
+    "kind": "macos_printcore",
+    "schema_version": 1,
+    "digest": "sha256:<64 lowercase hex characters>",
+    "blob_base64": "<base64 JSON LocalMacNativeConfiguration>"
+  },
+  "portable_options": {
+    "copies": 2,
+    "collate": true,
+    "duplex": "long-edge",
+    "fit_to_page": true,
+    "pages": "1-2",
+    "paper": "iso-a4",
+    "rotate": "0",
+    "native_options": {}
+  },
+  "safe_overrides": [
+    "copies",
+    "collate",
+    "duplex",
+    "fit_to_page",
+    "pages",
+    "paper",
+    "rotate"
+  ]
+}
+```
+
+`bin`, `color`, `dpi`, `media`, `nup`, and arbitrary `native_options` are
+rejected even if allowlisted: macOS has no stable public AppKit/PrintCore job
+override for them, and replacing driver-owned dictionary keys would corrupt
+exact-profile semantics. Save those choices into the native profile instead.
+Page ranges are one page or one ascending contiguous range.
+
+Stdout is one bounded JSON response. Success means AppKit accepted the
+synchronous operation; PrintCore does not expose a reliable native queue job ID
+through this API:
+
+```json
+{"ok":true,"retryable":false,"handoff_may_have_succeeded":false}
+```
+
+Failures include a stable `code`, a bounded `message`, `retryable`, and
+`handoff_may_have_succeeded`. A failure after `NSPrintOperation.run()` begins is
+marked ambiguous and must not be retried automatically. The process exits zero
+on success and one on failure. The app bundle builder embeds the helper at
+`Spool.app/Contents/MacOS/SpoolPrintCoreReplay`.

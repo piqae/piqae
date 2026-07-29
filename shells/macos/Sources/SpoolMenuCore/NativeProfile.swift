@@ -42,6 +42,18 @@ public struct LocalNativeProfileSeed: Codable, Equatable, Sendable {
     public let digest: String
     public let nativeBlob: Data
 
+    public init(
+        kind: String,
+        schemaVersion: UInt32,
+        digest: String,
+        nativeBlob: Data
+    ) {
+        self.kind = kind
+        self.schemaVersion = schemaVersion
+        self.digest = digest
+        self.nativeBlob = nativeBlob
+    }
+
     enum CodingKeys: String, CodingKey {
         case kind
         case schemaVersion = "schema_version"
