@@ -103,7 +103,27 @@ export function createLiveApi(
       revision: profile.revision,
       name: profile.name,
       isDefault: profile.is_default,
-      options: profile.options
+      options: profile.options,
+      status: profile.status ?? 'needs_test',
+      nativeKind: profile.native_kind ?? 'portable_options',
+      nativeDigest: profile.native_digest ?? null,
+      driverName: profile.driver_fingerprint?.driver_name ?? null,
+      driverVersion: profile.driver_fingerprint?.driver_version ?? null,
+      summary: {
+        paper: profile.summary?.paper ?? profile.options.paper ?? null,
+        dimensionsMm: profile.summary?.dimensions_mm ?? null,
+        source: profile.summary?.source ?? profile.options.bin ?? null,
+        media: profile.summary?.media ?? profile.options.media ?? null,
+        color:
+          profile.summary?.color ??
+          (profile.options.color === undefined ? null : profile.options.color ? 'Colour' : 'Mono'),
+        resolution: profile.summary?.resolution ?? profile.options.dpi ?? null
+      },
+      stockId: profile.stock_id ?? null,
+      safeOverrides: profile.safe_overrides ?? ['copies', 'pages'],
+      lastValidatedAt: profile.last_validated_at ?? null,
+      lastTestJobId: profile.last_test_job_id ?? null,
+      published: profile.published ?? true
     })),
     capabilities: {
       color: printer.capabilities.color === true,

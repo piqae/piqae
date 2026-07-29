@@ -10,6 +10,8 @@
 
   let query = $state('');
   let filterState = $state('all');
+  const readyProfileCount = (printer: (typeof printers)[number]) =>
+    printer.profiles.filter((profile) => profile.status === 'ready').length;
   const visible = $derived(
     printers.filter((printer) => {
       const matchesQuery =
@@ -29,7 +31,7 @@
 
 <PageHeader
   title="Printers"
-  description="Installed operating-system queues and driver-reported capabilities."
+  description="Installed destinations, native profiles, and operational readiness."
   {actions}
 />
 
@@ -57,7 +59,8 @@
         <th>Printer</th>
         <th>Status</th>
         <th>Agent</th>
-        <th>Capabilities</th>
+        <th>Profiles</th>
+        <th>Readiness</th>
         <th>Queue</th>
         <th class="right">Last seen</th>
         <th><span class="sr-only">Actions</span></th>
@@ -88,11 +91,19 @@
             </span>
           </td>
           <td>
-            <div class="capabilities">
-              <span>{printer.capabilities.color ? 'Color' : 'Mono'}</span>
-              {#if printer.capabilities.duplex}<span>Duplex</span>{/if}
-              <span>{printer.capabilities.dpis[0]}</span>
-            </div>
+            <strong class="numeric">{printer.profiles.length}</strong>
+            <small class="profile-copy">
+              {printer.profiles.filter((profile) => profile.published).length} published
+            </small>
+          </td>
+          <td>
+            {#if printer.profiles.length === 0}
+              <span class="muted">No profiles</span>
+            {:else if readyProfileCount(printer) === printer.profiles.length}
+              <Status value="online" label={`${readyProfileCount(printer)} ready`} />
+            {:else}
+              <Status value="degraded" label={`${printer.profiles.length - readyProfileCount(printer)} need attention`} />
+            {/if}
           </td>
           <td class="numeric">{printer.queueDepth}</td>
           <td class="right muted numeric"><RelativeTime value={printer.lastSeenAt} /></td>
@@ -243,17 +254,10 @@
     color: var(--text-tertiary);
   }
 
-  .capabilities {
-    display: flex;
-    gap: 4px;
-  }
-
-  .capabilities span {
-    padding: 2px 5px;
+  .profile-copy {
+    display: block;
+    margin-top: 2px;
     color: var(--text-tertiary);
-    background: var(--surface-raised);
-    border: 1px solid var(--border-subtle);
-    border-radius: var(--radius-sm);
     font-size: 8px;
   }
 

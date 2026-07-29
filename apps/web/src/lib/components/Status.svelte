@@ -8,11 +8,11 @@
   } = $props();
 
   const tone = $derived(
-    ['online', 'completed_reported', 'healthy', 'accepted_by_spooler'].includes(value)
+    ['online', 'ready', 'completed_reported', 'healthy', 'accepted_by_spooler'].includes(value)
       ? 'success'
-      : ['blocked', 'degraded', 'waiting_for_agent'].includes(value)
+      : ['blocked', 'degraded', 'waiting_for_agent', 'needs_test', 'stale', 'dependency_missing'].includes(value)
         ? 'warning'
-        : ['failed_terminal', 'failed_retryable', 'offline', 'failing'].includes(value)
+        : ['failed_terminal', 'failed_retryable', 'offline', 'failing', 'invalid', 'driver_mismatch', 'destination_missing', 'retired'].includes(value)
           ? 'danger'
           : ['delivery_uncertain'].includes(value)
             ? 'danger'

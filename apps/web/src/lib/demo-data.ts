@@ -98,7 +98,33 @@ export const printers: DashboardPrinter[] = [
     lastSeenAt: ago(0),
     capabilityRevision: 1,
     nativeOptions: {},
-    profiles: [],
+    profiles: [
+      {
+        profileId: 'prf_zebra_shipping',
+        revision: 3,
+        name: '4 × 6 shipping',
+        isDefault: true,
+        options: { paper: '4x6', dpi: '203x203', copies: 1 },
+        status: 'ready',
+        nativeKind: 'windows_devmode',
+        nativeDigest: 'sha256:772a',
+        driverName: 'ZDesigner ZD421-203dpi ZPL',
+        driverVersion: '10.5.1',
+        summary: {
+          paper: '4 × 6 shipping',
+          dimensionsMm: [101.6, 152.4],
+          source: 'Roll',
+          media: 'Gap',
+          color: 'Mono',
+          resolution: '203 × 203 dpi'
+        },
+        stockId: 'stk_shipping_4x6',
+        safeOverrides: ['copies', 'pages'],
+        lastValidatedAt: ago(14),
+        lastTestJobId: 'job_test_zebra',
+        published: true
+      }
+    ],
     capabilities
   },
   {
@@ -114,7 +140,33 @@ export const printers: DashboardPrinter[] = [
     lastSeenAt: ago(1),
     capabilityRevision: 1,
     nativeOptions: {},
-    profiles: [],
+    profiles: [
+      {
+        profileId: 'prf_brother_product',
+        revision: 1,
+        name: '62 mm product label',
+        isDefault: true,
+        options: { paper: '62mm', copies: 1 },
+        status: 'needs_test',
+        nativeKind: 'portable_options',
+        nativeDigest: null,
+        driverName: null,
+        driverVersion: null,
+        summary: {
+          paper: '62 mm',
+          dimensionsMm: null,
+          source: 'Roll',
+          media: null,
+          color: 'Mono',
+          resolution: null
+        },
+        stockId: 'stk_product_62',
+        safeOverrides: ['copies'],
+        lastValidatedAt: null,
+        lastTestJobId: null,
+        published: false
+      }
+    ],
     capabilities: { ...capabilities, papers: ['62mm', '29mm'], source: 'windows_driver' }
   },
   {
@@ -130,7 +182,58 @@ export const printers: DashboardPrinter[] = [
     lastSeenAt: ago(1),
     capabilityRevision: 1,
     nativeOptions: {},
-    profiles: [],
+    profiles: [
+      {
+        profileId: 'prf_office_colour',
+        revision: 2,
+        name: 'A4 colour',
+        isDefault: true,
+        options: { paper: 'A4', color: true, duplex: 'one-sided', copies: 1 },
+        status: 'ready',
+        nativeKind: 'macos_printcore',
+        nativeDigest: 'sha256:b061',
+        driverName: 'HP OfficeJet Pro',
+        driverVersion: '4.2',
+        summary: {
+          paper: 'A4',
+          dimensionsMm: [210, 297],
+          source: 'Automatic',
+          media: 'Plain paper',
+          color: 'Colour',
+          resolution: '600 dpi'
+        },
+        stockId: 'stk_a4_plain',
+        safeOverrides: ['copies', 'pages'],
+        lastValidatedAt: ago(18),
+        lastTestJobId: 'job_test_hp_colour',
+        published: true
+      },
+      {
+        profileId: 'prf_office_mono',
+        revision: 1,
+        name: 'A4 mono draft',
+        isDefault: false,
+        options: { paper: 'A4', color: false, duplex: 'one-sided', copies: 1 },
+        status: 'ready',
+        nativeKind: 'macos_printcore',
+        nativeDigest: 'sha256:508d',
+        driverName: 'HP OfficeJet Pro',
+        driverVersion: '4.2',
+        summary: {
+          paper: 'A4',
+          dimensionsMm: [210, 297],
+          source: 'Automatic',
+          media: 'Plain paper',
+          color: 'Monochrome draft',
+          resolution: '300 dpi'
+        },
+        stockId: 'stk_a4_plain',
+        safeOverrides: ['copies', 'pages'],
+        lastValidatedAt: ago(16),
+        lastTestJobId: 'job_test_hp_mono',
+        published: true
+      }
+    ],
     capabilities: {
       ...capabilities,
       color: true,

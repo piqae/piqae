@@ -53,6 +53,35 @@ export interface DashboardPrinterProfile {
   name: string;
   isDefault: boolean;
   options: JobOptions;
+  status:
+    | 'draft'
+    | 'capturing'
+    | 'ready'
+    | 'needs_test'
+    | 'stale'
+    | 'driver_mismatch'
+    | 'destination_missing'
+    | 'dependency_missing'
+    | 'interactive_only'
+    | 'invalid'
+    | 'retired';
+  nativeKind: string;
+  nativeDigest: string | null;
+  driverName: string | null;
+  driverVersion: string | null;
+  summary: {
+    paper: string | null;
+    dimensionsMm: [number, number] | null;
+    source: string | null;
+    media: string | null;
+    color: string | null;
+    resolution: string | null;
+  };
+  stockId: string | null;
+  safeOverrides: string[];
+  lastValidatedAt: string | null;
+  lastTestJobId: string | null;
+  published: boolean;
 }
 
 export interface DashboardJob {

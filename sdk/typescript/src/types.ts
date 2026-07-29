@@ -136,6 +136,57 @@ export interface PrinterProfileSnapshot {
   name: string;
   is_default: boolean;
   options: JobOptions;
+  /** Readiness of the exact immutable native profile revision. */
+  status?:
+    | 'draft'
+    | 'capturing'
+    | 'ready'
+    | 'needs_test'
+    | 'stale'
+    | 'driver_mismatch'
+    | 'destination_missing'
+    | 'dependency_missing'
+    | 'interactive_only'
+    | 'invalid'
+    | 'retired';
+  /** Platform replay backend for the opaque native configuration. */
+  native_kind?:
+    | 'portable_options'
+    | 'cups_options'
+    | 'cups_instance'
+    | 'macos_printcore'
+    | 'windows_devmode'
+    | 'windows_printticket';
+  /** Digest of the node-local opaque native configuration; the blob is never returned. */
+  native_digest?: string | null;
+  driver_fingerprint?: DriverFingerprint | null;
+  summary?: PrintProfileSummary;
+  stock_id?: string | null;
+  safe_overrides?: string[];
+  last_validated_at?: string | null;
+  last_test_job_id?: string | null;
+  published?: boolean;
+}
+
+export interface DriverFingerprint {
+  platform: 'windows' | 'macos' | 'linux' | string;
+  driver_name: string;
+  driver_version: string | null;
+  architecture: string | null;
+  native_queue_id: string;
+  device_fingerprint: string | null;
+}
+
+export interface PrintProfileSummary {
+  paper?: string | null;
+  dimensions_mm?: [number, number] | null;
+  source?: string | null;
+  media?: string | null;
+  color?: string | null;
+  duplex?: string | null;
+  resolution?: string | null;
+  copies?: number | null;
+  native?: Record<string, string>;
 }
 
 export interface JobOptions {
