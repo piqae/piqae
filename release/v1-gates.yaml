@@ -14,6 +14,12 @@ required:
     command: pnpm --package=@redocly/cli@1.34.3 dlx redocly lint contracts/openapi/spool-v1.yaml
   - id: native_shell
     command: swift build --package-path shells/macos
+  - id: release_policy
+    command: ruby release/tools/check_release_policy.rb
+  - id: release_evidence
+    command: python3 -m unittest discover -s release/tools -p 'test_*.py' -v
+  - id: deployment_rendering
+    command: ./deploy/validate.sh
 manual:
   - id: compatibility
     evidence: PrintNode fixture suite and compatibility endpoint report
@@ -25,6 +31,12 @@ manual:
     evidence: Windows 10/11 PDF and RAW runs on every advertised driver class
   - id: code_signing
     evidence: Windows Authenticode and macOS notarisation verification
+  - id: regional_dr
+    evidence: fenced cross-region promotion, reconciliation, RPO, and RTO report
+  - id: external_security_review
+    evidence: resolved independent security assessment for the release candidate
+  - id: production_soak
+    evidence: no-loss and duplicate-handoff fleet soak covering the release candidate
 platforms:
   windows_x86_64:
     required: true

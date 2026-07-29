@@ -40,7 +40,7 @@ jobs:
       WINSPARKLE_PUBLIC_KEY: ${{ vars.WINSPARKLE_ED25519_PUBLIC_KEY }}
       WINDOWS_UPDATE_FEED_URL: ${{ vars.WINDOWS_UPDATE_FEED_URL }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Test Windows packaging scripts
         shell: pwsh
@@ -92,12 +92,12 @@ jobs:
             throw "Signing configuration is partial. Missing: $($missing -join ', ')"
           }
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           toolchain: 1.88.0
           targets: x86_64-pc-windows-msvc
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
         with:
           key: windows-release-x86_64
 
@@ -316,7 +316,7 @@ jobs:
             -ReleaseNotesUrl $notes
 
       - name: Generate SPDX SBOM
-        uses: anchore/sbom-action@v0
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
         with:
           path: artifacts/stage
           format: spdx-json
@@ -336,11 +336,11 @@ jobs:
           }
           $lines | Out-File -Encoding ascii "artifacts\release\SHA256SUMS"
 
-      - uses: actions/attest-build-provenance@v2
+      - uses: actions/attest-build-provenance@96b4a1ef7235a096b17240c259729fdd70c83d45 # v2
         with:
           subject-path: artifacts/release/*
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ${{ steps.release.outputs.artifact_name }}
           path: artifacts/release/*

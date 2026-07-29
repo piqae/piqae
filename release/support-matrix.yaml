@@ -18,3 +18,28 @@ platforms:
   linux_aarch64:
     tier: preview
     reason: low-power hardware gates have not run
+features:
+  durable_job_registration:
+    tier: preview
+    reason: durable database and object-store paths are tested locally but have no production soak evidence
+  offline_node_delivery:
+    tier: preview
+    reason: lease expiry and reconnect paths are tested, but long-running fleet evidence is incomplete
+  primary_standby_target_routing:
+    tier: preview
+    reason: new jobs select a ready binding, but already-waiting jobs are not automatically reassigned
+  automatic_waiting_job_reassignment:
+    tier: disabled
+    reason: atomic pre-acceptance reassignment and duplicate-prevention evidence are not implemented
+  compose_self_hosting:
+    tier: preview
+    reason: configuration renders locally but backup, restore, and upgrade drills are operator-owned
+  kubernetes_self_hosting:
+    tier: preview
+    reason: Helm policy renders and validates locally but Kind disruption and rollback evidence is incomplete
+  signed_automatic_node_updates:
+    tier: disabled
+    reason: production signing credentials and atomic full-node rollback evidence do not exist
+  printnode_compatibility:
+    tier: preview
+    reason: only the documented compatibility subset is covered by fixtures

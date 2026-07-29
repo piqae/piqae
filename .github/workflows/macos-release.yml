@@ -38,14 +38,14 @@ jobs:
       SPARKLE_FEED_URL: ${{ secrets.SPARKLE_FEED_URL }}
       SPARKLE_DOWNLOAD_URL_PREFIX: ${{ secrets.SPARKLE_DOWNLOAD_URL_PREFIX }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           toolchain: 1.88.0
           targets: aarch64-apple-darwin,x86_64-apple-darwin
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
         with:
           key: macos-universal-release
 
@@ -276,7 +276,7 @@ jobs:
             "$fixture/sbom-input/spool-executor-cups"
 
       - name: Generate SPDX SBOM
-        uses: anchore/sbom-action@v0
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
         with:
           path: .spool-test-fixtures/native-release/sbom-input
           format: spdx-json
@@ -356,11 +356,11 @@ jobs:
             mv "$checksum_file" SHA256SUMS
           )
 
-      - uses: actions/attest-build-provenance@v2
+      - uses: actions/attest-build-provenance@96b4a1ef7235a096b17240c259729fdd70c83d45 # v2
         with:
           subject-path: artifacts/*
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: spool-macos-${{ steps.gate.outputs.release_mode }}-${{ steps.gate.outputs.version }}-${{ steps.gate.outputs.build_number }}
           path: artifacts/
