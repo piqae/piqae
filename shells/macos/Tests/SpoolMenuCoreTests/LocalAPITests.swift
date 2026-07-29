@@ -168,6 +168,64 @@ final class LocalAPITests: XCTestCase {
         XCTAssertEqual(accepted.jobID, "job_test")
     }
 
+    func testRejectsUnsafeResourceIdentifiersBeforeRequest() async throws {
+        let tokenFile = FileManager.default.temporaryDirectory
+            .appendingPathComponent("spool-menu-\(UUID().uuidString).token")
+        try Data("test-secret".utf8).write(to: tokenFile, options: .atomic)
+        defer { try? FileManager.default.removeItem(at: tokenFile) }
+        let client = LocalAPIClient(
+            configuration: try LocalAPIConfiguration(
+                baseURL: XCTUnwrap(URL(string: "http://127.0.0.1:39100")),
+                tokenFile: tokenFile
+            )
+        )
+
+        do {
+            _ = try await client.profiles(printerID: "..")
+            XCTFail("Expected an unsafe identifier to be rejected.")
+        } catch let error as LocalAPIError {
+            XCTAssertEqual(
+                error,
+                .invalidConfiguration("The local agent returned an invalid resource identifier.")
+            )
+        }
+    }
+
+    func testRejectsDeclaredOversizedResponseBeforeBuffering() async throws {
+        let tokenFile = FileManager.default.temporaryDirectory
+            .appendingPathComponent("spool-menu-\(UUID().uuidString).token")
+        try Data("test-secret".utf8).write(to: tokenFile, options: .atomic)
+        defer { try? FileManager.default.removeItem(at: tokenFile) }
+
+        let sessionConfiguration = URLSessionConfiguration.ephemeral
+        sessionConfiguration.protocolClasses = [StubURLProtocol.self]
+        let client = LocalAPIClient(
+            configuration: try LocalAPIConfiguration(
+                baseURL: XCTUnwrap(URL(string: "http://127.0.0.1:39100")),
+                tokenFile: tokenFile
+            ),
+            session: URLSession(configuration: sessionConfiguration)
+        )
+        StubURLProtocol.handler = { request in
+            (
+                HTTPURLResponse(
+                    url: request.url!,
+                    statusCode: 200,
+                    httpVersion: "HTTP/1.1",
+                    headerFields: ["Content-Length": "1048577"]
+                )!,
+                Data()
+            )
+        }
+
+        do {
+            _ = try await client.status()
+            XCTFail("Expected an oversized response to be rejected.")
+        } catch let error as LocalAPIError {
+            XCTAssertEqual(error, .responseTooLarge)
+        }
+    }
+
     private static func response(
         for request: URLRequest,
         status: Int = 200,

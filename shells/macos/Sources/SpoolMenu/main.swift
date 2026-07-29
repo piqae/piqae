@@ -3,6 +3,7 @@ import SpoolMenuCore
 
 private struct RecentJob: Sendable {
     let jobID: String
+    let sequence: Int64?
     let title: String
     let state: String
 }
@@ -81,6 +82,11 @@ final class SpoolMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         refreshTask?.cancel()
         refreshTask = Task { [weak self] in
             guard let self else { return }
+            defer {
+                isRefreshing = false
+                updateStatusIcon()
+                rebuildMenu()
+            }
             do {
                 async let nextStatus = client.status()
                 async let nextPrinters = client.printers()
@@ -113,6 +119,7 @@ final class SpoolMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                                 contentsOf: jobs.map {
                                     RecentJob(
                                         jobID: $0.jobID,
+                                        sequence: $0.sequence,
                                         title: $0.title,
                                         state: $0.state
                                     )
@@ -139,7 +146,11 @@ final class SpoolMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 profilesSupported = loadedPrinters.allSatisfy { $0.profiles != nil }
                 queueSupported = supportsQueue
                 if supportsQueue {
-                    recentJobs = Array(loadedJobs.prefix(8))
+                    recentJobs = Array(
+                        loadedJobs
+                            .sorted { ($0.sequence ?? 0) > ($1.sequence ?? 0) }
+                            .prefix(8)
+                    )
                 }
                 lastError = nil
             } catch is CancellationError {
@@ -149,11 +160,9 @@ final class SpoolMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 printers = []
                 profilesSupported = false
                 queueSupported = false
+                recentJobs = []
                 lastError = error.localizedDescription
             }
-            isRefreshing = false
-            updateStatusIcon()
-            rebuildMenu()
         }
     }
 

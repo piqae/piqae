@@ -153,6 +153,7 @@ public struct LocalPrintProfile: Codable, Equatable, Identifiable, Sendable {
 
 public struct LocalQueueJob: Codable, Equatable, Identifiable, Sendable {
     public let jobID: String
+    public let sequence: Int64?
     public let title: String
     public let state: String
     public let createdUnixMS: Int64?
@@ -161,6 +162,7 @@ public struct LocalQueueJob: Codable, Equatable, Identifiable, Sendable {
 
     enum CodingKeys: String, CodingKey {
         case jobID = "job_id"
+        case sequence
         case title
         case state
         case createdUnixMS = "created_unix_ms"
@@ -237,7 +239,7 @@ public final class LocalAPIClient: @unchecked Sendable {
 
     public func profiles(printerID: String) async throws -> [LocalPrintProfile] {
         let data = try await requestData(
-            path: "/v1/local/printers/\(pathComponent(printerID))/profiles"
+            path: "/v1/local/printers/\(try pathComponent(printerID))/profiles"
         )
         if let collection = try? decoder.decode(ProfileCollection.self, from: data) {
             return collection.profiles
@@ -247,7 +249,7 @@ public final class LocalAPIClient: @unchecked Sendable {
 
     public func queue(printerID: String) async throws -> [LocalQueueJob] {
         let data = try await requestData(
-            path: "/v1/local/printers/\(pathComponent(printerID))/queue"
+            path: "/v1/local/printers/\(try pathComponent(printerID))/queue"
         )
         if let collection = try? decoder.decode(QueueCollection.self, from: data) {
             return collection.localJobs
@@ -258,7 +260,7 @@ public final class LocalAPIClient: @unchecked Sendable {
     public func setExposure(printerID: String, exposed: Bool) async throws {
         try await sendWithoutResponse(
             method: "PUT",
-            path: "/v1/local/printers/\(pathComponent(printerID))/exposure",
+            path: "/v1/local/printers/\(try pathComponent(printerID))/exposure",
             body: try encoder.encode(ExposureUpdate(exposed: exposed))
         )
     }
@@ -277,7 +279,7 @@ public final class LocalAPIClient: @unchecked Sendable {
     ) async throws -> LocalJobAccepted {
         try await request(
             method: "POST",
-            path: "/v1/local/printers/\(pathComponent(printerID))/test-page",
+            path: "/v1/local/printers/\(try pathComponent(printerID))/test-page",
             body: try encoder.encode(TestPageRequest(profileID: profileID))
         )
     }
@@ -322,12 +324,22 @@ public final class LocalAPIClient: @unchecked Sendable {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         }
 
-        let (data, response) = try await session.data(for: request)
-        guard data.count <= Self.maximumResponseBytes else {
-            throw LocalAPIError.responseTooLarge
-        }
+        let (bytes, response) = try await session.bytes(for: request)
         guard let http = response as? HTTPURLResponse else {
             throw LocalAPIError.invalidResponse
+        }
+        if http.expectedContentLength > Self.maximumResponseBytes {
+            throw LocalAPIError.responseTooLarge
+        }
+        var data = Data()
+        if http.expectedContentLength > 0 {
+            data.reserveCapacity(Int(http.expectedContentLength))
+        }
+        for try await byte in bytes {
+            guard data.count < Self.maximumResponseBytes else {
+                throw LocalAPIError.responseTooLarge
+            }
+            data.append(byte)
         }
         guard (200 ... 299).contains(http.statusCode) else {
             let message = (try? decoder.decode(APIMessage.self, from: data).message)
@@ -344,10 +356,21 @@ public final class LocalAPIClient: @unchecked Sendable {
             }
     }
 
-    private func pathComponent(_ value: String) -> String {
-        // Resource IDs are opaque path segments. Rejecting separators prevents
-        // an unexpected identifier from changing the local route.
-        value.replacingOccurrences(of: "/", with: "")
+    private func pathComponent(_ value: String) throws -> String {
+        // Resource IDs are opaque path segments. Refuse separators and dot
+        // segments instead of silently changing which resource is addressed.
+        guard
+            !value.isEmpty,
+            value != ".",
+            value != "..",
+            !value.contains("/"),
+            !value.contains("\\")
+        else {
+            throw LocalAPIError.invalidConfiguration(
+                "The local agent returned an invalid resource identifier."
+            )
+        }
+        return value
     }
 
     private func readToken() throws -> String {
