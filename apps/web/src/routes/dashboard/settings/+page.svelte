@@ -19,7 +19,9 @@
     <a href="#printing">Printing policy</a>
     <a href="#retention">Data retention</a>
     {#if data.meta.auth.invitations}<a href="#team">Team</a>{/if}
-    {#if data.meta.billing.enabled}<a href="#usage">Usage</a>{/if}
+    {#if data.meta.billing.enabled && (data.viewer?.role === 'owner' || data.viewer?.role === 'billing')}
+      <a href="/dashboard/settings/billing">Billing</a>
+    {/if}
   </nav>
 
   <div class="settings-content">
@@ -52,7 +54,10 @@
     </section>
 
     <section class="panel" id="retention">
-      <header><h2>Document retention</h2><p>Content is encrypted at rest and deleted independently of job metadata.</p></header>
+      <header>
+        <h2>Document retention</h2>
+        <p>Private-beta policy preview. Automated deletion enforcement is still a release gate.</p>
+      </header>
       <div class="form-body">
         <label class="field">
           <span>Delete successful job content after</span>

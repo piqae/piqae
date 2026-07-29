@@ -39,10 +39,7 @@ test('documentation and hosted authentication boundaries are reachable', async (
   await expect(page.getByRole('heading', { name: 'Print in under ten minutes' })).toBeVisible();
   await expect(page.getByText('A 201 response means durable registration')).toBeVisible();
   await page.goto('/login');
-  await expect(page.getByRole('link', { name: /Continue with WorkOS/ })).toHaveAttribute(
-    'href',
-    '/auth/login?return_to=%2Fdashboard'
-  );
+  await expect(page).toHaveURL(/\/dashboard$/);
   const sessionResponse = await page.request.get('/auth/session');
   const session = await sessionResponse.json();
   expect(JSON.stringify(session)).not.toContain('accessToken');

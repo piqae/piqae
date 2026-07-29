@@ -16,7 +16,8 @@ export const load: LayoutServerLoad = async (event) => {
         id: 'usr_demo',
         email: 'developer@spool.local',
         name: 'Spool Developer',
-        organizationId: 'org_demo'
+        organizationId: 'org_demo',
+        role: 'owner'
       }
     };
   }
@@ -34,7 +35,8 @@ export const load: LayoutServerLoad = async (event) => {
         id: user.id,
         email: user.email,
         name: `${user.firstName ?? ''} ${user.lastName ?? ''}`.trim() || null,
-        organizationId: event.locals.auth?.organizationId ?? null
+        organizationId: event.locals.auth?.organizationId ?? null,
+        role: event.locals.auth?.role ?? null
       }
     };
   }
@@ -50,7 +52,8 @@ export const load: LayoutServerLoad = async (event) => {
       id: user.id,
       email: user.email,
       name: user.name,
-      organizationId: user.workspaceId
+      organizationId: user.workspaceId,
+      role: 'owner'
     }
   };
 };

@@ -1,5 +1,7 @@
 <script lang="ts">
   import Icon from '$lib/components/Icon.svelte';
+  import MarketingShell from '$lib/components/marketing/MarketingShell.svelte';
+  import Seo from '$lib/components/marketing/Seo.svelte';
   import type { PageData } from './$types';
 
   let { data }: { data: PageData } = $props();
@@ -20,20 +22,14 @@
   }
 </script>
 
-<svelte:head>
-  <title>Download Spool</title>
-  <meta
-    name="description"
-    content="Install the native Spool node and connect printers through browser pairing."
-  />
-</svelte:head>
+<Seo
+  title="Download the Spool native agent"
+  description="See current Windows, macOS, and Linux Spool agent availability, signing state, checksums, minimum versions, and release notes."
+  path="/downloads"
+/>
 
-<header class="topbar">
-  <a class="brand" href="/dashboard"><span><Icon name="printers" size={14} /></span>Spool</a>
-  <a class="button" href="/dashboard/nodes">Back to nodes</a>
-</header>
-
-<main>
+<MarketingShell announcement="Downloads follow the checked-in release gates; preview builds are not presented as production">
+<div class="downloads-page">
   <section class="intro" aria-labelledby="downloads-title">
     <div>
       <span class="eyebrow">Native nodes · {data.manifest.channel}</span>
@@ -101,7 +97,12 @@
 
         <div class="card-actions">
           {#if artifact.downloadUrl && artifact.fileName}
-            <a class="button primary" href={artifact.downloadUrl}>
+            <a
+              class="button primary"
+              href={artifact.downloadUrl}
+              data-marketing-download
+              data-platform={artifact.platform}
+            >
               Download {artifact.fileName} <Icon name="arrow-right" size={12} />
             </a>
           {:else}
@@ -184,29 +185,19 @@
     </span>
     <a href="/docs/quickstart">Installation guide</a>
   </footer>
-</main>
+</div>
+</MarketingShell>
 
 <style>
-  .topbar {
-    height: 54px;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 0 24px;
-    background: var(--sidebar);
-    border-bottom: 1px solid var(--border-subtle);
+  .downloads-page {
+    width: min(1120px, calc(100% - 32px));
+    margin: 56px auto;
+    padding: 54px 20px 30px;
+    border: 1px solid rgb(255 255 255 / .08);
+    border-radius: 22px;
+    background: var(--m-dark);
+    box-shadow: 0 30px 80px rgb(24 20 36 / .2);
   }
-  .brand { display: flex; align-items: center; gap: 8px; font-weight: 580; }
-  .brand > span {
-    width: 24px;
-    height: 24px;
-    display: grid;
-    place-items: center;
-    color: white;
-    background: var(--accent);
-    border-radius: 6px;
-  }
-  main { width: min(1080px, calc(100% - 32px)); margin: 0 auto; padding: 64px 0 36px; }
   .intro {
     display: grid;
     grid-template-columns: minmax(0, 1fr) minmax(250px, 320px);
@@ -309,7 +300,7 @@
     .pairing-actions { grid-column: 1 / -1; grid-template-columns: 1fr 1fr; }
   }
   @media (max-width: 660px) {
-    main { padding-top: 40px; }
+    .downloads-page { padding-top: 40px; }
     .downloads { grid-template-columns: 1fr; }
     .pairing { grid-template-columns: 1fr; }
     .pairing-actions { grid-column: auto; grid-template-columns: 1fr; }
@@ -317,7 +308,6 @@
     .safety a { grid-column: 2; }
   }
   @media (max-width: 480px) {
-    .topbar { padding: 0 14px; }
     .section-heading { align-items: start; gap: 12px; }
     footer { display: grid; gap: 8px; }
   }
