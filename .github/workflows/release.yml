@@ -135,7 +135,7 @@ jobs:
           $hash = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
           "$hash  $([System.IO.Path]::GetFileName($archive))" |
             Out-File -Encoding ascii "$archive.sha256"
-      - uses: actions/attest-build-provenance@v2
+      - uses: actions/attest-build-provenance@v4
         with:
           subject-path: artifacts/${{ matrix.artifact }}.*
       - uses: actions/upload-artifact@v4
@@ -183,7 +183,7 @@ jobs:
           push: ${{ startsWith(github.ref, 'refs/tags/') }}
           tags: ${{ steps.metadata.outputs.tags }}
           labels: ${{ steps.metadata.outputs.labels }}
-      - uses: actions/attest-build-provenance@v2
+      - uses: actions/attest-build-provenance@v4
         if: startsWith(github.ref, 'refs/tags/')
         with:
           subject-name: ghcr.io/${{ github.repository }}/${{ matrix.name }}
