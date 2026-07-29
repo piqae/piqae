@@ -68,7 +68,8 @@ docker compose --env-file deploy/self-host/.env \
 See [self-hosting](docs/operations/self-hosting.md), the
 [PrintNode migration guide](docs/api/printnode-migration.md), and the
 [OpenAPI contract](contracts/openapi/spool-v1.yaml) before connecting real
-printers.
+printers. Production trace export is covered in the
+[observability guide](docs/operations/observability.md).
 
 ## Documentation
 

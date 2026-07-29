@@ -5,10 +5,11 @@ containers, PostgreSQL 16 or newer, and an S3-compatible object store.
 
 ## Start
 
-1. Copy `deploy/self-host/.env.example` to `.env`.
-2. Replace every placeholder with randomly generated values.
-3. Run `docker compose --env-file .env up -d --build`.
-4. Use the bootstrap API key only from a trusted server-side integration.
+1. Change to `deploy/self-host`.
+2. Copy `.env.example` to `.env`.
+3. Replace every placeholder with randomly generated values.
+4. Run `docker compose --env-file .env up -d --build`.
+5. Use the bootstrap API key only from a trusted server-side integration.
 
 The API-only topology has no identity-provider dependency. To include the
 optional dashboard, configure the `WORKOS_*` values and run:

@@ -115,7 +115,9 @@ async fn run() -> Result<()> {
             }
         }
     });
-    let address: SocketAddr = listen.parse().context("invalid SPOOL_LISTEN")?;
+    let address: SocketAddr = listen
+        .parse()
+        .context("invalid SPOOL_BIND or SPOOL_LISTEN")?;
     let listener = tokio::net::TcpListener::bind(address)
         .await
         .context("bind HTTP listener")?;
