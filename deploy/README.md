@@ -64,11 +64,14 @@ not production approval.
 ## Hosted GCP option
 
 `terraform/` continues to default to one Cloud Run region with external
-PostgreSQL/S3. Optional flags add a warm Melbourne service, global HTTPS load
-balancing, a regional-HA Cloud SQL primary with a cross-region read replica,
-and dual-region GCS. Managed data resources are intentionally not wired into
-runtime secrets: database promotion and data-plane cutover require explicit
-operator action and verification.
+PostgreSQL/S3. Production flags add a warm Melbourne service, global HTTPS load
+balancing, a regional-HA Cloud SQL primary with a cross-region DR replica, and
+dual-region GCS. When the managed data plane is enabled, Terraform creates the
+database identity, stores its generated URL in Secret Manager, mounts the Cloud
+SQL connector into API/sync/worker services and the migration Job, and grants
+the runtime service account only the required client and object permissions.
+Database DR promotion and application traffic cutover still require the
+explicit, fenced operator procedure in the production runbook.
 
 Use separate projects and Terraform states for staging and production. Review
 every plan, provider release, quota, and deletion-protection change before
