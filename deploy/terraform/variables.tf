@@ -105,3 +105,79 @@ variable "oidc_permissions_claim" {
   description = "Verified array claim mapped to Spool API scopes."
   default     = "permissions"
 }
+
+variable "enable_multi_region" {
+  type        = bool
+  description = "Create a warm Cloud Run service and, when managed data is enabled, a PostgreSQL DR replica in Melbourne."
+  default     = false
+}
+
+variable "secondary_region" {
+  type        = string
+  description = "Warm-standby region. australia-southeast2 is Melbourne."
+  default     = "australia-southeast2"
+}
+
+variable "secondary_min_instances" {
+  type        = number
+  description = "Warm Cloud Run capacity held in the secondary region."
+  default     = 1
+  validation {
+    condition     = var.secondary_min_instances >= 0
+    error_message = "secondary_min_instances must be non-negative"
+  }
+}
+
+variable "enable_global_load_balancer" {
+  type        = bool
+  description = "Create a global external HTTPS load balancer across both serverless NEGs."
+  default     = false
+}
+
+variable "load_balancer_domains" {
+  type        = list(string)
+  description = "DNS names on the Google-managed load-balancer certificate."
+  default     = []
+  validation {
+    condition     = !var.enable_global_load_balancer || length(var.load_balancer_domains) > 0
+    error_message = "load_balancer_domains must not be empty when the load balancer is enabled"
+  }
+}
+
+variable "allow_public_cloud_run_invocation" {
+  type        = bool
+  description = "Grant allUsers Cloud Run invocation. Spool application authentication still applies."
+  default     = false
+  validation {
+    condition     = !var.enable_global_load_balancer || var.allow_public_cloud_run_invocation
+    error_message = "allow_public_cloud_run_invocation must be true for an external serverless NEG; Spool application auth remains enforced"
+  }
+}
+
+variable "enable_managed_data_plane" {
+  type        = bool
+  description = "Create optional Cloud SQL HA/DR and a custom dual-region GCS bucket. Existing external data services remain the default."
+  default     = false
+}
+
+variable "cloud_sql_tier" {
+  type        = string
+  description = "Cloud SQL machine tier for primary and DR replica."
+  default     = "db-custom-2-7680"
+}
+
+variable "cloud_sql_disk_size_gb" {
+  type        = number
+  description = "Initial primary Cloud SQL SSD size; autoresize remains enabled."
+  default     = 100
+}
+
+variable "managed_object_bucket_name" {
+  type        = string
+  description = "Globally unique GCS bucket name, required when enable_managed_data_plane=true."
+  default     = ""
+  validation {
+    condition     = !var.enable_managed_data_plane || length(var.managed_object_bucket_name) >= 3
+    error_message = "managed_object_bucket_name is required when managed data is enabled"
+  }
+}

@@ -1,0 +1,55 @@
+# Spool deployment foundations
+
+Spool supports two self-hosting shapes:
+
+- `self-host/`: one-node Docker Compose for evaluation and small installations;
+- `helm/spool/`: production Kubernetes control plane using external PostgreSQL
+  and S3-compatible storage.
+
+The Helm chart creates three independently scalable compute pools:
+
+```text
+Ingress / Gateway ──> api Service  ─┐
+Agent routing ──────> sync Service ─┼─> external PostgreSQL
+No public Service ──> worker Pods  ─┘   external S3
+Optional public route ─> dashboard ───> api Service
+```
+
+Today each pool runs the same combined `spool-server` process. PostgreSQL
+leases and transactional outboxes make that topology safe, while separate
+Deployments provide disruption and scaling boundaries. Do not use NetworkPolicy
+or cost estimates as if unused roles were disabled inside a pool.
+
+Production operators must provide:
+
+- PostgreSQL HA, PITR, tested restores, connection pooling, and migration DDL
+  permissions;
+- versioned S3 storage, retention/replication, lifecycle policy, and credentials;
+- immutable server, migration, and dashboard image digests;
+- the runtime Secret or a working External Secrets Operator store;
+- DNS, TLS, WAF/rate limiting, alerting, and an incident-tested failover plan.
+
+Run all deployment checks with:
+
+```sh
+./deploy/validate.sh
+```
+
+The check lints and renders Helm, validates built-in Kubernetes resources with
+kubeconform, formats Terraform, initializes providers without a backend, and
+validates configuration. Docker is used when local Helm/Terraform binaries are
+not installed. It never plans, applies, opens credentials, or accesses a
+cluster/cloud account.
+
+## Hosted GCP option
+
+`terraform/` continues to default to one Cloud Run region with external
+PostgreSQL/S3. Optional flags add a warm Melbourne service, global HTTPS load
+balancing, a regional-HA Cloud SQL primary with a cross-region read replica,
+and dual-region GCS. Managed data resources are intentionally not wired into
+runtime secrets: database promotion and data-plane cutover require explicit
+operator action and verification.
+
+Use separate projects and Terraform states for staging and production. Review
+every plan, provider release, quota, and deletion-protection change before
+apply.

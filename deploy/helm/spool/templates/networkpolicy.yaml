@@ -1,0 +1,68 @@
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "spool.fullname" . }}-ingress
+  labels:
+    {{- include "spool.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "spool.selectorLabels" . | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        -
+          {{- with .Values.networkPolicy.ingressNamespaceSelector }}
+          namespaceSelector:
+            matchLabels: {{ toYaml .Values.networkPolicy.ingressNamespaceSelector | nindent 14 }}
+          {{- end }}
+          podSelector:
+            matchLabels: {{ toYaml .Values.networkPolicy.ingressPodSelector | nindent 14 }}
+      ports:
+        - { protocol: TCP, port: 8080 }
+        - { protocol: TCP, port: 3000 }
+{{- if .Values.networkPolicy.egress.restricted }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "spool.fullname" . }}-egress
+  labels:
+    {{- include "spool.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "spool.selectorLabels" . | nindent 6 }}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "spool.selectorLabels" . | nindent 14 }}
+      ports:
+        - { protocol: TCP, port: 8080 }
+        - { protocol: TCP, port: 3000 }
+    - to:
+        - namespaceSelector:
+            matchLabels: {{ toYaml .Values.networkPolicy.egress.dnsNamespaceSelector | nindent 14 }}
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+    {{- range .Values.networkPolicy.egress.databaseCIDRs }}
+    - to: [{ ipBlock: { cidr: {{ . | quote }} } }]
+      ports: [{ protocol: TCP, port: {{ $.Values.networkPolicy.egress.databasePort }} }]
+    {{- end }}
+    {{- range .Values.networkPolicy.egress.objectStoreCIDRs }}
+    - to: [{ ipBlock: { cidr: {{ . | quote }} } }]
+      ports: [{ protocol: TCP, port: {{ $.Values.networkPolicy.egress.objectStorePort }} }]
+    {{- end }}
+    {{- range .Values.networkPolicy.egress.additionalRules }}
+    - to: [{ ipBlock: { cidr: {{ .cidr | quote }} } }]
+      ports:
+        {{- range .ports }}
+        - { protocol: TCP, port: {{ . }} }
+        {{- end }}
+    {{- end }}
+{{- end }}
+{{- end }}

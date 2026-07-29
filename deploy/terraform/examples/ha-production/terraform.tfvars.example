@@ -1,0 +1,24 @@
+gcp_project_id = "replace-production-project"
+environment    = "production"
+image          = "australia-southeast1-docker.pkg.dev/replace/spool/server@sha256:replace"
+
+# Supply these through an encrypted tfvars mechanism; never commit values.
+database_url_secret              = "replace-at-apply"
+object_store_endpoint            = "https://replace.r2.cloudflarestorage.com"
+object_store_bucket              = "spool-production"
+object_store_access_key_secret   = "replace-at-apply"
+object_store_secret_key_secret   = "replace-at-apply"
+webhook_master_key_secret        = "replace-at-apply"
+oidc_jwks_url                    = "https://replace.example.com/.well-known/jwks.json"
+oidc_binding_value               = "client_replace"
+
+enable_multi_region             = true
+secondary_region               = "australia-southeast2"
+secondary_min_instances        = 1
+enable_global_load_balancer    = true
+allow_public_cloud_run_invocation = true
+load_balancer_domains          = ["api.spool.example.com"]
+
+# Optional. Leave false while using external PostgreSQL and S3.
+enable_managed_data_plane = false
+# managed_object_bucket_name = "globally-unique-spool-production"

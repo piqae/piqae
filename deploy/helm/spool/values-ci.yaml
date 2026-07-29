@@ -1,0 +1,41 @@
+image:
+  tag: ci
+config:
+  authMode: bootstrap
+  s3Endpoint: https://s3.example.invalid
+  s3Bucket: spool-ci
+secrets:
+  existingSecret: spool-ci-runtime
+migration:
+  image:
+    tag: ci
+externalSecret:
+  enabled: true
+  secretStoreRef:
+    name: ci-store
+  remoteKeys:
+    databaseUrl: ci/database-url
+    webhookMasterKey: ci/webhook-key
+    s3AccessKeyId: ci/s3-access
+    s3SecretAccessKey: ci/s3-secret
+dashboard:
+  enabled: true
+  image:
+    tag: ci
+  origin: https://spool.example.invalid
+ingress:
+  enabled: true
+  hosts:
+    - host: api.spool.example.invalid
+      paths:
+        - path: /
+          pathType: Prefix
+          component: api
+networkPolicy:
+  egress:
+    restricted: true
+    databaseCIDRs: [10.20.0.0/24]
+    objectStoreCIDRs: [10.30.0.0/24]
+    additionalRules:
+      - cidr: 10.40.0.0/24
+        ports: [443]

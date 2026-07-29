@@ -1,0 +1,140 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["image", "config", "secrets", "components", "migration"],
+  "properties": {
+    "nameOverride": { "type": "string" },
+    "fullnameOverride": { "type": "string" },
+    "image": { "$ref": "#/$defs/image" },
+    "imagePullSecrets": { "type": "array", "items": { "type": "object" } },
+    "config": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["environment", "authMode", "s3Bucket"],
+      "properties": {
+        "environment": { "type": "string", "enum": ["staging", "production"] },
+        "authMode": { "type": "string", "enum": ["api_key", "bootstrap", "hybrid", "oidc"] },
+        "oidcIssuer": { "type": "string" },
+        "oidcJwksUrl": { "type": "string" },
+        "oidcAudience": { "type": "string" },
+        "oidcBindingClaim": { "type": "string" },
+        "oidcBindingValue": { "type": "string" },
+        "oidcOrganizationClaim": { "type": "string" },
+        "oidcPermissionsClaim": { "type": "string" },
+        "s3Endpoint": { "type": "string" },
+        "s3Bucket": { "type": "string" },
+        "s3Region": { "type": "string" },
+        "s3AllowHttp": { "type": "boolean" },
+        "s3VirtualHostedStyle": { "type": "boolean" },
+        "rustLog": { "type": "string" },
+        "extraEnv": { "type": "array", "items": { "type": "object" } }
+      }
+    },
+    "secrets": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["existingSecret", "keys"],
+      "properties": {
+        "existingSecret": { "type": "string" },
+        "keys": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["databaseUrl", "webhookMasterKey", "s3AccessKeyId", "s3SecretAccessKey"],
+          "properties": {
+            "databaseUrl": { "type": "string", "minLength": 1 },
+            "webhookMasterKey": { "type": "string", "minLength": 1 },
+            "s3AccessKeyId": { "type": "string", "minLength": 1 },
+            "s3SecretAccessKey": { "type": "string", "minLength": 1 }
+          }
+        }
+      }
+    },
+    "externalSecret": { "type": "object" },
+    "components": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["api", "sync", "worker"],
+      "properties": {
+        "api": { "$ref": "#/$defs/component" },
+        "sync": { "$ref": "#/$defs/component" },
+        "worker": { "$ref": "#/$defs/component" }
+      }
+    },
+    "serviceAccount": { "type": "object" },
+    "podAnnotations": { "type": "object" },
+    "podLabels": { "type": "object" },
+    "podSecurityContext": { "type": "object" },
+    "securityContext": { "type": "object" },
+    "probes": { "type": "object" },
+    "podDisruptionBudget": { "type": "object" },
+    "topologySpreadConstraints": { "type": "object" },
+    "affinity": { "type": "object" },
+    "nodeSelector": { "type": "object" },
+    "tolerations": { "type": "array" },
+    "migration": {
+      "type": "object",
+      "required": ["enabled", "image"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "image": { "$ref": "#/$defs/image" },
+        "backoffLimit": { "type": "integer", "minimum": 0 },
+        "activeDeadlineSeconds": { "type": "integer", "minimum": 60 },
+        "resources": { "type": "object" }
+      }
+    },
+    "dashboard": { "type": "object" },
+    "ingress": { "type": "object" },
+    "gateway": { "type": "object" },
+    "networkPolicy": { "type": "object" },
+    "terminationGracePeriodSeconds": { "type": "integer", "minimum": 10 }
+  },
+  "$defs": {
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "tag", "digest", "pullPolicy"],
+      "properties": {
+        "repository": { "type": "string", "minLength": 1 },
+        "tag": { "type": "string" },
+        "digest": { "type": "string", "pattern": "^$|^sha256:[a-f0-9]{64}$" },
+        "pullPolicy": { "type": "string", "enum": ["Always", "IfNotPresent", "Never"] }
+      },
+      "anyOf": [
+        { "properties": { "tag": { "minLength": 1 } } },
+        { "properties": { "digest": { "minLength": 71 } } }
+      ]
+    },
+    "component": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "replicas", "service", "resources", "autoscaling"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "replicas": { "type": "integer", "minimum": 1 },
+        "service": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["enabled", "port"],
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "port": { "type": "integer", "minimum": 1, "maximum": 65535 }
+          }
+        },
+        "resources": { "type": "object" },
+        "autoscaling": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["enabled", "minReplicas", "maxReplicas", "cpuUtilization", "memoryUtilization"],
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "minReplicas": { "type": "integer", "minimum": 1 },
+            "maxReplicas": { "type": "integer", "minimum": 1 },
+            "cpuUtilization": { "type": "integer", "minimum": 1, "maximum": 100 },
+            "memoryUtilization": { "type": "integer", "minimum": 1, "maximum": 100 }
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,20 @@
+{{- $root := . -}}
+{{- range $name, $component := .Values.components }}
+{{- if and $component.enabled $component.service.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "spool.fullname" $root }}-{{ $name }}
+  labels:
+    {{- include "spool.labels" $root | nindent 4 }}
+    app.kubernetes.io/component: {{ $name }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "spool.selectorLabels" $root | nindent 4 }}
+    app.kubernetes.io/component: {{ $name }}
+  ports:
+    - { name: http, port: {{ $component.service.port }}, targetPort: http, protocol: TCP }
+{{- end }}
+{{- end }}

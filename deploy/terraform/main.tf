@@ -92,7 +92,7 @@ resource "google_cloud_run_v2_service" "server" {
   name                = local.name
   location            = var.gcp_region
   deletion_protection = var.environment == "production"
-  ingress             = "INGRESS_TRAFFIC_ALL"
+  ingress             = var.enable_global_load_balancer ? "INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER" : "INGRESS_TRAFFIC_ALL"
 
   depends_on = [google_project_service.run]
 
