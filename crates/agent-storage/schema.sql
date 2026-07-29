@@ -12,6 +12,9 @@ VALUES (2, CAST(unixepoch('subsec') * 1000 AS INTEGER));
 INSERT OR IGNORE INTO schema_migrations (version, applied_unix_ms)
 VALUES (3, CAST(unixepoch('subsec') * 1000 AS INTEGER));
 
+INSERT OR IGNORE INTO schema_migrations (version, applied_unix_ms)
+VALUES (4, CAST(unixepoch('subsec') * 1000 AS INTEGER));
+
 CREATE TABLE IF NOT EXISTS identity (
   key TEXT PRIMARY KEY,
   value BLOB NOT NULL,
@@ -70,6 +73,17 @@ CREATE TABLE IF NOT EXISTS printer_profiles (
   name TEXT NOT NULL CHECK (length(trim(name)) > 0),
   is_default INTEGER NOT NULL DEFAULT 0 CHECK (is_default IN (0, 1)),
   options_json TEXT NOT NULL CHECK (json_valid(options_json)),
+  status TEXT NOT NULL DEFAULT 'needs_test',
+  native_kind TEXT NOT NULL DEFAULT 'portable_options',
+  native_blob_id TEXT,
+  native_digest TEXT,
+  driver_fingerprint_json TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(driver_fingerprint_json)),
+  summary_json TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(summary_json)),
+  stock_id TEXT,
+  safe_overrides_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(safe_overrides_json)),
+  last_validated_unix_ms INTEGER,
+  last_test_job_id TEXT,
+  published INTEGER NOT NULL DEFAULT 0 CHECK (published IN (0, 1)),
   deleted INTEGER NOT NULL DEFAULT 0 CHECK (deleted IN (0, 1)),
   updated_unix_ms INTEGER NOT NULL,
   PRIMARY KEY (profile_id, revision)
@@ -77,6 +91,131 @@ CREATE TABLE IF NOT EXISTS printer_profiles (
 
 CREATE INDEX IF NOT EXISTS printer_profiles_latest
   ON printer_profiles (printer_id, profile_id, revision DESC);
+
+CREATE TABLE IF NOT EXISTS physical_devices (
+  device_id TEXT PRIMARY KEY,
+  display_name TEXT NOT NULL,
+  hardware_fingerprint TEXT,
+  identity_confidence TEXT NOT NULL DEFAULT 'unknown',
+  metadata_json TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(metadata_json)),
+  updated_unix_ms INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS printer_device_bindings (
+  printer_id TEXT PRIMARY KEY REFERENCES printers(printer_id) ON DELETE CASCADE,
+  device_id TEXT NOT NULL REFERENCES physical_devices(device_id) ON DELETE CASCADE,
+  binding_confidence TEXT NOT NULL,
+  confirmed_by TEXT,
+  updated_unix_ms INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS profile_native_blobs (
+  blob_id TEXT PRIMARY KEY,
+  profile_id TEXT NOT NULL,
+  profile_revision INTEGER NOT NULL CHECK (profile_revision > 0),
+  native_kind TEXT NOT NULL,
+  schema_version INTEGER NOT NULL CHECK (schema_version > 0),
+  digest TEXT NOT NULL,
+  native_blob BLOB NOT NULL,
+  created_unix_ms INTEGER NOT NULL,
+  UNIQUE (profile_id, profile_revision),
+  FOREIGN KEY (profile_id, profile_revision)
+    REFERENCES printer_profiles(profile_id, revision) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS profile_native_blobs_digest
+  ON profile_native_blobs (digest);
+
+CREATE TABLE IF NOT EXISTS profile_dependencies (
+  profile_id TEXT NOT NULL,
+  profile_revision INTEGER NOT NULL CHECK (profile_revision > 0),
+  dependency_index INTEGER NOT NULL CHECK (dependency_index >= 0),
+  kind TEXT NOT NULL,
+  value TEXT NOT NULL,
+  PRIMARY KEY (profile_id, profile_revision, dependency_index),
+  FOREIGN KEY (profile_id, profile_revision)
+    REFERENCES printer_profiles(profile_id, revision) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS stocks (
+  stock_id TEXT PRIMARY KEY,
+  name TEXT NOT NULL CHECK (length(trim(name)) > 0),
+  sku TEXT,
+  kind TEXT NOT NULL,
+  definition_json TEXT NOT NULL CHECK (json_valid(definition_json)),
+  retired INTEGER NOT NULL DEFAULT 0 CHECK (retired IN (0, 1)),
+  updated_unix_ms INTEGER NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS stocks_sku_active
+  ON stocks (sku) WHERE sku IS NOT NULL AND retired = 0;
+
+CREATE TABLE IF NOT EXISTS loaded_media (
+  device_id TEXT NOT NULL REFERENCES physical_devices(device_id) ON DELETE CASCADE,
+  source TEXT NOT NULL,
+  stock_id TEXT REFERENCES stocks(stock_id),
+  confidence TEXT NOT NULL,
+  confirmed_unix_ms INTEGER NOT NULL,
+  confirmed_by TEXT,
+  PRIMARY KEY (device_id, source)
+);
+
+CREATE TABLE IF NOT EXISTS targets (
+  target_id TEXT PRIMARY KEY,
+  name TEXT NOT NULL CHECK (length(trim(name)) > 0),
+  stock_id TEXT REFERENCES stocks(stock_id),
+  routing_policy TEXT NOT NULL DEFAULT 'primary_only',
+  published INTEGER NOT NULL DEFAULT 0 CHECK (published IN (0, 1)),
+  retired INTEGER NOT NULL DEFAULT 0 CHECK (retired IN (0, 1)),
+  updated_unix_ms INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS target_bindings (
+  binding_id TEXT PRIMARY KEY,
+  target_id TEXT NOT NULL REFERENCES targets(target_id) ON DELETE CASCADE,
+  agent_id TEXT NOT NULL,
+  printer_id TEXT NOT NULL REFERENCES printers(printer_id) ON DELETE CASCADE,
+  profile_id TEXT NOT NULL,
+  profile_revision INTEGER NOT NULL CHECK (profile_revision > 0),
+  role TEXT NOT NULL,
+  priority INTEGER NOT NULL DEFAULT 0 CHECK (priority >= 0),
+  enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+  created_unix_ms INTEGER NOT NULL,
+  FOREIGN KEY (profile_id, profile_revision)
+    REFERENCES printer_profiles(profile_id, revision)
+);
+
+CREATE INDEX IF NOT EXISTS target_bindings_route
+  ON target_bindings (target_id, enabled DESC, priority, binding_id);
+
+CREATE TABLE IF NOT EXISTS profile_validation_events (
+  validation_id TEXT PRIMARY KEY,
+  profile_id TEXT NOT NULL,
+  profile_revision INTEGER NOT NULL CHECK (profile_revision > 0),
+  status TEXT NOT NULL,
+  code TEXT,
+  summary_json TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(summary_json)),
+  observed_unix_ms INTEGER NOT NULL,
+  FOREIGN KEY (profile_id, profile_revision)
+    REFERENCES printer_profiles(profile_id, revision) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS profile_capture_sessions (
+  session_id TEXT PRIMARY KEY,
+  token_digest TEXT NOT NULL,
+  printer_id TEXT NOT NULL REFERENCES printers(printer_id) ON DELETE CASCADE,
+  profile_id TEXT,
+  expected_revision INTEGER,
+  operation TEXT NOT NULL,
+  status TEXT NOT NULL,
+  peer_user_id TEXT NOT NULL,
+  expires_unix_ms INTEGER NOT NULL,
+  created_unix_ms INTEGER NOT NULL,
+  completed_unix_ms INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS profile_capture_sessions_expiry
+  ON profile_capture_sessions (status, expires_unix_ms);
 
 CREATE TABLE IF NOT EXISTS content_files (
   sha256 TEXT PRIMARY KEY,
@@ -104,6 +243,14 @@ CREATE TABLE IF NOT EXISTS jobs (
   accepted_unix_ms INTEGER NOT NULL,
   updated_unix_ms INTEGER NOT NULL,
   cloud_managed INTEGER NOT NULL DEFAULT 0 CHECK (cloud_managed IN (0, 1)),
+  target_id TEXT,
+  binding_id TEXT,
+  profile_id TEXT,
+  profile_revision INTEGER,
+  stock_id TEXT,
+  loaded_media_snapshot_json TEXT CHECK (
+    loaded_media_snapshot_json IS NULL OR json_valid(loaded_media_snapshot_json)
+  ),
   UNIQUE (printer_id, printer_sequence)
 );
 

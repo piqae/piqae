@@ -3051,6 +3051,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
  "spool-domain",
  "tempfile",
  "thiserror",
@@ -3120,6 +3121,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "serde",
+ "serde_json",
  "thiserror",
  "ulid",
  "uuid",
@@ -3169,6 +3171,11 @@ dependencies = [
 name = "spool-executor-windows"
 version = "0.1.0"
 dependencies = [
+ "base64",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2",
  "spool-domain",
  "spool-executor-protocol",
  "spool-protocol",

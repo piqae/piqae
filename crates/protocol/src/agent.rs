@@ -1,8 +1,9 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use spool_domain::{
-    AgentId, EventId, Job, JobEvent, NativePrinterOption, PrinterCapabilities, PrinterId,
-    PrinterState, UriAuthentication,
+    AgentId, DriverFingerprint, EventId, Job, JobEvent, NativePrinterOption, NativeProfileKind,
+    PrinterCapabilities, PrinterId, PrinterState, ProfileStatus, ProfileSummary,
+    SafeProfileOverride, UriAuthentication,
 };
 use std::collections::BTreeMap;
 use uuid::Uuid;
@@ -181,4 +182,24 @@ pub struct PrinterProfileSnapshot {
     pub name: String,
     pub is_default: bool,
     pub options: spool_domain::JobOptions,
+    #[serde(default)]
+    pub status: ProfileStatus,
+    #[serde(default)]
+    pub native_kind: Option<NativeProfileKind>,
+    #[serde(default)]
+    pub native_digest: Option<String>,
+    #[serde(default)]
+    pub driver_fingerprint: DriverFingerprint,
+    #[serde(default)]
+    pub summary: ProfileSummary,
+    #[serde(default)]
+    pub stock_id: Option<String>,
+    #[serde(default)]
+    pub safe_overrides: Vec<SafeProfileOverride>,
+    #[serde(default)]
+    pub last_validated_unix_ms: Option<i64>,
+    #[serde(default)]
+    pub last_test_job_id: Option<String>,
+    #[serde(default)]
+    pub published: bool,
 }

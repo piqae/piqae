@@ -88,6 +88,13 @@ typed_id!(WorkspaceId, "wsp");
 typed_id!(EnvironmentId, "env");
 typed_id!(AgentId, "agt");
 typed_id!(PrinterId, "ptr");
+typed_id!(PhysicalDeviceId, "dev");
+typed_id!(ProfileId, "prf");
+typed_id!(NativeProfileBlobId, "npb");
+typed_id!(StockId, "stk");
+typed_id!(TargetId, "tgt");
+typed_id!(TargetBindingId, "bnd");
+typed_id!(ProfileCaptureSessionId, "pcs");
 typed_id!(JobId, "job");
 typed_id!(EventId, "evt");
 

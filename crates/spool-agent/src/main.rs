@@ -12,10 +12,13 @@ use spool_agent_core::{
     NativeAcceptance, NativeJobReference, SystemClock,
 };
 use spool_agent_storage::{
-    AcceptedJob, AgentStore, CloudAcceptIntent, PendingEvent, QueueCounts, StorageError,
-    StoredNamedProfile, StoredPrinter,
+    AcceptedJob, AgentStore, CloudAcceptIntent, NativeProfileCapture, PendingEvent, QueueCounts,
+    StorageError, StoredLoadedMedia, StoredNamedProfile, StoredPrinter,
 };
-use spool_domain::{AgentId, ContentKind, EventId, JobEvent, JobFailureReason, JobId, JobState};
+use spool_domain::{
+    AgentId, ContentKind, EventId, JobEvent, JobFailureReason, JobId, JobState, NativeProfileKind,
+    ProfileCaptureOperation, ProfileStatus,
+};
 use spool_executor_supervisor::{ExecutorSupervisor, SupervisedExecutor};
 use spool_local_api::{
     ControlFailure, ControlRequest, LocalApiState, LocalContent, LocalCreateJob, LocalJobAccepted,
@@ -23,7 +26,9 @@ use spool_local_api::{
 };
 use spool_local_ipc::{
     ConnectionState, LocalNativeQueueJob, LocalPrinter, LocalPrinterProfile, LocalPrinterQueue,
-    LocalPrinterQueueCounts, LocalQueueJob, LocalStatus, SessionAuthenticator,
+    LocalPrinterQueueCounts, LocalQueueJob, LocalStatus, NativeProfileCapturePayload,
+    NativeProfileSeed, ProfileCaptureAuthorized, ProfileValidationResult, SessionAuthenticator,
+    capture_token_digest, generate_capture_token,
 };
 use spool_protocol::{
     CURRENT_PROTOCOL_VERSION,
@@ -54,6 +59,8 @@ use url::Url;
 
 const LEASE_RENEWAL_INTERVAL: Duration = Duration::from_secs(10);
 const LEASE_RENEWAL_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+const PROFILE_CAPTURE_LIFETIME: Duration = Duration::from_secs(5 * 60);
+const LOCAL_PROFILE_HOST_ID: &str = "authenticated-loopback-profile-host";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum AgentMode {
@@ -451,6 +458,55 @@ async fn handle_control_request(
                 .map_err(storage_control_failure);
             let _ = respond_to.send(result);
         }
+        ControlRequest::BeginProfileCapture {
+            printer_id,
+            request,
+            respond_to,
+        } => {
+            let result = begin_profile_capture(engine.store_mut(), &printer_id, request);
+            let _ = respond_to.send(result);
+        }
+        ControlRequest::CommitProfileCapture {
+            session_id,
+            capture_token,
+            capture,
+            respond_to,
+        } => {
+            let result =
+                commit_profile_capture(engine.store_mut(), &session_id, &capture_token, *capture);
+            let _ = respond_to.send(result);
+        }
+        ControlRequest::CancelProfileCapture {
+            session_id,
+            capture_token,
+            respond_to,
+        } => {
+            let result = engine
+                .store_mut()
+                .cancel_profile_capture(
+                    &session_id,
+                    &capture_token_digest(&capture_token),
+                    LOCAL_PROFILE_HOST_ID,
+                    Utc::now().timestamp_millis(),
+                )
+                .map_err(storage_control_failure);
+            let _ = respond_to.send(result);
+        }
+        ControlRequest::ValidateProfile {
+            profile_id,
+            revision,
+            respond_to,
+        } => {
+            let result = validate_profile_revision(engine.store(), &profile_id, revision);
+            let _ = respond_to.send(result);
+        }
+        ControlRequest::ConfirmLoadedMedia {
+            request,
+            respond_to,
+        } => {
+            let result = confirm_loaded_media(engine.store_mut(), request);
+            let _ = respond_to.send(result);
+        }
         ControlRequest::PrinterQueue {
             printer_id,
             respond_to,
@@ -679,11 +735,26 @@ fn local_profiles(
         .named_profiles(printer_id)
         .map_err(storage_control_failure)?
         .into_iter()
-        .map(local_profile)
+        .map(|profile| local_profile(store, profile))
         .collect()
 }
 
-fn local_profile(profile: StoredNamedProfile) -> Result<LocalPrinterProfile, ControlFailure> {
+fn local_profile(
+    store: &AgentStore,
+    profile: StoredNamedProfile,
+) -> Result<LocalPrinterProfile, ControlFailure> {
+    let status = parse_stored_enum(&profile.status, "profile status")?;
+    let native_kind = if profile.native_kind.is_empty() {
+        None
+    } else {
+        Some(parse_stored_enum(
+            &profile.native_kind,
+            "native profile kind",
+        )?)
+    };
+    let dependencies = store
+        .profile_dependencies(&profile.profile_id, profile.revision)
+        .map_err(storage_control_failure)?;
     Ok(LocalPrinterProfile {
         profile_id: profile.profile_id,
         revision: profile.revision,
@@ -691,6 +762,20 @@ fn local_profile(profile: StoredNamedProfile) -> Result<LocalPrinterProfile, Con
         is_default: profile.is_default,
         options: serde_json::from_str(&profile.options_json)
             .map_err(|error| control_failure("profile_invalid", &error.to_string()))?,
+        status,
+        native_kind,
+        native_digest: profile.native_digest,
+        driver_fingerprint: serde_json::from_str(&profile.driver_fingerprint_json)
+            .map_err(|error| control_failure("profile_invalid", &error.to_string()))?,
+        summary: serde_json::from_str(&profile.summary_json)
+            .map_err(|error| control_failure("profile_invalid", &error.to_string()))?,
+        stock_id: profile.stock_id,
+        dependencies,
+        safe_overrides: serde_json::from_str(&profile.safe_overrides_json)
+            .map_err(|error| control_failure("profile_invalid", &error.to_string()))?,
+        last_validated_unix_ms: profile.last_validated_unix_ms,
+        last_test_job_id: profile.last_test_job_id,
+        published: profile.published,
     })
 }
 
@@ -706,17 +791,16 @@ fn create_profile(
     validate_options(&printer, &request.options)?;
     let options_json = serde_json::to_string(&request.options)
         .map_err(|error| control_failure("profile_invalid", &error.to_string()))?;
-    local_profile(
-        store
-            .create_named_profile(
-                printer_id,
-                &request.name,
-                request.is_default,
-                &options_json,
-                Utc::now().timestamp_millis(),
-            )
-            .map_err(storage_control_failure)?,
-    )
+    let profile = store
+        .create_named_profile(
+            printer_id,
+            &request.name,
+            request.is_default,
+            &options_json,
+            Utc::now().timestamp_millis(),
+        )
+        .map_err(storage_control_failure)?;
+    local_profile(store, profile)
 }
 
 fn update_profile(
@@ -732,19 +816,216 @@ fn update_profile(
     validate_options(&printer, &request.options)?;
     let options_json = serde_json::to_string(&request.options)
         .map_err(|error| control_failure("profile_invalid", &error.to_string()))?;
-    local_profile(
+    let profile = store
+        .update_named_profile(
+            printer_id,
+            profile_id,
+            request.expected_revision,
+            &request.name,
+            request.is_default,
+            &options_json,
+            Utc::now().timestamp_millis(),
+        )
+        .map_err(storage_control_failure)?;
+    local_profile(store, profile)
+}
+
+fn begin_profile_capture(
+    store: &mut AgentStore,
+    printer_id: &str,
+    request: spool_local_api::ProfileCaptureBeginRequest,
+) -> Result<ProfileCaptureAuthorized, ControlFailure> {
+    match request.operation {
+        ProfileCaptureOperation::Create
+            if request.profile_id.is_some() || request.expected_revision.is_some() =>
+        {
+            return Err(control_failure(
+                "profile_invalid",
+                "create capture cannot reference an existing profile",
+            ));
+        }
+        ProfileCaptureOperation::Edit | ProfileCaptureOperation::Clone
+            if request.profile_id.is_none() || request.expected_revision.is_none() =>
+        {
+            return Err(control_failure(
+                "profile_invalid",
+                "edit and clone capture require a profile and exact revision",
+            ));
+        }
+        _ => {}
+    }
+
+    let printer = store
+        .printer(printer_id)
+        .map_err(storage_control_failure)?
+        .ok_or_else(|| control_failure("printer_not_found", "printer was not found"))?;
+    if !printer.present {
+        return Err(control_failure(
+            "printer_not_present",
+            "printer is not currently installed on this node",
+        ));
+    }
+    let existing = request
+        .profile_id
+        .as_deref()
+        .map(|profile_id| store.named_profile(printer_id, profile_id))
+        .transpose()
+        .map_err(storage_control_failure)?
+        .flatten();
+    let native_configuration = if let Some(profile) = &existing {
         store
-            .update_named_profile(
-                printer_id,
-                profile_id,
-                request.expected_revision,
-                &request.name,
-                request.is_default,
-                &options_json,
-                Utc::now().timestamp_millis(),
-            )
-            .map_err(storage_control_failure)?,
-    )
+            .native_profile_blob(&profile.profile_id, profile.revision)
+            .map_err(storage_control_failure)?
+            .map(|blob| {
+                Ok(NativeProfileSeed {
+                    kind: parse_stored_enum(&blob.native_kind, "native profile kind")?,
+                    schema_version: blob.schema_version,
+                    digest: blob.digest,
+                    native_blob_base64: STANDARD.encode(blob.native_blob),
+                })
+            })
+            .transpose()?
+    } else {
+        None
+    };
+    let safe_overrides = existing
+        .as_ref()
+        .map(|profile| serde_json::from_str(&profile.safe_overrides_json))
+        .transpose()
+        .map_err(|error| control_failure("profile_invalid", &error.to_string()))?
+        .unwrap_or_default();
+
+    let session_id = spool_domain::ProfileCaptureSessionId::new().to_string();
+    let (capture_token, token_digest) = generate_capture_token();
+    let created_unix_ms = Utc::now().timestamp_millis();
+    let lifetime_ms = i64::try_from(PROFILE_CAPTURE_LIFETIME.as_millis())
+        .map_err(|error| control_failure("profile_invalid", &error.to_string()))?;
+    let expires_unix_ms = created_unix_ms.saturating_add(lifetime_ms);
+    store
+        .create_profile_capture_session(
+            &session_id,
+            &token_digest,
+            printer_id,
+            request.profile_id.as_deref(),
+            request.expected_revision,
+            &enum_string(request.operation),
+            LOCAL_PROFILE_HOST_ID,
+            expires_unix_ms,
+            created_unix_ms,
+        )
+        .map_err(storage_control_failure)?;
+
+    Ok(ProfileCaptureAuthorized {
+        session_id,
+        capture_token,
+        expires_unix_ms,
+        operation: request.operation,
+        printer_id: printer.printer_id,
+        native_id: printer.native_id,
+        printer_name: printer.name,
+        profile_id: existing.as_ref().map(|profile| profile.profile_id.clone()),
+        profile_name: existing.as_ref().map(|profile| profile.name.clone()),
+        stock_id: existing
+            .as_ref()
+            .and_then(|profile| profile.stock_id.clone()),
+        safe_overrides,
+        expected_revision: request.expected_revision,
+        native_configuration,
+    })
+}
+
+fn commit_profile_capture(
+    store: &mut AgentStore,
+    session_id: &str,
+    capture_token: &str,
+    capture: NativeProfileCapturePayload,
+) -> Result<LocalPrinterProfile, ControlFailure> {
+    let native_blob = STANDARD.decode(&capture.native_blob_base64).map_err(|_| {
+        control_failure("profile_invalid", "native profile blob is not valid base64")
+    })?;
+    if native_blob.len() > spool_local_ipc::MAX_NATIVE_CAPTURE_BYTES {
+        return Err(control_failure(
+            "profile_invalid",
+            "native profile blob exceeds the one MiB limit",
+        ));
+    }
+    let durable_capture = NativeProfileCapture {
+        name: capture.name,
+        is_default: capture.is_default,
+        options_json: serde_json::to_string(&capture.options)
+            .map_err(|error| control_failure("profile_invalid", &error.to_string()))?,
+        status: enum_string(ProfileStatus::NeedsTest),
+        native_kind: enum_string(capture.native_kind),
+        native_schema_version: capture.native_schema_version,
+        native_digest: capture.native_digest,
+        native_blob,
+        driver_fingerprint_json: serde_json::to_string(&capture.driver_fingerprint)
+            .map_err(|error| control_failure("profile_invalid", &error.to_string()))?,
+        summary_json: serde_json::to_string(&capture.summary)
+            .map_err(|error| control_failure("profile_invalid", &error.to_string()))?,
+        stock_id: capture.stock_id,
+        dependencies_json: serde_json::to_string(&capture.dependencies)
+            .map_err(|error| control_failure("profile_invalid", &error.to_string()))?,
+        safe_overrides_json: serde_json::to_string(&capture.safe_overrides)
+            .map_err(|error| control_failure("profile_invalid", &error.to_string()))?,
+        // Captures must pass an actual driver test before publication.
+        published: false,
+    };
+    let stored = store
+        .commit_profile_capture(
+            session_id,
+            &capture_token_digest(capture_token),
+            LOCAL_PROFILE_HOST_ID,
+            &durable_capture,
+            Utc::now().timestamp_millis(),
+        )
+        .map_err(storage_control_failure)?;
+    local_profile(store, stored)
+}
+
+fn validate_profile_revision(
+    store: &AgentStore,
+    profile_id: &str,
+    revision: u64,
+) -> Result<ProfileValidationResult, ControlFailure> {
+    let validated_unix_ms = Utc::now().timestamp_millis();
+    let blob = store
+        .native_profile_blob(profile_id, revision)
+        .map_err(storage_control_failure)?
+        .ok_or_else(|| control_failure("profile_not_found", "profile revision was not found"))?;
+    let _: NativeProfileKind = parse_stored_enum(&blob.native_kind, "native profile kind")?;
+    Ok(ProfileValidationResult {
+        profile_id: profile_id.to_owned(),
+        revision,
+        status: ProfileStatus::NeedsTest,
+        code: Some("driver_test_required".into()),
+        message: Some(
+            "The immutable native settings are intact; run a driver test before publishing.".into(),
+        ),
+        validated_unix_ms,
+    })
+}
+
+fn confirm_loaded_media(
+    store: &mut AgentStore,
+    request: spool_local_ipc::ConfirmLoadedMedia,
+) -> Result<(), ControlFailure> {
+    if request.device_id.trim().is_empty() || request.source.trim().is_empty() {
+        return Err(control_failure(
+            "loaded_media_invalid",
+            "device and source are required",
+        ));
+    }
+    store
+        .confirm_loaded_media(&StoredLoadedMedia {
+            device_id: request.device_id,
+            source: request.source,
+            stock_id: request.stock_id,
+            confidence: enum_string(request.confidence),
+            confirmed_unix_ms: Utc::now().timestamp_millis(),
+            confirmed_by: request.confirmed_by,
+        })
+        .map_err(storage_control_failure)
 }
 
 fn resolve_exposed_printer(
@@ -1020,6 +1301,14 @@ fn enum_string<T: serde::Serialize>(value: T) -> String {
         .unwrap_or_else(|| "unknown".into())
 }
 
+fn parse_stored_enum<T: serde::de::DeserializeOwned>(
+    value: &str,
+    label: &str,
+) -> Result<T, ControlFailure> {
+    serde_json::from_value(serde_json::Value::String(value.to_owned()))
+        .map_err(|error| control_failure("profile_invalid", &format!("invalid {label}: {error}")))
+}
+
 #[allow(
     clippy::needless_pass_by_value,
     reason = "matches map_err's owned error signature throughout the agent boundary"
@@ -1033,6 +1322,18 @@ fn storage_control_failure(error: StorageError) -> ControlFailure {
             control_failure("profile_revision_conflict", &error.to_string())
         }
         StorageError::InvalidPrinterProfile(_) => {
+            control_failure("profile_invalid", &error.to_string())
+        }
+        StorageError::CaptureSessionNotFound(_) => {
+            control_failure("profile_capture_not_found", &error.to_string())
+        }
+        StorageError::CaptureSessionNotAuthorized(_) => {
+            control_failure("profile_capture_timed_out", &error.to_string())
+        }
+        StorageError::InvalidCaptureToken => {
+            control_failure("profile_capture_token_invalid", &error.to_string())
+        }
+        StorageError::NativeBlobTooLarge(_) => {
             control_failure("profile_invalid", &error.to_string())
         }
         _ => control_failure("local_storage_failed", &error.to_string()),
@@ -1731,6 +2032,22 @@ async fn discover_cloud_printers(
                         name: profile.name,
                         is_default: profile.is_default,
                         options: serde_json::from_str(&profile.options_json)?,
+                        status: serde_json::from_value(serde_json::Value::String(profile.status))?,
+                        native_kind: if profile.native_kind.is_empty() {
+                            None
+                        } else {
+                            Some(serde_json::from_value(serde_json::Value::String(
+                                profile.native_kind,
+                            ))?)
+                        },
+                        native_digest: profile.native_digest,
+                        driver_fingerprint: serde_json::from_str(&profile.driver_fingerprint_json)?,
+                        summary: serde_json::from_str(&profile.summary_json)?,
+                        stock_id: profile.stock_id,
+                        safe_overrides: serde_json::from_str(&profile.safe_overrides_json)?,
+                        last_validated_unix_ms: profile.last_validated_unix_ms,
+                        last_test_job_id: profile.last_test_job_id,
+                        published: profile.published,
                     })
                 })
                 .collect::<Result<Vec<_>>>()?;

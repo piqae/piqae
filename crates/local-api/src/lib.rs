@@ -12,7 +12,9 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use spool_local_ipc::{
-    LocalPrinter, LocalPrinterProfile, LocalPrinterQueue, LocalStatus, SessionAuthenticator,
+    ConfirmLoadedMedia, LocalPrinter, LocalPrinterProfile, LocalPrinterQueue, LocalStatus,
+    NativeProfileCapturePayload, ProfileCaptureAuthorized, ProfileValidationResult,
+    SessionAuthenticator,
 };
 use std::{net::SocketAddr, sync::Arc};
 use thiserror::Error;
@@ -51,6 +53,31 @@ pub enum ControlRequest {
         printer_id: String,
         profile_id: String,
         expected_revision: u64,
+        respond_to: oneshot::Sender<Result<(), ControlFailure>>,
+    },
+    BeginProfileCapture {
+        printer_id: String,
+        request: ProfileCaptureBeginRequest,
+        respond_to: oneshot::Sender<Result<ProfileCaptureAuthorized, ControlFailure>>,
+    },
+    CommitProfileCapture {
+        session_id: String,
+        capture_token: String,
+        capture: Box<NativeProfileCapturePayload>,
+        respond_to: oneshot::Sender<Result<LocalPrinterProfile, ControlFailure>>,
+    },
+    CancelProfileCapture {
+        session_id: String,
+        capture_token: String,
+        respond_to: oneshot::Sender<Result<(), ControlFailure>>,
+    },
+    ValidateProfile {
+        profile_id: String,
+        revision: u64,
+        respond_to: oneshot::Sender<Result<ProfileValidationResult, ControlFailure>>,
+    },
+    ConfirmLoadedMedia {
+        request: ConfirmLoadedMedia,
         respond_to: oneshot::Sender<Result<(), ControlFailure>>,
     },
     PrinterQueue {
@@ -142,6 +169,28 @@ pub struct TestPageRequest {
     pub profile_id: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProfileCaptureBeginRequest {
+    pub operation: spool_domain::ProfileCaptureOperation,
+    pub profile_id: Option<String>,
+    pub expected_revision: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ValidateProfileRequest {
+    pub revision: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConfirmLoadedMediaRequest {
+    pub stock_id: Option<String>,
+    pub confidence: spool_domain::LoadedMediaConfidence,
+    pub confirmed_by: Option<String>,
+}
+
 #[derive(Debug, Error)]
 pub enum LocalApiError {
     #[error("local API must bind to a loopback address, got {0}")]
@@ -192,6 +241,26 @@ pub fn router(state: LocalApiState) -> Router {
         .route(
             "/v1/local/printers/{printer_id}/profiles/{profile_id}",
             put(update_profile).delete(delete_profile),
+        )
+        .route(
+            "/v1/local/printers/{printer_id}/profile-capture-sessions",
+            post(begin_profile_capture),
+        )
+        .route(
+            "/v1/local/profile-capture-sessions/{session_id}/complete",
+            post(commit_profile_capture),
+        )
+        .route(
+            "/v1/local/profile-capture-sessions/{session_id}",
+            axum::routing::delete(cancel_profile_capture),
+        )
+        .route(
+            "/v1/local/profiles/{profile_id}/validate",
+            post(validate_profile),
+        )
+        .route(
+            "/v1/local/devices/{device_id}/loaded-media/{source}",
+            put(confirm_loaded_media),
         )
         .route("/v1/local/printers/{printer_id}/queue", get(printer_queue))
         .route("/v1/local/printers/{printer_id}/test-page", post(test_page))
@@ -349,6 +418,114 @@ async fn delete_profile(
     .await
 }
 
+async fn begin_profile_capture(
+    State(state): State<LocalApiState>,
+    Path(printer_id): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<ProfileCaptureBeginRequest>,
+) -> Response {
+    request_response(
+        state,
+        headers,
+        |respond_to| ControlRequest::BeginProfileCapture {
+            printer_id,
+            request,
+            respond_to,
+        },
+        StatusCode::CREATED,
+    )
+    .await
+}
+
+async fn commit_profile_capture(
+    State(state): State<LocalApiState>,
+    Path(session_id): Path<String>,
+    headers: HeaderMap,
+    Json(capture): Json<NativeProfileCapturePayload>,
+) -> Response {
+    let Some(capture_token) = capture_token(&headers) else {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(ControlFailure {
+                code: "capture_token_required".into(),
+                message: "X-Spool-Capture-Token is required".into(),
+            }),
+        )
+            .into_response();
+    };
+    request_response(
+        state,
+        headers,
+        |respond_to| ControlRequest::CommitProfileCapture {
+            session_id,
+            capture_token,
+            capture: Box::new(capture),
+            respond_to,
+        },
+        StatusCode::CREATED,
+    )
+    .await
+}
+
+async fn cancel_profile_capture(
+    State(state): State<LocalApiState>,
+    Path(session_id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(capture_token) = capture_token(&headers) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    control_action(state, headers, |respond_to| {
+        ControlRequest::CancelProfileCapture {
+            session_id,
+            capture_token,
+            respond_to,
+        }
+    })
+    .await
+}
+
+async fn validate_profile(
+    State(state): State<LocalApiState>,
+    Path(profile_id): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<ValidateProfileRequest>,
+) -> Response {
+    request_response(
+        state,
+        headers,
+        |respond_to| ControlRequest::ValidateProfile {
+            profile_id,
+            revision: request.revision,
+            respond_to,
+        },
+        StatusCode::OK,
+    )
+    .await
+}
+
+async fn confirm_loaded_media(
+    State(state): State<LocalApiState>,
+    Path((device_id, source)): Path<(String, String)>,
+    headers: HeaderMap,
+    Json(body): Json<ConfirmLoadedMediaRequest>,
+) -> Response {
+    let request = ConfirmLoadedMedia {
+        device_id,
+        source,
+        stock_id: body.stock_id,
+        confidence: body.confidence,
+        confirmed_by: body.confirmed_by,
+    };
+    control_action(state, headers, |respond_to| {
+        ControlRequest::ConfirmLoadedMedia {
+            request,
+            respond_to,
+        }
+    })
+    .await
+}
+
 async fn printer_queue(
     State(state): State<LocalApiState>,
     Path(printer_id): Path<String>,
@@ -467,8 +644,12 @@ async fn request_response<T: Serialize>(
 
 fn failure_status(code: &str) -> StatusCode {
     match code {
-        "printer_not_found" | "profile_not_found" => StatusCode::NOT_FOUND,
+        "printer_not_found" | "profile_not_found" | "profile_capture_not_found" => {
+            StatusCode::NOT_FOUND
+        }
         "profile_revision_conflict" => StatusCode::CONFLICT,
+        "profile_capture_token_invalid" => StatusCode::UNAUTHORIZED,
+        "profile_capture_timed_out" | "profile_capture_cancelled" => StatusCode::GONE,
         _ => StatusCode::UNPROCESSABLE_ENTITY,
     }
 }
@@ -484,6 +665,14 @@ fn authenticate(state: &LocalApiState, headers: &HeaderMap) -> bool {
         return false;
     };
     state.authenticator.authenticate(candidate)
+}
+
+fn capture_token(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get("x-spool-capture-token")
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.is_empty() && value.len() <= 512)
+        .map(str::to_owned)
 }
 
 fn unavailable() -> Response {
@@ -507,6 +696,27 @@ mod tests {
     fn test_state() -> (LocalApiState, mpsc::Receiver<ControlRequest>) {
         let (send, receive) = mpsc::channel(4);
         (LocalApiState::new("secret", send), receive)
+    }
+
+    fn profile(profile_id: &str, name: String) -> LocalPrinterProfile {
+        LocalPrinterProfile {
+            profile_id: profile_id.into(),
+            revision: 1,
+            name,
+            is_default: true,
+            options: spool_domain::JobOptions::default(),
+            status: spool_domain::ProfileStatus::NeedsTest,
+            native_kind: Some(spool_domain::NativeProfileKind::PortableOptions),
+            native_digest: None,
+            driver_fingerprint: spool_domain::DriverFingerprint::default(),
+            summary: spool_domain::ProfileSummary::default(),
+            stock_id: None,
+            dependencies: Vec::new(),
+            safe_overrides: Vec::new(),
+            last_validated_unix_ms: None,
+            last_test_job_id: None,
+            published: false,
+        }
     }
 
     #[tokio::test]
@@ -568,11 +778,8 @@ mod tests {
                 assert_eq!(printer_id, "ptr_test");
                 assert_eq!(request.name, "A4 Colour");
                 let _ = respond_to.send(Ok(LocalPrinterProfile {
-                    profile_id: "prf_test".into(),
-                    revision: 1,
-                    name: request.name,
-                    is_default: true,
                     options: request.options,
+                    ..profile("prf_test", request.name)
                 }));
             }
         });
@@ -592,6 +799,54 @@ mod tests {
             .expect("response");
         responder.await.expect("responder");
         assert_eq!(response.status(), StatusCode::CREATED);
+    }
+
+    #[tokio::test]
+    async fn native_capture_commit_requires_both_session_and_capture_tokens() {
+        let (state, mut receive) = test_state();
+        let responder = tokio::spawn(async move {
+            if let Some(ControlRequest::CommitProfileCapture {
+                session_id,
+                capture_token,
+                capture,
+                respond_to,
+            }) = receive.recv().await
+            {
+                assert_eq!(session_id, "pcs_test");
+                assert_eq!(capture_token, "one-time-token");
+                assert_eq!(capture.name, "A4 colour");
+                assert_eq!(
+                    capture.native_kind,
+                    spool_domain::NativeProfileKind::MacosPrintcore
+                );
+                let _ = respond_to.send(Ok(profile("prf_native", capture.name.clone())));
+            }
+        });
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/local/profile-capture-sessions/pcs_test/complete")
+                    .header("authorization", "Bearer secret")
+                    .header("x-spool-capture-token", "one-time-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{
+                          "name":"A4 colour",
+                          "native_kind":"macos_printcore",
+                          "native_schema_version":1,
+                          "native_digest":"sha256:test",
+                          "native_blob_base64":"b3BhcXVl",
+                          "driver_fingerprint":{},
+                          "summary":{}
+                        }"#,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::CREATED);
+        responder.await.expect("responder");
     }
 
     #[tokio::test]

@@ -7,17 +7,39 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use spool_domain::{JobOptions, NativePrinterOption, PrinterCapabilities};
+use spool_domain::{
+    DriverFingerprint, JobOptions, NativePrinterOption, NativeProfileKind, PrinterCapabilities,
+    ProfileCaptureOperation, ProfileDependency, ProfileStatus, ProfileSummary, SafeProfileOverride,
+};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use uuid::Uuid;
 
-pub const LOCAL_PROTOCOL_VERSION: u16 = 1;
-pub const MAX_MESSAGE_BYTES: usize = 64 * 1024;
+pub const LOCAL_PROTOCOL_VERSION: u16 = 2;
+pub const MAX_MESSAGE_BYTES: usize = 2 * 1024 * 1024;
+pub const MAX_NATIVE_CAPTURE_BYTES: usize = 1024 * 1024;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Generates a one-time 256-bit bearer token and the digest that may be
+/// persisted by the agent. The plaintext token is returned only to the
+/// authorized native profile host.
+#[must_use]
+pub fn generate_capture_token() -> (String, String) {
+    let mut token = [0_u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut token);
+    let token = URL_SAFE_NO_PAD.encode(token);
+    let digest = capture_token_digest(&token);
+    (token, digest)
+}
+
+/// Produces the stable storage representation of a profile capture token.
+#[must_use]
+pub fn capture_token_digest(token: &str) -> String {
+    format!("sha256:{:x}", Sha256::digest(token.as_bytes()))
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LocalRequest {
     pub protocol: u16,
     pub request_id: Uuid,
@@ -25,7 +47,7 @@ pub struct LocalRequest {
     pub operation: LocalOperation,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum LocalOperation {
     Status,
@@ -35,6 +57,11 @@ pub enum LocalOperation {
     RestartAgent,
     ExportSupportBundle { destination: PathBuf },
     Reenrol { confirmation: String },
+    BeginProfileCapture(BeginProfileCapture),
+    CommitProfileCapture(CommitProfileCapture),
+    CancelProfileCapture(CancelProfileCapture),
+    ValidateProfile(ValidateProfile),
+    ConfirmLoadedMedia(ConfirmLoadedMedia),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -51,6 +78,9 @@ pub enum LocalResult {
     Printers { printers: Vec<LocalPrinter> },
     Accepted,
     SupportBundle { path: PathBuf },
+    ProfileCaptureAuthorized(ProfileCaptureAuthorized),
+    ProfileCaptured { profile: LocalPrinterProfile },
+    ProfileValidation(ProfileValidationResult),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -90,13 +120,219 @@ pub struct LocalPrinter {
     pub queue_counts: LocalPrinterQueueCounts,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LocalPrinterProfile {
     pub profile_id: String,
     pub revision: u64,
     pub name: String,
     pub is_default: bool,
     pub options: JobOptions,
+    #[serde(default)]
+    pub status: ProfileStatus,
+    #[serde(default)]
+    pub native_kind: Option<NativeProfileKind>,
+    #[serde(default)]
+    pub native_digest: Option<String>,
+    #[serde(default)]
+    pub driver_fingerprint: DriverFingerprint,
+    #[serde(default)]
+    pub summary: ProfileSummary,
+    #[serde(default)]
+    pub stock_id: Option<String>,
+    #[serde(default)]
+    pub dependencies: Vec<ProfileDependency>,
+    #[serde(default)]
+    pub safe_overrides: Vec<SafeProfileOverride>,
+    #[serde(default)]
+    pub last_validated_unix_ms: Option<i64>,
+    #[serde(default)]
+    pub last_test_job_id: Option<String>,
+    #[serde(default)]
+    pub published: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BeginProfileCapture {
+    pub printer_id: String,
+    pub operation: ProfileCaptureOperation,
+    pub profile_id: Option<String>,
+    pub expected_revision: Option<u64>,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProfileCaptureAuthorized {
+    pub session_id: String,
+    pub capture_token: String,
+    pub expires_unix_ms: i64,
+    pub operation: ProfileCaptureOperation,
+    pub printer_id: String,
+    pub native_id: String,
+    pub printer_name: String,
+    pub profile_id: Option<String>,
+    pub profile_name: Option<String>,
+    pub stock_id: Option<String>,
+    #[serde(default)]
+    pub safe_overrides: Vec<SafeProfileOverride>,
+    pub expected_revision: Option<u64>,
+    /// The prior immutable revision for edit/clone. This response is available
+    /// only through the authenticated, loopback-only local API.
+    pub native_configuration: Option<NativeProfileSeed>,
+}
+
+impl std::fmt::Debug for ProfileCaptureAuthorized {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProfileCaptureAuthorized")
+            .field("session_id", &self.session_id)
+            .field("capture_token", &"[REDACTED]")
+            .field("expires_unix_ms", &self.expires_unix_ms)
+            .field("operation", &self.operation)
+            .field("printer_id", &self.printer_id)
+            .field("native_id", &self.native_id)
+            .field("printer_name", &self.printer_name)
+            .field("profile_id", &self.profile_id)
+            .field("profile_name", &self.profile_name)
+            .field("stock_id", &self.stock_id)
+            .field("safe_overrides", &self.safe_overrides)
+            .field("expected_revision", &self.expected_revision)
+            .field("native_configuration", &self.native_configuration)
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NativeProfileSeed {
+    pub kind: NativeProfileKind,
+    pub schema_version: u16,
+    pub digest: String,
+    /// Standard Base64. Kept inside the short-lived authenticated response so
+    /// the native profile host can restore the exact prior driver state.
+    pub native_blob_base64: String,
+}
+
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+pub struct CommitProfileCapture {
+    pub session_id: String,
+    pub capture_token: String,
+    pub capture: NativeProfileCapturePayload,
+}
+
+impl std::fmt::Debug for CommitProfileCapture {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CommitProfileCapture")
+            .field("session_id", &self.session_id)
+            .field("capture_token", &"[REDACTED]")
+            .field("capture", &self.capture.redacted())
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+pub struct NativeProfileCapturePayload {
+    pub name: String,
+    #[serde(default)]
+    pub is_default: bool,
+    #[serde(default)]
+    pub options: JobOptions,
+    pub native_kind: NativeProfileKind,
+    pub native_schema_version: u16,
+    pub native_digest: String,
+    /// Standard Base64. Decoding and the one-MiB ceiling are enforced before
+    /// the capture reaches durable storage.
+    pub native_blob_base64: String,
+    pub driver_fingerprint: DriverFingerprint,
+    pub summary: ProfileSummary,
+    pub stock_id: Option<String>,
+    #[serde(default)]
+    pub dependencies: Vec<ProfileDependency>,
+    #[serde(default)]
+    pub safe_overrides: Vec<SafeProfileOverride>,
+    #[serde(default)]
+    pub published: bool,
+}
+
+impl NativeProfileCapturePayload {
+    fn redacted(&self) -> NativeProfileCaptureDebug<'_> {
+        NativeProfileCaptureDebug {
+            name: &self.name,
+            native_kind: self.native_kind,
+            native_schema_version: self.native_schema_version,
+            native_digest: &self.native_digest,
+            native_blob_bytes_estimate: self.native_blob_base64.len().saturating_mul(3) / 4,
+        }
+    }
+}
+
+impl std::fmt::Debug for NativeProfileCapturePayload {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.redacted().fmt(formatter)
+    }
+}
+
+struct NativeProfileCaptureDebug<'a> {
+    name: &'a str,
+    native_kind: NativeProfileKind,
+    native_schema_version: u16,
+    native_digest: &'a str,
+    native_blob_bytes_estimate: usize,
+}
+
+impl std::fmt::Debug for NativeProfileCaptureDebug<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("NativeProfileCapture")
+            .field("name", &self.name)
+            .field("native_kind", &self.native_kind)
+            .field("native_schema_version", &self.native_schema_version)
+            .field("native_digest", &self.native_digest)
+            .field(
+                "native_blob_bytes_estimate",
+                &self.native_blob_bytes_estimate,
+            )
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CancelProfileCapture {
+    pub session_id: String,
+    pub capture_token: String,
+}
+
+impl std::fmt::Debug for CancelProfileCapture {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CancelProfileCapture")
+            .field("session_id", &self.session_id)
+            .field("capture_token", &"[REDACTED]")
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValidateProfile {
+    pub profile_id: String,
+    pub revision: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProfileValidationResult {
+    pub profile_id: String,
+    pub revision: u64,
+    pub status: ProfileStatus,
+    pub code: Option<String>,
+    pub message: Option<String>,
+    pub validated_unix_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfirmLoadedMedia {
+    pub device_id: String,
+    pub source: String,
+    pub stock_id: Option<String>,
+    pub confidence: spool_domain::LoadedMediaConfidence,
+    pub confirmed_by: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -310,6 +546,16 @@ mod tests {
         let (authenticator, challenge) = SessionAuthenticator::generate();
         assert!(authenticator.authenticate(&challenge));
         assert!(!authenticator.authenticate("wrong"));
+    }
+
+    #[test]
+    fn capture_tokens_are_random_and_only_their_digest_needs_persistence() {
+        let (first, first_digest) = generate_capture_token();
+        let (second, second_digest) = generate_capture_token();
+        assert_ne!(first, second);
+        assert_ne!(first_digest, second_digest);
+        assert_eq!(first_digest, capture_token_digest(&first));
+        assert!(!first_digest.contains(&first));
     }
 
     #[cfg(unix)]

@@ -6,9 +6,11 @@
 
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 use spool_domain::{
-    EventId, JobOptions, NativePrinterOption, PRINTER_PROFILE_SCHEMA_VERSION, PrinterCapabilities,
-    PrinterCapabilityProfile, PrinterId,
+    DriverFingerprint, EventId, JobOptions, NativePrinterOption, NativeProfileKind,
+    PRINTER_PROFILE_SCHEMA_VERSION, PrinterCapabilities, PrinterCapabilityProfile, PrinterId,
+    ProfileDependency, ProfileId, ProfileStatus, ProfileSummary, SafeProfileOverride,
 };
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -40,7 +42,17 @@ pub enum StorageError {
     ProfileRevisionConflict { expected: u64, current: u64 },
     #[error("invalid printer profile: {0}")]
     InvalidPrinterProfile(String),
+    #[error("profile capture session {0} was not found")]
+    CaptureSessionNotFound(String),
+    #[error("profile capture session {0} is no longer authorized")]
+    CaptureSessionNotAuthorized(String),
+    #[error("profile capture token is invalid")]
+    InvalidCaptureToken,
+    #[error("native profile blob exceeds the {0} byte limit")]
+    NativeBlobTooLarge(usize),
 }
+
+pub const MAX_NATIVE_PROFILE_BLOB_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AcceptedJob {
@@ -73,6 +85,12 @@ pub struct LocalJob {
     pub state: String,
     pub expires_unix_ms: Option<i64>,
     pub native_job_id: Option<String>,
+    pub target_id: Option<String>,
+    pub binding_id: Option<String>,
+    pub profile_id: Option<String>,
+    pub profile_revision: Option<u64>,
+    pub stock_id: Option<String>,
+    pub loaded_media_snapshot_json: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -121,7 +139,107 @@ pub struct StoredNamedProfile {
     pub name: String,
     pub is_default: bool,
     pub options_json: String,
+    pub status: String,
+    pub native_kind: String,
+    pub native_blob_id: Option<String>,
+    pub native_digest: Option<String>,
+    pub driver_fingerprint_json: String,
+    pub summary_json: String,
+    pub stock_id: Option<String>,
+    pub safe_overrides_json: String,
+    pub last_validated_unix_ms: Option<i64>,
+    pub last_test_job_id: Option<String>,
+    pub published: bool,
     pub updated_unix_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NativeProfileCapture {
+    pub name: String,
+    pub is_default: bool,
+    pub options_json: String,
+    pub status: String,
+    pub native_kind: String,
+    pub native_schema_version: u16,
+    pub native_digest: String,
+    pub native_blob: Vec<u8>,
+    pub driver_fingerprint_json: String,
+    pub summary_json: String,
+    pub stock_id: Option<String>,
+    pub dependencies_json: String,
+    pub safe_overrides_json: String,
+    pub published: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredNativeProfileBlob {
+    pub blob_id: String,
+    pub profile_id: String,
+    pub profile_revision: u64,
+    pub native_kind: String,
+    pub schema_version: u16,
+    pub digest: String,
+    pub native_blob: Vec<u8>,
+    pub created_unix_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredCaptureSession {
+    pub session_id: String,
+    pub printer_id: String,
+    pub profile_id: Option<String>,
+    pub expected_revision: Option<u64>,
+    pub operation: String,
+    pub status: String,
+    pub peer_user_id: String,
+    pub expires_unix_ms: i64,
+    pub created_unix_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredStock {
+    pub stock_id: String,
+    pub name: String,
+    pub sku: Option<String>,
+    pub kind: String,
+    pub definition_json: String,
+    pub retired: bool,
+    pub updated_unix_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredLoadedMedia {
+    pub device_id: String,
+    pub source: String,
+    pub stock_id: Option<String>,
+    pub confidence: String,
+    pub confirmed_unix_ms: i64,
+    pub confirmed_by: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredTarget {
+    pub target_id: String,
+    pub name: String,
+    pub stock_id: Option<String>,
+    pub routing_policy: String,
+    pub published: bool,
+    pub retired: bool,
+    pub updated_unix_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredTargetBinding {
+    pub binding_id: String,
+    pub target_id: String,
+    pub agent_id: String,
+    pub printer_id: String,
+    pub profile_id: String,
+    pub profile_revision: u64,
+    pub role: String,
+    pub priority: u16,
+    pub enabled: bool,
+    pub created_unix_ms: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -237,6 +355,51 @@ impl AgentStore {
                 [],
             )?;
         }
+        for (name, definition) in [
+            ("status", "TEXT NOT NULL DEFAULT 'needs_test'"),
+            ("native_kind", "TEXT NOT NULL DEFAULT 'portable_options'"),
+            ("native_blob_id", "TEXT"),
+            ("native_digest", "TEXT"),
+            (
+                "driver_fingerprint_json",
+                "TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(driver_fingerprint_json))",
+            ),
+            (
+                "summary_json",
+                "TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(summary_json))",
+            ),
+            ("stock_id", "TEXT"),
+            (
+                "safe_overrides_json",
+                "TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(safe_overrides_json))",
+            ),
+            ("last_validated_unix_ms", "INTEGER"),
+            ("last_test_job_id", "TEXT"),
+            (
+                "published",
+                "INTEGER NOT NULL DEFAULT 0 CHECK (published IN (0, 1))",
+            ),
+        ] {
+            ensure_column(&connection, "printer_profiles", name, definition)?;
+        }
+        for (name, definition) in [
+            ("target_id", "TEXT"),
+            ("binding_id", "TEXT"),
+            ("profile_id", "TEXT"),
+            ("profile_revision", "INTEGER"),
+            ("stock_id", "TEXT"),
+            (
+                "loaded_media_snapshot_json",
+                "TEXT CHECK (loaded_media_snapshot_json IS NULL OR json_valid(loaded_media_snapshot_json))",
+            ),
+        ] {
+            ensure_column(&connection, "jobs", name, definition)?;
+        }
+        connection.execute(
+            "INSERT OR IGNORE INTO schema_migrations(version, applied_unix_ms)
+             VALUES (4, CAST(unixepoch('subsec') * 1000 AS INTEGER))",
+            [],
+        )?;
         Ok(Self { connection })
     }
 
@@ -618,7 +781,11 @@ impl AgentStore {
     ) -> Result<Vec<StoredNamedProfile>, StorageError> {
         let mut statement = self.connection.prepare(
             "SELECT p.profile_id, p.printer_id, p.revision, p.name,
-                    p.is_default, p.options_json, p.updated_unix_ms
+                    p.is_default, p.options_json, p.status, p.native_kind,
+                    p.native_blob_id, p.native_digest,
+                    p.driver_fingerprint_json, p.summary_json, p.stock_id,
+                    p.safe_overrides_json, p.last_validated_unix_ms,
+                    p.last_test_job_id, p.published, p.updated_unix_ms
              FROM printer_profiles p
              WHERE p.printer_id = ?1
                AND p.revision = (
@@ -650,6 +817,670 @@ impl AgentStore {
             )
             .optional()
             .map_err(Into::into)
+    }
+
+    /// Returns the dependency manifest for one immutable profile revision.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `SQLite` cannot execute or decode the query.
+    pub fn profile_dependencies(
+        &self,
+        profile_id: &str,
+        revision: u64,
+    ) -> Result<Vec<ProfileDependency>, StorageError> {
+        let mut statement = self.connection.prepare(
+            "SELECT kind, value
+             FROM profile_dependencies
+             WHERE profile_id = ?1 AND profile_revision = ?2
+             ORDER BY dependency_index",
+        )?;
+        let rows = statement.query_map(params![profile_id, revision], |row| {
+            Ok(ProfileDependency {
+                kind: row.get(0)?,
+                value: row.get(1)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Authorizes one short-lived native profile capture without storing its
+    /// plaintext bearer token.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unknown destination, invalid operation, or
+    /// failed transaction.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_profile_capture_session(
+        &mut self,
+        session_id: &str,
+        token_digest: &str,
+        printer_id: &str,
+        profile_id: Option<&str>,
+        expected_revision: Option<u64>,
+        operation: &str,
+        peer_user_id: &str,
+        expires_unix_ms: i64,
+        created_unix_ms: i64,
+    ) -> Result<StoredCaptureSession, StorageError> {
+        if self.printer(printer_id)?.is_none() {
+            return Err(StorageError::PrinterNotFound(printer_id.to_owned()));
+        }
+        if !matches!(operation, "create" | "edit" | "clone")
+            || token_digest.trim().is_empty()
+            || peer_user_id.trim().is_empty()
+            || expires_unix_ms <= created_unix_ms
+        {
+            return Err(StorageError::InvalidPrinterProfile(
+                "invalid profile capture authorization".into(),
+            ));
+        }
+        if matches!(operation, "edit" | "clone") {
+            let Some(profile_id) = profile_id else {
+                return Err(StorageError::InvalidPrinterProfile(
+                    "edit and clone captures require a profile".into(),
+                ));
+            };
+            let current = self.named_profile(printer_id, profile_id)?.ok_or_else(|| {
+                StorageError::InvalidPrinterProfile("profile was not found".into())
+            })?;
+            if expected_revision != Some(current.revision) {
+                return Err(StorageError::ProfileRevisionConflict {
+                    expected: expected_revision.unwrap_or(0),
+                    current: current.revision,
+                });
+            }
+        }
+        self.connection.execute(
+            "INSERT INTO profile_capture_sessions(
+               session_id, token_digest, printer_id, profile_id,
+               expected_revision, operation, status, peer_user_id,
+               expires_unix_ms, created_unix_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'authorized', ?7, ?8, ?9)",
+            params![
+                session_id,
+                token_digest,
+                printer_id,
+                profile_id,
+                expected_revision,
+                operation,
+                peer_user_id,
+                expires_unix_ms,
+                created_unix_ms
+            ],
+        )?;
+        self.capture_session(session_id)?
+            .ok_or_else(|| StorageError::CaptureSessionNotFound(session_id.to_owned()))
+    }
+
+    /// Reads non-secret capture-session metadata.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the row cannot be decoded.
+    pub fn capture_session(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<StoredCaptureSession>, StorageError> {
+        self.connection
+            .query_row(
+                "SELECT session_id, printer_id, profile_id, expected_revision,
+                        operation, status, peer_user_id, expires_unix_ms,
+                        created_unix_ms
+                 FROM profile_capture_sessions WHERE session_id = ?1",
+                [session_id],
+                |row| {
+                    Ok(StoredCaptureSession {
+                        session_id: row.get(0)?,
+                        printer_id: row.get(1)?,
+                        profile_id: row.get(2)?,
+                        expected_revision: row.get(3)?,
+                        operation: row.get(4)?,
+                        status: row.get(5)?,
+                        peer_user_id: row.get(6)?,
+                        expires_unix_ms: row.get(7)?,
+                        created_unix_ms: row.get(8)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    /// Atomically appends a native profile revision, its opaque local blob and
+    /// dependency manifest, then consumes the one-time capture session.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a bad/expired token, stale revision, invalid
+    /// metadata, oversized or incorrectly digested blob, or failed commit.
+    pub fn commit_profile_capture(
+        &mut self,
+        session_id: &str,
+        token_digest: &str,
+        peer_user_id: &str,
+        capture: &NativeProfileCapture,
+        committed_unix_ms: i64,
+    ) -> Result<StoredNamedProfile, StorageError> {
+        validate_native_capture(capture)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let authorization = transaction
+            .query_row(
+                "SELECT token_digest, printer_id, profile_id, expected_revision,
+                        operation, status, peer_user_id, expires_unix_ms
+                 FROM profile_capture_sessions WHERE session_id = ?1",
+                [session_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<u64>>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, String>(6)?,
+                        row.get::<_, i64>(7)?,
+                    ))
+                },
+            )
+            .optional()?
+            .ok_or_else(|| StorageError::CaptureSessionNotFound(session_id.to_owned()))?;
+        if authorization.5 != "authorized"
+            || authorization.7 < committed_unix_ms
+            || authorization.6 != peer_user_id
+        {
+            return Err(StorageError::CaptureSessionNotAuthorized(
+                session_id.to_owned(),
+            ));
+        }
+        if !constant_time_str_eq(&authorization.0, token_digest) {
+            return Err(StorageError::InvalidCaptureToken);
+        }
+
+        let current = authorization
+            .2
+            .as_deref()
+            .map(|profile_id| query_named_profile(&transaction, &authorization.1, profile_id))
+            .transpose()?
+            .flatten();
+        let current_revision = current.as_ref().map_or(0, |profile| profile.revision);
+        if authorization.3.unwrap_or(0) != current_revision {
+            return Err(StorageError::ProfileRevisionConflict {
+                expected: authorization.3.unwrap_or(0),
+                current: current_revision,
+            });
+        }
+        let (profile_id, revision) = if authorization.4 == "edit" {
+            (
+                authorization.2.clone().ok_or_else(|| {
+                    StorageError::InvalidPrinterProfile("edit capture requires a profile".into())
+                })?,
+                current_revision + 1,
+            )
+        } else {
+            (ProfileId::new().to_string(), 1)
+        };
+        let blob_id = spool_domain::NativeProfileBlobId::new().to_string();
+        if capture.is_default {
+            demote_default_profiles(
+                &transaction,
+                &authorization.1,
+                &profile_id,
+                committed_unix_ms,
+            )?;
+        }
+        transaction.execute(
+            "INSERT INTO printer_profiles(
+               profile_id, printer_id, revision, name, is_default, options_json,
+               status, native_kind, native_blob_id, native_digest,
+               driver_fingerprint_json, summary_json, stock_id,
+               safe_overrides_json, published, deleted, updated_unix_ms
+             ) VALUES (
+               ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
+               ?14, ?15, 0, ?16
+             )",
+            params![
+                profile_id,
+                authorization.1,
+                revision,
+                capture.name.trim(),
+                capture.is_default,
+                capture.options_json,
+                capture.status,
+                capture.native_kind,
+                blob_id,
+                capture.native_digest,
+                capture.driver_fingerprint_json,
+                capture.summary_json,
+                capture.stock_id,
+                capture.safe_overrides_json,
+                capture.published,
+                committed_unix_ms
+            ],
+        )?;
+        transaction.execute(
+            "INSERT INTO profile_native_blobs(
+               blob_id, profile_id, profile_revision, native_kind,
+               schema_version, digest, native_blob, created_unix_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                blob_id,
+                profile_id,
+                revision,
+                capture.native_kind,
+                capture.native_schema_version,
+                capture.native_digest,
+                capture.native_blob,
+                committed_unix_ms
+            ],
+        )?;
+        let dependencies: Vec<ProfileDependency> =
+            serde_json::from_str(&capture.dependencies_json)?;
+        for (index, dependency) in dependencies.iter().enumerate() {
+            transaction.execute(
+                "INSERT INTO profile_dependencies(
+                   profile_id, profile_revision, dependency_index, kind, value
+                 ) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    profile_id,
+                    revision,
+                    i64::try_from(index).map_err(|error| {
+                        StorageError::InvalidPrinterProfile(error.to_string())
+                    })?,
+                    dependency.kind,
+                    dependency.value
+                ],
+            )?;
+        }
+        transaction.execute(
+            "UPDATE profile_capture_sessions
+             SET status = 'committed', completed_unix_ms = ?2
+             WHERE session_id = ?1 AND status = 'authorized'",
+            params![session_id, committed_unix_ms],
+        )?;
+        let stored = query_named_profile(&transaction, &authorization.1, &profile_id)?
+            .ok_or_else(|| StorageError::InvalidPrinterProfile("profile insert failed".into()))?;
+        transaction.commit()?;
+        Ok(stored)
+    }
+
+    /// Consumes an authorized capture session without creating a profile.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid token/session or failed update.
+    pub fn cancel_profile_capture(
+        &mut self,
+        session_id: &str,
+        token_digest: &str,
+        peer_user_id: &str,
+        cancelled_unix_ms: i64,
+    ) -> Result<(), StorageError> {
+        let changed = self.connection.execute(
+            "UPDATE profile_capture_sessions
+             SET status = 'cancelled', completed_unix_ms = ?4
+             WHERE session_id = ?1 AND token_digest = ?2
+               AND peer_user_id = ?3 AND status = 'authorized'
+               AND expires_unix_ms >= ?4",
+            params![session_id, token_digest, peer_user_id, cancelled_unix_ms],
+        )?;
+        if changed == 0 {
+            return Err(StorageError::CaptureSessionNotAuthorized(
+                session_id.to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Loads one opaque native profile blob by exact immutable revision.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the row cannot be decoded.
+    pub fn native_profile_blob(
+        &self,
+        profile_id: &str,
+        revision: u64,
+    ) -> Result<Option<StoredNativeProfileBlob>, StorageError> {
+        self.connection
+            .query_row(
+                "SELECT blob_id, profile_id, profile_revision, native_kind,
+                        schema_version, digest, native_blob, created_unix_ms
+                 FROM profile_native_blobs
+                 WHERE profile_id = ?1 AND profile_revision = ?2",
+                params![profile_id, revision],
+                |row| {
+                    Ok(StoredNativeProfileBlob {
+                        blob_id: row.get(0)?,
+                        profile_id: row.get(1)?,
+                        profile_revision: row.get(2)?,
+                        native_kind: row.get(3)?,
+                        schema_version: row.get(4)?,
+                        digest: row.get(5)?,
+                        native_blob: row.get(6)?,
+                        created_unix_ms: row.get(7)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    /// Pins an accepted job to the exact target, binding, profile revision and
+    /// stock facts selected by routing.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a missing job/profile or invalid media snapshot.
+    #[allow(clippy::too_many_arguments)]
+    pub fn pin_job_profile(
+        &mut self,
+        job_id: &str,
+        target_id: Option<&str>,
+        binding_id: Option<&str>,
+        profile_id: &str,
+        profile_revision: u64,
+        stock_id: Option<&str>,
+        loaded_media_snapshot_json: Option<&str>,
+    ) -> Result<(), StorageError> {
+        if let Some(snapshot) = loaded_media_snapshot_json {
+            let _: serde_json::Value = serde_json::from_str(snapshot)?;
+        }
+        let profile_exists: bool = self.connection.query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM printer_profiles
+               WHERE profile_id = ?1 AND revision = ?2 AND deleted = 0
+             )",
+            params![profile_id, profile_revision],
+            |row| row.get(0),
+        )?;
+        if !profile_exists {
+            return Err(StorageError::InvalidPrinterProfile(format!(
+                "profile {profile_id} revision {profile_revision} was not found"
+            )));
+        }
+        let changed = self.connection.execute(
+            "UPDATE jobs SET target_id = ?2, binding_id = ?3, profile_id = ?4,
+                    profile_revision = ?5, stock_id = ?6,
+                    loaded_media_snapshot_json = ?7
+             WHERE job_id = ?1
+               AND (profile_id IS NULL OR (
+                    profile_id = ?4 AND profile_revision = ?5
+               ))",
+            params![
+                job_id,
+                target_id,
+                binding_id,
+                profile_id,
+                profile_revision,
+                stock_id,
+                loaded_media_snapshot_json
+            ],
+        )?;
+        if changed != 1 {
+            return Err(StorageError::JobConflict(job_id.to_owned()));
+        }
+        Ok(())
+    }
+
+    /// Creates or updates a physical-device identity used by loaded-media
+    /// state. Destination grouping remains explicit and confidence-labelled.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid metadata JSON or failed persistence.
+    #[allow(clippy::too_many_arguments)]
+    pub fn upsert_physical_device(
+        &mut self,
+        device_id: &str,
+        display_name: &str,
+        hardware_fingerprint: Option<&str>,
+        identity_confidence: &str,
+        metadata_json: &str,
+        updated_unix_ms: i64,
+    ) -> Result<(), StorageError> {
+        let _: serde_json::Value = serde_json::from_str(metadata_json)?;
+        self.connection.execute(
+            "INSERT INTO physical_devices(
+               device_id, display_name, hardware_fingerprint,
+               identity_confidence, metadata_json, updated_unix_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(device_id) DO UPDATE SET
+               display_name = excluded.display_name,
+               hardware_fingerprint = excluded.hardware_fingerprint,
+               identity_confidence = excluded.identity_confidence,
+               metadata_json = excluded.metadata_json,
+               updated_unix_ms = excluded.updated_unix_ms",
+            params![
+                device_id,
+                display_name,
+                hardware_fingerprint,
+                identity_confidence,
+                metadata_json,
+                updated_unix_ms
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Associates an installed destination with a physical device.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for unknown resources or failed persistence.
+    pub fn bind_printer_device(
+        &mut self,
+        printer_id: &str,
+        device_id: &str,
+        confidence: &str,
+        confirmed_by: Option<&str>,
+        updated_unix_ms: i64,
+    ) -> Result<(), StorageError> {
+        self.connection.execute(
+            "INSERT INTO printer_device_bindings(
+               printer_id, device_id, binding_confidence, confirmed_by,
+               updated_unix_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(printer_id) DO UPDATE SET
+               device_id = excluded.device_id,
+               binding_confidence = excluded.binding_confidence,
+               confirmed_by = excluded.confirmed_by,
+               updated_unix_ms = excluded.updated_unix_ms",
+            params![
+                printer_id,
+                device_id,
+                confidence,
+                confirmed_by,
+                updated_unix_ms
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Creates or updates a portable stock definition.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid definition JSON or failed persistence.
+    #[allow(clippy::too_many_arguments)]
+    pub fn upsert_stock(
+        &mut self,
+        stock_id: &str,
+        name: &str,
+        sku: Option<&str>,
+        kind: &str,
+        definition_json: &str,
+        retired: bool,
+        updated_unix_ms: i64,
+    ) -> Result<StoredStock, StorageError> {
+        let _: serde_json::Value = serde_json::from_str(definition_json)?;
+        if name.trim().is_empty() {
+            return Err(StorageError::InvalidPrinterProfile(
+                "stock name cannot be empty".into(),
+            ));
+        }
+        self.connection.execute(
+            "INSERT INTO stocks(
+               stock_id, name, sku, kind, definition_json, retired,
+               updated_unix_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(stock_id) DO UPDATE SET
+               name = excluded.name, sku = excluded.sku, kind = excluded.kind,
+               definition_json = excluded.definition_json,
+               retired = excluded.retired,
+               updated_unix_ms = excluded.updated_unix_ms",
+            params![
+                stock_id,
+                name.trim(),
+                sku,
+                kind,
+                definition_json,
+                retired,
+                updated_unix_ms
+            ],
+        )?;
+        Ok(StoredStock {
+            stock_id: stock_id.to_owned(),
+            name: name.trim().to_owned(),
+            sku: sku.map(str::to_owned),
+            kind: kind.to_owned(),
+            definition_json: definition_json.to_owned(),
+            retired,
+            updated_unix_ms,
+        })
+    }
+
+    /// Confirms the stock loaded in one physical source/tray.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for unknown device/stock or failed persistence.
+    pub fn confirm_loaded_media(&mut self, media: &StoredLoadedMedia) -> Result<(), StorageError> {
+        self.connection.execute(
+            "INSERT INTO loaded_media(
+               device_id, source, stock_id, confidence, confirmed_unix_ms,
+               confirmed_by
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(device_id, source) DO UPDATE SET
+               stock_id = excluded.stock_id,
+               confidence = excluded.confidence,
+               confirmed_unix_ms = excluded.confirmed_unix_ms,
+               confirmed_by = excluded.confirmed_by",
+            params![
+                media.device_id,
+                media.source,
+                media.stock_id,
+                media.confidence,
+                media.confirmed_unix_ms,
+                media.confirmed_by
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Reads loaded-media state for one device and source.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the row cannot be decoded.
+    pub fn loaded_media(
+        &self,
+        device_id: &str,
+        source: &str,
+    ) -> Result<Option<StoredLoadedMedia>, StorageError> {
+        self.connection
+            .query_row(
+                "SELECT device_id, source, stock_id, confidence,
+                        confirmed_unix_ms, confirmed_by
+                 FROM loaded_media WHERE device_id = ?1 AND source = ?2",
+                params![device_id, source],
+                |row| {
+                    Ok(StoredLoadedMedia {
+                        device_id: row.get(0)?,
+                        source: row.get(1)?,
+                        stock_id: row.get(2)?,
+                        confidence: row.get(3)?,
+                        confirmed_unix_ms: row.get(4)?,
+                        confirmed_by: row.get(5)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    /// Creates or updates a stable logical print target.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an empty name or failed persistence.
+    pub fn upsert_target(&mut self, target: &StoredTarget) -> Result<(), StorageError> {
+        if target.name.trim().is_empty() {
+            return Err(StorageError::InvalidPrinterProfile(
+                "target name cannot be empty".into(),
+            ));
+        }
+        self.connection.execute(
+            "INSERT INTO targets(
+               target_id, name, stock_id, routing_policy, published, retired,
+               updated_unix_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(target_id) DO UPDATE SET
+               name = excluded.name, stock_id = excluded.stock_id,
+               routing_policy = excluded.routing_policy,
+               published = excluded.published, retired = excluded.retired,
+               updated_unix_ms = excluded.updated_unix_ms",
+            params![
+                target.target_id,
+                target.name.trim(),
+                target.stock_id,
+                target.routing_policy,
+                target.published,
+                target.retired,
+                target.updated_unix_ms
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Creates or updates one node/destination/profile target binding.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a missing pinned profile revision or failed write.
+    pub fn upsert_target_binding(
+        &mut self,
+        binding: &StoredTargetBinding,
+    ) -> Result<(), StorageError> {
+        self.connection.execute(
+            "INSERT INTO target_bindings(
+               binding_id, target_id, agent_id, printer_id, profile_id,
+               profile_revision, role, priority, enabled, created_unix_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+             ON CONFLICT(binding_id) DO UPDATE SET
+               target_id = excluded.target_id, agent_id = excluded.agent_id,
+               printer_id = excluded.printer_id,
+               profile_id = excluded.profile_id,
+               profile_revision = excluded.profile_revision,
+               role = excluded.role, priority = excluded.priority,
+               enabled = excluded.enabled",
+            params![
+                binding.binding_id,
+                binding.target_id,
+                binding.agent_id,
+                binding.printer_id,
+                binding.profile_id,
+                binding.profile_revision,
+                binding.role,
+                binding.priority,
+                binding.enabled,
+                binding.created_unix_ms
+            ],
+        )?;
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1127,7 +1958,8 @@ impl AgentStore {
             "SELECT job_id, submission_id, printer_id, printer_native_id,
                     printer_sequence, title, content_sha256, content_path,
                     content_kind, options_json, state, expires_unix_ms,
-                    native_job_id
+                    native_job_id, target_id, binding_id, profile_id,
+                    profile_revision, stock_id, loaded_media_snapshot_json
              FROM jobs WHERE printer_id = ?1
              ORDER BY printer_sequence DESC LIMIT ?2",
         )?;
@@ -1175,7 +2007,9 @@ impl AgentStore {
             "SELECT j.job_id, j.submission_id, j.printer_id, j.printer_native_id,
                     j.printer_sequence, j.title, j.content_sha256, j.content_path,
                     j.content_kind, j.options_json, j.state, j.expires_unix_ms,
-                    j.native_job_id
+                    j.native_job_id, j.target_id, j.binding_id, j.profile_id,
+                    j.profile_revision, j.stock_id,
+                    j.loaded_media_snapshot_json
              FROM jobs j
              WHERE j.state IN ('queued_local', 'failed_retryable')
                AND (j.next_attempt_unix_ms IS NULL OR j.next_attempt_unix_ms <= ?1)
@@ -1429,7 +2263,9 @@ impl AgentStore {
             "SELECT j.job_id, j.submission_id, j.printer_id, j.printer_native_id,
                     j.printer_sequence, j.title, j.content_sha256, j.content_path,
                     j.content_kind, j.options_json, j.state, j.expires_unix_ms,
-                    j.native_job_id, r.next_observe_unix_ms,
+                    j.native_job_id, j.target_id, j.binding_id, j.profile_id,
+                    j.profile_revision, j.stock_id, j.loaded_media_snapshot_json,
+                    r.next_observe_unix_ms,
                     r.uncertainty_deadline_unix_ms, r.attempt_count,
                     r.cancel_requested
              FROM job_reconciliation r
@@ -1458,11 +2294,17 @@ impl AgentStore {
                     state: row.get(10)?,
                     expires_unix_ms: row.get(11)?,
                     native_job_id: row.get(12)?,
+                    target_id: row.get(13)?,
+                    binding_id: row.get(14)?,
+                    profile_id: row.get(15)?,
+                    profile_revision: row.get(16)?,
+                    stock_id: row.get(17)?,
+                    loaded_media_snapshot_json: row.get(18)?,
                 },
-                next_observe_unix_ms: row.get(13)?,
-                uncertainty_deadline_unix_ms: row.get(14)?,
-                attempt_count: row.get(15)?,
-                cancel_requested: row.get(16)?,
+                next_observe_unix_ms: row.get(19)?,
+                uncertainty_deadline_unix_ms: row.get(20)?,
+                attempt_count: row.get(21)?,
+                cancel_requested: row.get(22)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -1892,12 +2734,31 @@ fn query_job(connection: &Connection, job_id: &str) -> Result<Option<LocalJob>, 
             "SELECT job_id, submission_id, printer_id, printer_native_id,
                     printer_sequence, title, content_sha256, content_path,
                     content_kind, options_json, state, expires_unix_ms,
-                    native_job_id
+                    native_job_id, target_id, binding_id, profile_id,
+                    profile_revision, stock_id, loaded_media_snapshot_json
              FROM jobs WHERE job_id = ?1",
             [job_id],
             row_to_job,
         )
         .optional()
+}
+
+fn ensure_column(
+    connection: &Connection,
+    table: &str,
+    name: &str,
+    definition: &str,
+) -> Result<(), rusqlite::Error> {
+    let mut statement = connection.prepare(&format!("PRAGMA table_info({table})"))?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?;
+    if !columns.iter().any(|column| column == name) {
+        connection.execute_batch(&format!(
+            "ALTER TABLE {table} ADD COLUMN {name} {definition}"
+        ))?;
+    }
+    Ok(())
 }
 
 const STORED_PRINTER_QUERY: &str = "
@@ -1943,13 +2804,27 @@ fn named_profile_from_row(row: &rusqlite::Row<'_>) -> Result<StoredNamedProfile,
         name: row.get(3)?,
         is_default: row.get(4)?,
         options_json: row.get(5)?,
-        updated_unix_ms: row.get(6)?,
+        status: row.get(6)?,
+        native_kind: row.get(7)?,
+        native_blob_id: row.get(8)?,
+        native_digest: row.get(9)?,
+        driver_fingerprint_json: row.get(10)?,
+        summary_json: row.get(11)?,
+        stock_id: row.get(12)?,
+        safe_overrides_json: row.get(13)?,
+        last_validated_unix_ms: row.get(14)?,
+        last_test_job_id: row.get(15)?,
+        published: row.get(16)?,
+        updated_unix_ms: row.get(17)?,
     })
 }
 
 const NAMED_PROFILE_QUERY: &str = "
     SELECT profile_id, printer_id, revision, name, is_default,
-           options_json, updated_unix_ms
+           options_json, status, native_kind, native_blob_id, native_digest,
+           driver_fingerprint_json, summary_json, stock_id,
+           safe_overrides_json, last_validated_unix_ms, last_test_job_id,
+           published, updated_unix_ms
     FROM printer_profiles
     WHERE printer_id = ?1 AND profile_id = ?2
       AND revision = (
@@ -1986,44 +2861,28 @@ fn insert_named_profile_tx(
     updated_unix_ms: i64,
 ) -> Result<(), StorageError> {
     if is_default {
-        let previous: Vec<_> = {
-            let mut statement = transaction.prepare(
-                "SELECT p.profile_id, p.revision, p.name, p.options_json
-                 FROM printer_profiles p
-                 WHERE p.printer_id = ?1 AND p.profile_id <> ?2
-                   AND p.is_default = 1 AND p.deleted = 0
-                   AND p.revision = (
-                     SELECT MAX(latest.revision) FROM printer_profiles latest
-                     WHERE latest.profile_id = p.profile_id
-                   )",
-            )?;
-            statement
-                .query_map(params![printer_id, profile_id], |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, u64>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, String>(3)?,
-                    ))
-                })?
-                .collect::<Result<Vec<_>, _>>()?
-        };
-        for (old_id, old_revision, old_name, old_options) in previous {
-            transaction.execute(
-                "INSERT INTO printer_profiles(
-                   profile_id, printer_id, revision, name, is_default,
-                   options_json, deleted, updated_unix_ms
-                 ) VALUES (?1, ?2, ?3, ?4, 0, ?5, 0, ?6)",
-                params![
-                    old_id,
-                    printer_id,
-                    old_revision + 1,
-                    old_name,
-                    old_options,
-                    updated_unix_ms
-                ],
-            )?;
-        }
+        transaction.execute(
+            "INSERT INTO printer_profiles(
+               profile_id, printer_id, revision, name, is_default, options_json,
+               status, native_kind, native_blob_id, native_digest,
+               driver_fingerprint_json, summary_json, stock_id,
+               safe_overrides_json, last_validated_unix_ms, last_test_job_id,
+               published, deleted, updated_unix_ms
+             )
+             SELECT p.profile_id, p.printer_id, p.revision + 1, p.name, 0,
+                    p.options_json, p.status, p.native_kind, p.native_blob_id,
+                    p.native_digest, p.driver_fingerprint_json, p.summary_json,
+                    p.stock_id, p.safe_overrides_json, p.last_validated_unix_ms,
+                    p.last_test_job_id, p.published, 0, ?3
+             FROM printer_profiles p
+             WHERE p.printer_id = ?1 AND p.profile_id <> ?2
+               AND p.is_default = 1 AND p.deleted = 0
+               AND p.revision = (
+                 SELECT MAX(latest.revision) FROM printer_profiles latest
+                 WHERE latest.profile_id = p.profile_id
+               )",
+            params![printer_id, profile_id, updated_unix_ms],
+        )?;
     }
     transaction.execute(
         "INSERT INTO printer_profiles(
@@ -2044,6 +2903,37 @@ fn insert_named_profile_tx(
     Ok(())
 }
 
+fn demote_default_profiles(
+    transaction: &Connection,
+    printer_id: &str,
+    profile_id: &str,
+    updated_unix_ms: i64,
+) -> Result<(), StorageError> {
+    transaction.execute(
+        "INSERT INTO printer_profiles(
+           profile_id, printer_id, revision, name, is_default, options_json,
+           status, native_kind, native_blob_id, native_digest,
+           driver_fingerprint_json, summary_json, stock_id,
+           safe_overrides_json, last_validated_unix_ms, last_test_job_id,
+           published, deleted, updated_unix_ms
+         )
+         SELECT p.profile_id, p.printer_id, p.revision + 1, p.name, 0,
+                p.options_json, p.status, p.native_kind, p.native_blob_id,
+                p.native_digest, p.driver_fingerprint_json, p.summary_json,
+                p.stock_id, p.safe_overrides_json, p.last_validated_unix_ms,
+                p.last_test_job_id, p.published, 0, ?3
+         FROM printer_profiles p
+         WHERE p.printer_id = ?1 AND p.profile_id <> ?2
+           AND p.is_default = 1 AND p.deleted = 0
+           AND p.revision = (
+             SELECT MAX(latest.revision) FROM printer_profiles latest
+             WHERE latest.profile_id = p.profile_id
+           )",
+        params![printer_id, profile_id, updated_unix_ms],
+    )?;
+    Ok(())
+}
+
 fn validate_named_profile(name: &str, options_json: &str) -> Result<(), StorageError> {
     if name.trim().is_empty() {
         return Err(StorageError::InvalidPrinterProfile(
@@ -2052,6 +2942,57 @@ fn validate_named_profile(name: &str, options_json: &str) -> Result<(), StorageE
     }
     let _: JobOptions = serde_json::from_str(options_json)?;
     Ok(())
+}
+
+fn validate_native_capture(capture: &NativeProfileCapture) -> Result<(), StorageError> {
+    validate_named_profile(&capture.name, &capture.options_json)?;
+    if capture.native_blob.len() > MAX_NATIVE_PROFILE_BLOB_BYTES {
+        return Err(StorageError::NativeBlobTooLarge(
+            MAX_NATIVE_PROFILE_BLOB_BYTES,
+        ));
+    }
+    if capture.native_schema_version == 0 {
+        return Err(StorageError::InvalidPrinterProfile(
+            "native profile schema version must be positive".into(),
+        ));
+    }
+    let _: DriverFingerprint = serde_json::from_str(&capture.driver_fingerprint_json)?;
+    let _: ProfileSummary = serde_json::from_str(&capture.summary_json)?;
+    let _: Vec<ProfileDependency> = serde_json::from_str(&capture.dependencies_json)?;
+    let _: Vec<SafeProfileOverride> = serde_json::from_str(&capture.safe_overrides_json)?;
+    let encoded_kind = serde_json::to_string(&capture.native_kind)?;
+    let _: NativeProfileKind = serde_json::from_str(&encoded_kind)?;
+    let encoded_status = serde_json::to_string(&capture.status)?;
+    let status: ProfileStatus = serde_json::from_str(&encoded_status)?;
+    if !matches!(
+        status,
+        ProfileStatus::Draft
+            | ProfileStatus::Ready
+            | ProfileStatus::NeedsTest
+            | ProfileStatus::InteractiveOnly
+    ) {
+        return Err(StorageError::InvalidPrinterProfile(
+            "a newly captured profile has an invalid status".into(),
+        ));
+    }
+    let expected = format!("sha256:{:x}", Sha256::digest(&capture.native_blob));
+    if !constant_time_str_eq(&expected, &capture.native_digest) {
+        return Err(StorageError::InvalidPrinterProfile(
+            "native profile digest does not match blob".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn constant_time_str_eq(left: &str, right: &str) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    left.as_bytes()
+        .iter()
+        .zip(right.as_bytes())
+        .fold(0_u8, |difference, (a, b)| difference | (a ^ b))
+        == 0
 }
 
 fn upsert_cloud_accept_intent(
@@ -2122,6 +3063,12 @@ fn row_to_job(row: &rusqlite::Row<'_>) -> Result<LocalJob, rusqlite::Error> {
         state: row.get(10)?,
         expires_unix_ms: row.get(11)?,
         native_job_id: row.get(12)?,
+        target_id: row.get(13)?,
+        binding_id: row.get(14)?,
+        profile_id: row.get(15)?,
+        profile_revision: row.get(16)?,
+        stock_id: row.get(17)?,
+        loaded_media_snapshot_json: row.get(18)?,
     })
 }
 
@@ -2648,5 +3595,285 @@ mod tests {
         assert_eq!(reappeared.printer_id, stale.printer_id);
         assert_eq!(store.present_printers().unwrap().len(), 2);
         assert_eq!(store.present_printer_warning_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn native_capture_is_single_use_digest_checked_and_revisioned() {
+        let mut store = AgentStore::in_memory().unwrap();
+        let printer = store
+            .upsert_printer(
+                "native-hp",
+                "HP",
+                "online",
+                true,
+                &serde_json::to_string(&PrinterCapabilities::default()).unwrap(),
+                10,
+            )
+            .unwrap();
+        store
+            .create_profile_capture_session(
+                "pcs_create",
+                "token-digest",
+                &printer.printer_id,
+                None,
+                None,
+                "create",
+                "501",
+                310_000,
+                10_000,
+            )
+            .unwrap();
+        let blob = b"opaque-native-settings".to_vec();
+        let digest = format!("sha256:{:x}", Sha256::digest(&blob));
+        let capture = NativeProfileCapture {
+            name: "A4 colour".into(),
+            is_default: true,
+            options_json: serde_json::to_string(&JobOptions::default()).unwrap(),
+            status: "ready".into(),
+            native_kind: "macos_printcore".into(),
+            native_schema_version: 1,
+            native_digest: digest,
+            native_blob: blob.clone(),
+            driver_fingerprint_json: serde_json::to_string(&DriverFingerprint {
+                platform: "macos".into(),
+                driver_name: "HP".into(),
+                native_queue_id: "native-hp".into(),
+                ..DriverFingerprint::default()
+            })
+            .unwrap(),
+            summary_json: serde_json::to_string(&ProfileSummary::default()).unwrap(),
+            stock_id: None,
+            dependencies_json: "[]".into(),
+            safe_overrides_json: r#"["copies","pages"]"#.into(),
+            published: true,
+        };
+        let first = store
+            .commit_profile_capture("pcs_create", "token-digest", "501", &capture, 20_000)
+            .unwrap();
+        assert_eq!(first.revision, 1);
+        assert_eq!(first.status, "ready");
+        assert_eq!(first.native_kind, "macos_printcore");
+        assert!(first.published);
+        assert_eq!(
+            store
+                .native_profile_blob(&first.profile_id, 1)
+                .unwrap()
+                .unwrap()
+                .native_blob,
+            blob
+        );
+        assert!(matches!(
+            store.commit_profile_capture("pcs_create", "token-digest", "501", &capture, 21_000),
+            Err(StorageError::CaptureSessionNotAuthorized(_))
+        ));
+
+        store
+            .create_profile_capture_session(
+                "pcs_edit",
+                "edit-token-digest",
+                &printer.printer_id,
+                Some(&first.profile_id),
+                Some(1),
+                "edit",
+                "501",
+                320_000,
+                30_000,
+            )
+            .unwrap();
+        let second = store
+            .commit_profile_capture(
+                "pcs_edit",
+                "edit-token-digest",
+                "501",
+                &NativeProfileCapture {
+                    name: "A4 colour best".into(),
+                    ..capture
+                },
+                40_000,
+            )
+            .unwrap();
+        assert_eq!(second.profile_id, first.profile_id);
+        assert_eq!(second.revision, 2);
+        assert!(
+            store
+                .native_profile_blob(&first.profile_id, 1)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            store
+                .native_profile_blob(&first.profile_id, 2)
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn stock_target_and_job_profile_pin_are_durable() {
+        let mut store = AgentStore::in_memory().unwrap();
+        let printer = store
+            .upsert_printer(
+                "native-label",
+                "Label",
+                "online",
+                false,
+                &serde_json::to_string(&PrinterCapabilities::default()).unwrap(),
+                1,
+            )
+            .unwrap();
+        store
+            .upsert_physical_device("dev_test", "Label device", None, "operator", "{}", 2)
+            .unwrap();
+        store
+            .bind_printer_device(&printer.printer_id, "dev_test", "operator", Some("user"), 3)
+            .unwrap();
+        store
+            .upsert_stock(
+                "stk_test",
+                "80 mm matte",
+                Some("LABEL-80"),
+                "roll_label",
+                r#"{"width_mm":80}"#,
+                false,
+                4,
+            )
+            .unwrap();
+        let media = StoredLoadedMedia {
+            device_id: "dev_test".into(),
+            source: "roll".into(),
+            stock_id: Some("stk_test".into()),
+            confidence: "operator_confirmed".into(),
+            confirmed_unix_ms: 5,
+            confirmed_by: Some("user".into()),
+        };
+        store.confirm_loaded_media(&media).unwrap();
+        assert_eq!(store.loaded_media("dev_test", "roll").unwrap(), Some(media));
+
+        let profile = store
+            .create_named_profile(
+                &printer.printer_id,
+                "Legacy profile",
+                true,
+                &serde_json::to_string(&JobOptions::default()).unwrap(),
+                6,
+            )
+            .unwrap();
+        assert_eq!(profile.status, "needs_test");
+        assert_eq!(profile.native_kind, "portable_options");
+        store
+            .upsert_target(&StoredTarget {
+                target_id: "tgt_test".into(),
+                name: "80 mm target".into(),
+                stock_id: Some("stk_test".into()),
+                routing_policy: "primary_only".into(),
+                published: true,
+                retired: false,
+                updated_unix_ms: 7,
+            })
+            .unwrap();
+        store
+            .upsert_target_binding(&StoredTargetBinding {
+                binding_id: "bnd_test".into(),
+                target_id: "tgt_test".into(),
+                agent_id: "agt_test".into(),
+                printer_id: printer.printer_id.clone(),
+                profile_id: profile.profile_id.clone(),
+                profile_revision: profile.revision,
+                role: "primary".into(),
+                priority: 0,
+                enabled: true,
+                created_unix_ms: 8,
+            })
+            .unwrap();
+        store
+            .accept_job(&job("pinned", &printer.printer_id, 9))
+            .unwrap();
+        store
+            .pin_job_profile(
+                "pinned",
+                Some("tgt_test"),
+                Some("bnd_test"),
+                &profile.profile_id,
+                profile.revision,
+                Some("stk_test"),
+                Some(r#"{"roll":"stk_test"}"#),
+            )
+            .unwrap();
+        let pinned = store.get_job("pinned").unwrap().unwrap();
+        assert_eq!(pinned.target_id.as_deref(), Some("tgt_test"));
+        assert_eq!(pinned.binding_id.as_deref(), Some("bnd_test"));
+        assert_eq!(
+            pinned.profile_id.as_deref(),
+            Some(profile.profile_id.as_str())
+        );
+        assert_eq!(pinned.profile_revision, Some(1));
+        assert_eq!(pinned.stock_id.as_deref(), Some("stk_test"));
+    }
+
+    #[test]
+    fn version_three_tables_gain_profile_and_job_columns() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("agent.sqlite3");
+        {
+            let old = Connection::open(&path).unwrap();
+            old.execute_batch(
+                "CREATE TABLE printer_profiles (
+                   profile_id TEXT NOT NULL,
+                   printer_id TEXT NOT NULL,
+                   revision INTEGER NOT NULL,
+                   name TEXT NOT NULL,
+                   is_default INTEGER NOT NULL DEFAULT 0,
+                   options_json TEXT NOT NULL,
+                   deleted INTEGER NOT NULL DEFAULT 0,
+                   updated_unix_ms INTEGER NOT NULL,
+                   PRIMARY KEY(profile_id, revision)
+                 );
+                 CREATE TABLE jobs (
+                   job_id TEXT PRIMARY KEY,
+                   submission_id TEXT NOT NULL,
+                   printer_id TEXT NOT NULL,
+                   printer_native_id TEXT NOT NULL,
+                   printer_sequence INTEGER NOT NULL,
+                   title TEXT NOT NULL,
+                   content_sha256 TEXT NOT NULL,
+                   content_path TEXT NOT NULL,
+                   content_kind TEXT NOT NULL,
+                   options_json TEXT NOT NULL,
+                   state TEXT NOT NULL,
+                   expires_unix_ms INTEGER,
+                   next_attempt_unix_ms INTEGER,
+                   attempt_count INTEGER NOT NULL DEFAULT 0,
+                   native_job_id TEXT,
+                   accepted_unix_ms INTEGER NOT NULL,
+                   updated_unix_ms INTEGER NOT NULL,
+                   cloud_managed INTEGER NOT NULL DEFAULT 0
+                 );",
+            )
+            .unwrap();
+        }
+        let store = AgentStore::open(&path).unwrap();
+        for (table, expected) in [
+            (
+                "printer_profiles",
+                vec!["status", "native_kind", "native_blob_id", "published"],
+            ),
+            (
+                "jobs",
+                vec!["target_id", "profile_id", "profile_revision", "stock_id"],
+            ),
+        ] {
+            let mut statement = store
+                .connection
+                .prepare(&format!("PRAGMA table_info({table})"))
+                .unwrap();
+            let columns = statement
+                .query_map([], |row| row.get::<_, String>(1))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            for name in expected {
+                assert!(columns.iter().any(|column| column == name));
+            }
+        }
     }
 }
