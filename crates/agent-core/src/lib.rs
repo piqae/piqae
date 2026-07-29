@@ -508,6 +508,14 @@ impl<E: Executor, C: Clock> AgentEngine<E, C> {
                     "profile {profile_id} revision {revision} is missing"
                 ))
             })?;
+        let metadata_kind = serde_json::from_value::<NativeProfileKind>(
+            serde_json::Value::String(metadata.native_kind.clone()),
+        )?;
+        // Legacy/basic profiles are represented entirely by the already
+        // pinned JobOptions. They intentionally have no opaque driver blob.
+        if metadata_kind == NativeProfileKind::PortableOptions {
+            return Ok(None);
+        }
         let native = self
             .store
             .native_profile_blob(profile_id, revision)?
@@ -1022,6 +1030,39 @@ mod tests {
         assert_eq!(profile.revision, revision_one.revision);
         assert_eq!(profile.blob, first_blob);
         assert_eq!(profile.safe_overrides, vec![SafeProfileOverride::Copies]);
+    }
+
+    #[tokio::test]
+    async fn portable_profile_pin_uses_options_without_requiring_a_native_blob() {
+        let mut store = AgentStore::in_memory().expect("store");
+        let printer = store
+            .upsert_printer("native", "HP", "online", true, "{}", 1)
+            .expect("printer");
+        let profile = store
+            .create_named_profile(&printer.printer_id, "Basic A4", true, r#"{"copies":2}"#, 2)
+            .expect("portable profile");
+        let mut job = accepted("job-portable-profile", "pdf");
+        job.printer_id.clone_from(&printer.printer_id);
+        job.options_json = profile.options_json.clone();
+        let mut engine = AgentEngine::new(store, FakeExecutor::default(), FixedClock(10));
+        engine.accept(&job).expect("accept");
+        engine
+            .store_mut()
+            .pin_job_profile(
+                &job.job_id,
+                None,
+                None,
+                &profile.profile_id,
+                profile.revision,
+                None,
+                None,
+            )
+            .expect("pin");
+
+        engine.run_once().await.expect("run");
+        let submitted = &engine.executor_mut().submitted[0];
+        assert!(submitted.native_profile.is_none());
+        assert_eq!(submitted.options.copies, Some(2));
     }
 
     #[tokio::test]
