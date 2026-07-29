@@ -43,3 +43,6 @@ features:
   printnode_compatibility:
     tier: preview
     reason: only the documented compatibility subset is covered by fixtures
+  platform_service_accounts:
+    tier: disabled
+    reason: implementation and the required tenant-isolation, revocation, audit, workspace-selection, and redaction evidence are incomplete
