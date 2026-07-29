@@ -39,6 +39,19 @@ describe('local agent server adapter', () => {
     expect(readFile).not.toHaveBeenCalled();
   });
 
+  it.each([
+    '//attacker.example/steal',
+    '/\\attacker.example/steal',
+    '/v1/local/status\\..\\..\\steal',
+    '/v1/local/status\u0000'
+  ])('rejects path escape %s before reading credentials', async (path) => {
+    environment.SPOOL_LOCAL_AGENT_URL = 'http://127.0.0.1:17890';
+    environment.SPOOL_LOCAL_AGENT_TOKEN_FILE = '/tmp/local.token';
+
+    await expect(localAgentRequest(vi.fn(), path)).rejects.toThrow(/absolute pathnames/);
+    expect(readFile).not.toHaveBeenCalled();
+  });
+
   it('reads the token server-side and forwards it only in the upstream header', async () => {
     environment.SPOOL_LOCAL_AGENT_URL = 'http://localhost:17890';
     environment.SPOOL_LOCAL_AGENT_TOKEN_FILE = '/var/run/spool/local.token';

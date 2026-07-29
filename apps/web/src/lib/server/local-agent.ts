@@ -92,17 +92,26 @@ export async function localAgentRequest(
   path: string,
   init: RequestInit = {}
 ): Promise<Response> {
-  if (!path.startsWith('/') || path.startsWith('//')) {
+  if (
+    !path.startsWith('/') ||
+    path.startsWith('//') ||
+    path.includes('\\') ||
+    /[\u0000-\u001f\u007f]/.test(path)
+  ) {
     throw new TypeError('Local agent paths must be absolute pathnames.');
   }
   const baseUrl = configuredBaseUrl();
+  const targetUrl = new URL(path, baseUrl);
+  if (targetUrl.origin !== baseUrl.origin) {
+    throw new TypeError('Local agent paths must remain on the configured loopback origin.');
+  }
   const token = await localToken();
   const headers = new Headers(init.headers);
   headers.set('authorization', `Bearer ${token}`);
   headers.set('accept', 'application/json');
   if (init.body) headers.set('content-type', 'application/json');
 
-  return fetcher(new URL(path, baseUrl), {
+  return fetcher(targetUrl, {
     ...init,
     headers,
     cache: 'no-store'
