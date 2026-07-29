@@ -346,4 +346,63 @@ describe('SpoolClient', () => {
     expect(headers.get('authorization')).toBeNull();
     expect(headers.get('x-upload-token')).toBe('opaque');
   });
+
+  it('omits tenant-selection headers for ordinary API keys', async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
+      Response.json({ data: [], next_cursor: null, has_more: false })
+    );
+    const client = new SpoolClient({
+      apiKey: 'spl_live_tenant',
+      fetch: fetcher,
+      headers: {
+        'X-Spool-Workspace-Id': 'wrk_must_not_escape',
+        'x-spool-environment-id': 'env_must_not_escape'
+      }
+    });
+
+    await client.printers.list();
+
+    const headers = new Headers(fetcher.mock.calls[0]?.[1]?.headers);
+    expect(headers.get('x-spool-workspace-id')).toBeNull();
+    expect(headers.get('x-spool-environment-id')).toBeNull();
+    expect(headers.get('authorization')).toBe('Bearer spl_live_tenant');
+  });
+
+  it('rejects tenant credentials combined with a platform context', () => {
+    expect(
+      () =>
+        new SpoolClient({
+          apiKey: 'spl_live_tenant',
+          platformContext: {
+            workspaceId: 'wrk_other',
+            environmentId: 'env_other'
+          }
+        } as never)
+    ).toThrow('platformContext requires a distinct platformKey');
+  });
+
+  it('adds an explicit grant context only for a platform credential', async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
+      Response.json({ data: [], next_cursor: null, has_more: false })
+    );
+    const client = new SpoolClient({
+      platformKey: 'spl_platform_service_account',
+      platformContext: {
+        workspaceId: 'wrk_customer_01',
+        environmentId: 'env_customer_live'
+      },
+      fetch: fetcher,
+      headers: {
+        'x-spool-workspace-id': 'wrk_cannot_override',
+        'x-spool-environment-id': 'env_cannot_override'
+      }
+    });
+
+    await client.jobs.list();
+
+    const headers = new Headers(fetcher.mock.calls[0]?.[1]?.headers);
+    expect(headers.get('authorization')).toBe('Bearer spl_platform_service_account');
+    expect(headers.get('x-spool-workspace-id')).toBe('wrk_customer_01');
+    expect(headers.get('x-spool-environment-id')).toBe('env_customer_live');
+  });
 });

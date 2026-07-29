@@ -97,6 +97,34 @@ export interface WorkspaceMember {
   updated_at: string;
 }
 
+export interface PlatformContext {
+  workspaceId: SpoolId;
+  environmentId: SpoolId;
+}
+
+/**
+ * Server-side grant projected from operator-managed platform configuration.
+ * Platform grant provisioning is intentionally not part of the tenant API.
+ */
+export interface PlatformGrant {
+  id: SpoolId;
+  service_account_id: SpoolId;
+  workspace_id: SpoolId;
+  environment_id: SpoolId;
+  scopes: ApiKeyScope[];
+  expires_at: string | null;
+  revoked_at: string | null;
+  created_at: string;
+}
+
+export interface PlatformServiceAccount {
+  id: SpoolId;
+  name: string;
+  grants: PlatformGrant[];
+  created_at: string;
+  revoked_at: string | null;
+}
+
 export interface CurrentIdentity {
   id: SpoolId;
   email: string;

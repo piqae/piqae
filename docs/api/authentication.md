@@ -14,6 +14,16 @@ JavaScript, native print content, URLs, logs, or support bundles. Create one key
 per integration/environment with the minimum scopes and revoke without deleting
 the audit record.
 
+Ordinary API keys can never select another workspace or environment. Spool
+derives their tenant from the verified key and ignores or rejects
+`X-Spool-Workspace-Id` and `X-Spool-Environment-Id` as tenant-escalation
+attempts.
+
+Multi-workspace SaaS backends use a separate platform service-account
+credential with explicit workspace/environment/scope grants. See
+[platform service accounts](platform-service-accounts.md). Platform
+credentials are never suitable for browser JavaScript or native nodes.
+
 Bootstrap authentication is for initial self-host setup. Rotate or remove the
 bootstrap key after creating durable keys. Nodes use their enrolled device
 identity, not an integration key.

@@ -132,6 +132,10 @@ pub fn generate_local_owner_session() -> Result<GeneratedLocalSecret, AuthError>
     generate_local_secret("spl_session_")
 }
 
+pub fn generate_platform_service_account_key() -> Result<GeneratedLocalSecret, AuthError> {
+    generate_local_secret("spl_platform_")
+}
+
 fn generate_local_secret(prefix: &str) -> Result<GeneratedLocalSecret, AuthError> {
     let id = Uuid::now_v7();
     let mut random = [0_u8; 32];
@@ -157,6 +161,10 @@ pub fn local_owner_session_id(plaintext: &str) -> Result<Uuid, AuthError> {
     local_secret_id(plaintext, "spl_session_")
 }
 
+pub fn platform_service_account_key_id(plaintext: &str) -> Result<Uuid, AuthError> {
+    local_secret_id(plaintext, "spl_platform_")
+}
+
 fn local_secret_id(plaintext: &str, prefix: &str) -> Result<Uuid, AuthError> {
     let value = plaintext
         .strip_prefix(prefix)
@@ -175,6 +183,14 @@ pub fn verify_local_owner_credential(plaintext: &str, encoded_hash: &str) -> Res
 
 pub fn verify_local_owner_session(plaintext: &str, encoded_hash: &str) -> Result<(), AuthError> {
     local_owner_session_id(plaintext)?;
+    verify_local_secret(plaintext, encoded_hash)
+}
+
+pub fn verify_platform_service_account_key(
+    plaintext: &str,
+    encoded_hash: &str,
+) -> Result<(), AuthError> {
+    platform_service_account_key_id(plaintext)?;
     verify_local_secret(plaintext, encoded_hash)
 }
 
@@ -272,5 +288,15 @@ mod tests {
         assert_eq!(local_owner_session_id(&session.plaintext), Ok(session.id));
         assert!(local_owner_credential_id(&session.plaintext).is_err());
         assert!(verify_local_owner_session(&session.plaintext, &session.password_hash).is_ok());
+    }
+
+    #[test]
+    fn platform_keys_are_distinct_opaque_credentials() {
+        let key = generate_platform_service_account_key().unwrap();
+        assert!(key.plaintext.starts_with("spl_platform_"));
+        assert_eq!(platform_service_account_key_id(&key.plaintext), Ok(key.id));
+        assert!(verify_platform_service_account_key(&key.plaintext, &key.password_hash).is_ok());
+        assert!(local_owner_session_id(&key.plaintext).is_err());
+        assert!(api_key_lookup_prefix(&key.plaintext).is_err());
     }
 }

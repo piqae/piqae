@@ -16,6 +16,7 @@ servers:
     description: Replace with the deployment API origin.
 security:
   - bearer: []
+  - platformBearer: []
 tags:
   - name: API Keys
     description: Create and revoke environment-scoped developer credentials.
@@ -709,6 +710,8 @@ paths:
       operationId: createJob
       parameters:
         - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/PlatformWorkspaceId"
+        - $ref: "#/components/parameters/PlatformEnvironmentId"
       requestBody:
         required: true
         content:
@@ -1736,6 +1739,16 @@ components:
       scheme: bearer
       bearerFormat: Spool API key, local-owner session, or OIDC JWT
       description: API keys are scope-limited. Local-owner sessions are short-lived and self-host only. OIDC JWTs require issuer, expiry, organization, permissions, and either audience or an exact configured claim/value application binding.
+    platformBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: Spool platform service-account key
+      description: |
+        Operator-issued credential with explicit workspace/environment grants.
+        Tenant API requests must also send X-Spool-Workspace-Id and
+        X-Spool-Environment-Id. An ordinary API key cannot use these headers to
+        change tenant; the server ignores or rejects tenant selection unless
+        the verified credential is a platform service account.
     compatibilityBasic:
       type: http
       scheme: basic
@@ -1803,6 +1816,24 @@ components:
         type: string
         minLength: 8
         maxLength: 255
+    PlatformWorkspaceId:
+      name: X-Spool-Workspace-Id
+      in: header
+      required: false
+      description: Required only with a platform service-account credential and checked against its grants.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 120
+    PlatformEnvironmentId:
+      name: X-Spool-Environment-Id
+      in: header
+      required: false
+      description: Required only with a platform service-account credential and checked against its workspace/environment grant.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 120
     JobId:
       name: job_id
       in: path

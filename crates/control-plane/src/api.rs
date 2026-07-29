@@ -25,8 +25,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use spool_auth::{Environment, Scope, generate_api_key};
 use spool_domain::{
-    AgentId, ContentKind, ContentSource, Job, JobEvent, JobId, JobOptions, JobState, PrinterId,
-    PrinterState,
+    AgentId, ContentKind, ContentSource, EnvironmentId, Job, JobEvent, JobId, JobOptions, JobState,
+    PrinterId, PrinterState, WorkspaceId,
 };
 use spool_object_store::{ObjectByteStream, ObjectStoreError, digest_hex};
 use spool_protocol::agent::{
@@ -1827,11 +1827,27 @@ pub(crate) async fn authenticate_native(
         .get("authorization")
         .and_then(|value| value.to_str().ok())
         .ok_or_else(AppError::unauthorized)?;
-    let tenant = state
-        .authenticator
-        .authenticate_bearer(authorization)
-        .await
-        .map_err(|_| AppError::unauthorized())?;
+    let platform_workspace = headers
+        .get("x-spool-workspace-id")
+        .and_then(|value| value.to_str().ok());
+    let platform_environment = headers
+        .get("x-spool-environment-id")
+        .and_then(|value| value.to_str().ok());
+    let tenant = match (platform_workspace, platform_environment) {
+        (None, None) => state.authenticator.authenticate_bearer(authorization).await,
+        (Some(workspace), Some(environment)) => {
+            let workspace_id =
+                WorkspaceId::from_str(workspace).map_err(|_| AppError::unauthorized())?;
+            let environment_id =
+                EnvironmentId::from_str(environment).map_err(|_| AppError::unauthorized())?;
+            state
+                .authenticator
+                .authenticate_platform_bearer(authorization, workspace_id, environment_id)
+                .await
+        }
+        _ => Err(crate::authentication::AuthenticationError),
+    }
+    .map_err(|_| AppError::unauthorized())?;
     if !tenant.allows(required_scope) {
         return Err(AppError::forbidden());
     }

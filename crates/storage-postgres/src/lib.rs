@@ -50,6 +50,12 @@ pub struct AgentAuthenticationRecord {
 }
 
 #[derive(Clone, Debug)]
+pub struct PlatformGrantAuthenticationRecord {
+    pub secret_hash: String,
+    pub scopes: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
 pub struct EnrolledAgent {
     pub agent_id: AgentId,
     pub workspace_id: WorkspaceId,
@@ -815,6 +821,135 @@ impl PostgresStore {
             secret_hash: row.try_get("secret_hash")?,
             scopes: row.try_get("scopes")?,
         })
+    }
+
+    pub async fn platform_grant_for_authentication(
+        &self,
+        service_account_id: &str,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+    ) -> Result<PlatformGrantAuthenticationRecord, StorageError> {
+        let row = sqlx::query(
+            "SELECT account.secret_hash, grant.scopes
+             FROM platform_service_accounts account
+             JOIN platform_workspace_grants grant
+               ON grant.service_account_id = account.id
+             WHERE account.id = $1 AND account.revoked_at IS NULL
+               AND grant.workspace_id = $2 AND grant.environment_id = $3
+               AND grant.revoked_at IS NULL
+               AND (grant.expires_at IS NULL OR grant.expires_at > now())",
+        )
+        .bind(service_account_id)
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(StorageError::NotFound)?;
+        Ok(PlatformGrantAuthenticationRecord {
+            secret_hash: row.try_get("secret_hash")?,
+            scopes: row.try_get("scopes")?,
+        })
+    }
+
+    pub async fn mark_platform_service_account_used(
+        &self,
+        service_account_id: &str,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            "UPDATE platform_service_accounts SET last_used_at = now()
+             WHERE id = $1 AND revoked_at IS NULL",
+        )
+        .bind(service_account_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn create_platform_service_account_with_grant(
+        &self,
+        id: &str,
+        name: &str,
+        secret_hash: &str,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        scopes: &[String],
+        expires_at: Option<DateTime<Utc>>,
+    ) -> Result<(), StorageError> {
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query(
+            "INSERT INTO platform_service_accounts (id, name, secret_hash)
+             VALUES ($1,$2,$3)",
+        )
+        .bind(id)
+        .bind(name)
+        .bind(secret_hash)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "INSERT INTO platform_workspace_grants (
+                id, service_account_id, workspace_id, environment_id, scopes, expires_at
+             ) VALUES ($1,$2,$3,$4,$5,$6)",
+        )
+        .bind(format!("pgr_{}", Uuid::now_v7()))
+        .bind(id)
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(scopes)
+        .bind(expires_at)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    pub async fn upsert_platform_workspace_grant(
+        &self,
+        service_account_id: &str,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        scopes: &[String],
+        expires_at: Option<DateTime<Utc>>,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            "INSERT INTO platform_workspace_grants (
+                id, service_account_id, workspace_id, environment_id, scopes, expires_at
+             ) VALUES ($1,$2,$3,$4,$5,$6)
+             ON CONFLICT (service_account_id, workspace_id, environment_id)
+             DO UPDATE SET scopes = EXCLUDED.scopes, expires_at = EXCLUDED.expires_at,
+                           revoked_at = NULL",
+        )
+        .bind(format!("pgr_{}", Uuid::now_v7()))
+        .bind(service_account_id)
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(scopes)
+        .bind(expires_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn revoke_platform_workspace_grant(
+        &self,
+        service_account_id: &str,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+    ) -> Result<(), StorageError> {
+        let affected = sqlx::query(
+            "UPDATE platform_workspace_grants SET revoked_at = COALESCE(revoked_at, now())
+             WHERE service_account_id = $1 AND workspace_id = $2 AND environment_id = $3
+               AND revoked_at IS NULL",
+        )
+        .bind(service_account_id)
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        if affected != 1 {
+            return Err(StorageError::NotFound);
+        }
+        Ok(())
     }
 
     pub async fn mark_api_key_used(&self, lookup_prefix: &str) -> Result<(), StorageError> {

@@ -29,6 +29,7 @@ import type {
   PatchStock,
   PatchTarget,
   Page,
+  PlatformContext,
   Printer,
   Stock,
   Target,
@@ -40,13 +41,32 @@ import type {
   WorkspaceMember
 } from './types.js';
 
-export interface SpoolClientOptions {
-  apiKey?: string;
+interface CommonSpoolClientOptions {
   baseUrl?: string;
   fetch?: typeof globalThis.fetch;
   headers?: Record<string, string>;
-  accessToken?: () => string | Promise<string | undefined> | undefined;
 }
+
+interface TenantSpoolClientOptions {
+  apiKey?: string;
+  accessToken?: () => string | Promise<string | undefined> | undefined;
+  platformKey?: never;
+  platformContext?: never;
+}
+
+interface PlatformSpoolClientOptions {
+  /** Distinct operator-issued service-account credential. Never use a tenant API key. */
+  platformKey: string;
+  /** Explicit grant boundary applied to every tenant API request. */
+  platformContext: PlatformContext;
+  apiKey?: never;
+  accessToken?: never;
+}
+
+export type SpoolClientOptions = CommonSpoolClientOptions &
+  (TenantSpoolClientOptions | PlatformSpoolClientOptions);
+
+type AccessTokenProvider = TenantSpoolClientOptions['accessToken'];
 
 export class SpoolError extends Error {
   readonly code: string;
@@ -78,15 +98,25 @@ export class SpoolError extends Error {
 export class SpoolClient {
   readonly baseUrl: string;
   private readonly apiKey: string | undefined;
+  private readonly platformKey: string | undefined;
+  private readonly platformContext: PlatformContext | undefined;
   private readonly fetcher: typeof globalThis.fetch;
   private readonly defaultHeaders: Record<string, string>;
-  private readonly accessToken: SpoolClientOptions['accessToken'];
+  private readonly accessToken: AccessTokenProvider;
 
   constructor(options: SpoolClientOptions = {}) {
+    if (options.platformContext && !options.platformKey) {
+      throw new TypeError('platformContext requires a distinct platformKey');
+    }
+    if (options.platformKey && (options.apiKey || options.accessToken)) {
+      throw new TypeError('platformKey cannot be combined with apiKey or accessToken');
+    }
     this.baseUrl = (options.baseUrl ?? 'https://api.spool.dev').replace(/\/+$/, '');
     this.apiKey = options.apiKey;
+    this.platformKey = options.platformKey;
+    this.platformContext = options.platformContext;
     this.fetcher = options.fetch ?? globalThis.fetch;
-    this.defaultHeaders = options.headers ?? {};
+    this.defaultHeaders = withoutPlatformSelectionHeaders(options.headers ?? {});
     this.accessToken = options.accessToken;
   }
 
@@ -315,12 +345,16 @@ export class SpoolClient {
     }
 
     const dynamicToken = await this.accessToken?.();
-    const authorization = this.apiKey ?? dynamicToken;
+    const authorization = this.platformKey ?? this.apiKey ?? dynamicToken;
     const headers: Record<string, string> = {
       accept: 'application/json',
       ...this.defaultHeaders,
       ...options.headers
     };
+    if (this.platformContext) {
+      headers['x-spool-workspace-id'] = this.platformContext.workspaceId;
+      headers['x-spool-environment-id'] = this.platformContext.environmentId;
+    }
     if (options.body !== undefined) headers['content-type'] = 'application/json';
     if (authorization) headers.authorization = `Bearer ${authorization}`;
     if (options.idempotencyKey) headers['idempotency-key'] = options.idempotencyKey;
@@ -362,8 +396,12 @@ export class SpoolClient {
     if (relative) {
       Object.assign(headers, this.defaultHeaders);
       const dynamicToken = await this.accessToken?.();
-      const authorization = this.apiKey ?? dynamicToken;
+      const authorization = this.platformKey ?? this.apiKey ?? dynamicToken;
       if (authorization) headers.authorization = `Bearer ${authorization}`;
+      if (this.platformContext) {
+        headers['x-spool-workspace-id'] = this.platformContext.workspaceId;
+        headers['x-spool-environment-id'] = this.platformContext.environmentId;
+      }
     }
     const response = await this.fetcher(url, {
       method: upload.upload_method ?? 'PUT',
@@ -389,4 +427,19 @@ export class SpoolClient {
     const text = await response.text();
     return text === '' ? undefined : (JSON.parse(text) as Upload);
   }
+}
+
+const PLATFORM_SELECTION_HEADERS = new Set([
+  'x-spool-workspace-id',
+  'x-spool-environment-id'
+]);
+
+function withoutPlatformSelectionHeaders(
+  headers: Record<string, string>
+): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(headers).filter(
+      ([name]) => !PLATFORM_SELECTION_HEADERS.has(name.toLowerCase())
+    )
+  );
 }

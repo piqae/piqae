@@ -3,7 +3,10 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use clap::{Parser, Subcommand, ValueEnum};
 use reqwest::{Client, Method, StatusCode};
 use serde_json::{Value, json};
-use std::path::PathBuf;
+use spool_auth::generate_platform_service_account_key;
+use spool_domain::{EnvironmentId, WorkspaceId};
+use spool_storage_postgres::PostgresStore;
+use std::{path::PathBuf, str::FromStr};
 
 #[derive(Debug, Parser)]
 #[command(name = "spoolctl", version, about = "Operate a Spool deployment")]
@@ -29,6 +32,42 @@ enum Command {
     Jobs {
         #[command(subcommand)]
         command: JobCommand,
+    },
+    Platform {
+        #[command(subcommand)]
+        command: PlatformCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum PlatformCommand {
+    Create {
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        workspace: String,
+        #[arg(long)]
+        environment: String,
+        #[arg(long, value_delimiter = ',', required = true)]
+        scopes: Vec<String>,
+    },
+    Grant {
+        #[arg(long)]
+        service_account: String,
+        #[arg(long)]
+        workspace: String,
+        #[arg(long)]
+        environment: String,
+        #[arg(long, value_delimiter = ',', required = true)]
+        scopes: Vec<String>,
+    },
+    RevokeGrant {
+        #[arg(long)]
+        service_account: String,
+        #[arg(long)]
+        workspace: String,
+        #[arg(long)]
+        environment: String,
     },
 }
 
@@ -134,6 +173,10 @@ async fn main() -> Result<()> {
                 idempotency_key,
             )
         }
+        Command::Platform { command } => {
+            run_platform_command(command).await?;
+            return Ok(());
+        }
     };
 
     let url = format!("{}{}", arguments.api_origin.trim_end_matches('/'), path);
@@ -170,6 +213,83 @@ async fn main() -> Result<()> {
         Err(_) => println!("{body}"),
     }
     Ok(())
+}
+
+async fn run_platform_command(command: PlatformCommand) -> Result<()> {
+    let database_url = std::env::var("SPOOL_DATABASE_URL")
+        .context("SPOOL_DATABASE_URL is required for platform operator commands")?;
+    let store = PostgresStore::connect(&database_url, 2)
+        .await
+        .context("failed to connect to the Spool database")?;
+    store.migrate().await.context("database migration failed")?;
+    match command {
+        PlatformCommand::Create {
+            name,
+            workspace,
+            environment,
+            scopes,
+        } => {
+            let workspace_id = parse_workspace(&workspace)?;
+            let environment_id = parse_environment(&environment)?;
+            let generated = generate_platform_service_account_key()
+                .context("failed to generate platform credential")?;
+            store
+                .create_platform_service_account_with_grant(
+                    &generated.id.to_string(),
+                    &name,
+                    &generated.password_hash,
+                    workspace_id,
+                    environment_id,
+                    &scopes,
+                    None,
+                )
+                .await
+                .context("failed to create platform service account")?;
+            println!("service_account_id={}", generated.id);
+            println!("credential={}", generated.plaintext);
+            eprintln!("Store the credential now; Spool cannot display it again.");
+        }
+        PlatformCommand::Grant {
+            service_account,
+            workspace,
+            environment,
+            scopes,
+        } => {
+            store
+                .upsert_platform_workspace_grant(
+                    &service_account,
+                    parse_workspace(&workspace)?,
+                    parse_environment(&environment)?,
+                    &scopes,
+                    None,
+                )
+                .await
+                .context("failed to grant platform workspace access")?;
+        }
+        PlatformCommand::RevokeGrant {
+            service_account,
+            workspace,
+            environment,
+        } => {
+            store
+                .revoke_platform_workspace_grant(
+                    &service_account,
+                    parse_workspace(&workspace)?,
+                    parse_environment(&environment)?,
+                )
+                .await
+                .context("failed to revoke platform workspace access")?;
+        }
+    }
+    Ok(())
+}
+
+fn parse_workspace(value: &str) -> Result<WorkspaceId> {
+    WorkspaceId::from_str(value).context("invalid workspace ID")
+}
+
+fn parse_environment(value: &str) -> Result<EnvironmentId> {
+    EnvironmentId::from_str(value).context("invalid environment ID")
 }
 
 fn print_failure(status: StatusCode, request_id: Option<&str>, body: &str) {

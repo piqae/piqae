@@ -51,5 +51,22 @@ await spool.jobs.create(
 summaries, safe overrides, and current target readiness. Vendor-native settings
 are display-only facts captured by the node.
 
+Trusted multi-workspace SaaS backends use a distinct platform key and an
+explicit grant context:
+
+```ts
+const customerSpool = new SpoolClient({
+  platformKey: process.env.SPOOL_PLATFORM_KEY,
+  platformContext: {
+    workspaceId: customer.spoolWorkspaceId,
+    environmentId: customer.spoolEnvironmentId
+  }
+});
+```
+
+Ordinary API keys cannot set a platform context. The SDK strips tenant-selection
+headers from ordinary custom headers and never sends them to absolute signed
+upload URLs.
+
 Set `baseUrl` for self-hosted deployments or
 `http://127.0.0.1:39100` for local-only mode.

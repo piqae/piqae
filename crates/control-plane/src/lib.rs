@@ -1354,6 +1354,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ordinary_api_keys_cannot_select_another_workspace() {
+        let application = application().await;
+        let response = application
+            .router
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/jobs")
+                    .header("authorization", "Bearer spl_test_integration")
+                    .header("x-spool-workspace-id", WorkspaceId::new().to_string())
+                    .header("x-spool-environment-id", EnvironmentId::new().to_string())
+                    .body(Body::empty())
+                    .expect("valid request"),
+            )
+            .await
+            .expect("router response");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
     async fn native_and_compatibility_error_ids_match_response_headers() {
         let application = application().await;
         let native = application

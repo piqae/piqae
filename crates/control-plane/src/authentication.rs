@@ -4,8 +4,8 @@ use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header, jw
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use spool_auth::{
-    Scope, api_key_lookup_prefix, local_owner_session_id, verify_api_key,
-    verify_local_owner_session,
+    Scope, api_key_lookup_prefix, local_owner_session_id, platform_service_account_key_id,
+    verify_api_key, verify_local_owner_session, verify_platform_service_account_key,
 };
 use spool_domain::{EnvironmentId, WorkspaceId};
 use spool_storage_postgres::PostgresStore;
@@ -120,6 +120,14 @@ pub trait Authenticator: Send + Sync + 'static {
         &self,
         authorization: &str,
     ) -> Result<TenantContext, AuthenticationError>;
+    async fn authenticate_platform_bearer(
+        &self,
+        _authorization: &str,
+        _workspace_id: WorkspaceId,
+        _environment_id: EnvironmentId,
+    ) -> Result<TenantContext, AuthenticationError> {
+        Err(AuthenticationError)
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -287,6 +295,44 @@ impl Authenticator for PostgresAuthenticator {
         }
         self.authenticate_token(username).await
     }
+
+    async fn authenticate_platform_bearer(
+        &self,
+        authorization: &str,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+    ) -> Result<TenantContext, AuthenticationError> {
+        let token = authorization
+            .strip_prefix("Bearer ")
+            .filter(|value| !value.is_empty())
+            .ok_or(AuthenticationError)?;
+        let id = platform_service_account_key_id(token).map_err(|_| AuthenticationError)?;
+        let record = self
+            .store
+            .platform_grant_for_authentication(&id.to_string(), workspace_id, environment_id)
+            .await
+            .map_err(|_| AuthenticationError)?;
+        let token = token.to_owned();
+        let secret_hash = record.secret_hash;
+        tokio::task::spawn_blocking(move || {
+            verify_platform_service_account_key(&token, &secret_hash)
+        })
+        .await
+        .map_err(|_| AuthenticationError)?
+        .map_err(|_| AuthenticationError)?;
+        if let Err(error) = self
+            .store
+            .mark_platform_service_account_used(&id.to_string())
+            .await
+        {
+            tracing::warn!(%error, "failed to record platform service account use");
+        }
+        Ok(TenantContext {
+            workspace_id,
+            environment_id,
+            permissions: Permissions::from_names(&record.scopes),
+        })
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -351,6 +397,17 @@ impl Authenticator for CombinedAuthenticator {
                 None => Err(AuthenticationError),
             },
         }
+    }
+
+    async fn authenticate_platform_bearer(
+        &self,
+        authorization: &str,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+    ) -> Result<TenantContext, AuthenticationError> {
+        self.postgres
+            .authenticate_platform_bearer(authorization, workspace_id, environment_id)
+            .await
     }
 }
 
