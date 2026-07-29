@@ -56,8 +56,10 @@ final class SpoolMenuDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
-let application = NSApplication.shared
-let delegate = SpoolMenuDelegate()
-application.delegate = delegate
-application.setActivationPolicy(.accessory)
-application.run()
+MainActor.assumeIsolated {
+    let application = NSApplication.shared
+    let delegate = SpoolMenuDelegate()
+    application.delegate = delegate
+    application.setActivationPolicy(.accessory)
+    application.run()
+}

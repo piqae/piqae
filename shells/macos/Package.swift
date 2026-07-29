@@ -1,4 +1,4 @@
-// swift-tools-version: 6.0
+// swift-tools-version: 5.10
 import PackageDescription
 
 let package = Package(
@@ -7,4 +7,3 @@ let package = Package(
     products: [.executable(name: "SpoolMenu", targets: ["SpoolMenu"])],
     targets: [.executableTarget(name: "SpoolMenu")]
 )
-
