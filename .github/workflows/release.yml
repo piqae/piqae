@@ -95,6 +95,7 @@ jobs:
             cp "shells/macos/.build/release/SpoolMenu" "artifacts/${{ matrix.artifact }}/"
           fi
           cp README.md LICENSE "artifacts/${{ matrix.artifact }}/"
+          cp -R LICENSES "artifacts/${{ matrix.artifact }}/"
           cp packaging/README.md "artifacts/${{ matrix.artifact }}/PACKAGING.md"
           cp release/native-bundle-status.md "artifacts/${{ matrix.artifact }}/NATIVE-BUNDLE-STATUS.md"
           cp release/support-matrix.yaml "artifacts/${{ matrix.artifact }}/SUPPORT-MATRIX.yaml"
