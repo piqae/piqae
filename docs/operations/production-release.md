@@ -131,7 +131,9 @@ The two metered Prices use the same Billing Meter event name configured as
 `stripe_meter_event_name` in Terraform. Its customer key is
 `stripe_customer_id`, value key is `value`, and aggregation is `sum`. Spool
 submits integer 1,000-job overage blocks—not raw print counts—after closing a
-subscription period. Apply this Price metadata:
+subscription period. The worker checks every 60 seconds, claims exports
+durably, and retries transport failures without changing the Stripe event
+identifier. Apply this Price metadata:
 
 ```text
 spool_plan=pro
@@ -142,10 +144,33 @@ spool_overage_unit=1000
 
 Put each Price’s unique lookup key—not its displayed amount—in the matching
 `STRIPE_PRICE_*` Vercel variable. Register the control-plane endpoint
-`https://<api-host>/v1/integrations/stripe/webhook` for checkout-session,
-subscription create/update/delete, invoice-paid, and invoice-payment-failed
-events. Put its signing secret in both the control-plane secret manager and the
+`https://<api-host>/v1/integrations/stripe/webhook` for these exact events:
+
+```text
+checkout.session.completed
+customer.subscription.created
+customer.subscription.updated
+customer.subscription.deleted
+invoice.paid
+invoice.payment_failed
+```
+
+Put its signing secret in both the control-plane secret manager and the
 protected release configuration.
+
+In Stripe **Invoice settings**, add a 72-hour invoice-finalization grace-period
+rule for subscription-cycle invoices with a metered Price. Stripe includes
+late-reported usage only while the invoice remains draft, so this rule is a
+billing correctness requirement rather than an optional buffer. Alert when the
+oldest pending or failed Spool usage export is 15 minutes old and block
+promotion unless a test-clock renewal proves that:
+
+1. the ending subscription period is snapshotted once;
+2. its overage meter event reaches Stripe within the grace period;
+3. replaying either Stripe webhook or worker claim does not duplicate usage;
+4. the finalized test invoice contains the expected integer overage blocks.
+
+Never depend on a failed `invoice.created` webhook to delay finalization.
 
 Before promotion, call `/api/internal/pricing-drift` with the protected
 `PRICING_DRIFT_SHARED_SECRET`. Any missing, duplicate, inactive, wrongly priced,
@@ -184,5 +209,15 @@ The preflight expects one JSON record for each filename declared in
 `release/production-readiness.json`. A record must identify the gate, say
 `passed`, bind to a full commit, include a timestamp, and point to access-
 controlled evidence. A locally created assertion is not acceptable evidence.
-Signing, physical Windows/OKI tests, regional DR, independent security review,
-and the 30-day production soak remain open until those activities really occur.
+Signing, physical Windows/OKI tests, regional DR, live WorkOS identity, live
+Stripe test-clock billing, production Sentry redaction/source maps, independent
+security review, and the 30-day production soak remain open until those
+activities really occur.
+
+The live WorkOS record must cover workspace creation, invitation, role change,
+workspace switching, removal, and session revocation without cross-workspace
+data exposure. The live Stripe record must cover monthly and annual Checkout,
+Portal, signed webhook replay, quota behavior, the 72-hour finalization rule,
+renewal export, invoice overage, and payment-failure grace. The Sentry record
+must prove server/browser event delivery, release association, source-map
+resolution, and redaction using synthetic data only.

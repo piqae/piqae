@@ -242,14 +242,7 @@ fn stripe_projection(
         })
         .filter(|value| !value.is_empty())
         .map(str::to_owned);
-    let customer_id = object
-        .get("customer")
-        .and_then(stripe_identifier)
-        .or_else(|| {
-            (envelope.event_type == "checkout.session.completed")
-                .then(|| object.get("customer").and_then(stripe_identifier))
-                .flatten()
-        });
+    let customer_id = object.get("customer").and_then(stripe_identifier);
     let subscription_event = envelope.event_type.starts_with("customer.subscription.");
     let subscription_id = if subscription_event {
         object.get("id").and_then(stripe_identifier)

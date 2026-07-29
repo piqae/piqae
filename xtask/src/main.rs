@@ -379,7 +379,20 @@ fn release_check(root: &Path) -> TaskResult {
         ["release/tools/check_postgres_release_tests.py"],
     ))?;
     test_all(root)?;
-    run(command(root, "pnpm", ["build"]))?;
+    let mut build = command(root, "pnpm", ["build"]);
+    if env::var_os("PAYLOAD_SECRET").is_none() {
+        build.env(
+            "PAYLOAD_SECRET",
+            "spool-release-build-only-secret-not-for-runtime",
+        );
+    }
+    if env::var_os("DATABASE_URL").is_none() {
+        build.env(
+            "DATABASE_URL",
+            "postgresql://spool_cms_build@127.0.0.1:1/spool_cms_build",
+        );
+    }
+    run(build)?;
     if command_success(root, "cargo", &["deny", "--version"]) {
         run(command(
             root,

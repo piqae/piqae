@@ -1,17 +1,33 @@
-import type { CollectionConfig } from 'payload'
+import type { Access, CollectionConfig, Where } from 'payload'
 import {
-  authenticated,
   canEditContent,
+  canEditOrReviewContent,
   canReviewContent,
-  publishedOrAuthenticated,
   reviewerFieldOnly,
 } from '../access'
 import { triggerMarketingRebuild } from '../hooks/publish'
 
+const publishedVerifiedClaim: Access = ({ req }) => {
+  if (req.user) return true
+  const where: Where = {
+    and: [
+      { _status: { equals: 'published' } },
+      { status: { equals: 'verified' } },
+      { reviewDueAt: { greater_than: new Date().toISOString() } },
+    ],
+  }
+  return where
+}
+
 export const ComparisonClaims: CollectionConfig = {
   slug: 'comparison-claims',
   admin: { useAsTitle: 'claim', defaultColumns: ['competitor', 'status', 'reviewDueAt', 'updatedAt'] },
-  access: { create: canEditContent, delete: canReviewContent, read: publishedOrAuthenticated, update: authenticated },
+  access: {
+    create: canEditContent,
+    delete: canReviewContent,
+    read: publishedVerifiedClaim,
+    update: canEditOrReviewContent,
+  },
   versions: { drafts: true, maxPerDoc: 50 },
   hooks: {
     beforeChange: [

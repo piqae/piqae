@@ -91,6 +91,10 @@ export function stripePortalAvailable(): boolean {
   return env.STRIPE_CHECKOUT_ENABLED === 'true' && Boolean(env.STRIPE_SECRET_KEY);
 }
 
+export function subscriptionBlocksCheckout(status: string): boolean {
+  return !['canceled', 'incomplete_expired'].includes(status);
+}
+
 export function stripePriceMatchesCatalog(
   price: Stripe.Price,
   plan: PlanSlug,

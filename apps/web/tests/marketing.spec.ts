@@ -76,6 +76,7 @@ test('cost calculator updates locally and exposes its evidence', async ({ page }
   await page.getByLabel('Connected computers / agents').fill('8');
   await expect(page.getByText('Pro', { exact: true })).toBeVisible();
   await expect(page.getByText('Standard Integrator', { exact: true })).toBeVisible();
+  await expect(page.getByText('$51 less / month', { exact: true })).toBeVisible();
   await expect(page.getByRole('link', { name: 'official USD pricing page' })).toHaveAttribute(
     'href',
     'https://www.printnode.com/en/pricing'

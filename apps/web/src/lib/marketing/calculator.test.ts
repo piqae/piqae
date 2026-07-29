@@ -92,4 +92,25 @@ describe('marketing cost calculator', () => {
       })
     ).toMatchObject({ plan: 'Large Integrator', monthlyCents: 67_500 });
   });
+
+  it('returns an unavailable estimate when no PrintNode tier can serve the input', () => {
+    expect(
+      estimatePrintNode(
+        {
+          jobs: 1,
+          agents: 1,
+          tenants: 1,
+          growthPercent: 0,
+          interval: 'monthly'
+        },
+        {
+          currency: 'USD',
+          sourceUrl: 'https://example.com/pricing',
+          observedAt: '2026-07-29',
+          reviewDueAt: '2026-10-27',
+          tiers: []
+        }
+      )
+    ).toMatchObject({ plan: 'Contact us', available: false });
+  });
 });

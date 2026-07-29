@@ -18,6 +18,11 @@ import { SiteSettings } from './globals/SiteSettings'
 
 const filename = fileURLToPath(import.meta.url)
 const dirname = path.dirname(filename)
+const requiredEnv = (name: 'DATABASE_URL' | 'PAYLOAD_SECRET'): string => {
+  const value = process.env[name]
+  if (!value) throw new Error(`Missing required environment variable: ${name}`)
+  return value
+}
 const r2Configured = [
   process.env.R2_BUCKET,
   process.env.R2_ENDPOINT,
@@ -45,9 +50,9 @@ export default buildConfig({
   ],
   globals: [SiteSettings],
   editor: lexicalEditor(),
-  secret: process.env.PAYLOAD_SECRET || '',
+  secret: requiredEnv('PAYLOAD_SECRET'),
   db: postgresAdapter({
-    pool: { connectionString: process.env.DATABASE_URL || '' },
+    pool: { connectionString: requiredEnv('DATABASE_URL') },
   }),
   sharp,
   telemetry: false,
@@ -69,4 +74,3 @@ export default buildConfig({
       ]
     : [],
 })
-

@@ -19,6 +19,10 @@ export const canReviewContent: Access = ({ req }) => {
   const role = roleOf(req.user)
   return role === 'admin' || role === 'reviewer'
 }
+export const canEditOrReviewContent: Access = ({ req }) => {
+  const role = roleOf(req.user)
+  return role === 'admin' || role === 'editor' || role === 'reviewer'
+}
 export const publishedOrAuthenticated: Access = ({ req }) =>
   req.user ? true : { _status: { equals: 'published' } }
 

@@ -74,6 +74,7 @@ export function sanitizeSentryEvent<T extends Event>(event: T): T {
     tags: redactUnknown(event.tags) as Event['tags'],
     spans: event.spans?.map((span) => ({
       ...span,
+      description: span.description ? redactSentryText(span.description) : span.description,
       data: redactUnknown(span.data) as typeof span.data
     }))
   };

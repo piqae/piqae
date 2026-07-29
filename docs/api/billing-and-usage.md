@@ -72,7 +72,17 @@ must never be treated as a Spool workspace ID without that verified mapping.
 Stripe supplies Checkout, Customer Portal, subscription state, and metered
 invoice calculation. Signed Stripe webhooks update the Spool billing
 projection idempotently. The immutable Spool usage ledger remains authoritative
-for printing and is exported to Stripe with stable event identifiers.
+for printing and is exported to Stripe with stable event identifiers. Checkout
+fails closed when the workspace already has a non-terminal subscription, so
+plan changes and payment recovery go through Customer Portal rather than
+creating duplicate subscriptions.
+
+Spool snapshots the ending period on renewal and its worker submits durable
+overage exports every minute. Production Stripe configuration must keep
+usage-based subscription-cycle invoices in draft for a 72-hour finalization
+grace period; the private-beta gate proves the export appears on a test-clock
+invoice before enabling live Checkout. See
+[Production release](../operations/production-release.md#one-time-stripe-setup).
 
 Self-hosted deployments report billing capability disabled and make no Stripe
 or WorkOS billing calls.

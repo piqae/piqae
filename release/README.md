@@ -63,10 +63,11 @@ re-audited.
 ## Gate ownership
 
 Automated policy lives in `.github/workflows/supply-chain.yml`,
-`.cargo/audit.toml`, `deny.toml`, and `.gitleaks.toml`. Manual physical-printer,
-Apple notarisation, Authenticode, disaster-recovery, security-review, and soak
-evidence remains open until its external record exists. Neither an SBOM nor a
-successful spooler handoff proves those claims.
+`.cargo/audit.toml`, `deny.toml`, and `.gitleaks.toml`. Live identity, billing,
+observability, manual physical-printer, Apple notarisation, Authenticode,
+disaster-recovery, security-review, and soak evidence remains open until its
+external record exists. Neither an SBOM nor a successful spooler handoff proves
+those claims.
 
 Any vulnerability scanner ignore must have the same identifier in
 `release/security-exceptions.json`, with an owner, narrow reachability

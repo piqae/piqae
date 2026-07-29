@@ -41,13 +41,27 @@
     }
     return { amount: item.includedAcceptedJobs, period: 'per month' };
   }
+
+  function retentionMaximum(hours: number): string {
+    return hours % 24 === 0 ? `${hours / 24} days` : `${wholeNumber.format(hours)} hours`;
+  }
 </script>
 
 <div id="pro" class="pricing-anchor" aria-hidden="true"></div>
 
-<div class="pricing-controls" aria-label="Billing interval">
-  <button class:active={interval === 'monthly'} onclick={() => (interval = 'monthly')}>Monthly</button>
-  <button class:active={interval === 'annual'} onclick={() => (interval = 'annual')}>
+<div class="pricing-controls" role="group" aria-label="Billing interval">
+  <button
+    type="button"
+    aria-pressed={interval === 'monthly'}
+    class:active={interval === 'monthly'}
+    onclick={() => (interval = 'monthly')}
+  >Monthly</button>
+  <button
+    type="button"
+    aria-pressed={interval === 'annual'}
+    class:active={interval === 'annual'}
+    onclick={() => (interval = 'annual')}
+  >
     Annual <span>2 months free</span>
   </button>
 </div>
@@ -146,7 +160,7 @@
             <td class:featured={item.plan === 'pro'}>
               <strong>
                 {item.documentRetention.configurable
-                  ? `Up to ${item.documentRetention.maximumHours / 24} days`
+                  ? `Up to ${retentionMaximum(item.documentRetention.maximumHours)}`
                   : `${item.documentRetention.defaultHours} hours`}
               </strong>
               <small>preview target</small>

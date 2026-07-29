@@ -149,6 +149,8 @@
           {/if}
         {:else if data.summary && !data.summary.managedByPlatform && !data.canManageBilling}
           <span>Only workspace owners and billing members can change the plan.</span>
+        {:else if data.canManageBilling && data.summary && !data.summary.managedByPlatform}
+          <span>Managed billing is not configured for this deployment. Contact support.</span>
         {:else if !data.summary}
           <span>Refresh after the billing projection becomes available. No billing action is safe while status is unknown.</span>
         {/if}
@@ -171,9 +173,19 @@
         <strong>Usage boundary</strong>
         <p>Spooler acceptance is billable once, but does not prove physical delivery.</p>
       </div>
-      <div class="interval-picker">
-        <button class:active={interval === 'monthly'} onclick={() => (interval = 'monthly')}>Monthly</button>
-        <button class:active={interval === 'annual'} onclick={() => (interval = 'annual')}>Annual</button>
+      <div class="interval-picker" role="group" aria-label="Billing interval">
+        <button
+          type="button"
+          aria-pressed={interval === 'monthly'}
+          class:active={interval === 'monthly'}
+          onclick={() => (interval = 'monthly')}
+        >Monthly</button>
+        <button
+          type="button"
+          aria-pressed={interval === 'annual'}
+          class:active={interval === 'annual'}
+          onclick={() => (interval = 'annual')}
+        >Annual</button>
       </div>
     </aside>
   </div>

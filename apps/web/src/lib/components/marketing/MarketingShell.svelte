@@ -25,7 +25,13 @@
     { label: 'Docs', href: '/docs' },
     { label: 'Open source', href: '/open-source' }
   ];
+
+  function closeOnEscape(event: KeyboardEvent) {
+    if (event.key === 'Escape') open = false;
+  }
 </script>
+
+<svelte:window onkeydown={closeOnEscape} />
 
 <div class="marketing">
   <a class="skip-link" href="#main-content">Skip to content</a>
@@ -35,7 +41,7 @@
   <header class="site-header">
     <div class="header-inner">
       <a class="brand" href="/" aria-label="Spool home"><Logo /></a>
-      <nav class:open aria-label="Primary navigation">
+      <nav id="primary-navigation" class:open aria-label="Primary navigation">
         {#each nav as item}
           <a href={item.href} onclick={() => (open = false)}>{item.label}</a>
         {/each}
@@ -53,6 +59,7 @@
         type="button"
         aria-label={open ? 'Close navigation' : 'Open navigation'}
         aria-expanded={open}
+        aria-controls="primary-navigation"
         onclick={() => (open = !open)}
       >
         <span></span><span></span>

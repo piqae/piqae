@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { safeExternalHttpUrl } from '$lib/marketing/urls';
+
   let {
     eyebrow,
     title,
@@ -12,6 +14,7 @@
     verified: string;
     source: string;
   } = $props();
+  const officialSource = $derived(safeExternalHttpUrl(source));
 </script>
 
 <section class="m-page-hero">
@@ -23,7 +26,14 @@
       <a class="m-button primary" href="/start?plan=free&source=comparison">Start with Spool</a>
       <a class="m-button" href="/tools/printnode-cost-calculator">Compare costs</a>
     </div>
-    <p class="source">Last verified {verified} · <a href={source}>Official source</a></p>
+    <p class="source">
+      Last verified {verified} ·
+      {#if officialSource}
+        <a href={officialSource} rel="noopener noreferrer">Official source</a>
+      {:else}
+        <span>Source unavailable</span>
+      {/if}
+    </p>
   </div>
 </section>
 
@@ -31,4 +41,3 @@
   .source { margin: 30px 0 0; color: var(--m-faint); font-size: 12px; }
   .source a { text-decoration: underline; text-underline-offset: 2px; }
 </style>
-

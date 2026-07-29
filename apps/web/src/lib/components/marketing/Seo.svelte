@@ -24,6 +24,9 @@
   const socialImage = $derived(image ?? (origin ? `${origin}/og-default.svg` : null));
   const googleVerification = import.meta.env.PUBLIC_GOOGLE_SITE_VERIFICATION;
   const bingVerification = import.meta.env.PUBLIC_BING_SITE_VERIFICATION;
+  const serializedStructuredData = $derived(
+    structuredData ? JSON.stringify(structuredData).replaceAll('<', '\\u003c') : null
+  );
 </script>
 
 <svelte:head>
@@ -51,7 +54,7 @@
     <meta property="og:image" content={socialImage} />
     <meta name="twitter:image" content={socialImage} />
   {/if}
-  {#if structuredData}
-    <script type="application/ld+json">{JSON.stringify(structuredData)}</script>
+  {#if serializedStructuredData}
+    <script type="application/ld+json">{serializedStructuredData}</script>
   {/if}
 </svelte:head>

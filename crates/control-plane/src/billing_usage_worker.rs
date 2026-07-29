@@ -1,6 +1,7 @@
 use chrono::Utc;
 use reqwest::Client;
 use spool_storage_postgres::{ClaimedUsageExport, PostgresStore, StorageError};
+use std::time::Duration;
 
 #[derive(Clone)]
 pub struct BillingUsageWorker {
@@ -30,14 +31,14 @@ impl BillingUsageWorker {
         store: PostgresStore,
         stripe_secret_key: impl Into<String>,
         stripe_meter_event_name: impl Into<String>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, reqwest::Error> {
+        Ok(Self {
             store,
-            client: Client::new(),
+            client: Client::builder().timeout(Duration::from_secs(15)).build()?,
             stripe_secret_key: stripe_secret_key.into(),
             stripe_meter_event_name: stripe_meter_event_name.into(),
             stripe_meter_events_url: "https://api.stripe.com/v1/billing/meter_events".into(),
-        }
+        })
     }
 
     /// Prepares ended periods and submits at most `limit` Stripe meter events.

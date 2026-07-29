@@ -28,7 +28,10 @@ export const load: PageServerLoad = async (event) => {
   }
   const base = {
     pricing: pricingCatalog(),
-    selectedInterval: attribution?.interval ?? 'monthly',
+    selectedInterval:
+      attribution?.interval === 'annual' || attribution?.interval === 'monthly'
+        ? attribution.interval
+        : 'monthly',
     checkoutState: url.searchParams.get('checkout'),
     checkoutAvailable: {
       monthly: checkoutAllowed('pro', 'monthly'),

@@ -71,8 +71,8 @@ FROM workspaces workspace
 ON CONFLICT (workspace_id) DO NOTHING;
 
 ALTER TABLE workspaces
-    ADD COLUMN identity_provider text,
-    ADD COLUMN identity_organization_id text,
+    ADD COLUMN IF NOT EXISTS identity_provider text,
+    ADD COLUMN IF NOT EXISTS identity_organization_id text,
     ADD CONSTRAINT workspaces_identity_pair_check CHECK (
         (identity_provider IS NULL) = (identity_organization_id IS NULL)
     ),
@@ -91,12 +91,12 @@ CREATE UNIQUE INDEX workspaces_identity_organization_unique
     WHERE identity_provider IS NOT NULL;
 
 ALTER TABLE billing_webhook_receipts
-    ADD COLUMN stripe_created_at timestamptz;
+    ADD COLUMN IF NOT EXISTS stripe_created_at timestamptz;
 
 ALTER TABLE usage_exports
-    ADD COLUMN claim_token text,
-    ADD COLUMN claimed_at timestamptz,
-    ADD COLUMN next_attempt_at timestamptz;
+    ADD COLUMN IF NOT EXISTS claim_token text,
+    ADD COLUMN IF NOT EXISTS claimed_at timestamptz,
+    ADD COLUMN IF NOT EXISTS next_attempt_at timestamptz;
 
 ALTER TABLE usage_exports
     DROP CONSTRAINT IF EXISTS usage_exports_state_check;

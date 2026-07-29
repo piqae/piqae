@@ -32,6 +32,21 @@
       "required_file": "regional-dr-rehearsal.json"
     },
     {
+      "id": "workos_live_identity",
+      "status": "open",
+      "required_file": "workos-live-identity.json"
+    },
+    {
+      "id": "stripe_live_billing",
+      "status": "open",
+      "required_file": "stripe-live-billing.json"
+    },
+    {
+      "id": "sentry_production_observability",
+      "status": "open",
+      "required_file": "sentry-production-observability.json"
+    },
+    {
       "id": "external_security_review",
       "status": "open",
       "required_file": "external-security-review.json"

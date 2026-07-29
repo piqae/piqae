@@ -1,8 +1,24 @@
-import type { CollectionConfig } from 'payload'
-import { canEditContent, publishedOrAuthenticated } from '../access'
+import type { Access, CollectionConfig, Where } from 'payload'
+import { canEditContent } from '../access'
 
 function isPublishing(data: unknown): boolean {
   return Boolean(data && typeof data === 'object' && '_status' in data && data._status === 'published')
+}
+
+const publiclyClearedMedia: Access = ({ req }) => {
+  if (req.user) return true
+  const where: Where = {
+    and: [
+      { _status: { equals: 'published' } },
+      {
+        or: [
+          { rightsExpiresAt: { exists: false } },
+          { rightsExpiresAt: { greater_than: new Date().toISOString() } },
+        ],
+      },
+    ],
+  }
+  return where
 }
 
 export const Media: CollectionConfig = {
@@ -11,7 +27,7 @@ export const Media: CollectionConfig = {
   access: {
     create: canEditContent,
     delete: canEditContent,
-    read: publishedOrAuthenticated,
+    read: publiclyClearedMedia,
     update: canEditContent,
   },
   upload: {

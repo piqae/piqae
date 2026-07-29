@@ -14,7 +14,8 @@ import {
   parseBillingSummary,
   stripeCustomerIdempotencyKey,
   stripeOveragePriceMatchesCatalog,
-  stripePriceMatchesCatalog
+  stripePriceMatchesCatalog,
+  subscriptionBlocksCheckout
 } from './billing';
 
 function price(overrides: Partial<Stripe.Price> = {}): Stripe.Price {
@@ -194,6 +195,14 @@ describe('hosted billing contract', () => {
     expect(stripeCustomerIdempotencyKey('workspace_123')).not.toContain('workspace_123');
   });
 
+  it('prevents duplicate Checkout for every non-terminal Stripe subscription', () => {
+    for (const status of ['incomplete', 'trialing', 'active', 'past_due', 'unpaid', 'paused']) {
+      expect(subscriptionBlocksCheckout(status)).toBe(true);
+    }
+    expect(subscriptionBlocksCheckout('canceled')).toBe(false);
+    expect(subscriptionBlocksCheckout('incomplete_expired')).toBe(false);
+  });
+
   it('strictly projects billing and usage responses', () => {
     expect(
       parseBillingSummary({
@@ -232,6 +241,10 @@ describe('hosted billing contract', () => {
       parseBillingSummary({
         enabled: true,
         managed_by_platform: false,
+        plan: 'free',
+        billing_interval: null,
+        subscription_status: null,
+        grace_ends_at: null,
         accept_new_cloud_jobs: true,
         usage: {
           period_start: '2026-07-01T00:00:00Z',

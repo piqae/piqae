@@ -13,7 +13,8 @@ import {
   stripeOveragePriceMatchesCatalog,
   stripeCustomerIdempotencyKey,
   stripePriceLookupKey,
-  stripePriceMatchesCatalog
+  stripePriceMatchesCatalog,
+  subscriptionBlocksCheckout
 } from '$lib/server/billing';
 import { dashboardConnection } from '$lib/server/dashboard-data';
 import type { BillingInterval, PlanSlug } from '$lib/marketing/types';
@@ -100,6 +101,19 @@ export const POST: RequestHandler = async (event) => {
   }
   const workspaceId = workspace.id;
   const existingCustomer = await findStripeCustomer(stripe, workspaceId);
+  if (existingCustomer) {
+    const subscriptions = await stripe.subscriptions.list({
+      customer: existingCustomer.id,
+      status: 'all',
+      limit: 100
+    });
+    if (
+      subscriptions.has_more ||
+      subscriptions.data.some((subscription) => subscriptionBlocksCheckout(subscription.status))
+    ) {
+      error(409, 'This workspace already has a managed subscription; use the billing portal');
+    }
+  }
   const customer =
     existingCustomer ??
     (await stripe.customers.create(

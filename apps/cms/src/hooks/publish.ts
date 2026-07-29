@@ -10,8 +10,8 @@ async function postQuietly(url: string | undefined, body: Record<string, unknown
       signal: AbortSignal.timeout(8_000),
     })
     if (!response.ok) console.error(`${label} returned ${response.status}`)
-  } catch (error) {
-    console.error(`${label} failed`, error)
+  } catch {
+    console.error(`${label} failed`)
   }
 }
 
@@ -21,6 +21,19 @@ export const triggerMarketingRebuild: CollectionAfterChangeHook = async ({
   operation,
 }) => {
   if (doc?._status !== 'published') return doc
+  await postQuietly(
+    process.env.MARKETING_DEPLOY_HOOK_URL,
+    { collection: collection.slug, id: doc.id, operation },
+    'Marketing deploy hook',
+  )
+  return doc
+}
+
+export const triggerMarketingRebuildAlways: CollectionAfterChangeHook = async ({
+  collection,
+  doc,
+  operation,
+}) => {
   await postQuietly(
     process.env.MARKETING_DEPLOY_HOOK_URL,
     { collection: collection.slug, id: doc.id, operation },
@@ -63,13 +76,13 @@ export async function runPricingDriftCheck(source = 'payload') {
       )
     }
     return { configured: true, drift: result.drift === true }
-  } catch (error) {
+  } catch {
     await postQuietly(
       process.env.PRICING_DRIFT_WEBHOOK_URL,
       { source, detectedAt: new Date().toISOString(), error: 'pricing_check_failed' },
       'Pricing drift webhook',
     )
-    console.error('Pricing drift check failed', error)
+    console.error('Pricing drift check failed')
     return { configured: true, drift: true }
   }
 }

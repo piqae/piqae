@@ -7,6 +7,7 @@
     estimateSpool
   } from '$lib/marketing/calculator';
   import { formatUsd } from '$lib/marketing/plans';
+  import { safeExternalHttpUrl } from '$lib/marketing/urls';
   import type { BillingInterval } from '$lib/marketing/types';
   import { captureMarketingEvent } from '$lib/marketing/analytics';
   import type { PageData } from './$types';
@@ -15,6 +16,7 @@
 
   const params = browser ? new URLSearchParams(window.location.search) : new URLSearchParams();
   const bounded = (value: string | null, fallback: number, max: number) => {
+    if (value === null) return fallback;
     const parsed = Number(value);
     return Number.isFinite(parsed) ? Math.max(0, Math.min(max, Math.round(parsed))) : fallback;
   };
@@ -37,6 +39,7 @@
   let snapshotExpired = $derived(
     new Date() > new Date(`${data.printNodeSnapshot.reviewDueAt}T23:59:59Z`)
   );
+  let officialSource = $derived(safeExternalHttpUrl(data.printNodeSnapshot.sourceUrl));
 
   function shareEstimate() {
     if (!browser) return;
@@ -161,7 +164,11 @@
       <h2 class="m-heading">An estimate, with its assumptions attached.</h2>
       <p>
         PrintNode values come from its
-        <a href={data.printNodeSnapshot.sourceUrl}>official USD pricing page</a>, observed
+        {#if officialSource}
+          <a href={officialSource} rel="noopener noreferrer">official USD pricing page</a>
+        {:else}
+          <span>stored pricing evidence</span>
+        {/if}, observed
         {data.printNodeSnapshot.observedAt} and due for review
         {data.printNodeSnapshot.reviewDueAt}. Spool values come from server catalog
         {data.spoolPricing.version}.

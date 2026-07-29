@@ -240,6 +240,15 @@ export function estimatePrintNode(
         cost: { monthlyCents: number; annualCents: number };
       } => entry.cost !== null
     );
+  if (candidates.length === 0) {
+    return {
+      plan: 'Contact us',
+      monthlyCents: 0,
+      annualCents: 0,
+      available: false,
+      note: 'No matching PrintNode plan is available for this estimate.'
+    };
+  }
   const selected = candidates.reduce((best, entry) =>
     entry.cost.annualCents < best.cost.annualCents ? entry : best
   );

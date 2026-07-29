@@ -174,11 +174,6 @@
   font-size: 13px;
 }
 
-.marketing .m-button[aria-disabled='true'] {
-  pointer-events: none;
-  opacity: 0.5;
-}
-
 .marketing .m-grid-2,
 .marketing .m-grid-3,
 .marketing .m-grid-4 {

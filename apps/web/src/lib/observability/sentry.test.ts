@@ -32,6 +32,7 @@ describe('Sentry privacy boundary', () => {
           start_timestamp: 1,
           timestamp: 2,
           op: 'http.client',
+          description: 'POST https://api.example.com/jobs?token=not-safe',
           data: {
             url: 'https://api.example.com/jobs?access_token=not-safe',
             authorization: 'Bearer not-safe'
@@ -69,6 +70,7 @@ describe('Sentry privacy boundary', () => {
       url: 'https://api.example.com/jobs',
       authorization: '[redacted]'
     });
+    expect(event.spans?.[0]?.description).not.toContain('not-safe');
   });
 
   it('drops interaction and console breadcrumbs and sanitizes navigation URLs', () => {

@@ -141,15 +141,18 @@ async fn run() -> Result<()> {
         );
     }
     let billing_usage_worker = if capabilities.billing.enabled && service_role.runs_workers() {
-        Some(BillingUsageWorker::new(
-            store,
-            env::var("STRIPE_SECRET_KEY")
-                .or_else(|_| env::var("SPOOL_STRIPE_SECRET_KEY"))
-                .context("STRIPE_SECRET_KEY is required by the Cloud billing worker")?,
-            env::var("STRIPE_METER_EVENT_NAME")
-                .or_else(|_| env::var("SPOOL_STRIPE_METER_EVENT_NAME"))
-                .unwrap_or_else(|_| "spool_print_overage_blocks".into()),
-        ))
+        Some(
+            BillingUsageWorker::new(
+                store,
+                env::var("STRIPE_SECRET_KEY")
+                    .or_else(|_| env::var("SPOOL_STRIPE_SECRET_KEY"))
+                    .context("STRIPE_SECRET_KEY is required by the Cloud billing worker")?,
+                env::var("STRIPE_METER_EVENT_NAME")
+                    .or_else(|_| env::var("SPOOL_STRIPE_METER_EVENT_NAME"))
+                    .unwrap_or_else(|_| "spool_print_overage_blocks".into()),
+            )
+            .context("build Stripe billing worker HTTP client")?,
+        )
     } else {
         None
     };
