@@ -23,4 +23,4 @@ WORKDIR /app
 COPY --from=builder --chown=node:node /app /app
 USER node
 EXPOSE 3000
-CMD ["node", "build-node"]
+CMD ["node", "build-node/index.js"]

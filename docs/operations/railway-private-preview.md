@@ -137,9 +137,40 @@ pass.
 5. Create scoped API keys through the authenticated application; do not retain
    a legacy bootstrap API key as the normal integration credential.
 
-The Vercel dashboard uses `SPOOL_AUTH_MODE=local` and points
+The dashboard normally runs on Vercel with `SPOOL_AUTH_MODE=local` and points
 `PUBLIC_SPOOL_API_URL` at the public Railway API. Browser identity and
 control-plane service credentials stay server-side.
+
+### Railway dashboard fallback
+
+If Vercel artifact publication is unavailable, the same SvelteKit application
+can run as a normal Node service on Railway. Create a separate public service
+from this repository and select `/railway.web.toml` as its config file. That
+file builds [`deploy/docker/Dockerfile.web`](../../deploy/docker/Dockerfile.web)
+and uses `/healthz` for the Railway deployment gate.
+
+Set:
+
+```text
+ORIGIN=https://<web-service-domain>
+SPOOL_AUTH_MODE=local
+PUBLIC_SPOOL_DASHBOARD_MODE=live
+PUBLIC_SPOOL_API_URL=https://<api-service-domain>
+PUBLIC_SITE_URL=https://<web-service-domain>
+PUBLIC_MARKETING_INDEXABLE=false
+SPOOL_COOKIE_SECURE=true
+STRIPE_CHECKOUT_ENABLED=false
+```
+
+`ORIGIN` must exactly match the public HTTPS dashboard origin so adapter-node
+can reject forged cross-origin form submissions. Do not enable WorkOS or
+Stripe merely to move the web runtime. Add their protected server variables
+only after the corresponding identity or billing evidence gate passes.
+
+The web service is stateless and may later scale independently. Its `/healthz`
+route proves only that the SvelteKit process can serve requests; the dashboard
+continues to display control-plane failures rather than hiding them behind its
+own liveness response.
 
 ## Migrations and releases
 

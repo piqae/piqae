@@ -1,0 +1,11 @@
+# Select this config file on the Railway dashboard service. The root
+# railway.toml continues to describe the Rust API and worker image.
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "deploy/docker/Dockerfile.web"
+
+[deploy]
+healthcheckPath = "/healthz"
+healthcheckTimeout = 300
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10
