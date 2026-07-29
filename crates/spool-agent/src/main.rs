@@ -1694,6 +1694,7 @@ async fn accept_offer_under_lease(
 ) -> Result<()> {
     let job_id = offer.job.id;
     let logical_printer_id = offer.job.printer_id.to_string();
+    let profile_pin = profile_pin_metadata(&offer.job.metadata)?;
     let printer = store
         .printer(&logical_printer_id)?
         .with_context(|| format!("printer_not_found: {logical_printer_id}"))?;
@@ -1739,6 +1740,36 @@ async fn accept_offer_under_lease(
         &offer.lease_token,
         offer.lease_expires_at.timestamp_millis(),
     )?;
+    if let Some(pin) = profile_pin {
+        let profile = store
+            .named_profile_revision(&printer.printer_id, &pin.profile_id, pin.profile_revision)?
+            .with_context(|| {
+                format!(
+                    "profile_not_found: {} revision {}",
+                    pin.profile_id, pin.profile_revision
+                )
+            })?;
+        let status: ProfileStatus =
+            serde_json::from_value(serde_json::Value::String(profile.status.clone()))
+                .context("profile status is invalid")?;
+        if !status.permits_jobs() {
+            anyhow::bail!(
+                "profile_not_ready: {} revision {} is {}",
+                pin.profile_id,
+                pin.profile_revision,
+                profile.status
+            );
+        }
+        store.pin_job_profile(
+            &job_id.to_string(),
+            pin.target_id.as_deref(),
+            pin.binding_id.as_deref(),
+            &pin.profile_id,
+            pin.profile_revision,
+            pin.stock_id.as_deref(),
+            pin.loaded_media_snapshot_json.as_deref(),
+        )?;
+    }
     confirm_cloud_accept(
         cloud,
         store,
@@ -1752,6 +1783,45 @@ async fn accept_offer_under_lease(
         },
     )
     .await
+}
+
+#[derive(Debug)]
+struct ProfilePinMetadata {
+    target_id: Option<String>,
+    binding_id: Option<String>,
+    profile_id: String,
+    profile_revision: u64,
+    stock_id: Option<String>,
+    loaded_media_snapshot_json: Option<String>,
+}
+
+fn profile_pin_metadata(
+    metadata: &std::collections::BTreeMap<String, String>,
+) -> Result<Option<ProfilePinMetadata>> {
+    let Some(profile_id) = metadata.get("spool.profile_id") else {
+        return Ok(None);
+    };
+    let revision = metadata
+        .get("spool.profile_revision")
+        .context("spool.profile_revision is required with spool.profile_id")?
+        .parse::<u64>()
+        .context("spool.profile_revision must be an unsigned integer")?;
+    if profile_id.trim().is_empty() || revision == 0 {
+        anyhow::bail!("profile pin metadata is invalid");
+    }
+    let loaded_media_snapshot_json = metadata.get("spool.loaded_media_snapshot").cloned();
+    if let Some(snapshot) = &loaded_media_snapshot_json {
+        let _: serde_json::Value =
+            serde_json::from_str(snapshot).context("loaded-media snapshot is invalid")?;
+    }
+    Ok(Some(ProfilePinMetadata {
+        target_id: metadata.get("spool.target_id").cloned(),
+        binding_id: metadata.get("spool.binding_id").cloned(),
+        profile_id: profile_id.clone(),
+        profile_revision: revision,
+        stock_id: metadata.get("spool.stock_id").cloned(),
+        loaded_media_snapshot_json,
+    }))
 }
 
 async fn resume_pending_cloud_accepts(cloud: &CloudConfiguration, store: &mut AgentStore) {
@@ -2424,5 +2494,31 @@ mod tests {
             .parse::<usize>()
             .expect("numeric offset");
         assert_eq!(&pdf[xref..xref + 4], b"xref");
+    }
+
+    #[test]
+    fn profile_pin_metadata_requires_an_exact_revision() {
+        let mut metadata = std::collections::BTreeMap::new();
+        metadata.insert("spool.profile_id".into(), "prf_shipping".into());
+        assert!(profile_pin_metadata(&metadata).is_err());
+
+        metadata.insert("spool.profile_revision".into(), "7".into());
+        metadata.insert("spool.stock_id".into(), "stk_a4".into());
+        let pin = profile_pin_metadata(&metadata)
+            .expect("valid metadata")
+            .expect("profile pin");
+        assert_eq!(pin.profile_id, "prf_shipping");
+        assert_eq!(pin.profile_revision, 7);
+        assert_eq!(pin.stock_id.as_deref(), Some("stk_a4"));
+    }
+
+    #[test]
+    fn profile_pin_metadata_rejects_invalid_media_snapshot() {
+        let metadata = std::collections::BTreeMap::from([
+            ("spool.profile_id".into(), "prf_shipping".into()),
+            ("spool.profile_revision".into(), "7".into()),
+            ("spool.loaded_media_snapshot".into(), "{broken".into()),
+        ]);
+        assert!(profile_pin_metadata(&metadata).is_err());
     }
 }

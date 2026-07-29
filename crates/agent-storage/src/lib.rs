@@ -819,6 +819,39 @@ impl AgentStore {
             .map_err(Into::into)
     }
 
+    /// Returns one exact immutable profile revision.
+    ///
+    /// Historical and tombstoned rows remain readable so a job that was
+    /// durably pinned before a later edit or retirement can replay exactly
+    /// what routing selected.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `SQLite` cannot execute or decode the query.
+    pub fn named_profile_revision(
+        &self,
+        printer_id: &str,
+        profile_id: &str,
+        revision: u64,
+    ) -> Result<Option<StoredNamedProfile>, StorageError> {
+        self.connection
+            .query_row(
+                "SELECT profile_id, printer_id, revision, name, is_default,
+                        options_json, status, native_kind, native_blob_id,
+                        native_digest, driver_fingerprint_json, summary_json,
+                        stock_id, safe_overrides_json,
+                        last_validated_unix_ms, last_test_job_id, published,
+                        updated_unix_ms
+                 FROM printer_profiles
+                 WHERE printer_id = ?1 AND profile_id = ?2 AND revision = ?3
+                 LIMIT 1",
+                params![printer_id, profile_id, revision],
+                named_profile_from_row,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
     /// Returns the dependency manifest for one immutable profile revision.
     ///
     /// # Errors
