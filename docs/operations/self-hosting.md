@@ -33,6 +33,11 @@ The Compose file includes source builds as a fallback, so a checkout can start
 without a previously published registry tag. Pin released images by digest for
 repeatable production upgrades.
 
+The server writes structured JSON logs by default. Optional feature-gated OTLP
+traces, W3C trace propagation, resource labels, safe error events, exporter
+configuration, and failure limits are documented in
+[control-plane observability](observability.md).
+
 The current V1 bootstrap API key is a deployment credential, not a one-time
 owner token. Rotate or remove it after creating durable API keys. Do not expose
 it to browsers or native agents.

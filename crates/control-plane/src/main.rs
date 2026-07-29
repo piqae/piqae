@@ -1,3 +1,5 @@
+mod observability;
+
 use anyhow::{Context, Result};
 use base64::{
     Engine,
@@ -17,20 +19,35 @@ use spool_domain::{EnvironmentId, WorkspaceId};
 use spool_object_store::{FileObjectStore, ObjectStore, S3Configuration, S3ObjectStore};
 use spool_storage_postgres::PostgresStore;
 use std::{env, net::SocketAddr, str::FromStr, sync::Arc};
-use tracing_subscriber::EnvFilter;
+use tracing::Instrument;
 
 #[tokio::main]
 async fn main() -> Result<()> {
     if env::args().nth(1).as_deref() == Some("healthcheck") {
         return healthcheck().await;
     }
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .json()
-        .init();
+    let observability = observability::init()?;
+    let run_span = tracing::info_span!(
+        "service.run",
+        otel.kind = "internal",
+        otel.status_code = tracing::field::Empty,
+        error.type = tracing::field::Empty,
+    );
+    let result = run().instrument(run_span.clone()).await;
+    if result.is_err() {
+        run_span.record("otel.status_code", "ERROR");
+        run_span.record("error.type", "service_failure");
+        let _entered = run_span.enter();
+        tracing::error!(
+            error.type = "service_failure",
+            "control plane stopped with an error"
+        );
+    }
+    let shutdown_result = observability.shutdown();
+    result.and(shutdown_result)
+}
 
+async fn run() -> Result<()> {
     let database_url = env::var("SPOOL_DATABASE_URL")
         .or_else(|_| env::var("DATABASE_URL"))
         .context("SPOOL_DATABASE_URL or DATABASE_URL is required")?;

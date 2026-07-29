@@ -5,7 +5,15 @@ COPY Cargo.toml Cargo.lock ./
 COPY crates crates
 COPY bins bins
 COPY migrations migrations
-RUN cargo build --locked --release --bin spool-server
+# Published server images include OTLP capability; runtime export remains off
+# unless standard OTEL configuration enables it. Local Compose builds override
+# this argument with an empty value by default for the lightweight build.
+ARG SPOOL_SERVER_FEATURES="otlp"
+RUN if [ -n "${SPOOL_SERVER_FEATURES}" ]; then \
+      cargo build --locked --release --bin spool-server --features "${SPOOL_SERVER_FEATURES}"; \
+    else \
+      cargo build --locked --release --bin spool-server; \
+    fi
 
 FROM gcr.io/distroless/cc-debian12:nonroot
 COPY --from=builder /source/target/release/spool-server /usr/local/bin/spool-server

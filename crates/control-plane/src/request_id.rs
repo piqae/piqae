@@ -1,5 +1,5 @@
 use axum::{
-    extract::Request,
+    extract::{MatchedPath, Request},
     http::{HeaderName, HeaderValue},
     middleware::Next,
     response::Response,
@@ -7,6 +7,11 @@ use axum::{
 use std::time::Instant;
 use tracing::Instrument;
 use ulid::Ulid;
+
+#[cfg(feature = "otlp")]
+use opentelemetry::propagation::TextMapPropagator;
+#[cfg(feature = "otlp")]
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 pub const HEADER_NAME: HeaderName = HeaderName::from_static("x-request-id");
 const MAX_REQUEST_ID_BYTES: usize = 128;
@@ -35,18 +40,30 @@ pub async fn middleware(mut request: Request, next: Next) -> Response {
         .headers_mut()
         .insert(HEADER_NAME, header_value.clone());
     let method = request.method().clone();
-    let path = request.uri().path().to_owned();
+    let route = request
+        .extensions()
+        .get::<MatchedPath>()
+        .map_or("unmatched", MatchedPath::as_str)
+        .to_owned();
     let completion_request_id = request_id.clone();
     let completion_method = method.clone();
-    let completion_path = path.clone();
+    let completion_route = route.clone();
     let started_at = Instant::now();
     let span = tracing::info_span!(
         "http.request",
         request_id = %request_id,
         method = %method,
-        path = %path,
+        route = %route,
+        http.request.method = %method,
+        http.route = %route,
+        http.response.status_code = tracing::field::Empty,
+        otel.kind = "server",
+        otel.status_code = tracing::field::Empty,
+        error.type = tracing::field::Empty,
         status_code = tracing::field::Empty,
     );
+    #[cfg(feature = "otlp")]
+    let _ = span.set_parent(remote_parent(request.headers()));
     async move {
         let mut response = CURRENT_REQUEST_ID
             .scope(request_id, next.run(request))
@@ -54,10 +71,14 @@ pub async fn middleware(mut request: Request, next: Next) -> Response {
         let status_code = response.status().as_u16();
         let elapsed_ms = u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
         tracing::Span::current().record("status_code", status_code);
+        tracing::Span::current().record("http.response.status_code", status_code);
+        if response.status().is_server_error() {
+            tracing::Span::current().record("otel.status_code", "ERROR");
+        }
         tracing::info!(
             request_id = %completion_request_id,
             method = %completion_method,
-            path = %completion_path,
+            route = %completion_route,
             status_code,
             elapsed_ms,
             "http request completed"
@@ -67,6 +88,12 @@ pub async fn middleware(mut request: Request, next: Next) -> Response {
     }
     .instrument(span)
     .await
+}
+
+#[cfg(feature = "otlp")]
+fn remote_parent(headers: &axum::http::HeaderMap) -> opentelemetry::Context {
+    opentelemetry_sdk::propagation::TraceContextPropagator::new()
+        .extract(&opentelemetry_http::HeaderExtractor(headers))
 }
 
 fn generated() -> String {
@@ -93,5 +120,28 @@ mod tests {
         assert!(!valid(" bad"));
         assert!(!valid("bad id"));
         assert!(!valid(&"a".repeat(129)));
+    }
+
+    #[cfg(feature = "otlp")]
+    #[test]
+    fn extracts_a_valid_w3c_remote_parent() {
+        use axum::http::{HeaderMap, HeaderValue};
+        use opentelemetry::trace::TraceContextExt;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "traceparent",
+            HeaderValue::from_static("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"),
+        );
+
+        let parent = super::remote_parent(&headers);
+        let span = parent.span();
+        let span_context = span.span_context();
+        assert!(span_context.is_valid());
+        assert!(span_context.is_remote());
+        assert_eq!(
+            span_context.trace_id().to_string(),
+            "4bf92f3577b34da6a3ce929d0e0e4736"
+        );
     }
 }

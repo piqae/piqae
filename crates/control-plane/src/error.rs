@@ -150,6 +150,26 @@ impl From<serde_json::Error> for AppError {
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let request_id = request_id::current();
+        let span = tracing::Span::current();
+        span.record("error.type", self.code);
+        if self.status.is_server_error() {
+            span.record("otel.status_code", "ERROR");
+            tracing::error!(
+                request_id,
+                error.type = self.code,
+                http.response.status_code = self.status.as_u16(),
+                retryable = self.retryable,
+                "request failed"
+            );
+        } else {
+            tracing::warn!(
+                request_id,
+                error.type = self.code,
+                http.response.status_code = self.status.as_u16(),
+                retryable = self.retryable,
+                "request rejected"
+            );
+        }
         if self.compatibility {
             return (
                 self.status,
