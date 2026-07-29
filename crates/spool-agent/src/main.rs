@@ -381,23 +381,13 @@ async fn handle_control_request(
 ) {
     match request {
         ControlRequest::Status { respond_to } => {
-            let counts = match engine.store().queue_counts() {
-                Ok(counts) => counts,
-                Err(error) => {
-                    error!(%error, "failed to read local queue counts");
-                    QueueCounts::default()
-                }
-            };
-            let _ = respond_to.send(LocalStatus {
-                agent_id: None,
-                workspace_name: None,
-                version: version.to_owned(),
-                connection: *connection.read().await,
-                queued_jobs: counts.queued,
-                active_jobs: counts.active,
-                printer_warnings: 0,
-                paused: paused.load(Ordering::Relaxed),
-            });
+            let current_connection = *connection.read().await;
+            let _ = respond_to.send(local_status(
+                engine.store(),
+                version,
+                current_connection,
+                paused,
+            ));
         }
         ControlRequest::Printers { respond_to } => match refresh_local_printers(engine).await {
             Ok(printers) => {
@@ -516,6 +506,38 @@ async fn handle_control_request(
     }
 }
 
+fn local_status(
+    store: &AgentStore,
+    version: &str,
+    connection: ConnectionState,
+    paused: &AtomicBool,
+) -> LocalStatus {
+    let counts = match store.queue_counts() {
+        Ok(counts) => counts,
+        Err(error) => {
+            error!(%error, "failed to read local queue counts");
+            QueueCounts::default()
+        }
+    };
+    let printer_warnings = match store.present_printer_warning_count() {
+        Ok(count) => count,
+        Err(error) => {
+            error!(%error, "failed to read printer warning count");
+            0
+        }
+    };
+    LocalStatus {
+        agent_id: None,
+        workspace_name: None,
+        version: version.to_owned(),
+        connection,
+        queued_jobs: counts.queued,
+        active_jobs: counts.active,
+        printer_warnings,
+        paused: paused.load(Ordering::Relaxed),
+    }
+}
+
 async fn submit_local_job(
     engine: &mut AgentEngine<RuntimeExecutor>,
     content_store: &ContentStore,
@@ -567,6 +589,10 @@ async fn refresh_local_printers(
     engine: &mut AgentEngine<RuntimeExecutor>,
 ) -> Result<Vec<LocalPrinter>, ControlFailure> {
     let discovered = engine.executor_mut().discover_printers().await?;
+    let present_native_ids = discovered
+        .iter()
+        .map(|printer| printer.native_id.clone())
+        .collect::<Vec<_>>();
     let observed_unix_ms = Utc::now().timestamp_millis();
     for printer in discovered {
         let state = enum_string(printer.state);
@@ -597,8 +623,12 @@ async fn refresh_local_printers(
             .map_err(storage_control_failure)?;
     }
     engine
+        .store_mut()
+        .reconcile_printer_presence(&present_native_ids)
+        .map_err(storage_control_failure)?;
+    engine
         .store()
-        .printers()
+        .present_printers()
         .map_err(storage_control_failure)?
         .into_iter()
         .map(|printer| local_printer_from_stored(engine.store(), printer))
@@ -725,6 +755,12 @@ fn resolve_exposed_printer(
         .printer(printer_id)
         .map_err(storage_control_failure)?
         .ok_or_else(|| control_failure("printer_not_found", "printer was not found"))?;
+    if !printer.present {
+        return Err(control_failure(
+            "printer_not_present",
+            "printer is not present in the latest successful native discovery",
+        ));
+    }
     if !printer.exposed {
         return Err(control_failure(
             "printer_not_exposed",
@@ -1328,7 +1364,9 @@ async fn accept_offer(
                     &AgentReleaseLeaseRequest {
                         lease_id,
                         lease_token,
-                        reason: if error.to_string().contains("printer_not_exposed") {
+                        reason: if error.to_string().contains("printer_not_present") {
+                            "printer_not_present"
+                        } else if error.to_string().contains("printer_not_exposed") {
                             "printer_not_exposed"
                         } else if error.to_string().contains("unsupported_profile_option")
                             || error.to_string().contains("native option")
@@ -1358,6 +1396,9 @@ async fn accept_offer_under_lease(
     let printer = store
         .printer(&logical_printer_id)?
         .with_context(|| format!("printer_not_found: {logical_printer_id}"))?;
+    if !printer.present {
+        anyhow::bail!("printer_not_present: {logical_printer_id}");
+    }
     if !printer.exposed {
         anyhow::bail!("printer_not_exposed: {logical_printer_id}");
     }
@@ -1648,6 +1689,10 @@ async fn discover_cloud_printers(
             _ => anyhow::bail!("executor returned the wrong discovery result"),
         },
     };
+    let present_native_ids = discovered
+        .iter()
+        .map(|printer| printer.native_id.clone())
+        .collect::<Vec<_>>();
     let observed_unix_ms = Utc::now().timestamp_millis();
     let snapshots = discovered
         .into_iter()
@@ -1698,10 +1743,12 @@ async fn discover_cloud_printers(
                 capabilities: printer.capabilities,
                 exposed: true,
                 capability_revision: profile.revision,
+                native_options: printer.native_options,
                 profiles,
             }))
         })
         .collect::<Result<Vec<Option<PrinterSnapshot>>>>()?;
+    store.reconcile_printer_presence(&present_native_ids)?;
     Ok(snapshots.into_iter().flatten().collect())
 }
 

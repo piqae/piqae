@@ -95,6 +95,7 @@ pub struct StoredPrinter {
     pub name: String,
     pub state: String,
     pub is_default: bool,
+    pub present: bool,
     pub exposed: bool,
     pub capabilities_json: String,
     pub native_options_json: String,
@@ -222,6 +223,20 @@ impl AgentStore {
                 [],
             )?;
         }
+        let has_present: bool = connection.query_row(
+            "SELECT EXISTS (
+               SELECT 1 FROM pragma_table_info('printers') WHERE name = 'present'
+             )",
+            [],
+            |row| row.get(0),
+        )?;
+        if !has_present {
+            connection.execute(
+                "ALTER TABLE printers ADD COLUMN present INTEGER NOT NULL
+                 DEFAULT 1 CHECK (present IN (0, 1))",
+                [],
+            )?;
+        }
         Ok(Self { connection })
     }
 
@@ -304,14 +319,16 @@ impl AgentStore {
             .unwrap_or_else(|| PrinterId::new().to_string());
         transaction.execute(
             "INSERT INTO printers(
-               printer_id, native_id, name, state, is_default, observed_unix_ms
+               printer_id, native_id, name, state, is_default, present,
+               observed_unix_ms
              )
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6)
              ON CONFLICT(printer_id) DO UPDATE SET
                native_id = excluded.native_id,
                name = excluded.name,
                state = excluded.state,
                is_default = excluded.is_default,
+               present = 1,
                observed_unix_ms = excluded.observed_unix_ms",
             params![
                 printer_id,
@@ -338,12 +355,39 @@ impl AgentStore {
             name: name.to_owned(),
             state: state.to_owned(),
             is_default,
+            present: true,
             exposed: false,
             capabilities_json: capabilities_json.to_owned(),
             native_options_json: "{}".into(),
             profile_revision: 0,
             observed_unix_ms,
         })
+    }
+
+    /// Reconciles one successful native discovery as the authoritative set.
+    ///
+    /// Missing queues are retained for job/profile history but marked absent.
+    /// A later upsert or reconciliation restores the same logical printer.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the presence update cannot be committed.
+    pub fn reconcile_printer_presence(
+        &mut self,
+        present_native_ids: &[String],
+    ) -> Result<(), StorageError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        transaction.execute("UPDATE printers SET present = 0", [])?;
+        for native_id in present_native_ids {
+            transaction.execute(
+                "UPDATE printers SET present = 1 WHERE native_id = ?1",
+                [native_id],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
     }
 
     /// Persists a new immutable profile revision when capabilities change.
@@ -690,6 +734,35 @@ impl AgentStore {
         let mut statement = self.connection.prepare(&query)?;
         let rows = statement.query_map([Option::<String>::None], stored_printer_from_row)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Returns only queues confirmed by the latest successful discovery.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `SQLite` cannot execute or decode the query.
+    pub fn present_printers(&self) -> Result<Vec<StoredPrinter>, StorageError> {
+        let query =
+            format!("{STORED_PRINTER_QUERY} AND p.present = 1 ORDER BY p.name, p.printer_id");
+        let mut statement = self.connection.prepare(&query)?;
+        let rows = statement.query_map([Option::<String>::None], stored_printer_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Counts currently present queues reporting an actionable degraded state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `SQLite` cannot execute the aggregate query.
+    pub fn present_printer_warning_count(&self) -> Result<u32, StorageError> {
+        self.connection
+            .query_row(
+                "SELECT COUNT(*) FROM printers
+                 WHERE present = 1 AND state IN ('offline', 'error', 'paper_out')",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
     }
 
     /// Resolves a cloud logical printer ID to the current native queue key.
@@ -1829,7 +1902,7 @@ fn query_job(connection: &Connection, job_id: &str) -> Result<Option<LocalJob>, 
 
 const STORED_PRINTER_QUERY: &str = "
     SELECT p.printer_id, p.native_id, p.name, p.state, p.is_default,
-           COALESCE(e.exposed, 0),
+           p.present, COALESCE(e.exposed, 0),
            COALESCE(profile.portable_json, legacy.capabilities_json, '{}'),
            COALESCE(profile.native_options_json, '{}'),
            COALESCE(profile.revision, 0),
@@ -1853,11 +1926,12 @@ fn stored_printer_from_row(row: &rusqlite::Row<'_>) -> Result<StoredPrinter, rus
         name: row.get(2)?,
         state: row.get(3)?,
         is_default: row.get(4)?,
-        exposed: row.get(5)?,
-        capabilities_json: row.get(6)?,
-        native_options_json: row.get(7)?,
-        profile_revision: row.get(8)?,
-        observed_unix_ms: row.get(9)?,
+        present: row.get(5)?,
+        exposed: row.get(6)?,
+        capabilities_json: row.get(7)?,
+        native_options_json: row.get(8)?,
+        profile_revision: row.get(9)?,
+        observed_unix_ms: row.get(10)?,
     })
 }
 
@@ -2505,5 +2579,74 @@ mod tests {
             store.jobs_for_printer("large-queue", 200).unwrap().len(),
             200
         );
+    }
+
+    #[test]
+    fn authoritative_discovery_hides_absent_queues_without_losing_history() {
+        let mut store = AgentStore::in_memory().unwrap();
+        let present = store
+            .upsert_printer(
+                "native-present",
+                "Present",
+                "online",
+                true,
+                &serde_json::to_string(&PrinterCapabilities::default()).unwrap(),
+                10,
+            )
+            .unwrap();
+        let stale = store
+            .upsert_printer(
+                "native-stale",
+                "Stale",
+                "offline",
+                false,
+                &serde_json::to_string(&PrinterCapabilities::default()).unwrap(),
+                10,
+            )
+            .unwrap();
+        let profile = store
+            .create_named_profile(
+                &stale.printer_id,
+                "Historical profile",
+                true,
+                &serde_json::to_string(&JobOptions::default()).unwrap(),
+                11,
+            )
+            .unwrap();
+        store
+            .reconcile_printer_presence(&["native-present".into()])
+            .unwrap();
+
+        let active = store.present_printers().unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].printer_id, present.printer_id);
+        let retained = store.printer(&stale.printer_id).unwrap().unwrap();
+        assert!(!retained.present);
+        assert_eq!(
+            store
+                .named_profile(&stale.printer_id, &profile.profile_id)
+                .unwrap()
+                .unwrap()
+                .name,
+            "Historical profile"
+        );
+        assert_eq!(store.present_printer_warning_count().unwrap(), 0);
+
+        let reappeared = store
+            .upsert_printer(
+                "native-stale",
+                "Stale renamed",
+                "error",
+                false,
+                &serde_json::to_string(&PrinterCapabilities::default()).unwrap(),
+                20,
+            )
+            .unwrap();
+        store
+            .reconcile_printer_presence(&["native-present".into(), "native-stale".into()])
+            .unwrap();
+        assert_eq!(reappeared.printer_id, stale.printer_id);
+        assert_eq!(store.present_printers().unwrap().len(), 2);
+        assert_eq!(store.present_printer_warning_count().unwrap(), 1);
     }
 }

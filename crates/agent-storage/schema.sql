@@ -9,6 +9,9 @@ VALUES (1, CAST(unixepoch('subsec') * 1000 AS INTEGER));
 INSERT OR IGNORE INTO schema_migrations (version, applied_unix_ms)
 VALUES (2, CAST(unixepoch('subsec') * 1000 AS INTEGER));
 
+INSERT OR IGNORE INTO schema_migrations (version, applied_unix_ms)
+VALUES (3, CAST(unixepoch('subsec') * 1000 AS INTEGER));
+
 CREATE TABLE IF NOT EXISTS identity (
   key TEXT PRIMARY KEY,
   value BLOB NOT NULL,
@@ -27,6 +30,7 @@ CREATE TABLE IF NOT EXISTS printers (
   name TEXT NOT NULL,
   state TEXT NOT NULL,
   is_default INTEGER NOT NULL DEFAULT 0 CHECK (is_default IN (0, 1)),
+  present INTEGER NOT NULL DEFAULT 1 CHECK (present IN (0, 1)),
   observed_unix_ms INTEGER NOT NULL
 );
 
