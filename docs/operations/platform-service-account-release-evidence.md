@@ -44,6 +44,7 @@ That wrapper requires the exact non-skipped storage and HTTP tests:
 
 - `postgres_platform_grants_are_exact_scoped_and_revocable`
 - `postgres_platform_http_auth_is_tenant_scoped_audited_and_revocable`
+- `postgres_http_platform_accounts_are_owned_idempotent_and_archive_safely`
 
 It rejects a missing integration-test target, zero matched tests, a skip
 message, or a failing command. This requirement applies even while the feature

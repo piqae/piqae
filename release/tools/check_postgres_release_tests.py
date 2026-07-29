@@ -69,6 +69,21 @@ GATES = (
         ),
         expected_test="postgres_platform_http_auth_is_tenant_scoped_audited_and_revocable",
     ),
+    Gate(
+        identifier="platform_accounts",
+        command=(
+            "cargo",
+            "test",
+            "-p",
+            "spool-control-plane",
+            "--test",
+            "platform_accounts",
+            "--locked",
+            "--",
+            "--nocapture",
+        ),
+        expected_test="postgres_http_platform_accounts_are_owned_idempotent_and_archive_safely",
+    ),
 )
 
 
