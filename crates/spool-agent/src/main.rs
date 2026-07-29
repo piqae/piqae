@@ -35,8 +35,8 @@ use spool_protocol::{
     agent::{
         AgentAcceptJobRequest, AgentCommand, AgentHealth, AgentReleaseLeaseRequest,
         AgentRenewLeaseRequest, AgentSyncRequest, AgentSyncResponse, ContentDescriptor,
-        EnrolRequest, InstallationMode, JobOffer, PrinterProfileSnapshot, PrinterSnapshot,
-        QueueSnapshot,
+        CreateDeviceAuthorizationRequest, EnrolRequest, InstallationMode, JobOffer,
+        PrinterProfileSnapshot, PrinterSnapshot, QueueSnapshot,
     },
     executor::{DiscoveredPrinter, ExecutorOperation, ExecutorResult, NativeJobObservation},
 };
@@ -121,7 +121,11 @@ struct Arguments {
     #[arg(long, env = "SPOOL_ENROLMENT_TOKEN", hide_env_values = true)]
     enrolment_token: Option<String>,
 
-    /// Human-readable installation name used with --enrolment-token.
+    /// Pair this installation through a browser approval flow, then exit.
+    #[arg(long, conflicts_with = "enrolment_token")]
+    pair: bool,
+
+    /// Human-readable installation name used with --enrolment-token or --pair.
     #[arg(long)]
     enrolment_name: Option<String>,
 }
@@ -259,6 +263,9 @@ async fn main() -> Result<()> {
     let arguments = Arguments::parse();
     if let Some(token) = arguments.enrolment_token.as_deref() {
         return enrol_installation(&arguments, token).await;
+    }
+    if arguments.pair {
+        return pair_installation(&arguments).await;
     }
 
     tracing_subscriber::fmt()
@@ -428,6 +435,132 @@ async fn enrol_installation(arguments: &Arguments, token: &str) -> Result<()> {
         }))?
     );
     Ok(())
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "keeps the secret-bearing browser-pairing lifecycle in one auditable flow"
+)]
+async fn pair_installation(arguments: &Arguments) -> Result<()> {
+    let base_url = arguments
+        .control_plane_url
+        .clone()
+        .context("--control-plane-url is required for browser pairing")?;
+    std::fs::create_dir_all(&arguments.data_dir)
+        .with_context(|| format!("create {}", arguments.data_dir.display()))?;
+    let key_path = arguments
+        .device_key_file
+        .clone()
+        .unwrap_or_else(|| arguments.data_dir.join("device.key"));
+    let config_path = arguments.data_dir.join("agent-config.json");
+    if key_path.exists() || config_path.exists() {
+        anyhow::bail!(
+            "this installation already has a device identity; revoke or migrate it explicitly"
+        );
+    }
+    let hostname = installation_hostname();
+    let name = arguments
+        .enrolment_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .unwrap_or(hostname.as_str());
+    let identity = DeviceIdentity::generate(AgentId::new());
+    let client = AgentClient::new(base_url.clone())?;
+    let authorization = client
+        .create_device_authorization(&CreateDeviceAuthorizationRequest {
+            public_key: identity.public_key_base64(),
+            installation_id: uuid::Uuid::now_v7().to_string(),
+            proposed_name: name.to_owned(),
+            hostname,
+            platform: std::env::consts::OS.to_owned(),
+            architecture: std::env::consts::ARCH.to_owned(),
+            installation_mode: InstallationMode::User,
+            agent_version: env!("CARGO_PKG_VERSION").to_owned(),
+            protocol_version: CURRENT_PROTOCOL_VERSION,
+        })
+        .await
+        .context("start browser pairing")?;
+    let mut verification_url = base_url
+        .join(authorization.verification_uri.trim_start_matches('/'))
+        .context("resolve pairing verification URL")?;
+    verification_url
+        .query_pairs_mut()
+        .append_pair("authorization_id", &authorization.id);
+    println!("Open {verification_url}");
+    println!("Enter pairing code {}", authorization.user_code);
+    open_verification_url(&verification_url);
+    let lifetime = u64::try_from(authorization.expires_in).unwrap_or(600);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(lifetime);
+    let interval = Duration::from_secs(u64::from(authorization.interval.max(1)));
+    let exchange = loop {
+        if tokio::time::Instant::now() >= deadline {
+            anyhow::bail!("browser pairing expired; start pairing again");
+        }
+        tokio::time::sleep(interval).await;
+        let status = client
+            .device_authorization_status(&authorization.device_code)
+            .await
+            .context("poll browser pairing")?;
+        match status.state.as_str() {
+            "approved" => {
+                break client
+                    .exchange_device_authorization(&authorization.device_code)
+                    .await
+                    .context("exchange approved browser pairing")?;
+            }
+            "pending" => {}
+            "denied" => anyhow::bail!("browser pairing was denied"),
+            "expired" => anyhow::bail!("browser pairing expired; start pairing again"),
+            "consumed" => anyhow::bail!("browser pairing code was already consumed"),
+            _ => anyhow::bail!("control plane returned an unknown pairing state"),
+        }
+    };
+    write_new_device_key(&key_path, &identity.secret_bytes())?;
+    let mode = match arguments.mode {
+        AgentMode::Hosted => "hosted",
+        AgentMode::SelfHosted | AgentMode::Local => "self-hosted",
+    };
+    let config = serde_json::json!({
+        "mode": mode,
+        "control_plane_url": base_url,
+        "agent_id": exchange.node_id,
+        "workspace_id": exchange.workspace_id,
+        "environment_id": exchange.environment_id,
+        "device_key_file": key_path,
+        "data_dir": arguments.data_dir,
+        "local_bind": arguments.local_bind,
+    });
+    if let Err(error) = write_new_json(&config_path, &config) {
+        let _ = std::fs::remove_file(&key_path);
+        return Err(error).context("persist paired node configuration");
+    }
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "node_id": exchange.node_id,
+            "workspace_id": exchange.workspace_id,
+            "environment_id": exchange.environment_id,
+            "config_file": config_path,
+        }))?
+    );
+    Ok(())
+}
+
+fn open_verification_url(url: &Url) {
+    #[cfg(target_os = "macos")]
+    let result = std::process::Command::new("open").arg(url.as_str()).spawn();
+    #[cfg(target_os = "windows")]
+    let result = std::process::Command::new("cmd")
+        .args(["/C", "start", "", url.as_str()])
+        .spawn();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let result = std::process::Command::new("xdg-open")
+        .arg(url.as_str())
+        .spawn();
+    if let Err(error) = result {
+        eprintln!("Could not open the browser automatically: {error}");
+    }
 }
 
 fn installation_hostname() -> String {
@@ -1791,6 +1924,10 @@ fn apply_command(
         }
         AgentCommand::UpdateAvailable { version, .. } => {
             info!(%version, "signed update is available");
+        }
+        AgentCommand::CollectDiagnostics { request_id } => {
+            store.set_setting("diagnostics_request_id", &request_id)?;
+            info!(%request_id, "redacted diagnostics collection requested");
         }
     }
     Ok(())

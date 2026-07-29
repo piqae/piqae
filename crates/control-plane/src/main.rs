@@ -6,7 +6,7 @@ use base64::{
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
 };
 use spool_control_plane::{
-    AppState,
+    AppState, AuthCapabilities, BillingCapabilities, DeploymentCapabilities, UpdateCapabilities,
     authentication::{
         CombinedAuthenticator, OidcAuthenticator, OidcConfiguration, PostgresAuthenticator,
         StaticAuthenticator, TenantContext,
@@ -101,7 +101,8 @@ async fn run() -> Result<()> {
         Arc::new(authenticator),
         webhook_key,
         object_store,
-    );
+    )
+    .with_capabilities(deployment_capabilities());
     let webhook_worker = WebhookWorker::new(application.clone());
     let _webhook_worker = tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_millis(500));
@@ -126,6 +127,38 @@ async fn run() -> Result<()> {
         .with_graceful_shutdown(shutdown_signal())
         .await
         .context("serve HTTP")
+}
+
+fn deployment_capabilities() -> DeploymentCapabilities {
+    let deployment = env::var("SPOOL_DEPLOYMENT").unwrap_or_else(|_| "self_hosted".into());
+    let cloud = deployment == "cloud";
+    let configured_auth = env::var("SPOOL_IDENTITY_PROVIDER").unwrap_or_else(|_| {
+        if cloud {
+            "workos".into()
+        } else {
+            "local_owner".into()
+        }
+    });
+    let auth_provider = match configured_auth.as_str() {
+        "bootstrap" | "api_key" => "local_owner",
+        other => other,
+    };
+    DeploymentCapabilities {
+        deployment,
+        version: env!("CARGO_PKG_VERSION"),
+        auth: AuthCapabilities {
+            provider: auth_provider.into(),
+            workspace_switching: cloud,
+            invitations: cloud,
+        },
+        billing: BillingCapabilities {
+            enabled: cloud && env::var("SPOOL_BILLING_ENABLED").as_deref() != Ok("false"),
+        },
+        updates: UpdateCapabilities {
+            official_feed: env::var("SPOOL_OFFICIAL_UPDATE_FEED").as_deref() != Ok("false"),
+            custom_feed: !cloud,
+        },
+    }
 }
 
 fn build_oidc_authenticator(store: &PostgresStore) -> Result<Option<OidcAuthenticator>> {

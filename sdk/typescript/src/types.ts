@@ -33,6 +33,18 @@ export interface Health {
   version: string;
 }
 
+export interface DeploymentMeta {
+  deployment: 'cloud' | 'self_hosted' | 'local';
+  version: string;
+  auth: {
+    provider: 'workos' | 'local_owner' | 'oidc' | 'hybrid' | 'none';
+    workspace_switching: boolean;
+    invitations: boolean;
+  };
+  billing: { enabled: boolean };
+  updates: { official_feed: boolean; custom_feed: boolean };
+}
+
 export type ApiKeyScope =
   | 'api_keys_read'
   | 'api_keys_write'
@@ -76,6 +88,76 @@ export interface Agent {
   state: 'connected' | 'disconnected' | 'paused' | 'degraded';
   version: string;
   last_seen_at: string;
+}
+
+export interface CreateDeviceAuthorization {
+  public_key: string;
+  installation_id: string;
+  proposed_name: string;
+  hostname: string;
+  platform: string;
+  architecture: string;
+  installation_mode: 'user' | 'machine' | 'local';
+  agent_version: string;
+  protocol_version: number;
+}
+
+export interface CreatedDeviceAuthorization {
+  id: SpoolId;
+  device_code: string;
+  user_code: string;
+  verification_uri: string;
+  expires_in: number;
+  interval: number;
+}
+
+export interface DeviceAuthorizationStatus {
+  id: SpoolId;
+  state: 'pending' | 'approved' | 'denied' | 'consumed' | 'expired';
+  expires_at: string;
+}
+
+export interface DeviceAuthorizationReview {
+  id: SpoolId;
+  proposed_name: string;
+  hostname: string;
+  platform: string;
+  architecture: string;
+  state: 'pending' | 'approved' | 'denied' | 'consumed' | 'expired';
+  expires_at: string;
+}
+
+export interface DeviceAuthorizationExchange {
+  node_id: SpoolId;
+  workspace_id: SpoolId;
+  environment_id: SpoolId;
+  server_time: string;
+  sync_after_ms: number;
+}
+
+export interface NodeUpdatePolicy {
+  channel: 'stable' | 'canary' | 'pinned';
+  mode: 'automatic' | 'prompt' | 'disabled';
+  pinned_version: string | null;
+  maintenance_window: Record<string, unknown> | null;
+}
+
+export interface NodeUpdateState {
+  current_version: string;
+  available_version: string | null;
+  state: string;
+  download_percent: number | null;
+  deferred_reason: string | null;
+  last_checked_at: string | null;
+  last_success_at: string | null;
+  last_error_code: string | null;
+  rollback_version: string | null;
+}
+
+export interface NodeUpdate {
+  node_id: SpoolId;
+  policy: NodeUpdatePolicy;
+  status: NodeUpdateState;
 }
 
 export interface Printer {

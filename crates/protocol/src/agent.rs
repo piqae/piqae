@@ -38,6 +38,45 @@ pub struct EnrolResponse {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct CreateDeviceAuthorizationRequest {
+    pub public_key: String,
+    pub installation_id: String,
+    pub proposed_name: String,
+    pub hostname: String,
+    pub platform: String,
+    pub architecture: String,
+    pub installation_mode: InstallationMode,
+    pub agent_version: String,
+    pub protocol_version: u16,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct CreatedDeviceAuthorization {
+    pub id: String,
+    pub device_code: String,
+    pub user_code: String,
+    pub verification_uri: String,
+    pub expires_in: i64,
+    pub interval: u8,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct DeviceAuthorizationStatus {
+    pub id: String,
+    pub state: String,
+    pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct DeviceAuthorizationExchange {
+    pub node_id: AgentId,
+    pub workspace_id: spool_domain::WorkspaceId,
+    pub environment_id: spool_domain::EnvironmentId,
+    pub server_time: DateTime<Utc>,
+    pub sync_after_ms: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct AgentSyncRequest {
     pub agent_id: AgentId,
     pub protocol_version: u16,
@@ -137,6 +176,9 @@ pub enum AgentCommand {
         version: String,
         channel: String,
         metadata_url: String,
+    },
+    CollectDiagnostics {
+        request_id: String,
     },
 }
 

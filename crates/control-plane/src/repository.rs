@@ -13,9 +13,11 @@ use spool_domain::{
 use spool_protocol::agent::AgentCommand;
 use spool_storage_postgres::{
     AgentAuthenticationRecord, CreateJobResult as PgCreateJobResult, EnrolledAgent, JobLease,
-    PostgresStore, StorageError, StoredAgent, StoredAgentCommandBatch, StoredApiKey, StoredPrinter,
-    StoredStock, StoredTarget, StoredTargetBinding, StoredTenantEvent, StoredUpload, StoredWebhook,
-    StoredWebhookDelivery, SyncedPrinter, WebhookDeliveryWork,
+    NewDeviceAuthorization, NodeUpdatePolicy, NodeUpdateState, PostgresStore, StorageError,
+    StoredAgent, StoredAgentCommandBatch, StoredApiKey, StoredDeviceAuthorization,
+    StoredNodeUpdate, StoredPrinter, StoredStock, StoredTarget, StoredTargetBinding,
+    StoredTenantEvent, StoredUpload, StoredWebhook, StoredWebhookDelivery, SyncedPrinter,
+    WebhookDeliveryWork,
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -131,6 +133,48 @@ pub trait Repository: Send + Sync + 'static {
         workspace_id: WorkspaceId,
         environment_id: EnvironmentId,
     ) -> Result<Vec<StoredAgent>, RepositoryError>;
+    async fn get_agent(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+    ) -> Result<StoredAgent, RepositoryError>;
+    async fn rename_agent(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        name: &str,
+    ) -> Result<StoredAgent, RepositoryError>;
+    async fn revoke_agent(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+    ) -> Result<(), RepositoryError>;
+    async fn get_node_update(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        node_id: AgentId,
+        default_mode: &str,
+    ) -> Result<StoredNodeUpdate, RepositoryError>;
+    async fn update_node_policy(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        node_id: AgentId,
+        policy: &NodeUpdatePolicy,
+        default_mode: &str,
+    ) -> Result<StoredNodeUpdate, RepositoryError>;
+    async fn request_node_update(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        node_id: AgentId,
+        version: &str,
+        default_mode: &str,
+    ) -> Result<StoredNodeUpdate, RepositoryError>;
     async fn list_printers(
         &self,
         workspace_id: WorkspaceId,
@@ -217,6 +261,35 @@ pub trait Repository: Send + Sync + 'static {
         secret_hash: &str,
         expires_at: DateTime<Utc>,
     ) -> Result<(), RepositoryError>;
+    async fn create_device_authorization(
+        &self,
+        authorization: &NewDeviceAuthorization<'_>,
+    ) -> Result<StoredDeviceAuthorization, RepositoryError>;
+    async fn device_authorization_by_hash(
+        &self,
+        device_code_hash: &str,
+    ) -> Result<StoredDeviceAuthorization, RepositoryError>;
+    async fn device_authorization_by_id(
+        &self,
+        id: &str,
+    ) -> Result<StoredDeviceAuthorization, RepositoryError>;
+    async fn approve_device_authorization(
+        &self,
+        id: &str,
+        user_code_hash: &str,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        approved_by: &str,
+    ) -> Result<StoredDeviceAuthorization, RepositoryError>;
+    async fn deny_device_authorization(
+        &self,
+        id: &str,
+        user_code_hash: &str,
+    ) -> Result<StoredDeviceAuthorization, RepositoryError>;
+    async fn exchange_device_authorization(
+        &self,
+        device_code_hash: &str,
+    ) -> Result<EnrolledAgent, RepositoryError>;
     async fn enrol_agent(
         &self,
         secret_hash: &str,
@@ -592,6 +665,92 @@ impl Repository for PostgresStore {
             .map_err(Into::into)
     }
 
+    async fn get_agent(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+    ) -> Result<StoredAgent, RepositoryError> {
+        Self::get_agent(self, workspace_id, environment_id, agent_id)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn rename_agent(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        name: &str,
+    ) -> Result<StoredAgent, RepositoryError> {
+        Self::rename_agent(self, workspace_id, environment_id, agent_id, name)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn revoke_agent(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+    ) -> Result<(), RepositoryError> {
+        Self::revoke_agent(self, workspace_id, environment_id, agent_id)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn get_node_update(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        node_id: AgentId,
+        default_mode: &str,
+    ) -> Result<StoredNodeUpdate, RepositoryError> {
+        Self::get_node_update(self, workspace_id, environment_id, node_id, default_mode)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn update_node_policy(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        node_id: AgentId,
+        policy: &NodeUpdatePolicy,
+        default_mode: &str,
+    ) -> Result<StoredNodeUpdate, RepositoryError> {
+        Self::update_node_policy(
+            self,
+            workspace_id,
+            environment_id,
+            node_id,
+            policy,
+            default_mode,
+        )
+        .await
+        .map_err(Into::into)
+    }
+
+    async fn request_node_update(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        node_id: AgentId,
+        version: &str,
+        default_mode: &str,
+    ) -> Result<StoredNodeUpdate, RepositoryError> {
+        Self::request_node_update(
+            self,
+            workspace_id,
+            environment_id,
+            node_id,
+            version,
+            default_mode,
+        )
+        .await
+        .map_err(Into::into)
+    }
+
     async fn list_printers(
         &self,
         workspace_id: WorkspaceId,
@@ -753,6 +912,72 @@ impl Repository for PostgresStore {
         )
         .await
         .map_err(Into::into)
+    }
+
+    async fn create_device_authorization(
+        &self,
+        authorization: &NewDeviceAuthorization<'_>,
+    ) -> Result<StoredDeviceAuthorization, RepositoryError> {
+        Self::create_device_authorization(self, authorization)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn device_authorization_by_hash(
+        &self,
+        device_code_hash: &str,
+    ) -> Result<StoredDeviceAuthorization, RepositoryError> {
+        Self::device_authorization_by_hash(self, device_code_hash)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn device_authorization_by_id(
+        &self,
+        id: &str,
+    ) -> Result<StoredDeviceAuthorization, RepositoryError> {
+        Self::device_authorization_by_id(self, id)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn approve_device_authorization(
+        &self,
+        id: &str,
+        user_code_hash: &str,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        approved_by: &str,
+    ) -> Result<StoredDeviceAuthorization, RepositoryError> {
+        Self::approve_device_authorization(
+            self,
+            id,
+            user_code_hash,
+            workspace_id,
+            environment_id,
+            approved_by,
+        )
+        .await
+        .map_err(Into::into)
+    }
+
+    async fn deny_device_authorization(
+        &self,
+        id: &str,
+        user_code_hash: &str,
+    ) -> Result<StoredDeviceAuthorization, RepositoryError> {
+        Self::deny_device_authorization(self, id, user_code_hash)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn exchange_device_authorization(
+        &self,
+        device_code_hash: &str,
+    ) -> Result<EnrolledAgent, RepositoryError> {
+        Self::exchange_device_authorization(self, device_code_hash)
+            .await
+            .map_err(Into::into)
     }
 
     async fn resolve_printer_agent(
@@ -1238,6 +1463,15 @@ struct MemoryJobAcceptance {
     local_sequence: u64,
 }
 
+#[derive(Clone, Debug)]
+struct MemoryDeviceAuthorization {
+    record: StoredDeviceAuthorization,
+    device_code_hash: String,
+    user_code_hash: String,
+    public_key: Vec<u8>,
+    agent_version: String,
+}
+
 #[derive(Debug, Default)]
 struct MemoryState {
     api_keys: HashMap<String, (WorkspaceId, EnvironmentId, StoredApiKey, String)>,
@@ -1249,6 +1483,8 @@ struct MemoryState {
     agents: HashMap<AgentId, (WorkspaceId, EnvironmentId, StoredAgent)>,
     agent_public_keys: HashMap<AgentId, Vec<u8>>,
     enrolments: HashMap<String, (WorkspaceId, EnvironmentId, String, DateTime<Utc>)>,
+    device_authorizations: HashMap<String, MemoryDeviceAuthorization>,
+    node_updates: HashMap<AgentId, StoredNodeUpdate>,
     webhooks: HashMap<String, (WorkspaceId, EnvironmentId, StoredWebhook, Vec<u8>)>,
     webhook_deliveries: HashMap<String, (WorkspaceId, EnvironmentId, StoredWebhookDelivery)>,
     webhook_work: HashMap<String, WebhookDeliveryWork>,
@@ -1603,6 +1839,141 @@ impl Repository for MemoryRepository {
             .collect())
     }
 
+    async fn get_agent(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+    ) -> Result<StoredAgent, RepositoryError> {
+        self.state
+            .read()
+            .await
+            .agents
+            .get(&agent_id)
+            .filter(|(workspace, environment, _)| {
+                *workspace == workspace_id && *environment == environment_id
+            })
+            .map(|(_, _, agent)| agent.clone())
+            .ok_or(RepositoryError::NotFound)
+    }
+
+    async fn rename_agent(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        name: &str,
+    ) -> Result<StoredAgent, RepositoryError> {
+        let mut state = self.state.write().await;
+        let (_, _, agent) = state
+            .agents
+            .get_mut(&agent_id)
+            .filter(|(workspace, environment, _)| {
+                *workspace == workspace_id && *environment == environment_id
+            })
+            .ok_or(RepositoryError::NotFound)?;
+        name.clone_into(&mut agent.name);
+        Ok(agent.clone())
+    }
+
+    async fn revoke_agent(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+    ) -> Result<(), RepositoryError> {
+        let mut state = self.state.write().await;
+        let belongs_to_tenant =
+            state
+                .agents
+                .get(&agent_id)
+                .is_some_and(|(workspace, environment, _)| {
+                    *workspace == workspace_id && *environment == environment_id
+                });
+        if !belongs_to_tenant {
+            return Err(RepositoryError::NotFound);
+        }
+        state.agents.remove(&agent_id);
+        Ok(())
+    }
+
+    async fn get_node_update(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        node_id: AgentId,
+        default_mode: &str,
+    ) -> Result<StoredNodeUpdate, RepositoryError> {
+        let agent = self
+            .get_agent(workspace_id, environment_id, node_id)
+            .await?;
+        let mut state = self.state.write().await;
+        Ok(state
+            .node_updates
+            .entry(node_id)
+            .or_insert_with(|| StoredNodeUpdate {
+                node_id,
+                policy: NodeUpdatePolicy {
+                    channel: "stable".into(),
+                    mode: default_mode.into(),
+                    pinned_version: None,
+                    maintenance_window: None,
+                },
+                status: NodeUpdateState {
+                    current_version: agent.version,
+                    available_version: None,
+                    state: "idle".into(),
+                    download_percent: None,
+                    deferred_reason: None,
+                    last_checked_at: None,
+                    last_success_at: None,
+                    last_error_code: None,
+                    rollback_version: None,
+                },
+            })
+            .clone())
+    }
+
+    async fn update_node_policy(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        node_id: AgentId,
+        policy: &NodeUpdatePolicy,
+        default_mode: &str,
+    ) -> Result<StoredNodeUpdate, RepositoryError> {
+        self.get_node_update(workspace_id, environment_id, node_id, default_mode)
+            .await?;
+        let mut state = self.state.write().await;
+        let update = state
+            .node_updates
+            .get_mut(&node_id)
+            .ok_or(RepositoryError::NotFound)?;
+        update.policy = policy.clone();
+        Ok(update.clone())
+    }
+
+    async fn request_node_update(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        node_id: AgentId,
+        version: &str,
+        default_mode: &str,
+    ) -> Result<StoredNodeUpdate, RepositoryError> {
+        self.get_node_update(workspace_id, environment_id, node_id, default_mode)
+            .await?;
+        let mut state = self.state.write().await;
+        let update = state
+            .node_updates
+            .get_mut(&node_id)
+            .ok_or(RepositoryError::NotFound)?;
+        update.status.available_version = Some(version.into());
+        update.status.state = "requested".into();
+        update.status.last_checked_at = Some(Utc::now());
+        Ok(update.clone())
+    }
+
     async fn list_printers(
         &self,
         workspace_id: WorkspaceId,
@@ -1942,6 +2313,156 @@ impl Repository for MemoryRepository {
             ),
         );
         Ok(())
+    }
+
+    async fn create_device_authorization(
+        &self,
+        authorization: &NewDeviceAuthorization<'_>,
+    ) -> Result<StoredDeviceAuthorization, RepositoryError> {
+        let record = StoredDeviceAuthorization {
+            id: authorization.id.to_owned(),
+            user_code: authorization.user_code_display.to_owned(),
+            proposed_name: authorization.proposed_name.to_owned(),
+            hostname: authorization.hostname.to_owned(),
+            platform: authorization.platform.to_owned(),
+            architecture: authorization.architecture.to_owned(),
+            state: "pending".into(),
+            expires_at: authorization.expires_at,
+            workspace_id: None,
+            environment_id: None,
+        };
+        self.state.write().await.device_authorizations.insert(
+            authorization.id.to_owned(),
+            MemoryDeviceAuthorization {
+                record: record.clone(),
+                device_code_hash: authorization.device_code_hash.to_owned(),
+                user_code_hash: authorization.user_code_hash.to_owned(),
+                public_key: authorization.device_public_key.to_vec(),
+                agent_version: authorization.agent_version.to_owned(),
+            },
+        );
+        Ok(record)
+    }
+
+    async fn device_authorization_by_hash(
+        &self,
+        device_code_hash: &str,
+    ) -> Result<StoredDeviceAuthorization, RepositoryError> {
+        let mut state = self.state.write().await;
+        let authorization = state
+            .device_authorizations
+            .values_mut()
+            .find(|authorization| authorization.device_code_hash == device_code_hash)
+            .ok_or(RepositoryError::NotFound)?;
+        if authorization.record.expires_at <= Utc::now()
+            && matches!(authorization.record.state.as_str(), "pending" | "approved")
+        {
+            authorization.record.state = "expired".into();
+        }
+        Ok(authorization.record.clone())
+    }
+
+    async fn device_authorization_by_id(
+        &self,
+        id: &str,
+    ) -> Result<StoredDeviceAuthorization, RepositoryError> {
+        let mut state = self.state.write().await;
+        let authorization = state
+            .device_authorizations
+            .get_mut(id)
+            .ok_or(RepositoryError::NotFound)?;
+        if authorization.record.expires_at <= Utc::now()
+            && matches!(authorization.record.state.as_str(), "pending" | "approved")
+        {
+            authorization.record.state = "expired".into();
+        }
+        Ok(authorization.record.clone())
+    }
+
+    async fn approve_device_authorization(
+        &self,
+        id: &str,
+        user_code_hash: &str,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        _approved_by: &str,
+    ) -> Result<StoredDeviceAuthorization, RepositoryError> {
+        let mut state = self.state.write().await;
+        let authorization = state
+            .device_authorizations
+            .get_mut(id)
+            .filter(|authorization| {
+                authorization.record.state == "pending"
+                    && authorization.user_code_hash == user_code_hash
+                    && authorization.record.expires_at > Utc::now()
+            })
+            .ok_or(RepositoryError::NotFound)?;
+        authorization.record.state = "approved".into();
+        authorization.record.workspace_id = Some(workspace_id);
+        authorization.record.environment_id = Some(environment_id);
+        Ok(authorization.record.clone())
+    }
+
+    async fn deny_device_authorization(
+        &self,
+        id: &str,
+        user_code_hash: &str,
+    ) -> Result<StoredDeviceAuthorization, RepositoryError> {
+        let mut state = self.state.write().await;
+        let authorization = state
+            .device_authorizations
+            .get_mut(id)
+            .filter(|authorization| {
+                authorization.record.state == "pending"
+                    && authorization.user_code_hash == user_code_hash
+            })
+            .ok_or(RepositoryError::NotFound)?;
+        authorization.record.state = "denied".into();
+        Ok(authorization.record.clone())
+    }
+
+    async fn exchange_device_authorization(
+        &self,
+        device_code_hash: &str,
+    ) -> Result<EnrolledAgent, RepositoryError> {
+        let mut state = self.state.write().await;
+        let authorization = state
+            .device_authorizations
+            .values_mut()
+            .find(|authorization| {
+                authorization.device_code_hash == device_code_hash
+                    && authorization.record.state == "approved"
+                    && authorization.record.expires_at > Utc::now()
+            })
+            .ok_or(RepositoryError::NotFound)?;
+        let workspace_id = authorization
+            .record
+            .workspace_id
+            .ok_or(RepositoryError::NotFound)?;
+        let environment_id = authorization
+            .record
+            .environment_id
+            .ok_or(RepositoryError::NotFound)?;
+        let agent_id = AgentId::new();
+        let agent = StoredAgent {
+            id: agent_id,
+            name: authorization.record.proposed_name.clone(),
+            platform: authorization.record.platform.clone(),
+            state: "disconnected".into(),
+            version: authorization.agent_version.clone(),
+            last_seen_at: Utc::now(),
+        };
+        let public_key = authorization.public_key.clone();
+        authorization.record.state = "consumed".into();
+        state
+            .agents
+            .insert(agent_id, (workspace_id, environment_id, agent));
+        state.agent_public_keys.insert(agent_id, public_key);
+        Ok(EnrolledAgent {
+            agent_id,
+            workspace_id,
+            environment_id,
+        })
     }
 
     async fn enrol_agent(

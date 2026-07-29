@@ -3,13 +3,21 @@ import type {
   AgentEnrolment,
   ApiKey,
   CreateApiKey,
+  CreateDeviceAuthorization,
   CreateJob,
+  CreatedDeviceAuthorization,
+  DeploymentMeta,
+  DeviceAuthorizationExchange,
+  DeviceAuthorizationReview,
+  DeviceAuthorizationStatus,
   CreatedApiKey,
   ErrorEnvelope,
   Health,
   Job,
   JobEvent,
   ListOptions,
+  NodeUpdate,
+  NodeUpdatePolicy,
   Page,
   Printer,
   Webhook
@@ -67,6 +75,7 @@ export class SpoolClient {
 
   health = () => this.request<Health>('GET', '/v1/health');
   ready = () => this.request<Health>('GET', '/v1/ready');
+  meta = () => this.request<DeploymentMeta>('GET', '/v1/meta');
 
   readonly apiKeys = {
     list: () => this.request<ApiKey[]>('GET', '/v1/api-keys'),
@@ -80,6 +89,75 @@ export class SpoolClient {
     list: () => this.request<Agent[]>('GET', '/v1/agents'),
     createEnrolment: (input: { name: string; expires_in_seconds?: number }) =>
       this.request<AgentEnrolment>('POST', '/v1/agent-enrolments', { body: input })
+  };
+
+  readonly pairing = {
+    create: (input: CreateDeviceAuthorization) =>
+      this.request<CreatedDeviceAuthorization>('POST', '/v1/device-authorizations', {
+        body: input
+      }),
+    status: (deviceCode: string) =>
+      this.request<DeviceAuthorizationStatus>(
+        'GET',
+        `/v1/device-authorizations/${encodeURIComponent(deviceCode)}`
+      ),
+    review: (authorizationId: string) =>
+      this.request<DeviceAuthorizationReview>(
+        'GET',
+        `/v1/device-authorizations/${encodeURIComponent(authorizationId)}/review`
+      ),
+    approve: (authorizationId: string, userCode: string) =>
+      this.request<DeviceAuthorizationStatus>(
+        'POST',
+        `/v1/device-authorizations/${encodeURIComponent(authorizationId)}/approve`,
+        { body: { user_code: userCode } }
+      ),
+    deny: (authorizationId: string, userCode: string) =>
+      this.request<DeviceAuthorizationStatus>(
+        'POST',
+        `/v1/device-authorizations/${encodeURIComponent(authorizationId)}/deny`,
+        { body: { user_code: userCode } }
+      ),
+    exchange: (deviceCode: string) =>
+      this.request<DeviceAuthorizationExchange>(
+        'POST',
+        `/v1/device-authorizations/${encodeURIComponent(deviceCode)}/exchange`
+      )
+  };
+
+  readonly nodes = {
+    list: () => this.request<Agent[]>('GET', '/v1/nodes'),
+    retrieve: (id: string) =>
+      this.request<Agent>('GET', `/v1/nodes/${encodeURIComponent(id)}`),
+    rename: (id: string, name: string) =>
+      this.request<Agent>('PATCH', `/v1/nodes/${encodeURIComponent(id)}`, {
+        body: { name }
+      }),
+    revoke: (id: string) =>
+      this.request<void>('DELETE', `/v1/nodes/${encodeURIComponent(id)}`),
+    pause: (id: string) =>
+      this.request<void>('POST', `/v1/nodes/${encodeURIComponent(id)}/pause`),
+    resume: (id: string) =>
+      this.request<void>('POST', `/v1/nodes/${encodeURIComponent(id)}/resume`),
+    diagnostics: (id: string) =>
+      this.request<{ request_id: string; state: 'requested' }>(
+        'POST',
+        `/v1/nodes/${encodeURIComponent(id)}/diagnostics`
+      ),
+    update: (id: string) =>
+      this.request<NodeUpdate>('GET', `/v1/nodes/${encodeURIComponent(id)}/update`),
+    updatePolicy: (id: string, policy: NodeUpdatePolicy) =>
+      this.request<NodeUpdate>('PATCH', `/v1/nodes/${encodeURIComponent(id)}/update-policy`, {
+        body: policy
+      }),
+    requestUpdate: (id: string, version: string, metadataUrl: string) =>
+      this.request<NodeUpdate>('POST', `/v1/nodes/${encodeURIComponent(id)}/update`, {
+        body: { version, metadata_url: metadataUrl }
+      }),
+    rollback: (id: string, metadataUrl: string) =>
+      this.request<NodeUpdate>('POST', `/v1/nodes/${encodeURIComponent(id)}/rollback`, {
+        body: { metadata_url: metadataUrl }
+      })
   };
 
   readonly printers = {
@@ -166,6 +244,8 @@ export class SpoolClient {
     }
 
     if (response.status === 204) return undefined as T;
-    return (await response.json()) as T;
+    const text = await response.text();
+    if (text === '') return undefined as T;
+    return JSON.parse(text) as T;
   }
 }

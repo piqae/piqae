@@ -130,13 +130,20 @@ impl From<RepositoryError> for AppError {
                 retryable: false,
                 compatibility: false,
             },
-            RepositoryError::Persistence(_) => Self {
-                status: StatusCode::SERVICE_UNAVAILABLE,
-                code: "service_unavailable",
-                message: "A required service is temporarily unavailable.".into(),
-                retryable: true,
-                compatibility: false,
-            },
+            RepositoryError::Persistence(message) => {
+                tracing::error!(
+                    database.error = %message,
+                    error.type = "repository_persistence_failure",
+                    "repository operation failed"
+                );
+                Self {
+                    status: StatusCode::SERVICE_UNAVAILABLE,
+                    code: "service_unavailable",
+                    message: "A required service is temporarily unavailable.".into(),
+                    retryable: true,
+                    compatibility: false,
+                }
+            }
         }
     }
 }

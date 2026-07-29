@@ -56,6 +56,38 @@ pub struct EnrolledAgent {
     pub environment_id: EnvironmentId,
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct StoredDeviceAuthorization {
+    pub id: String,
+    pub user_code: String,
+    pub proposed_name: String,
+    pub hostname: String,
+    pub platform: String,
+    pub architecture: String,
+    pub state: String,
+    pub expires_at: DateTime<Utc>,
+    pub workspace_id: Option<WorkspaceId>,
+    pub environment_id: Option<EnvironmentId>,
+}
+
+#[derive(Clone, Debug)]
+pub struct NewDeviceAuthorization<'a> {
+    pub id: &'a str,
+    pub device_code_hash: &'a str,
+    pub user_code_hash: &'a str,
+    pub user_code_display: &'a str,
+    pub device_public_key: &'a [u8],
+    pub installation_id: &'a str,
+    pub proposed_name: &'a str,
+    pub hostname: &'a str,
+    pub platform: &'a str,
+    pub architecture: &'a str,
+    pub installation_mode: &'a str,
+    pub agent_version: &'a str,
+    pub protocol_version: u16,
+    pub expires_at: DateTime<Utc>,
+}
+
 #[derive(Clone, Debug)]
 pub struct ApiKeyAuthenticationRecord {
     pub workspace_id: WorkspaceId,
@@ -84,6 +116,34 @@ pub struct StoredAgent {
     pub state: String,
     pub version: String,
     pub last_seen_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct NodeUpdatePolicy {
+    pub channel: String,
+    pub mode: String,
+    pub pinned_version: Option<String>,
+    pub maintenance_window: Option<serde_json::Value>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct NodeUpdateState {
+    pub current_version: String,
+    pub available_version: Option<String>,
+    pub state: String,
+    pub download_percent: Option<u8>,
+    pub deferred_reason: Option<String>,
+    pub last_checked_at: Option<DateTime<Utc>>,
+    pub last_success_at: Option<DateTime<Utc>>,
+    pub last_error_code: Option<String>,
+    pub rollback_version: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct StoredNodeUpdate {
+    pub node_id: AgentId,
+    pub policy: NodeUpdatePolicy,
+    pub status: NodeUpdateState,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -306,7 +366,8 @@ impl PostgresStore {
     ) -> Result<(), StorageError> {
         let mut transaction = self.pool.begin().await?;
         sqlx::query(
-            "INSERT INTO workspaces (id, name) VALUES ($1, 'Self-hosted')
+            "INSERT INTO workspaces (id, name, slug)
+             VALUES ($1, 'Self-hosted', lower(replace($1, '_', '-')))
              ON CONFLICT (id) DO NOTHING",
         )
         .bind(workspace_id.to_string())
@@ -363,8 +424,8 @@ impl PostgresStore {
         } else {
             let id = WorkspaceId::new();
             sqlx::query(
-                "INSERT INTO workspaces (id, name, workos_organization_id)
-                 VALUES ($1,$2,$2)",
+                "INSERT INTO workspaces (id, name, slug, workos_organization_id)
+                 VALUES ($1,$2,lower(replace($1, '_', '-')),$2)",
             )
             .bind(id.to_string())
             .bind(organization_id)
@@ -754,21 +815,245 @@ impl PostgresStore {
         .bind(environment_id.to_string())
         .fetch_all(&self.pool)
         .await?;
-        rows.into_iter()
-            .map(|row| {
-                let id: String = row.try_get("id")?;
-                Ok(StoredAgent {
-                    id: id.parse().map_err(|error| {
-                        StorageError::InvalidData(format!("agent id `{id}`: {error}"))
-                    })?,
-                    name: row.try_get("name")?,
-                    platform: row.try_get("os")?,
-                    state: normalize_agent_state(&row.try_get::<String, _>("state")?),
-                    version: row.try_get("version")?,
-                    last_seen_at: row.try_get("last_seen_at")?,
-                })
-            })
-            .collect()
+        rows.iter().map(agent_from_row).collect()
+    }
+
+    pub async fn get_agent(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+    ) -> Result<StoredAgent, StorageError> {
+        let row = sqlx::query(
+            "SELECT id, name, os, state, version, COALESCE(last_seen_at, created_at) AS last_seen_at
+             FROM agents
+             WHERE id = $1 AND workspace_id = $2 AND environment_id = $3
+               AND revoked_at IS NULL",
+        )
+        .bind(agent_id.to_string())
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(StorageError::NotFound)?;
+        agent_from_row(&row)
+    }
+
+    pub async fn rename_agent(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        name: &str,
+    ) -> Result<StoredAgent, StorageError> {
+        sqlx::query(
+            "UPDATE agents SET name = $4
+             WHERE id = $1 AND workspace_id = $2 AND environment_id = $3
+               AND revoked_at IS NULL",
+        )
+        .bind(agent_id.to_string())
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(name)
+        .execute(&self.pool)
+        .await?
+        .rows_affected()
+        .eq(&1)
+        .then_some(())
+        .ok_or(StorageError::NotFound)?;
+        self.get_agent(workspace_id, environment_id, agent_id).await
+    }
+
+    pub async fn revoke_agent(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+    ) -> Result<(), StorageError> {
+        let mut transaction = self.pool.begin().await?;
+        let affected = sqlx::query(
+            "UPDATE agents
+             SET revoked_at = now(), state = 'offline'
+             WHERE id = $1 AND workspace_id = $2 AND environment_id = $3
+               AND revoked_at IS NULL",
+        )
+        .bind(agent_id.to_string())
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .execute(&mut *transaction)
+        .await?
+        .rows_affected();
+        if affected != 1 {
+            return Err(StorageError::NotFound);
+        }
+        sqlx::query(
+            "UPDATE jobs
+             SET state = 'waiting_for_agent', lease_owner = NULL, lease_until = NULL,
+                 updated_at = now()
+             WHERE agent_id = $1 AND workspace_id = $2 AND environment_id = $3
+               AND final_at IS NULL
+               AND state IN ('registered','content_pending','waiting_for_agent','agent_downloading')",
+        )
+        .bind(agent_id.to_string())
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    pub async fn get_node_update(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        node_id: AgentId,
+        default_mode: &str,
+    ) -> Result<StoredNodeUpdate, StorageError> {
+        if !matches!(default_mode, "automatic" | "prompt" | "disabled") {
+            return Err(StorageError::InvalidData(
+                "invalid default node update mode".into(),
+            ));
+        }
+        let mut transaction = self.pool.begin().await?;
+        let current_version = sqlx::query_scalar::<_, String>(
+            "SELECT version FROM agents
+             WHERE id = $1 AND workspace_id = $2 AND environment_id = $3
+               AND revoked_at IS NULL
+             FOR SHARE",
+        )
+        .bind(node_id.to_string())
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(StorageError::NotFound)?;
+        sqlx::query(
+            "INSERT INTO node_update_policies (
+                node_id, workspace_id, environment_id, mode
+             ) VALUES ($1,$2,$3,$4)
+             ON CONFLICT (node_id) DO NOTHING",
+        )
+        .bind(node_id.to_string())
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(default_mode)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "INSERT INTO node_update_states (
+                node_id, workspace_id, environment_id, current_version
+             ) VALUES ($1,$2,$3,$4)
+             ON CONFLICT (node_id) DO UPDATE
+             SET current_version = EXCLUDED.current_version, updated_at = now()",
+        )
+        .bind(node_id.to_string())
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(current_version)
+        .execute(&mut *transaction)
+        .await?;
+        let row = node_update_row(&mut transaction, workspace_id, environment_id, node_id).await?;
+        transaction.commit().await?;
+        parse_node_update(&row)
+    }
+
+    pub async fn update_node_policy(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        node_id: AgentId,
+        policy: &NodeUpdatePolicy,
+        default_mode: &str,
+    ) -> Result<StoredNodeUpdate, StorageError> {
+        self.get_node_update(workspace_id, environment_id, node_id, default_mode)
+            .await?;
+        let affected = sqlx::query(
+            "UPDATE node_update_policies
+             SET channel = $4, mode = $5, pinned_version = $6,
+                 maintenance_window = $7, updated_at = now()
+             WHERE node_id = $1 AND workspace_id = $2 AND environment_id = $3",
+        )
+        .bind(node_id.to_string())
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(&policy.channel)
+        .bind(&policy.mode)
+        .bind(&policy.pinned_version)
+        .bind(&policy.maintenance_window)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        if affected != 1 {
+            return Err(StorageError::NotFound);
+        }
+        self.get_node_update(workspace_id, environment_id, node_id, default_mode)
+            .await
+    }
+
+    pub async fn request_node_update(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        node_id: AgentId,
+        version: &str,
+        default_mode: &str,
+    ) -> Result<StoredNodeUpdate, StorageError> {
+        self.get_node_update(workspace_id, environment_id, node_id, default_mode)
+            .await?;
+        let mut transaction = self.pool.begin().await?;
+        let current_version = sqlx::query_scalar::<_, String>(
+            "SELECT current_version FROM node_update_states
+             WHERE node_id = $1 AND workspace_id = $2 AND environment_id = $3
+             FOR UPDATE",
+        )
+        .bind(node_id.to_string())
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(StorageError::NotFound)?;
+        sqlx::query(
+            "UPDATE node_update_policies
+             SET desired_version = $4, updated_at = now()
+             WHERE node_id = $1 AND workspace_id = $2 AND environment_id = $3",
+        )
+        .bind(node_id.to_string())
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(version)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "UPDATE node_update_states
+             SET available_version = $4, state = 'requested',
+                 deferred_reason = NULL, last_error_code = NULL,
+                 last_checked_at = now(), updated_at = now()
+             WHERE node_id = $1 AND workspace_id = $2 AND environment_id = $3",
+        )
+        .bind(node_id.to_string())
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(version)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "INSERT INTO node_update_attempts (
+                id, node_id, workspace_id, environment_id, from_version,
+                to_version, state
+             ) VALUES ($1,$2,$3,$4,$5,$6,'requested')",
+        )
+        .bind(format!("nua_{}", ulid::Ulid::new()))
+        .bind(node_id.to_string())
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(current_version)
+        .bind(version)
+        .execute(&mut *transaction)
+        .await?;
+        let row = node_update_row(&mut transaction, workspace_id, environment_id, node_id).await?;
+        transaction.commit().await?;
+        parse_node_update(&row)
     }
 
     pub async fn list_printers(
@@ -1178,6 +1463,213 @@ impl PostgresStore {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    pub async fn create_device_authorization(
+        &self,
+        authorization: &NewDeviceAuthorization<'_>,
+    ) -> Result<StoredDeviceAuthorization, StorageError> {
+        sqlx::query(
+            "INSERT INTO device_authorizations (
+                id, device_code_hash, user_code_hash, user_code_display,
+                device_public_key, installation_id, proposed_name, hostname,
+                platform, architecture, installation_mode, agent_version,
+                protocol_version, expires_at
+             ) VALUES (
+                $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14
+             )",
+        )
+        .bind(authorization.id)
+        .bind(authorization.device_code_hash)
+        .bind(authorization.user_code_hash)
+        .bind(authorization.user_code_display)
+        .bind(authorization.device_public_key)
+        .bind(authorization.installation_id)
+        .bind(authorization.proposed_name)
+        .bind(authorization.hostname)
+        .bind(authorization.platform)
+        .bind(authorization.architecture)
+        .bind(authorization.installation_mode)
+        .bind(authorization.agent_version)
+        .bind(i32::from(authorization.protocol_version))
+        .bind(authorization.expires_at)
+        .execute(&self.pool)
+        .await?;
+        self.device_authorization_by_hash(authorization.device_code_hash)
+            .await
+    }
+
+    pub async fn device_authorization_by_hash(
+        &self,
+        device_code_hash: &str,
+    ) -> Result<StoredDeviceAuthorization, StorageError> {
+        let row = sqlx::query(
+            "UPDATE device_authorizations
+             SET state = 'expired'
+             WHERE device_code_hash = $1 AND state IN ('pending', 'approved')
+               AND expires_at <= now()
+             RETURNING id",
+        )
+        .bind(device_code_hash)
+        .fetch_optional(&self.pool)
+        .await?;
+        drop(row);
+        let row = sqlx::query(
+            "SELECT id, user_code_display, proposed_name, hostname, platform,
+                    architecture, state, expires_at, workspace_id, environment_id
+             FROM device_authorizations WHERE device_code_hash = $1",
+        )
+        .bind(device_code_hash)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(StorageError::NotFound)?;
+        parse_device_authorization(&row)
+    }
+
+    pub async fn device_authorization_by_id(
+        &self,
+        id: &str,
+    ) -> Result<StoredDeviceAuthorization, StorageError> {
+        sqlx::query(
+            "UPDATE device_authorizations
+             SET state = 'expired'
+             WHERE id = $1 AND state IN ('pending', 'approved')
+               AND expires_at <= now()",
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        let row = sqlx::query(
+            "SELECT id, user_code_display, proposed_name, hostname, platform,
+                    architecture, state, expires_at, workspace_id, environment_id
+             FROM device_authorizations WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(StorageError::NotFound)?;
+        parse_device_authorization(&row)
+    }
+
+    pub async fn approve_device_authorization(
+        &self,
+        id: &str,
+        user_code_hash: &str,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        approved_by: &str,
+    ) -> Result<StoredDeviceAuthorization, StorageError> {
+        let row = sqlx::query(
+            "UPDATE device_authorizations AS target
+             SET state = 'approved', workspace_id = $2, environment_id = $3,
+                 approved_by = $4, approved_at = now()
+             WHERE target.id = $1 AND target.user_code_hash = $5
+               AND target.state = 'pending'
+               AND target.expires_at > now()
+               AND EXISTS (
+                   SELECT 1 FROM environments environment
+                   WHERE environment.id = $3 AND environment.workspace_id = $2
+               )
+             RETURNING id, user_code_display, proposed_name, hostname, platform,
+                       architecture, state, expires_at, workspace_id, environment_id",
+        )
+        .bind(id)
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(approved_by)
+        .bind(user_code_hash)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(StorageError::NotFound)?;
+        parse_device_authorization(&row)
+    }
+
+    pub async fn deny_device_authorization(
+        &self,
+        id: &str,
+        user_code_hash: &str,
+    ) -> Result<StoredDeviceAuthorization, StorageError> {
+        let row = sqlx::query(
+            "UPDATE device_authorizations
+             SET state = 'denied', denied_at = now()
+             WHERE id = $1 AND user_code_hash = $2
+               AND state = 'pending' AND expires_at > now()
+             RETURNING id, user_code_display, proposed_name, hostname, platform,
+                       architecture, state, expires_at, workspace_id, environment_id",
+        )
+        .bind(id)
+        .bind(user_code_hash)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(StorageError::NotFound)?;
+        parse_device_authorization(&row)
+    }
+
+    pub async fn exchange_device_authorization(
+        &self,
+        device_code_hash: &str,
+    ) -> Result<EnrolledAgent, StorageError> {
+        let mut transaction = self.pool.begin().await?;
+        let row = sqlx::query(
+            "SELECT id, workspace_id, environment_id, device_public_key,
+                    installation_id, proposed_name, hostname, platform,
+                    architecture, agent_version, protocol_version
+             FROM device_authorizations
+             WHERE device_code_hash = $1 AND state = 'approved'
+               AND expires_at > now() AND consumed_at IS NULL
+             FOR UPDATE",
+        )
+        .bind(device_code_hash)
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(StorageError::NotFound)?;
+        let authorization_id: String = row.try_get("id")?;
+        let workspace_text: String = row.try_get("workspace_id")?;
+        let environment_text: String = row.try_get("environment_id")?;
+        let workspace_id: WorkspaceId = workspace_text.parse().map_err(|error| {
+            StorageError::InvalidData(format!("workspace id `{workspace_text}`: {error}"))
+        })?;
+        let environment_id: EnvironmentId = environment_text.parse().map_err(|error| {
+            StorageError::InvalidData(format!("environment id `{environment_text}`: {error}"))
+        })?;
+        let agent_id = AgentId::new();
+        sqlx::query(
+            "INSERT INTO agents (
+                id, workspace_id, environment_id, name, installation_id, public_key,
+                os, architecture, version, protocol_version, state, last_seen_at,
+                metadata
+             ) VALUES (
+                $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'offline',now(),
+                jsonb_build_object('hostname', $11::text, 'pairing', 'browser')
+             )",
+        )
+        .bind(agent_id.to_string())
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(row.try_get::<String, _>("proposed_name")?)
+        .bind(row.try_get::<String, _>("installation_id")?)
+        .bind(row.try_get::<Vec<u8>, _>("device_public_key")?)
+        .bind(row.try_get::<String, _>("platform")?)
+        .bind(row.try_get::<String, _>("architecture")?)
+        .bind(row.try_get::<String, _>("agent_version")?)
+        .bind(row.try_get::<i32, _>("protocol_version")?)
+        .bind(row.try_get::<String, _>("hostname")?)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "UPDATE device_authorizations
+             SET state = 'consumed', consumed_at = now()
+             WHERE id = $1 AND state = 'approved'",
+        )
+        .bind(authorization_id)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(EnrolledAgent {
+            agent_id,
+            workspace_id,
+            environment_id,
+        })
     }
 
     pub async fn enrol_agent(
@@ -2582,6 +3074,37 @@ fn parse_state(value: &str) -> Result<JobState, StorageError> {
         .map_err(|error| StorageError::InvalidData(format!("job state `{value}`: {error}")))
 }
 
+fn parse_device_authorization(row: &PgRow) -> Result<StoredDeviceAuthorization, StorageError> {
+    let workspace_id = row
+        .try_get::<Option<String>, _>("workspace_id")?
+        .map(|value| {
+            value.parse().map_err(|error| {
+                StorageError::InvalidData(format!("workspace id `{value}`: {error}"))
+            })
+        })
+        .transpose()?;
+    let environment_id = row
+        .try_get::<Option<String>, _>("environment_id")?
+        .map(|value| {
+            value.parse().map_err(|error| {
+                StorageError::InvalidData(format!("environment id `{value}`: {error}"))
+            })
+        })
+        .transpose()?;
+    Ok(StoredDeviceAuthorization {
+        id: row.try_get("id")?,
+        user_code: row.try_get("user_code_display")?,
+        proposed_name: row.try_get("proposed_name")?,
+        hostname: row.try_get("hostname")?,
+        platform: row.try_get("platform")?,
+        architecture: row.try_get("architecture")?,
+        state: row.try_get("state")?,
+        expires_at: row.try_get("expires_at")?,
+        workspace_id,
+        environment_id,
+    })
+}
+
 fn normalize_agent_state(value: &str) -> String {
     match value {
         "online" | "connected" => "connected",
@@ -2590,6 +3113,81 @@ fn normalize_agent_state(value: &str) -> String {
         _ => "disconnected",
     }
     .to_owned()
+}
+
+fn agent_from_row(row: &PgRow) -> Result<StoredAgent, StorageError> {
+    let id: String = row.try_get("id")?;
+    Ok(StoredAgent {
+        id: id
+            .parse()
+            .map_err(|error| StorageError::InvalidData(format!("agent id `{id}`: {error}")))?,
+        name: row.try_get("name")?,
+        platform: row.try_get("os")?,
+        state: normalize_agent_state(&row.try_get::<String, _>("state")?),
+        version: row.try_get("version")?,
+        last_seen_at: row.try_get("last_seen_at")?,
+    })
+}
+
+async fn node_update_row(
+    transaction: &mut Transaction<'_, Postgres>,
+    workspace_id: WorkspaceId,
+    environment_id: EnvironmentId,
+    node_id: AgentId,
+) -> Result<PgRow, StorageError> {
+    sqlx::query(
+        "SELECT policy.node_id, policy.channel, policy.mode,
+                policy.pinned_version, policy.maintenance_window,
+                state.current_version, state.available_version, state.state,
+                state.download_percent, state.deferred_reason,
+                state.last_checked_at, state.last_success_at,
+                state.last_error_code, state.rollback_version
+         FROM node_update_policies policy
+         JOIN node_update_states state ON state.node_id = policy.node_id
+         WHERE policy.node_id = $1
+           AND policy.workspace_id = $2 AND policy.environment_id = $3
+           AND state.workspace_id = $2 AND state.environment_id = $3",
+    )
+    .bind(node_id.to_string())
+    .bind(workspace_id.to_string())
+    .bind(environment_id.to_string())
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(StorageError::NotFound)
+}
+
+fn parse_node_update(row: &PgRow) -> Result<StoredNodeUpdate, StorageError> {
+    let node_id = row.try_get::<String, _>("node_id")?;
+    let download_percent = row
+        .try_get::<Option<i16>, _>("download_percent")?
+        .map(|value| {
+            u8::try_from(value).map_err(|error| {
+                StorageError::InvalidData(format!("invalid update percentage: {error}"))
+            })
+        })
+        .transpose()?;
+    Ok(StoredNodeUpdate {
+        node_id: node_id
+            .parse()
+            .map_err(|error| StorageError::InvalidData(format!("node id `{node_id}`: {error}")))?,
+        policy: NodeUpdatePolicy {
+            channel: row.try_get("channel")?,
+            mode: row.try_get("mode")?,
+            pinned_version: row.try_get("pinned_version")?,
+            maintenance_window: row.try_get("maintenance_window")?,
+        },
+        status: NodeUpdateState {
+            current_version: row.try_get("current_version")?,
+            available_version: row.try_get("available_version")?,
+            state: row.try_get("state")?,
+            download_percent,
+            deferred_reason: row.try_get("deferred_reason")?,
+            last_checked_at: row.try_get("last_checked_at")?,
+            last_success_at: row.try_get("last_success_at")?,
+            last_error_code: row.try_get("last_error_code")?,
+            rollback_version: row.try_get("rollback_version")?,
+        },
+    })
 }
 
 fn printer_from_row(row: &PgRow) -> Result<StoredPrinter, StorageError> {

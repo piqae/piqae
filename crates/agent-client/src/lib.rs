@@ -10,7 +10,8 @@ use spool_domain::{AgentId, JobId};
 use spool_protocol::agent::{
     AgentAcceptJobRequest, AgentAcceptJobResponse, AgentReleaseLeaseRequest,
     AgentRenewLeaseRequest, AgentRenewLeaseResponse, AgentSyncRequest, AgentSyncResponse,
-    EnrolRequest, EnrolResponse,
+    CreateDeviceAuthorizationRequest, CreatedDeviceAuthorization, DeviceAuthorizationExchange,
+    DeviceAuthorizationStatus, EnrolRequest, EnrolResponse,
 };
 use std::time::Duration;
 use thiserror::Error;
@@ -33,6 +34,8 @@ pub enum ClientError {
     Status { status: u16, body: String },
     #[error("control-plane response exceeds {MAX_RESPONSE_BYTES} bytes")]
     ResponseTooLarge,
+    #[error("device authorization request failed")]
+    DeviceAuthorization,
 }
 
 #[derive(Debug)]
@@ -152,6 +155,51 @@ impl AgentClient {
     /// response-decoding failure.
     pub async fn enrol(&self, request: &EnrolRequest) -> Result<EnrolResponse, ClientError> {
         self.post_json("v1/agents/enrol", request, None).await
+    }
+
+    /// Starts a ten-minute browser authorization without sending the private key.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for serialization, transport, status, size, or decoding failures.
+    pub async fn create_device_authorization(
+        &self,
+        request: &CreateDeviceAuthorizationRequest,
+    ) -> Result<CreatedDeviceAuthorization, ClientError> {
+        self.post_json("v1/device-authorizations", request, None)
+            .await
+    }
+
+    /// Polls one device authorization without exposing its code in error values.
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted device-authorization error when polling fails.
+    pub async fn device_authorization_status(
+        &self,
+        device_code: &str,
+    ) -> Result<DeviceAuthorizationStatus, ClientError> {
+        self.get_json(&format!("v1/device-authorizations/{device_code}"), None)
+            .await
+            .map_err(|_| ClientError::DeviceAuthorization)
+    }
+
+    /// Exchanges one approved device authorization for its assigned node identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted device-authorization error when exchange fails.
+    pub async fn exchange_device_authorization(
+        &self,
+        device_code: &str,
+    ) -> Result<DeviceAuthorizationExchange, ClientError> {
+        self.post_json(
+            &format!("v1/device-authorizations/{device_code}/exchange"),
+            &serde_json::json!({}),
+            None,
+        )
+        .await
+        .map_err(|_| ClientError::DeviceAuthorization)
     }
 
     /// Performs one signed, resumable long-poll synchronization request.
@@ -292,6 +340,38 @@ impl AgentClient {
                 "POST",
                 &request_path,
                 &body,
+                Utc::now().timestamp_millis(),
+                Uuid::new_v4(),
+            )?);
+        }
+        let response = builder.send().await?;
+        let status = response.status();
+        let bytes = response.bytes().await?;
+        if bytes.len() > MAX_RESPONSE_BYTES {
+            return Err(ClientError::ResponseTooLarge);
+        }
+        if !status.is_success() {
+            return Err(ClientError::Status {
+                status: status.as_u16(),
+                body: String::from_utf8_lossy(&bytes).chars().take(1024).collect(),
+            });
+        }
+        Ok(serde_json::from_slice(&bytes)?)
+    }
+
+    async fn get_json<Res: serde::de::DeserializeOwned>(
+        &self,
+        path: &str,
+        identity: Option<&DeviceIdentity>,
+    ) -> Result<Res, ClientError> {
+        let url = self.base_url.join(path)?;
+        let request_path = format!("/{}", path.trim_start_matches('/'));
+        let mut builder = self.client.get(url);
+        if let Some(identity) = identity {
+            builder = builder.headers(identity.signed_headers(
+                "GET",
+                &request_path,
+                &[],
                 Utc::now().timestamp_millis(),
                 Uuid::new_v4(),
             )?);

@@ -171,4 +171,29 @@ describe('SpoolClient', () => {
     expect(String(revokeUrl)).toBe('https://print.example.test/v1/api-keys/key_1');
     expect(revokeInit?.method).toBe('DELETE');
   });
+
+  it('uses canonical node routes and keeps pairing codes out of query strings', async () => {
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ id: 'node_1', name: 'Packing' })))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ id: 'dva_1', state: 'approved', expires_at: 'later' }))
+      );
+    const client = new SpoolClient({
+      apiKey: 'spl_live_manager',
+      fetch: fetcher,
+      baseUrl: 'https://print.example.test'
+    });
+
+    await client.nodes.rename('node_1', 'Packing');
+    await client.pairing.approve('dva_1', 'ABCD-EFGH');
+
+    expect(String(fetcher.mock.calls[0]?.[0])).toBe(
+      'https://print.example.test/v1/nodes/node_1'
+    );
+    expect(JSON.parse(String(fetcher.mock.calls[1]?.[1]?.body))).toEqual({
+      user_code: 'ABCD-EFGH'
+    });
+    expect(String(fetcher.mock.calls[1]?.[0])).not.toContain('ABCD-EFGH');
+  });
 });

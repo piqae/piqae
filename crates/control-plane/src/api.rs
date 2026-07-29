@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use spool_auth::{Environment, Scope, generate_api_key};
 use spool_domain::{
-    ContentKind, ContentSource, Job, JobEvent, JobId, JobOptions, JobState, PrinterId,
+    AgentId, ContentKind, ContentSource, Job, JobEvent, JobId, JobOptions, JobState, PrinterId,
 };
 use spool_object_store::digest_hex;
 use spool_protocol::agent::{
@@ -49,6 +49,10 @@ pub async fn health() -> Json<HealthResponse> {
         status: "ok",
         version: env!("CARGO_PKG_VERSION"),
     })
+}
+
+pub async fn meta(State(state): State<AppState>) -> Json<crate::DeploymentCapabilities> {
+    Json(state.capabilities)
 }
 
 pub async fn ready(State(state): State<AppState>) -> Result<Json<HealthResponse>, AppError> {
@@ -174,6 +178,165 @@ pub async fn list_agents(
             .list_agents(tenant.workspace_id, tenant.environment_id)
             .await?,
     ))
+}
+
+pub async fn get_node(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(node_id): Path<AgentId>,
+) -> Result<Json<StoredAgent>, AppError> {
+    let tenant = authenticate_native(&state, &headers, Scope::AgentsRead).await?;
+    Ok(Json(
+        state
+            .repository
+            .get_agent(tenant.workspace_id, tenant.environment_id, node_id)
+            .await?,
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PatchNodeRequest {
+    name: Option<String>,
+}
+
+pub async fn patch_node(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(node_id): Path<AgentId>,
+    Json(request): Json<PatchNodeRequest>,
+) -> Result<Json<StoredAgent>, AppError> {
+    let tenant = authenticate_native(&state, &headers, Scope::AgentsWrite).await?;
+    let name = request.name.as_deref().map(str::trim).ok_or_else(|| {
+        AppError::invalid("invalid_node", "A node name is required for this update.")
+    })?;
+    if name.is_empty() || name.chars().count() > 120 {
+        return Err(AppError::invalid(
+            "invalid_node",
+            "The node name is outside the supported limits.",
+        ));
+    }
+    let node = state
+        .repository
+        .rename_agent(tenant.workspace_id, tenant.environment_id, node_id, name)
+        .await?;
+    state.publish(tenant, "node.updated", &node).await?;
+    Ok(Json(node))
+}
+
+pub async fn delete_node(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(node_id): Path<AgentId>,
+) -> Result<StatusCode, AppError> {
+    let tenant = authenticate_native(&state, &headers, Scope::AgentsWrite).await?;
+    state
+        .repository
+        .revoke_agent(tenant.workspace_id, tenant.environment_id, node_id)
+        .await?;
+    state
+        .publish(
+            tenant,
+            "node.revoked",
+            &serde_json::json!({"node_id": node_id}),
+        )
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn pause_node(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(node_id): Path<AgentId>,
+) -> Result<StatusCode, AppError> {
+    enqueue_node_command(
+        &state,
+        &headers,
+        node_id,
+        spool_protocol::agent::AgentCommand::Pause,
+    )
+    .await
+}
+
+pub async fn resume_node(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(node_id): Path<AgentId>,
+) -> Result<StatusCode, AppError> {
+    enqueue_node_command(
+        &state,
+        &headers,
+        node_id,
+        spool_protocol::agent::AgentCommand::Resume,
+    )
+    .await
+}
+
+#[derive(Debug, Serialize)]
+pub struct DiagnosticsRequestResponse {
+    request_id: String,
+    state: &'static str,
+}
+
+pub async fn request_node_diagnostics(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(node_id): Path<AgentId>,
+) -> Result<Response, AppError> {
+    let tenant = authenticate_native(&state, &headers, Scope::AgentsWrite).await?;
+    state
+        .repository
+        .get_agent(tenant.workspace_id, tenant.environment_id, node_id)
+        .await?;
+    let request_id = format!("diag_{}", ulid::Ulid::new());
+    state
+        .repository
+        .enqueue_agent_command(
+            tenant.workspace_id,
+            tenant.environment_id,
+            node_id,
+            &spool_protocol::agent::AgentCommand::CollectDiagnostics {
+                request_id: request_id.clone(),
+            },
+        )
+        .await?;
+    state
+        .publish(
+            tenant,
+            "node.diagnostics.requested",
+            &serde_json::json!({"node_id": node_id, "request_id": request_id}),
+        )
+        .await?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(DiagnosticsRequestResponse {
+            request_id,
+            state: "requested",
+        }),
+    )
+        .into_response())
+}
+
+async fn enqueue_node_command(
+    state: &AppState,
+    headers: &HeaderMap,
+    node_id: AgentId,
+    command: spool_protocol::agent::AgentCommand,
+) -> Result<StatusCode, AppError> {
+    let tenant = authenticate_native(state, headers, Scope::AgentsWrite).await?;
+    state
+        .repository
+        .get_agent(tenant.workspace_id, tenant.environment_id, node_id)
+        .await?;
+    state
+        .repository
+        .enqueue_agent_command(
+            tenant.workspace_id,
+            tenant.environment_id,
+            node_id,
+            &command,
+        )
+        .await?;
+    Ok(StatusCode::ACCEPTED)
 }
 
 pub async fn list_printers(

@@ -5,9 +5,11 @@ pub mod authentication;
 pub mod compatibility;
 pub mod device_auth;
 pub mod error;
+pub mod pairing;
 pub mod repository;
 pub mod request_id;
 pub mod routing;
+pub mod updates;
 pub mod webhook_worker;
 
 use authentication::{Authenticator, TenantContext};
@@ -40,6 +42,7 @@ pub struct AppState {
     pub events: broadcast::Sender<PublishedEvent>,
     pub webhook_secrets: Arc<WebhookSecretBox>,
     pub object_store: Arc<dyn ObjectStore>,
+    pub capabilities: DeploymentCapabilities,
 }
 
 impl fmt::Debug for AppState {
@@ -90,7 +93,14 @@ impl AppState {
             events,
             webhook_secrets: Arc::new(WebhookSecretBox::new(webhook_key)),
             object_store,
+            capabilities: DeploymentCapabilities::default(),
         }
+    }
+
+    #[must_use]
+    pub fn with_capabilities(mut self, capabilities: DeploymentCapabilities) -> Self {
+        self.capabilities = capabilities;
+        self
     }
 
     /// Persists a tenant webhook event and broadcasts it to live subscribers.
@@ -125,10 +135,58 @@ impl AppState {
     }
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct DeploymentCapabilities {
+    pub deployment: String,
+    pub version: &'static str,
+    pub auth: AuthCapabilities,
+    pub billing: BillingCapabilities,
+    pub updates: UpdateCapabilities,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct AuthCapabilities {
+    pub provider: String,
+    pub workspace_switching: bool,
+    pub invitations: bool,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+pub struct BillingCapabilities {
+    pub enabled: bool,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+pub struct UpdateCapabilities {
+    pub official_feed: bool,
+    pub custom_feed: bool,
+}
+
+impl Default for DeploymentCapabilities {
+    fn default() -> Self {
+        Self {
+            deployment: "self_hosted".into(),
+            version: env!("CARGO_PKG_VERSION"),
+            auth: AuthCapabilities {
+                provider: "local_owner".into(),
+                workspace_switching: false,
+                invitations: false,
+            },
+            billing: BillingCapabilities { enabled: false },
+            updates: UpdateCapabilities {
+                official_feed: true,
+                custom_feed: true,
+            },
+        }
+    }
+}
+
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/v1/health", get(api::health))
         .route("/v1/ready", get(api::ready))
+        .route("/v1/meta", get(api::meta))
+        .merge(pairing_router())
         .route(
             "/v1/api-keys",
             get(api::list_api_keys).post(api::create_api_key),
@@ -138,6 +196,7 @@ pub fn router(state: AppState) -> Router {
             axum::routing::delete(api::revoke_api_key),
         )
         .route("/v1/agents", get(api::list_agents))
+        .merge(node_operator_router())
         .route("/v1/printers", get(api::list_printers))
         .route(
             "/v1/stocks",
@@ -224,6 +283,57 @@ pub fn router(state: AppState) -> Router {
         .layer(CompressionLayer::new())
         .layer(middleware::from_fn(request_id::middleware))
         .with_state(state)
+}
+
+fn pairing_router() -> Router<AppState> {
+    Router::new()
+        .route("/v1/device-authorizations", post(pairing::create))
+        .route(
+            "/v1/device-authorizations/{device_code}",
+            get(pairing::status),
+        )
+        .route(
+            "/v1/device-authorizations/{authorization_id}/review",
+            get(pairing::review),
+        )
+        .route(
+            "/v1/device-authorizations/{authorization_id}/approve",
+            post(pairing::approve),
+        )
+        .route(
+            "/v1/device-authorizations/{authorization_id}/deny",
+            post(pairing::deny),
+        )
+        .route(
+            "/v1/device-authorizations/{device_code}/exchange",
+            post(pairing::exchange),
+        )
+}
+
+fn node_operator_router() -> Router<AppState> {
+    Router::new()
+        .route("/v1/nodes", get(api::list_agents))
+        .route(
+            "/v1/nodes/{node_id}",
+            get(api::get_node)
+                .patch(api::patch_node)
+                .delete(api::delete_node),
+        )
+        .route("/v1/nodes/{node_id}/pause", post(api::pause_node))
+        .route("/v1/nodes/{node_id}/resume", post(api::resume_node))
+        .route(
+            "/v1/nodes/{node_id}/diagnostics",
+            post(api::request_node_diagnostics),
+        )
+        .route(
+            "/v1/nodes/{node_id}/update",
+            get(updates::get).post(updates::request),
+        )
+        .route(
+            "/v1/nodes/{node_id}/update-policy",
+            axum::routing::patch(updates::patch_policy),
+        )
+        .route("/v1/nodes/{node_id}/rollback", post(updates::rollback))
 }
 
 fn compatibility_router() -> Router<AppState> {

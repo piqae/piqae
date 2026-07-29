@@ -26,7 +26,9 @@ tags:
   - name: Routing
     description: Manage stocks and stable profile-backed print targets.
   - name: Agents
-    description: Enrol and observe local Spool agents.
+    description: Deprecated V1 aliases for local Spool nodes.
+  - name: Nodes
+    description: Pair, observe, operate, and update computers running Spool.
   - name: Events
     description: Consume immutable state changes.
   - name: Webhooks
@@ -398,6 +400,130 @@ paths:
                 $ref: "#/components/schemas/Health"
         "503":
           $ref: "#/components/responses/Error"
+  /v1/meta:
+    get:
+      summary: Discover deployment capabilities
+      tags: [Nodes]
+      operationId: getDeploymentMeta
+      security: []
+      responses:
+        "200":
+          description: Capability flags used by the shared cloud and self-hosted dashboard.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DeploymentMeta" }
+  /v1/device-authorizations:
+    post:
+      summary: Start browser pairing for a node
+      tags: [Nodes]
+      operationId: createDeviceAuthorization
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateDeviceAuthorization" }
+      responses:
+        "201":
+          description: Ten-minute, single-use device and human codes.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CreatedDeviceAuthorization" }
+        "400": { $ref: "#/components/responses/Error" }
+  /v1/device-authorizations/{device_code}:
+    parameters:
+      - name: device_code
+        in: path
+        required: true
+        schema: { type: string, pattern: '^spl_dev_' }
+    get:
+      summary: Poll browser-pairing state
+      tags: [Nodes]
+      operationId: getDeviceAuthorization
+      security: []
+      responses:
+        "200":
+          description: Current authorization state without workspace details.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DeviceAuthorizationStatus" }
+        "404": { $ref: "#/components/responses/Error" }
+  /v1/device-authorizations/{authorization_id}/approve:
+    parameters:
+      - $ref: "#/components/parameters/DeviceAuthorizationId"
+    post:
+      summary: Approve a node into the caller's workspace and environment
+      tags: [Nodes]
+      operationId: approveDeviceAuthorization
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DecideDeviceAuthorization" }
+      responses:
+        "200":
+          description: Pairing approved.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DeviceAuthorizationStatus" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /v1/device-authorizations/{authorization_id}/review:
+    parameters:
+      - $ref: "#/components/parameters/DeviceAuthorizationId"
+    get:
+      summary: Review a pending node before browser approval
+      tags: [Nodes]
+      operationId: reviewDeviceAuthorization
+      responses:
+        "200":
+          description: Non-secret device details for an authenticated pairing operator.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DeviceAuthorizationReview" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /v1/device-authorizations/{authorization_id}/deny:
+    parameters:
+      - $ref: "#/components/parameters/DeviceAuthorizationId"
+    post:
+      summary: Deny a browser-pairing request
+      tags: [Nodes]
+      operationId: denyDeviceAuthorization
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DecideDeviceAuthorization" }
+      responses:
+        "200":
+          description: Pairing denied.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DeviceAuthorizationStatus" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /v1/device-authorizations/{device_code}/exchange:
+    parameters:
+      - name: device_code
+        in: path
+        required: true
+        schema: { type: string, pattern: '^spl_dev_' }
+    post:
+      summary: Exchange one approved device code for node identity
+      tags: [Nodes]
+      operationId: exchangeDeviceAuthorization
+      security: []
+      responses:
+        "200":
+          description: Node identity assignment. The private device key never leaves the node.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DeviceAuthorizationExchange" }
+        "404": { $ref: "#/components/responses/Error" }
   /v1/api-keys:
     get:
       summary: List API key metadata for the current environment
@@ -807,6 +933,185 @@ paths:
           $ref: "#/components/responses/Error"
         "403":
           $ref: "#/components/responses/Error"
+  /v1/nodes:
+    get:
+      summary: List nodes
+      tags: [Nodes]
+      operationId: listNodes
+      responses:
+        "200":
+          description: Nodes visible in the active environment.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Agent" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+  /v1/nodes/{node_id}:
+    parameters:
+      - $ref: "#/components/parameters/NodeId"
+    get:
+      summary: Get a node
+      tags: [Nodes]
+      operationId: getNode
+      responses:
+        "200":
+          description: Node details.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Agent" }
+        "404": { $ref: "#/components/responses/Error" }
+    patch:
+      summary: Rename a node
+      tags: [Nodes]
+      operationId: patchNode
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [name]
+              properties:
+                name: { type: string, minLength: 1, maxLength: 120 }
+      responses:
+        "200":
+          description: Updated node.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Agent" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+    delete:
+      summary: Revoke a node and its device key
+      tags: [Nodes]
+      operationId: deleteNode
+      responses:
+        "204": { description: Node revoked. }
+        "404": { $ref: "#/components/responses/Error" }
+  /v1/nodes/{node_id}/pause:
+    parameters:
+      - $ref: "#/components/parameters/NodeId"
+    post:
+      summary: Durably request node pause
+      tags: [Nodes]
+      operationId: pauseNode
+      responses:
+        "202": { description: Command queued. }
+        "404": { $ref: "#/components/responses/Error" }
+  /v1/nodes/{node_id}/resume:
+    parameters:
+      - $ref: "#/components/parameters/NodeId"
+    post:
+      summary: Durably request node resume
+      tags: [Nodes]
+      operationId: resumeNode
+      responses:
+        "202": { description: Command queued. }
+        "404": { $ref: "#/components/responses/Error" }
+  /v1/nodes/{node_id}/diagnostics:
+    parameters:
+      - $ref: "#/components/parameters/NodeId"
+    post:
+      summary: Request redacted local diagnostics
+      tags: [Nodes]
+      operationId: requestNodeDiagnostics
+      responses:
+        "202":
+          description: Diagnostic collection requested.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [request_id, state]
+                properties:
+                  request_id: { type: string, pattern: '^diag_' }
+                  state: { const: requested }
+        "404": { $ref: "#/components/responses/Error" }
+  /v1/nodes/{node_id}/update:
+    parameters:
+      - $ref: "#/components/parameters/NodeId"
+    get:
+      summary: Get node update policy and state
+      tags: [Nodes]
+      operationId: getNodeUpdate
+      responses:
+        "200":
+          description: Update projection.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NodeUpdate" }
+        "404": { $ref: "#/components/responses/Error" }
+    post:
+      summary: Request a signed node update
+      tags: [Nodes]
+      operationId: requestNodeUpdate
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [version, metadata_url]
+              properties:
+                version: { type: string, maxLength: 64 }
+                metadata_url: { type: string, format: uri }
+      responses:
+        "202":
+          description: Update command queued.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NodeUpdate" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /v1/nodes/{node_id}/update-policy:
+    parameters:
+      - $ref: "#/components/parameters/NodeId"
+    patch:
+      summary: Replace node update policy
+      tags: [Nodes]
+      operationId: patchNodeUpdatePolicy
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/NodeUpdatePolicy" }
+      responses:
+        "200":
+          description: Updated policy and state.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NodeUpdate" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /v1/nodes/{node_id}/rollback:
+    parameters:
+      - $ref: "#/components/parameters/NodeId"
+    post:
+      summary: Request rollback to the locally retained verified version
+      tags: [Nodes]
+      operationId: rollbackNode
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [metadata_url]
+              properties:
+                metadata_url: { type: string, format: uri }
+      responses:
+        "202":
+          description: Rollback command queued.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NodeUpdate" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
   /v1/agent-enrolments:
     post:
       summary: Create a single-use agent enrolment
@@ -1402,6 +1707,20 @@ components:
       schema:
         type: string
         pattern: ^whd_[0-9A-HJKMNP-TV-Z]{26}$
+    NodeId:
+      name: node_id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: ^agt_[0-9A-HJKMNP-TV-Z]{26}$
+    DeviceAuthorizationId:
+      name: authorization_id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: ^dva_[0-9A-HJKMNP-TV-Z]{26}$
     LeaseIdHeader:
       name: x-spool-lease-id
       in: header
@@ -1527,6 +1846,127 @@ components:
           enum: [ok]
         version:
           type: string
+    DeploymentMeta:
+      type: object
+      additionalProperties: false
+      required: [deployment, version, auth, billing, updates]
+      properties:
+        deployment: { type: string, enum: [cloud, self_hosted, local] }
+        version: { type: string }
+        auth:
+          type: object
+          additionalProperties: false
+          required: [provider, workspace_switching, invitations]
+          properties:
+            provider: { type: string, enum: [workos, local_owner, oidc, hybrid, none] }
+            workspace_switching: { type: boolean }
+            invitations: { type: boolean }
+        billing:
+          type: object
+          additionalProperties: false
+          required: [enabled]
+          properties:
+            enabled: { type: boolean }
+        updates:
+          type: object
+          additionalProperties: false
+          required: [official_feed, custom_feed]
+          properties:
+            official_feed: { type: boolean }
+            custom_feed: { type: boolean }
+    CreateDeviceAuthorization:
+      type: object
+      additionalProperties: false
+      required:
+        [public_key, installation_id, proposed_name, hostname, platform, architecture, installation_mode, agent_version, protocol_version]
+      properties:
+        public_key: { type: string, contentEncoding: base64url }
+        installation_id: { type: string, minLength: 1, maxLength: 160 }
+        proposed_name: { type: string, minLength: 1, maxLength: 120 }
+        hostname: { type: string, minLength: 1, maxLength: 255 }
+        platform: { type: string, minLength: 1, maxLength: 40 }
+        architecture: { type: string, minLength: 1, maxLength: 40 }
+        installation_mode: { type: string, enum: [user, machine, local] }
+        agent_version: { type: string, minLength: 1, maxLength: 40 }
+        protocol_version: { type: integer, minimum: 1 }
+    CreatedDeviceAuthorization:
+      type: object
+      additionalProperties: false
+      required: [id, device_code, user_code, verification_uri, expires_in, interval]
+      properties:
+        id: { type: string, pattern: '^dva_' }
+        device_code: { type: string, pattern: '^spl_dev_' }
+        user_code: { type: string, pattern: '^[2-9A-HJ-NP-Z]{4}-[2-9A-HJ-NP-Z]{4}$' }
+        verification_uri: { type: string }
+        expires_in: { type: integer, const: 600 }
+        interval: { type: integer, minimum: 1 }
+    DecideDeviceAuthorization:
+      type: object
+      additionalProperties: false
+      required: [user_code]
+      properties:
+        user_code: { type: string, pattern: '^[2-9A-HJ-NP-Z]{4}-?[2-9A-HJ-NP-Z]{4}$' }
+    DeviceAuthorizationStatus:
+      type: object
+      additionalProperties: false
+      required: [id, state, expires_at]
+      properties:
+        id: { type: string, pattern: '^dva_' }
+        state: { type: string, enum: [pending, approved, denied, consumed, expired] }
+        expires_at: { type: string, format: date-time }
+    DeviceAuthorizationReview:
+      type: object
+      additionalProperties: false
+      required: [id, proposed_name, hostname, platform, architecture, state, expires_at]
+      properties:
+        id: { type: string, pattern: '^dva_' }
+        proposed_name: { type: string }
+        hostname: { type: string }
+        platform: { type: string }
+        architecture: { type: string }
+        state: { type: string, enum: [pending, approved, denied, consumed, expired] }
+        expires_at: { type: string, format: date-time }
+    DeviceAuthorizationExchange:
+      type: object
+      additionalProperties: false
+      required: [node_id, workspace_id, environment_id, server_time, sync_after_ms]
+      properties:
+        node_id: { type: string }
+        workspace_id: { type: string }
+        environment_id: { type: string }
+        server_time: { type: string, format: date-time }
+        sync_after_ms: { type: integer, minimum: 0 }
+    NodeUpdatePolicy:
+      type: object
+      additionalProperties: false
+      required: [channel, mode, pinned_version, maintenance_window]
+      properties:
+        channel: { type: string, enum: [stable, canary, pinned] }
+        mode: { type: string, enum: [automatic, prompt, disabled] }
+        pinned_version: { type: [string, "null"], maxLength: 64 }
+        maintenance_window: { type: [object, "null"] }
+    NodeUpdateState:
+      type: object
+      required:
+        [current_version, available_version, state, download_percent, deferred_reason, last_checked_at, last_success_at, last_error_code, rollback_version]
+      properties:
+        current_version: { type: string }
+        available_version: { type: [string, "null"] }
+        state: { type: string }
+        download_percent: { type: [integer, "null"], minimum: 0, maximum: 100 }
+        deferred_reason: { type: [string, "null"] }
+        last_checked_at: { type: [string, "null"], format: date-time }
+        last_success_at: { type: [string, "null"], format: date-time }
+        last_error_code: { type: [string, "null"] }
+        rollback_version: { type: [string, "null"] }
+    NodeUpdate:
+      type: object
+      additionalProperties: false
+      required: [node_id, policy, status]
+      properties:
+        node_id: { type: string }
+        policy: { $ref: "#/components/schemas/NodeUpdatePolicy" }
+        status: { $ref: "#/components/schemas/NodeUpdateState" }
     ApiKeyScope:
       type: string
       enum:
