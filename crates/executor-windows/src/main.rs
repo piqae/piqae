@@ -154,16 +154,20 @@ mod platform {
             ExecutorOperation::Submit {
                 job_id,
                 native_printer_id,
-                title: _,
+                title,
                 content_kind: ContentKind::Pdf,
                 content_path,
                 options,
                 native_profile,
             } => {
-                if native_profile.is_some() {
-                    Err(native_profile_backend_unavailable(
-                        "Windows native profile replay requires the PDFium/GDI backend; the Sumatra fallback cannot apply DEVMODE profiles",
-                    ))
+                if let Some(profile) = native_profile.as_ref() {
+                    spool_executor_windows::windows_replay::submit_native_pdf(
+                        &native_printer_id,
+                        &title,
+                        &content_path,
+                        &options,
+                        profile,
+                    )
                 } else {
                     submit_pdf_helper(job_id, &native_printer_id, &content_path, &options)
                 }

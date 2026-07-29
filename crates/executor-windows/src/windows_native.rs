@@ -83,6 +83,48 @@ pub fn current_fingerprint(
     fingerprint(&printer, native_printer_id)
 }
 
+/// Revalidates the immutable capture against the currently installed queue and
+/// asks the same vendor driver to normalize the DEVMODE. A byte change means
+/// the saved private settings no longer have their original meaning, so replay
+/// fails closed and requires a new profile revision.
+pub fn revalidate_profile_devmode(
+    native_printer_id: &str,
+    capture: &WindowsNativeProfileCapture,
+) -> Result<Vec<u8>, NativeProfileError> {
+    let printer = PrinterHandle::open(native_printer_id)?;
+    let current = fingerprint(&printer, native_printer_id)?;
+    if let Some(error) = capture.fingerprint.compatibility_error(&current) {
+        return Err(error);
+    }
+    let captured = capture.validate_envelope()?;
+    let normalized = normalize_bytes(&printer, native_printer_id, &captured)?;
+    if normalized != captured {
+        return Err(NativeProfileError::new(
+            "devmode_normalization_changed",
+            "the installed driver changed the captured DEVMODE; create and test a new profile revision before printing",
+        ));
+    }
+    Ok(normalized)
+}
+
+/// Normalizes explicitly permitted public-field overrides while retaining the
+/// captured vendor-private data. Driver identity is checked again so a queue
+/// update between profile validation and submission cannot silently reinterpret
+/// the opaque bytes.
+pub fn normalize_replay_devmode(
+    native_printer_id: &str,
+    capture: &WindowsNativeProfileCapture,
+    candidate: &[u8],
+) -> Result<Vec<u8>, NativeProfileError> {
+    validate_devmode_bytes(candidate)?;
+    let printer = PrinterHandle::open(native_printer_id)?;
+    let current = fingerprint(&printer, native_printer_id)?;
+    if let Some(error) = capture.fingerprint.compatibility_error(&current) {
+        return Err(error);
+    }
+    normalize_bytes(&printer, native_printer_id, candidate)
+}
+
 struct PrinterHandle(HANDLE);
 
 impl PrinterHandle {

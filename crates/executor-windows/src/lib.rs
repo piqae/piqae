@@ -9,3 +9,6 @@ pub mod replay;
 
 #[cfg(windows)]
 pub mod windows_native;
+
+#[cfg(windows)]
+pub mod windows_replay;
