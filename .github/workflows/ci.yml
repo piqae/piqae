@@ -28,12 +28,12 @@ jobs:
           components: rustfmt,clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all -- --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --workspace
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo test --workspace --locked
       - if: runner.os == 'Linux'
-        run: cargo clippy -p spool-control-plane --all-targets --features otlp -- -D warnings
+        run: cargo clippy -p spool-control-plane --all-targets --features otlp --locked -- -D warnings
       - if: runner.os == 'Linux'
-        run: cargo test -p spool-control-plane --features otlp
+        run: cargo test -p spool-control-plane --features otlp --locked
 
   web:
     name: Web and SDK
