@@ -16,6 +16,12 @@ interface LocalProfile {
   options: JobOptions;
 }
 
+function isA4Paper(value: string): boolean {
+  return /^(?:(?:iso[_ -])?a4(?:[._-](?:210x297(?:mm)?|fullbleed))?|210x297(?:mm)?)$/i.test(
+    value.trim()
+  );
+}
+
 export const POST: RequestHandler = async (event) => {
   if (dashboardMode() !== 'live') {
     return Response.json(
@@ -61,10 +67,7 @@ export const POST: RequestHandler = async (event) => {
       );
     }
     const paper = profile.options.paper;
-    const a4Compatible =
-      !paper ||
-      /(^|[^a-z0-9])a4([^a-z0-9]|$)/i.test(paper) ||
-      paper.toLowerCase().includes('iso_a4');
+    const a4Compatible = !paper || isA4Paper(paper);
     if (!a4Compatible) {
       return Response.json(
         {

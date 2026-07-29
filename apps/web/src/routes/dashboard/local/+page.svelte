@@ -142,6 +142,7 @@
   let refreshing = $state(false);
   let pending = $state('');
   let errorMessage = $state<string | null>(null);
+  let actionError = $state<string | null>(null);
   let notice = $state<string | null>(null);
   let confirmationOpen = $state(false);
   let confirmed = $state(false);
@@ -167,9 +168,7 @@
     selectedProfiles.find((profile) => profile.profile_id === selectedProfileId) ?? null
   );
   const selectedProfileA4Compatible = $derived(
-    !selectedProfile?.options.paper ||
-      /(^|[^a-z0-9])a4([^a-z0-9]|$)/i.test(selectedProfile.options.paper) ||
-      selectedProfile.options.paper.toLowerCase().includes('iso_a4')
+    !selectedProfile?.options.paper || isA4Paper(selectedProfile.options.paper)
   );
   const exposedCount = $derived(printers.filter((printer) => printer.exposed).length);
   const portableNativeKeys = new Set([
@@ -193,6 +192,12 @@
 
   function isAdvancedNativeOption(key: string): boolean {
     return !portableNativeKeys.has(key.toLowerCase().replaceAll(/[^a-z0-9]/g, ''));
+  }
+
+  function isA4Paper(value: string): boolean {
+    return /^(?:(?:iso[_ -])?a4(?:[._-](?:210x297(?:mm)?|fullbleed))?|210x297(?:mm)?)$/i.test(
+      value.trim()
+    );
   }
 
   function displayError(value: unknown, fallback: string): string {
@@ -287,14 +292,14 @@
   async function setPaused(paused: boolean) {
     if (demo) return;
     notice = null;
-    errorMessage = null;
+    actionError = null;
     pending = paused ? 'pause' : 'resume';
     try {
       await jsonRequest(`/api/local/${paused ? 'pause' : 'resume'}`, { method: 'POST' });
       await refresh();
       notice = paused ? 'Local pickup paused.' : 'Local pickup resumed.';
     } catch (error) {
-      errorMessage = error instanceof Error ? error.message : 'The node could not be updated.';
+      actionError = error instanceof Error ? error.message : 'The node could not be updated.';
     } finally {
       pending = '';
     }
@@ -303,7 +308,7 @@
   async function setExposure(printer: Printer) {
     if (demo) return;
     notice = null;
-    errorMessage = null;
+    actionError = null;
     pending = `exposure:${printer.printer_id}`;
     try {
       await jsonRequest(`/api/local/printers/${encodeURIComponent(printer.printer_id)}/exposure`, {
@@ -313,7 +318,7 @@
       await refresh();
       notice = printer.exposed ? `${printer.name} is hidden.` : `${printer.name} is exposed.`;
     } catch (error) {
-      errorMessage = error instanceof Error ? error.message : 'Exposure could not be changed.';
+      actionError = error instanceof Error ? error.message : 'Exposure could not be changed.';
     } finally {
       pending = '';
     }
@@ -391,6 +396,7 @@
 
   async function saveProfile() {
     if (demo || !selectedPrinter || !profileName.trim()) return;
+    actionError = null;
     pending = 'profile';
     const current = selectedProfiles.find((profile) => profile.profile_id === editingProfileId);
     const endpoint = current
@@ -410,7 +416,7 @@
       resetProfileForm();
       await refresh();
     } catch (error) {
-      errorMessage = error instanceof Error ? error.message : 'Profile could not be saved.';
+      actionError = error instanceof Error ? error.message : 'Profile could not be saved.';
     } finally {
       pending = '';
     }
@@ -418,6 +424,8 @@
 
   async function deleteProfile(profile: Profile) {
     if (demo || !selectedPrinter) return;
+    if (!window.confirm(`Delete the “${profile.name}” profile? This cannot be undone.`)) return;
+    actionError = null;
     pending = `delete:${profile.profile_id}`;
     try {
       await jsonRequest(
@@ -429,7 +437,7 @@
       await refresh();
       notice = 'Profile deleted.';
     } catch (error) {
-      errorMessage = error instanceof Error ? error.message : 'Profile could not be deleted.';
+      actionError = error instanceof Error ? error.message : 'Profile could not be deleted.';
     } finally {
       pending = '';
     }
@@ -437,6 +445,7 @@
 
   async function sendHostedTest() {
     if (demo || !selectedPrinter || !selectedProfile || !confirmed) return;
+    actionError = null;
     pending = 'hosted-test';
     try {
       const result = await jsonRequest<{ job_id: string; state: string }>('/api/hosted-test', {
@@ -451,7 +460,7 @@
       confirmationOpen = false;
       confirmed = false;
     } catch (error) {
-      errorMessage = error instanceof Error ? error.message : 'The hosted test could not be sent.';
+      actionError = error instanceof Error ? error.message : 'The hosted test could not be sent.';
     } finally {
       pending = '';
     }
@@ -459,6 +468,7 @@
 
   async function runLocalDiagnostic() {
     if (demo || !selectedPrinter || !selectedProfile) return;
+    actionError = null;
     pending = 'diagnostic';
     try {
       const result = await jsonRequest<{ job_id: string; state: string }>(
@@ -468,7 +478,7 @@
       notice = `Local diagnostic queued as ${result.job_id}. It did not test hosted delivery.`;
       await refreshQueue();
     } catch (error) {
-      errorMessage = error instanceof Error ? error.message : 'The local diagnostic could not run.';
+      actionError = error instanceof Error ? error.message : 'The local diagnostic could not run.';
     } finally {
       pending = '';
     }
@@ -518,15 +528,18 @@
     <div><strong>Local node unavailable</strong><span>{errorMessage}</span></div>
   </div>
 {/if}
+{#if actionError}
+  <div class="alert error" role="alert">
+    <Icon name="warning" size={14} />
+    <div><strong>Action failed</strong><span>{actionError}</span></div>
+    <button class="icon-button dismiss" aria-label="Dismiss action error" onclick={() => (actionError = null)}><Icon name="x" size={12} /></button>
+  </div>
+{/if}
 {#if notice}
-  <button
-    class="alert success"
-    aria-live="polite"
-    aria-label="Dismiss notification"
-    onclick={() => (notice = null)}
-  >
+  <div class="alert success" role="status" aria-live="polite">
     <Icon name="check" size={14} /><span>{notice}</span>
-  </button>
+    <button class="icon-button dismiss" aria-label="Dismiss notification" onclick={() => (notice = null)}><Icon name="x" size={12} /></button>
+  </div>
 {/if}
 
 <section class="metrics" aria-label="Local node status">
@@ -599,7 +612,7 @@
       <h2>Send A4 test to {selectedPrinter.name}</h2>
       <p>The PDF is registered in the hosted durable queue, downloaded by this Mac, handed to the local queue, and reported back.</p>
     </div>
-    <label>Print profile<select bind:value={selectedProfileId}>{#each selectedProfiles as profile}<option value={profile.profile_id}>{profile.name} · r{profile.revision}{profile.options.paper && !/(^|[^a-z0-9])a4([^a-z0-9]|$)/i.test(profile.options.paper) && !profile.options.paper.toLowerCase().includes('iso_a4') ? ' · not A4' : ''}</option>{/each}</select></label>
+    <label>Print profile<select bind:value={selectedProfileId}>{#each selectedProfiles as profile}<option value={profile.profile_id}>{profile.name} · r{profile.revision}{profile.options.paper && !isA4Paper(profile.options.paper) ? ' · not A4' : ''}</option>{/each}</select></label>
     <div class="test-summary">
       <span><small>Printer</small><strong>{selectedPrinter.name}</strong></span>
       <span><small>Paper / media</small><strong>{selectedProfile?.options.paper ?? 'Driver default'} · {selectedProfile?.options.media ?? 'Default media'}</strong></span>
@@ -700,7 +713,8 @@
   .alert { width: 100%; min-height: 42px; display: flex; align-items: center; gap: 9px; margin-top: 12px; padding: 8px 11px; text-align: left; border: 1px solid; border-radius: var(--radius-md); }
   .alert div { display: grid; gap: 2px; } .alert strong { font-size: 11px; } .alert span { font-size: 10px; }
   .alert.error { color: var(--danger); background: var(--danger-soft); border-color: color-mix(in oklch, var(--danger), transparent 70%); }
-  button.alert.success { color: var(--success); background: var(--success-soft); border-color: color-mix(in oklch, var(--success), transparent 75%); cursor: pointer; }
+  .alert.success { color: var(--success); background: var(--success-soft); border-color: color-mix(in oklch, var(--success), transparent 75%); }
+  .alert .dismiss { margin-left: auto; color: currentColor; }
   .metrics { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-top: 14px; }
   .metric { min-height: 92px; display: flex; flex-direction: column; justify-content: center; padding: 13px; }
   .metric > span { color: var(--text-tertiary); font-size: 9px; font-weight: 550; text-transform: uppercase; letter-spacing: .04em; }

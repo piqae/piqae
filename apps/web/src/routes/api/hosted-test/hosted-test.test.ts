@@ -104,6 +104,27 @@ describe('hosted A4 test', () => {
     expect(createJob).not.toHaveBeenCalled();
   });
 
+  it('does not confuse extended A4-family stock with an A4 sheet', async () => {
+    agentRequest.mockResolvedValue(
+      Response.json([
+        {
+          profile_id: 'prof_banner',
+          revision: 2,
+          name: 'A4 x 3 banner',
+          is_default: false,
+          options: { paper: 'iso_a4x3_297x630mm', color: true }
+        }
+      ])
+    );
+
+    const response = await POST(
+      event({ printer_id: 'prt_01', profile_id: 'prof_banner', confirmed: true })
+    );
+
+    expect(response.status).toBe(409);
+    expect(createJob).not.toHaveBeenCalled();
+  });
+
   it('preserves a local profile lookup failure', async () => {
     agentRequest.mockResolvedValue(
       Response.json(
