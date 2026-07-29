@@ -461,13 +461,6 @@ pub fn run_profile_host(
         .map_err(|error| {
             ShellError::ProfileHost(format!("cannot launch {}: {error}", executable.display()))
         })?;
-    let mut stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| ShellError::ProfileHost("profile host stdin is unavailable".into()))?;
-    stdin.write_all(&encoded).map_err(ShellError::Io)?;
-    drop(stdin);
-
     let stdout = child
         .stdout
         .take()
@@ -481,6 +474,12 @@ pub fn run_profile_host(
             .map(|_| output);
         let _ignored = sender.send(result);
     });
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| ShellError::ProfileHost("profile host stdin is unavailable".into()))?;
+    stdin.write_all(&encoded).map_err(ShellError::Io)?;
+    drop(stdin);
 
     let deadline = Instant::now() + PROFILE_HOST_TIMEOUT;
     let exit_status = loop {

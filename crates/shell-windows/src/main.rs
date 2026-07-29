@@ -9,7 +9,7 @@ mod windows_shell {
     use std::{
         mem::size_of,
         path::PathBuf,
-        sync::{Mutex, OnceLock},
+        sync::{Arc, Mutex, OnceLock},
     };
     use windows_sys::Win32::{
         Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM},
@@ -53,15 +53,24 @@ mod windows_shell {
 
     #[derive(Debug)]
     struct ShellState {
-        client: LocalAgentClient,
+        client: Arc<LocalAgentClient>,
         profile_host: PathBuf,
         dashboard_url: String,
         actions: Vec<MenuAction>,
+        snapshot: Option<ShellSnapshot>,
+        refresh_error: Option<String>,
+        refresh_in_progress: bool,
+    }
+
+    #[derive(Clone, Debug)]
+    struct ShellSnapshot {
+        status: spool_local_ipc::LocalStatus,
+        printers: Vec<spool_local_ipc::LocalPrinter>,
     }
 
     pub fn run() -> Result<(), String> {
         let configuration = LocalApiConfiguration::from_environment().map_err(|e| e.to_string())?;
-        let client = LocalAgentClient::new(configuration).map_err(|e| e.to_string())?;
+        let client = Arc::new(LocalAgentClient::new(configuration).map_err(|e| e.to_string())?);
         let profile_host = profile_host_path()?;
         let dashboard_url = dashboard_url();
         SHELL_STATE
@@ -70,6 +79,9 @@ mod windows_shell {
                 profile_host,
                 dashboard_url,
                 actions: Vec::new(),
+                snapshot: None,
+                refresh_error: None,
+                refresh_in_progress: false,
             }))
             .map_err(|_| "Windows shell state was already initialized".to_owned())?;
 
@@ -109,6 +121,7 @@ mod windows_shell {
                 return Err("CreateWindowExW failed".into());
             }
             add_icon(window)?;
+            schedule_refresh();
             let mut message: MSG = std::mem::zeroed();
             while GetMessageW(&mut message, std::ptr::null_mut(), 0, 0) > 0 {
                 TranslateMessage(&message);
@@ -182,6 +195,7 @@ mod windows_shell {
         if message == TRAY_MESSAGE {
             let event = u32::try_from(lparam).unwrap_or_default();
             if matches!(event, WM_LBUTTONUP | WM_RBUTTONUP | WM_CONTEXTMENU) {
+                schedule_refresh();
                 show_menu(window);
                 return 0;
             }
@@ -248,8 +262,8 @@ mod windows_shell {
         let Ok(state) = state_lock.lock() else {
             return actions;
         };
-        match state.status_and_printers() {
-            Ok((status, printers)) => {
+        match state.snapshot.as_ref() {
+            Some(ShellSnapshot { status, printers }) => {
                 let workspace = status.workspace_name.as_deref().unwrap_or("Local node");
                 append_disabled(
                     menu,
@@ -283,7 +297,7 @@ mod windows_shell {
                     );
                     if !printer.profiles.is_empty() {
                         append_separator(submenu);
-                        for profile in printer.profiles {
+                        for profile in &printer.profiles {
                             let profile_menu = unsafe { CreatePopupMenu() };
                             if profile_menu.is_null() {
                                 continue;
@@ -309,7 +323,7 @@ mod windows_shell {
                                 "Clone as new profile…",
                                 MenuAction::Capture {
                                     printer_id: printer.printer_id.clone(),
-                                    profile_id: Some(profile.profile_id),
+                                    profile_id: Some(profile.profile_id.clone()),
                                     revision: Some(profile.revision),
                                     operation: ProfileCaptureOperation::Clone,
                                     is_default: false,
@@ -322,9 +336,13 @@ mod windows_shell {
                     append_submenu(menu, submenu, &printer.name);
                 }
             }
-            Err(error) => {
-                append_disabled(menu, "Spool — Agent unavailable");
-                append_disabled(menu, &compact_error(&error));
+            None => {
+                append_disabled(menu, "Spool — Connecting…");
+                if let Some(error) = state.refresh_error.as_deref() {
+                    append_disabled(menu, error);
+                } else {
+                    append_disabled(menu, "Checking the local agent");
+                }
             }
         }
         drop(state);
@@ -334,20 +352,6 @@ mod windows_shell {
         append_separator(menu);
         append_action(menu, "Quit Spool", MenuAction::Exit, &mut actions);
         actions
-    }
-
-    impl ShellState {
-        fn status_and_printers(
-            &self,
-        ) -> Result<
-            (
-                spool_local_ipc::LocalStatus,
-                Vec<spool_local_ipc::LocalPrinter>,
-            ),
-            ShellError,
-        > {
-            Ok((self.client.status()?, self.client.printers()?))
-        }
     }
 
     fn execute_action(window: HWND, index: u32) {
@@ -371,7 +375,7 @@ mod windows_shell {
                 is_default,
             ),
             Some(MenuAction::OpenDashboard) => open_dashboard(window),
-            Some(MenuAction::Refresh) => show_menu(window),
+            Some(MenuAction::Refresh) => schedule_refresh(),
             Some(MenuAction::Exit) => unsafe {
                 DestroyWindow(window);
             },
@@ -391,29 +395,30 @@ mod windows_shell {
             let state_lock = SHELL_STATE
                 .get()
                 .ok_or_else(|| ShellError::Configuration("shell is not initialized".into()))?;
-            let state = state_lock
-                .lock()
-                .map_err(|_| ShellError::Configuration("shell state is unavailable".into()))?;
-            let session = state
-                .client
-                .begin_profile_capture(printer_id, operation, profile_id, revision)?;
-            let captured =
-                match run_profile_host(&state.profile_host, &session, Some(window as isize)) {
-                    Ok(Some(captured)) => captured,
-                    Ok(None) => {
-                        state.client.cancel_profile_capture(&session);
-                        return Ok(None);
-                    }
-                    Err(error) => {
-                        state.client.cancel_profile_capture(&session);
-                        return Err(error);
-                    }
-                };
+            let (client, profile_host) = {
+                let state = state_lock
+                    .lock()
+                    .map_err(|_| ShellError::Configuration("shell state is unavailable".into()))?;
+                (Arc::clone(&state.client), state.profile_host.clone())
+            };
+            let session =
+                client.begin_profile_capture(printer_id, operation, profile_id, revision)?;
+            let captured = match run_profile_host(&profile_host, &session, Some(window as isize)) {
+                Ok(Some(captured)) => captured,
+                Ok(None) => {
+                    client.cancel_profile_capture(&session);
+                    return Ok(None);
+                }
+                Err(error) => {
+                    client.cancel_profile_capture(&session);
+                    return Err(error);
+                }
+            };
             let payload = capture_payload(&session, &captured, is_default)?;
-            match state.client.complete_profile_capture(&session, &payload) {
+            match client.complete_profile_capture(&session, &payload) {
                 Ok(profile) => Ok(Some(profile)),
                 Err(error) => {
-                    state.client.cancel_profile_capture(&session);
+                    client.cancel_profile_capture(&session);
                     Err(error)
                 }
             }
@@ -437,6 +442,46 @@ mod windows_shell {
                 MB_ICONERROR,
             ),
         }
+        schedule_refresh();
+    }
+
+    fn schedule_refresh() {
+        let Some(state_lock) = SHELL_STATE.get() else {
+            return;
+        };
+        let client = {
+            let Ok(mut state) = state_lock.lock() else {
+                return;
+            };
+            if state.refresh_in_progress {
+                return;
+            }
+            state.refresh_in_progress = true;
+            Arc::clone(&state.client)
+        };
+        std::thread::spawn(move || {
+            let refreshed = client.status().and_then(|status| {
+                client
+                    .printers()
+                    .map(|printers| ShellSnapshot { status, printers })
+            });
+            let Some(state_lock) = SHELL_STATE.get() else {
+                return;
+            };
+            let Ok(mut state) = state_lock.lock() else {
+                return;
+            };
+            state.refresh_in_progress = false;
+            match refreshed {
+                Ok(snapshot) => {
+                    state.snapshot = Some(snapshot);
+                    state.refresh_error = None;
+                }
+                Err(error) => {
+                    state.refresh_error = Some(compact_error(&error));
+                }
+            }
+        });
     }
 
     fn open_dashboard(window: HWND) {
