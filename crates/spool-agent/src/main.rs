@@ -51,7 +51,7 @@ use std::{
     },
     time::Duration,
 };
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::{Notify, RwLock, mpsc};
 use tokio_util::io::StreamReader;
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
@@ -318,6 +318,8 @@ async fn main() -> Result<()> {
         ConnectionState::Connecting
     }));
     let paused = Arc::new(AtomicBool::new(initially_paused));
+    let cloud_sync_wakeup = Arc::new(Notify::new());
+    let printer_inventory_dirty = Arc::new(AtomicBool::new(true));
     let (control_tx, control_rx) = mpsc::channel(32);
     tokio::spawn(control_loop(
         control_rx,
@@ -327,6 +329,8 @@ async fn main() -> Result<()> {
         env!("CARGO_PKG_VERSION").to_owned(),
         Arc::clone(&connection),
         Arc::clone(&paused),
+        Arc::clone(&cloud_sync_wakeup),
+        Arc::clone(&printer_inventory_dirty),
     ));
 
     if arguments.mode != AgentMode::Local {
@@ -339,6 +343,8 @@ async fn main() -> Result<()> {
             printer_discovery,
             Arc::clone(&connection),
             Arc::clone(&paused),
+            Arc::clone(&cloud_sync_wakeup),
+            Arc::clone(&printer_inventory_dirty),
         ));
     }
 
@@ -605,6 +611,11 @@ fn write_new_json(path: &Path, value: &serde_json::Value) -> Result<()> {
         .with_context(|| format!("sync {}", path.display()))
 }
 
+#[allow(
+    clippy::cognitive_complexity,
+    clippy::too_many_arguments,
+    reason = "the single owner loop coordinates queue, control, and wakeup state without shared mutable engines"
+)]
 async fn control_loop(
     mut requests: mpsc::Receiver<ControlRequest>,
     mut engine: AgentEngine<RuntimeExecutor>,
@@ -613,6 +624,8 @@ async fn control_loop(
     version: String,
     connection: Arc<RwLock<ConnectionState>>,
     paused: Arc<AtomicBool>,
+    cloud_sync_wakeup: Arc<Notify>,
+    printer_inventory_dirty: Arc<AtomicBool>,
 ) {
     let mut scheduler = tokio::time::interval(Duration::from_millis(250));
     scheduler.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -622,6 +635,20 @@ async fn control_loop(
                 let Some(request) = request else {
                     break;
                 };
+                let inventory_changed = matches!(
+                    &request,
+                    ControlRequest::SetPrinterExposure { .. }
+                        | ControlRequest::CreateProfile { .. }
+                        | ControlRequest::UpdateProfile { .. }
+                        | ControlRequest::DeleteProfile { .. }
+                        | ControlRequest::CommitProfileCapture { .. }
+                        | ControlRequest::ConfirmLoadedMedia { .. }
+                );
+                let sync_relevant = inventory_changed
+                    || matches!(&request, ControlRequest::Pause { .. } | ControlRequest::Resume { .. });
+                if inventory_changed {
+                    printer_inventory_dirty.store(true, Ordering::Release);
+                }
                 handle_control_request(
                     request,
                     &mut engine,
@@ -631,10 +658,18 @@ async fn control_loop(
                     &connection,
                     &paused,
                 ).await;
+                if sync_relevant {
+                    cloud_sync_wakeup.notify_one();
+                }
             }
             _ = scheduler.tick(), if !paused.load(Ordering::Relaxed) => {
+                let before = engine.store().latest_pending_cloud_event_sequence();
                 if let Err(error) = engine.run_once().await {
                     error!(%error, "local print scheduler iteration failed");
+                }
+                let after = engine.store().latest_pending_cloud_event_sequence();
+                if matches!((before, after), (Ok(before), Ok(after)) if after > before) {
+                    cloud_sync_wakeup.notify_one();
                 }
             }
         }
@@ -1734,6 +1769,10 @@ fn cloud_configuration(arguments: &Arguments) -> Result<CloudConfiguration> {
     })
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "cloud synchronization dependencies are explicit process-boundary capabilities"
+)]
 async fn cloud_sync_loop(
     cloud: CloudConfiguration,
     database_path: PathBuf,
@@ -1742,6 +1781,8 @@ async fn cloud_sync_loop(
     printer_discovery: PrinterDiscovery,
     connection: Arc<RwLock<ConnectionState>>,
     paused: Arc<AtomicBool>,
+    cloud_sync_wakeup: Arc<Notify>,
+    printer_inventory_dirty: Arc<AtomicBool>,
 ) {
     let store = match AgentStore::open(&database_path) {
         Ok(store) => store,
@@ -1759,10 +1800,16 @@ async fn cloud_sync_loop(
         printer_discovery,
         connection,
         paused,
+        cloud_sync_wakeup,
+        printer_inventory_dirty,
     )
     .await;
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "cloud synchronization dependencies are explicit process-boundary capabilities"
+)]
 async fn run_cloud_sync_loop(
     cloud: CloudConfiguration,
     mut store: AgentStore,
@@ -1771,14 +1818,17 @@ async fn run_cloud_sync_loop(
     printer_discovery: PrinterDiscovery,
     connection: Arc<RwLock<ConnectionState>>,
     paused: Arc<AtomicBool>,
+    cloud_sync_wakeup: Arc<Notify>,
+    printer_inventory_dirty: Arc<AtomicBool>,
 ) {
     let started_at = Utc::now();
     let mut failures = 0_u32;
     let mut last_printer_refresh: Option<tokio::time::Instant> = None;
     loop {
         resume_pending_cloud_accepts(&cloud, &mut store).await;
-        let refresh_printers =
-            last_printer_refresh.is_none_or(|last| last.elapsed() >= Duration::from_secs(15 * 60));
+        let refresh_printers = printer_inventory_dirty.swap(false, Ordering::AcqRel)
+            || last_printer_refresh
+                .is_none_or(|last| last.elapsed() >= Duration::from_secs(15 * 60));
         let request = match prepare_sync_request(
             &mut store,
             &printer_discovery,
@@ -1799,6 +1849,8 @@ async fn run_cloud_sync_loop(
         };
         if request.printers.is_some() {
             last_printer_refresh = Some(tokio::time::Instant::now());
+        } else if refresh_printers {
+            printer_inventory_dirty.store(true, Ordering::Release);
         }
         let delay = match cloud.client.sync(&cloud.identity, &request).await {
             Ok(response) => {
@@ -1818,7 +1870,10 @@ async fn run_cloud_sync_loop(
             }
             Err(error) => sync_failed(&error, &mut failures, &connection).await,
         };
-        tokio::time::sleep(delay).await;
+        tokio::select! {
+            () = tokio::time::sleep(delay) => {}
+            () = cloud_sync_wakeup.notified() => {}
+        }
     }
 }
 

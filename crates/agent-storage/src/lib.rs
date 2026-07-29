@@ -2661,6 +2661,28 @@ impl AgentStore {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
+    /// Returns the newest unacknowledged cloud event sequence.
+    ///
+    /// This lets the runtime wake cloud synchronization when the local
+    /// executor records a new state without reading the full outbox.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `SQLite` cannot execute the query.
+    pub fn latest_pending_cloud_event_sequence(&self) -> Result<i64, StorageError> {
+        self.connection
+            .query_row(
+                "SELECT COALESCE(MAX(outbox.outbox_sequence), 0)
+                 FROM event_outbox outbox
+                 JOIN jobs ON jobs.job_id = outbox.job_id
+                 WHERE jobs.cloud_managed = 1
+                   AND outbox.acknowledged_unix_ms IS NULL",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+    }
+
     /// Marks every outbound event through a cursor as acknowledged.
     ///
     /// # Errors
@@ -3438,12 +3460,17 @@ mod tests {
         assert_eq!(cloud_events.len(), 1);
         assert_eq!(cloud_events[0].job_id, "cloud");
         assert_eq!(
+            store.latest_pending_cloud_event_sequence().unwrap(),
+            cloud_events[0].outbox_sequence
+        );
+        assert_eq!(
             store
                 .acknowledge_cloud_event(&cloud_events[0].event_id, 20)
                 .unwrap(),
             1
         );
         assert!(store.pending_cloud_events(0, 10).unwrap().is_empty());
+        assert_eq!(store.latest_pending_cloud_event_sequence().unwrap(), 0);
 
         let remaining = store.pending_events(0, 10).unwrap();
         assert_eq!(remaining.len(), 1);
