@@ -5,7 +5,7 @@ virtual node and fake printers from a fresh checkout:
 
 ```console
 git clone https://github.com/C4CoffeeCo/piqae.git
-cd spool
+cd piqae
 cargo xtask doctor
 cargo xtask dev
 ```
