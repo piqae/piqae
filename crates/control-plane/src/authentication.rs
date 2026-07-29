@@ -1,10 +1,16 @@
 use async_trait::async_trait;
 use base64::{Engine, engine::general_purpose::STANDARD};
+use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header, jwk::JwkSet};
+use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use spool_auth::{Scope, api_key_lookup_prefix, verify_api_key};
 use spool_domain::{EnvironmentId, WorkspaceId};
 use spool_storage_postgres::PostgresStore;
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use subtle::ConstantTimeEq;
 use thiserror::Error;
 use tokio::sync::RwLock;
@@ -210,6 +216,7 @@ impl Authenticator for PostgresAuthenticator {
 pub struct CombinedAuthenticator {
     postgres: PostgresAuthenticator,
     bootstrap: Option<StaticAuthenticator>,
+    oidc: Option<OidcAuthenticator>,
 }
 
 impl CombinedAuthenticator {
@@ -217,10 +224,12 @@ impl CombinedAuthenticator {
     pub const fn new(
         postgres: PostgresAuthenticator,
         bootstrap: Option<StaticAuthenticator>,
+        oidc: Option<OidcAuthenticator>,
     ) -> Self {
         Self {
             postgres,
             bootstrap,
+            oidc,
         }
     }
 }
@@ -231,12 +240,18 @@ impl Authenticator for CombinedAuthenticator {
         &self,
         authorization: &str,
     ) -> Result<TenantContext, AuthenticationError> {
-        match self.postgres.authenticate_bearer(authorization).await {
-            Ok(tenant) => Ok(tenant),
-            Err(_) => match &self.bootstrap {
-                Some(bootstrap) => bootstrap.authenticate_bearer(authorization).await,
+        if let Ok(tenant) = self.postgres.authenticate_bearer(authorization).await {
+            Ok(tenant)
+        } else {
+            if let Some(bootstrap) = &self.bootstrap
+                && let Ok(tenant) = bootstrap.authenticate_bearer(authorization).await
+            {
+                return Ok(tenant);
+            }
+            match &self.oidc {
+                Some(oidc) => oidc.authenticate_bearer(authorization).await,
                 None => Err(AuthenticationError),
-            },
+            }
         }
     }
 
@@ -251,5 +266,153 @@ impl Authenticator for CombinedAuthenticator {
                 None => Err(AuthenticationError),
             },
         }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct OidcConfiguration {
+    pub issuer: String,
+    pub audience: String,
+    pub jwks_url: String,
+    pub organization_claim: String,
+    pub environment_kind: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct OidcAuthenticator {
+    store: PostgresStore,
+    configuration: Arc<OidcConfiguration>,
+    client: reqwest::Client,
+    jwks: Arc<RwLock<Option<CachedJwks>>>,
+}
+
+#[derive(Clone, Debug)]
+struct CachedJwks {
+    fetched_at: Instant,
+    keys: JwkSet,
+}
+
+#[derive(Debug, Deserialize)]
+struct OidcClaims {
+    #[serde(flatten)]
+    values: HashMap<String, serde_json::Value>,
+}
+
+impl OidcAuthenticator {
+    /// Creates an OIDC authenticator with a bounded, no-redirect JWKS client.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when required configuration is empty or invalid.
+    pub fn new(
+        store: PostgresStore,
+        configuration: OidcConfiguration,
+    ) -> Result<Self, AuthenticationError> {
+        if configuration.issuer.is_empty()
+            || configuration.audience.is_empty()
+            || configuration.jwks_url.is_empty()
+            || configuration.organization_claim.is_empty()
+            || !matches!(configuration.environment_kind.as_str(), "test" | "live")
+        {
+            return Err(AuthenticationError);
+        }
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|_| AuthenticationError)?;
+        Ok(Self {
+            store,
+            configuration: Arc::new(configuration),
+            client,
+            jwks: Arc::new(RwLock::new(None)),
+        })
+    }
+
+    async fn authenticate_token(&self, token: &str) -> Result<TenantContext, AuthenticationError> {
+        let header = decode_header(token).map_err(|_| AuthenticationError)?;
+        if !matches!(
+            header.alg,
+            Algorithm::RS256
+                | Algorithm::RS384
+                | Algorithm::RS512
+                | Algorithm::ES256
+                | Algorithm::ES384
+                | Algorithm::EdDSA
+        ) {
+            return Err(AuthenticationError);
+        }
+        let key_id = header.kid.as_deref().ok_or(AuthenticationError)?;
+        let jwk = self.key_for_id(key_id).await?;
+        let key = DecodingKey::from_jwk(&jwk).map_err(|_| AuthenticationError)?;
+        let mut validation = Validation::new(header.alg);
+        validation.set_issuer(&[self.configuration.issuer.as_str()]);
+        validation.set_audience(&[self.configuration.audience.as_str()]);
+        validation.validate_exp = true;
+        let claims = decode::<OidcClaims>(token, &key, &validation)
+            .map_err(|_| AuthenticationError)?
+            .claims;
+        let organization_id = claims
+            .values
+            .get(&self.configuration.organization_claim)
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.is_empty())
+            .ok_or(AuthenticationError)?;
+        let (workspace_id, environment_id) = self
+            .store
+            .provision_oidc_tenant(organization_id, &self.configuration.environment_kind)
+            .await
+            .map_err(|_| AuthenticationError)?;
+        Ok(TenantContext::unrestricted(workspace_id, environment_id))
+    }
+
+    async fn key_for_id(
+        &self,
+        key_id: &str,
+    ) -> Result<jsonwebtoken::jwk::Jwk, AuthenticationError> {
+        if let Some(cached) = self.jwks.read().await.as_ref()
+            && cached.fetched_at.elapsed() < Duration::from_secs(300)
+            && let Some(key) = cached.keys.find(key_id)
+        {
+            return Ok(key.clone());
+        }
+        let keys = self
+            .client
+            .get(&self.configuration.jwks_url)
+            .send()
+            .await
+            .map_err(|_| AuthenticationError)?
+            .error_for_status()
+            .map_err(|_| AuthenticationError)?
+            .json::<JwkSet>()
+            .await
+            .map_err(|_| AuthenticationError)?;
+        let key = keys.find(key_id).cloned().ok_or(AuthenticationError)?;
+        *self.jwks.write().await = Some(CachedJwks {
+            fetched_at: Instant::now(),
+            keys,
+        });
+        Ok(key)
+    }
+}
+
+#[async_trait]
+impl Authenticator for OidcAuthenticator {
+    async fn authenticate_bearer(
+        &self,
+        authorization: &str,
+    ) -> Result<TenantContext, AuthenticationError> {
+        let token = authorization
+            .strip_prefix("Bearer ")
+            .filter(|value| !value.is_empty())
+            .ok_or(AuthenticationError)?;
+        self.authenticate_token(token).await
+    }
+
+    async fn authenticate_basic(
+        &self,
+        _authorization: &str,
+    ) -> Result<TenantContext, AuthenticationError> {
+        Err(AuthenticationError)
     }
 }

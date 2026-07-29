@@ -6,7 +6,8 @@ use base64::{
 use spool_control_plane::{
     AppState,
     authentication::{
-        CombinedAuthenticator, PostgresAuthenticator, StaticAuthenticator, TenantContext,
+        CombinedAuthenticator, OidcAuthenticator, OidcConfiguration, PostgresAuthenticator,
+        StaticAuthenticator, TenantContext,
     },
     repository::Repository,
     router,
@@ -75,7 +76,9 @@ async fn main() -> Result<()> {
     } else {
         None
     };
-    let authenticator = CombinedAuthenticator::new(PostgresAuthenticator::new(store), bootstrap);
+    let oidc = build_oidc_authenticator(&store)?;
+    let authenticator =
+        CombinedAuthenticator::new(PostgresAuthenticator::new(store), bootstrap, oidc);
     let application = AppState::new_with_resources(
         repository,
         Arc::new(authenticator),
@@ -104,6 +107,35 @@ async fn main() -> Result<()> {
         .with_graceful_shutdown(shutdown_signal())
         .await
         .context("serve HTTP")
+}
+
+fn build_oidc_authenticator(store: &PostgresStore) -> Result<Option<OidcAuthenticator>> {
+    match env::var("SPOOL_AUTH_MODE")
+        .unwrap_or_else(|_| "bootstrap".into())
+        .as_str()
+    {
+        "bootstrap" | "api_key" => Ok(None),
+        "oidc" | "hybrid" => Ok(Some(
+            OidcAuthenticator::new(
+                store.clone(),
+                OidcConfiguration {
+                    issuer: env::var("SPOOL_OIDC_ISSUER")
+                        .context("SPOOL_OIDC_ISSUER is required for OIDC")?,
+                    audience: env::var("SPOOL_OIDC_AUDIENCE")
+                        .or_else(|_| env::var("SPOOL_OIDC_CLIENT_ID"))
+                        .context("SPOOL_OIDC_AUDIENCE is required for OIDC")?,
+                    jwks_url: env::var("SPOOL_OIDC_JWKS_URL")
+                        .context("SPOOL_OIDC_JWKS_URL is required for OIDC")?,
+                    organization_claim: env::var("SPOOL_OIDC_ORGANIZATION_CLAIM")
+                        .unwrap_or_else(|_| "org_id".into()),
+                    environment_kind: env::var("SPOOL_OIDC_ENVIRONMENT")
+                        .unwrap_or_else(|_| "live".into()),
+                },
+            )
+            .map_err(|_| anyhow::anyhow!("invalid OIDC configuration"))?,
+        )),
+        other => anyhow::bail!("unsupported SPOOL_AUTH_MODE `{other}`"),
+    }
 }
 
 async fn build_object_store() -> Result<Arc<dyn ObjectStore>> {

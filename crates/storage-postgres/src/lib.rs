@@ -220,6 +220,76 @@ impl PostgresStore {
         Ok(())
     }
 
+    pub async fn provision_oidc_tenant(
+        &self,
+        organization_id: &str,
+        environment_kind: &str,
+    ) -> Result<(WorkspaceId, EnvironmentId), StorageError> {
+        if organization_id.is_empty() || !matches!(environment_kind, "test" | "live") {
+            return Err(StorageError::InvalidData(
+                "invalid OIDC tenant mapping".into(),
+            ));
+        }
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 1))")
+            .bind(organization_id)
+            .execute(&mut *transaction)
+            .await?;
+        let workspace_id = if let Some(id) = sqlx::query_scalar::<_, String>(
+            "SELECT id FROM workspaces WHERE workos_organization_id = $1",
+        )
+        .bind(organization_id)
+        .fetch_optional(&mut *transaction)
+        .await?
+        {
+            id.parse().map_err(|error| {
+                StorageError::InvalidData(format!("workspace id `{id}`: {error}"))
+            })?
+        } else {
+            let id = WorkspaceId::new();
+            sqlx::query(
+                "INSERT INTO workspaces (id, name, workos_organization_id)
+                 VALUES ($1,$2,$2)",
+            )
+            .bind(id.to_string())
+            .bind(organization_id)
+            .execute(&mut *transaction)
+            .await?;
+            id
+        };
+        let environment_id = if let Some(id) = sqlx::query_scalar::<_, String>(
+            "SELECT id FROM environments WHERE workspace_id = $1 AND kind = $2",
+        )
+        .bind(workspace_id.to_string())
+        .bind(environment_kind)
+        .fetch_optional(&mut *transaction)
+        .await?
+        {
+            id.parse().map_err(|error| {
+                StorageError::InvalidData(format!("environment id `{id}`: {error}"))
+            })?
+        } else {
+            let id = EnvironmentId::new();
+            sqlx::query(
+                "INSERT INTO environments (id, workspace_id, kind, name)
+                 VALUES ($1,$2,$3,$4)",
+            )
+            .bind(id.to_string())
+            .bind(workspace_id.to_string())
+            .bind(environment_kind)
+            .bind(if environment_kind == "live" {
+                "Live"
+            } else {
+                "Test"
+            })
+            .execute(&mut *transaction)
+            .await?;
+            id
+        };
+        transaction.commit().await?;
+        Ok((workspace_id, environment_id))
+    }
+
     pub async fn api_key_for_authentication(
         &self,
         lookup_prefix: &str,
