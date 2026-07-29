@@ -623,6 +623,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one end-to-end test exercises profile sync, compatibility projection, and rejection"
+    )]
     async fn synced_printer_profiles_are_visible_through_the_canonical_api() {
         let application = application().await;
         let now = Utc::now();
@@ -717,7 +721,13 @@ mod tests {
             .iter()
             .find(|printer| printer["name"] == "Office Laser — A4 shipping")
             .expect("virtual profile printer");
-        assert_eq!(profile_printer["capabilities"]["papers"].as_object().unwrap().len(), 1);
+        assert_eq!(
+            profile_printer["capabilities"]["papers"]
+                .as_object()
+                .expect("profile papers object")
+                .len(),
+            1
+        );
         let virtual_id = profile_printer["id"].as_i64().expect("virtual printer ID");
 
         let (status, created) = compatibility_json(
@@ -808,12 +818,7 @@ mod tests {
                 .to_bytes(),
         )
         .expect("stock JSON");
-        assert!(
-            stock["id"]
-                .as_str()
-                .expect("stock id")
-                .starts_with("stk_")
-        );
+        assert!(stock["id"].as_str().expect("stock id").starts_with("stk_"));
 
         let target_response = application
             .router
