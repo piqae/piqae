@@ -1,5 +1,5 @@
 [package]
-name = "spool-agent-storage"
+name = "spool-fake-executor"
 version.workspace = true
 edition.workspace = true
 license = "Apache-2.0"
@@ -8,14 +8,14 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
-rusqlite.workspace = true
-serde.workspace = true
-serde_json.workspace = true
 spool-domain.workspace = true
-thiserror.workspace = true
+spool-executor-protocol = { path = "../executor-protocol" }
+spool-protocol.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
-tempfile = "3.20.0"
+spool-executor-supervisor = { path = "../executor-supervisor" }
+tokio.workspace = true
 
 [lints]
 workspace = true

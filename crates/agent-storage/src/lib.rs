@@ -6,6 +6,7 @@
 
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
+use spool_domain::EventId;
 use std::path::Path;
 use thiserror::Error;
 
@@ -27,6 +28,8 @@ pub enum StorageError {
         expected: i64,
         actual: i64,
     },
+    #[error("invalid durable local event: {0}")]
+    InvalidLocalEvent(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -42,6 +45,7 @@ pub struct AcceptedJob {
     pub options_json: String,
     pub expires_unix_ms: Option<i64>,
     pub accepted_unix_ms: i64,
+    pub cloud_managed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -112,6 +116,20 @@ impl AgentStore {
         connection.pragma_update(None, "journal_mode", "WAL")?;
         connection.pragma_update(None, "synchronous", "FULL")?;
         connection.execute_batch(SCHEMA)?;
+        let has_cloud_managed: bool = connection.query_row(
+            "SELECT EXISTS (
+               SELECT 1 FROM pragma_table_info('jobs') WHERE name = 'cloud_managed'
+             )",
+            [],
+            |row| row.get(0),
+        )?;
+        if !has_cloud_managed {
+            connection.execute(
+                "ALTER TABLE jobs ADD COLUMN cloud_managed INTEGER NOT NULL
+                 DEFAULT 0 CHECK (cloud_managed IN (0, 1))",
+                [],
+            )?;
+        }
         Ok(Self { connection })
     }
 
@@ -125,6 +143,44 @@ impl AgentStore {
             .connection
             .query_row("PRAGMA quick_check", [], |row| row.get(0))?;
         Ok(result == "ok")
+    }
+
+    /// Reads a durable agent setting.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `SQLite` cannot execute or decode the query.
+    pub fn setting(&self, key: &str) -> Result<Option<String>, StorageError> {
+        let encoded: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT value_json FROM settings WHERE key = ?1",
+                [key],
+                |row| row.get(0),
+            )
+            .optional()?;
+        encoded
+            .map(|value| serde_json::from_str(&value))
+            .transpose()
+            .map_err(Into::into)
+    }
+
+    /// Atomically creates or replaces a durable agent setting.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `SQLite` cannot update the setting.
+    pub fn set_setting(&mut self, key: &str, value: &str) -> Result<(), StorageError> {
+        let encoded = serde_json::to_string(value)?;
+        self.connection.execute(
+            "INSERT INTO settings(key, value_json, updated_unix_ms)
+             VALUES (?1, ?2, CAST(unixepoch('subsec') * 1000 AS INTEGER))
+             ON CONFLICT(key) DO UPDATE SET
+               value_json = excluded.value_json,
+               updated_unix_ms = excluded.updated_unix_ms",
+            params![key, encoded],
+        )?;
+        Ok(())
     }
 
     /// Atomically accepts local responsibility for a job. Duplicate delivery
@@ -188,9 +244,9 @@ impl AgentStore {
              (job_id, submission_id, printer_id, printer_native_id,
               printer_sequence, title, content_sha256, content_path,
               content_kind, options_json, state, expires_unix_ms,
-              accepted_unix_ms, updated_unix_ms)
+              accepted_unix_ms, updated_unix_ms, cloud_managed)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
-                     'queued_local', ?11, ?12, ?12)",
+                     'queued_local', ?11, ?12, ?12, ?13)",
             params![
                 job.job_id,
                 job.submission_id,
@@ -204,11 +260,12 @@ impl AgentStore {
                 job.options_json,
                 job.expires_unix_ms,
                 job.accepted_unix_ms,
+                job.cloud_managed,
             ],
         )?;
         append_event_tx(
             &tx,
-            &format!("{}:1", job.job_id),
+            &EventId::new().to_string(),
             &job.job_id,
             1,
             "queued_local",
@@ -442,6 +499,44 @@ impl AgentStore {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
+    /// Returns only cloud-managed events for signed agent synchronization.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `SQLite` cannot execute or decode the query.
+    pub fn pending_cloud_events(
+        &self,
+        after_sequence: i64,
+        limit: usize,
+    ) -> Result<Vec<PendingEvent>, StorageError> {
+        let bounded = i64::try_from(limit.clamp(1, 500)).unwrap_or(500);
+        let mut statement = self.connection.prepare(
+            "SELECT outbox.outbox_sequence, outbox.event_id, outbox.job_id,
+                    outbox.job_sequence, outbox.state, outbox.reason,
+                    outbox.message, outbox.details_json, outbox.observed_unix_ms
+             FROM event_outbox outbox
+             JOIN jobs ON jobs.job_id = outbox.job_id
+             WHERE jobs.cloud_managed = 1
+               AND outbox.acknowledged_unix_ms IS NULL
+               AND outbox.outbox_sequence > ?1
+             ORDER BY outbox.outbox_sequence LIMIT ?2",
+        )?;
+        let rows = statement.query_map(params![after_sequence, bounded], |row| {
+            Ok(PendingEvent {
+                outbox_sequence: row.get(0)?,
+                event_id: row.get(1)?,
+                job_id: row.get(2)?,
+                job_sequence: row.get(3)?,
+                state: row.get(4)?,
+                reason: row.get(5)?,
+                message: row.get(6)?,
+                details_json: row.get(7)?,
+                observed_unix_ms: row.get(8)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
     /// Marks every outbound event through a cursor as acknowledged.
     ///
     /// # Errors
@@ -457,6 +552,76 @@ impl AgentStore {
              WHERE outbox_sequence <= ?2 AND acknowledged_unix_ms IS NULL",
             params![acknowledged_unix_ms, through_sequence],
         )?)
+    }
+
+    /// Acknowledges cloud-managed events through a server-returned event ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the event cannot be found or `SQLite` cannot update
+    /// the cloud outbox projection.
+    pub fn acknowledge_cloud_event(
+        &mut self,
+        event_id: &str,
+        acknowledged_unix_ms: i64,
+    ) -> Result<usize, StorageError> {
+        let sequence: i64 = self
+            .connection
+            .query_row(
+                "SELECT outbox_sequence FROM event_outbox WHERE event_id = ?1",
+                [event_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| StorageError::JobNotFound(format!("event:{event_id}")))?;
+        Ok(self.connection.execute(
+            "UPDATE event_outbox
+             SET acknowledged_unix_ms = ?1
+             WHERE outbox_sequence <= ?2
+               AND acknowledged_unix_ms IS NULL
+               AND job_id IN (
+                 SELECT job_id FROM jobs WHERE cloud_managed = 1
+               )",
+            params![acknowledged_unix_ms, sequence],
+        )?)
+    }
+
+    /// Cancels a job that has not crossed the native handoff boundary.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unknown job or if either cancellation event
+    /// cannot be persisted.
+    pub fn cancel_before_handoff(
+        &mut self,
+        job_id: &str,
+        observed_unix_ms: i64,
+    ) -> Result<bool, StorageError> {
+        let Some(job) = self.get_job(job_id)? else {
+            return Err(StorageError::JobNotFound(job_id.to_owned()));
+        };
+        if !matches!(job.state.as_str(), "queued_local" | "failed_retryable") {
+            return Ok(false);
+        }
+        self.append_next_event(
+            &EventId::new().to_string(),
+            job_id,
+            "cancel_requested",
+            Some("cancelled_by_server"),
+            Some("Cancellation requested by control plane"),
+            "{}",
+            observed_unix_ms,
+        )?;
+        self.append_next_event(
+            &EventId::new().to_string(),
+            job_id,
+            "cancelled",
+            Some("cancelled_by_server"),
+            Some("Cancelled before native handoff"),
+            "{}",
+            observed_unix_ms,
+        )?;
+        Ok(true)
     }
 
     /// Expires locally queued jobs whose policy deadline has elapsed.
@@ -482,7 +647,7 @@ impl AgentStore {
                 |row| row.get(0),
             )?;
             self.append_event(
-                &format!("{job_id}:{sequence}"),
+                &EventId::new().to_string(),
                 job_id,
                 sequence,
                 "expired",
@@ -593,6 +758,7 @@ mod tests {
             options_json: "{}".into(),
             expires_unix_ms: None,
             accepted_unix_ms: accepted,
+            cloud_managed: false,
         }
     }
 
@@ -662,5 +828,84 @@ mod tests {
         store.accept_job(&expiring).unwrap();
         assert_eq!(store.expire_waiting(16).unwrap(), 1);
         assert_eq!(store.get_job("one").unwrap().unwrap().state, "expired");
+    }
+
+    #[test]
+    fn cloud_outbox_is_isolated_and_acknowledged_by_event_id() {
+        let mut store = AgentStore::in_memory().unwrap();
+        store.accept_job(&job("local", "p1", 10)).unwrap();
+        let mut cloud = job("cloud", "p2", 11);
+        cloud.cloud_managed = true;
+        store.accept_job(&cloud).unwrap();
+
+        let cloud_events = store.pending_cloud_events(0, 10).unwrap();
+        assert_eq!(cloud_events.len(), 1);
+        assert_eq!(cloud_events[0].job_id, "cloud");
+        assert_eq!(
+            store
+                .acknowledge_cloud_event(&cloud_events[0].event_id, 20)
+                .unwrap(),
+            1
+        );
+        assert!(store.pending_cloud_events(0, 10).unwrap().is_empty());
+
+        let remaining = store.pending_events(0, 10).unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].job_id, "local");
+    }
+
+    #[test]
+    fn cancellation_stops_at_the_native_handoff_boundary() {
+        let mut store = AgentStore::in_memory().unwrap();
+        store.accept_job(&job("waiting", "p1", 10)).unwrap();
+        assert!(store.cancel_before_handoff("waiting", 20).unwrap());
+        assert_eq!(
+            store.get_job("waiting").unwrap().unwrap().state,
+            "cancelled"
+        );
+
+        store.accept_job(&job("handed-off", "p2", 30)).unwrap();
+        store
+            .append_event(
+                "handed-off:2",
+                "handed-off",
+                2,
+                "preparing",
+                None,
+                None,
+                "{}",
+                31,
+            )
+            .unwrap();
+        store
+            .append_event(
+                "handed-off:3",
+                "handed-off",
+                3,
+                "spool_intent",
+                None,
+                None,
+                "{}",
+                32,
+            )
+            .unwrap();
+        assert!(!store.cancel_before_handoff("handed-off", 33).unwrap());
+        assert_eq!(
+            store.get_job("handed-off").unwrap().unwrap().state,
+            "spool_intent"
+        );
+    }
+
+    #[test]
+    fn settings_are_durable_json_strings() {
+        let mut store = AgentStore::in_memory().unwrap();
+        assert_eq!(store.setting("command_cursor").unwrap(), None);
+        store
+            .set_setting("command_cursor", "cursor-with-\"quotes\"")
+            .unwrap();
+        assert_eq!(
+            store.setting("command_cursor").unwrap().as_deref(),
+            Some("cursor-with-\"quotes\"")
+        );
     }
 }

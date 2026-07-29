@@ -6,8 +6,12 @@ use ed25519_dalek::{Signer, SigningKey};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use spool_domain::AgentId;
-use spool_protocol::agent::{AgentSyncRequest, AgentSyncResponse, EnrolRequest, EnrolResponse};
+use spool_domain::{AgentId, JobId};
+use spool_protocol::agent::{
+    AgentAcceptJobRequest, AgentAcceptJobResponse, AgentReleaseLeaseRequest,
+    AgentRenewLeaseRequest, AgentRenewLeaseResponse, AgentSyncRequest, AgentSyncResponse,
+    EnrolRequest, EnrolResponse,
+};
 use std::time::Duration;
 use thiserror::Error;
 use url::Url;
@@ -147,7 +151,7 @@ impl AgentClient {
     /// Returns an error for serialization, transport, status, size, or
     /// response-decoding failure.
     pub async fn enrol(&self, request: &EnrolRequest) -> Result<EnrolResponse, ClientError> {
-        self.post_json("v1/agent/enrol", request, None).await
+        self.post_json("v1/agents/enrol", request, None).await
     }
 
     /// Performs one signed, resumable long-poll synchronization request.
@@ -163,6 +167,66 @@ impl AgentClient {
     ) -> Result<AgentSyncResponse, ClientError> {
         self.post_json("v1/agent/sync", request, Some(identity))
             .await
+    }
+
+    /// Confirms a lease only after the job is durable in local `SQLite`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for signing, serialization, transport, status, size,
+    /// or response-decoding failure.
+    pub async fn accept_job(
+        &self,
+        identity: &DeviceIdentity,
+        job_id: JobId,
+        request: &AgentAcceptJobRequest,
+    ) -> Result<AgentAcceptJobResponse, ClientError> {
+        self.post_json(
+            &format!("v1/agent/jobs/{job_id}/accept"),
+            request,
+            Some(identity),
+        )
+        .await
+    }
+
+    /// Renews an active download/acceptance lease.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for signing, serialization, transport, status, size,
+    /// or response-decoding failure.
+    pub async fn renew_lease(
+        &self,
+        identity: &DeviceIdentity,
+        job_id: JobId,
+        request: &AgentRenewLeaseRequest,
+    ) -> Result<AgentRenewLeaseResponse, ClientError> {
+        self.post_json(
+            &format!("v1/agent/jobs/{job_id}/lease"),
+            request,
+            Some(identity),
+        )
+        .await
+    }
+
+    /// Releases a lease the agent cannot safely accept.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for signing, serialization, transport, status, size,
+    /// or response-decoding failure.
+    pub async fn release_lease(
+        &self,
+        identity: &DeviceIdentity,
+        job_id: JobId,
+        request: &AgentReleaseLeaseRequest,
+    ) -> Result<serde_json::Value, ClientError> {
+        self.post_json(
+            &format!("v1/agent/jobs/{job_id}/release"),
+            request,
+            Some(identity),
+        )
+        .await
     }
 
     async fn post_json<Req: Serialize + Sync, Res: serde::de::DeserializeOwned>(

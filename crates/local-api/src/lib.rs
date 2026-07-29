@@ -31,12 +31,41 @@ pub enum ControlRequest {
     Resume {
         respond_to: oneshot::Sender<Result<(), ControlFailure>>,
     },
+    SubmitJob {
+        request: Box<LocalCreateJob>,
+        respond_to: oneshot::Sender<Result<LocalJobAccepted, ControlFailure>>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ControlFailure {
     pub code: String,
     pub message: String,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct LocalCreateJob {
+    pub printer_id: String,
+    pub printer_native_id: String,
+    pub title: String,
+    pub content_kind: spool_domain::ContentKind,
+    pub content: LocalContent,
+    #[serde(default)]
+    pub options: spool_domain::JobOptions,
+    pub expires_unix_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum LocalContent {
+    Base64 { data: String },
+    Uri { uri: String },
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LocalJobAccepted {
+    pub job_id: String,
+    pub state: String,
 }
 
 #[derive(Debug, Error)]
@@ -80,7 +109,8 @@ pub fn router(state: LocalApiState) -> Router {
         .route("/v1/local/printers", get(printers))
         .route("/v1/local/pause", post(pause))
         .route("/v1/local/resume", post(resume))
-        .layer(RequestBodyLimitLayer::new(64 * 1024))
+        .route("/v1/jobs", post(submit_job))
+        .layer(RequestBodyLimitLayer::new(64 * 1024 * 1024))
         .with_state(state)
 }
 
@@ -151,6 +181,33 @@ async fn resume(State(state): State<LocalApiState>, headers: HeaderMap) -> Respo
         respond_to,
     })
     .await
+}
+
+async fn submit_job(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+    Json(request): Json<LocalCreateJob>,
+) -> Response {
+    if !authenticate(&state, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let (send, receive) = oneshot::channel();
+    if state
+        .control
+        .send(ControlRequest::SubmitJob {
+            request: Box::new(request),
+            respond_to: send,
+        })
+        .await
+        .is_err()
+    {
+        return unavailable();
+    }
+    match receive.await {
+        Ok(Ok(accepted)) => (StatusCode::ACCEPTED, Json(accepted)).into_response(),
+        Ok(Err(failure)) => (StatusCode::UNPROCESSABLE_ENTITY, Json(failure)).into_response(),
+        Err(_) => unavailable(),
+    }
 }
 
 async fn control_action(

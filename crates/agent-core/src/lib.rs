@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use spool_agent_storage::{AcceptedJob, AgentStore, LocalJob, StorageError};
-use spool_domain::{JobOptions, JobState, validate_transition};
+use spool_domain::{EventId, JobOptions, JobState, validate_transition};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
@@ -22,6 +22,8 @@ pub enum AgentError {
     Io(#[from] std::io::Error),
     #[error("content digest mismatch: expected {expected}, got {actual}")]
     ContentDigestMismatch { expected: String, actual: String },
+    #[error("content exceeds the {limit} byte local limit")]
+    ContentTooLarge { limit: u64 },
     #[error("invalid stored print options: {0}")]
     InvalidOptions(#[from] serde_json::Error),
     #[error("invalid local state {0}")]
@@ -82,12 +84,20 @@ impl Clock for SystemClock {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ContentStore {
     root: PathBuf,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredContent {
+    pub sha256: String,
+    pub path: PathBuf,
+    pub bytes: u64,
+}
+
 impl ContentStore {
+    pub const MAX_CONTENT_BYTES: u64 = 50 * 1024 * 1024;
     /// Creates the content-addressed storage directory.
     ///
     /// # Errors
@@ -109,14 +119,41 @@ impl ContentStore {
     pub async fn put_verified(
         &self,
         expected_sha256: &str,
-        mut input: impl AsyncRead + Unpin,
+        input: impl AsyncRead + Unpin,
     ) -> Result<PathBuf, AgentError> {
-        let expected = expected_sha256.to_ascii_lowercase();
-        let final_path = self.root.join(&expected);
-        if tokio::fs::try_exists(&final_path).await? {
-            return Ok(final_path);
-        }
+        let stored = self
+            .put_inner(Some(expected_sha256.to_ascii_lowercase()), input)
+            .await?;
+        Ok(stored.path)
+    }
 
+    /// Streams content into the digest-addressed store and returns its
+    /// computed identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the input or local filesystem cannot be read or
+    /// written.
+    pub async fn put(&self, input: impl AsyncRead + Unpin) -> Result<StoredContent, AgentError> {
+        self.put_inner(None, input).await
+    }
+
+    async fn put_inner(
+        &self,
+        expected: Option<String>,
+        mut input: impl AsyncRead + Unpin,
+    ) -> Result<StoredContent, AgentError> {
+        if let Some(expected) = &expected {
+            let final_path = self.root.join(expected);
+            if tokio::fs::try_exists(&final_path).await? {
+                let bytes = tokio::fs::metadata(&final_path).await?.len();
+                return Ok(StoredContent {
+                    sha256: expected.clone(),
+                    path: final_path,
+                    bytes,
+                });
+            }
+        }
         let temporary_path = self.root.join(format!(".{}.part", Uuid::new_v4()));
         let mut output = tokio::fs::OpenOptions::new()
             .create_new(true)
@@ -124,6 +161,7 @@ impl ContentStore {
             .open(&temporary_path)
             .await?;
         let mut hasher = Sha256::new();
+        let mut total_bytes = 0_u64;
         let mut buffer = vec![0_u8; 64 * 1024];
         loop {
             let count = input.read(&mut buffer).await?;
@@ -132,21 +170,40 @@ impl ContentStore {
             }
             hasher.update(&buffer[..count]);
             output.write_all(&buffer[..count]).await?;
+            total_bytes = total_bytes.saturating_add(u64::try_from(count).unwrap_or(u64::MAX));
+            if total_bytes > Self::MAX_CONTENT_BYTES {
+                drop(output);
+                let _ = tokio::fs::remove_file(&temporary_path).await;
+                return Err(AgentError::ContentTooLarge {
+                    limit: Self::MAX_CONTENT_BYTES,
+                });
+            }
         }
         output.sync_all().await?;
         drop(output);
 
         let actual = format!("{:x}", hasher.finalize());
-        if actual != expected {
-            let _ = tokio::fs::remove_file(&temporary_path).await;
-            return Err(AgentError::ContentDigestMismatch { expected, actual });
+        if let Some(expected) = expected {
+            if actual != expected {
+                let _ = tokio::fs::remove_file(&temporary_path).await;
+                return Err(AgentError::ContentDigestMismatch { expected, actual });
+            }
         }
+        let final_path = self.root.join(&actual);
 
         match tokio::fs::rename(&temporary_path, &final_path).await {
-            Ok(()) => Ok(final_path),
+            Ok(()) => Ok(StoredContent {
+                sha256: actual,
+                path: final_path,
+                bytes: total_bytes,
+            }),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                 let _ = tokio::fs::remove_file(&temporary_path).await;
-                Ok(final_path)
+                Ok(StoredContent {
+                    sha256: actual,
+                    path: final_path,
+                    bytes: total_bytes,
+                })
             }
             Err(error) => {
                 let _ = tokio::fs::remove_file(&temporary_path).await;
@@ -192,6 +249,10 @@ impl<E: Executor, C: Clock> AgentEngine<E, C> {
 
     pub const fn store_mut(&mut self) -> &mut AgentStore {
         &mut self.store
+    }
+
+    pub const fn executor_mut(&mut self) -> &mut E {
+        &mut self.executor
     }
 
     pub fn into_parts(self) -> (AgentStore, E, C) {
@@ -313,7 +374,7 @@ impl<E: Executor, C: Clock> AgentEngine<E, C> {
         validate_transition(from, to).map_err(|_| AgentError::InvalidTransition { from, to })?;
         let now = self.clock.unix_ms();
         self.store.append_next_event(
-            &format!("evt_{}", Uuid::new_v4()),
+            &EventId::new().to_string(),
             job_id,
             state_name(to),
             reason,
@@ -425,6 +486,7 @@ mod tests {
             options_json: "{}".into(),
             expires_unix_ms: None,
             accepted_unix_ms: 1,
+            cloud_managed: false,
         }
     }
 

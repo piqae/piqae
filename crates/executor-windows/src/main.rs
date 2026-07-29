@@ -1,0 +1,356 @@
+use spool_executor_protocol::{read_frame, write_frame};
+#[cfg(not(windows))]
+use spool_protocol::executor::ExecutorError;
+use spool_protocol::executor::{ExecutorRequest, ExecutorResponse};
+
+fn main() {
+    if let Err(error) = run() {
+        eprintln!("Windows executor failed: {error}");
+        std::process::exit(1);
+    }
+}
+
+fn run() -> Result<(), Box<dyn std::error::Error>> {
+    let request: ExecutorRequest = read_frame(std::io::stdin().lock())?;
+    let result = platform::execute(request.operation);
+    write_frame(
+        std::io::stdout().lock(),
+        &ExecutorResponse {
+            request_id: request.request_id,
+            result,
+        },
+    )?;
+    Ok(())
+}
+
+#[cfg(windows)]
+mod platform {
+    use spool_domain::{ContentKind, PrinterCapabilities, PrinterState};
+    use spool_protocol::executor::{
+        DiscoveredPrinter, ExecutorError, ExecutorOperation, ExecutorResult,
+    };
+    use std::{ffi::c_void, ptr};
+    use windows_sys::Win32::{
+        Foundation::{ERROR_INSUFFICIENT_BUFFER, GetLastError, HANDLE},
+        Graphics::Printing::{
+            ClosePrinter, DOC_INFO_1W, EndDocPrinter, EndPagePrinter, EnumPrintersW,
+            JOB_CONTROL_CANCEL, OpenPrinterW, PRINTER_ENUM_CONNECTIONS, PRINTER_ENUM_LOCAL,
+            PRINTER_INFO_4W, SetJobW, StartDocPrinterW, StartPagePrinter, WritePrinter,
+        },
+    };
+
+    pub fn execute(operation: ExecutorOperation) -> Result<ExecutorResult, ExecutorError> {
+        match operation {
+            ExecutorOperation::DiscoverPrinters => discover(),
+            ExecutorOperation::GetPrinterState { native_printer_id } => {
+                ensure_printer(&native_printer_id)?;
+                Ok(ExecutorResult::State {
+                    state: PrinterState::Unknown,
+                })
+            }
+            ExecutorOperation::GetPrinterCapabilities { native_printer_id } => {
+                ensure_printer(&native_printer_id)?;
+                Ok(ExecutorResult::Capabilities {
+                    capabilities: PrinterCapabilities::default(),
+                })
+            }
+            ExecutorOperation::Submit {
+                native_printer_id,
+                title,
+                content_kind: ContentKind::Raw,
+                content_path,
+                ..
+            } => submit_raw(&native_printer_id, &title, &content_path),
+            ExecutorOperation::Submit {
+                job_id,
+                native_printer_id,
+                title: _,
+                content_kind: ContentKind::Pdf,
+                content_path,
+                options,
+            } => submit_pdf_helper(job_id, &native_printer_id, &content_path, &options),
+            ExecutorOperation::Cancel {
+                native_printer_id,
+                native_job_id,
+            } => cancel(&native_printer_id, &native_job_id),
+        }
+    }
+
+    fn discover() -> Result<ExecutorResult, ExecutorError> {
+        // SAFETY: EnumPrintersW is first called for its required size; the
+        // second call receives an exactly sized writable buffer. The returned
+        // PRINTER_INFO_4W records and strings remain inside that buffer while
+        // copied into Rust-owned strings.
+        unsafe {
+            let flags = PRINTER_ENUM_LOCAL | PRINTER_ENUM_CONNECTIONS;
+            let mut needed = 0_u32;
+            let mut returned = 0_u32;
+            EnumPrintersW(
+                flags,
+                ptr::null(),
+                4,
+                ptr::null_mut(),
+                0,
+                &mut needed,
+                &mut returned,
+            );
+            if needed == 0 && GetLastError() != ERROR_INSUFFICIENT_BUFFER {
+                return Err(win_error("winspool_discovery_failed", false));
+            }
+            let mut buffer = vec![0_u8; usize::try_from(needed).unwrap_or(0)];
+            if EnumPrintersW(
+                flags,
+                ptr::null(),
+                4,
+                buffer.as_mut_ptr(),
+                needed,
+                &mut needed,
+                &mut returned,
+            ) == 0
+            {
+                return Err(win_error("winspool_discovery_failed", false));
+            }
+            let records = std::slice::from_raw_parts(
+                buffer.as_ptr().cast::<PRINTER_INFO_4W>(),
+                usize::try_from(returned).unwrap_or(0),
+            );
+            let printers = records
+                .iter()
+                .filter_map(|record| wide_pointer(record.pPrinterName, &buffer))
+                .map(|name| DiscoveredPrinter {
+                    native_id: name.clone(),
+                    name,
+                    is_default: false,
+                    state: PrinterState::Unknown,
+                    capabilities: PrinterCapabilities::default(),
+                })
+                .collect();
+            Ok(ExecutorResult::Printers { printers })
+        }
+    }
+
+    fn ensure_printer(native_id: &str) -> Result<(), ExecutorError> {
+        let printers = match discover()? {
+            ExecutorResult::Printers { printers } => printers,
+            _ => Vec::new(),
+        };
+        printers
+            .iter()
+            .any(|printer| printer.native_id == native_id)
+            .then_some(())
+            .ok_or_else(|| ExecutorError {
+                code: "printer_not_found".into(),
+                message: format!("Windows printer {native_id} was not found"),
+                retryable: false,
+                handoff_may_have_succeeded: false,
+            })
+    }
+
+    fn submit_raw(
+        printer: &str,
+        title: &str,
+        content_path: &str,
+    ) -> Result<ExecutorResult, ExecutorError> {
+        let content = std::fs::read(content_path).map_err(|error| ExecutorError {
+            code: "content_unavailable".into(),
+            message: error.to_string(),
+            retryable: false,
+            handoff_may_have_succeeded: false,
+        })?;
+        let printer = wide(printer);
+        let title = wide(title);
+        let raw = wide("RAW");
+        let mut handle: HANDLE = ptr::null_mut();
+        // SAFETY: All passed buffers live through the synchronous Winspool
+        // calls. Every successful OpenPrinterW is paired with ClosePrinter;
+        // the content pointer is valid for the exact byte length supplied.
+        unsafe {
+            if OpenPrinterW(printer.as_ptr(), &mut handle, ptr::null()) == 0 {
+                return Err(win_error("winspool_open_failed", false));
+            }
+            let document = DOC_INFO_1W {
+                pDocName: title.as_ptr().cast_mut(),
+                pOutputFile: ptr::null_mut(),
+                pDatatype: raw.as_ptr().cast_mut(),
+            };
+            let job_id = StartDocPrinterW(handle, 1, &document);
+            if job_id == 0 {
+                ClosePrinter(handle);
+                return Err(win_error("winspool_start_failed", false));
+            }
+            if StartPagePrinter(handle) == 0 {
+                EndDocPrinter(handle);
+                ClosePrinter(handle);
+                return Err(win_error("winspool_page_failed", true));
+            }
+            let mut written = 0_u32;
+            let length = u32::try_from(content.len()).map_err(|_| ExecutorError {
+                code: "content_too_large".into(),
+                message: "RAW content exceeds the Winspool call limit".into(),
+                retryable: false,
+                handoff_may_have_succeeded: true,
+            })?;
+            let wrote = WritePrinter(
+                handle,
+                content.as_ptr().cast::<c_void>(),
+                length,
+                &mut written,
+            );
+            EndPagePrinter(handle);
+            EndDocPrinter(handle);
+            ClosePrinter(handle);
+            if wrote == 0 || written != length {
+                return Err(win_error("winspool_write_failed", true));
+            }
+            Ok(ExecutorResult::Submitted {
+                native_job_id: Some(job_id.to_string()),
+            })
+        }
+    }
+
+    fn submit_pdf_helper(
+        job_id: spool_domain::JobId,
+        printer: &str,
+        content_path: &str,
+        options: &spool_domain::JobOptions,
+    ) -> Result<ExecutorResult, ExecutorError> {
+        ensure_printer(printer)?;
+        let helper = std::env::var_os("SPOOL_WINDOWS_PDF_HELPER").ok_or_else(|| ExecutorError {
+            code: "windows_pdf_helper_unconfigured".into(),
+            message: "set SPOOL_WINDOWS_PDF_HELPER to an approved SumatraPDF executable".into(),
+            retryable: false,
+            handoff_may_have_succeeded: false,
+        })?;
+        let mut settings = Vec::new();
+        if let Some(pages) = &options.pages {
+            settings.push(pages.clone());
+        }
+        if let Some(copies) = options.copies {
+            settings.push(format!("{copies}x"));
+        }
+        if let Some(color) = options.color {
+            settings.push(if color { "color" } else { "monochrome" }.into());
+        }
+        if let Some(collate) = options.collate {
+            settings.push(if collate { "collate" } else { "nocollate" }.into());
+        }
+        if let Some(bin) = &options.bin {
+            settings.push(format!("bin={bin}"));
+        }
+        if let Some(paper) = &options.paper {
+            settings.push(format!("paper={paper}"));
+        }
+        if options.fit_to_page == Some(false) {
+            settings.push("noscale".into());
+        }
+
+        let mut command = std::process::Command::new(helper);
+        command.arg("-print-to").arg(printer);
+        if !settings.is_empty() {
+            command.arg("-print-settings").arg(settings.join(","));
+        }
+        let status = command
+            .arg(content_path)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map_err(|error| ExecutorError {
+                code: "windows_pdf_helper_start_failed".into(),
+                message: error.to_string(),
+                retryable: false,
+                handoff_may_have_succeeded: false,
+            })?;
+        if !status.success() {
+            return Err(ExecutorError {
+                code: "windows_pdf_helper_failed".into(),
+                message: format!(
+                    "PDF helper exited with code {}",
+                    status.code().unwrap_or(-1)
+                ),
+                retryable: false,
+                handoff_may_have_succeeded: false,
+            });
+        }
+        Ok(ExecutorResult::Submitted {
+            // Sumatra does not expose the Winspool ID. This marker remains
+            // explicitly backend-scoped and must not be queried through
+            // SetJobW as though it were a native integer.
+            native_job_id: Some(format!("sumatra-{job_id}")),
+        })
+    }
+
+    fn cancel(printer: &str, native_job_id: &str) -> Result<ExecutorResult, ExecutorError> {
+        let job_id = native_job_id.parse::<u32>().map_err(|_| ExecutorError {
+            code: "invalid_native_job_id".into(),
+            message: "Winspool job ID must be an integer".into(),
+            retryable: false,
+            handoff_may_have_succeeded: false,
+        })?;
+        let printer = wide(printer);
+        let mut handle: HANDLE = ptr::null_mut();
+        // SAFETY: The printer name is a valid NUL-terminated UTF-16 buffer and
+        // the acquired handle is closed exactly once.
+        unsafe {
+            if OpenPrinterW(printer.as_ptr(), &mut handle, ptr::null()) == 0 {
+                return Err(win_error("winspool_open_failed", false));
+            }
+            let result = SetJobW(handle, job_id, 0, ptr::null_mut(), JOB_CONTROL_CANCEL);
+            ClosePrinter(handle);
+            if result == 0 {
+                return Err(win_error("winspool_cancel_failed", false));
+            }
+            Ok(ExecutorResult::Cancelled)
+        }
+    }
+
+    fn wide_pointer(pointer: *mut u16, buffer: &[u8]) -> Option<String> {
+        if pointer.is_null() {
+            return None;
+        }
+        let start = buffer.as_ptr() as usize;
+        let end = start.checked_add(buffer.len())?;
+        let address = pointer as usize;
+        if address < start || address >= end || !address.is_multiple_of(std::mem::size_of::<u16>())
+        {
+            return None;
+        }
+        let maximum_units = (end - address) / std::mem::size_of::<u16>();
+        // SAFETY: The pointer was returned for this exact EnumPrintersW buffer,
+        // is checked for alignment and containment above, and the slice is
+        // bounded by the remaining bytes in that live buffer.
+        let units = unsafe { std::slice::from_raw_parts(pointer, maximum_units) };
+        let length = units.iter().position(|unit| *unit == 0)?;
+        Some(String::from_utf16_lossy(&units[..length]))
+    }
+
+    fn wide(value: &str) -> Vec<u16> {
+        value.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    fn win_error(code: &str, handoff: bool) -> ExecutorError {
+        // SAFETY: GetLastError has no preconditions.
+        let native = unsafe { GetLastError() };
+        ExecutorError {
+            code: code.into(),
+            message: format!("Win32 error {native}"),
+            retryable: false,
+            handoff_may_have_succeeded: handoff,
+        }
+    }
+}
+
+#[cfg(not(windows))]
+mod platform {
+    use super::ExecutorError;
+    use spool_protocol::executor::{ExecutorOperation, ExecutorResult};
+
+    pub fn execute(_operation: ExecutorOperation) -> Result<ExecutorResult, ExecutorError> {
+        Err(ExecutorError {
+            code: "winspool_unavailable".into(),
+            message: "Winspool executor is available only on Windows".into(),
+            retryable: false,
+            handoff_may_have_succeeded: false,
+        })
+    }
+}

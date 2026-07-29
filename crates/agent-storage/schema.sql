@@ -64,6 +64,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   native_job_id TEXT,
   accepted_unix_ms INTEGER NOT NULL,
   updated_unix_ms INTEGER NOT NULL,
+  cloud_managed INTEGER NOT NULL DEFAULT 0 CHECK (cloud_managed IN (0, 1)),
   UNIQUE (printer_id, printer_sequence)
 );
 

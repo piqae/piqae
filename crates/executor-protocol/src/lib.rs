@@ -99,6 +99,44 @@ pub fn read_frame<T: for<'de> Deserialize<'de>>(mut reader: impl Read) -> Result
     Ok(serde_json::from_slice(&body)?)
 }
 
+/// Asynchronously writes and flushes exactly one framed executor message.
+///
+/// # Errors
+///
+/// Returns an error if serialization or stream I/O fails.
+pub async fn write_frame_async<T: Serialize + Sync>(
+    writer: &mut (impl tokio::io::AsyncWrite + Unpin + Send),
+    value: &T,
+) -> Result<(), FrameError> {
+    use tokio::io::AsyncWriteExt as _;
+
+    writer.write_all(&encode_frame(value)?).await?;
+    writer.flush().await?;
+    Ok(())
+}
+
+/// Asynchronously reads exactly one framed executor message.
+///
+/// # Errors
+///
+/// Returns an error for stream I/O, an oversized frame, or invalid JSON.
+pub async fn read_frame_async<T: serde::de::DeserializeOwned>(
+    reader: &mut (impl tokio::io::AsyncRead + Unpin + Send),
+) -> Result<T, FrameError> {
+    use tokio::io::AsyncReadExt as _;
+
+    let mut header = [0_u8; 4];
+    reader.read_exact(&mut header).await?;
+    let body_len = usize::try_from(u32::from_be_bytes(header))
+        .map_err(|_| FrameError::TooLarge(usize::MAX))?;
+    if body_len > MAX_FRAME_BYTES {
+        return Err(FrameError::TooLarge(body_len));
+    }
+    let mut body = vec![0_u8; body_len];
+    reader.read_exact(&mut body).await?;
+    Ok(serde_json::from_slice(&body)?)
+}
+
 /// Incremental decoder used when a child process stream splits or coalesces
 /// frame writes.
 #[derive(Debug, Default)]

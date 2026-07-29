@@ -10,6 +10,7 @@ publish = false
 [dependencies]
 axum.workspace = true
 serde.workspace = true
+spool-domain.workspace = true
 spool-local-ipc = { path = "../local-ipc" }
 thiserror.workspace = true
 tokio.workspace = true
@@ -20,4 +21,3 @@ tower.workspace = true
 
 [lints]
 workspace = true
-

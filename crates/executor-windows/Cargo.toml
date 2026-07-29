@@ -1,0 +1,19 @@
+[package]
+name = "spool-executor-windows"
+version.workspace = true
+edition.workspace = true
+license = "Apache-2.0"
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+spool-domain.workspace = true
+spool-executor-protocol = { path = "../executor-protocol" }
+spool-protocol.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59.0", features = [
+  "Win32_Foundation",
+  "Win32_Graphics_Printing",
+] }
