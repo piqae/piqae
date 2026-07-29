@@ -1,6 +1,8 @@
 <script lang="ts">
   import Icon from '$lib/components/Icon.svelte';
   import { createAuthBoundary } from '$lib/auth';
+  import type { ActionData, PageData } from './$types';
+  let { data, form }: { data: PageData; form: ActionData } = $props();
   const auth = createAuthBoundary('hosted');
 </script>
 
@@ -16,13 +18,36 @@
       <h1>Sign in to Spool</h1>
       <p>Manage your print fleet, queues, API keys, and live delivery state.</p>
     </div>
-    <a class="button primary sign-in" href={auth.signInUrl('/dashboard')}>
-      Continue with WorkOS <Icon name="arrow-right" size={13} />
-    </a>
-    <div class="divider"><span>or</span></div>
-    <a class="button self-host" href="/docs/self-host">
-      Configure self-hosted identity <Icon name="external" size={12} />
-    </a>
+    {#if data.authMode === 'local'}
+      <form method="POST">
+        <input type="hidden" name="return_to" value={data.returnTo} />
+        <label for="credential">Owner credential</label>
+        <input
+          id="credential"
+          name="credential"
+          type="password"
+          autocomplete="current-password"
+          spellcheck="false"
+          required
+          placeholder="spl_owner_…"
+        />
+        {#if form?.invalid}
+          <p class="form-error" role="alert">That owner credential was not accepted.</p>
+        {/if}
+        <button class="button primary sign-in" type="submit">
+          Sign in <Icon name="arrow-right" size={13} />
+        </button>
+      </form>
+      <p class="local-note">Your credential is exchanged server-side and stored only in an HttpOnly session cookie.</p>
+    {:else}
+      <a class="button primary sign-in" href={auth.signInUrl(data.returnTo)}>
+        Continue with WorkOS <Icon name="arrow-right" size={13} />
+      </a>
+      <div class="divider"><span>or</span></div>
+      <a class="button self-host" href="/docs/self-host">
+        Configure self-hosted identity <Icon name="external" size={12} />
+      </a>
+    {/if}
     <p class="terms">
       By continuing, you agree to the service terms and acknowledge the privacy policy.
     </p>
@@ -97,6 +122,47 @@
   .self-host {
     width: 100%;
     min-height: 34px;
+  }
+
+  form {
+    display: grid;
+    gap: 8px;
+  }
+
+  label {
+    color: var(--text-secondary);
+    font-size: 10px;
+    font-weight: 560;
+  }
+
+  input {
+    width: 100%;
+    min-height: 36px;
+    padding: 0 11px;
+    color: var(--text-primary);
+    background: var(--surface);
+    border: 1px solid var(--border-default);
+    border-radius: 7px;
+    font: inherit;
+  }
+
+  input:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  .form-error {
+    margin: 0;
+    color: var(--danger, #d14b4b);
+    font-size: 9px;
+  }
+
+  .local-note {
+    margin: 11px 4px 0;
+    color: var(--text-tertiary);
+    font-size: 9px;
+    line-height: 14px;
+    text-align: center;
   }
 
   .divider {

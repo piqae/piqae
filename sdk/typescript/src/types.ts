@@ -45,6 +45,47 @@ export interface DeploymentMeta {
   updates: { official_feed: boolean; custom_feed: boolean };
 }
 
+export interface Workspace {
+  id: SpoolId;
+  name: string;
+  slug: string;
+  status: 'active' | 'suspended' | 'cancelled';
+  created_at: string;
+  updated_at: string;
+}
+
+export interface WorkspaceMember {
+  id: SpoolId;
+  email: string;
+  name: string | null;
+  role: 'owner' | 'admin' | 'developer' | 'operator' | 'viewer' | 'billing';
+  status: 'pending' | 'active' | 'inactive';
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CurrentIdentity {
+  id: SpoolId;
+  email: string;
+  name: string | null;
+  workspace_id: SpoolId;
+  environment_id: SpoolId;
+  roles: WorkspaceMember['role'][];
+}
+
+export interface LocalOwnerSession {
+  /** Opaque secret returned only by exchange or rotation. */
+  token: string;
+  expires_at: string;
+}
+
+export interface BootstrappedLocalOwner {
+  /** Long-lived owner credential returned exactly once. */
+  credential: string;
+  workspace: Workspace;
+  member: WorkspaceMember;
+}
+
 export type ApiKeyScope =
   | 'api_keys_read'
   | 'api_keys_write'

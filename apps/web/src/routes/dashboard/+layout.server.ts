@@ -3,6 +3,7 @@ import { redirect } from '@sveltejs/kit';
 import type { LayoutServerLoad } from './$types';
 import { authMode } from '$lib/server/auth-config';
 import { dashboardMeta, dashboardMode } from '$lib/server/dashboard-data';
+import { currentLocalIdentity } from '$lib/server/local-owner-auth';
 
 export const load: LayoutServerLoad = async (event) => {
   const mode = dashboardMode();
@@ -38,7 +39,18 @@ export const load: LayoutServerLoad = async (event) => {
     };
   }
 
-  // Local/self-host mode remains independent of WorkOS. The control plane or
-  // reverse proxy can supply its own session boundary.
-  return { dashboardMode: mode, meta, viewer: null };
+  const token = event.locals.localSessionToken;
+  if (!token) redirect(303, `/login?return_to=${encodeURIComponent(event.url.pathname)}`);
+  const user = await currentLocalIdentity(event, token);
+  if (!user) redirect(303, `/login?return_to=${encodeURIComponent(event.url.pathname)}`);
+  return {
+    dashboardMode: mode,
+    meta,
+    viewer: {
+      id: user.id,
+      email: user.email,
+      name: user.name,
+      organizationId: user.workspaceId
+    }
+  };
 };

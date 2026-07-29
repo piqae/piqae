@@ -196,4 +196,34 @@ describe('SpoolClient', () => {
     });
     expect(String(fetcher.mock.calls[1]?.[0])).not.toContain('ABCD-EFGH');
   });
+
+  it('keeps local-owner bootstrap tokens in headers and credentials in JSON bodies', async () => {
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        Response.json({ credential: 'spl_owner_once', workspace: {}, member: {} })
+      )
+      .mockResolvedValueOnce(
+        Response.json({ token: 'spl_session_once', expires_at: '2030-01-01T00:00:00Z' })
+      );
+    const client = new SpoolClient({
+      fetch: fetcher,
+      baseUrl: 'https://print.example.test'
+    });
+
+    await client.identity.bootstrap(
+      { workspace_name: 'Warehouse', email: 'owner@example.com' },
+      'bootstrap-secret'
+    );
+    await client.identity.exchange('spl_owner_once');
+
+    const [bootstrapUrl, bootstrapInit] = fetcher.mock.calls[0] ?? [];
+    expect(String(bootstrapUrl)).not.toContain('bootstrap-secret');
+    expect(new Headers(bootstrapInit?.headers).get('x-spool-bootstrap-token')).toBe(
+      'bootstrap-secret'
+    );
+    const [exchangeUrl, exchangeInit] = fetcher.mock.calls[1] ?? [];
+    expect(String(exchangeUrl)).not.toContain('spl_owner_once');
+    expect(JSON.parse(String(exchangeInit?.body))).toEqual({ credential: 'spl_owner_once' });
+  });
 });

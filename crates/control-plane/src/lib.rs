@@ -5,6 +5,7 @@ pub mod authentication;
 pub mod compatibility;
 pub mod device_auth;
 pub mod error;
+pub mod identity;
 pub mod pairing;
 pub mod repository;
 pub mod request_id;
@@ -43,6 +44,7 @@ pub struct AppState {
     pub webhook_secrets: Arc<WebhookSecretBox>,
     pub object_store: Arc<dyn ObjectStore>,
     pub capabilities: DeploymentCapabilities,
+    pub local_identity: Option<identity::LocalIdentityState>,
 }
 
 impl fmt::Debug for AppState {
@@ -94,12 +96,19 @@ impl AppState {
             webhook_secrets: Arc::new(WebhookSecretBox::new(webhook_key)),
             object_store,
             capabilities: DeploymentCapabilities::default(),
+            local_identity: None,
         }
     }
 
     #[must_use]
     pub fn with_capabilities(mut self, capabilities: DeploymentCapabilities) -> Self {
         self.capabilities = capabilities;
+        self
+    }
+
+    #[must_use]
+    pub fn with_local_identity(mut self, identity: identity::LocalIdentityState) -> Self {
+        self.local_identity = Some(identity);
         self
     }
 
@@ -186,6 +195,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/health", get(api::health))
         .route("/v1/ready", get(api::ready))
         .route("/v1/meta", get(api::meta))
+        .merge(identity::router())
         .merge(pairing_router())
         .route(
             "/v1/api-keys",

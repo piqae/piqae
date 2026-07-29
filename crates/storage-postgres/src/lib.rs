@@ -96,6 +96,41 @@ pub struct ApiKeyAuthenticationRecord {
     pub scopes: Vec<String>,
 }
 
+#[derive(Clone, Debug)]
+pub struct LocalOwnerAuthenticationRecord {
+    pub workspace_id: WorkspaceId,
+    pub environment_id: EnvironmentId,
+    pub credential_id: String,
+    pub secret_hash: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct StoredWorkspace {
+    pub id: WorkspaceId,
+    pub name: String,
+    pub slug: String,
+    pub status: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct StoredWorkspaceMember {
+    pub id: String,
+    pub email: String,
+    pub name: Option<String>,
+    pub role: String,
+    pub status: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug)]
+pub struct BootstrappedLocalOwner {
+    pub workspace: StoredWorkspace,
+    pub member: StoredWorkspaceMember,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct StoredApiKey {
     pub id: String,
@@ -464,6 +499,294 @@ impl PostgresStore {
         };
         transaction.commit().await?;
         Ok((workspace_id, environment_id))
+    }
+
+    pub async fn bootstrap_local_owner(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        credential_id: &str,
+        credential_hash: &str,
+        workspace_name: &str,
+        user_id: &str,
+        email: &str,
+        display_name: Option<&str>,
+    ) -> Result<BootstrappedLocalOwner, StorageError> {
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('spool-local-owner', 1))")
+            .execute(&mut *transaction)
+            .await?;
+        let already_configured: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM local_owner_credentials)")
+                .fetch_one(&mut *transaction)
+                .await?;
+        if already_configured {
+            return Err(StorageError::ConcurrentStateChange);
+        }
+        let slug = format!(
+            "{}-{}",
+            slugify(workspace_name),
+            workspace_id
+                .to_string()
+                .chars()
+                .rev()
+                .take(6)
+                .collect::<String>()
+        );
+        let workspace_row = sqlx::query(
+            "INSERT INTO workspaces (id, name, slug)
+             VALUES ($1,$2,$3)
+             RETURNING id, name, slug, status, created_at, updated_at",
+        )
+        .bind(workspace_id.to_string())
+        .bind(workspace_name)
+        .bind(slug)
+        .fetch_one(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "INSERT INTO environments (id, workspace_id, kind, name)
+             VALUES ($1,$2,'live','Live')",
+        )
+        .bind(environment_id.to_string())
+        .bind(workspace_id.to_string())
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "INSERT INTO users (id, email, display_name)
+             VALUES ($1,$2,$3)",
+        )
+        .bind(user_id)
+        .bind(email)
+        .bind(display_name)
+        .execute(&mut *transaction)
+        .await?;
+        let member_row = sqlx::query(
+            "INSERT INTO workspace_members (workspace_id, user_id, role, status)
+             VALUES ($1,$2,'owner','active')
+             RETURNING user_id AS id, 'owner'::text AS role, status, created_at, updated_at",
+        )
+        .bind(workspace_id.to_string())
+        .bind(user_id)
+        .fetch_one(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "INSERT INTO local_owner_credentials (id, workspace_id, key_hash)
+             VALUES ($1,$2,$3)",
+        )
+        .bind(credential_id)
+        .bind(workspace_id.to_string())
+        .bind(credential_hash)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(BootstrappedLocalOwner {
+            workspace: workspace_from_row(&workspace_row)?,
+            member: StoredWorkspaceMember {
+                id: member_row.try_get("id")?,
+                email: email.to_owned(),
+                name: display_name.map(str::to_owned),
+                role: member_row.try_get("role")?,
+                status: member_row.try_get("status")?,
+                created_at: member_row.try_get("created_at")?,
+                updated_at: member_row.try_get("updated_at")?,
+            },
+        })
+    }
+
+    pub async fn local_owner_credential_for_authentication(
+        &self,
+        credential_id: &str,
+    ) -> Result<LocalOwnerAuthenticationRecord, StorageError> {
+        self.local_owner_authentication_record(
+            "SELECT credential.workspace_id, environment.id AS environment_id,
+                    credential.id AS credential_id, credential.key_hash AS secret_hash
+             FROM local_owner_credentials credential
+             JOIN workspaces workspace ON workspace.id = credential.workspace_id
+             JOIN environments environment
+               ON environment.workspace_id = credential.workspace_id
+              AND environment.kind = 'live'
+             WHERE credential.id = $1 AND credential.revoked_at IS NULL
+               AND workspace.status = 'active'",
+            credential_id,
+        )
+        .await
+    }
+
+    pub async fn local_owner_session_for_authentication(
+        &self,
+        session_id: &str,
+    ) -> Result<LocalOwnerAuthenticationRecord, StorageError> {
+        let record = self
+            .local_owner_authentication_record(
+                "SELECT session.workspace_id, environment.id AS environment_id,
+                        session.credential_id, session.token_hash AS secret_hash
+                 FROM local_owner_sessions session
+                 JOIN local_owner_credentials credential
+                   ON credential.id = session.credential_id
+                 JOIN workspaces workspace ON workspace.id = session.workspace_id
+                 JOIN environments environment
+                   ON environment.workspace_id = session.workspace_id
+                  AND environment.kind = 'live'
+                 WHERE session.id = $1 AND session.revoked_at IS NULL
+                   AND session.expires_at > now() AND credential.revoked_at IS NULL
+                   AND workspace.status = 'active'",
+                session_id,
+            )
+            .await?;
+        sqlx::query(
+            "UPDATE local_owner_sessions SET last_seen_at = now()
+             WHERE id = $1 AND workspace_id = $2",
+        )
+        .bind(session_id)
+        .bind(record.workspace_id.to_string())
+        .execute(&self.pool)
+        .await?;
+        Ok(record)
+    }
+
+    async fn local_owner_authentication_record(
+        &self,
+        query: &str,
+        id: &str,
+    ) -> Result<LocalOwnerAuthenticationRecord, StorageError> {
+        let row = sqlx::query(query)
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?
+            .ok_or(StorageError::NotFound)?;
+        let workspace_id: String = row.try_get("workspace_id")?;
+        let environment_id: String = row.try_get("environment_id")?;
+        Ok(LocalOwnerAuthenticationRecord {
+            workspace_id: workspace_id.parse().map_err(|error| {
+                StorageError::InvalidData(format!("workspace id `{workspace_id}`: {error}"))
+            })?,
+            environment_id: environment_id.parse().map_err(|error| {
+                StorageError::InvalidData(format!("environment id `{environment_id}`: {error}"))
+            })?,
+            credential_id: row.try_get("credential_id")?,
+            secret_hash: row.try_get("secret_hash")?,
+        })
+    }
+
+    pub async fn create_local_owner_session(
+        &self,
+        session_id: &str,
+        workspace_id: WorkspaceId,
+        credential_id: &str,
+        token_hash: &str,
+        expires_at: DateTime<Utc>,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            "INSERT INTO local_owner_sessions
+                (id, workspace_id, credential_id, token_hash, expires_at)
+             SELECT $1,$2,$3,$4,$5
+             WHERE EXISTS (
+                 SELECT 1 FROM local_owner_credentials
+                 WHERE id = $3 AND workspace_id = $2 AND revoked_at IS NULL
+             )",
+        )
+        .bind(session_id)
+        .bind(workspace_id.to_string())
+        .bind(credential_id)
+        .bind(token_hash)
+        .bind(expires_at)
+        .execute(&self.pool)
+        .await?
+        .rows_affected()
+        .eq(&1)
+        .then_some(())
+        .ok_or(StorageError::NotFound)
+    }
+
+    pub async fn rotate_local_owner_session(
+        &self,
+        workspace_id: WorkspaceId,
+        old_session_id: &str,
+        new_session_id: &str,
+        credential_id: &str,
+        token_hash: &str,
+        expires_at: DateTime<Utc>,
+    ) -> Result<(), StorageError> {
+        let mut transaction = self.pool.begin().await?;
+        let revoked = sqlx::query(
+            "UPDATE local_owner_sessions SET revoked_at = now()
+             WHERE id = $1 AND workspace_id = $2 AND credential_id = $3
+               AND revoked_at IS NULL AND expires_at > now()",
+        )
+        .bind(old_session_id)
+        .bind(workspace_id.to_string())
+        .bind(credential_id)
+        .execute(&mut *transaction)
+        .await?
+        .rows_affected();
+        if revoked != 1 {
+            return Err(StorageError::NotFound);
+        }
+        sqlx::query(
+            "INSERT INTO local_owner_sessions
+                (id, workspace_id, credential_id, token_hash, expires_at)
+             VALUES ($1,$2,$3,$4,$5)",
+        )
+        .bind(new_session_id)
+        .bind(workspace_id.to_string())
+        .bind(credential_id)
+        .bind(token_hash)
+        .bind(expires_at)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    pub async fn revoke_local_owner_session(
+        &self,
+        workspace_id: WorkspaceId,
+        session_id: &str,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            "UPDATE local_owner_sessions SET revoked_at = COALESCE(revoked_at, now())
+             WHERE id = $1 AND workspace_id = $2",
+        )
+        .bind(session_id)
+        .bind(workspace_id.to_string())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn get_workspace(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<StoredWorkspace, StorageError> {
+        let row = sqlx::query(
+            "SELECT id, name, slug, status, created_at, updated_at
+             FROM workspaces WHERE id = $1",
+        )
+        .bind(workspace_id.to_string())
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(StorageError::NotFound)?;
+        workspace_from_row(&row)
+    }
+
+    pub async fn list_workspace_members(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<Vec<StoredWorkspaceMember>, StorageError> {
+        sqlx::query(
+            "SELECT users.id, users.email, users.display_name AS name,
+                    member.role, member.status, member.created_at, member.updated_at
+             FROM workspace_members member
+             JOIN users ON users.id = member.user_id
+             WHERE member.workspace_id = $1
+             ORDER BY member.created_at, users.id",
+        )
+        .bind(workspace_id.to_string())
+        .fetch_all(&self.pool)
+        .await?
+        .iter()
+        .map(workspace_member_from_row)
+        .collect()
     }
 
     pub async fn api_key_for_authentication(
@@ -2998,6 +3321,54 @@ fn stored_api_key_from_row(row: &sqlx::postgres::PgRow) -> Result<StoredApiKey, 
     })
 }
 
+fn workspace_from_row(row: &PgRow) -> Result<StoredWorkspace, StorageError> {
+    let id = row.try_get::<String, _>("id")?;
+    Ok(StoredWorkspace {
+        id: id
+            .parse()
+            .map_err(|error| StorageError::InvalidData(format!("workspace id `{id}`: {error}")))?,
+        name: row.try_get("name")?,
+        slug: row.try_get("slug")?,
+        status: row.try_get("status")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+    })
+}
+
+fn workspace_member_from_row(row: &PgRow) -> Result<StoredWorkspaceMember, StorageError> {
+    Ok(StoredWorkspaceMember {
+        id: row.try_get("id")?,
+        email: row.try_get("email")?,
+        name: row.try_get("name")?,
+        role: row.try_get("role")?,
+        status: row.try_get("status")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+    })
+}
+
+fn slugify(value: &str) -> String {
+    let mut slug = String::with_capacity(value.len());
+    let mut separator = false;
+    for character in value.chars().flat_map(char::to_lowercase) {
+        if character.is_ascii_alphanumeric() {
+            slug.push(character);
+            separator = false;
+        } else if !separator && !slug.is_empty() {
+            slug.push('-');
+            separator = true;
+        }
+    }
+    while slug.ends_with('-') {
+        slug.pop();
+    }
+    if slug.is_empty() {
+        "workspace".into()
+    } else {
+        slug
+    }
+}
+
 async fn insert_event(
     transaction: &mut Transaction<'_, Postgres>,
     job: &Job,
@@ -3363,5 +3734,11 @@ mod tests {
     #[test]
     fn lease_duration_matches_protocol_contract() {
         assert!(chrono::Duration::seconds(30).num_seconds() == 30);
+    }
+
+    #[test]
+    fn workspace_slugs_are_bounded_to_portable_ascii() {
+        assert_eq!(slugify("  C4 Coffee / Auckland  "), "c4-coffee-auckland");
+        assert_eq!(slugify("***"), "workspace");
     }
 }

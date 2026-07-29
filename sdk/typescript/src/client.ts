@@ -2,6 +2,7 @@ import type {
   Agent,
   AgentEnrolment,
   ApiKey,
+  BootstrappedLocalOwner,
   CreateApiKey,
   CreateDeviceAuthorization,
   CreateJob,
@@ -11,16 +12,20 @@ import type {
   DeviceAuthorizationReview,
   DeviceAuthorizationStatus,
   CreatedApiKey,
+  CurrentIdentity,
   ErrorEnvelope,
   Health,
   Job,
   JobEvent,
   ListOptions,
+  LocalOwnerSession,
   NodeUpdate,
   NodeUpdatePolicy,
   Page,
   Printer,
-  Webhook
+  Webhook,
+  Workspace,
+  WorkspaceMember
 } from './types.js';
 
 export interface SpoolClientOptions {
@@ -76,6 +81,31 @@ export class SpoolClient {
   health = () => this.request<Health>('GET', '/v1/health');
   ready = () => this.request<Health>('GET', '/v1/ready');
   meta = () => this.request<DeploymentMeta>('GET', '/v1/meta');
+
+  readonly identity = {
+    bootstrap: (
+      input: { workspace_name: string; email: string; display_name?: string | null },
+      bootstrapToken: string
+    ) =>
+      this.request<BootstrappedLocalOwner>('POST', '/v1/identity/local/bootstrap', {
+        body: input,
+        headers: { 'x-spool-bootstrap-token': bootstrapToken }
+      }),
+    exchange: (credential: string) =>
+      this.request<LocalOwnerSession>('POST', '/v1/identity/local/exchange', {
+        body: { credential }
+      }),
+    rotate: () =>
+      this.request<LocalOwnerSession>('POST', '/v1/identity/local/sessions/rotate'),
+    revoke: () => this.request<void>('POST', '/v1/identity/local/sessions/revoke'),
+    me: () => this.request<CurrentIdentity>('GET', '/v1/identity/me')
+  };
+
+  readonly workspaces = {
+    current: () => this.request<Workspace>('GET', '/v1/workspaces/current'),
+    members: () =>
+      this.request<WorkspaceMember[]>('GET', '/v1/workspaces/current/members')
+  };
 
   readonly apiKeys = {
     list: () => this.request<ApiKey[]>('GET', '/v1/api-keys'),
@@ -205,6 +235,7 @@ export class SpoolClient {
       body?: unknown;
       idempotencyKey?: string;
       query?: ListOptions;
+      headers?: Record<string, string>;
     } = {}
   ): Promise<T> {
     const url = new URL(`${this.baseUrl}${path}`);
@@ -216,7 +247,8 @@ export class SpoolClient {
     const authorization = this.apiKey ?? dynamicToken;
     const headers: Record<string, string> = {
       accept: 'application/json',
-      ...this.defaultHeaders
+      ...this.defaultHeaders,
+      ...options.headers
     };
     if (options.body !== undefined) headers['content-type'] = 'application/json';
     if (authorization) headers.authorization = `Bearer ${authorization}`;

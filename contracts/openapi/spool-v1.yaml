@@ -19,6 +19,8 @@ security:
 tags:
   - name: API Keys
     description: Create and revoke environment-scoped developer credentials.
+  - name: Identity
+    description: Self-hosted local-owner sessions and tenant identity projections.
   - name: Jobs
     description: Register and observe durable print jobs.
   - name: Printers
@@ -412,6 +414,112 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/DeploymentMeta" }
+  /v1/identity/local/bootstrap:
+    post:
+      summary: Create the first self-hosted owner
+      description: |
+        Available only when local-owner identity and an explicit bootstrap token are
+        configured. The bootstrap token is supplied in `X-Spool-Bootstrap-Token`.
+        The returned owner credential is shown exactly once.
+      tags: [Identity]
+      operationId: bootstrapLocalOwner
+      security: []
+      parameters:
+        - name: X-Spool-Bootstrap-Token
+          in: header
+          required: true
+          schema: { type: string, minLength: 16, maxLength: 512 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/BootstrapLocalOwner" }
+      responses:
+        "201":
+          description: First owner and workspace created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BootstrappedLocalOwner" }
+        "401": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /v1/identity/local/exchange:
+    post:
+      summary: Exchange a local-owner credential for a short-lived session
+      tags: [Identity]
+      operationId: exchangeLocalOwnerCredential
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ExchangeLocalOwnerCredential" }
+      responses:
+        "200":
+          description: Opaque session secret for a server-side browser adapter.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LocalOwnerSession" }
+        "401": { $ref: "#/components/responses/Error" }
+  /v1/identity/local/sessions/rotate:
+    post:
+      summary: Atomically rotate the current local-owner session
+      tags: [Identity]
+      operationId: rotateLocalOwnerSession
+      responses:
+        "200":
+          description: Replacement session. The presented session is revoked.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LocalOwnerSession" }
+        "401": { $ref: "#/components/responses/Error" }
+  /v1/identity/local/sessions/revoke:
+    post:
+      summary: Revoke the current local-owner session
+      tags: [Identity]
+      operationId: revokeLocalOwnerSession
+      responses:
+        "204": { description: Session revoked or already inactive. }
+        "401": { $ref: "#/components/responses/Error" }
+  /v1/identity/me:
+    get:
+      summary: Inspect the authenticated identity and active workspace
+      tags: [Identity]
+      operationId: getCurrentIdentity
+      responses:
+        "200":
+          description: Tenant-scoped identity projection.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CurrentIdentity" }
+        "401": { $ref: "#/components/responses/Error" }
+  /v1/workspaces/current:
+    get:
+      summary: Inspect the authenticated workspace
+      tags: [Identity]
+      operationId: getCurrentWorkspace
+      responses:
+        "200":
+          description: Current workspace only.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Workspace" }
+        "401": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /v1/workspaces/current/members:
+    get:
+      summary: List members of the authenticated workspace
+      tags: [Identity]
+      operationId: listCurrentWorkspaceMembers
+      responses:
+        "200":
+          description: Members scoped by the authenticated workspace ID.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/WorkspaceMember" }
+        "401": { $ref: "#/components/responses/Error" }
   /v1/device-authorizations:
     post:
       summary: Start browser pairing for a node
@@ -1589,8 +1697,8 @@ components:
     bearer:
       type: http
       scheme: bearer
-      bearerFormat: Spool API key or OIDC JWT
-      description: API keys are scope-limited. OIDC JWTs require issuer, expiry, organization, permissions, and either audience or an exact configured claim/value application binding.
+      bearerFormat: Spool API key, local-owner session, or OIDC JWT
+      description: API keys are scope-limited. Local-owner sessions are short-lived and self-host only. OIDC JWTs require issuer, expiry, organization, permissions, and either audience or an exact configured claim/value application binding.
     compatibilityBasic:
       type: http
       scheme: basic
@@ -1766,6 +1874,71 @@ components:
           schema:
             $ref: "#/components/schemas/ErrorEnvelope"
   schemas:
+    BootstrapLocalOwner:
+      type: object
+      additionalProperties: false
+      required: [workspace_name, email]
+      properties:
+        workspace_name: { type: string, minLength: 1, maxLength: 120 }
+        email: { type: string, format: email, maxLength: 320 }
+        display_name: { type: [string, "null"], maxLength: 120 }
+    BootstrappedLocalOwner:
+      type: object
+      additionalProperties: false
+      required: [credential, workspace, member]
+      properties:
+        credential: { type: string, pattern: '^spl_owner_', writeOnly: true }
+        workspace: { $ref: "#/components/schemas/Workspace" }
+        member: { $ref: "#/components/schemas/WorkspaceMember" }
+    ExchangeLocalOwnerCredential:
+      type: object
+      additionalProperties: false
+      required: [credential]
+      properties:
+        credential: { type: string, pattern: '^spl_owner_', maxLength: 512, writeOnly: true }
+    LocalOwnerSession:
+      type: object
+      additionalProperties: false
+      required: [token, expires_at]
+      properties:
+        token: { type: string, pattern: '^spl_session_', writeOnly: true }
+        expires_at: { type: string, format: date-time }
+    CurrentIdentity:
+      type: object
+      additionalProperties: false
+      required: [id, email, name, workspace_id, environment_id, roles]
+      properties:
+        id: { type: string }
+        email: { type: string, format: email }
+        name: { type: [string, "null"] }
+        workspace_id: { type: string }
+        environment_id: { type: string }
+        roles:
+          type: array
+          items: { type: string, enum: [owner, admin, developer, operator, viewer, billing] }
+    Workspace:
+      type: object
+      additionalProperties: false
+      required: [id, name, slug, status, created_at, updated_at]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        slug: { type: string }
+        status: { type: string, enum: [active, suspended, cancelled] }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    WorkspaceMember:
+      type: object
+      additionalProperties: false
+      required: [id, email, name, role, status, created_at, updated_at]
+      properties:
+        id: { type: string }
+        email: { type: string, format: email }
+        name: { type: [string, "null"] }
+        role: { type: string, enum: [owner, admin, developer, operator, viewer, billing] }
+        status: { type: string, enum: [pending, active, inactive] }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
     CompatibilityWhoAmI:
       type: object
       required: [id, email, canCreateSubAccounts, credits, numComputers, totalPrints, versions]

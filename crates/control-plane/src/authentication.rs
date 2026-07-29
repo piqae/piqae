@@ -3,7 +3,10 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header, jwk::JwkSet};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use spool_auth::{Scope, api_key_lookup_prefix, verify_api_key};
+use spool_auth::{
+    Scope, api_key_lookup_prefix, local_owner_session_id, verify_api_key,
+    verify_local_owner_session,
+};
 use spool_domain::{EnvironmentId, WorkspaceId};
 use spool_storage_postgres::PostgresStore;
 use std::{
@@ -179,6 +182,58 @@ pub struct PostgresAuthenticator {
     store: PostgresStore,
 }
 
+#[derive(Clone, Debug)]
+pub struct LocalSessionAuthenticator {
+    store: PostgresStore,
+}
+
+impl LocalSessionAuthenticator {
+    #[must_use]
+    pub const fn new(store: PostgresStore) -> Self {
+        Self { store }
+    }
+
+    async fn authenticate_token(&self, token: &str) -> Result<TenantContext, AuthenticationError> {
+        let id = local_owner_session_id(token).map_err(|_| AuthenticationError)?;
+        let record = self
+            .store
+            .local_owner_session_for_authentication(&id.to_string())
+            .await
+            .map_err(|_| AuthenticationError)?;
+        let token = token.to_owned();
+        let secret_hash = record.secret_hash.clone();
+        tokio::task::spawn_blocking(move || verify_local_owner_session(&token, &secret_hash))
+            .await
+            .map_err(|_| AuthenticationError)?
+            .map_err(|_| AuthenticationError)?;
+        Ok(TenantContext::unrestricted(
+            record.workspace_id,
+            record.environment_id,
+        ))
+    }
+}
+
+#[async_trait]
+impl Authenticator for LocalSessionAuthenticator {
+    async fn authenticate_bearer(
+        &self,
+        authorization: &str,
+    ) -> Result<TenantContext, AuthenticationError> {
+        let token = authorization
+            .strip_prefix("Bearer ")
+            .filter(|value| !value.is_empty())
+            .ok_or(AuthenticationError)?;
+        self.authenticate_token(token).await
+    }
+
+    async fn authenticate_basic(
+        &self,
+        _authorization: &str,
+    ) -> Result<TenantContext, AuthenticationError> {
+        Err(AuthenticationError)
+    }
+}
+
 impl PostgresAuthenticator {
     #[must_use]
     pub const fn new(store: PostgresStore) -> Self {
@@ -237,6 +292,7 @@ impl Authenticator for PostgresAuthenticator {
 #[derive(Clone, Debug)]
 pub struct CombinedAuthenticator {
     postgres: PostgresAuthenticator,
+    local_session: Option<LocalSessionAuthenticator>,
     bootstrap: Option<StaticAuthenticator>,
     oidc: Option<OidcAuthenticator>,
 }
@@ -245,11 +301,13 @@ impl CombinedAuthenticator {
     #[must_use]
     pub const fn new(
         postgres: PostgresAuthenticator,
+        local_session: Option<LocalSessionAuthenticator>,
         bootstrap: Option<StaticAuthenticator>,
         oidc: Option<OidcAuthenticator>,
     ) -> Self {
         Self {
             postgres,
+            local_session,
             bootstrap,
             oidc,
         }
@@ -265,6 +323,11 @@ impl Authenticator for CombinedAuthenticator {
         if let Ok(tenant) = self.postgres.authenticate_bearer(authorization).await {
             Ok(tenant)
         } else {
+            if let Some(local_session) = &self.local_session
+                && let Ok(tenant) = local_session.authenticate_bearer(authorization).await
+            {
+                return Ok(tenant);
+            }
             if let Some(bootstrap) = &self.bootstrap
                 && let Ok(tenant) = bootstrap.authenticate_bearer(authorization).await
             {

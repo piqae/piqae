@@ -3,6 +3,7 @@ declare global {
     interface Locals {
       auth?: import('@workos/authkit-sveltekit').AuthKitAuth;
       authMode: 'workos' | 'local' | 'demo';
+      localSessionToken?: string;
     }
 
     interface PageData {

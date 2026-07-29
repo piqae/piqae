@@ -8,9 +8,10 @@ use base64::{
 use spool_control_plane::{
     AppState, AuthCapabilities, BillingCapabilities, DeploymentCapabilities, UpdateCapabilities,
     authentication::{
-        CombinedAuthenticator, OidcAuthenticator, OidcConfiguration, PostgresAuthenticator,
-        StaticAuthenticator, TenantContext,
+        CombinedAuthenticator, LocalSessionAuthenticator, OidcAuthenticator, OidcConfiguration,
+        PostgresAuthenticator, StaticAuthenticator, TenantContext,
     },
+    identity::LocalIdentityState,
     repository::Repository,
     router,
     webhook_worker::WebhookWorker,
@@ -94,15 +95,35 @@ async fn run() -> Result<()> {
         None
     };
     let oidc = build_oidc_authenticator(&store)?;
-    let authenticator =
-        CombinedAuthenticator::new(PostgresAuthenticator::new(store), bootstrap, oidc);
-    let application = AppState::new_with_resources(
+    let local_identity = local_identity_enabled().then(|| {
+        LocalIdentityState::new(
+            store.clone(),
+            env::var("SPOOL_LOCAL_OWNER_BOOTSTRAP_TOKEN")
+                .ok()
+                .as_deref(),
+            env::var("SPOOL_LOCAL_OWNER_SESSION_SECONDS")
+                .ok()
+                .and_then(|value| value.parse().ok()),
+        )
+    });
+    let authenticator = CombinedAuthenticator::new(
+        PostgresAuthenticator::new(store.clone()),
+        local_identity
+            .as_ref()
+            .map(|_| LocalSessionAuthenticator::new(store)),
+        bootstrap,
+        oidc,
+    );
+    let mut application = AppState::new_with_resources(
         repository,
         Arc::new(authenticator),
         webhook_key,
         object_store,
     )
     .with_capabilities(deployment_capabilities());
+    if let Some(local_identity) = local_identity {
+        application = application.with_local_identity(local_identity);
+    }
     let webhook_worker = WebhookWorker::new(application.clone());
     let _webhook_worker = tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_millis(500));
@@ -127,6 +148,17 @@ async fn run() -> Result<()> {
         .with_graceful_shutdown(shutdown_signal())
         .await
         .context("serve HTTP")
+}
+
+fn local_identity_enabled() -> bool {
+    let cloud = env::var("SPOOL_DEPLOYMENT").as_deref() == Ok("cloud");
+    env::var("SPOOL_IDENTITY_PROVIDER").unwrap_or_else(|_| {
+        if cloud {
+            "workos".into()
+        } else {
+            "local_owner".into()
+        }
+    }) == "local_owner"
 }
 
 fn deployment_capabilities() -> DeploymentCapabilities {

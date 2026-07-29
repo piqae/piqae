@@ -110,6 +110,27 @@ describe('dashboard data source selection', () => {
     expect(JSON.stringify({ mode: source.mode })).not.toContain('spl_live_local_service_key');
   });
 
+  it('prefers the HttpOnly local-owner session over the legacy service key', async () => {
+    privateEnvironment.SPOOL_DASHBOARD_API_KEY = 'spl_live_legacy_service_key';
+    fetcher.mockResolvedValueOnce(
+      new Response(JSON.stringify({ data: [], has_more: false }), { status: 200 })
+    );
+    const source = dashboardSource({
+      ...baseEvent,
+      locals: {
+        authMode: 'local',
+        localSessionToken: 'spl_session_server_only'
+      } as never
+    });
+
+    await source.api.jobs();
+
+    const [, init] = fetcher.mock.calls[0] ?? [];
+    expect(new Headers(init?.headers).get('authorization')).toBe(
+      'Bearer spl_session_server_only'
+    );
+  });
+
   it('maps active API keys without expecting or retaining plaintext secrets', async () => {
     fetcher.mockResolvedValueOnce(
       Response.json([

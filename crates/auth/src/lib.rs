@@ -89,6 +89,12 @@ pub struct GeneratedApiKey {
     pub password_hash: String,
 }
 
+pub struct GeneratedLocalSecret {
+    pub id: Uuid,
+    pub plaintext: String,
+    pub password_hash: String,
+}
+
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum AuthError {
     #[error("invalid API key")]
@@ -116,6 +122,67 @@ pub fn generate_api_key(environment: Environment) -> Result<GeneratedApiKey, Aut
         lookup_prefix,
         password_hash,
     })
+}
+
+pub fn generate_local_owner_credential() -> Result<GeneratedLocalSecret, AuthError> {
+    generate_local_secret("spl_owner_")
+}
+
+pub fn generate_local_owner_session() -> Result<GeneratedLocalSecret, AuthError> {
+    generate_local_secret("spl_session_")
+}
+
+fn generate_local_secret(prefix: &str) -> Result<GeneratedLocalSecret, AuthError> {
+    let id = Uuid::now_v7();
+    let mut random = [0_u8; 32];
+    OsRng.fill_bytes(&mut random);
+    let plaintext = format!("{prefix}{id}.{}", URL_SAFE_NO_PAD.encode(random));
+    let salt = SaltString::generate(&mut OsRng);
+    let password_hash = Argon2::default()
+        .hash_password(plaintext.as_bytes(), &salt)
+        .map_err(|_| AuthError::Hashing)?
+        .to_string();
+    Ok(GeneratedLocalSecret {
+        id,
+        plaintext,
+        password_hash,
+    })
+}
+
+pub fn local_owner_credential_id(plaintext: &str) -> Result<Uuid, AuthError> {
+    local_secret_id(plaintext, "spl_owner_")
+}
+
+pub fn local_owner_session_id(plaintext: &str) -> Result<Uuid, AuthError> {
+    local_secret_id(plaintext, "spl_session_")
+}
+
+fn local_secret_id(plaintext: &str, prefix: &str) -> Result<Uuid, AuthError> {
+    let value = plaintext
+        .strip_prefix(prefix)
+        .and_then(|value| value.split_once('.'))
+        .filter(|(_, secret)| {
+            secret.len() >= 40 && !secret.contains(char::is_whitespace) && !secret.contains('.')
+        })
+        .ok_or(AuthError::InvalidKey)?;
+    value.0.parse().map_err(|_| AuthError::InvalidKey)
+}
+
+pub fn verify_local_owner_credential(plaintext: &str, encoded_hash: &str) -> Result<(), AuthError> {
+    local_owner_credential_id(plaintext)?;
+    verify_local_secret(plaintext, encoded_hash)
+}
+
+pub fn verify_local_owner_session(plaintext: &str, encoded_hash: &str) -> Result<(), AuthError> {
+    local_owner_session_id(plaintext)?;
+    verify_local_secret(plaintext, encoded_hash)
+}
+
+fn verify_local_secret(plaintext: &str, encoded_hash: &str) -> Result<(), AuthError> {
+    let parsed = PasswordHash::new(encoded_hash).map_err(|_| AuthError::InvalidKey)?;
+    Argon2::default()
+        .verify_password(plaintext.as_bytes(), &parsed)
+        .map_err(|_| AuthError::InvalidKey)
 }
 
 pub fn verify_api_key(plaintext: &str, encoded_hash: &str) -> Result<(), AuthError> {
@@ -177,5 +244,33 @@ mod tests {
         let prefix = api_key_lookup_prefix(&key.plaintext).unwrap();
         assert_eq!(prefix, key.lookup_prefix);
         assert!(prefix.len() < key.plaintext.len());
+    }
+
+    #[test]
+    fn local_owner_credentials_are_opaque_argon2_secrets() {
+        let credential = generate_local_owner_credential().unwrap();
+        assert!(credential.plaintext.starts_with("spl_owner_"));
+        assert_eq!(
+            local_owner_credential_id(&credential.plaintext),
+            Ok(credential.id)
+        );
+        assert!(
+            verify_local_owner_credential(&credential.plaintext, &credential.password_hash).is_ok()
+        );
+        assert!(
+            verify_local_owner_credential(
+                &format!("spl_owner_{}.wrong", credential.id),
+                &credential.password_hash
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn local_owner_sessions_cannot_be_used_as_credentials() {
+        let session = generate_local_owner_session().unwrap();
+        assert_eq!(local_owner_session_id(&session.plaintext), Ok(session.id));
+        assert!(local_owner_credential_id(&session.plaintext).is_err());
+        assert!(verify_local_owner_session(&session.plaintext, &session.password_hash).is_ok());
     }
 }

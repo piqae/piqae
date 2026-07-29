@@ -47,6 +47,16 @@ impl AppError {
         }
     }
 
+    pub fn conflict(code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code,
+            message: message.into(),
+            retryable: false,
+            compatibility: false,
+        }
+    }
+
     #[must_use]
     pub fn unauthorized() -> Self {
         Self {
@@ -145,6 +155,12 @@ impl From<RepositoryError> for AppError {
                 }
             }
         }
+    }
+}
+
+impl From<spool_storage_postgres::StorageError> for AppError {
+    fn from(error: spool_storage_postgres::StorageError) -> Self {
+        RepositoryError::from(error).into()
     }
 }
 

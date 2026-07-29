@@ -48,10 +48,10 @@ export function dashboardConnection(
       throw new Error('The verified hosted session does not contain an OIDC access token.');
     }
   } else {
-    bearerToken = privateEnv.SPOOL_DASHBOARD_API_KEY;
+    bearerToken = event.locals.localSessionToken ?? privateEnv.SPOOL_DASHBOARD_API_KEY;
     if (!bearerToken) {
       throw new Error(
-        'Local live dashboard authentication requires the server-only SPOOL_DASHBOARD_API_KEY.'
+        'Local live dashboard authentication requires a local-owner session.'
       );
     }
   }
