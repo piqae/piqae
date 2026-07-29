@@ -8,6 +8,11 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+base64.workspace = true
+hex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
 spool-domain.workspace = true
 spool-executor-protocol = { path = "../executor-protocol", version = "0.1.0" }
 spool-protocol.workspace = true
@@ -15,5 +20,6 @@ spool-protocol.workspace = true
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59.0", features = [
   "Win32_Foundation",
+  "Win32_Graphics_Gdi",
   "Win32_Graphics_Printing",
 ] }
