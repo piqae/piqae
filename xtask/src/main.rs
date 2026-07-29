@@ -452,6 +452,7 @@ fn collect_manifests(directory: &Path, destination: &mut Vec<PathBuf>) -> TaskRe
                 path.file_name().and_then(OsStr::to_str),
                 Some(
                     ".git"
+                        | ".next"
                         | "node_modules"
                         | "target"
                         | ".build"
