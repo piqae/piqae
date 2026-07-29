@@ -130,8 +130,12 @@ pub struct WebhookDeliveryWork {
     pub url: String,
     pub secret_ciphertext: Vec<u8>,
     pub payload: serde_json::Value,
+    pub event_occurred_at: DateTime<Utc>,
     pub attempt: i32,
 }
+
+pub const WEBHOOK_MAX_CLAIM_BATCH: i64 = 100;
+pub const WEBHOOK_CLAIM_TTL_SECONDS: i64 = 300;
 
 #[derive(Clone, Debug, Serialize)]
 pub struct StoredTenantEvent {
@@ -939,16 +943,17 @@ impl PostgresStore {
                 FOR UPDATE SKIP LOCKED LIMIT $1
              )
              UPDATE webhook_deliveries AS delivery
-             SET claimed_until = now() + interval '30 seconds'
+             SET claimed_until = now() + $2 * interval '1 second'
              FROM candidates, webhook_endpoints AS endpoint, webhook_events AS event
              WHERE delivery.id = candidates.id
                AND endpoint.id = delivery.endpoint_id
                AND event.id = delivery.event_id
              RETURNING delivery.id, delivery.event_id, delivery.destination_url,
                        delivery.attempt, endpoint.secret_ciphertext,
-                       event.event_type, event.payload",
+                       event.event_type, event.payload, event.occurred_at",
         )
-        .bind(limit.clamp(1, 100))
+        .bind(limit.clamp(1, WEBHOOK_MAX_CLAIM_BATCH))
+        .bind(WEBHOOK_CLAIM_TTL_SECONDS)
         .fetch_all(&self.pool)
         .await?;
         rows.into_iter()
@@ -960,6 +965,7 @@ impl PostgresStore {
                     url: row.try_get("destination_url")?,
                     secret_ciphertext: row.try_get("secret_ciphertext")?,
                     payload: row.try_get("payload")?,
+                    event_occurred_at: row.try_get("occurred_at")?,
                     attempt: row.try_get("attempt")?,
                 })
             })

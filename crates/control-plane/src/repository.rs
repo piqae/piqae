@@ -1401,6 +1401,7 @@ impl Repository for MemoryRepository {
     ) -> Result<String, RepositoryError> {
         let mut state = self.state.write().await;
         let event_id = EventId::new().to_string();
+        let event_occurred_at = Utc::now();
         let endpoints = state
             .webhooks
             .values()
@@ -1423,6 +1424,7 @@ impl Repository for MemoryRepository {
                     url,
                     secret_ciphertext,
                     payload: payload.clone(),
+                    event_occurred_at,
                     attempt: 0,
                 },
             );

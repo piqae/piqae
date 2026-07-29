@@ -295,6 +295,24 @@ Separate:
 A single red/green status is insufficient. Readiness endpoints must avoid
 claiming the service is ready when it cannot durably register jobs.
 
+## Webhook delivery semantics
+
+Webhook delivery is durable and at least once. Spool claims no more than 100
+due deliveries for five minutes and processes at most eight requests
+concurrently. Each request has a five-second DNS budget and a ten-second HTTP
+budget, so the claim remains valid beyond the bounded worst-case duration of a
+full batch. One slow or failing destination does not block unrelated
+destinations. Failed deliveries retain the existing retry and dead-letter
+policy.
+
+The event ID, `created_at`, event type, data, and serialized JSON body remain
+stable across retries. The `spool-attempt`, `spool-timestamp`, and
+`spool-signature` headers are generated for each attempt. A process failure or
+an ambiguous network response can still produce a duplicate delivery.
+Consumers must therefore deduplicate using `spool-event-id` (the same value as
+the payload `id`) and make handlers idempotent before returning a successful
+2xx response.
+
 ## Backups and disaster recovery
 
 ### Self-hosted
