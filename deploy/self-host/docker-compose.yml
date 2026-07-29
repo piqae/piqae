@@ -65,6 +65,8 @@ services:
       - "${SPOOL_PORT:-8080}:8080"
     environment:
       SPOOL_ENVIRONMENT: production
+      SPOOL_SERVICE_ROLE: all
+      SPOOL_RUN_MIGRATIONS_ON_STARTUP: "true"
       SPOOL_BIND: 0.0.0.0:8080
       SPOOL_DATABASE_URL: postgres://spool:${POSTGRES_PASSWORD}@postgres:5432/spool
       SPOOL_OBJECT_STORE: s3
@@ -101,7 +103,7 @@ services:
       OTEL_SDK_DISABLED: ${OTEL_SDK_DISABLED:-false}
       RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
     healthcheck:
-      test: ["CMD", "/usr/local/bin/spool-server", "healthcheck", "--url", "http://127.0.0.1:8080/v1/health"]
+      test: ["CMD", "/usr/local/bin/spool-server", "healthcheck", "--url", "http://127.0.0.1:8080/v1/ready"]
       interval: 10s
       timeout: 3s
       retries: 12

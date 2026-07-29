@@ -1,5 +1,5 @@
 output "server_uri" {
-  value = google_cloud_run_v2_service.server.uri
+  value = google_cloud_run_v2_service.server["api"].uri
 }
 
 output "service_account" {
@@ -7,7 +7,7 @@ output "service_account" {
 }
 
 output "secondary_server_uri" {
-  value = try(google_cloud_run_v2_service.server_secondary[0].uri, null)
+  value = try(google_cloud_run_v2_service.server_secondary["api"].uri, null)
 }
 
 output "global_load_balancer_ip" {

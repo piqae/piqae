@@ -1,0 +1,45 @@
+{
+  "version": 1,
+  "commercial_plans": ["free", "pro"],
+  "hosted_components": {
+    "cloud_run": "required",
+    "cloud_sql": "required",
+    "gcs": "required",
+    "vercel": "required",
+    "workos": "required",
+    "stripe": "required",
+    "sentry": "required"
+  },
+  "external_evidence": [
+    {
+      "id": "apple_signing_and_notarisation",
+      "status": "open",
+      "required_file": "apple-signing-and-notarisation.json"
+    },
+    {
+      "id": "windows_authenticode",
+      "status": "open",
+      "required_file": "windows-authenticode.json"
+    },
+    {
+      "id": "windows_oki_physical",
+      "status": "open",
+      "required_file": "windows-oki-physical.json"
+    },
+    {
+      "id": "regional_dr_rehearsal",
+      "status": "open",
+      "required_file": "regional-dr-rehearsal.json"
+    },
+    {
+      "id": "external_security_review",
+      "status": "open",
+      "required_file": "external-security-review.json"
+    },
+    {
+      "id": "production_soak_30_days",
+      "status": "open",
+      "required_file": "production-soak-30-days.json"
+    }
+  ]
+}

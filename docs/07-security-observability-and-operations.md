@@ -365,9 +365,11 @@ observable, idempotent, and tested under failure.
 - status page and public incident history;
 - metering is derived from immutable job events, not mutable counters.
 
-Start billing only after usage semantics are clear: charge on registered job,
-agent acceptance, or spooler acceptance. Spooler acceptance is the fairest
-default but creates delayed/reversed usage records for expired jobs.
+Spool Cloud charges only when a Live job first reaches
+`accepted_by_spooler`. Registration, Test jobs, retries, expired jobs that
+never reach the operating-system spooler, and later state updates do not add
+usage. The immutable usage ledger is authoritative; Stripe receives an
+idempotent projection and is not the source of print truth.
 
 ## Self-host operations
 

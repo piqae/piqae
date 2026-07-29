@@ -1,0 +1,188 @@
+# Production release and promotion
+
+**Status:** structural deployment foundations are implemented; Spool Cloud is
+not yet approved for production or a 99.95% availability claim.
+
+The release decision is fail-closed. A successful build, Helm render, Terraform
+validation, or virtual print does not approve a production promotion.
+
+## One-command preflight
+
+Run repository-only checks during development:
+
+```console
+./deploy/production-check.sh structural
+```
+
+Run the release preflight with protected, populated configuration and external
+evidence:
+
+```console
+SPOOL_PRODUCTION_VERCEL_ENV_FILE=/protected/vercel-production.env \
+SPOOL_PRODUCTION_TFVARS_FILE=/protected/production.tfvars \
+SPOOL_PRODUCTION_EVIDENCE_DIR=/protected/release-evidence \
+  ./deploy/production-check.sh
+```
+
+The command does not deploy, publish, sign, or print. It runs the full release
+check and rejects missing configuration, mutable images, example domains,
+unfinished hosted integrations, absent external evidence, and unsafe rollout
+semantics. It never prints secret values.
+
+## Current gate classification
+
+| Area | Classification | Repository evidence | Remaining release evidence |
+| --- | --- | --- | --- |
+| Compose | Preview | `deploy/self-host/docker-compose.yml`, readiness rendering | backup/restore and upgrade drill |
+| Helm | Preview | digest example, pre-upgrade migration Job, PDB/HPA/topology/network policy | Kind install/upgrade/rollback and disruption run |
+| Cloud Run | Preview foundation | role-separated two-region Terraform, guarded API/sync invocation, readiness, staged two-region promotion and rollback workflow | rehearsed promotion and failure evidence |
+| Cloud SQL | Preview foundation | Enterprise Plus regional HA, PITR, retained backups, DR replica, generated database identity and authenticated Cloud Run connector | fenced promotion and restore rehearsal |
+| GCS | Preview foundation | native ADC-backed runtime adapter, bucket IAM and versioned dual-region bucket | deployed end-to-end object and retention checks |
+| WorkOS | Preview | OIDC validation and hosted environment contract | production tenant/session/invitation run |
+| Stripe | Preview | canonical Free/Pro checkout validation, signed idempotent webhook projection and durable overage exporter | live-mode price/webhook/meter replay evidence |
+| Sentry | Preview | server/browser SDK, aggressive PII redaction and release-bound source-map upload | production project and redaction evidence |
+| Native signing | Blocked externally | fail-closed packaging workflows | Apple notarisation and Windows Authenticode records |
+| Availability | Blocked externally | lease/outbox architecture and HA foundations | regional DR rehearsal and 30-day no-loss soak |
+
+`release/support-matrix.yaml` remains the public source of support claims.
+
+## Required production order
+
+1. Build and attest immutable server, migration, web, macOS, and Windows
+   candidates from the same reviewed commit.
+2. Verify SBOMs, checksums, repository-bound provenance, code signatures, update
+   metadata, protocol N/N-1, and the support matrix.
+3. Back up PostgreSQL and object storage and prove the restore checkpoint is
+   readable.
+4. Run backward-compatible migrations exactly once with the migration image.
+   Do not let ordinary API/sync/worker replicas run DDL.
+5. Deploy the new server revision with zero unavailable capacity. Keep the
+   previous digest addressable and do not move all traffic immediately.
+6. Gate traffic on `/v1/ready`; verify job registration, node sync, object
+   digest fetch, webhook delivery, queue age, and tenant isolation using
+   non-physical canaries.
+7. Shift traffic in bounded stages, observing errors, pickup latency, event
+   propagation, database pressure, object failures, and duplicate-handoff
+   alarms at each stage.
+8. Hand worker services over one region at a time without percentage-splitting
+   worker revisions. PostgreSQL outbox leases remain the duplicate-processing
+   boundary while both regions are available.
+9. Promote the web only after the API contract is healthy. Then release a small
+   signed node canary cohort and widen only after its rollback window.
+10. Record the exact commit, digests, six prior and six promoted Cloud Run
+   revisions, configuration revision, migration version,
+   evidence links, approver, and observation window.
+
+The protected promotion workflow requires the previous API, sync, and worker
+revision in both regions. It creates all six candidates without traffic, checks
+API/sync candidate readiness directly, stages API/sync at 5%, 25%, and 100%,
+then hands workers over one region at a time. A failure restores every service
+whose candidate was created. Database migrations are not reversed; they must
+remain compatible with both application versions.
+
+## Rollback and database rules
+
+Application rollback restores the previous immutable digest and traffic split.
+It must not run down-migrations automatically. Every migration must remain
+compatible with N and N-1 server versions throughout the rollout. If a schema
+change cannot be expanded and contracted safely, stop the release and schedule
+a separately rehearsed maintenance operation.
+
+During regional database promotion, fence the old writer before accepting
+writes in the secondary region. Reconcile jobs near the recovery point by
+event and native spooler evidence; never bulk-resubmit `delivery_uncertain`
+jobs. A control-plane outage leaves durably registered jobs waiting, and
+connected nodes preserve already leased work in their local SQLite queues.
+
+## Hosted configuration contract
+
+`deploy/hosted/vercel.env.example` is the Cloud dashboard contract. Spool Cloud
+has exactly Free and Pro plans. The production preflight requires WorkOS,
+Stripe, Sentry, public domains and release metadata, while rejecting blank
+values and non-HTTPS origins.
+
+### One-time WorkOS setup
+
+1. Create separate WorkOS applications for Preview and Production.
+2. Configure each production role (`owner`, `admin`, `developer`, `operator`,
+   `viewer`, and `billing`) and grant the API permission names Spool expects,
+   including `usage_read` for billing pages. Keep server-side permission checks
+   authoritative.
+3. Set the organisation claim to `org_id` and permissions claim to
+   `permissions`; set the exact issuer, JWKS URL, and application binding in
+   protected Terraform variables.
+4. Add only the production site callback and logout URLs. Export the AuthKit
+   variables in `deploy/hosted/vercel.env.example` to Vercel Production.
+5. Prove workspace switching, role refresh, removal, and cross-workspace denial
+   with two real organisations before enabling public signup.
+
+### One-time Stripe setup
+
+Create one Pro product with four recurring Prices:
+
+| Price | Amount | Interval | Usage |
+| --- | ---: | --- | --- |
+| Pro monthly base | USD $9.00 | month | licensed |
+| Pro annual base | USD $90.00 | year | licensed |
+| Pro monthly overage | USD $0.25 | month | metered |
+| Pro annual overage | USD $0.25 | year | metered |
+
+The two metered Prices use the same Billing Meter event name configured as
+`stripe_meter_event_name` in Terraform. Its customer key is
+`stripe_customer_id`, value key is `value`, and aggregation is `sum`. Spool
+submits integer 1,000-job overage blocks—not raw print counts—after closing a
+subscription period. Apply this Price metadata:
+
+```text
+spool_plan=pro
+spool_metric=accepted_live_jobs_overage
+spool_included_jobs=25000       # monthly; use 300000 for annual
+spool_overage_unit=1000
+```
+
+Put each Price’s unique lookup key—not its displayed amount—in the matching
+`STRIPE_PRICE_*` Vercel variable. Register the control-plane endpoint
+`https://<api-host>/v1/integrations/stripe/webhook` for checkout-session,
+subscription create/update/delete, invoice-paid, and invoice-payment-failed
+events. Put its signing secret in both the control-plane secret manager and the
+protected release configuration.
+
+Before promotion, call `/api/internal/pricing-drift` with the protected
+`PRICING_DRIFT_SHARED_SECRET`. Any missing, duplicate, inactive, wrongly priced,
+wrong-interval, wrong-meter, or wrong-metadata Price fails with HTTP 409.
+
+### One-time Sentry setup
+
+1. Create production Sentry project(s) for server and browser events. The
+   runtime DSNs may be the same, but both `SENTRY_DSN` and
+   `PUBLIC_SENTRY_DSN` must be configured for complete coverage.
+2. Keep `sendDefaultPii` disabled. Spool additionally removes users, request
+   bodies, headers, cookies, query strings, console/UI breadcrumbs, local
+   variables, and known credential fields from errors and transactions.
+3. Give the build a least-privilege `SENTRY_AUTH_TOKEN`, organisation, project,
+   and an immutable `SENTRY_RELEASE` tied to the promoted commit. If only part
+   of this set is present, the build fails before Vite emits a candidate.
+4. Source maps are generated as hidden artifacts, uploaded under that release,
+   and removed from deploy output by the Sentry SvelteKit integration. Never
+   put the upload token behind a `PUBLIC_` prefix.
+5. Keep tracing sample rates at zero until the error-only synthetic check
+   passes. Then set an approved per-environment rate and prove a transaction
+   also contains no query values, credentials, or user identity.
+6. Record a production event and source-map resolution using synthetic,
+   non-customer data. Attach the redaction and release-association evidence to
+   the production gate; code presence alone does not close it.
+
+`deploy/terraform/examples/ha-production/terraform.tfvars.example` is not
+deployable. A protected production tfvars file must select multi-region Cloud
+Run, the global load balancer, Cloud SQL, dual-region GCS, and digest-pinned
+images without placeholders. Secret values belong in a protected secret
+manager and state backend, not Git or command output.
+
+## External evidence records
+
+The preflight expects one JSON record for each filename declared in
+`release/production-readiness.json`. A record must identify the gate, say
+`passed`, bind to a full commit, include a timestamp, and point to access-
+controlled evidence. A locally created assertion is not acceptable evidence.
+Signing, physical Windows/OKI tests, regional DR, independent security review,
+and the 30-day production soak remain open until those activities really occur.

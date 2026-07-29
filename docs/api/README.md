@@ -6,6 +6,7 @@
 - [Headless SaaS quickstart](platform-headless-quickstart.md)
 - [Idempotency](idempotency.md)
 - [Uploads and design applications](uploads-and-design-apps.md)
+- [Cloud billing and usage](billing-and-usage.md)
 - [Webhooks](webhooks.md)
 - [PrintNode migration](printnode-migration.md)
 

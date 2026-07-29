@@ -20,6 +20,12 @@ leases and transactional outboxes make that topology safe, while separate
 Deployments provide disruption and scaling boundaries. Do not use NetworkPolicy
 or cost estimates as if unused roles were disabled inside a pool.
 
+The server supports explicit `api`, `sync`, `worker`, and local `all` roles.
+Helm and Cloud Run assign roles to independent pools, disable replica startup
+DDL, and provide bounded migration Jobs. The global load balancer routes device
+sync and lease/content paths to the sync pool; worker services have no public
+invoker binding.
+
 Production operators must provide:
 
 - PostgreSQL HA, PITR, tested restores, connection pooling, and migration DDL
@@ -40,6 +46,20 @@ kubeconform, formats Terraform, initializes providers without a backend, and
 validates configuration. Docker is used when local Helm/Terraform binaries are
 not installed. It never plans, applies, opens credentials, or accesses a
 cluster/cloud account.
+
+Run the fail-closed production preflight with:
+
+```sh
+SPOOL_PRODUCTION_VERCEL_ENV_FILE=/protected/vercel-production.env \
+SPOOL_PRODUCTION_TFVARS_FILE=/protected/production.tfvars \
+SPOOL_PRODUCTION_EVIDENCE_DIR=/protected/release-evidence \
+  ./deploy/production-check.sh
+```
+
+The command deliberately fails until code gates, populated configuration, and
+external evidence all exist. `./deploy/production-check.sh structural` checks
+only repository-owned templates and policies and is safe for normal CI. It is
+not production approval.
 
 ## Hosted GCP option
 

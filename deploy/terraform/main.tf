@@ -2,6 +2,11 @@ locals {
   name          = "spool-${var.environment}"
   min_instances = var.environment == "production" ? 3 : 0
   max_instances = var.environment == "production" ? 10 : 2
+  database_url = var.enable_managed_data_plane ? format(
+    "postgresql://spool:%s@localhost/spool?host=%s",
+    urlencode(random_password.database[0].result),
+    urlencode("/cloudsql/${google_sql_database_instance.primary[0].connection_name}")
+  ) : var.database_url_secret
 }
 
 resource "google_project_service" "run" {
@@ -34,7 +39,7 @@ resource "google_secret_manager_secret" "database_url" {
 
 resource "google_secret_manager_secret_version" "database_url" {
   secret      = google_secret_manager_secret.database_url.id
-  secret_data = var.database_url_secret
+  secret_data = local.database_url
 }
 
 resource "google_secret_manager_secret" "object_access_key" {
@@ -76,20 +81,56 @@ resource "google_secret_manager_secret_version" "webhook_master_key" {
   secret_data = var.webhook_master_key_secret
 }
 
+resource "google_secret_manager_secret" "stripe_secret_key" {
+  secret_id  = "${local.name}-stripe-secret-key"
+  depends_on = [google_project_service.secret_manager]
+  replication {
+    auto {}
+  }
+}
+
+resource "google_secret_manager_secret_version" "stripe_secret_key" {
+  secret      = google_secret_manager_secret.stripe_secret_key.id
+  secret_data = var.stripe_secret_key_secret
+}
+
+resource "google_secret_manager_secret" "stripe_webhook_secret" {
+  secret_id  = "${local.name}-stripe-webhook-secret"
+  depends_on = [google_project_service.secret_manager]
+  replication {
+    auto {}
+  }
+}
+
+resource "google_secret_manager_secret_version" "stripe_webhook_secret" {
+  secret      = google_secret_manager_secret.stripe_webhook_secret.id
+  secret_data = var.stripe_webhook_secret
+}
+
 resource "google_secret_manager_secret_iam_member" "runtime_secrets" {
   for_each = toset([
     google_secret_manager_secret.database_url.id,
     google_secret_manager_secret.object_access_key.id,
     google_secret_manager_secret.object_secret_key.id,
     google_secret_manager_secret.webhook_master_key.id,
+    google_secret_manager_secret.stripe_secret_key.id,
+    google_secret_manager_secret.stripe_webhook_secret.id,
   ])
   secret_id = each.value
   role      = "roles/secretmanager.secretAccessor"
   member    = "serviceAccount:${google_service_account.server.email}"
 }
 
+resource "google_project_iam_member" "cloud_sql_client" {
+  count   = var.enable_managed_data_plane ? 1 : 0
+  project = var.gcp_project_id
+  role    = "roles/cloudsql.client"
+  member  = "serviceAccount:${google_service_account.server.email}"
+}
+
 resource "google_cloud_run_v2_service" "server" {
-  name                = local.name
+  for_each            = toset(["api", "sync", "worker"])
+  name                = "${local.name}-${each.key}"
   location            = var.gcp_region
   deletion_protection = var.environment == "production"
   ingress             = var.enable_global_load_balancer ? "INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER" : "INGRESS_TRAFFIC_ALL"
@@ -103,6 +144,16 @@ resource "google_cloud_run_v2_service" "server" {
     # digest is verified. Keep per-instance memory use bounded until the object
     # store interface supports end-to-end streaming.
     max_instance_request_concurrency = 4
+
+    dynamic "volumes" {
+      for_each = var.enable_managed_data_plane ? [1] : []
+      content {
+        name = "cloudsql"
+        cloud_sql_instance {
+          instances = [google_sql_database_instance.primary[0].connection_name]
+        }
+      }
+    }
 
     scaling {
       min_instance_count = local.min_instances
@@ -125,9 +176,41 @@ resource "google_cloud_run_v2_service" "server" {
         cpu_idle = false
       }
 
+      dynamic "volume_mounts" {
+        for_each = var.enable_managed_data_plane ? [1] : []
+        content {
+          name       = "cloudsql"
+          mount_path = "/cloudsql"
+        }
+      }
+
       env {
         name  = "SPOOL_ENVIRONMENT"
         value = var.environment
+      }
+      env {
+        name  = "SPOOL_DEPLOYMENT"
+        value = "cloud"
+      }
+      env {
+        name  = "SPOOL_SERVICE_ROLE"
+        value = each.key
+      }
+      env {
+        name  = "SPOOL_RUN_MIGRATIONS_ON_STARTUP"
+        value = "false"
+      }
+      env {
+        name  = "SPOOL_IDENTITY_PROVIDER"
+        value = "workos"
+      }
+      env {
+        name  = "SPOOL_BILLING_ENABLED"
+        value = "true"
+      }
+      env {
+        name  = "STRIPE_METER_EVENT_NAME"
+        value = var.stripe_meter_event_name
       }
       env {
         name  = "SPOOL_BIND"
@@ -171,7 +254,11 @@ resource "google_cloud_run_v2_service" "server" {
       }
       env {
         name  = "SPOOL_OBJECT_STORE"
-        value = "s3"
+        value = var.enable_managed_data_plane ? "gcs" : "s3"
+      }
+      env {
+        name  = "SPOOL_GCS_BUCKET"
+        value = var.enable_managed_data_plane ? google_storage_bucket.objects[0].name : ""
       }
       env {
         name  = "SPOOL_S3_ENDPOINT"
@@ -221,6 +308,24 @@ resource "google_cloud_run_v2_service" "server" {
           }
         }
       }
+      env {
+        name = "STRIPE_SECRET_KEY"
+        value_source {
+          secret_key_ref {
+            secret  = google_secret_manager_secret.stripe_secret_key.secret_id
+            version = "latest"
+          }
+        }
+      }
+      env {
+        name = "STRIPE_WEBHOOK_SECRET"
+        value_source {
+          secret_key_ref {
+            secret  = google_secret_manager_secret.stripe_webhook_secret.secret_id
+            version = "latest"
+          }
+        }
+      }
 
       startup_probe {
         failure_threshold     = 12
@@ -228,7 +333,7 @@ resource "google_cloud_run_v2_service" "server" {
         period_seconds        = 2
         timeout_seconds       = 1
         http_get {
-          path = "/v1/health"
+          path = "/v1/ready"
           port = 8080
         }
       }
@@ -261,9 +366,54 @@ resource "google_cloud_run_v2_service" "server" {
   }
 }
 
+resource "google_cloud_run_v2_job" "migration" {
+  name                = "${local.name}-migrate"
+  location            = var.gcp_region
+  deletion_protection = var.environment == "production"
+
+  template {
+    template {
+      service_account = google_service_account.server.email
+      max_retries     = 1
+      timeout         = "600s"
+
+      dynamic "volumes" {
+        for_each = var.enable_managed_data_plane ? [1] : []
+        content {
+          name = "cloudsql"
+          cloud_sql_instance {
+            instances = [google_sql_database_instance.primary[0].connection_name]
+          }
+        }
+      }
+
+      containers {
+        image = var.migration_image
+        dynamic "volume_mounts" {
+          for_each = var.enable_managed_data_plane ? [1] : []
+          content {
+            name       = "cloudsql"
+            mount_path = "/cloudsql"
+          }
+        }
+        env {
+          name = "DATABASE_URL"
+          value_source {
+            secret_key_ref {
+              secret  = google_secret_manager_secret.database_url.secret_id
+              version = "latest"
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
 resource "google_cloud_run_v2_service_iam_member" "public" {
-  location = google_cloud_run_v2_service.server.location
-  name     = google_cloud_run_v2_service.server.name
+  for_each = var.allow_public_cloud_run_invocation ? toset(["api", "sync"]) : toset([])
+  location = google_cloud_run_v2_service.server[each.key].location
+  name     = google_cloud_run_v2_service.server[each.key].name
   role     = "roles/run.invoker"
   member   = "allUsers"
 }

@@ -20,6 +20,8 @@ required:
     command: python3 -m unittest discover -s release/tools -p 'test_*.py' -v
   - id: deployment_rendering
     command: ./deploy/validate.sh
+  - id: production_configuration
+    command: python3 release/tools/check_production_readiness.py --mode structural
   - id: streaming_faults
     command: cargo test -p spool-object-store --test stream_faults --locked
   - id: offline_recovery
@@ -47,6 +49,10 @@ manual:
     evidence: resolved independent security assessment for the release candidate
   - id: production_soak
     evidence: no-loss and duplicate-handoff fleet soak covering the release candidate
+  - id: production_runtime_roles
+    evidence: API/sync/worker role isolation and a migration-only rollout with no startup DDL
+  - id: hosted_integrations
+    evidence: canonical Free/Pro Stripe webhooks, WorkOS, Sentry source maps, Cloud SQL, and native GCS end-to-end report
 platforms:
   windows_x86_64:
     required: true

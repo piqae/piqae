@@ -21,17 +21,39 @@ variable "environment" {
 variable "image" {
   type        = string
   description = "Immutable spool-server OCI image digest."
+  validation {
+    condition     = can(regex("@sha256:[0-9a-f]{64}$", var.image))
+    error_message = "image must be an immutable OCI reference ending in @sha256:<64 lowercase hex characters>"
+  }
+}
+
+variable "migration_image" {
+  type        = string
+  description = "Immutable spool-migrate OCI image digest."
+  validation {
+    condition     = can(regex("@sha256:[0-9a-f]{64}$", var.migration_image))
+    error_message = "migration_image must be an immutable OCI reference ending in @sha256:<64 lowercase hex characters>"
+  }
 }
 
 variable "database_url_secret" {
   type        = string
   sensitive   = true
-  description = "Neon pooled PostgreSQL connection URL."
+  description = "External PostgreSQL URL. Leave empty when enable_managed_data_plane=true; Terraform then creates a Cloud SQL user and authenticated Unix-socket URL."
+  default     = ""
+  validation {
+    condition     = var.enable_managed_data_plane || length(trimspace(var.database_url_secret)) > 0
+    error_message = "database_url_secret is required when the managed data plane is disabled"
+  }
 }
 
 variable "object_store_endpoint" {
   type        = string
   description = "Cloudflare R2 S3-compatible endpoint."
+  validation {
+    condition     = startswith(var.object_store_endpoint, "https://")
+    error_message = "object_store_endpoint must use HTTPS"
+  }
 }
 
 variable "object_store_bucket" {
@@ -52,6 +74,31 @@ variable "webhook_master_key_secret" {
   type        = string
   sensitive   = true
   description = "Base64-encoded 32-byte key used to encrypt webhook signing secrets."
+  validation {
+    condition     = can(base64decode(var.webhook_master_key_secret)) && length(base64decode(var.webhook_master_key_secret)) == 32
+    error_message = "webhook_master_key_secret must be base64 that decodes to exactly 32 bytes"
+  }
+}
+
+variable "stripe_secret_key_secret" {
+  type        = string
+  sensitive   = true
+  description = "Stripe server API key used by the billing meter worker."
+}
+
+variable "stripe_webhook_secret" {
+  type        = string
+  sensitive   = true
+  description = "Stripe endpoint signing secret for the control-plane webhook."
+}
+
+variable "stripe_meter_event_name" {
+  type        = string
+  description = "Stripe Billing Meter event name exported by the worker."
+  validation {
+    condition     = length(trimspace(var.stripe_meter_event_name)) > 0
+    error_message = "stripe_meter_event_name must not be empty"
+  }
 }
 
 variable "auth_mode" {
@@ -163,7 +210,7 @@ variable "enable_managed_data_plane" {
 variable "cloud_sql_tier" {
   type        = string
   description = "Cloud SQL machine tier for primary and DR replica."
-  default     = "db-custom-2-7680"
+  default     = "db-perf-optimized-N-2"
 }
 
 variable "cloud_sql_disk_size_gb" {

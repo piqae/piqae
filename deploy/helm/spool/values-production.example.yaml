@@ -1,0 +1,66 @@
+# Replace every example value. This file demonstrates the production shape; it
+# is deliberately not directly deployable.
+image:
+  repository: ghcr.io/c4coffeeco/spool/server
+  tag: ""
+  digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+  pullPolicy: IfNotPresent
+
+config:
+  environment: production
+  authMode: oidc
+  oidcIssuer: https://api.workos.com/
+  oidcJwksUrl: https://replace.example.com/.well-known/jwks.json
+  oidcAudience: ""
+  oidcBindingClaim: client_id
+  oidcBindingValue: client_replace
+  oidcOrganizationClaim: org_id
+  oidcPermissionsClaim: permissions
+  s3Endpoint: https://replace.example.com
+  s3Bucket: spool-production
+  s3Region: auto
+  s3AllowHttp: false
+  s3VirtualHostedStyle: false
+
+externalSecret:
+  enabled: true
+  secretStoreRef:
+    kind: ClusterSecretStore
+    name: replace-production-store
+  remoteKeys:
+    databaseUrl: replace/spool/database-url
+    webhookMasterKey: replace/spool/webhook-master-key
+    s3AccessKeyId: replace/spool/object-access-key
+    s3SecretAccessKey: replace/spool/object-secret-key
+
+migration:
+  image:
+    repository: ghcr.io/c4coffeeco/spool/migrate
+    tag: ""
+    digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+    pullPolicy: IfNotPresent
+
+dashboard:
+  enabled: false
+
+ingress:
+  enabled: true
+  className: replace
+  hosts:
+    - host: api.spool.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: spool-api-tls
+      hosts: [api.spool.example.com]
+
+networkPolicy:
+  enabled: true
+  egress:
+    restricted: true
+    databaseCIDRs: [10.0.0.0/24]
+    databasePort: 5432
+    objectStoreCIDRs: [10.0.1.0/24]
+    objectStorePort: 443
+    additionalRules: []

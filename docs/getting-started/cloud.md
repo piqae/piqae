@@ -19,7 +19,9 @@ a self-hosted deployment.
   pair nodes, capture profiles, monitor queues, and diagnose failures.
 
 See the [headless SaaS quickstart](../api/platform-headless-quickstart.md) or
-[single-workspace API quickstart](../api/quickstart.md).
+[single-workspace API quickstart](../api/quickstart.md). The
+[billing and usage guide](../api/billing-and-usage.md) defines the exact
+billable event, quotas, and hosted identity/billing boundary.
 
 ## Connect the first node
 

@@ -20,6 +20,7 @@ print jobs through the same API used by the dashboard.
 - [Platform accounts](api/platform-service-accounts.md)
 - [Authentication](api/authentication.md)
 - [Uploads and design applications](api/uploads-and-design-apps.md)
+- [Cloud billing and usage](api/billing-and-usage.md)
 - [Jobs, offline nodes, and delivery truth](printing/jobs-and-statuses.md)
 - [Idempotency](api/idempotency.md)
 - [Signed webhooks](api/webhooks.md)

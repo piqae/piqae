@@ -47,6 +47,10 @@ spec:
           envFrom:
             - configMapRef: { name: {{ include "spool.fullname" $root }}-config }
           env:
+            - name: SPOOL_SERVICE_ROLE
+              value: {{ $name | quote }}
+            - name: SPOOL_RUN_MIGRATIONS_ON_STARTUP
+              value: "false"
             - name: SPOOL_DATABASE_URL
               valueFrom: { secretKeyRef: { name: {{ include "spool.secretName" $root }}, key: {{ $root.Values.secrets.keys.databaseUrl }} } }
             - name: SPOOL_WEBHOOK_MASTER_KEY

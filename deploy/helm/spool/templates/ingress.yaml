@@ -9,9 +9,12 @@ metadata:
   annotations: {{ toYaml . | nindent 4 }}
   {{- end }}
 spec:
-  {{- with .Values.ingress.className }}ingressClassName: {{ . }}{{- end }}
+  {{- with .Values.ingress.className }}
+  ingressClassName: {{ . | quote }}
+  {{- end }}
   {{- with .Values.ingress.tls }}
-  tls: {{ toYaml . | nindent 4 }}
+  tls:
+    {{- toYaml . | nindent 4 }}
   {{- end }}
   rules:
     {{- range .Values.ingress.hosts }}

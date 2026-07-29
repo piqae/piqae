@@ -1,5 +1,6 @@
 # Operations guides
 
+- [Production release and promotion](production-release.md)
 - [Configuration](configuration.md)
 - [Upgrades](upgrades.md)
 - [Backups and restore](backups-and-restore.md)

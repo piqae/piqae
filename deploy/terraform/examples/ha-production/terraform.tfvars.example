@@ -1,14 +1,19 @@
 gcp_project_id = "replace-production-project"
 environment    = "production"
 image          = "australia-southeast1-docker.pkg.dev/replace/spool/server@sha256:replace"
+migration_image = "australia-southeast1-docker.pkg.dev/replace/spool/migrate@sha256:replace"
 
-# Supply these through an encrypted tfvars mechanism; never commit values.
-database_url_secret              = "replace-at-apply"
+# Supply secrets through an encrypted tfvars mechanism; never commit values.
+# Managed Cloud SQL creates the spool database/user and authenticated connector
+# URL, so no database_url_secret is needed.
 object_store_endpoint            = "https://replace.r2.cloudflarestorage.com"
 object_store_bucket              = "spool-production"
 object_store_access_key_secret   = "replace-at-apply"
 object_store_secret_key_secret   = "replace-at-apply"
 webhook_master_key_secret        = "replace-at-apply"
+stripe_secret_key_secret          = "replace-at-apply"
+stripe_webhook_secret             = "replace-at-apply"
+stripe_meter_event_name           = "spool_jobs_accepted"
 oidc_jwks_url                    = "https://replace.example.com/.well-known/jwks.json"
 oidc_binding_value               = "client_replace"
 
@@ -19,6 +24,5 @@ enable_global_load_balancer    = true
 allow_public_cloud_run_invocation = true
 load_balancer_domains          = ["api.spool.example.com"]
 
-# Optional. Leave false while using external PostgreSQL and S3.
-enable_managed_data_plane = false
-# managed_object_bucket_name = "globally-unique-spool-production"
+enable_managed_data_plane   = true
+managed_object_bucket_name  = "replace-globally-unique-spool-production"

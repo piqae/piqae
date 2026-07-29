@@ -1,0 +1,74 @@
+name: Production promotion
+
+on:
+  workflow_dispatch:
+    inputs:
+      server_image:
+        description: Immutable server image including @sha256 digest
+        required: true
+      primary_api_previous_revision:
+        description: Known-good primary API revision
+        required: true
+      primary_sync_previous_revision:
+        description: Known-good primary sync revision
+        required: true
+      primary_worker_previous_revision:
+        description: Known-good primary worker revision
+        required: true
+      secondary_api_previous_revision:
+        description: Known-good secondary API revision
+        required: true
+      secondary_sync_previous_revision:
+        description: Known-good secondary sync revision
+        required: true
+      secondary_worker_previous_revision:
+        description: Known-good secondary worker revision
+        required: true
+      confirm:
+        description: Type PROMOTE
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: spool-production-promotion
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    if: inputs.confirm == 'PROMOTE'
+    environment: production
+    runs-on: [self-hosted, spool-production]
+    timeout-minutes: 1440
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Validate candidate and protected production configuration
+        env:
+          SPOOL_PRODUCTION_VERCEL_ENV_FILE: /etc/spool/production/vercel.env
+          SPOOL_PRODUCTION_TFVARS_FILE: /etc/spool/production/terraform.tfvars
+          SPOOL_PRODUCTION_EVIDENCE_DIR: /etc/spool/production/release-evidence
+        run: ./deploy/production-check.sh release
+      - name: Migrate, stage, observe, and promote
+        env:
+          SPOOL_GCP_PROJECT: ${{ vars.SPOOL_GCP_PROJECT }}
+          SPOOL_PRIMARY_GCP_REGION: ${{ vars.SPOOL_PRIMARY_GCP_REGION }}
+          SPOOL_SECONDARY_GCP_REGION: ${{ vars.SPOOL_SECONDARY_GCP_REGION }}
+          SPOOL_PRIMARY_API_SERVICE: ${{ vars.SPOOL_PRIMARY_API_SERVICE }}
+          SPOOL_PRIMARY_SYNC_SERVICE: ${{ vars.SPOOL_PRIMARY_SYNC_SERVICE }}
+          SPOOL_PRIMARY_WORKER_SERVICE: ${{ vars.SPOOL_PRIMARY_WORKER_SERVICE }}
+          SPOOL_SECONDARY_API_SERVICE: ${{ vars.SPOOL_SECONDARY_API_SERVICE }}
+          SPOOL_SECONDARY_SYNC_SERVICE: ${{ vars.SPOOL_SECONDARY_SYNC_SERVICE }}
+          SPOOL_SECONDARY_WORKER_SERVICE: ${{ vars.SPOOL_SECONDARY_WORKER_SERVICE }}
+          SPOOL_MIGRATION_JOB: ${{ vars.SPOOL_MIGRATION_JOB }}
+          SPOOL_API_ORIGIN: ${{ vars.SPOOL_API_ORIGIN }}
+          SPOOL_SERVER_IMAGE: ${{ inputs.server_image }}
+          SPOOL_PRIMARY_API_PREVIOUS_REVISION: ${{ inputs.primary_api_previous_revision }}
+          SPOOL_PRIMARY_SYNC_PREVIOUS_REVISION: ${{ inputs.primary_sync_previous_revision }}
+          SPOOL_PRIMARY_WORKER_PREVIOUS_REVISION: ${{ inputs.primary_worker_previous_revision }}
+          SPOOL_SECONDARY_API_PREVIOUS_REVISION: ${{ inputs.secondary_api_previous_revision }}
+          SPOOL_SECONDARY_SYNC_PREVIOUS_REVISION: ${{ inputs.secondary_sync_previous_revision }}
+          SPOOL_SECONDARY_WORKER_PREVIOUS_REVISION: ${{ inputs.secondary_worker_previous_revision }}
+          SPOOL_STAGE_5_PERCENT_SECONDS: "21600"
+          SPOOL_STAGE_25_PERCENT_SECONDS: "43200"
+        run: ./deploy/cloud/promote.sh

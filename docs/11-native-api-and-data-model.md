@@ -416,17 +416,16 @@ them.
 
 ## SaaS usage ledger
 
-Billing events are append-only and linked to job events:
+Spool Cloud has one published billable event:
 
-- `job.registered`;
-- `agent.accepted`;
-- `spooler.accepted`;
-- reversal/credit if policy requires.
+- `print_job_accepted`, recorded when a Live job first reaches
+  `accepted_by_spooler`.
 
-Choose one billable event and publish it. Do not calculate invoices from the
-mutable current job table. A PrintNode-compatible “one API request equals one
-print” plan can use registration, while a customer-friendly plan may charge at
-spooler acceptance.
+The event is append-only, linked to the tenant and job, and unique per job.
+Test jobs, registration retries, lease retries, and later spooler states do not
+add usage. Invoices and quota decisions are derived from this ledger, never
+from the mutable current job table. Spooler acceptance remains distinct from
+proof that ink reached paper.
 
 ## Configuration
 

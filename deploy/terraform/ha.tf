@@ -1,22 +1,27 @@
 locals {
   secondary_enabled = var.enable_multi_region
-  secondary_name    = "${local.name}-${var.secondary_region}"
   runtime_env = {
-    SPOOL_ENVIRONMENT             = var.environment
-    SPOOL_BIND                    = "0.0.0.0:8080"
-    SPOOL_AUTH_MODE               = var.auth_mode
-    SPOOL_OIDC_ISSUER             = var.oidc_issuer
-    SPOOL_OIDC_JWKS_URL           = var.oidc_jwks_url
-    SPOOL_OIDC_AUDIENCE           = var.oidc_audience
-    SPOOL_OIDC_BINDING_CLAIM      = var.oidc_binding_claim
-    SPOOL_OIDC_BINDING_VALUE      = var.oidc_binding_value
-    SPOOL_OIDC_ORGANIZATION_CLAIM = var.oidc_organization_claim
-    SPOOL_OIDC_PERMISSIONS_CLAIM  = var.oidc_permissions_claim
-    SPOOL_OIDC_ALLOW_UNRESTRICTED = "false"
-    SPOOL_OBJECT_STORE            = "s3"
-    SPOOL_S3_ENDPOINT             = var.object_store_endpoint
-    SPOOL_S3_BUCKET               = var.object_store_bucket
-    SPOOL_S3_REGION               = "auto"
+    SPOOL_ENVIRONMENT               = var.environment
+    SPOOL_DEPLOYMENT                = "cloud"
+    SPOOL_RUN_MIGRATIONS_ON_STARTUP = "false"
+    SPOOL_IDENTITY_PROVIDER         = "workos"
+    SPOOL_BILLING_ENABLED           = "true"
+    STRIPE_METER_EVENT_NAME         = var.stripe_meter_event_name
+    SPOOL_BIND                      = "0.0.0.0:8080"
+    SPOOL_AUTH_MODE                 = var.auth_mode
+    SPOOL_OIDC_ISSUER               = var.oidc_issuer
+    SPOOL_OIDC_JWKS_URL             = var.oidc_jwks_url
+    SPOOL_OIDC_AUDIENCE             = var.oidc_audience
+    SPOOL_OIDC_BINDING_CLAIM        = var.oidc_binding_claim
+    SPOOL_OIDC_BINDING_VALUE        = var.oidc_binding_value
+    SPOOL_OIDC_ORGANIZATION_CLAIM   = var.oidc_organization_claim
+    SPOOL_OIDC_PERMISSIONS_CLAIM    = var.oidc_permissions_claim
+    SPOOL_OIDC_ALLOW_UNRESTRICTED   = "false"
+    SPOOL_OBJECT_STORE              = var.enable_managed_data_plane ? "gcs" : "s3"
+    SPOOL_GCS_BUCKET                = var.enable_managed_data_plane ? google_storage_bucket.objects[0].name : ""
+    SPOOL_S3_ENDPOINT               = var.object_store_endpoint
+    SPOOL_S3_BUCKET                 = var.object_store_bucket
+    SPOOL_S3_REGION                 = "auto"
   }
 }
 
@@ -39,8 +44,8 @@ resource "google_project_service" "storage" {
 }
 
 resource "google_cloud_run_v2_service" "server_secondary" {
-  count               = local.secondary_enabled ? 1 : 0
-  name                = local.secondary_name
+  for_each            = local.secondary_enabled ? toset(["api", "sync", "worker"]) : toset([])
+  name                = "${local.name}-${var.secondary_region}-${each.key}"
   location            = var.secondary_region
   deletion_protection = var.environment == "production"
   ingress             = var.enable_global_load_balancer ? "INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER" : "INGRESS_TRAFFIC_ALL"
@@ -51,6 +56,16 @@ resource "google_cloud_run_v2_service" "server_secondary" {
     service_account                  = google_service_account.server.email
     timeout                          = "60s"
     max_instance_request_concurrency = 4
+
+    dynamic "volumes" {
+      for_each = var.enable_managed_data_plane ? [1] : []
+      content {
+        name = "cloudsql"
+        cloud_sql_instance {
+          instances = [google_sql_database_instance.primary[0].connection_name]
+        }
+      }
+    }
 
     scaling {
       min_instance_count = var.environment == "production" ? var.secondary_min_instances : 0
@@ -70,12 +85,24 @@ resource "google_cloud_run_v2_service" "server_secondary" {
         cpu_idle = false
       }
 
+      dynamic "volume_mounts" {
+        for_each = var.enable_managed_data_plane ? [1] : []
+        content {
+          name       = "cloudsql"
+          mount_path = "/cloudsql"
+        }
+      }
+
       dynamic "env" {
         for_each = local.runtime_env
         content {
           name  = env.key
           value = env.value
         }
+      }
+      env {
+        name  = "SPOOL_SERVICE_ROLE"
+        value = each.key
       }
 
       dynamic "env" {
@@ -84,6 +111,8 @@ resource "google_cloud_run_v2_service" "server_secondary" {
           SPOOL_S3_ACCESS_KEY_ID     = google_secret_manager_secret.object_access_key.secret_id
           SPOOL_S3_SECRET_ACCESS_KEY = google_secret_manager_secret.object_secret_key.secret_id
           SPOOL_WEBHOOK_MASTER_KEY   = google_secret_manager_secret.webhook_master_key.secret_id
+          STRIPE_SECRET_KEY          = google_secret_manager_secret.stripe_secret_key.secret_id
+          STRIPE_WEBHOOK_SECRET      = google_secret_manager_secret.stripe_webhook_secret.secret_id
         }
         content {
           name = env.key
@@ -101,7 +130,7 @@ resource "google_cloud_run_v2_service" "server_secondary" {
         period_seconds    = 2
         timeout_seconds   = 1
         http_get {
-          path = "/v1/health"
+          path = "/v1/ready"
           port = 8080
         }
       }
@@ -130,22 +159,11 @@ resource "google_cloud_run_v2_service" "server_secondary" {
   }
 }
 
-# Application authentication remains mandatory; this grants only Cloud Run
-# transport-level invocation so the global HTTPS load balancer can reach it.
-resource "google_cloud_run_v2_service_iam_member" "primary_invoker" {
-  count    = var.allow_public_cloud_run_invocation ? 1 : 0
-  project  = var.gcp_project_id
-  location = google_cloud_run_v2_service.server.location
-  name     = google_cloud_run_v2_service.server.name
-  role     = "roles/run.invoker"
-  member   = "allUsers"
-}
-
 resource "google_cloud_run_v2_service_iam_member" "secondary_invoker" {
-  count    = local.secondary_enabled && var.allow_public_cloud_run_invocation ? 1 : 0
+  for_each = local.secondary_enabled && var.allow_public_cloud_run_invocation ? toset(["api", "sync"]) : toset([])
   project  = var.gcp_project_id
-  location = google_cloud_run_v2_service.server_secondary[0].location
-  name     = google_cloud_run_v2_service.server_secondary[0].name
+  location = google_cloud_run_v2_service.server_secondary[each.key].location
+  name     = google_cloud_run_v2_service.server_secondary[each.key].name
   role     = "roles/run.invoker"
   member   = "allUsers"
 }
@@ -155,7 +173,7 @@ resource "google_compute_region_network_endpoint_group" "primary" {
   name                  = "${local.name}-primary"
   region                = var.gcp_region
   network_endpoint_type = "SERVERLESS"
-  cloud_run { service = google_cloud_run_v2_service.server.name }
+  cloud_run { service = google_cloud_run_v2_service.server["api"].name }
   depends_on = [google_project_service.compute]
 }
 
@@ -164,7 +182,25 @@ resource "google_compute_region_network_endpoint_group" "secondary" {
   name                  = "${local.name}-secondary"
   region                = var.secondary_region
   network_endpoint_type = "SERVERLESS"
-  cloud_run { service = google_cloud_run_v2_service.server_secondary[0].name }
+  cloud_run { service = google_cloud_run_v2_service.server_secondary["api"].name }
+  depends_on = [google_project_service.compute]
+}
+
+resource "google_compute_region_network_endpoint_group" "primary_sync" {
+  count                 = var.enable_global_load_balancer ? 1 : 0
+  name                  = "${local.name}-primary-sync"
+  region                = var.gcp_region
+  network_endpoint_type = "SERVERLESS"
+  cloud_run { service = google_cloud_run_v2_service.server["sync"].name }
+  depends_on = [google_project_service.compute]
+}
+
+resource "google_compute_region_network_endpoint_group" "secondary_sync" {
+  count                 = var.enable_global_load_balancer ? 1 : 0
+  name                  = "${local.name}-secondary-sync"
+  region                = var.secondary_region
+  network_endpoint_type = "SERVERLESS"
+  cloud_run { service = google_cloud_run_v2_service.server_secondary["sync"].name }
   depends_on = [google_project_service.compute]
 }
 
@@ -188,10 +224,44 @@ resource "google_compute_backend_service" "global" {
   }
 }
 
+resource "google_compute_backend_service" "global_sync" {
+  count                 = var.enable_global_load_balancer ? 1 : 0
+  name                  = "${local.name}-global-sync"
+  protocol              = "HTTP"
+  load_balancing_scheme = "EXTERNAL_MANAGED"
+  backend { group = google_compute_region_network_endpoint_group.primary_sync[0].id }
+  backend { group = google_compute_region_network_endpoint_group.secondary_sync[0].id }
+  outlier_detection {
+    consecutive_errors = 5
+    interval { seconds = 5 }
+    base_ejection_time { seconds = 30 }
+    max_ejection_percent         = 50
+    enforcing_consecutive_errors = 100
+  }
+}
+
 resource "google_compute_url_map" "global" {
   count           = var.enable_global_load_balancer ? 1 : 0
   name            = local.name
   default_service = google_compute_backend_service.global[0].id
+
+  host_rule {
+    hosts        = ["*"]
+    path_matcher = "spool-routes"
+  }
+
+  path_matcher {
+    name            = "spool-routes"
+    default_service = google_compute_backend_service.global[0].id
+    path_rule {
+      paths = [
+        "/v1/agent/sync",
+        "/v1/agent/jobs/*",
+        "/v1/agents/enrol",
+      ]
+      service = google_compute_backend_service.global_sync[0].id
+    }
+  }
 }
 
 resource "google_compute_managed_ssl_certificate" "global" {
@@ -232,6 +302,7 @@ resource "google_sql_database_instance" "primary" {
   depends_on          = [google_project_service.sqladmin]
 
   settings {
+    edition           = "ENTERPRISE_PLUS"
     tier              = var.cloud_sql_tier
     availability_type = "REGIONAL"
     disk_type         = "PD_SSD"
@@ -261,6 +332,25 @@ resource "google_sql_database_instance" "primary" {
   }
 }
 
+resource "random_password" "database" {
+  count   = var.enable_managed_data_plane ? 1 : 0
+  length  = 32
+  special = false
+}
+
+resource "google_sql_database" "spool" {
+  count    = var.enable_managed_data_plane ? 1 : 0
+  name     = "spool"
+  instance = google_sql_database_instance.primary[0].name
+}
+
+resource "google_sql_user" "spool" {
+  count    = var.enable_managed_data_plane ? 1 : 0
+  name     = "spool"
+  instance = google_sql_database_instance.primary[0].name
+  password = random_password.database[0].result
+}
+
 resource "google_sql_database_instance" "dr_replica" {
   count                = var.enable_managed_data_plane && var.enable_multi_region ? 1 : 0
   name                 = "${local.name}-postgres-dr"
@@ -271,6 +361,7 @@ resource "google_sql_database_instance" "dr_replica" {
 
   replica_configuration { failover_target = false }
   settings {
+    edition         = "ENTERPRISE_PLUS"
     tier            = var.cloud_sql_tier
     disk_type       = "PD_SSD"
     disk_autoresize = true
@@ -302,4 +393,11 @@ resource "google_storage_bucket" "objects" {
       type = "Delete"
     }
   }
+}
+
+resource "google_storage_bucket_iam_member" "runtime_objects" {
+  count  = var.enable_managed_data_plane ? 1 : 0
+  bucket = google_storage_bucket.objects[0].name
+  role   = "roles/storage.objectAdmin"
+  member = "serviceAccount:${google_service_account.server.email}"
 }
