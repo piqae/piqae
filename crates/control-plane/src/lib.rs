@@ -265,13 +265,16 @@ mod tests {
     use rand::rngs::OsRng;
     use sha2::{Digest, Sha256};
     use spool_auth::Scope;
-    use spool_domain::{AgentId, EnvironmentId, JobId, JobState, PrinterId, WorkspaceId};
+    use spool_domain::{
+        AgentId, EnvironmentId, JobId, JobOptions, JobState, NativePrinterChoice,
+        NativePrinterOption, PrinterCapabilities, PrinterId, PrinterState, WorkspaceId,
+    };
     use spool_object_store::{ObjectStoreError, StoredObject};
     use spool_protocol::agent::{
         AgentAcceptJobRequest, AgentCommand, AgentHealth, AgentSyncRequest, AgentSyncResponse,
-        QueueSnapshot,
+        PrinterProfileSnapshot, PrinterSnapshot, QueueSnapshot,
     };
-    use std::str::FromStr;
+    use std::{collections::BTreeMap, str::FromStr};
     use tower::ServiceExt;
 
     struct TestApplication {
@@ -514,6 +517,138 @@ mod tests {
                 .to_bytes(),
         )
         .expect("sync response JSON")
+    }
+
+    fn profiled_printer_snapshot(printer_id: PrinterId) -> PrinterSnapshot {
+        let mut native_options = BTreeMap::new();
+        native_options.insert(
+            "StapleLocation".into(),
+            NativePrinterOption {
+                display_name: "Staple".into(),
+                default_choice: Some("None".into()),
+                selected_choice: Some("None".into()),
+                choices: vec![
+                    NativePrinterChoice {
+                        value: "None".into(),
+                        display_name: "Off".into(),
+                    },
+                    NativePrinterChoice {
+                        value: "UpperLeft".into(),
+                        display_name: "Upper left".into(),
+                    },
+                ],
+            },
+        );
+        let mut selected_native_options = BTreeMap::new();
+        selected_native_options.insert("StapleLocation".into(), "UpperLeft".into());
+        PrinterSnapshot {
+            id: printer_id,
+            native_id: "cups-office".into(),
+            name: "Office Laser".into(),
+            state: PrinterState::Online,
+            is_default: true,
+            capabilities: PrinterCapabilities {
+                color: true,
+                duplex: true,
+                copies: 99,
+                dpis: vec!["600".into()],
+                papers: BTreeMap::from([("A4".into(), [Some(210_000), Some(297_000)])]),
+                ..PrinterCapabilities::default()
+            },
+            exposed: true,
+            capability_revision: 7,
+            native_options,
+            profiles: vec![PrinterProfileSnapshot {
+                profile_id: "profile_shipping".into(),
+                revision: 4,
+                name: "A4 shipping".into(),
+                is_default: true,
+                options: JobOptions {
+                    paper: Some("A4".into()),
+                    duplex: Some(spool_domain::Duplex::LongEdge),
+                    native_options: selected_native_options,
+                    ..JobOptions::default()
+                },
+            }],
+        }
+    }
+
+    #[tokio::test]
+    async fn synced_printer_profiles_are_visible_through_the_canonical_api() {
+        let application = application().await;
+        let now = Utc::now();
+        let printer_id = PrinterId::new();
+        let request = AgentSyncRequest {
+            agent_id: application.agent_id,
+            protocol_version: 1,
+            agent_version: "test-profile-sync".into(),
+            printer_revision: 12,
+            acknowledged_command_cursor: None,
+            event_cursor: None,
+            queue: QueueSnapshot {
+                queued_jobs: 0,
+                active_jobs: 0,
+                content_bytes: 0,
+                accepts_jobs: true,
+            },
+            health: AgentHealth {
+                started_at: now,
+                observed_at: now,
+                sqlite_integrity_ok: true,
+                executor_crashes: 0,
+                last_error_code: None,
+            },
+            printers: Some(vec![profiled_printer_snapshot(printer_id)]),
+            events: Vec::new(),
+        };
+        let body = serde_json::to_vec(&request).expect("sync JSON");
+        let sync = application
+            .router
+            .clone()
+            .oneshot(signed_request(&application, "POST", "/v1/agent/sync", body))
+            .await
+            .expect("sync response");
+        assert_eq!(sync.status(), StatusCode::OK);
+
+        let response = application
+            .router
+            .clone()
+            .oneshot(api_request(
+                "GET",
+                "/v1/printers",
+                "spl_test_integration",
+                None,
+            ))
+            .await
+            .expect("printer list response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let json: serde_json::Value = serde_json::from_slice(
+            &response
+                .into_body()
+                .collect()
+                .await
+                .expect("printer list body")
+                .to_bytes(),
+        )
+        .expect("printer list JSON");
+        let printer = &json["data"][0];
+        assert_eq!(printer["id"], printer_id.as_ulid().to_string());
+        assert_eq!(printer["capability_revision"], 7);
+        assert_eq!(printer["capabilities"]["color"], true);
+        assert_eq!(
+            printer["native_options"]["StapleLocation"]["selected_choice"],
+            "None"
+        );
+        assert_eq!(
+            printer["native_options"]["StapleLocation"]["choices"][1]["value"],
+            "UpperLeft"
+        );
+        assert_eq!(printer["profiles"][0]["profile_id"], "profile_shipping");
+        assert_eq!(printer["profiles"][0]["revision"], 4);
+        assert_eq!(
+            printer["profiles"][0]["options"]["native_options"]["StapleLocation"],
+            "UpperLeft"
+        );
     }
 
     #[tokio::test]

@@ -11,10 +11,12 @@ use rand::{RngCore, rngs::OsRng};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use spool_domain::{
-    AgentId, EnvironmentId, EventId, Job, JobEvent, JobId, JobState, PrinterCapabilities,
-    PrinterId, PrinterState, WorkspaceId, validate_transition,
+    AgentId, EnvironmentId, EventId, Job, JobEvent, JobId, JobOptions, JobState,
+    NativePrinterOption, PrinterCapabilities, PrinterId, PrinterState, WorkspaceId,
+    validate_transition,
 };
 use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgPoolOptions};
+use std::collections::BTreeMap;
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -88,7 +90,19 @@ pub struct StoredPrinter {
     pub name: String,
     pub state: PrinterState,
     pub capabilities: PrinterCapabilities,
+    pub capability_revision: u64,
+    pub native_options: BTreeMap<String, NativePrinterOption>,
+    pub profiles: Vec<PrinterProfileSnapshot>,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct PrinterProfileSnapshot {
+    pub profile_id: String,
+    pub revision: u64,
+    pub name: String,
+    pub is_default: bool,
+    pub options: JobOptions,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -152,6 +166,9 @@ pub struct SyncedPrinter {
     pub state: PrinterState,
     pub is_default: bool,
     pub capabilities: PrinterCapabilities,
+    pub capability_revision: u64,
+    pub native_options: BTreeMap<String, NativePrinterOption>,
+    pub profiles: Vec<PrinterProfileSnapshot>,
 }
 
 #[derive(Clone, Debug)]
@@ -524,14 +541,16 @@ impl PostgresStore {
                     "INSERT INTO printers (
                         id, workspace_id, environment_id, agent_id, native_id, name,
                         state, capabilities, capabilities_revision, is_default,
-                        last_seen_at, removed_at
-                     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,1,$9,now(),NULL)
+                        native_options, profiles, last_seen_at, removed_at
+                     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,now(),NULL)
                      ON CONFLICT (agent_id, native_id) DO UPDATE SET
                         name = EXCLUDED.name, state = EXCLUDED.state,
                         capabilities = EXCLUDED.capabilities,
-                        capabilities_revision = printers.capabilities_revision + 1,
-                        is_default = EXCLUDED.is_default, last_seen_at = now(),
-                        removed_at = NULL",
+                        capabilities_revision = EXCLUDED.capabilities_revision,
+                        is_default = EXCLUDED.is_default,
+                        native_options = EXCLUDED.native_options,
+                        profiles = EXCLUDED.profiles,
+                        last_seen_at = now(), removed_at = NULL",
                 )
                 .bind(printer.id.to_string())
                 .bind(workspace_id.to_string())
@@ -541,7 +560,12 @@ impl PostgresStore {
                 .bind(&printer.name)
                 .bind(printer_state_name(printer.state))
                 .bind(serde_json::to_value(&printer.capabilities)?)
+                .bind(i64::try_from(printer.capability_revision).map_err(|error| {
+                    StorageError::InvalidData(format!("capability revision overflow: {error}"))
+                })?)
                 .bind(printer.is_default)
+                .bind(serde_json::to_value(&printer.native_options)?)
+                .bind(serde_json::to_value(&printer.profiles)?)
                 .execute(&mut *transaction)
                 .await?;
             }
@@ -679,7 +703,8 @@ impl PostgresStore {
         limit: i64,
     ) -> Result<Vec<StoredPrinter>, StorageError> {
         let rows = sqlx::query(
-            "SELECT id, agent_id, name, state, capabilities,
+            "SELECT id, agent_id, name, state, capabilities, capabilities_revision,
+                    native_options, profiles,
                     COALESCE(last_seen_at, created_at) AS updated_at
              FROM printers
              WHERE workspace_id = $1 AND environment_id = $2 AND removed_at IS NULL
@@ -713,6 +738,16 @@ impl PostgresStore {
                             StorageError::InvalidData(format!("printer state `{state}`: {error}"))
                         })?,
                     capabilities: serde_json::from_value(row.try_get("capabilities")?)?,
+                    capability_revision: u64::try_from(
+                        row.try_get::<i64, _>("capabilities_revision")?,
+                    )
+                    .map_err(|error| {
+                        StorageError::InvalidData(format!(
+                            "capability revision is negative: {error}"
+                        ))
+                    })?,
+                    native_options: serde_json::from_value(row.try_get("native_options")?)?,
+                    profiles: serde_json::from_value(row.try_get("profiles")?)?,
                     updated_at: row.try_get("updated_at")?,
                 })
             })

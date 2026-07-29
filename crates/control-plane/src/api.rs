@@ -973,6 +973,19 @@ pub async fn agent_sync(
                 state: printer.state,
                 is_default: printer.is_default,
                 capabilities: printer.capabilities.clone(),
+                capability_revision: printer.capability_revision,
+                native_options: printer.native_options.clone(),
+                profiles: printer
+                    .profiles
+                    .iter()
+                    .map(|profile| spool_storage_postgres::PrinterProfileSnapshot {
+                        profile_id: profile.profile_id.clone(),
+                        revision: profile.revision,
+                        name: profile.name.clone(),
+                        is_default: profile.is_default,
+                        options: profile.options.clone(),
+                    })
+                    .collect(),
             })
             .collect::<Vec<_>>()
     });

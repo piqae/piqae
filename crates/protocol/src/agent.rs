@@ -1,9 +1,10 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use spool_domain::{
-    AgentId, EventId, Job, JobEvent, PrinterCapabilities, PrinterId, PrinterState,
-    UriAuthentication,
+    AgentId, EventId, Job, JobEvent, NativePrinterOption, PrinterCapabilities, PrinterId,
+    PrinterState, UriAuthentication,
 };
+use std::collections::BTreeMap;
 use uuid::Uuid;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -167,6 +168,8 @@ pub struct PrinterSnapshot {
     pub exposed: bool,
     #[serde(default)]
     pub capability_revision: u64,
+    #[serde(default)]
+    pub native_options: BTreeMap<String, NativePrinterOption>,
     #[serde(default)]
     pub profiles: Vec<PrinterProfileSnapshot>,
 }
