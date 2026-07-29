@@ -1027,6 +1027,15 @@ struct MemoryAgentCommand {
     acknowledged: bool,
 }
 
+#[derive(Clone, Debug)]
+struct MemoryJobAcceptance {
+    agent_id: AgentId,
+    lease_id: Uuid,
+    lease_token: String,
+    content_sha256: Option<String>,
+    local_sequence: u64,
+}
+
 #[derive(Debug, Default)]
 struct MemoryState {
     api_keys: HashMap<String, (WorkspaceId, EnvironmentId, StoredApiKey, String)>,
@@ -1045,6 +1054,7 @@ struct MemoryState {
     agent_commands: HashMap<AgentId, Vec<MemoryAgentCommand>>,
     next_agent_command_cursor: u64,
     leases: HashMap<JobId, (AgentId, Uuid, String, DateTime<Utc>)>,
+    job_acceptances: HashMap<JobId, MemoryJobAcceptance>,
     idempotency: HashMap<(WorkspaceId, EnvironmentId, String), (Vec<u8>, JobId)>,
     compatibility: HashMap<(WorkspaceId, EnvironmentId, String, String), i64>,
     reverse_compatibility: HashMap<(WorkspaceId, EnvironmentId, String, i64), String>,
@@ -2134,9 +2144,20 @@ impl Repository for MemoryRepository {
         job_id: JobId,
         lease_id: Uuid,
         lease_token: &str,
-        _content_sha256: Option<&str>,
-        _local_sequence: u64,
+        content_sha256: Option<&str>,
+        local_sequence: u64,
     ) -> Result<Job, RepositoryError> {
+        if let Some(acceptance) = self.state.read().await.job_acceptances.get(&job_id) {
+            if acceptance.agent_id != agent_id
+                || acceptance.lease_id != lease_id
+                || acceptance.lease_token != lease_token
+                || acceptance.content_sha256.as_deref() != content_sha256
+                || acceptance.local_sequence != local_sequence
+            {
+                return Err(RepositoryError::IdempotencyConflict);
+            }
+            return self.get_job(workspace_id, environment_id, job_id).await;
+        }
         self.renew_agent_lease(
             workspace_id,
             environment_id,
@@ -2165,7 +2186,18 @@ impl Repository for MemoryRepository {
             native_job_id: None,
             occurred_at: Utc::now(),
         });
-        Ok(record.job.clone())
+        let job = record.job.clone();
+        state.job_acceptances.insert(
+            job_id,
+            MemoryJobAcceptance {
+                agent_id,
+                lease_id,
+                lease_token: lease_token.to_owned(),
+                content_sha256: content_sha256.map(str::to_owned),
+                local_sequence,
+            },
+        );
+        Ok(job)
     }
 
     async fn compatibility_id(

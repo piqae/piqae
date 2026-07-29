@@ -1836,8 +1836,10 @@ impl PostgresStore {
         local_sequence: u64,
     ) -> Result<Job, StorageError> {
         let mut transaction = self.pool.begin().await?;
+        let token_hash = Sha256::digest(lease_token.as_bytes()).to_vec();
         if let Some(row) = sqlx::query(
-            "SELECT content_sha256, local_sequence FROM job_acceptances
+            "SELECT lease_id, lease_token_hash, content_sha256, local_sequence
+             FROM job_acceptances
              WHERE job_id = $1 AND workspace_id = $2 AND environment_id = $3 AND agent_id = $4",
         )
         .bind(job_id.to_string())
@@ -1849,7 +1851,11 @@ impl PostgresStore {
         {
             let stored_sha: Option<String> = row.try_get("content_sha256")?;
             let stored_sequence: i64 = row.try_get("local_sequence")?;
-            if stored_sha.as_deref() != content_sha256
+            let stored_lease_id: Uuid = row.try_get("lease_id")?;
+            let stored_token_hash: Option<Vec<u8>> = row.try_get("lease_token_hash")?;
+            if stored_lease_id != lease_id
+                || stored_token_hash.as_deref() != Some(token_hash.as_slice())
+                || stored_sha.as_deref() != content_sha256
                 || stored_sequence != i64::try_from(local_sequence).unwrap_or(i64::MAX)
             {
                 return Err(StorageError::IdempotencyConflict);
@@ -1857,7 +1863,6 @@ impl PostgresStore {
             transaction.commit().await?;
             return self.get_job(workspace_id, environment_id, job_id).await;
         }
-        let token_hash = Sha256::digest(lease_token.as_bytes()).to_vec();
         let row = sqlx::query(
             "SELECT payload, state, state_sequence FROM jobs
              WHERE id = $1 AND workspace_id = $2 AND environment_id = $3 AND agent_id = $4
@@ -1869,7 +1874,7 @@ impl PostgresStore {
         .bind(environment_id.to_string())
         .bind(agent_id.to_string())
         .bind(lease_id)
-        .bind(token_hash)
+        .bind(&token_hash)
         .fetch_optional(&mut *transaction)
         .await?
         .ok_or(StorageError::ConcurrentStateChange)?;
@@ -1940,14 +1945,15 @@ impl PostgresStore {
         sqlx::query(
             "INSERT INTO job_acceptances (
                 job_id, workspace_id, environment_id, agent_id, lease_id,
-                content_sha256, local_sequence
-             ) VALUES ($1,$2,$3,$4,$5,$6,$7)",
+                lease_token_hash, content_sha256, local_sequence
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
         )
         .bind(job_id.to_string())
         .bind(workspace_id.to_string())
         .bind(environment_id.to_string())
         .bind(agent_id.to_string())
         .bind(lease_id)
+        .bind(&token_hash)
         .bind(content_sha256)
         .bind(i64::try_from(local_sequence).map_err(|error| {
             StorageError::InvalidData(format!("local sequence overflow: {error}"))

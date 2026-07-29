@@ -1045,6 +1045,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn signed_agent_claim_and_durable_accept_flow() {
         let application = application().await;
         let create = Request::builder()
@@ -1134,6 +1135,48 @@ mod tests {
             .await
             .expect("accept response");
         assert_eq!(response.status(), StatusCode::OK);
+        let retry = application
+            .router
+            .clone()
+            .oneshot(signed_request(
+                &application,
+                "POST",
+                &path,
+                serde_json::to_vec(&accept).expect("retry accept JSON"),
+            ))
+            .await
+            .expect("retry accept response");
+        assert_eq!(retry.status(), StatusCode::OK);
+        let mut mismatched = accept.clone();
+        mismatched.lease_token.push('x');
+        let rejected = application
+            .router
+            .clone()
+            .oneshot(signed_request(
+                &application,
+                "POST",
+                &path,
+                serde_json::to_vec(&mismatched).expect("mismatched accept JSON"),
+            ))
+            .await
+            .expect("mismatched accept response");
+        assert_eq!(rejected.status(), StatusCode::CONFLICT);
+        assert!(matches!(
+            application
+                .repository
+                .accept_agent_job(
+                    application.tenant.workspace_id,
+                    application.tenant.environment_id,
+                    AgentId::new(),
+                    offer.job.id,
+                    accept.lease_id,
+                    &accept.lease_token,
+                    Some(&accept.content_sha256),
+                    accept.local_sequence,
+                )
+                .await,
+            Err(crate::repository::RepositoryError::IdempotencyConflict)
+        ));
         let stored = application
             .repository
             .get_job(
