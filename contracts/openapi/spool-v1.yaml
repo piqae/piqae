@@ -2555,10 +2555,19 @@ components:
     CreateJob:
       type: object
       additionalProperties: false
-      required: [printer_id, title, content_type, content]
+      required: [title, content_type, content]
+      oneOf:
+        - required: [printer_id]
+          not: { required: [target_id] }
+        - required: [target_id]
+          not: { required: [printer_id] }
       properties:
         printer_id:
           type: string
+          description: Concrete printer destination. Mutually exclusive with target_id.
+        target_id:
+          type: string
+          description: Logical primary/standby destination. Mutually exclusive with printer_id.
         title:
           type: string
           minLength: 1

@@ -1,9 +1,10 @@
 # Reliability and job lifecycle
 
-**Status:** the durable control-plane queue, leased node pickup, durable local
-queue, native handoff intent, and spooler reconciliation are implemented.
-Automatic cross-node rerouting, production regional failover, and the release
-soak gates in this document are not yet proven.
+**Status:** the durable control-plane queue, leased node pickup, target-based
+primary/standby selection, durable local queue, native handoff intent, and
+spooler reconciliation are implemented. Automatic reassignment of an existing
+waiting job, production regional failover, and the release soak gates in this
+document are not yet proven.
 
 Spool has two different reliability responsibilities:
 
@@ -61,11 +62,11 @@ WebSockets, tray state, and logs are never authoritative queues.
 - Expiry is explicit and produces an event.
 
 Rerouting to another node is safe only in this phase and only when the selected
-printer/profile/stock contract is equivalent. The current native job API pins
-a concrete printer and node when the job is created. Target bindings and
-readiness are implemented, but automatic reassignment of an already-created
-waiting job is not. That gap must close before cross-node failover is described
-as Supported.
+printer/profile/stock contract is equivalent. A target-based job chooses the
+first ready primary or standby binding at registration and pins its concrete
+node, printer, profile revision, and stock metadata. Automatic reassignment of
+an already-created waiting job is not implemented. That gap must close before
+cross-node failover is described as Supported.
 
 ### Durable node acceptance
 

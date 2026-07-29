@@ -273,9 +273,10 @@ is replayable and idempotent; a native `spool_intent` is persisted before
 CUPS/Winspool handoff. Failures proven to occur before handoff may retry.
 Ambiguous handoff becomes `delivery_uncertain` and is never blindly retried.
 Cross-node reassignment is safe only before durable local acceptance and only
-to an equivalent ready profile/stock binding. Automatic reassignment of an
-already-created waiting job is not yet implemented, so multi-node failover is
-Preview rather than Supported.
+to an equivalent ready profile/stock binding. Initial target registration
+selects and pins the first ready primary/standby binding. Automatic
+reassignment of an already-created waiting job is not yet implemented, so
+multi-node failover is Preview rather than Supported.
 
 ### Monitoring
 

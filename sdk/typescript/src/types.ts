@@ -335,7 +335,10 @@ export type JobContent =
   | { type: 'uri'; uri: string };
 
 export interface CreateJob {
-  printer_id: SpoolId;
+  /** Concrete printer destination. Provide exactly one destination field. */
+  printer_id?: SpoolId;
+  /** Logical primary/standby destination. Provide exactly one destination field. */
+  target_id?: SpoolId;
   title: string;
   source?: string | null;
   content_type: 'pdf' | 'raw';

@@ -742,6 +742,41 @@ mod tests {
         }
     }
 
+    fn stored_profiled_printer(printer_id: PrinterId) -> spool_storage_postgres::SyncedPrinter {
+        let printer = profiled_printer_snapshot(printer_id);
+        spool_storage_postgres::SyncedPrinter {
+            id: printer.id,
+            native_id: printer.native_id,
+            name: printer.name,
+            state: printer.state,
+            is_default: printer.is_default,
+            capabilities: printer.capabilities,
+            capability_revision: printer.capability_revision,
+            native_options: printer.native_options,
+            profiles: printer
+                .profiles
+                .into_iter()
+                .map(|profile| spool_storage_postgres::PrinterProfileSnapshot {
+                    profile_id: profile.profile_id,
+                    revision: profile.revision,
+                    name: profile.name,
+                    is_default: profile.is_default,
+                    options: profile.options,
+                    status: Some("ready".into()),
+                    native_kind: Some("cups_options".into()),
+                    native_digest: profile.native_digest,
+                    driver_fingerprint: None,
+                    summary: Some(serde_json::to_value(profile.summary).expect("profile summary")),
+                    stock_id: profile.stock_id,
+                    safe_overrides: vec!["copies".into(), "pages".into()],
+                    last_validated_at: None,
+                    last_test_job_id: None,
+                    published: profile.published,
+                })
+                .collect(),
+        }
+    }
+
     #[tokio::test]
     #[allow(
         clippy::too_many_lines,
@@ -1002,6 +1037,58 @@ mod tests {
         assert_eq!(readiness["status"], "ready");
         assert_eq!(readiness["bindings"][0]["status"], "ready");
 
+        let target_job_response = application
+            .router
+            .clone()
+            .oneshot(api_request(
+                "POST",
+                "/v1/jobs",
+                "spl_test_integration",
+                Some(&format!(
+                    r#"{{"target_id":"{target_id}","title":"Routed shipping label","content_type":"pdf","content":{{"type":"base64","data":"JVBERi0="}}}}"#
+                )),
+            ))
+            .await
+            .expect("target job response");
+        assert_eq!(target_job_response.status(), StatusCode::CREATED);
+        let target_job: serde_json::Value = serde_json::from_slice(
+            &target_job_response
+                .into_body()
+                .collect()
+                .await
+                .expect("target job body")
+                .to_bytes(),
+        )
+        .expect("target job JSON");
+        let routed_job = application
+            .repository
+            .get_job(
+                application.tenant.workspace_id,
+                application.tenant.environment_id,
+                target_job["id"]
+                    .as_str()
+                    .expect("target job id")
+                    .parse()
+                    .expect("typed target job id"),
+            )
+            .await
+            .expect("stored target job");
+        assert_eq!(routed_job.printer_id, printer_id);
+        assert_eq!(
+            routed_job
+                .metadata
+                .get("spool.target_id")
+                .map(String::as_str),
+            Some(target_id)
+        );
+        assert_eq!(
+            routed_job
+                .metadata
+                .get("spool.profile_revision")
+                .map(String::as_str),
+            Some("4")
+        );
+
         let cross_tenant = application
             .router
             .clone()
@@ -1029,6 +1116,98 @@ mod tests {
             .await
             .expect("invalid binding response");
         assert_eq!(wrong_revision.status(), StatusCode::NOT_FOUND);
+
+        let standby_agent = AgentId::new();
+        let standby_printer = PrinterId::new();
+        application
+            .repository
+            .add_printer(
+                application.tenant.workspace_id,
+                application.tenant.environment_id,
+                standby_printer,
+                standby_agent,
+            )
+            .await;
+        let standby_snapshot = stored_profiled_printer(standby_printer);
+        application
+            .repository
+            .sync_agent_presence(
+                application.tenant.workspace_id,
+                application.tenant.environment_id,
+                standby_agent,
+                "test-standby",
+                Some(std::slice::from_ref(&standby_snapshot)),
+            )
+            .await
+            .expect("standby presence");
+        let standby_binding = application
+            .router
+            .clone()
+            .oneshot(api_request(
+                "POST",
+                &format!("/v1/targets/{target_id}/bindings"),
+                "spl_test_integration",
+                Some(&format!(
+                    r#"{{"printer_id":"{standby_printer}","profile_id":"profile_shipping","profile_revision":4,"role":"standby"}}"#
+                )),
+            ))
+            .await
+            .expect("standby binding response");
+        assert_eq!(standby_binding.status(), StatusCode::CREATED);
+        application
+            .repository
+            .revoke_agent(
+                application.tenant.workspace_id,
+                application.tenant.environment_id,
+                application.agent_id,
+            )
+            .await
+            .expect("primary node offline");
+
+        let standby_job_response = application
+            .router
+            .clone()
+            .oneshot(api_request(
+                "POST",
+                "/v1/jobs",
+                "spl_test_integration",
+                Some(&format!(
+                    r#"{{"target_id":"{target_id}","title":"Standby shipping label","content_type":"pdf","content":{{"type":"base64","data":"JVBERi0="}}}}"#
+                )),
+            ))
+            .await
+            .expect("standby job response");
+        assert_eq!(standby_job_response.status(), StatusCode::CREATED);
+        let standby_job: serde_json::Value = serde_json::from_slice(
+            &standby_job_response
+                .into_body()
+                .collect()
+                .await
+                .expect("standby job body")
+                .to_bytes(),
+        )
+        .expect("standby job JSON");
+        let stored_standby_job = application
+            .repository
+            .get_job(
+                application.tenant.workspace_id,
+                application.tenant.environment_id,
+                standby_job["id"]
+                    .as_str()
+                    .expect("standby job id")
+                    .parse()
+                    .expect("typed standby job id"),
+            )
+            .await
+            .expect("stored standby job");
+        assert_eq!(stored_standby_job.printer_id, standby_printer);
+        assert_eq!(
+            stored_standby_job
+                .metadata
+                .get("spool.target_id")
+                .map(String::as_str),
+            Some(target_id)
+        );
     }
 
     #[tokio::test]

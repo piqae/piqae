@@ -25,6 +25,7 @@ use sha2::{Digest, Sha256};
 use spool_auth::{Environment, Scope, generate_api_key};
 use spool_domain::{
     AgentId, ContentKind, ContentSource, Job, JobEvent, JobId, JobOptions, JobState, PrinterId,
+    PrinterState,
 };
 use spool_object_store::digest_hex;
 use spool_protocol::agent::{
@@ -36,7 +37,11 @@ use spool_storage_postgres::{
     StoredAgent, StoredApiKey, StoredPrinter, StoredUpload, StoredWebhook, StoredWebhookDelivery,
     SyncedPrinter,
 };
-use std::{collections::BTreeSet, convert::Infallible, str::FromStr};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    convert::Infallible,
+    str::FromStr,
+};
 
 #[derive(Debug, Serialize)]
 pub struct HealthResponse {
@@ -788,7 +793,8 @@ pub async fn complete_upload(
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreateJobRequest {
-    pub printer_id: String,
+    pub printer_id: Option<String>,
+    pub target_id: Option<String>,
     pub title: String,
     pub source: Option<String>,
     pub content_type: ContentKind,
@@ -867,27 +873,24 @@ pub async fn create_job(
 ) -> Result<Response, AppError> {
     let tenant = authenticate_native(&state, &headers, Scope::JobsWrite).await?;
     validate_create(&request)?;
-    let printer_id = PrinterId::from_str(&request.printer_id)
-        .map_err(|_| AppError::invalid("invalid_printer_id", "The printer ID is invalid."))?;
-    let agent_id = state
-        .repository
-        .resolve_printer_agent(tenant.workspace_id, tenant.environment_id, printer_id)
-        .await?;
+    let destination = resolve_job_destination(&state, tenant, &request).await?;
     let request_bytes = serde_json::to_vec(&request)?;
     let now = Utc::now();
     let content =
         persist_job_content(&state, tenant, request.content_type, request.content).await?;
+    let mut metadata = request.metadata;
+    metadata.extend(destination.metadata);
     let job = Job {
         id: JobId::new(),
         workspace_id: tenant.workspace_id,
         environment_id: tenant.environment_id,
-        printer_id,
+        printer_id: destination.printer_id,
         title: request.title,
         source: request.source,
         content_kind: request.content_type,
         content,
         options: request.options,
-        metadata: request.metadata,
+        metadata,
         deliveries: request.deliveries,
         state: JobState::Registered,
         created_at: now,
@@ -904,7 +907,7 @@ pub async fn create_job(
     }
     match state
         .repository
-        .create_job(&job, agent_id, idempotency, &request_bytes)
+        .create_job(&job, destination.agent_id, idempotency, &request_bytes)
         .await?
     {
         CreateResult::Existing(existing) => {
@@ -928,6 +931,131 @@ pub async fn create_job(
             Ok((StatusCode::CREATED, Json(JobResponse::from(queued))).into_response())
         }
     }
+}
+
+struct ResolvedJobDestination {
+    printer_id: PrinterId,
+    agent_id: AgentId,
+    metadata: BTreeMap<String, String>,
+}
+
+async fn resolve_job_destination(
+    state: &AppState,
+    tenant: TenantContext,
+    request: &CreateJobRequest,
+) -> Result<ResolvedJobDestination, AppError> {
+    match (
+        request
+            .printer_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty()),
+        request
+            .target_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty()),
+    ) {
+        (Some(printer_id), None) => {
+            let printer_id = PrinterId::from_str(printer_id).map_err(|_| {
+                AppError::invalid("invalid_printer_id", "The printer ID is invalid.")
+            })?;
+            let agent_id = state
+                .repository
+                .resolve_printer_agent(tenant.workspace_id, tenant.environment_id, printer_id)
+                .await?;
+            Ok(ResolvedJobDestination {
+                printer_id,
+                agent_id,
+                metadata: BTreeMap::new(),
+            })
+        }
+        (None, Some(target_id)) => resolve_ready_target_destination(state, tenant, target_id).await,
+        _ => Err(AppError::invalid(
+            "invalid_destination",
+            "Provide exactly one printer_id or target_id.",
+        )),
+    }
+}
+
+async fn resolve_ready_target_destination(
+    state: &AppState,
+    tenant: TenantContext,
+    target_id: &str,
+) -> Result<ResolvedJobDestination, AppError> {
+    let target = state
+        .repository
+        .get_target(tenant.workspace_id, tenant.environment_id, target_id)
+        .await?;
+    if !target.enabled {
+        return Err(AppError::conflict(
+            "target_not_ready",
+            "The target is disabled or has no ready binding.",
+        ));
+    }
+    let agents = state
+        .repository
+        .list_agents(tenant.workspace_id, tenant.environment_id)
+        .await?;
+    let bindings = state
+        .repository
+        .list_target_bindings(tenant.workspace_id, tenant.environment_id, target_id)
+        .await?;
+    for binding in bindings.into_iter().filter(|binding| binding.enabled) {
+        if !agents
+            .iter()
+            .any(|agent| agent.id == binding.agent_id && agent.state == "connected")
+        {
+            continue;
+        }
+        let Ok(printer) = state
+            .repository
+            .get_printer(
+                tenant.workspace_id,
+                tenant.environment_id,
+                binding.printer_id,
+            )
+            .await
+        else {
+            continue;
+        };
+        if printer.agent_id != binding.agent_id || printer.state != PrinterState::Online {
+            continue;
+        }
+        let Some(profile) = printer.profiles.iter().find(|profile| {
+            (profile.profile_id.as_str(), profile.revision)
+                == (binding.profile_id.as_str(), binding.profile_revision)
+                && profile.published
+                && matches!(profile.status.as_deref(), None | Some("ready"))
+                && target
+                    .stock_id
+                    .as_ref()
+                    .is_none_or(|stock_id| profile.stock_id.as_ref() == Some(stock_id))
+        }) else {
+            continue;
+        };
+        let mut metadata = BTreeMap::from([
+            ("spool.target_id".into(), target.id.clone()),
+            ("spool.binding_id".into(), binding.id),
+            ("spool.profile_id".into(), profile.profile_id.clone()),
+            (
+                "spool.profile_revision".into(),
+                profile.revision.to_string(),
+            ),
+        ]);
+        if let Some(stock_id) = &target.stock_id {
+            metadata.insert("spool.stock_id".into(), stock_id.clone());
+        }
+        return Ok(ResolvedJobDestination {
+            printer_id: printer.id,
+            agent_id: printer.agent_id,
+            metadata,
+        });
+    }
+    Err(AppError::conflict(
+        "target_not_ready",
+        "The target is disabled or has no ready binding.",
+    ))
 }
 
 pub(crate) async fn persist_job_content(
@@ -1532,6 +1660,20 @@ pub(crate) async fn authenticate_compatibility(
 }
 
 fn validate_create(request: &CreateJobRequest) -> Result<(), AppError> {
+    let has_printer = request
+        .printer_id
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty());
+    let has_target = request
+        .target_id
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty());
+    if has_printer == has_target {
+        return Err(AppError::invalid(
+            "invalid_destination",
+            "Provide exactly one printer_id or target_id.",
+        ));
+    }
     if request.title.trim().is_empty() || request.title.len() > 255 {
         return Err(AppError::invalid(
             "invalid_title",
