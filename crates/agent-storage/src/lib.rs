@@ -882,7 +882,7 @@ impl AgentStore {
     ///
     /// # Errors
     ///
-    /// Returns an error when the exact revision no longer exists or SQLite
+    /// Returns an error when the exact revision no longer exists or `SQLite`
     /// cannot update it.
     pub fn record_profile_test_result(
         &mut self,
@@ -1030,6 +1030,10 @@ impl AgentStore {
     ///
     /// Returns an error for a bad/expired token, stale revision, invalid
     /// metadata, oversized or incorrectly digested blob, or failed commit.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one immediate transaction keeps capture authorization, immutable blob, metadata, dependencies, and session consumption atomic"
+    )]
     pub fn commit_profile_capture(
         &mut self,
         session_id: &str,

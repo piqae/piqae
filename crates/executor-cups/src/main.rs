@@ -23,6 +23,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg(unix)]
 mod platform {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
     use serde::{Deserialize, Deserializer, de};
     use sha2::{Digest, Sha256};
     use spool_domain::{
@@ -34,8 +35,9 @@ mod platform {
         NativeJobState, NativeProfilePayload, NativeQueueJob,
     };
     use std::{
-        collections::BTreeMap,
+        collections::{BTreeMap, BTreeSet},
         ffi::{CStr, CString, c_char, c_int, c_long},
+        io::Write as _,
         path::Path,
         process::{Command, Stdio},
         ptr,
@@ -156,6 +158,12 @@ mod platform {
     }
 
     fn list_jobs(printer: &str) -> Result<ExecutorResult, ExecutorError> {
+        Ok(ExecutorResult::Jobs {
+            jobs: queue_jobs(printer)?,
+        })
+    }
+
+    fn queue_jobs(printer: &str) -> Result<Vec<NativeQueueJob>, ExecutorError> {
         ensure_printer(printer)?;
         let printer_string = printer.to_owned();
         let printer = c_string(printer)?;
@@ -191,7 +199,7 @@ mod platform {
             }
             result
         };
-        Ok(ExecutorResult::Jobs { jobs })
+        Ok(jobs)
     }
 
     fn cups_time_ms(value: c_long) -> Option<i64> {
@@ -966,6 +974,11 @@ mod platform {
         native_profile: Option<&NativeProfilePayload>,
     ) -> Result<ExecutorResult, ExecutorError> {
         ensure_printer(printer)?;
+        if let Some(profile) = native_profile
+            && profile.kind == NativeProfileKind::MacosPrintcore
+        {
+            return submit_printcore_profile(printer, title, content_path, raw, options, profile);
+        }
         let (submission_destination, mapped_options) =
             prepare_submission(printer, raw, options, native_profile)?;
         if let Some(instance) = submission_destination
@@ -1009,6 +1022,196 @@ mod platform {
         Ok(ExecutorResult::Submitted {
             native_job_id: Some(job_id.to_string()),
         })
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct PrintCoreReplayResponse {
+        ok: bool,
+        native_job_id: Option<String>,
+        code: Option<String>,
+        message: Option<String>,
+        retryable: bool,
+        handoff_may_have_succeeded: bool,
+    }
+
+    fn submit_printcore_profile(
+        printer: &str,
+        title: &str,
+        content_path: &str,
+        raw: bool,
+        options: &JobOptions,
+        profile: &NativeProfilePayload,
+    ) -> Result<ExecutorResult, ExecutorError> {
+        if raw {
+            return Err(profile_error(
+                "native_profile_raw_unsupported",
+                "RAW jobs cannot use a macOS PrintCore profile",
+            ));
+        }
+        if profile.schema_version != spool_domain::NATIVE_PROFILE_SCHEMA_VERSION {
+            return Err(profile_error(
+                "native_profile_schema_unsupported",
+                format!(
+                    "unsupported native profile schema {}; expected {}",
+                    profile.schema_version,
+                    spool_domain::NATIVE_PROFILE_SCHEMA_VERSION
+                ),
+            ));
+        }
+        verify_profile_digest(profile)?;
+        if profile.driver_fingerprint.platform != "macos"
+            || profile.driver_fingerprint.native_queue_id != printer
+        {
+            return Err(profile_error(
+                "profile_destination_mismatch",
+                "PrintCore profile does not belong to this macOS printer queue",
+            ));
+        }
+        // The helper repeats this check before touching PrintCore. Keeping it
+        // here makes unsupported overrides fail inside the bounded executor
+        // before a child process or native handoff exists.
+        enforce_safe_overrides(options, &profile.safe_overrides)?;
+
+        let before = queue_jobs(printer)?
+            .into_iter()
+            .map(|job| job.native_job_id)
+            .collect::<BTreeSet<_>>();
+        let request = serde_json::json!({
+            "printer_native_id": printer,
+            "pdf_path": content_path,
+            "job_title": title,
+            "native_profile": {
+                "kind": "macos_printcore",
+                "schema_version": profile.schema_version,
+                "digest": profile.digest,
+                "blob_base64": STANDARD.encode(&profile.blob),
+            },
+            "portable_options": options,
+            "safe_overrides": profile.safe_overrides,
+        });
+        let body = serde_json::to_vec(&request).map_err(|error| {
+            profile_error(
+                "native_profile_invalid",
+                format!("could not encode PrintCore replay request: {error}"),
+            )
+        })?;
+        let helper = printcore_helper_path()?;
+        let mut child = Command::new(&helper)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|error| {
+                profile_error(
+                    "native_profile_backend_unavailable",
+                    format!("could not start {}: {error}", helper.display()),
+                )
+            })?;
+        child
+            .stdin
+            .take()
+            .ok_or_else(|| {
+                profile_error(
+                    "native_profile_backend_unavailable",
+                    "PrintCore helper stdin was unavailable",
+                )
+            })?
+            .write_all(&body)
+            .map_err(|error| {
+                profile_error(
+                    "native_profile_backend_unavailable",
+                    format!("could not send the PrintCore replay request: {error}"),
+                )
+            })?;
+        let output = child.wait_with_output().map_err(|error| ExecutorError {
+            code: "native_profile_backend_failed".into(),
+            message: format!("PrintCore replay process failed: {error}"),
+            retryable: false,
+            handoff_may_have_succeeded: true,
+        })?;
+        if output.stdout.len() > 64 * 1024 {
+            return Err(ExecutorError {
+                code: "native_profile_backend_failed".into(),
+                message: "PrintCore replay response exceeded 64 KiB".into(),
+                retryable: false,
+                handoff_may_have_succeeded: true,
+            });
+        }
+        let response: PrintCoreReplayResponse =
+            serde_json::from_slice(&output.stdout).map_err(|_| ExecutorError {
+                code: "native_profile_backend_failed".into(),
+                message: "PrintCore replay returned an invalid response".into(),
+                retryable: false,
+                handoff_may_have_succeeded: true,
+            })?;
+        if !response.ok || !output.status.success() {
+            return Err(ExecutorError {
+                code: response
+                    .code
+                    .unwrap_or_else(|| "native_profile_backend_failed".into()),
+                message: response
+                    .message
+                    .unwrap_or_else(|| "PrintCore rejected the print operation".into()),
+                retryable: response.retryable,
+                handoff_may_have_succeeded: response.handoff_may_have_succeeded,
+            });
+        }
+        if let Some(job_id) = response.native_job_id {
+            return Ok(ExecutorResult::Submitted {
+                native_job_id: Some(job_id),
+            });
+        }
+
+        // AppKit does not expose the CUPS job ID. Correlate a new exact-title
+        // queue record after its synchronous handoff; never invent an ID.
+        for _ in 0..20 {
+            if let Some(job_id) = queue_jobs(printer)?
+                .into_iter()
+                .filter(|job| job.title == title && !before.contains(&job.native_job_id))
+                .filter_map(|job| {
+                    job.native_job_id
+                        .parse::<i64>()
+                        .ok()
+                        .map(|id| (id, job.native_job_id))
+                })
+                .max_by_key(|(id, _)| *id)
+                .map(|(_, id)| id)
+            {
+                return Ok(ExecutorResult::Submitted {
+                    native_job_id: Some(job_id),
+                });
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        Err(ExecutorError {
+            code: "printcore_job_id_unavailable".into(),
+            message:
+                "PrintCore accepted the job, but its CUPS identifier could not be correlated safely"
+                    .into(),
+            retryable: false,
+            handoff_may_have_succeeded: true,
+        })
+    }
+
+    fn printcore_helper_path() -> Result<std::path::PathBuf, ExecutorError> {
+        let configured =
+            std::env::var_os("SPOOL_PRINTCORE_REPLAY_PATH").map(std::path::PathBuf::from);
+        let sibling = std::env::current_exe().ok().and_then(|path| {
+            path.parent()
+                .map(|parent| parent.join("SpoolPrintCoreReplay"))
+        });
+        let development = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../shells/macos/.build/release/SpoolPrintCoreReplay");
+        [configured, sibling, Some(development)]
+            .into_iter()
+            .flatten()
+            .find(|path| path.is_absolute() && path.is_file())
+            .ok_or_else(|| {
+                profile_error(
+                    "native_profile_backend_unavailable",
+                    "SpoolPrintCoreReplay is not installed; set SPOOL_PRINTCORE_REPLAY_PATH",
+                )
+            })
     }
 
     fn cups_job_options(raw: bool, options: &spool_domain::JobOptions) -> Vec<(String, String)> {
