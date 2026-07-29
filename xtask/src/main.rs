@@ -374,6 +374,11 @@ fn fixture_reset(root: &Path) -> TaskResult {
 }
 
 fn release_check(root: &Path) -> TaskResult {
+    run(command(
+        root,
+        "python3",
+        ["release/tools/check_postgres_release_tests.py"],
+    ))?;
     test_all(root)?;
     run(command(root, "pnpm", ["build"]))?;
     if command_success(root, "cargo", &["deny", "--version"]) {

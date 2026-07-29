@@ -52,6 +52,26 @@ pre-acceptance attempts create one reassignment and one durable
 `job_routing_attempts` row. It separately proves that an active lease and a
 durable node acceptance each prevent reassignment.
 
+Platform service-account release evidence uses the same disposable database:
+
+```console
+SPOOL_TEST_DATABASE_URL=postgres://postgres:password@127.0.0.1:5432/spool_test \
+  cargo test -p spool-storage-postgres --test platform_service_accounts -- --nocapture
+
+SPOOL_TEST_DATABASE_URL=postgres://postgres:password@127.0.0.1:5432/spool_test \
+  cargo test -p spool-control-plane --test platform_service_accounts_postgres -- --nocapture
+```
+
+Normal contributor checks may omit both PostgreSQL suites. The release-only
+wrapper requires the exact routing, grant-lifecycle, and HTTP-auth tests. It
+fails closed if any target is
+missing, skipped, filtered to zero tests, or unsuccessful:
+
+```console
+SPOOL_TEST_DATABASE_URL=postgres://postgres:password@127.0.0.1:5432/spool_test \
+  python3 release/tools/check_postgres_release_tests.py
+```
+
 Do not weaken an assertion to make a flaky test pass. Find the nondeterministic
 boundary, make time or I/O controllable, and retain the original behavior claim.
 

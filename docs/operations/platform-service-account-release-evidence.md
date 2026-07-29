@@ -13,8 +13,42 @@ Validate it with:
 
 ```console
 python3 release/tools/check_platform_service_account_policy.py
+python3 release/tools/audit_platform_service_account_coverage.py
 python3 release/tools/test_platform_service_account_policy.py -v
 ```
+
+The code-backed coverage audit is intentionally separate from release
+evidence. It records implemented controls, currently passing focused tests, and
+the remaining assertions for each gate. It cannot mark a partial scenario as
+passed, and it blocks Preview while any scenario remains partial or missing.
+
+The current audit keeps this feature Disabled:
+
+| Gate | Current evidence | Smallest remaining change |
+| --- | --- | --- |
+| Tenant isolation | PostgreSQL and HTTP tests cover granted, ungranted, unknown and scope-limited tenants | Add cross-resource and concurrent multi-tenant HTTP tests |
+| Grant revocation | Passed: next-request denial, unaffected second grant, account revoke, rotation and expiry are database-tested | Retain the non-skipped release database gate |
+| Auditability | Lifecycle mutations and verified or scope-denied requests write tenant-scoped audit events transactionally | Add durable operator identity attribution and audit-export redaction evidence |
+| Ordinary-key selection | Paired platform headers are rejected for an ordinary key | Cover partial headers, query/JSON selector attempts, and the ordinary tenant control case |
+| Secret redaction | Platform keys are distinct Argon2-backed credentials; database tests scan account and audit rows for plaintext | Add synthetic canary scans for logs, traces, errors, metrics, process arguments and support bundles |
+
+Policy validation describes the required scenarios but does not prove the
+PostgreSQL authorization boundary. A release candidate must also run:
+
+```console
+SPOOL_TEST_DATABASE_URL=postgres://postgres:password@127.0.0.1:5432/spool_test \
+  python3 release/tools/check_postgres_release_tests.py
+```
+
+That wrapper requires the exact non-skipped storage and HTTP tests:
+
+- `postgres_platform_grants_are_exact_scoped_and_revocable`
+- `postgres_platform_http_auth_is_tenant_scoped_audited_and_revocable`
+
+It rejects a missing integration-test target, zero matched tests, a skip
+message, or a failing command. This requirement applies even while the feature
+is Disabled, so a future tier change cannot accidentally rely only on policy
+fixtures or in-memory authorization tests.
 
 ## Security invariants
 

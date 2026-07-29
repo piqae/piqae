@@ -24,8 +24,12 @@ required:
     command: cargo test -p spool-object-store --test stream_faults --locked
   - id: offline_recovery
     command: cargo test -p spool-agent-storage --test offline_recovery --locked
+  - id: postgres_release_evidence
+    command: python3 release/tools/check_postgres_release_tests.py
   - id: platform_service_account_policy
     command: python3 release/tools/check_platform_service_account_policy.py
+  - id: platform_service_account_coverage
+    command: python3 release/tools/audit_platform_service_account_coverage.py
 manual:
   - id: compatibility
     evidence: PrintNode fixture suite and compatibility endpoint report
