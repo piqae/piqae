@@ -2,6 +2,7 @@
   import { onMount, untrack } from 'svelte';
   import Icon from '$lib/components/Icon.svelte';
   import PageHeader from '$lib/components/PageHeader.svelte';
+  import { copyLimit } from '$lib/printer-capabilities';
 
   type Connection = 'local_only' | 'connected' | 'connecting' | 'offline' | 'degraded';
   type NativeChoice = { value: string; display_name: string };
@@ -382,7 +383,7 @@
     return {
       copies: Math.max(
         1,
-        Math.min(Number.isFinite(copies) ? copies : 1, selectedPrinter?.capabilities.copies ?? 99)
+        Math.min(Number.isFinite(copies) ? copies : 1, copyLimit(selectedPrinter?.capabilities.copies))
       ),
       color: selectedPrinter?.capabilities.color ? profileColor : false,
       duplex: selectedPrinter?.capabilities.duplex ? profileDuplex : 'one-sided',
@@ -658,7 +659,7 @@
         <label>Name<input bind:value={profileName} maxlength="80" placeholder="A4 packing slips" required /></label>
         <div class="form-row">
           <label>Paper<select bind:value={profilePaper}>{#each Object.keys(selectedPrinter?.capabilities.papers ?? {}) as paper}<option value={paper}>{paper}</option>{/each}{#if !Object.keys(selectedPrinter?.capabilities.papers ?? {}).length}<option value="A4">A4</option>{/if}</select></label>
-          <label>Copies<input type="number" min="1" max={selectedPrinter?.capabilities.copies ?? 99} bind:value={profileCopies} /></label>
+          <label>Copies<input type="number" min="1" max={copyLimit(selectedPrinter?.capabilities.copies)} bind:value={profileCopies} /></label>
         </div>
         <div class="form-row">
           <label>Color<select bind:value={profileColor} disabled={!selectedPrinter?.capabilities.color}><option value={false}>Monochrome</option><option value={true}>Color</option></select></label>
