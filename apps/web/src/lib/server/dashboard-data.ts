@@ -1,7 +1,7 @@
 import { env as privateEnv } from '$env/dynamic/private';
 import { env as publicEnv } from '$env/dynamic/public';
 import type { RequestEvent } from '@sveltejs/kit';
-import { SpoolError } from '@spool/sdk';
+import { SpoolClient, SpoolError } from '@spool/sdk';
 import { createLiveApi, mockApi, type DashboardApi } from '$lib/api';
 
 export type DashboardMode = 'live' | 'demo';
@@ -22,6 +22,10 @@ export interface DashboardLoadError {
   code: string;
   requestId: string | null;
   retryable: boolean;
+}
+
+export function preventSecretCaching(event: Pick<RequestEvent, 'setHeaders'>): void {
+  event.setHeaders({ 'cache-control': 'no-store, private' });
 }
 
 function configuredMode(): DashboardMode {
@@ -59,6 +63,18 @@ export function dashboardSource(event: Pick<RequestEvent, 'fetch' | 'url' | 'loc
   if (mode === 'demo') return { mode, api: mockApi };
   const { baseUrl, bearerToken } = dashboardConnection(event);
   return { mode, api: createLiveApi(event.fetch, baseUrl, bearerToken) };
+}
+
+export function dashboardSdk(
+  event: Pick<RequestEvent, 'fetch' | 'url' | 'locals'>
+): SpoolClient {
+  const { baseUrl, bearerToken } = dashboardConnection(event);
+  return new SpoolClient({
+    baseUrl,
+    fetch: event.fetch,
+    apiKey: bearerToken,
+    headers: { 'x-spool-dashboard': '1' }
+  });
 }
 
 export function dashboardMode(): DashboardMode {

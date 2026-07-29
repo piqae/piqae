@@ -41,8 +41,8 @@ export const mockApi: DashboardApi = {
 /**
  * The dashboard view model is intentionally richer than the current public
  * OpenAPI. This adapter only derives fields represented by that contract;
- * diagnostics, usage, and API-key screens remain disabled until their public
- * admin endpoints are added.
+ * diagnostics and usage screens remain disabled until their public endpoints
+ * are added.
  */
 export function createLiveApi(
   fetcher: typeof fetch,
@@ -197,8 +197,19 @@ export function createLiveApi(
           createdAt: webhook.created_at
         }))
       ),
-    apiKeys: async () => {
-      throw new Error('API key management is not available in the current control-plane API.');
-    }
+    apiKeys: async () =>
+      page(
+        (await client.apiKeys.list())
+          .filter((apiKey) => apiKey.revoked_at === null)
+          .map((apiKey) => ({
+            id: apiKey.id,
+            name: apiKey.name,
+            prefix: apiKey.lookup_prefix,
+            environment: apiKey.lookup_prefix.startsWith('spl_test_') ? 'test' : 'live',
+            scopes: apiKey.scopes.map((scope) => scope.replace(/_([^_]*)$/, ':$1')),
+            lastUsedAt: apiKey.last_used_at,
+            createdAt: apiKey.created_at
+          }))
+      )
   };
 }

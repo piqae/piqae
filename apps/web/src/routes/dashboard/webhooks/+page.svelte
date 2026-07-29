@@ -1,17 +1,67 @@
 <script lang="ts">
+  import { enhance } from '$app/forms';
   import Icon from '$lib/components/Icon.svelte';
   import DataError from '$lib/components/DataError.svelte';
   import PageHeader from '$lib/components/PageHeader.svelte';
   import RelativeTime from '$lib/components/RelativeTime.svelte';
   import Status from '$lib/components/Status.svelte';
-  let { data } = $props();
+  let { data, form } = $props();
   const webhooks = $derived(data.webhooks);
+
+  let createDialog: HTMLDialogElement;
+  let deleteDialog: HTMLDialogElement;
+  let selectedWebhook = $state<(typeof webhooks)[number] | null>(null);
+  let mutationPending = $state(false);
+  let copied = $state(false);
+  let createAttemptSubmitted = $state(false);
+  let createSessionDismissed = $state(false);
+  const createResultVisible = $derived(
+    createAttemptSubmitted ||
+      (!createSessionDismissed && form?.mutation === 'createWebhook')
+  );
+  let deleteAttemptVisible = $state(false);
+
+  function confirmDelete(webhook: (typeof webhooks)[number]) {
+    selectedWebhook = webhook;
+    deleteAttemptVisible = false;
+    deleteDialog.showModal();
+  }
+
+  function openCreate() {
+    copied = false;
+    createDialog.showModal();
+  }
+
+  function resetCreateSession() {
+    createAttemptSubmitted = false;
+    createSessionDismissed = true;
+    copied = false;
+  }
+
+  function closeCreate() {
+    resetCreateSession();
+    createDialog.close();
+  }
+
+  function resetDeleteSession() {
+    deleteAttemptVisible = false;
+  }
+
+  function closeDelete() {
+    resetDeleteSession();
+    deleteDialog.close();
+  }
+
+  async function copySecret(secret: string) {
+    await navigator.clipboard.writeText(secret);
+    copied = true;
+  }
 </script>
 
 <svelte:head><title>Webhooks · Spool</title></svelte:head>
 
 {#snippet actions()}
-  <button class="button primary" disabled title="Webhook mutation UI is not implemented"><Icon name="plus" size={13} /> Add endpoint</button>
+  <button class="button primary" onclick={openCreate}><Icon name="plus" size={13} /> Add endpoint</button>
 {/snippet}
 
 <PageHeader
@@ -42,8 +92,8 @@
     <article>
       <span class="endpoint-icon"><Icon name="webhooks" size={15} /></span>
       <div class="endpoint-main">
-        <div class="endpoint-title">
-          <strong>{webhook.description}</strong>
+      <div class="endpoint-title">
+          <strong>{webhook.description ?? 'Webhook endpoint'}</strong>
           <Status value={webhook.status} />
         </div>
         <code>{webhook.url}</code>
@@ -57,7 +107,10 @@
           {#if webhook.lastDeliveryAt}<RelativeTime value={webhook.lastDeliveryAt} />{:else}Never{/if}
         </strong>
       </div>
-      <button disabled title="Webhook mutation UI is not implemented" aria-label={`Actions for ${webhook.description}`}><Icon name="more" size={14} /></button>
+      <button
+        aria-label={`Revoke ${webhook.description ?? 'webhook endpoint'}`}
+        onclick={() => confirmDelete(webhook)}
+      ><Icon name="x" size={14} /></button>
     </article>
   {/each}
   {#if webhooks.length === 0 && !data.dataError}
@@ -112,6 +165,119 @@
     </div>
   </section>
 {/if}
+
+<dialog bind:this={createDialog} aria-labelledby="create-webhook-title" onclose={resetCreateSession}>
+  <form
+    method="POST"
+    action="?/createWebhook"
+    use:enhance={() => {
+      mutationPending = true;
+      createAttemptSubmitted = true;
+      createSessionDismissed = false;
+      copied = false;
+      return async ({ update }) => {
+        await update({ reset: false });
+        mutationPending = false;
+      };
+    }}
+  >
+    <header class="dialog-header">
+      <div>
+        <h2 id="create-webhook-title">Add webhook endpoint</h2>
+        <p>Events are signed and retried until Spool receives a successful response.</p>
+      </div>
+      <button class="icon-button" type="button" aria-label="Close webhook dialog" onclick={closeCreate}>×</button>
+    </header>
+
+    {#if data.dashboardMode === 'demo'}
+      <p class="demo-note">Demo mode: preview only. No endpoint will be created.</p>
+    {/if}
+
+    <div class="dialog-body">
+      <label class="field">
+        <span>Endpoint URL</span>
+        <input name="url" type="url" required placeholder="https://example.com/spool/events" />
+      </label>
+      <fieldset>
+        <legend>Event families</legend>
+        <label><input type="checkbox" name="events" value="job.*" checked /> Jobs</label>
+        <label><input type="checkbox" name="events" value="agent.*" /> Agents</label>
+        <label><input type="checkbox" name="events" value="printer.*" /> Printers</label>
+      </fieldset>
+
+      {#if createResultVisible && !mutationPending && form?.mutation === 'createWebhook' && form?.error}
+        <p class="form-message error" role="alert">{form.error.message}</p>
+      {/if}
+
+      {#if createResultVisible && !mutationPending && form?.mutation === 'createWebhook' && form?.webhook}
+        <section class="secret-result" aria-live="polite">
+          <div>
+            <strong>Signing secret · shown once</strong>
+            <span>{form.webhook.url}</span>
+          </div>
+          <code>{form.webhook.secret}</code>
+          <button class="button" type="button" onclick={() => copySecret(form.webhook.secret)}>
+            <Icon name="copy" size={12} /> {copied ? 'Copied' : 'Copy secret'}
+          </button>
+        </section>
+      {/if}
+    </div>
+
+    <footer class="dialog-footer">
+      <button class="button" type="button" onclick={closeCreate}>Close</button>
+      <button
+        class="button primary"
+        type="submit"
+        disabled={mutationPending || data.dashboardMode !== 'live'}
+      >{mutationPending ? 'Creating…' : 'Create endpoint'}</button>
+    </footer>
+  </form>
+</dialog>
+
+<dialog bind:this={deleteDialog} aria-labelledby="delete-webhook-title" onclose={resetDeleteSession}>
+  <form
+    method="POST"
+    action="?/deleteWebhook"
+    use:enhance={() => {
+      mutationPending = true;
+      deleteAttemptVisible = true;
+      return async ({ result, update }) => {
+        await update();
+        mutationPending = false;
+        if (result.type === 'success') closeDelete();
+      };
+    }}
+  >
+    <header class="dialog-header">
+      <div>
+        <h2 id="delete-webhook-title">Revoke webhook endpoint?</h2>
+        <p>Spool will stop sending new deliveries to this endpoint.</p>
+      </div>
+      <button class="icon-button" type="button" aria-label="Close revoke dialog" onclick={closeDelete}>×</button>
+    </header>
+    <div class="dialog-body">
+      <input type="hidden" name="webhook_id" value={selectedWebhook?.id ?? ''} />
+      <p class="confirm-copy">
+        Revoke <strong>{selectedWebhook?.description ?? 'this webhook endpoint'}</strong> at
+        <code>{selectedWebhook?.url}</code>? This cannot be undone.
+      </p>
+      {#if data.dashboardMode === 'demo'}
+        <p class="demo-note inline">Demo mode: no endpoint will be revoked.</p>
+      {/if}
+      {#if deleteAttemptVisible && !mutationPending && form?.mutation === 'deleteWebhook' && form?.error}
+        <p class="form-message error" role="alert">{form.error.message}</p>
+      {/if}
+    </div>
+    <footer class="dialog-footer">
+      <button class="button" type="button" onclick={closeDelete}>Keep endpoint</button>
+      <button
+        class="button danger-button"
+        type="submit"
+        disabled={mutationPending || data.dashboardMode !== 'live'}
+      >{mutationPending ? 'Revoking…' : 'Revoke endpoint'}</button>
+    </footer>
+  </form>
+</dialog>
 
 <style>
   .notice {
@@ -345,6 +511,204 @@
 
   .right {
     text-align: right;
+  }
+
+  dialog {
+    width: min(460px, calc(100vw - 24px));
+    padding: 0;
+    color: var(--text-primary);
+    background: var(--surface);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-lg);
+    box-shadow: 0 22px 70px rgb(0 0 0 / 38%);
+  }
+
+  dialog::backdrop {
+    background: rgb(7 9 13 / 65%);
+    backdrop-filter: blur(2px);
+  }
+
+  dialog form {
+    display: grid;
+  }
+
+  .dialog-header,
+  .dialog-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 12px 14px;
+  }
+
+  .dialog-header {
+    border-bottom: 1px solid var(--border-subtle);
+  }
+
+  .dialog-header h2 {
+    margin: 0;
+    font-size: 12px;
+    font-weight: 560;
+  }
+
+  .dialog-header p,
+  .demo-note {
+    margin: 3px 0 0;
+    color: var(--text-tertiary);
+    font-size: 9px;
+    line-height: 14px;
+  }
+
+  .icon-button {
+    width: 25px;
+    height: 25px;
+    color: var(--text-tertiary);
+    background: transparent;
+    border: 0;
+    border-radius: var(--radius-sm);
+    font-size: 17px;
+  }
+
+  .icon-button:hover {
+    color: var(--text-primary);
+    background: var(--surface-hover);
+  }
+
+  .demo-note {
+    margin: 10px 14px 0;
+    padding: 7px 8px;
+    color: var(--warning);
+    background: var(--warning-soft);
+    border-radius: var(--radius-md);
+  }
+
+  .demo-note.inline {
+    margin: 0;
+  }
+
+  .dialog-body {
+    display: grid;
+    gap: 12px;
+    padding: 14px;
+  }
+
+  .field {
+    display: grid;
+    gap: 5px;
+    color: var(--text-secondary);
+    font-size: 9px;
+  }
+
+  .field input {
+    width: 100%;
+    height: 31px;
+    padding: 0 9px;
+    color: var(--text-primary);
+    background: var(--canvas);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-md);
+    outline: 0;
+    font-size: 10px;
+  }
+
+  .field input:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px var(--accent-soft);
+  }
+
+  fieldset {
+    display: flex;
+    gap: 13px;
+    margin: 0;
+    padding: 9px 10px;
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-md);
+  }
+
+  legend {
+    padding: 0 4px;
+    color: var(--text-tertiary);
+    font-size: 8px;
+  }
+
+  fieldset label {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    color: var(--text-secondary);
+    font-size: 9px;
+  }
+
+  .form-message,
+  .confirm-copy {
+    margin: 0;
+    padding: 8px;
+    border-radius: var(--radius-md);
+    font-size: 9px;
+    line-height: 15px;
+  }
+
+  .form-message.error {
+    color: var(--danger);
+    background: var(--danger-soft);
+  }
+
+  .confirm-copy {
+    color: var(--text-secondary);
+    background: var(--canvas);
+    border: 1px solid var(--border-subtle);
+  }
+
+  .confirm-copy code {
+    overflow-wrap: anywhere;
+  }
+
+  .secret-result {
+    display: grid;
+    gap: 8px;
+    padding: 10px;
+    background: var(--success-soft);
+    border: 1px solid color-mix(in oklch, var(--success), transparent 72%);
+    border-radius: var(--radius-md);
+  }
+
+  .secret-result > div {
+    display: grid;
+  }
+
+  .secret-result strong {
+    color: var(--success);
+    font-size: 9px;
+    font-weight: 550;
+  }
+
+  .secret-result span {
+    overflow: hidden;
+    color: var(--text-tertiary);
+    font-size: 8px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .secret-result code {
+    overflow-wrap: anywhere;
+    color: var(--text-secondary);
+    font: 9px/15px var(--font-mono);
+  }
+
+  .secret-result .button {
+    justify-self: start;
+  }
+
+  .dialog-footer {
+    justify-content: flex-end;
+    border-top: 1px solid var(--border-subtle);
+  }
+
+  .danger-button {
+    color: white;
+    background: var(--danger);
+    border-color: var(--danger);
   }
 
   @media (max-width: 660px) {

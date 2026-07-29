@@ -1,15 +1,37 @@
 <script lang="ts">
+  import { enhance } from '$app/forms';
   import Icon from '$lib/components/Icon.svelte';
   import DataError from '$lib/components/DataError.svelte';
   import PageHeader from '$lib/components/PageHeader.svelte';
   import RelativeTime from '$lib/components/RelativeTime.svelte';
   import Status from '$lib/components/Status.svelte';
 
-  let { data } = $props();
+  let { data, form } = $props();
   const job = $derived(data.job);
   const printer = $derived(data.printer);
   const agent = $derived(data.agent);
   const jobEvents = $derived(data.jobEvents);
+  const cancellationAvailable = $derived(
+    job !== null &&
+      !['completed_reported', 'cancelled', 'expired', 'failed_terminal'].includes(job.state)
+  );
+  let cancelDialog = $state<HTMLDialogElement>();
+  let cancellationPending = $state(false);
+  let cancellationAttemptVisible = $state(false);
+
+  function openCancellation() {
+    cancellationAttemptVisible = false;
+    cancelDialog?.showModal();
+  }
+
+  function resetCancellationSession() {
+    cancellationAttemptVisible = false;
+  }
+
+  function closeCancellation() {
+    resetCancellationSession();
+    cancelDialog?.close();
+  }
 </script>
 
 <svelte:head><title>{job?.title ?? 'Job unavailable'} · Spool</title></svelte:head>
@@ -19,7 +41,12 @@
   <DataError error={data.dataError} />
 {:else if job}
 {#snippet actions()}
-  <button class="button" disabled title="Job cancellation UI is not implemented">Cancel</button>
+  <button
+    class="button"
+    disabled={!cancellationAvailable}
+    title={cancellationAvailable ? 'Request job cancellation' : 'This job is already terminal'}
+    onclick={openCancellation}
+  >Cancel</button>
   <button class="button" disabled title="Reprint mutation is not implemented"><Icon name="copy" size={13} /> Reprint</button>
 {/snippet}
 
@@ -106,6 +133,51 @@
     </section>
   </aside>
 </div>
+
+<dialog bind:this={cancelDialog} aria-labelledby="cancel-job-title" onclose={resetCancellationSession}>
+  <form
+    method="POST"
+    action="?/cancel"
+    use:enhance={() => {
+      cancellationPending = true;
+      cancellationAttemptVisible = true;
+      return async ({ result, update }) => {
+        await update();
+        cancellationPending = false;
+        if (result.type === 'success') closeCancellation();
+      };
+    }}
+  >
+    <header class="dialog-header">
+      <div>
+        <h2 id="cancel-job-title">Cancel this print job?</h2>
+        <p>Spool will send a cancellation request to the agent’s durable local queue.</p>
+      </div>
+      <button class="icon-button" type="button" aria-label="Close cancellation dialog" onclick={closeCancellation}>×</button>
+    </header>
+    <div class="dialog-body">
+      <p class="confirm-copy">
+        Cancel <strong>{job.title}</strong>? If the operating system has already handed the document
+        to the printer, cancellation may not stop physical output. Spool will not create an
+        automatic duplicate.
+      </p>
+      {#if data.dashboardMode === 'demo'}
+        <p class="demo-note">Demo mode: no cancellation request will be sent.</p>
+      {/if}
+      {#if cancellationAttemptVisible && !cancellationPending && form?.mutation === 'cancel' && form?.error}
+        <p class="form-message error" role="alert">{form.error.message}</p>
+      {/if}
+    </div>
+    <footer class="dialog-footer">
+      <button class="button" type="button" onclick={closeCancellation}>Keep printing</button>
+      <button
+        class="button danger-button"
+        type="submit"
+        disabled={cancellationPending || data.dashboardMode !== 'live'}
+      >{cancellationPending ? 'Cancelling…' : 'Confirm cancellation'}</button>
+    </footer>
+  </form>
+</dialog>
 
 <style>
   .status-line {
@@ -322,6 +394,109 @@
 
   dd a:hover {
     color: var(--text-primary);
+  }
+
+  dialog {
+    width: min(450px, calc(100vw - 24px));
+    padding: 0;
+    color: var(--text-primary);
+    background: var(--surface);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-lg);
+    box-shadow: 0 22px 70px rgb(0 0 0 / 38%);
+  }
+
+  dialog::backdrop {
+    background: rgb(7 9 13 / 65%);
+    backdrop-filter: blur(2px);
+  }
+
+  dialog form {
+    display: grid;
+  }
+
+  .dialog-header,
+  .dialog-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 12px 14px;
+  }
+
+  .dialog-header {
+    border-bottom: 1px solid var(--border-subtle);
+  }
+
+  .dialog-header h2 {
+    margin: 0;
+    font-size: 12px;
+    font-weight: 560;
+  }
+
+  .dialog-header p {
+    margin: 3px 0 0;
+    color: var(--text-tertiary);
+    font-size: 9px;
+    line-height: 14px;
+  }
+
+  .icon-button {
+    width: 25px;
+    height: 25px;
+    color: var(--text-tertiary);
+    background: transparent;
+    border: 0;
+    border-radius: var(--radius-sm);
+    font-size: 17px;
+  }
+
+  .icon-button:hover {
+    color: var(--text-primary);
+    background: var(--surface-hover);
+  }
+
+  .dialog-body {
+    display: grid;
+    gap: 10px;
+    padding: 14px;
+  }
+
+  .confirm-copy,
+  .demo-note,
+  .form-message {
+    margin: 0;
+    padding: 8px;
+    border-radius: var(--radius-md);
+    font-size: 9px;
+    line-height: 15px;
+  }
+
+  .confirm-copy {
+    color: var(--text-secondary);
+    background: var(--canvas);
+    border: 1px solid var(--border-subtle);
+  }
+
+  .demo-note {
+    color: var(--warning);
+    background: var(--warning-soft);
+  }
+
+  .form-message.error {
+    color: var(--danger);
+    background: var(--danger-soft);
+  }
+
+  .dialog-footer {
+    justify-content: flex-end;
+    border-top: 1px solid var(--border-subtle);
+  }
+
+  .danger-button {
+    color: white;
+    background: var(--danger);
+    border-color: var(--danger);
   }
 
   @media (max-width: 900px) {

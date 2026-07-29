@@ -75,6 +75,55 @@ describe('dashboard data source selection', () => {
     expect(JSON.stringify({ mode: source.mode })).not.toContain('spl_live_local_service_key');
   });
 
+  it('maps active API keys without expecting or retaining plaintext secrets', async () => {
+    fetcher.mockResolvedValueOnce(
+      Response.json([
+        {
+          id: 'key_active',
+          name: 'Orders',
+          lookup_prefix: 'spl_live_abcd',
+          scopes: ['jobs_read', 'jobs_write'],
+          expires_at: null,
+          last_used_at: null,
+          revoked_at: null,
+          created_at: '2026-07-29T12:00:00.000Z'
+        },
+        {
+          id: 'key_revoked',
+          name: 'Old orders',
+          lookup_prefix: 'spl_live_efgh',
+          scopes: ['jobs_read'],
+          expires_at: null,
+          last_used_at: null,
+          revoked_at: '2026-07-29T12:01:00.000Z',
+          created_at: '2026-07-29T11:00:00.000Z'
+        }
+      ])
+    );
+    const source = dashboardSource({
+      ...baseEvent,
+      locals: {
+        authMode: 'workos',
+        auth: { accessToken: oidcAccessToken }
+      } as never
+    });
+
+    const result = await source.api.apiKeys();
+
+    expect(result.data).toEqual([
+      {
+        id: 'key_active',
+        name: 'Orders',
+        prefix: 'spl_live_abcd',
+        environment: 'live',
+        scopes: ['jobs:read', 'jobs:write'],
+        lastUsedAt: null,
+        createdAt: '2026-07-29T12:00:00.000Z'
+      }
+    ]);
+    expect(JSON.stringify(result)).not.toContain('secret');
+  });
+
   it('uses deterministic demo data only after explicit opt-in', async () => {
     publicEnvironment.PUBLIC_SPOOL_DASHBOARD_MODE = 'demo';
     const source = dashboardSource({

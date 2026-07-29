@@ -1,6 +1,11 @@
-import { error } from '@sveltejs/kit';
-import type { PageServerLoad } from './$types';
-import { dashboardSource, presentDashboardError } from '$lib/server/dashboard-data';
+import { error, fail } from '@sveltejs/kit';
+import type { Actions, PageServerLoad } from './$types';
+import {
+  dashboardMode,
+  dashboardSdk,
+  dashboardSource,
+  presentDashboardError
+} from '$lib/server/dashboard-data';
 
 export const load: PageServerLoad = async (event) => {
   try {
@@ -22,5 +27,25 @@ export const load: PageServerLoad = async (event) => {
   } catch (caught) {
     if (caught && typeof caught === 'object' && 'status' in caught && caught.status === 404) throw caught;
     return { job: null, jobEvents: [], printer: null, agent: null, dataError: presentDashboardError(caught) };
+  }
+};
+
+export const actions: Actions = {
+  cancel: async (event) => {
+    if (dashboardMode() !== 'live') {
+      return fail(400, {
+        mutation: 'cancel',
+        error: { message: 'Job cancellation is disabled while demo data is active.' }
+      });
+    }
+    try {
+      const job = await dashboardSdk(event).jobs.cancel(event.params.id);
+      return { mutation: 'cancel', cancelledJobId: job.id, state: job.state };
+    } catch (error) {
+      return fail(409, {
+        mutation: 'cancel',
+        error: { message: presentDashboardError(error).message }
+      });
+    }
   }
 };

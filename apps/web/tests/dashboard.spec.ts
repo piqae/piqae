@@ -49,20 +49,37 @@ test('documentation and hosted authentication boundaries are reachable', async (
   expect(JSON.stringify(session)).not.toContain('access_token');
 });
 
-test('unimplemented dashboard mutations are visibly disabled and demo evidence is labelled', async ({
+test('credential and cancellation dialogs are accessible and non-mutating in demo mode', async ({
   page
 }) => {
   await page.goto('/dashboard/agents');
-  await expect(page.getByRole('button', { name: 'Enrol agent' })).toBeDisabled();
+  await page.getByRole('button', { name: 'Enrol agent' }).click();
+  const enrolment = page.getByRole('dialog', { name: 'Enrol an agent' });
+  await expect(enrolment).toBeVisible();
+  await expect(enrolment.getByText('Demo mode: preview only.')).toBeVisible();
+  await expect(enrolment.getByRole('button', { name: 'Create token' })).toBeDisabled();
 
   await page.goto('/dashboard/api-keys');
-  await expect(page.getByRole('button', { name: 'Create secret key' })).toBeDisabled();
+  await page.getByRole('button', { name: 'Create secret key' }).click();
+  const apiKey = page.getByRole('dialog', { name: 'Create secret key' });
+  await expect(apiKey).toBeVisible();
+  await expect(apiKey.getByRole('checkbox', { name: 'Read jobs' })).toBeChecked();
+  await expect(apiKey.getByRole('button', { name: 'Create secret key' })).toBeDisabled();
 
   await page.goto('/dashboard/webhooks');
-  await expect(page.getByRole('button', { name: 'Add endpoint' })).toBeDisabled();
+  await page.getByRole('button', { name: 'Add endpoint' }).click();
+  const webhook = page.getByRole('dialog', { name: 'Add webhook endpoint' });
+  await expect(webhook).toBeVisible();
+  await expect(webhook.getByRole('button', { name: 'Create endpoint' })).toBeDisabled();
   await expect(page.getByRole('region', { name: 'Demo webhook delivery examples' })).toContainText(
     'Demo only'
   );
+
+  await page.goto('/dashboard/jobs/job_01K0VY5YJ');
+  await page.getByRole('button', { name: 'Cancel', exact: true }).click();
+  const cancellation = page.getByRole('dialog', { name: 'Cancel this print job?' });
+  await expect(cancellation).toBeVisible();
+  await expect(cancellation.getByRole('button', { name: 'Confirm cancellation' })).toBeDisabled();
 
   await page.goto('/dashboard/settings');
   await expect(page.getByRole('button', { name: 'Save changes' })).toBeDisabled();
