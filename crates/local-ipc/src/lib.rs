@@ -12,7 +12,7 @@ use spool_domain::{
     ProfileCaptureOperation, ProfileDependency, ProfileStatus, ProfileSummary, SafeProfileOverride,
 };
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use uuid::Uuid;
@@ -527,7 +527,7 @@ impl LocalEndpoint {
     }
 
     #[must_use]
-    pub fn path(&self) -> &Path {
+    pub fn path(&self) -> &std::path::Path {
         &self.path
     }
 }
