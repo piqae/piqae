@@ -23,7 +23,7 @@ mod windows_shell {
                 AppendMenuW, CW_USEDEFAULT, CreatePopupMenu, CreateWindowExW, DefWindowProcW,
                 DestroyMenu, DestroyWindow, DispatchMessageW, GetCursorPos, GetMessageW,
                 IDI_APPLICATION, LoadIconW, MB_ICONERROR, MB_ICONINFORMATION, MB_OK, MF_DISABLED,
-                MF_POPUP, MF_SEPARATOR, MF_STRING, MSG, MessageBoxW, PostQuitMessage,
+                MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING, MSG, MessageBoxW, PostQuitMessage,
                 RegisterClassW, SW_SHOWNORMAL, SetForegroundWindow, TPM_NONOTIFY, TPM_RETURNCMD,
                 TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WM_APP, WM_CONTEXTMENU,
                 WM_DESTROY, WM_LBUTTONUP, WM_RBUTTONUP, WNDCLASSW, WS_OVERLAPPED,
@@ -526,7 +526,7 @@ mod windows_shell {
     fn append_disabled(menu: *mut std::ffi::c_void, label: &str) {
         let label = wide(label);
         unsafe {
-            AppendMenuW(menu, MF_STRING | MF_DISABLED, 0, label.as_ptr());
+            AppendMenuW(menu, MF_STRING | MF_DISABLED | MF_GRAYED, 0, label.as_ptr());
         }
     }
 
