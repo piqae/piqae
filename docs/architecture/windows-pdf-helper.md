@@ -24,8 +24,13 @@ artifacts. Operators must install and approve their own copy and comply with
 its licence. An unset or invalid helper path fails closed before handoff.
 
 The helper does not return the native Winspool job ID. Spool records a
-backend-scoped correlation marker after a zero exit status and must not pass
-that marker to Winspool cancellation or reconciliation APIs. This backend
-remains Preview until physical printer, driver-option, hang, cancellation and
-signed-installer gates pass. A sandboxed PDFium/GDI backend remains the
-preferred long-term default.
+backend-scoped correlation marker after a zero exit status. The Windows
+executor recognizes that marker and reports the job as unobservable instead
+of passing it to `GetJobW` or `SetJobW`. If no authoritative native outcome
+becomes available before the bounded reconciliation deadline, the agent emits
+`delivery_uncertain`; it never converts the helper's successful process exit
+into a claim of printing or physical delivery.
+
+This backend remains Preview until physical printer, driver-option, process
+tree termination, cancellation and signed-installer gates pass. A sandboxed
+PDFium/GDI backend remains the preferred long-term default.

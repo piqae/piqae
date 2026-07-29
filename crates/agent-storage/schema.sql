@@ -126,3 +126,16 @@ CREATE TABLE IF NOT EXISTS native_observations (
   details_json TEXT NOT NULL CHECK (json_valid(details_json)),
   observed_unix_ms INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS job_reconciliation (
+  job_id TEXT PRIMARY KEY REFERENCES jobs(job_id) ON DELETE CASCADE,
+  next_observe_unix_ms INTEGER NOT NULL,
+  uncertainty_deadline_unix_ms INTEGER NOT NULL,
+  attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+  last_native_state TEXT,
+  last_error_code TEXT,
+  cancel_requested INTEGER NOT NULL DEFAULT 0 CHECK (cancel_requested IN (0, 1))
+);
+
+CREATE INDEX IF NOT EXISTS job_reconciliation_due
+  ON job_reconciliation (next_observe_unix_ms);

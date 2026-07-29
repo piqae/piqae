@@ -27,15 +27,23 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 mod platform {
     use spool_domain::{ContentKind, PrinterCapabilities, PrinterState};
     use spool_protocol::executor::{
-        DiscoveredPrinter, ExecutorError, ExecutorOperation, ExecutorResult,
+        DiscoveredPrinter, ExecutorError, ExecutorOperation, ExecutorResult, NativeJobObservation,
+        NativeJobState,
     };
     use std::{ffi::c_void, ptr};
     use windows_sys::Win32::{
-        Foundation::{ERROR_INSUFFICIENT_BUFFER, GetLastError, HANDLE},
+        Foundation::{
+            ERROR_FILE_NOT_FOUND, ERROR_INSUFFICIENT_BUFFER, ERROR_INVALID_PARAMETER, GetLastError,
+            HANDLE,
+        },
         Graphics::Printing::{
-            ClosePrinter, DOC_INFO_1W, EndDocPrinter, EndPagePrinter, EnumPrintersW,
-            JOB_CONTROL_CANCEL, OpenPrinterW, PRINTER_ENUM_CONNECTIONS, PRINTER_ENUM_LOCAL,
-            PRINTER_INFO_4W, SetJobW, StartDocPrinterW, StartPagePrinter, WritePrinter,
+            ClosePrinter, DOC_INFO_1W, EndDocPrinter, EndPagePrinter, EnumPrintersW, GetJobW,
+            JOB_CONTROL_CANCEL, JOB_INFO_1W, JOB_STATUS_BLOCKED_DEVQ, JOB_STATUS_COMPLETE,
+            JOB_STATUS_DELETED, JOB_STATUS_DELETING, JOB_STATUS_ERROR, JOB_STATUS_OFFLINE,
+            JOB_STATUS_PAPEROUT, JOB_STATUS_PAUSED, JOB_STATUS_PRINTED, JOB_STATUS_PRINTING,
+            JOB_STATUS_RENDERING_LOCALLY, JOB_STATUS_SPOOLING, JOB_STATUS_USER_INTERVENTION,
+            OpenPrinterW, PRINTER_ENUM_CONNECTIONS, PRINTER_ENUM_LOCAL, PRINTER_INFO_4W, SetJobW,
+            StartDocPrinterW, StartPagePrinter, WritePrinter,
         },
     };
 
@@ -69,10 +77,119 @@ mod platform {
                 content_path,
                 options,
             } => submit_pdf_helper(job_id, &native_printer_id, &content_path, &options),
+            ExecutorOperation::Observe {
+                native_printer_id,
+                native_job_id,
+            } => observe(&native_printer_id, &native_job_id),
             ExecutorOperation::Cancel {
                 native_printer_id,
                 native_job_id,
             } => cancel(&native_printer_id, &native_job_id),
+        }
+    }
+
+    fn observe(printer: &str, native_job_id: &str) -> Result<ExecutorResult, ExecutorError> {
+        if native_job_id.starts_with("sumatra-") {
+            return Ok(ExecutorResult::Observation {
+                observation: NativeJobObservation {
+                    state: NativeJobState::Unknown,
+                    native_code: Some("sumatra-job-id-unavailable".into()),
+                    message: Some(
+                        "The external PDF helper did not expose a Winspool job identifier".into(),
+                    ),
+                },
+            });
+        }
+        let job_id = native_job_id.parse::<u32>().map_err(|_| ExecutorError {
+            code: "invalid_native_job_id".into(),
+            message: "Winspool job ID must be an integer".into(),
+            retryable: false,
+            handoff_may_have_succeeded: false,
+        })?;
+        let printer = wide(printer);
+        let mut handle: HANDLE = ptr::null_mut();
+        // SAFETY: The printer handle is checked and closed exactly once. The
+        // first GetJobW call obtains the required size and the second receives
+        // an allocation of that exact size; JOB_INFO_1W is copied before the
+        // buffer is dropped.
+        unsafe {
+            if OpenPrinterW(printer.as_ptr(), &mut handle, ptr::null()) == 0 {
+                return Err(win_error("winspool_open_failed", false));
+            }
+            let mut needed = 0_u32;
+            GetJobW(handle, job_id, 1, ptr::null_mut(), 0, &mut needed);
+            let first_error = GetLastError();
+            if first_error == ERROR_FILE_NOT_FOUND || first_error == ERROR_INVALID_PARAMETER {
+                ClosePrinter(handle);
+                return Ok(ExecutorResult::Observation {
+                    observation: missing_observation(first_error),
+                });
+            }
+            if first_error != ERROR_INSUFFICIENT_BUFFER || needed == 0 {
+                ClosePrinter(handle);
+                return Err(win_error_code(
+                    "winspool_observation_failed",
+                    first_error,
+                    false,
+                ));
+            }
+            let mut buffer = vec![0_u8; usize::try_from(needed).unwrap_or(0)];
+            if GetJobW(handle, job_id, 1, buffer.as_mut_ptr(), needed, &mut needed) == 0 {
+                let error = GetLastError();
+                ClosePrinter(handle);
+                if error == ERROR_FILE_NOT_FOUND || error == ERROR_INVALID_PARAMETER {
+                    return Ok(ExecutorResult::Observation {
+                        observation: missing_observation(error),
+                    });
+                }
+                return Err(win_error_code("winspool_observation_failed", error, false));
+            }
+            let status = buffer.as_ptr().cast::<JOB_INFO_1W>().read().Status;
+            ClosePrinter(handle);
+            Ok(ExecutorResult::Observation {
+                observation: winspool_observation(status),
+            })
+        }
+    }
+
+    fn winspool_observation(status: u32) -> NativeJobObservation {
+        let state = if status & (JOB_STATUS_COMPLETE | JOB_STATUS_PRINTED) != 0 {
+            NativeJobState::Completed
+        } else if status & JOB_STATUS_DELETED != 0 {
+            NativeJobState::Cancelled
+        } else if status & JOB_STATUS_ERROR != 0 {
+            NativeJobState::Failed
+        } else if status
+            & (JOB_STATUS_PAUSED
+                | JOB_STATUS_OFFLINE
+                | JOB_STATUS_PAPEROUT
+                | JOB_STATUS_BLOCKED_DEVQ
+                | JOB_STATUS_USER_INTERVENTION)
+            != 0
+        {
+            NativeJobState::Blocked
+        } else if status & JOB_STATUS_PRINTING != 0 {
+            NativeJobState::Printing
+        } else if status
+            & (JOB_STATUS_SPOOLING | JOB_STATUS_RENDERING_LOCALLY | JOB_STATUS_DELETING)
+            != 0
+        {
+            NativeJobState::Queued
+        } else {
+            NativeJobState::Unknown
+        };
+        NativeJobObservation {
+            state,
+            native_code: Some(format!("winspool-status-0x{status:08x}")),
+            message: Some("Winspool reported job status flags".into()),
+        }
+    }
+
+    fn missing_observation(error: u32) -> NativeJobObservation {
+        NativeJobObservation {
+            state: NativeJobState::Missing,
+            native_code: Some(format!("win32-error-{error}")),
+            message: Some("Winspool no longer exposes this job".into()),
         }
     }
 
@@ -331,6 +448,10 @@ mod platform {
     fn win_error(code: &str, handoff: bool) -> ExecutorError {
         // SAFETY: GetLastError has no preconditions.
         let native = unsafe { GetLastError() };
+        win_error_code(code, native, handoff)
+    }
+
+    fn win_error_code(code: &str, native: u32, handoff: bool) -> ExecutorError {
         ExecutorError {
             code: code.into(),
             message: format!("Win32 error {native}"),

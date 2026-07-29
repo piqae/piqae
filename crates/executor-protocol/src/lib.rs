@@ -11,7 +11,7 @@ use thiserror::Error;
 
 pub use spool_protocol::executor::{
     DiscoveredPrinter, ExecutorError, ExecutorOperation, ExecutorRequest, ExecutorResponse,
-    ExecutorResult,
+    ExecutorResult, NativeJobObservation, NativeJobState,
 };
 
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;

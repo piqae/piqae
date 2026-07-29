@@ -6,7 +6,8 @@
 
 use async_trait::async_trait;
 use spool_protocol::executor::{
-    DiscoveredPrinter, ExecutorError, ExecutorOperation, ExecutorResult,
+    DiscoveredPrinter, ExecutorError, ExecutorOperation, ExecutorResult, NativeJobObservation,
+    NativeJobState,
 };
 
 #[async_trait]
@@ -117,6 +118,24 @@ impl PlatformAdapter for FakePlatformAdapter {
                     return Err(not_found(&native_printer_id));
                 }
                 Ok(ExecutorResult::Cancelled)
+            }
+            ExecutorOperation::Observe {
+                native_printer_id, ..
+            } => {
+                if !self
+                    .printers
+                    .iter()
+                    .any(|printer| printer.native_id == native_printer_id)
+                {
+                    return Err(not_found(&native_printer_id));
+                }
+                Ok(ExecutorResult::Observation {
+                    observation: NativeJobObservation {
+                        state: NativeJobState::Completed,
+                        native_code: Some("fake".into()),
+                        message: Some("Fake adapter reports completion".into()),
+                    },
+                })
             }
         }
     }

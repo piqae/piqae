@@ -7,7 +7,7 @@ use futures::TryStreamExt;
 use spool_agent_client::{AgentClient, ClientError, DeviceIdentity};
 use spool_agent_core::{
     AgentEngine, ContentStore, Executor, ExecutorFailure, FakeExecutor, LocalSubmission,
-    NativeAcceptance, SystemClock,
+    NativeAcceptance, NativeJobReference, SystemClock,
 };
 use spool_agent_storage::{AcceptedJob, AgentStore, PendingEvent, QueueCounts, StorageError};
 use spool_domain::{
@@ -25,6 +25,7 @@ use spool_protocol::{
         AgentSyncRequest, AgentSyncResponse, ContentDescriptor, JobOffer, PrinterSnapshot,
         QueueSnapshot,
     },
+    executor::NativeJobObservation,
     executor::{DiscoveredPrinter, ExecutorOperation, ExecutorResult},
 };
 use std::{
@@ -174,6 +175,35 @@ impl Executor for RuntimeExecutor {
                 native_code: None,
             }),
         }
+    }
+
+    async fn observe(
+        &mut self,
+        reference: NativeJobReference,
+    ) -> Result<NativeJobObservation, ExecutorFailure> {
+        match self {
+            Self::Fake(executor) => executor.observe(reference).await,
+            Self::Process(executor) => executor.observe(reference).await,
+            Self::Disabled => Err(disabled_executor_failure()),
+        }
+    }
+
+    async fn cancel(&mut self, reference: NativeJobReference) -> Result<(), ExecutorFailure> {
+        match self {
+            Self::Fake(executor) => executor.cancel(reference).await,
+            Self::Process(executor) => executor.cancel(reference).await,
+            Self::Disabled => Err(disabled_executor_failure()),
+        }
+    }
+}
+
+fn disabled_executor_failure() -> ExecutorFailure {
+    ExecutorFailure {
+        code: "native_adapter_disabled".into(),
+        message: "this build has no enabled native print adapter".into(),
+        retryable: false,
+        handoff_may_have_succeeded: false,
+        native_code: None,
     }
 }
 
@@ -662,7 +692,7 @@ fn apply_command(
             paused.store(false, Ordering::Relaxed);
         }
         AgentCommand::CancelJob { job_id } => {
-            store.cancel_before_handoff(&job_id.to_string(), Utc::now().timestamp_millis())?;
+            store.request_cancel(&job_id.to_string(), Utc::now().timestamp_millis())?;
         }
         AgentCommand::RefreshPrinters => {
             warn!("printer refresh requested but inventory watcher is not enabled");

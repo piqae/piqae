@@ -147,23 +147,40 @@ impl JobState {
                 AcceptedBySpooler | DeliveryUncertain | FailedRetryable | FailedTerminal
             ) | (
                 AcceptedBySpooler,
-                Spooling | Printing | CompletedReported | Blocked | DeliveryUncertain
+                Spooling
+                    | Printing
+                    | CompletedReported
+                    | Blocked
+                    | DeliveryUncertain
+                    | Cancelled
+                    | FailedTerminal
             ) | (
                 Spooling,
-                Printing | CompletedReported | Blocked | DeliveryUncertain
-            ) | (Printing, CompletedReported | Blocked | DeliveryUncertain)
-                | (
-                    Blocked,
-                    Spooling | Printing | CompletedReported | CancelRequested | FailedRetryable
-                )
-                | (
-                    CancelRequested,
-                    Cancelled | DeliveryUncertain | CompletedReported
-                )
-                | (
-                    FailedRetryable,
-                    WaitingForAgent | QueuedLocal | CancelRequested | Expired
-                )
+                Printing
+                    | CompletedReported
+                    | Blocked
+                    | DeliveryUncertain
+                    | Cancelled
+                    | FailedTerminal
+            ) | (
+                Printing,
+                CompletedReported | Blocked | DeliveryUncertain | Cancelled | FailedTerminal
+            ) | (
+                Blocked,
+                Spooling
+                    | Printing
+                    | CompletedReported
+                    | CancelRequested
+                    | Cancelled
+                    | FailedRetryable
+                    | FailedTerminal
+            ) | (
+                CancelRequested,
+                Cancelled | DeliveryUncertain | CompletedReported
+            ) | (
+                FailedRetryable,
+                WaitingForAgent | QueuedLocal | CancelRequested | Expired
+            )
         )
     }
 }

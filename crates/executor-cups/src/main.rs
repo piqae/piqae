@@ -25,10 +25,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 mod platform {
     use spool_domain::{PrinterCapabilities, PrinterState};
     use spool_protocol::executor::{
-        DiscoveredPrinter, ExecutorError, ExecutorOperation, ExecutorResult,
+        DiscoveredPrinter, ExecutorError, ExecutorOperation, ExecutorResult, NativeJobObservation,
+        NativeJobState,
     };
     use std::{
-        ffi::{CStr, CString, c_char, c_int},
+        ffi::{CStr, CString, c_char, c_int, c_long},
         ptr,
     };
 
@@ -45,6 +46,21 @@ mod platform {
         is_default: c_int,
         num_options: c_int,
         options: *mut CupsOption,
+    }
+
+    #[repr(C)]
+    struct CupsJob {
+        id: c_int,
+        dest: *mut c_char,
+        title: *mut c_char,
+        user: *mut c_char,
+        format: *mut c_char,
+        state: c_int,
+        size: c_int,
+        priority: c_int,
+        completed_time: c_long,
+        creation_time: c_long,
+        processing_time: c_long,
     }
 
     #[link(name = "cups")]
@@ -72,6 +88,15 @@ mod platform {
         fn cups_free_options(option_count: c_int, options: *mut CupsOption);
         #[link_name = "cupsCancelJob"]
         fn cups_cancel_job(printer: *const c_char, job_id: c_int) -> c_int;
+        #[link_name = "cupsGetJobs"]
+        fn cups_get_jobs(
+            jobs: *mut *mut CupsJob,
+            printer: *const c_char,
+            my_jobs: c_int,
+            which_jobs: c_int,
+        ) -> c_int;
+        #[link_name = "cupsFreeJobs"]
+        fn cups_free_jobs(count: c_int, jobs: *mut CupsJob);
         #[link_name = "cupsLastErrorString"]
         fn cups_last_error_string() -> *const c_char;
     }
@@ -105,10 +130,73 @@ mod platform {
                 content_kind == spool_domain::ContentKind::Raw,
                 &options,
             ),
+            ExecutorOperation::Observe {
+                native_printer_id,
+                native_job_id,
+            } => observe(&native_printer_id, &native_job_id),
             ExecutorOperation::Cancel {
                 native_printer_id,
                 native_job_id,
             } => cancel(&native_printer_id, &native_job_id),
+        }
+    }
+
+    fn observe(printer: &str, native_job_id: &str) -> Result<ExecutorResult, ExecutorError> {
+        let job_id = native_job_id.parse::<i32>().map_err(|_| ExecutorError {
+            code: "invalid_native_job_id".into(),
+            message: "CUPS job ID must be an integer".into(),
+            retryable: false,
+            handoff_may_have_succeeded: false,
+        })?;
+        let printer = c_string(printer)?;
+        // SAFETY: CUPS owns the returned array. Its count and pointer are
+        // validated, records are inspected only while the allocation is live,
+        // and cupsFreeJobs releases it exactly once.
+        let observation = unsafe {
+            let mut jobs: *mut CupsJob = ptr::null_mut();
+            let count = cups_get_jobs(&mut jobs, printer.as_ptr(), 0, -1);
+            if count < 0 || (count > 0 && jobs.is_null()) {
+                return Err(last_error("cups_observation_failed", false));
+            }
+            let length =
+                usize::try_from(count).map_err(|_| last_error("cups_observation_failed", false))?;
+            let records = std::slice::from_raw_parts(jobs, length);
+            let state = records
+                .iter()
+                .find(|job| {
+                    job.id == job_id
+                        && !job.dest.is_null()
+                        && CStr::from_ptr(job.dest).to_bytes() == printer.as_bytes()
+                })
+                .map(|job| job.state);
+            cups_free_jobs(count, jobs);
+            state.map_or_else(missing_observation, cups_observation)
+        };
+        Ok(ExecutorResult::Observation { observation })
+    }
+
+    fn cups_observation(state: i32) -> NativeJobObservation {
+        let mapped = match state {
+            3 => NativeJobState::Queued,
+            4 | 6 => NativeJobState::Blocked,
+            5 => NativeJobState::Printing,
+            7 => NativeJobState::Cancelled,
+            8 => NativeJobState::Failed,
+            9 => NativeJobState::Completed,
+            _ => NativeJobState::Unknown,
+        };
+        NativeJobObservation {
+            state: mapped,
+            native_code: Some(format!("ipp-job-state-{state}")),
+            message: Some("CUPS reported IPP job state".into()),
+        }
+    }
+
+    fn missing_observation() -> NativeJobObservation {
+        NativeJobObservation {
+            state: NativeJobState::Missing,
+            native_code: Some("cups-job-not-found".into()),
+            message: Some("CUPS no longer exposes this job in retained history".into()),
         }
     }
 
@@ -272,6 +360,21 @@ mod platform {
             message,
             retryable: false,
             handoff_may_have_succeeded: handoff,
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn ipp_job_states_map_conservatively() {
+            assert_eq!(cups_observation(3).state, NativeJobState::Queued);
+            assert_eq!(cups_observation(5).state, NativeJobState::Printing);
+            assert_eq!(cups_observation(9).state, NativeJobState::Completed);
+            assert_eq!(cups_observation(8).state, NativeJobState::Failed);
+            assert_eq!(cups_observation(42).state, NativeJobState::Unknown);
+            assert_eq!(missing_observation().state, NativeJobState::Missing);
         }
     }
 }

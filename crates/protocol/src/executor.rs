@@ -27,6 +27,10 @@ pub enum ExecutorOperation {
         content_path: String,
         options: JobOptions,
     },
+    Observe {
+        native_printer_id: String,
+        native_job_id: String,
+    },
     Cancel {
         native_printer_id: String,
         native_job_id: String,
@@ -46,7 +50,28 @@ pub enum ExecutorResult {
     State { state: PrinterState },
     Capabilities { capabilities: PrinterCapabilities },
     Submitted { native_job_id: Option<String> },
+    Observation { observation: NativeJobObservation },
     Cancelled,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct NativeJobObservation {
+    pub state: NativeJobState,
+    pub native_code: Option<String>,
+    pub message: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NativeJobState {
+    Queued,
+    Printing,
+    Blocked,
+    Completed,
+    Failed,
+    Cancelled,
+    Missing,
+    Unknown,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

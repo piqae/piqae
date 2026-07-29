@@ -1,11 +1,13 @@
 //! Killable, one-request-per-process native executor supervisor.
 
 use async_trait::async_trait;
-use spool_agent_core::{Executor, ExecutorFailure, LocalSubmission, NativeAcceptance};
+use spool_agent_core::{
+    Executor, ExecutorFailure, LocalSubmission, NativeAcceptance, NativeJobReference,
+};
 use spool_domain::{ContentKind, JobId};
 use spool_executor_protocol::{FrameError, read_frame_async, write_frame_async};
 use spool_protocol::executor::{
-    ExecutorOperation, ExecutorRequest, ExecutorResponse, ExecutorResult,
+    ExecutorOperation, ExecutorRequest, ExecutorResponse, ExecutorResult, NativeJobObservation,
 };
 use std::path::PathBuf;
 use thiserror::Error;
@@ -63,7 +65,7 @@ impl ExecutorSupervisor {
         drop(stdin);
 
         let response = if let Ok(response) = timeout(
-            self.hard_timeout,
+            request_timeout(request.deadline_unix_ms, self.hard_timeout),
             read_frame_async::<ExecutorResponse>(&mut stdout),
         )
         .await
@@ -92,6 +94,17 @@ impl ExecutorSupervisor {
             .spawn()
             .map_err(SupervisorError::Spawn)
     }
+}
+
+fn request_timeout(deadline_unix_ms: i64, hard_timeout: Duration) -> Duration {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let now_ms = i64::try_from(now.as_millis()).unwrap_or(i64::MAX);
+    let remaining_ms = deadline_unix_ms.saturating_sub(now_ms).max(0);
+    hard_timeout.min(Duration::from_millis(
+        u64::try_from(remaining_ms).unwrap_or(u64::MAX),
+    ))
 }
 
 async fn terminate(child: &mut Child) {
@@ -240,6 +253,51 @@ impl Executor for SupervisedExecutor {
                 native_code: None,
             }),
         }
+    }
+
+    async fn observe(
+        &mut self,
+        reference: NativeJobReference,
+    ) -> Result<NativeJobObservation, ExecutorFailure> {
+        match self
+            .execute_operation(
+                ExecutorOperation::Observe {
+                    native_printer_id: reference.printer_native_id,
+                    native_job_id: reference.native_job_id,
+                },
+                reference.deadline_unix_ms,
+            )
+            .await?
+        {
+            ExecutorResult::Observation { observation } => Ok(observation),
+            _ => Err(unexpected_response("observation")),
+        }
+    }
+
+    async fn cancel(&mut self, reference: NativeJobReference) -> Result<(), ExecutorFailure> {
+        match self
+            .execute_operation(
+                ExecutorOperation::Cancel {
+                    native_printer_id: reference.printer_native_id,
+                    native_job_id: reference.native_job_id,
+                },
+                reference.deadline_unix_ms,
+            )
+            .await?
+        {
+            ExecutorResult::Cancelled => Ok(()),
+            _ => Err(unexpected_response("cancellation")),
+        }
+    }
+}
+
+fn unexpected_response(operation: &str) -> ExecutorFailure {
+    ExecutorFailure {
+        code: "unexpected_executor_response".into(),
+        message: format!("executor returned the wrong {operation} result"),
+        retryable: false,
+        handoff_may_have_succeeded: false,
+        native_code: None,
     }
 }
 

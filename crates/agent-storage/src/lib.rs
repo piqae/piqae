@@ -88,6 +88,15 @@ pub struct StoredPrinter {
     pub observed_unix_ms: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReconciliationItem {
+    pub job: LocalJob,
+    pub next_observe_unix_ms: i64,
+    pub uncertainty_deadline_unix_ms: i64,
+    pub attempt_count: u32,
+    pub cancel_requested: bool,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueueCounts {
     pub queued: u32,
@@ -545,6 +554,265 @@ impl AgentStore {
             return Err(StorageError::JobNotFound(job_id.to_owned()));
         }
         Ok(())
+    }
+
+    /// Persists the native identifier and restart-safe reconciliation
+    /// schedule after the spooler accepts a job.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unknown job or failed transaction.
+    pub fn schedule_native_reconciliation(
+        &mut self,
+        job_id: &str,
+        native_job_id: &str,
+        next_observe_unix_ms: i64,
+        uncertainty_deadline_unix_ms: i64,
+    ) -> Result<(), StorageError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let changed = transaction.execute(
+            "UPDATE jobs
+             SET native_job_id = ?1, updated_unix_ms = ?2
+             WHERE job_id = ?3",
+            params![native_job_id, next_observe_unix_ms, job_id],
+        )?;
+        if changed != 1 {
+            return Err(StorageError::JobNotFound(job_id.to_owned()));
+        }
+        transaction.execute(
+            "INSERT INTO job_reconciliation(
+               job_id, next_observe_unix_ms, uncertainty_deadline_unix_ms
+             ) VALUES (?1, ?2, ?3)
+             ON CONFLICT(job_id) DO UPDATE SET
+               next_observe_unix_ms = excluded.next_observe_unix_ms,
+               uncertainty_deadline_unix_ms = excluded.uncertainty_deadline_unix_ms",
+            params![job_id, next_observe_unix_ms, uncertainty_deadline_unix_ms],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Atomically records native acceptance, publishes its durable event, and
+    /// creates the restart-safe reconciliation schedule.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unknown job, invalid details, or failed
+    /// transaction.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_native_acceptance(
+        &mut self,
+        event_id: &str,
+        job_id: &str,
+        native_job_id: &str,
+        details_json: &str,
+        observed_unix_ms: i64,
+        next_observe_unix_ms: i64,
+        uncertainty_deadline_unix_ms: i64,
+    ) -> Result<(), StorageError> {
+        let _: serde_json::Value = serde_json::from_str(details_json)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let sequence: i64 = transaction.query_row(
+            "SELECT COALESCE(MAX(job_sequence), 0) + 1
+             FROM job_events WHERE job_id = ?1",
+            [job_id],
+            |row| row.get(0),
+        )?;
+        append_event_tx(
+            &transaction,
+            event_id,
+            job_id,
+            sequence,
+            "accepted_by_spooler",
+            None,
+            Some("Operating system accepted the job"),
+            details_json,
+            observed_unix_ms,
+        )?;
+        let changed = transaction.execute(
+            "UPDATE jobs
+             SET native_job_id = ?1, state = 'accepted_by_spooler',
+                 updated_unix_ms = ?2
+             WHERE job_id = ?3 AND state = 'spool_intent'",
+            params![native_job_id, observed_unix_ms, job_id],
+        )?;
+        if changed != 1 {
+            return Err(StorageError::JobNotFound(job_id.to_owned()));
+        }
+        transaction.execute(
+            "INSERT INTO job_reconciliation(
+               job_id, next_observe_unix_ms, uncertainty_deadline_unix_ms
+             ) VALUES (?1, ?2, ?3)
+             ON CONFLICT(job_id) DO UPDATE SET
+               next_observe_unix_ms = excluded.next_observe_unix_ms,
+               uncertainty_deadline_unix_ms = excluded.uncertainty_deadline_unix_ms",
+            params![job_id, next_observe_unix_ms, uncertainty_deadline_unix_ms],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Returns active native jobs whose durable observation deadline is due.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `SQLite` cannot execute or decode the query.
+    pub fn due_reconciliations(
+        &self,
+        now_unix_ms: i64,
+        limit: usize,
+    ) -> Result<Vec<ReconciliationItem>, StorageError> {
+        let bounded = i64::try_from(limit.clamp(1, 100)).unwrap_or(100);
+        let mut statement = self.connection.prepare(
+            "SELECT j.job_id, j.submission_id, j.printer_id, j.printer_native_id,
+                    j.printer_sequence, j.title, j.content_sha256, j.content_path,
+                    j.content_kind, j.options_json, j.state, j.expires_unix_ms,
+                    j.native_job_id, r.next_observe_unix_ms,
+                    r.uncertainty_deadline_unix_ms, r.attempt_count,
+                    r.cancel_requested
+             FROM job_reconciliation r
+             JOIN jobs j ON j.job_id = r.job_id
+             WHERE r.next_observe_unix_ms <= ?1
+               AND j.state IN (
+                 'accepted_by_spooler', 'spooling', 'printing', 'blocked',
+                 'cancel_requested'
+               )
+             ORDER BY r.next_observe_unix_ms, j.job_id
+             LIMIT ?2",
+        )?;
+        let rows = statement.query_map(params![now_unix_ms, bounded], |row| {
+            Ok(ReconciliationItem {
+                job: LocalJob {
+                    job_id: row.get(0)?,
+                    submission_id: row.get(1)?,
+                    printer_id: row.get(2)?,
+                    printer_native_id: row.get(3)?,
+                    printer_sequence: row.get(4)?,
+                    title: row.get(5)?,
+                    content_sha256: row.get(6)?,
+                    content_path: row.get(7)?,
+                    content_kind: row.get(8)?,
+                    options_json: row.get(9)?,
+                    state: row.get(10)?,
+                    expires_unix_ms: row.get(11)?,
+                    native_job_id: row.get(12)?,
+                },
+                next_observe_unix_ms: row.get(13)?,
+                uncertainty_deadline_unix_ms: row.get(14)?,
+                attempt_count: row.get(15)?,
+                cancel_requested: row.get(16)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Records one native observation and schedules the next bounded attempt.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the job is unknown or the transaction fails.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_reconciliation_attempt(
+        &mut self,
+        job_id: &str,
+        native_job_id: &str,
+        native_state: &str,
+        authority: &str,
+        details_json: &str,
+        error_code: Option<&str>,
+        observed_unix_ms: i64,
+        next_observe_unix_ms: i64,
+    ) -> Result<(), StorageError> {
+        let _: serde_json::Value = serde_json::from_str(details_json)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        transaction.execute(
+            "INSERT INTO native_observations(
+               observation_id, job_id, native_job_id, state, authority,
+               details_json, observed_unix_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                EventId::new().to_string(),
+                job_id,
+                native_job_id,
+                native_state,
+                authority,
+                details_json,
+                observed_unix_ms
+            ],
+        )?;
+        let changed = transaction.execute(
+            "UPDATE job_reconciliation SET
+               next_observe_unix_ms = ?1,
+               attempt_count = attempt_count + 1,
+               last_native_state = ?2,
+               last_error_code = ?3,
+               cancel_requested = 0
+             WHERE job_id = ?4",
+            params![next_observe_unix_ms, native_state, error_code, job_id],
+        )?;
+        if changed != 1 {
+            return Err(StorageError::JobNotFound(job_id.to_owned()));
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Stops native reconciliation after a truthful terminal event.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `SQLite` cannot remove the schedule.
+    pub fn finish_reconciliation(&mut self, job_id: &str) -> Result<(), StorageError> {
+        self.connection
+            .execute("DELETE FROM job_reconciliation WHERE job_id = ?1", [job_id])?;
+        Ok(())
+    }
+
+    /// Marks an active native job for cancellation and immediate executor
+    /// attention. Pre-handoff jobs use the existing local cancellation path.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unknown job or failed durable transition.
+    pub fn request_cancel(
+        &mut self,
+        job_id: &str,
+        observed_unix_ms: i64,
+    ) -> Result<bool, StorageError> {
+        let Some(job) = self.get_job(job_id)? else {
+            return Err(StorageError::JobNotFound(job_id.to_owned()));
+        };
+        if matches!(job.state.as_str(), "queued_local" | "failed_retryable") {
+            return self.cancel_before_handoff(job_id, observed_unix_ms);
+        }
+        if !matches!(
+            job.state.as_str(),
+            "accepted_by_spooler" | "spooling" | "printing" | "blocked"
+        ) {
+            return Ok(false);
+        }
+        self.append_next_event(
+            &EventId::new().to_string(),
+            job_id,
+            "cancel_requested",
+            Some("cancelled_by_server"),
+            Some("Cancellation requested after native handoff"),
+            "{}",
+            observed_unix_ms,
+        )?;
+        self.connection.execute(
+            "UPDATE job_reconciliation
+             SET cancel_requested = 1, next_observe_unix_ms = ?1
+             WHERE job_id = ?2",
+            params![observed_unix_ms, job_id],
+        )?;
+        Ok(true)
     }
 
     /// Returns unacknowledged outbound events after the supplied cursor.

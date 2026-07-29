@@ -9,7 +9,11 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use spool_agent_storage::{AcceptedJob, AgentStore, LocalJob, StorageError};
 use spool_domain::{EventId, JobOptions, JobState, validate_transition};
-use std::path::{Path, PathBuf};
+use spool_protocol::executor::{NativeJobObservation, NativeJobState};
+use std::{
+    collections::VecDeque,
+    path::{Path, PathBuf},
+};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use uuid::Uuid;
@@ -49,6 +53,14 @@ pub struct NativeAcceptance {
     pub native_job_id: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeJobReference {
+    pub job_id: String,
+    pub printer_native_id: String,
+    pub native_job_id: String,
+    pub deadline_unix_ms: i64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecutorFailure {
     pub code: String,
@@ -66,6 +78,13 @@ pub trait Executor: Send {
         &mut self,
         submission: LocalSubmission,
     ) -> Result<NativeAcceptance, ExecutorFailure>;
+
+    async fn observe(
+        &mut self,
+        reference: NativeJobReference,
+    ) -> Result<NativeJobObservation, ExecutorFailure>;
+
+    async fn cancel(&mut self, reference: NativeJobReference) -> Result<(), ExecutorFailure>;
 }
 
 pub trait Clock: Send + Sync {
@@ -223,6 +242,9 @@ pub struct AgentEngine<E, C = SystemClock> {
 
 impl<E: Executor, C: Clock> AgentEngine<E, C> {
     pub const DEFAULT_EXECUTION_DEADLINE_MS: i64 = 120_000;
+    pub const DEFAULT_OBSERVATION_DEADLINE_MS: i64 = 30_000;
+    pub const DEFAULT_RECONCILIATION_INTERVAL_MS: i64 = 2_000;
+    pub const DEFAULT_UNCERTAINTY_AFTER_MS: i64 = 10 * 60 * 1_000;
 
     pub const fn new(store: AgentStore, executor: E, clock: C) -> Self {
         Self {
@@ -269,10 +291,11 @@ impl<E: Executor, C: Clock> AgentEngine<E, C> {
         let now = self.clock.unix_ms();
         self.store.expire_waiting(now)?;
         let jobs = self.store.runnable_heads(now)?;
-        let count = jobs.len();
+        let mut count = jobs.len();
         for job in jobs {
             self.execute_job(job).await?;
         }
+        count += self.reconcile_due().await?;
         Ok(count)
     }
 
@@ -326,18 +349,18 @@ impl<E: Executor, C: Clock> AgentEngine<E, C> {
         match self.executor.submit(submission).await {
             Ok(acceptance) => {
                 let now = self.clock.unix_ms();
-                self.store
-                    .set_native_job_id(&job.job_id, &acceptance.native_job_id, now)?;
-                self.transition(
+                let details = serde_json::json!({
+                    "native_job_id": acceptance.native_job_id
+                })
+                .to_string();
+                self.store.record_native_acceptance(
+                    &EventId::new().to_string(),
                     &job.job_id,
-                    "spool_intent",
-                    JobState::AcceptedBySpooler,
-                    None,
-                    "Operating system accepted the job",
-                    &serde_json::json!({
-                        "native_job_id": acceptance.native_job_id
-                    })
-                    .to_string(),
+                    &acceptance.native_job_id,
+                    &details,
+                    now,
+                    now + Self::DEFAULT_RECONCILIATION_INTERVAL_MS,
+                    now + Self::DEFAULT_UNCERTAINTY_AFTER_MS,
                 )?;
             }
             Err(error) => {
@@ -358,6 +381,252 @@ impl<E: Executor, C: Clock> AgentEngine<E, C> {
                 )?;
             }
         }
+        Ok(())
+    }
+
+    async fn reconcile_due(&mut self) -> Result<usize, AgentError> {
+        let now = self.clock.unix_ms();
+        let items = self.store.due_reconciliations(now, 32)?;
+        let count = items.len();
+        for item in items {
+            self.reconcile_item(item, now).await?;
+        }
+        Ok(count)
+    }
+
+    async fn reconcile_item(
+        &mut self,
+        item: spool_agent_storage::ReconciliationItem,
+        now: i64,
+    ) -> Result<(), AgentError> {
+        let Some(native_job_id) = item.job.native_job_id.clone() else {
+            return self.mark_uncertain(
+                &item.job,
+                "Native reconciliation schedule has no spooler identifier",
+                "{}",
+                now,
+            );
+        };
+        let reference = NativeJobReference {
+            job_id: item.job.job_id.clone(),
+            printer_native_id: item.job.printer_native_id.clone(),
+            native_job_id: native_job_id.clone(),
+            deadline_unix_ms: now + Self::DEFAULT_OBSERVATION_DEADLINE_MS,
+        };
+        if item.cancel_requested || item.job.state == "cancel_requested" {
+            return self
+                .reconcile_cancellation(item, reference, &native_job_id, now)
+                .await;
+        }
+        match self.executor.observe(reference).await {
+            Ok(observation) => {
+                self.apply_native_observation(&item, &native_job_id, &observation, now)
+            }
+            Err(error) => {
+                let details = serde_json::to_string(&error)?;
+                self.store.record_reconciliation_attempt(
+                    &item.job.job_id,
+                    &native_job_id,
+                    "observation_error",
+                    "executor",
+                    &details,
+                    Some(&error.code),
+                    now,
+                    now + Self::DEFAULT_RECONCILIATION_INTERVAL_MS,
+                )?;
+                if now >= item.uncertainty_deadline_unix_ms {
+                    self.mark_uncertain(
+                        &item.job,
+                        "Native job could not be observed before the uncertainty deadline",
+                        &details,
+                        now,
+                    )?;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    async fn reconcile_cancellation(
+        &mut self,
+        item: spool_agent_storage::ReconciliationItem,
+        reference: NativeJobReference,
+        native_job_id: &str,
+        now: i64,
+    ) -> Result<(), AgentError> {
+        match self.executor.cancel(reference).await {
+            Ok(()) => {
+                self.store.record_reconciliation_attempt(
+                    &item.job.job_id,
+                    native_job_id,
+                    "cancelled",
+                    "executor",
+                    "{}",
+                    None,
+                    now,
+                    now + Self::DEFAULT_RECONCILIATION_INTERVAL_MS,
+                )?;
+                self.transition(
+                    &item.job.job_id,
+                    &item.job.state,
+                    JobState::Cancelled,
+                    Some("cancelled_by_user"),
+                    "Operating system accepted cancellation",
+                    "{}",
+                )?;
+                self.store.finish_reconciliation(&item.job.job_id)?;
+                Ok(())
+            }
+            Err(error) => {
+                let details = serde_json::to_string(&error)?;
+                self.store.record_reconciliation_attempt(
+                    &item.job.job_id,
+                    native_job_id,
+                    "cancel_failed",
+                    "executor",
+                    &details,
+                    Some(&error.code),
+                    now,
+                    now + Self::DEFAULT_RECONCILIATION_INTERVAL_MS,
+                )?;
+                if now >= item.uncertainty_deadline_unix_ms {
+                    self.mark_uncertain(
+                        &item.job,
+                        "Cancellation outcome could not be proved",
+                        &details,
+                        now,
+                    )?;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    fn apply_native_observation(
+        &mut self,
+        item: &spool_agent_storage::ReconciliationItem,
+        native_job_id: &str,
+        observation: &NativeJobObservation,
+        now: i64,
+    ) -> Result<(), AgentError> {
+        let details = serde_json::to_string(&observation)?;
+        self.store.record_reconciliation_attempt(
+            &item.job.job_id,
+            native_job_id,
+            native_state_name(observation.state),
+            "native_spooler",
+            &details,
+            None,
+            now,
+            now + Self::DEFAULT_RECONCILIATION_INTERVAL_MS,
+        )?;
+        match observation.state {
+            NativeJobState::Queued
+                if matches!(item.job.state.as_str(), "accepted_by_spooler" | "blocked") =>
+            {
+                self.transition_if_needed(
+                    &item.job,
+                    JobState::Spooling,
+                    None,
+                    "Native spooler reports the job queued",
+                    &details,
+                )?;
+            }
+            NativeJobState::Printing
+                if matches!(
+                    item.job.state.as_str(),
+                    "accepted_by_spooler" | "spooling" | "blocked"
+                ) =>
+            {
+                self.transition_if_needed(
+                    &item.job,
+                    JobState::Printing,
+                    None,
+                    "Native spooler reports the job printing",
+                    &details,
+                )?;
+            }
+            NativeJobState::Blocked => self.transition_if_needed(
+                &item.job,
+                JobState::Blocked,
+                Some("driver_error"),
+                "Native spooler reports the job blocked",
+                &details,
+            )?,
+            NativeJobState::Completed => {
+                self.transition_if_needed(
+                    &item.job,
+                    JobState::CompletedReported,
+                    None,
+                    "Operating system spooler reported completion; physical output is not proven",
+                    &details,
+                )?;
+                self.store.finish_reconciliation(&item.job.job_id)?;
+            }
+            NativeJobState::Failed => {
+                self.transition_if_needed(
+                    &item.job,
+                    JobState::FailedTerminal,
+                    Some("driver_error"),
+                    "Native spooler reported terminal failure",
+                    &details,
+                )?;
+                self.store.finish_reconciliation(&item.job.job_id)?;
+            }
+            NativeJobState::Cancelled => {
+                self.transition_if_needed(
+                    &item.job,
+                    JobState::Cancelled,
+                    None,
+                    "Native spooler reported cancellation",
+                    &details,
+                )?;
+                self.store.finish_reconciliation(&item.job.job_id)?;
+            }
+            NativeJobState::Missing | NativeJobState::Unknown => {
+                if now >= item.uncertainty_deadline_unix_ms {
+                    self.mark_uncertain(
+                        &item.job,
+                        "Native spooler could not prove the final job outcome",
+                        &details,
+                        now,
+                    )?;
+                }
+            }
+            NativeJobState::Queued | NativeJobState::Printing => {}
+        }
+        Ok(())
+    }
+
+    fn transition_if_needed(
+        &mut self,
+        job: &LocalJob,
+        to: JobState,
+        reason: Option<&str>,
+        message: &str,
+        details_json: &str,
+    ) -> Result<(), AgentError> {
+        if job.state == state_name(to) {
+            return Ok(());
+        }
+        self.transition(&job.job_id, &job.state, to, reason, message, details_json)
+    }
+
+    fn mark_uncertain(
+        &mut self,
+        job: &LocalJob,
+        message: &str,
+        details_json: &str,
+        _now: i64,
+    ) -> Result<(), AgentError> {
+        self.transition_if_needed(
+            job,
+            JobState::DeliveryUncertain,
+            Some("ambiguous_handoff"),
+            message,
+            details_json,
+        )?;
+        self.store.finish_reconciliation(&job.job_id)?;
         Ok(())
     }
 
@@ -438,10 +707,25 @@ const fn state_name(state: JobState) -> &'static str {
     }
 }
 
+const fn native_state_name(state: NativeJobState) -> &'static str {
+    match state {
+        NativeJobState::Queued => "queued",
+        NativeJobState::Printing => "printing",
+        NativeJobState::Blocked => "blocked",
+        NativeJobState::Completed => "completed",
+        NativeJobState::Failed => "failed",
+        NativeJobState::Cancelled => "cancelled",
+        NativeJobState::Missing => "missing",
+        NativeJobState::Unknown => "unknown",
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct FakeExecutor {
     pub submitted: Vec<LocalSubmission>,
     pub result: Option<Result<NativeAcceptance, ExecutorFailure>>,
+    pub observations: VecDeque<Result<NativeJobObservation, ExecutorFailure>>,
+    pub cancellations: usize,
 }
 
 #[async_trait]
@@ -456,6 +740,24 @@ impl Executor for FakeExecutor {
                 native_job_id: format!("fake-{}", self.submitted.len()),
             })
         })
+    }
+
+    async fn observe(
+        &mut self,
+        _reference: NativeJobReference,
+    ) -> Result<NativeJobObservation, ExecutorFailure> {
+        self.observations.pop_front().unwrap_or_else(|| {
+            Ok(NativeJobObservation {
+                state: NativeJobState::Unknown,
+                native_code: Some("fake-observation-exhausted".into()),
+                message: None,
+            })
+        })
+    }
+
+    async fn cancel(&mut self, _reference: NativeJobReference) -> Result<(), ExecutorFailure> {
+        self.cancellations += 1;
+        Ok(())
     }
 }
 
@@ -487,6 +789,14 @@ mod tests {
             expires_unix_ms: None,
             accepted_unix_ms: 1,
             cloud_managed: false,
+        }
+    }
+
+    fn observation(state: NativeJobState) -> NativeJobObservation {
+        NativeJobObservation {
+            state,
+            native_code: Some("fake".into()),
+            message: None,
         }
     }
 
@@ -573,5 +883,128 @@ mod tests {
             .await
             .expect_err("mismatch");
         assert!(matches!(error, AgentError::ContentDigestMismatch { .. }));
+    }
+
+    #[tokio::test]
+    async fn fake_observations_progress_without_claiming_physical_delivery() {
+        let executor = FakeExecutor {
+            observations: VecDeque::from([
+                Ok(observation(NativeJobState::Queued)),
+                Ok(observation(NativeJobState::Printing)),
+                Ok(observation(NativeJobState::Completed)),
+            ]),
+            ..FakeExecutor::default()
+        };
+        let store = AgentStore::in_memory().expect("store");
+        let mut engine = AgentEngine::new(store, executor, FixedClock(10));
+        engine.accept(&accepted("job", "raw")).expect("accept");
+        engine.run_once().await.expect("submit");
+
+        let (store, executor, _) = engine.into_parts();
+        let mut engine = AgentEngine::new(store, executor, FixedClock(2_010));
+        engine.run_once().await.expect("queued observation");
+        let (store, executor, _) = engine.into_parts();
+        let mut engine = AgentEngine::new(store, executor, FixedClock(4_010));
+        engine.run_once().await.expect("printing observation");
+        let (store, executor, _) = engine.into_parts();
+        let mut engine = AgentEngine::new(store, executor, FixedClock(6_010));
+        engine.run_once().await.expect("completed observation");
+
+        let events = engine.store().pending_events(0, 20).expect("events");
+        let states: Vec<_> = events.iter().map(|event| event.state.as_str()).collect();
+        assert!(states.ends_with(&["spooling", "printing", "completed_reported"]));
+        let completed = events.last().expect("completed event");
+        assert!(
+            completed
+                .message
+                .as_deref()
+                .is_some_and(|message| message.contains("physical output is not proven"))
+        );
+        assert!(
+            engine
+                .store()
+                .due_reconciliations(i64::MAX, 10)
+                .expect("due")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn reconciliation_resumes_after_sqlite_restart() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let database = directory.path().join("agent.sqlite3");
+        let store = AgentStore::open(&database).expect("store");
+        let mut engine = AgentEngine::new(store, FakeExecutor::default(), FixedClock(10));
+        engine.accept(&accepted("job", "raw")).expect("accept");
+        engine.run_once().await.expect("submit");
+        drop(engine);
+
+        let executor = FakeExecutor {
+            observations: VecDeque::from([Ok(observation(NativeJobState::Completed))]),
+            ..FakeExecutor::default()
+        };
+        let store = AgentStore::open(&database).expect("reopen");
+        let mut restarted = AgentEngine::new(store, executor, FixedClock(2_010));
+        assert_eq!(restarted.run_once().await.expect("reconcile"), 1);
+        assert_eq!(
+            restarted
+                .store()
+                .get_job("job")
+                .expect("query")
+                .expect("job")
+                .state,
+            "completed_reported"
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_native_outcome_ages_to_delivery_uncertain() {
+        let executor = FakeExecutor {
+            observations: VecDeque::from([Ok(observation(NativeJobState::Unknown))]),
+            ..FakeExecutor::default()
+        };
+        let store = AgentStore::in_memory().expect("store");
+        let mut engine = AgentEngine::new(store, executor, FixedClock(10));
+        engine.accept(&accepted("job", "raw")).expect("accept");
+        engine.run_once().await.expect("submit");
+        let (store, executor, _) = engine.into_parts();
+        let deadline = 10 + AgentEngine::<FakeExecutor, FixedClock>::DEFAULT_UNCERTAINTY_AFTER_MS;
+        let mut engine = AgentEngine::new(store, executor, FixedClock(deadline));
+        engine.run_once().await.expect("uncertain");
+        assert_eq!(
+            engine
+                .store()
+                .get_job("job")
+                .expect("query")
+                .expect("job")
+                .state,
+            "delivery_uncertain"
+        );
+    }
+
+    #[tokio::test]
+    async fn active_cancellation_runs_through_executor() {
+        let store = AgentStore::in_memory().expect("store");
+        let mut engine = AgentEngine::new(store, FakeExecutor::default(), FixedClock(10));
+        engine.accept(&accepted("job", "raw")).expect("accept");
+        engine.run_once().await.expect("submit");
+        engine
+            .store_mut()
+            .request_cancel("job", 20)
+            .expect("request cancellation");
+        let (store, executor, _) = engine.into_parts();
+        let mut engine = AgentEngine::new(store, executor, FixedClock(20));
+        engine.run_once().await.expect("cancel");
+        assert_eq!(
+            engine
+                .store()
+                .get_job("job")
+                .expect("query")
+                .expect("job")
+                .state,
+            "cancelled"
+        );
+        let (_, executor, _) = engine.into_parts();
+        assert_eq!(executor.cancellations, 1);
     }
 }

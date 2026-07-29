@@ -2,7 +2,7 @@ use spool_domain::{PrinterCapabilities, PrinterState};
 use spool_executor_protocol::{read_frame, write_frame};
 use spool_protocol::executor::{
     DiscoveredPrinter, ExecutorError, ExecutorOperation, ExecutorRequest, ExecutorResponse,
-    ExecutorResult,
+    ExecutorResult, NativeJobObservation, NativeJobState,
 };
 
 fn main() {
@@ -48,10 +48,41 @@ fn execute(operation: ExecutorOperation) -> Result<ExecutorResult, ExecutorError
         ExecutorOperation::Submit { job_id, .. } => Ok(ExecutorResult::Submitted {
             native_job_id: Some(format!("fake-{}", job_id.as_ulid())),
         }),
+        ExecutorOperation::Observe {
+            native_printer_id, ..
+        } if native_printer_id != "fake-printer" => Err(not_found()),
+        ExecutorOperation::Observe { native_job_id, .. } => Ok(ExecutorResult::Observation {
+            observation: fake_observation(&native_job_id),
+        }),
         ExecutorOperation::Cancel {
             native_printer_id, ..
         } if native_printer_id != "fake-printer" => Err(not_found()),
         ExecutorOperation::Cancel { .. } => Ok(ExecutorResult::Cancelled),
+    }
+}
+
+fn fake_observation(native_job_id: &str) -> NativeJobObservation {
+    let state = if native_job_id.ends_with("-queued") {
+        NativeJobState::Queued
+    } else if native_job_id.ends_with("-printing") {
+        NativeJobState::Printing
+    } else if native_job_id.ends_with("-blocked") {
+        NativeJobState::Blocked
+    } else if native_job_id.ends_with("-failed") {
+        NativeJobState::Failed
+    } else if native_job_id.ends_with("-cancelled") {
+        NativeJobState::Cancelled
+    } else if native_job_id.ends_with("-missing") {
+        NativeJobState::Missing
+    } else if native_job_id.ends_with("-unknown") {
+        NativeJobState::Unknown
+    } else {
+        NativeJobState::Completed
+    };
+    NativeJobObservation {
+        state,
+        native_code: Some("fake".into()),
+        message: Some("Deterministic fake spooler observation".into()),
     }
 }
 
