@@ -12,9 +12,9 @@ base64.workspace = true
 clap.workspace = true
 reqwest.workspace = true
 serde_json.workspace = true
-spool-auth = { path = "../../crates/auth" }
-spool-domain = { path = "../../crates/domain" }
-spool-storage-postgres = { path = "../../crates/storage-postgres" }
+spool-auth = { path = "../../crates/auth", version = "0.1.0" }
+spool-domain = { path = "../../crates/domain", version = "0.1.0" }
+spool-storage-postgres = { path = "../../crates/storage-postgres", version = "0.1.0" }
 tokio.workspace = true
 uuid.workspace = true
 
