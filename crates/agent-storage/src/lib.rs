@@ -53,6 +53,7 @@ pub enum StorageError {
 }
 
 pub const MAX_NATIVE_PROFILE_BLOB_BYTES: usize = 1024 * 1024;
+const MAX_PROFILE_CAPTURE_SESSION_LIFETIME_MS: i64 = 10 * 60 * 1000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AcceptedJob {
@@ -852,6 +853,62 @@ impl AgentStore {
             .map_err(Into::into)
     }
 
+    /// Returns one exact immutable profile revision without requiring its
+    /// destination identifier.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `SQLite` cannot execute or decode the query.
+    pub fn profile_revision(
+        &self,
+        profile_id: &str,
+        revision: u64,
+    ) -> Result<Option<StoredNamedProfile>, StorageError> {
+        self.connection
+            .query_row(
+                "SELECT profile_id, printer_id, revision, name, is_default,
+                        options_json, status, native_kind, native_blob_id,
+                        native_digest, driver_fingerprint_json, summary_json,
+                        stock_id, safe_overrides_json,
+                        last_validated_unix_ms, last_test_job_id, published,
+                        updated_unix_ms
+                 FROM printer_profiles
+                 WHERE profile_id = ?1 AND revision = ?2
+                 LIMIT 1",
+                params![profile_id, revision],
+                named_profile_from_row,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    /// Records a successful integrity validation without changing profile
+    /// readiness or the immutable native settings.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the exact revision does not exist or `SQLite`
+    /// cannot update it.
+    pub fn record_profile_validation(
+        &mut self,
+        profile_id: &str,
+        revision: u64,
+        validated_unix_ms: i64,
+    ) -> Result<(), StorageError> {
+        let changed = self.connection.execute(
+            "UPDATE printer_profiles
+             SET last_validated_unix_ms = ?3, updated_unix_ms = ?3
+             WHERE profile_id = ?1 AND revision = ?2 AND deleted = 0",
+            params![profile_id, revision, validated_unix_ms],
+        )?;
+        if changed != 1 {
+            return Err(StorageError::InvalidPrinterProfile(format!(
+                "profile {profile_id} revision {revision} was not found"
+            )));
+        }
+        Ok(())
+    }
+
     /// Returns the dependency manifest for one immutable profile revision.
     ///
     /// # Errors
@@ -946,9 +1003,16 @@ impl AgentStore {
             || token_digest.trim().is_empty()
             || peer_user_id.trim().is_empty()
             || expires_unix_ms <= created_unix_ms
+            || expires_unix_ms.saturating_sub(created_unix_ms)
+                > MAX_PROFILE_CAPTURE_SESSION_LIFETIME_MS
         {
             return Err(StorageError::InvalidPrinterProfile(
                 "invalid profile capture authorization".into(),
+            ));
+        }
+        if operation == "create" && (profile_id.is_some() || expected_revision.is_some()) {
+            return Err(StorageError::InvalidPrinterProfile(
+                "create captures cannot reference an existing profile".into(),
             ));
         }
         if matches!(operation, "edit" | "clone") {
@@ -1300,7 +1364,16 @@ impl AgentStore {
             ],
         )?;
         if changed != 1 {
-            return Err(StorageError::JobConflict(job_id.to_owned()));
+            let job_exists: bool = self.connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM jobs WHERE job_id = ?1)",
+                [job_id],
+                |row| row.get(0),
+            )?;
+            return Err(if job_exists {
+                StorageError::JobConflict(job_id.to_owned())
+            } else {
+                StorageError::JobNotFound(job_id.to_owned())
+            });
         }
         Ok(())
     }
@@ -1534,6 +1607,25 @@ impl AgentStore {
         &mut self,
         binding: &StoredTargetBinding,
     ) -> Result<(), StorageError> {
+        let profile_exists: bool = self.connection.query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM printer_profiles
+               WHERE profile_id = ?1 AND printer_id = ?2
+                 AND revision = ?3 AND deleted = 0
+             )",
+            params![
+                binding.profile_id,
+                binding.printer_id,
+                binding.profile_revision
+            ],
+            |row| row.get(0),
+        )?;
+        if !profile_exists {
+            return Err(StorageError::InvalidPrinterProfile(format!(
+                "profile {} revision {} was not found for printer {}",
+                binding.profile_id, binding.profile_revision, binding.printer_id
+            )));
+        }
         self.connection.execute(
             "INSERT INTO target_bindings(
                binding_id, target_id, agent_id, printer_id, profile_id,
@@ -2940,28 +3032,7 @@ fn insert_named_profile_tx(
     updated_unix_ms: i64,
 ) -> Result<(), StorageError> {
     if is_default {
-        transaction.execute(
-            "INSERT INTO printer_profiles(
-               profile_id, printer_id, revision, name, is_default, options_json,
-               status, native_kind, native_blob_id, native_digest,
-               driver_fingerprint_json, summary_json, stock_id,
-               safe_overrides_json, last_validated_unix_ms, last_test_job_id,
-               published, deleted, updated_unix_ms
-             )
-             SELECT p.profile_id, p.printer_id, p.revision + 1, p.name, 0,
-                    p.options_json, p.status, p.native_kind, p.native_blob_id,
-                    p.native_digest, p.driver_fingerprint_json, p.summary_json,
-                    p.stock_id, p.safe_overrides_json, p.last_validated_unix_ms,
-                    p.last_test_job_id, p.published, 0, ?3
-             FROM printer_profiles p
-             WHERE p.printer_id = ?1 AND p.profile_id <> ?2
-               AND p.is_default = 1 AND p.deleted = 0
-               AND p.revision = (
-                 SELECT MAX(latest.revision) FROM printer_profiles latest
-                 WHERE latest.profile_id = p.profile_id
-               )",
-            params![printer_id, profile_id, updated_unix_ms],
-        )?;
+        demote_default_profiles(transaction, printer_id, profile_id, updated_unix_ms)?;
     }
     transaction.execute(
         "INSERT INTO printer_profiles(
@@ -2989,24 +3060,13 @@ fn demote_default_profiles(
     updated_unix_ms: i64,
 ) -> Result<(), StorageError> {
     transaction.execute(
-        "INSERT INTO printer_profiles(
-           profile_id, printer_id, revision, name, is_default, options_json,
-           status, native_kind, native_blob_id, native_digest,
-           driver_fingerprint_json, summary_json, stock_id,
-           safe_overrides_json, last_validated_unix_ms, last_test_job_id,
-           published, deleted, updated_unix_ms
-         )
-         SELECT p.profile_id, p.printer_id, p.revision + 1, p.name, 0,
-                p.options_json, p.status, p.native_kind, p.native_blob_id,
-                p.native_digest, p.driver_fingerprint_json, p.summary_json,
-                p.stock_id, p.safe_overrides_json, p.last_validated_unix_ms,
-                p.last_test_job_id, p.published, 0, ?3
-         FROM printer_profiles p
-         WHERE p.printer_id = ?1 AND p.profile_id <> ?2
-           AND p.is_default = 1 AND p.deleted = 0
-           AND p.revision = (
+        "UPDATE printer_profiles
+         SET is_default = 0, updated_unix_ms = ?3
+         WHERE printer_id = ?1 AND profile_id <> ?2
+           AND is_default = 1 AND deleted = 0
+           AND revision = (
              SELECT MAX(latest.revision) FROM printer_profiles latest
-             WHERE latest.profile_id = p.profile_id
+             WHERE latest.profile_id = printer_profiles.profile_id
            )",
         params![printer_id, profile_id, updated_unix_ms],
     )?;
@@ -3170,6 +3230,35 @@ mod tests {
             expires_unix_ms: None,
             accepted_unix_ms: accepted,
             cloud_managed: false,
+        }
+    }
+
+    fn native_capture(blob: Vec<u8>) -> NativeProfileCapture {
+        NativeProfileCapture {
+            name: "A4 colour".into(),
+            is_default: true,
+            options_json: serde_json::to_string(&JobOptions::default()).unwrap(),
+            status: "ready".into(),
+            native_kind: "macos_printcore".into(),
+            native_schema_version: 1,
+            native_digest: format!("sha256:{:x}", Sha256::digest(&blob)),
+            native_blob: blob,
+            driver_fingerprint_json: serde_json::to_string(&DriverFingerprint {
+                platform: "macos".into(),
+                driver_name: "HP".into(),
+                native_queue_id: "native-hp".into(),
+                ..DriverFingerprint::default()
+            })
+            .unwrap(),
+            summary_json: serde_json::to_string(&ProfileSummary::default()).unwrap(),
+            stock_id: None,
+            dependencies_json: serde_json::to_string(&vec![ProfileDependency {
+                kind: "driver".into(),
+                value: "HP 1.0".into(),
+            }])
+            .unwrap(),
+            safe_overrides_json: r#"["copies","pages"]"#.into(),
+            published: true,
         }
     }
 
@@ -3568,7 +3657,7 @@ mod tests {
                 .find(|profile| profile.profile_id == colour.profile_id)
                 .unwrap()
                 .revision,
-            2
+            1
         );
         store
             .record_profile_test_result(&updated.profile_id, updated.revision, "job_test", true, 35)
@@ -3713,29 +3802,7 @@ mod tests {
             )
             .unwrap();
         let blob = b"opaque-native-settings".to_vec();
-        let digest = format!("sha256:{:x}", Sha256::digest(&blob));
-        let capture = NativeProfileCapture {
-            name: "A4 colour".into(),
-            is_default: true,
-            options_json: serde_json::to_string(&JobOptions::default()).unwrap(),
-            status: "ready".into(),
-            native_kind: "macos_printcore".into(),
-            native_schema_version: 1,
-            native_digest: digest,
-            native_blob: blob.clone(),
-            driver_fingerprint_json: serde_json::to_string(&DriverFingerprint {
-                platform: "macos".into(),
-                driver_name: "HP".into(),
-                native_queue_id: "native-hp".into(),
-                ..DriverFingerprint::default()
-            })
-            .unwrap(),
-            summary_json: serde_json::to_string(&ProfileSummary::default()).unwrap(),
-            stock_id: None,
-            dependencies_json: "[]".into(),
-            safe_overrides_json: r#"["copies","pages"]"#.into(),
-            published: true,
-        };
+        let capture = native_capture(blob.clone());
         let first = store
             .commit_profile_capture("pcs_create", "token-digest", "501", &capture, 20_000)
             .unwrap();
@@ -3776,7 +3843,7 @@ mod tests {
                 "501",
                 &NativeProfileCapture {
                     name: "A4 colour best".into(),
-                    ..capture
+                    ..capture.clone()
                 },
                 40_000,
             )
@@ -3795,6 +3862,137 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+    }
+
+    #[test]
+    fn default_demotion_preserves_native_revision_blob_and_dependencies() {
+        let mut store = AgentStore::in_memory().unwrap();
+        let printer = store
+            .upsert_printer(
+                "native-hp",
+                "HP",
+                "online",
+                true,
+                &serde_json::to_string(&PrinterCapabilities::default()).unwrap(),
+                10,
+            )
+            .unwrap();
+        let blob = b"opaque-native-settings".to_vec();
+        let capture = native_capture(blob.clone());
+        for (session_id, token, name) in [
+            ("pcs_first", "first-token", "A4 colour"),
+            ("pcs_second", "second-token", "A4 draft"),
+        ] {
+            store
+                .create_profile_capture_session(
+                    session_id,
+                    token,
+                    &printer.printer_id,
+                    None,
+                    None,
+                    "create",
+                    "501",
+                    310_000,
+                    10_000,
+                )
+                .unwrap();
+            store
+                .commit_profile_capture(
+                    session_id,
+                    token,
+                    "501",
+                    &NativeProfileCapture {
+                        name: name.into(),
+                        ..capture.clone()
+                    },
+                    20_000,
+                )
+                .unwrap();
+        }
+
+        let profiles = store.named_profiles(&printer.printer_id).unwrap();
+        let first = profiles
+            .iter()
+            .find(|profile| profile.name == "A4 colour")
+            .unwrap();
+        assert_eq!(first.revision, 1);
+        assert!(!first.is_default);
+        assert_eq!(
+            store
+                .native_profile_blob(&first.profile_id, first.revision)
+                .unwrap()
+                .unwrap()
+                .native_blob,
+            blob
+        );
+        assert_eq!(
+            store
+                .profile_dependencies(&first.profile_id, first.revision)
+                .unwrap(),
+            vec![ProfileDependency {
+                kind: "driver".into(),
+                value: "HP 1.0".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn capture_authorization_rejects_invalid_create_context_and_long_lifetimes() {
+        let mut store = AgentStore::in_memory().unwrap();
+        let printer = store
+            .upsert_printer(
+                "native-hp",
+                "HP",
+                "online",
+                true,
+                &serde_json::to_string(&PrinterCapabilities::default()).unwrap(),
+                10,
+            )
+            .unwrap();
+
+        for (profile_id, expected_revision) in [(Some("prf_existing"), None), (None, Some(1))] {
+            assert!(matches!(
+                store.create_profile_capture_session(
+                    "pcs_invalid_create",
+                    "digest",
+                    &printer.printer_id,
+                    profile_id,
+                    expected_revision,
+                    "create",
+                    "501",
+                    20_000,
+                    10_000,
+                ),
+                Err(StorageError::InvalidPrinterProfile(_))
+            ));
+        }
+        assert!(matches!(
+            store.create_profile_capture_session(
+                "pcs_too_long",
+                "digest",
+                &printer.printer_id,
+                None,
+                None,
+                "create",
+                "501",
+                610_001,
+                10_000,
+            ),
+            Err(StorageError::InvalidPrinterProfile(_))
+        ));
+        store
+            .create_profile_capture_session(
+                "pcs_max_lifetime",
+                "digest",
+                &printer.printer_id,
+                None,
+                None,
+                "create",
+                "501",
+                610_000,
+                10_000,
+            )
+            .unwrap();
     }
 
     #[test]
@@ -3897,6 +4095,104 @@ mod tests {
         );
         assert_eq!(pinned.profile_revision, Some(1));
         assert_eq!(pinned.stock_id.as_deref(), Some("stk_test"));
+    }
+
+    #[test]
+    fn binding_and_job_pins_require_exact_existing_records() {
+        let mut store = AgentStore::in_memory().unwrap();
+        let printer = store
+            .upsert_printer(
+                "native-label",
+                "Label",
+                "online",
+                false,
+                &serde_json::to_string(&PrinterCapabilities::default()).unwrap(),
+                1,
+            )
+            .unwrap();
+        let first = store
+            .create_named_profile(
+                &printer.printer_id,
+                "First",
+                false,
+                &serde_json::to_string(&JobOptions::default()).unwrap(),
+                2,
+            )
+            .unwrap();
+        store
+            .upsert_target(&StoredTarget {
+                target_id: "tgt_test".into(),
+                name: "Target".into(),
+                stock_id: None,
+                routing_policy: "primary_only".into(),
+                published: true,
+                retired: false,
+                updated_unix_ms: 3,
+            })
+            .unwrap();
+        assert!(matches!(
+            store.upsert_target_binding(&StoredTargetBinding {
+                binding_id: "bnd_missing_revision".into(),
+                target_id: "tgt_test".into(),
+                agent_id: "agt_test".into(),
+                printer_id: printer.printer_id.clone(),
+                profile_id: first.profile_id.clone(),
+                profile_revision: first.revision + 1,
+                role: "primary".into(),
+                priority: 0,
+                enabled: true,
+                created_unix_ms: 4,
+            }),
+            Err(StorageError::InvalidPrinterProfile(_))
+        ));
+        assert!(matches!(
+            store.pin_job_profile(
+                "missing",
+                None,
+                None,
+                &first.profile_id,
+                first.revision,
+                None,
+                None,
+            ),
+            Err(StorageError::JobNotFound(_))
+        ));
+
+        store
+            .accept_job(&job("pinned", &printer.printer_id, 5))
+            .unwrap();
+        store
+            .pin_job_profile(
+                "pinned",
+                None,
+                None,
+                &first.profile_id,
+                first.revision,
+                None,
+                None,
+            )
+            .unwrap();
+        let second = store
+            .create_named_profile(
+                &printer.printer_id,
+                "Second",
+                false,
+                &serde_json::to_string(&JobOptions::default()).unwrap(),
+                6,
+            )
+            .unwrap();
+        assert!(matches!(
+            store.pin_job_profile(
+                "pinned",
+                None,
+                None,
+                &second.profile_id,
+                second.revision,
+                None,
+                None,
+            ),
+            Err(StorageError::JobConflict(_))
+        ));
     }
 
     #[test]
