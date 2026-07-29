@@ -228,6 +228,7 @@ mod tests {
         http::{Request, StatusCode},
     };
     use base64::{Engine, engine::general_purpose::STANDARD_NO_PAD};
+    use bytes::Bytes;
     use chrono::Utc;
     use ed25519_dalek::{Signer, SigningKey};
     use http_body_util::BodyExt;
@@ -235,6 +236,7 @@ mod tests {
     use sha2::{Digest, Sha256};
     use spool_auth::Scope;
     use spool_domain::{AgentId, EnvironmentId, JobId, JobState, PrinterId, WorkspaceId};
+    use spool_object_store::{ObjectStoreError, StoredObject};
     use spool_protocol::agent::{
         AgentAcceptJobRequest, AgentCommand, AgentHealth, AgentSyncRequest, AgentSyncResponse,
         QueueSnapshot,
@@ -249,6 +251,33 @@ mod tests {
         agent_id: AgentId,
         signing_key: SigningKey,
         tenant: TenantContext,
+    }
+
+    #[derive(Debug)]
+    struct UnavailableObjectStore;
+
+    #[async_trait::async_trait]
+    impl ObjectStore for UnavailableObjectStore {
+        async fn put(
+            &self,
+            _key: &str,
+            _content: Bytes,
+            _expected_sha256: Option<&str>,
+        ) -> Result<StoredObject, ObjectStoreError> {
+            Err(ObjectStoreError::S3("unavailable".into()))
+        }
+
+        async fn get(&self, _key: &str) -> Result<Bytes, ObjectStoreError> {
+            Err(ObjectStoreError::S3("unavailable".into()))
+        }
+
+        async fn delete(&self, _key: &str) -> Result<(), ObjectStoreError> {
+            Err(ObjectStoreError::S3("unavailable".into()))
+        }
+
+        async fn exists(&self, _key: &str) -> Result<bool, ObjectStoreError> {
+            Err(ObjectStoreError::S3("unavailable".into()))
+        }
     }
 
     async fn application() -> TestApplication {
@@ -338,6 +367,39 @@ mod tests {
             )
             .body(Body::from(body))
             .expect("valid signed request")
+    }
+
+    #[tokio::test]
+    async fn readiness_accepts_a_missing_health_object() {
+        let application = application().await;
+        let response = application
+            .router
+            .oneshot(api_request("GET", "/v1/ready", "", None))
+            .await
+            .expect("readiness response");
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn object_store_failure_blocks_readiness_but_not_liveness() {
+        let state = AppState::new_with_resources(
+            Arc::new(MemoryRepository::default()),
+            Arc::new(StaticAuthenticator::default()),
+            [0; 32],
+            Arc::new(UnavailableObjectStore),
+        );
+        let application = router(state);
+        let health = application
+            .clone()
+            .oneshot(api_request("GET", "/v1/health", "", None))
+            .await
+            .expect("health response");
+        assert_eq!(health.status(), StatusCode::OK);
+        let ready = application
+            .oneshot(api_request("GET", "/v1/ready", "", None))
+            .await
+            .expect("readiness response");
+        assert_eq!(ready.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     async fn sync_test_agent(

@@ -53,6 +53,11 @@ pub async fn health() -> Json<HealthResponse> {
 
 pub async fn ready(State(state): State<AppState>) -> Result<Json<HealthResponse>, AppError> {
     state.repository.ready().await?;
+    state
+        .object_store
+        .exists("health/readiness-probe")
+        .await
+        .map_err(|_| AppError::service_unavailable("object_store_unavailable"))?;
     Ok(health().await)
 }
 

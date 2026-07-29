@@ -294,6 +294,9 @@ Separate:
 
 A single red/green status is insufficient. Readiness endpoints must avoid
 claiming the service is ready when it cannot durably register jobs.
+`/v1/health` is process liveness only. `/v1/ready` checks PostgreSQL and performs
+a non-mutating existence probe against the configured object store; a missing
+probe object is healthy, while a backend error makes the service unready.
 
 ## Webhook delivery semantics
 
