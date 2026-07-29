@@ -2929,7 +2929,8 @@ impl PostgresStore {
         lease_token: &str,
     ) -> Result<DateTime<Utc>, StorageError> {
         let token_hash = Sha256::digest(lease_token.as_bytes()).to_vec();
-        sqlx::query_scalar(
+        let mut transaction = self.pool.begin().await?;
+        let lease_until = sqlx::query_scalar(
             "UPDATE jobs SET lease_until = now() + interval '30 seconds', updated_at = now()
              WHERE id = $1 AND workspace_id = $2 AND environment_id = $3 AND agent_id = $4
                AND lease_id = $5 AND lease_token_hash = $6 AND lease_until > now()
@@ -2941,9 +2942,21 @@ impl PostgresStore {
         .bind(agent_id.to_string())
         .bind(lease_id)
         .bind(token_hash)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *transaction)
         .await?
-        .ok_or(StorageError::ConcurrentStateChange)
+        .ok_or(StorageError::ConcurrentStateChange)?;
+        sqlx::query(
+            "UPDATE agents SET state = 'connected', last_seen_at = now()
+             WHERE id = $1 AND workspace_id = $2 AND environment_id = $3
+               AND revoked_at IS NULL",
+        )
+        .bind(agent_id.to_string())
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(lease_until)
     }
 
     pub async fn release_agent_lease(

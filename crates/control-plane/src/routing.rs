@@ -7,12 +7,13 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
-use chrono::Utc;
+use chrono::{DateTime, TimeDelta, Utc};
 use serde::Deserialize;
 use spool_auth::Scope;
 use spool_domain::{PrinterId, PrinterState};
 use spool_storage_postgres::{
-    StoredBindingReadiness, StoredStock, StoredTarget, StoredTargetBinding, StoredTargetReadiness,
+    StoredAgent, StoredBindingReadiness, StoredStock, StoredTarget, StoredTargetBinding,
+    StoredTargetReadiness,
 };
 use std::str::FromStr;
 
@@ -376,7 +377,7 @@ pub async fn target_readiness(
             "dependency_missing"
         } else if !agents
             .iter()
-            .any(|agent| agent.id == binding.agent_id && agent.state == "connected")
+            .any(|agent| agent.id == binding.agent_id && agent_is_connected(agent))
         {
             "node_offline"
         } else {
@@ -415,6 +416,17 @@ pub async fn target_readiness(
         selected_binding_id,
         bindings: evaluated,
     }))
+}
+
+const NODE_HEARTBEAT_STALE_AFTER_SECONDS: i64 = 45;
+
+pub(crate) fn agent_is_connected(agent: &StoredAgent) -> bool {
+    agent_is_connected_at(agent, Utc::now())
+}
+
+fn agent_is_connected_at(agent: &StoredAgent, now: DateTime<Utc>) -> bool {
+    agent.state == "connected"
+        && agent.last_seen_at >= now - TimeDelta::seconds(NODE_HEARTBEAT_STALE_AFTER_SECONDS)
 }
 
 fn binding_printer_readiness(
@@ -526,5 +538,24 @@ mod tests {
             Some(Some(valid))
         );
         assert!(clean_optional(Some("é".repeat(2_001)), 2_000, "invalid_target").is_err());
+    }
+
+    #[test]
+    fn connected_nodes_are_fenced_when_heartbeats_go_stale() {
+        let now = Utc::now();
+        let mut agent = StoredAgent {
+            id: spool_domain::AgentId::new(),
+            name: "Node".into(),
+            platform: "macos".into(),
+            state: "connected".into(),
+            version: "0.1.0".into(),
+            last_seen_at: now - TimeDelta::seconds(44),
+        };
+        assert!(agent_is_connected_at(&agent, now));
+        agent.last_seen_at = now - TimeDelta::seconds(46);
+        assert!(!agent_is_connected_at(&agent, now));
+        agent.state = "paused".into();
+        agent.last_seen_at = now;
+        assert!(!agent_is_connected_at(&agent, now));
     }
 }

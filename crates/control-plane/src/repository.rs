@@ -3082,7 +3082,12 @@ impl Repository for MemoryRepository {
             })
             .ok_or(RepositoryError::ConcurrentStateChange)?;
         lease.3 = Utc::now() + chrono::Duration::seconds(30);
-        Ok(lease.3)
+        let lease_until = lease.3;
+        if let Some((_workspace, _environment, agent)) = state.agents.get_mut(&agent_id) {
+            agent.state = "connected".into();
+            agent.last_seen_at = Utc::now();
+        }
+        Ok(lease_until)
     }
 
     async fn release_agent_lease(

@@ -1004,7 +1004,7 @@ async fn resolve_ready_target_destination(
     for binding in bindings.into_iter().filter(|binding| binding.enabled) {
         if !agents
             .iter()
-            .any(|agent| agent.id == binding.agent_id && agent.state == "connected")
+            .any(|agent| agent.id == binding.agent_id && crate::routing::agent_is_connected(agent))
         {
             continue;
         }

@@ -175,7 +175,7 @@ Required timers are workspace-configurable within safe limits:
 - online-node pickup p95 target: under 2 seconds;
 - pickup warning: 30 seconds;
 - pickup critical: 2 minutes for an otherwise ready online target;
-- node heartbeat stale: three missed sync intervals;
+- node heartbeat stale: 45 seconds in V1 (lease renewal also refreshes presence);
 - native reconciliation: every few seconds with bounded backoff;
 - uncertainty deadline: driver/platform specific and never silently terminal.
 
