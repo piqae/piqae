@@ -118,7 +118,7 @@ struct Arguments {
     allow_private_uri_sources: bool,
 
     /// Consume a one-time token, generate this installation's device key, and exit.
-    #[arg(long, hide_env_values = true)]
+    #[arg(long, env = "SPOOL_ENROLMENT_TOKEN", hide_env_values = true)]
     enrolment_token: Option<String>,
 
     /// Human-readable installation name used with --enrolment-token.
