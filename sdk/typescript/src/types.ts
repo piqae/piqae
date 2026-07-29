@@ -102,6 +102,32 @@ export interface PlatformContext {
   environmentId: SpoolId;
 }
 
+export interface PlatformAccountEnvironment {
+  id: SpoolId;
+  kind: 'test' | 'live';
+}
+
+export interface PlatformAccountEnvironments {
+  test: PlatformAccountEnvironment;
+  live: PlatformAccountEnvironment;
+}
+
+export interface PlatformAccount {
+  id: SpoolId;
+  external_id: string;
+  name: string;
+  status: 'active' | 'suspended' | 'cancelled';
+  metadata: Record<string, string>;
+  environments: PlatformAccountEnvironments;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface UpsertPlatformAccount {
+  name: string;
+  metadata?: Record<string, string>;
+}
+
 /**
  * Server-side grant projected from operator-managed platform configuration.
  * Platform grant provisioning is intentionally not part of the tenant API.
