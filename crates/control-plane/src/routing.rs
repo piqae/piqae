@@ -418,7 +418,7 @@ pub async fn target_readiness(
     }))
 }
 
-const NODE_HEARTBEAT_STALE_AFTER_SECONDS: i64 = 45;
+const NODE_HEARTBEAT_STALE_AFTER_SECONDS: i64 = 90;
 
 pub(crate) fn agent_is_connected(agent: &StoredAgent) -> bool {
     agent_is_connected_at(agent, Utc::now())
@@ -549,10 +549,10 @@ mod tests {
             platform: "macos".into(),
             state: "connected".into(),
             version: "0.1.0".into(),
-            last_seen_at: now - TimeDelta::seconds(44),
+            last_seen_at: now - TimeDelta::seconds(89),
         };
         assert!(agent_is_connected_at(&agent, now));
-        agent.last_seen_at = now - TimeDelta::seconds(46);
+        agent.last_seen_at = now - TimeDelta::seconds(91);
         assert!(!agent_is_connected_at(&agent, now));
         agent.state = "paused".into();
         agent.last_seen_at = now;
