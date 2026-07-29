@@ -200,6 +200,11 @@
     );
   }
 
+  function defaultPaper(): string {
+    const papers = Object.keys(selectedPrinter?.capabilities.papers ?? {});
+    return papers.find(isA4Paper) ?? papers[0] ?? 'A4';
+  }
+
   function displayError(value: unknown, fallback: string): string {
     if (value && typeof value === 'object') {
       const record = value as Record<string, unknown>;
@@ -331,7 +336,7 @@
     profileCopies = 1;
     profileColor = false;
     profileDuplex = 'one-sided';
-    profilePaper = Object.keys(selectedPrinter?.capabilities.papers ?? {})[0] ?? 'A4';
+    profilePaper = defaultPaper();
     profileDpi = selectedPrinter?.capabilities.dpis?.[0] ?? '';
     profileBin = selectedPrinter?.capabilities.bins?.[0] ?? '';
     profileMedia = selectedPrinter?.capabilities.medias?.[0] ?? '';
@@ -351,7 +356,7 @@
     profileCopies = profile.options.copies ?? 1;
     profileColor = profile.options.color ?? false;
     profileDuplex = profile.options.duplex ?? 'one-sided';
-    profilePaper = profile.options.paper ?? Object.keys(selectedPrinter?.capabilities.papers ?? {})[0] ?? 'A4';
+    profilePaper = profile.options.paper ?? defaultPaper();
     profileDpi = profile.options.dpi ?? selectedPrinter?.capabilities.dpis?.[0] ?? '';
     profileBin = profile.options.bin ?? selectedPrinter?.capabilities.bins?.[0] ?? '';
     profileMedia = profile.options.media ?? selectedPrinter?.capabilities.medias?.[0] ?? '';
