@@ -631,14 +631,14 @@ async fn submit_local_job(
                 .fetch_to_store(content_store, uri, None, None)
                 .await
                 .map_err(|error| control_failure("content_unavailable", &error.to_string()))?;
-            return accept_stored_local_job(engine, request, stored).await;
+            return accept_stored_local_job(engine, request, stored, None).await;
         }
     };
     let stored = content_store
         .put(input)
         .await
         .map_err(|error| control_failure("content_store_failed", &error.to_string()))?;
-    accept_stored_local_job(engine, request, stored).await
+    accept_stored_local_job(engine, request, stored, None).await
 }
 
 async fn refresh_local_printers(
@@ -1230,7 +1230,7 @@ async fn submit_test_page(
         .put(std::io::Cursor::new(a4_test_pdf()))
         .await
         .map_err(|error| control_failure("content_store_failed", &error.to_string()))?;
-    accept_stored_local_job(
+    let accepted = accept_stored_local_job(
         engine,
         LocalCreateJob {
             printer_id: printer_id.to_owned(),
@@ -1244,8 +1244,24 @@ async fn submit_test_page(
             expires_unix_ms: Some(Utc::now().timestamp_millis() + 300_000),
         },
         stored,
+        Some((profile.profile_id.clone(), profile.revision)),
     )
-    .await
+    .await?;
+    let passed_native_handoff = matches!(
+        accepted.state.as_str(),
+        "accepted_by_spooler" | "spooling" | "printing" | "completed_reported"
+    );
+    engine
+        .store_mut()
+        .record_profile_test_result(
+            &profile.profile_id,
+            profile.revision,
+            &accepted.job_id,
+            passed_native_handoff,
+            Utc::now().timestamp_millis(),
+        )
+        .map_err(storage_control_failure)?;
+    Ok(accepted)
 }
 
 fn is_a4(value: &str) -> bool {
@@ -1344,6 +1360,7 @@ async fn accept_stored_local_job(
     engine: &mut AgentEngine<RuntimeExecutor>,
     request: LocalCreateJob,
     stored: spool_agent_core::StoredContent,
+    profile_pin: Option<(String, u64)>,
 ) -> Result<LocalJobAccepted, ControlFailure> {
     let job_id = JobId::new().to_string();
     let options_json = serde_json::to_string(&request.options)
@@ -1373,6 +1390,12 @@ async fn accept_stored_local_job(
             cloud_managed: false,
         })
         .map_err(|error| control_failure("local_accept_failed", &error.to_string()))?;
+    if let Some((profile_id, revision)) = &profile_pin {
+        engine
+            .store_mut()
+            .pin_job_profile(&job_id, None, None, profile_id, *revision, None, None)
+            .map_err(storage_control_failure)?;
+    }
     engine
         .run_once()
         .await

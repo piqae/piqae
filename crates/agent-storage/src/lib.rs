@@ -877,6 +877,48 @@ impl AgentStore {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
+    /// Records the operational result of a driver test without changing the
+    /// immutable native configuration or its revision identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the exact revision no longer exists or SQLite
+    /// cannot update it.
+    pub fn record_profile_test_result(
+        &mut self,
+        profile_id: &str,
+        revision: u64,
+        job_id: &str,
+        passed_native_handoff: bool,
+        validated_unix_ms: i64,
+    ) -> Result<(), StorageError> {
+        let changed = self.connection.execute(
+            "UPDATE printer_profiles
+             SET status = ?4, last_validated_unix_ms = ?5,
+                 last_test_job_id = ?3, published = ?6,
+                 updated_unix_ms = ?5
+             WHERE profile_id = ?1 AND revision = ?2 AND deleted = 0",
+            params![
+                profile_id,
+                revision,
+                job_id,
+                if passed_native_handoff {
+                    "ready"
+                } else {
+                    "needs_test"
+                },
+                validated_unix_ms,
+                passed_native_handoff
+            ],
+        )?;
+        if changed != 1 {
+            return Err(StorageError::InvalidPrinterProfile(format!(
+                "profile {profile_id} revision {revision} was not found"
+            )));
+        }
+        Ok(())
+    }
+
     /// Authorizes one short-lived native profile capture without storing its
     /// plaintext bearer token.
     ///
@@ -3524,6 +3566,16 @@ mod tests {
                 .revision,
             2
         );
+        store
+            .record_profile_test_result(&updated.profile_id, updated.revision, "job_test", true, 35)
+            .unwrap();
+        let tested = store
+            .named_profile_revision(&printer.printer_id, &updated.profile_id, updated.revision)
+            .unwrap()
+            .unwrap();
+        assert_eq!(tested.status, "ready");
+        assert!(tested.published);
+        assert_eq!(tested.last_test_job_id.as_deref(), Some("job_test"));
         store
             .delete_named_profile(
                 &printer.printer_id,
