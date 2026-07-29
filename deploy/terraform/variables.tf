@@ -57,3 +57,55 @@ variable "webhook_master_key_secret" {
 variable "public_api_origin" {
   type = string
 }
+
+variable "auth_mode" {
+  type        = string
+  description = "Control-plane authentication mode. Hosted deployments should use oidc."
+  default     = "oidc"
+  validation {
+    condition     = contains(["api_key", "bootstrap", "hybrid", "oidc"], var.auth_mode)
+    error_message = "auth_mode must be api_key, bootstrap, hybrid, or oidc"
+  }
+}
+
+variable "oidc_issuer" {
+  type        = string
+  description = "Exact trusted OIDC issuer, including its trailing slash when the issuer publishes one."
+  default     = "https://api.workos.com/"
+}
+
+variable "oidc_jwks_url" {
+  type        = string
+  description = "HTTPS JWKS endpoint for the trusted identity application."
+  default     = ""
+}
+
+variable "oidc_audience" {
+  type        = string
+  description = "Expected standard aud claim. Leave empty when binding through oidc_binding_value."
+  default     = ""
+}
+
+variable "oidc_binding_claim" {
+  type        = string
+  description = "Verified application-binding claim used when the provider does not issue aud."
+  default     = "client_id"
+}
+
+variable "oidc_binding_value" {
+  type        = string
+  description = "Expected application identifier. WorkOS deployments should set this to WORKOS_CLIENT_ID."
+  default     = ""
+}
+
+variable "oidc_organization_claim" {
+  type        = string
+  description = "Verified claim that selects the tenant organization."
+  default     = "org_id"
+}
+
+variable "oidc_permissions_claim" {
+  type        = string
+  description = "Verified array claim mapped to Spool API scopes."
+  default     = "permissions"
+}

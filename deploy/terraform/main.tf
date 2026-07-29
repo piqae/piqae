@@ -102,9 +102,22 @@ resource "google_cloud_run_v2_service" "server" {
   }
 
   template {
-    service_account                  = google_service_account.server.email
-    timeout                          = "60s"
-    max_instance_request_concurrency = 200
+    service_account = google_service_account.server.email
+    timeout         = "60s"
+    # V1 object transfers are bounded to 50 MiB but are buffered while their
+    # digest is verified. Keep per-instance memory use bounded until the object
+    # store interface supports end-to-end streaming.
+    max_instance_request_concurrency = 8
+
+    lifecycle {
+      precondition {
+        condition = !contains(["oidc", "hybrid"], var.auth_mode) || (
+          var.oidc_jwks_url != "" &&
+          ((var.oidc_audience != "") != (var.oidc_binding_value != ""))
+        )
+        error_message = "OIDC requires oidc_jwks_url and exactly one of oidc_audience or oidc_binding_value."
+      }
+    }
 
     containers {
       image = var.image
@@ -117,7 +130,7 @@ resource "google_cloud_run_v2_service" "server" {
       resources {
         limits = {
           cpu    = "1"
-          memory = "512Mi"
+          memory = "1Gi"
         }
         cpu_idle = false
       }
@@ -133,6 +146,42 @@ resource "google_cloud_run_v2_service" "server" {
       env {
         name  = "SPOOL_PUBLIC_API_ORIGIN"
         value = var.public_api_origin
+      }
+      env {
+        name  = "SPOOL_AUTH_MODE"
+        value = var.auth_mode
+      }
+      env {
+        name  = "SPOOL_OIDC_ISSUER"
+        value = var.oidc_issuer
+      }
+      env {
+        name  = "SPOOL_OIDC_JWKS_URL"
+        value = var.oidc_jwks_url
+      }
+      env {
+        name  = "SPOOL_OIDC_AUDIENCE"
+        value = var.oidc_audience
+      }
+      env {
+        name  = "SPOOL_OIDC_BINDING_CLAIM"
+        value = var.oidc_binding_claim
+      }
+      env {
+        name  = "SPOOL_OIDC_BINDING_VALUE"
+        value = var.oidc_binding_value
+      }
+      env {
+        name  = "SPOOL_OIDC_ORGANIZATION_CLAIM"
+        value = var.oidc_organization_claim
+      }
+      env {
+        name  = "SPOOL_OIDC_PERMISSIONS_CLAIM"
+        value = var.oidc_permissions_claim
+      }
+      env {
+        name  = "SPOOL_OIDC_ALLOW_UNRESTRICTED"
+        value = "false"
       }
       env {
         name  = "SPOOL_OBJECT_STORE"
