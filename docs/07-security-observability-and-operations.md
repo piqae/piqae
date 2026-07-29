@@ -136,16 +136,27 @@ Policies:
 Defences:
 
 - only HTTP/HTTPS initially;
-- resolve and validate every redirect target;
-- block loopback, link-local, multicast, cloud metadata, and private ranges
-  unless allowed;
-- limit redirects, size, duration, and bandwidth;
+- reject redirects rather than following them;
+- resolve DNS inside the agent, validate every returned address, and pin the
+  approved addresses into the request client to reduce DNS rebinding;
+- block loopback, unspecified, link-local, private, multicast, reserved, and
+  IPv4-mapped private destinations by default;
+- always block known cloud-metadata, unspecified, and multicast destinations;
+- bypass ambient HTTP proxy configuration so a proxy cannot bypass destination
+  checks;
+- cap connect time at 5 seconds, total request time at 120 seconds, and content
+  at 50 MiB while streaming;
 - do not forward control-plane or agent credentials;
 - validate TLS by default;
-- redact URI credentials;
-- pin the resolved policy result per connection to reduce DNS rebinding.
+- reject credentials embedded in a URI and keep supplied authentication out of
+  errors and logs.
 
-Digest authentication support should be isolated and tested; credentials are
+These rules are shared by local submissions and hosted URI descriptors.
+Trusted local/self-hosted installations can opt into private, loopback, and
+link-local sources with `--allow-private-uri-sources` or
+`SPOOL_ALLOW_PRIVATE_URI_SOURCES=true`; the default is `false`, and the
+always-blocked classes remain blocked. Digest authentication is explicitly
+disabled in V1 rather than being silently downgraded. Credentials are
 job-scoped and deleted with content metadata.
 
 ## RAW printing controls
@@ -353,4 +364,3 @@ Provide:
 
 The control plane should remain usable without external telemetry. Remote crash
 reporting and update checks are opt-in for self-hosters.
-

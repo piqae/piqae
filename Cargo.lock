@@ -2608,6 +2608,8 @@ dependencies = [
  "spool-local-api",
  "spool-local-ipc",
  "spool-protocol",
+ "tempfile",
+ "thiserror",
  "tokio",
  "tokio-util",
  "tracing",

@@ -1,3 +1,5 @@
+mod uri_fetch;
+
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -10,9 +12,7 @@ use spool_agent_core::{
     NativeAcceptance, NativeJobReference, SystemClock,
 };
 use spool_agent_storage::{AcceptedJob, AgentStore, PendingEvent, QueueCounts, StorageError};
-use spool_domain::{
-    AgentId, ContentKind, EventId, JobEvent, JobFailureReason, JobId, JobState, UriAuthentication,
-};
+use spool_domain::{AgentId, ContentKind, EventId, JobEvent, JobFailureReason, JobId, JobState};
 use spool_executor_supervisor::{ExecutorSupervisor, SupervisedExecutor};
 use spool_local_api::{
     ControlFailure, ControlRequest, LocalApiState, LocalContent, LocalCreateJob, LocalJobAccepted,
@@ -42,6 +42,7 @@ use tokio::sync::{RwLock, mpsc};
 use tokio_util::io::StreamReader;
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
+use uri_fetch::UriFetcher;
 use url::Url;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -92,6 +93,11 @@ struct Arguments {
     /// Executor child-process path when --executor=process.
     #[arg(long, env = "SPOOL_EXECUTOR_PATH")]
     executor_path: Option<PathBuf>,
+
+    /// Allow trusted private, loopback, and link-local URI content sources.
+    /// Cloud metadata and unspecified/multicast destinations remain blocked.
+    #[arg(long, env = "SPOOL_ALLOW_PRIVATE_URI_SOURCES", default_value_t = false)]
+    allow_private_uri_sources: bool,
 }
 
 #[derive(Debug)]
@@ -230,6 +236,8 @@ async fn main() -> Result<()> {
     let challenge = load_or_create_private_token(&arguments.data_dir.join("local.token"))?;
     let content_store = ContentStore::open(arguments.data_dir.join("content")).await?;
     let cloud_content_store = content_store.clone();
+    let uri_fetcher = UriFetcher::new(arguments.allow_private_uri_sources);
+    let cloud_uri_fetcher = uri_fetcher.clone();
     let (executor, printer_discovery) = match arguments.executor {
         ExecutorMode::Disabled => (RuntimeExecutor::Disabled, PrinterDiscovery::Disabled),
         ExecutorMode::Fake => (
@@ -263,6 +271,7 @@ async fn main() -> Result<()> {
         control_rx,
         engine,
         content_store,
+        uri_fetcher,
         env!("CARGO_PKG_VERSION").to_owned(),
         Arc::clone(&connection),
         Arc::clone(&paused),
@@ -274,6 +283,7 @@ async fn main() -> Result<()> {
             cloud,
             database_path.clone(),
             cloud_content_store,
+            cloud_uri_fetcher,
             printer_discovery,
             Arc::clone(&connection),
             Arc::clone(&paused),
@@ -298,6 +308,7 @@ async fn control_loop(
     mut requests: mpsc::Receiver<ControlRequest>,
     mut engine: AgentEngine<RuntimeExecutor>,
     content_store: ContentStore,
+    uri_fetcher: UriFetcher,
     version: String,
     connection: Arc<RwLock<ConnectionState>>,
     paused: Arc<AtomicBool>,
@@ -314,6 +325,7 @@ async fn control_loop(
                     request,
                     &mut engine,
                     &content_store,
+                    &uri_fetcher,
                     &version,
                     &connection,
                     &paused,
@@ -333,6 +345,7 @@ async fn handle_control_request(
     request: ControlRequest,
     engine: &mut AgentEngine<RuntimeExecutor>,
     content_store: &ContentStore,
+    uri_fetcher: &UriFetcher,
     version: &str,
     connection: &RwLock<ConnectionState>,
     paused: &AtomicBool,
@@ -389,6 +402,7 @@ async fn handle_control_request(
             let result = submit_local_job(
                 engine,
                 content_store,
+                uri_fetcher,
                 *request,
                 paused.load(Ordering::Relaxed),
             )
@@ -401,6 +415,7 @@ async fn handle_control_request(
 async fn submit_local_job(
     engine: &mut AgentEngine<RuntimeExecutor>,
     content_store: &ContentStore,
+    uri_fetcher: &UriFetcher,
     request: LocalCreateJob,
     paused: bool,
 ) -> Result<LocalJobAccepted, ControlFailure> {
@@ -410,7 +425,7 @@ async fn submit_local_job(
             "the agent is not accepting new local jobs",
         ));
     }
-    let input: Box<dyn tokio::io::AsyncRead + Unpin + Send> = match request.content {
+    let input: Box<dyn tokio::io::AsyncRead + Unpin + Send> = match &request.content {
         LocalContent::Base64 { data } => {
             let bytes = STANDARD
                 .decode(data)
@@ -418,41 +433,25 @@ async fn submit_local_job(
             Box::new(std::io::Cursor::new(bytes))
         }
         LocalContent::Uri { uri } => {
-            let url = Url::parse(&uri)
-                .map_err(|_| control_failure("invalid_uri", "content URI is invalid"))?;
-            if !matches!(url.scheme(), "http" | "https") {
-                return Err(control_failure(
-                    "invalid_uri_scheme",
-                    "only HTTP and HTTPS content URIs are supported",
-                ));
-            }
-            let response = reqwest::Client::new()
-                .get(url)
-                .timeout(Duration::from_secs(120))
-                .send()
+            let stored = uri_fetcher
+                .fetch_to_store(content_store, uri, None, None)
                 .await
-                .map_err(|_| control_failure("content_unavailable", "content URI request failed"))?
-                .error_for_status()
-                .map_err(|_| {
-                    control_failure("content_unavailable", "content URI returned an error")
-                })?;
-            if response
-                .content_length()
-                .is_some_and(|length| length > ContentStore::MAX_CONTENT_BYTES)
-            {
-                return Err(control_failure(
-                    "content_too_large",
-                    "content exceeds the local 50 MiB limit",
-                ));
-            }
-            let stream = response.bytes_stream().map_err(std::io::Error::other);
-            Box::new(StreamReader::new(stream))
+                .map_err(|error| control_failure("content_unavailable", &error.to_string()))?;
+            return accept_stored_local_job(engine, request, stored).await;
         }
     };
     let stored = content_store
         .put(input)
         .await
         .map_err(|error| control_failure("content_store_failed", &error.to_string()))?;
+    accept_stored_local_job(engine, request, stored).await
+}
+
+async fn accept_stored_local_job(
+    engine: &mut AgentEngine<RuntimeExecutor>,
+    request: LocalCreateJob,
+    stored: spool_agent_core::StoredContent,
+) -> Result<LocalJobAccepted, ControlFailure> {
     let job_id = JobId::new().to_string();
     let options_json = serde_json::to_string(&request.options)
         .map_err(|_| control_failure("invalid_options", "print options are invalid"))?;
@@ -530,6 +529,7 @@ async fn cloud_sync_loop(
     cloud: CloudConfiguration,
     database_path: PathBuf,
     content_store: ContentStore,
+    uri_fetcher: UriFetcher,
     printer_discovery: PrinterDiscovery,
     connection: Arc<RwLock<ConnectionState>>,
     paused: Arc<AtomicBool>,
@@ -546,6 +546,7 @@ async fn cloud_sync_loop(
         cloud,
         store,
         content_store,
+        uri_fetcher,
         printer_discovery,
         connection,
         paused,
@@ -557,6 +558,7 @@ async fn run_cloud_sync_loop(
     cloud: CloudConfiguration,
     mut store: AgentStore,
     content_store: ContentStore,
+    uri_fetcher: UriFetcher,
     printer_discovery: PrinterDiscovery,
     connection: Arc<RwLock<ConnectionState>>,
     paused: Arc<AtomicBool>,
@@ -585,12 +587,15 @@ async fn run_cloud_sync_loop(
             Ok(response) => {
                 sync_succeeded(
                     response,
-                    &cloud,
-                    &mut store,
-                    &content_store,
-                    &paused,
-                    &mut failures,
-                    &connection,
+                    SyncContext {
+                        cloud: &cloud,
+                        store: &mut store,
+                        content_store: &content_store,
+                        uri_fetcher: &uri_fetcher,
+                        paused: &paused,
+                        failures: &mut failures,
+                        connection: &connection,
+                    },
                 )
                 .await
             }
@@ -617,15 +622,17 @@ async fn prepare_sync_request(
     Ok(sync_request(store, agent_id, started_at, paused, printers)?)
 }
 
-async fn sync_succeeded(
-    response: AgentSyncResponse,
-    cloud: &CloudConfiguration,
-    store: &mut AgentStore,
-    content_store: &ContentStore,
-    paused: &AtomicBool,
-    failures: &mut u32,
-    connection: &RwLock<ConnectionState>,
-) -> Duration {
+struct SyncContext<'a> {
+    cloud: &'a CloudConfiguration,
+    store: &'a mut AgentStore,
+    content_store: &'a ContentStore,
+    uri_fetcher: &'a UriFetcher,
+    paused: &'a AtomicBool,
+    failures: &'a mut u32,
+    connection: &'a RwLock<ConnectionState>,
+}
+
+async fn sync_succeeded(response: AgentSyncResponse, context: SyncContext<'_>) -> Duration {
     let AgentSyncResponse {
         acknowledged_event_cursor,
         command_cursor,
@@ -634,12 +641,20 @@ async fn sync_succeeded(
         next_poll_after_ms,
         ..
     } = response;
-    *failures = 0;
-    *connection.write().await = ConnectionState::Connected;
-    apply_event_acknowledgement(store, acknowledged_event_cursor);
-    apply_commands(store, paused, commands, command_cursor);
+    *context.failures = 0;
+    *context.connection.write().await = ConnectionState::Connected;
+    apply_event_acknowledgement(context.store, acknowledged_event_cursor);
+    apply_commands(context.store, context.paused, commands, command_cursor);
     for offer in candidate_jobs {
-        if let Err(error) = accept_offer(cloud, store, content_store, offer).await {
+        if let Err(error) = accept_offer(
+            context.cloud,
+            context.store,
+            context.content_store,
+            context.uri_fetcher,
+            offer,
+        )
+        .await
+        {
             warn!(%error, "job offer could not be durably accepted");
         }
     }
@@ -708,12 +723,14 @@ async fn accept_offer(
     cloud: &CloudConfiguration,
     store: &mut AgentStore,
     content_store: &ContentStore,
+    uri_fetcher: &UriFetcher,
     offer: JobOffer,
 ) -> Result<()> {
     let job_id = offer.job.id;
     let stored = match materialize_descriptor(
         cloud,
         content_store,
+        uri_fetcher,
         job_id,
         offer.lease_id,
         &offer.lease_token,
@@ -781,6 +798,7 @@ async fn accept_offer(
 async fn materialize_descriptor(
     cloud: &CloudConfiguration,
     content_store: &ContentStore,
+    uri_fetcher: &UriFetcher,
     job_id: JobId,
     lease_id: uuid::Uuid,
     lease_token: &str,
@@ -845,26 +863,14 @@ async fn materialize_descriptor(
             if bytes.is_some_and(|value| value > ContentStore::MAX_CONTENT_BYTES) {
                 anyhow::bail!("offered URI content exceeds local limit");
             }
-            let mut request = reqwest::Client::new().get(uri);
-            if let Some(UriAuthentication::Basic { username, password }) = authentication {
-                request = request.basic_auth(username, Some(password));
-            } else if authentication.is_some() {
-                anyhow::bail!("Digest URI authentication is not enabled in this build");
-            }
-            let response = request.send().await?.error_for_status()?;
-            let stream = response.bytes_stream().map_err(std::io::Error::other);
-            if let Some(expected) = sha256 {
-                let path = content_store
-                    .put_verified(&expected, StreamReader::new(stream))
-                    .await?;
-                Ok(spool_agent_core::StoredContent {
-                    bytes: tokio::fs::metadata(&path).await?.len(),
-                    path,
-                    sha256: expected,
-                })
-            } else {
-                Ok(content_store.put(StreamReader::new(stream)).await?)
-            }
+            Ok(uri_fetcher
+                .fetch_to_store(
+                    content_store,
+                    &uri,
+                    authentication.as_ref(),
+                    sha256.as_deref(),
+                )
+                .await?)
         }
     }
 }
