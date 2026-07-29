@@ -1,10 +1,11 @@
 # Reliability and job lifecycle
 
 **Status:** the durable control-plane queue, leased node pickup, target-based
-primary/standby selection, durable local queue, native handoff intent, and
-spooler reconciliation are implemented. Automatic reassignment of an existing
-waiting job, production regional failover, and the release soak gates in this
-document are not yet proven.
+primary/standby selection, pre-acceptance reassignment, durable local queue,
+native handoff intent, and spooler reconciliation are implemented.
+Pre-acceptance routing concurrency and acceptance/lease fences have disposable
+PostgreSQL evidence. Production regional failover and the release soak gates in
+this document are not yet proven.
 
 Spool has two different reliability responsibilities:
 
@@ -64,9 +65,18 @@ WebSockets, tray state, and logs are never authoritative queues.
 Rerouting to another node is safe only in this phase and only when the selected
 printer/profile/stock contract is equivalent. A target-based job chooses the
 first ready primary or standby binding at registration and pins its concrete
-node, printer, profile revision, and stock metadata. Automatic reassignment of
-an already-created waiting job is not implemented. That gap must close before
-cross-node failover is described as Supported.
+node, printer, profile revision, and stock metadata. If every node is offline
+but the target has a valid configured binding, the API durably registers the
+job as `waiting_for_agent` instead of rejecting or discarding it.
+
+On a later node sync, Spool examines a bounded oldest-first batch of waiting
+target jobs. Reassignment uses a PostgreSQL row lock and a final conditional
+update requiring the correct tenant, a waiting/retryable state, no unexpired
+lease, and no durable acceptance. The target, binding, immutable profile
+revision, and stock contract are revalidated in the same transaction. A
+successful change writes exactly one `job_routing_attempts` row and a routing
+outbox event. If the original node returns and remains the selected binding,
+the job needs no reassignment and is offered normally.
 
 ### Durable node acceptance
 
@@ -162,7 +172,7 @@ The dashboard and alerting distinguish:
 
 | Condition | Interpretation | Action |
 | --- | --- | --- |
-| No eligible node at registration | Routing dependency unavailable | Reject or retain waiting according to the API contract |
+| No eligible online node at registration | Valid configured target is temporarily unavailable | Register durably against its configured binding and retain as waiting |
 | Node offline after registration | Job is durable but not picked up | Alert on pickup age; reconnect or safely reroute before acceptance |
 | Repeated lease expiry | Node cannot finish download/validation | Surface reason and retry count; quarantine unhealthy node |
 | Local acceptance not confirmed | Node has durable intent; server is uncertain | Let the same node replay acceptance; do not offer elsewhere |

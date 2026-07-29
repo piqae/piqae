@@ -32,6 +32,26 @@ submit a physical print job.
 - Physical certification is a separately recorded, human-authorized hardware
   activity.
 
+### PostgreSQL routing recovery
+
+The cross-node reroute fence has a database-backed integration test. Point it
+only at a disposable PostgreSQL database; the test creates and drops its own
+random schema and never touches printer executors:
+
+```console
+SPOOL_TEST_DATABASE_URL=postgres://postgres:password@127.0.0.1:5432/spool_test \
+  cargo test -p spool-storage-postgres --test routing_recovery -- --nocapture
+```
+
+Without `SPOOL_TEST_DATABASE_URL`, the test reports that database evidence was
+skipped so a normal unit-test run does not unexpectedly connect to developer or
+production infrastructure. Release evidence must include a non-skipped run.
+
+The test uses two independent connection pools and proves that concurrent
+pre-acceptance attempts create one reassignment and one durable
+`job_routing_attempts` row. It separately proves that an active lease and a
+durable node acceptance each prevent reassignment.
+
 Do not weaken an assertion to make a flaky test pass. Find the nondeterministic
 boundary, make time or I/O controllable, and retain the original behavior claim.
 
