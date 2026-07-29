@@ -11,7 +11,7 @@ const config = {
     adapter:
       target === 'node'
         ? node({ out: 'build-node', precompress: true })
-        : vercel({ runtime: 'nodejs22.x' })
+        : vercel({ runtime: 'nodejs22.x', regions: ['sfo1'] })
   }
 };
 

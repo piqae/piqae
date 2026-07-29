@@ -13,6 +13,6 @@
     "format:check": "pnpm -r format:check"
   },
   "engines": {
-    "node": ">=22"
+    "node": "22.x"
   }
 }

@@ -1,0 +1,45 @@
+# Vercel builds only the SvelteKit workspace package and the local SDK it
+# imports. Exclude local build products and server/native sources so CLI
+# deployments stay small and cannot accidentally upload machine-local state.
+.git/
+.github/
+.agents/
+.artifacts/
+.cargo/
+.spool*/
+.vercel/
+artifacts/
+bins/
+contracts/
+crates/
+deploy/
+docs/
+migrations/
+node_modules/
+packaging/
+release/
+shells/
+target/
+xtask/
+
+apps/cms/
+apps/web/.env*
+apps/web/.svelte-kit/
+apps/web/build/
+apps/web/build-node/
+apps/web/node_modules/
+apps/web/playwright-report/
+apps/web/test-results/
+apps/web/coverage/
+
+sdk/typescript/node_modules/
+sdk/typescript/coverage/
+
+.env
+.env.*
+*.db
+*.db-shm
+*.db-wal
+*.log
+*.key
+*.pem

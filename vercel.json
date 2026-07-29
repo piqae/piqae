@@ -1,0 +1,6 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": "sveltekit",
+  "buildCommand": "pnpm --filter @spool/web build:vercel",
+  "outputDirectory": "apps/web/.vercel/output"
+}
