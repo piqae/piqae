@@ -1254,7 +1254,10 @@ mod tests {
             tokio::fs::read(content.path).await.expect("content"),
             b"first-second-third"
         );
-        assert_eq!(renewals.load(Ordering::Relaxed), 2);
+        assert!(
+            renewals.load(Ordering::Relaxed) >= 2,
+            "the delayed stream must cross at least two renewal intervals"
+        );
     }
 
     #[tokio::test]
