@@ -34,8 +34,9 @@ use spool_protocol::{
     CURRENT_PROTOCOL_VERSION,
     agent::{
         AgentAcceptJobRequest, AgentCommand, AgentHealth, AgentReleaseLeaseRequest,
-        AgentRenewLeaseRequest, AgentSyncRequest, AgentSyncResponse, ContentDescriptor, JobOffer,
-        PrinterProfileSnapshot, PrinterSnapshot, QueueSnapshot,
+        AgentRenewLeaseRequest, AgentSyncRequest, AgentSyncResponse, ContentDescriptor,
+        EnrolRequest, InstallationMode, JobOffer, PrinterProfileSnapshot, PrinterSnapshot,
+        QueueSnapshot,
     },
     executor::{DiscoveredPrinter, ExecutorOperation, ExecutorResult, NativeJobObservation},
 };
@@ -115,6 +116,14 @@ struct Arguments {
     /// Cloud metadata and unspecified/multicast destinations remain blocked.
     #[arg(long, env = "SPOOL_ALLOW_PRIVATE_URI_SOURCES", default_value_t = false)]
     allow_private_uri_sources: bool,
+
+    /// Consume a one-time token, generate this installation's device key, and exit.
+    #[arg(long, hide_env_values = true)]
+    enrolment_token: Option<String>,
+
+    /// Human-readable installation name used with --enrolment-token.
+    #[arg(long)]
+    enrolment_name: Option<String>,
 }
 
 #[derive(Debug)]
@@ -247,6 +256,11 @@ fn disabled_executor_failure() -> ExecutorFailure {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let arguments = Arguments::parse();
+    if let Some(token) = arguments.enrolment_token.as_deref() {
+        return enrol_installation(&arguments, token).await;
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
@@ -254,7 +268,6 @@ async fn main() -> Result<()> {
         .json()
         .init();
 
-    let arguments = Arguments::parse();
     std::fs::create_dir_all(&arguments.data_dir)
         .with_context(|| format!("create {}", arguments.data_dir.display()))?;
     let database_path = arguments.data_dir.join("agent.sqlite3");
@@ -334,6 +347,129 @@ async fn main() -> Result<()> {
     )
     .await
     .context("serve local API")
+}
+
+async fn enrol_installation(arguments: &Arguments, token: &str) -> Result<()> {
+    let token = token.trim();
+    if token.is_empty() {
+        anyhow::bail!("--enrolment-token cannot be empty");
+    }
+    let base_url = arguments
+        .control_plane_url
+        .clone()
+        .context("--control-plane-url is required for enrolment")?;
+    std::fs::create_dir_all(&arguments.data_dir)
+        .with_context(|| format!("create {}", arguments.data_dir.display()))?;
+    let key_path = arguments
+        .device_key_file
+        .clone()
+        .unwrap_or_else(|| arguments.data_dir.join("device.key"));
+    if key_path.exists() {
+        anyhow::bail!(
+            "{} already exists; refusing to replace an enrolled device identity",
+            key_path.display()
+        );
+    }
+    let config_path = arguments.data_dir.join("agent-config.json");
+    if config_path.exists() {
+        anyhow::bail!(
+            "{} already exists; refusing to replace an enrolled agent configuration",
+            config_path.display()
+        );
+    }
+    let hostname = installation_hostname();
+    let name = arguments
+        .enrolment_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .unwrap_or(hostname.as_str());
+    let provisional_id = AgentId::new();
+    let identity = DeviceIdentity::generate(provisional_id);
+    write_new_device_key(&key_path, &identity.secret_bytes())?;
+    let client = AgentClient::new(base_url.clone())?;
+    let enrolled = client
+        .enrol(&EnrolRequest {
+            token: token.to_owned(),
+            public_key: identity.public_key_base64(),
+            name: name.to_owned(),
+            hostname,
+            platform: std::env::consts::OS.to_owned(),
+            architecture: std::env::consts::ARCH.to_owned(),
+            installation_mode: InstallationMode::User,
+            agent_version: env!("CARGO_PKG_VERSION").to_owned(),
+            protocol_version: CURRENT_PROTOCOL_VERSION,
+        })
+        .await;
+    let enrolled = match enrolled {
+        Ok(enrolled) => enrolled,
+        Err(error) => {
+            let _ = std::fs::remove_file(&key_path);
+            return Err(error).context("enrol this Spool installation");
+        }
+    };
+    let config = serde_json::json!({
+        "mode": "self-hosted",
+        "control_plane_url": base_url,
+        "agent_id": enrolled.agent_id,
+        "environment": enrolled.environment,
+        "device_key_file": key_path,
+        "data_dir": arguments.data_dir,
+        "local_bind": arguments.local_bind,
+    });
+    write_new_json(&config_path, &config)?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "agent_id": enrolled.agent_id,
+            "environment": enrolled.environment,
+            "config_file": config_path,
+            "device_key_file": key_path,
+        }))?
+    );
+    Ok(())
+}
+
+fn installation_hostname() -> String {
+    ["COMPUTERNAME", "HOSTNAME"]
+        .into_iter()
+        .find_map(|name| std::env::var(name).ok())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "Spool node".into())
+}
+
+fn write_new_device_key(path: &Path, secret: &[u8; 32]) -> Result<()> {
+    let parent = path
+        .parent()
+        .context("device key path has no parent directory")?;
+    std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(path)
+        .with_context(|| format!("create {}", path.display()))?;
+    file.write_all(hex::encode(secret).as_bytes())
+        .with_context(|| format!("write {}", path.display()))?;
+    file.sync_all()
+        .with_context(|| format!("sync {}", path.display()))
+}
+
+fn write_new_json(path: &Path, value: &serde_json::Value) -> Result<()> {
+    let body = serde_json::to_vec_pretty(value)?;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .with_context(|| format!("create {}", path.display()))?;
+    file.write_all(&body)
+        .with_context(|| format!("write {}", path.display()))?;
+    file.sync_all()
+        .with_context(|| format!("sync {}", path.display()))
 }
 
 async fn control_loop(
@@ -2305,6 +2441,46 @@ mod tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    #[test]
+    fn enrolment_writes_a_new_key_without_overwriting_identity() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let key_path = directory.path().join("device.key");
+        let secret = [0x5a; 32];
+        write_new_device_key(&key_path, &secret).expect("write key");
+        assert_eq!(
+            std::fs::read_to_string(&key_path).expect("read key"),
+            hex::encode(secret)
+        );
+        assert!(write_new_device_key(&key_path, &[0x11; 32]).is_err());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(
+                std::fs::metadata(&key_path)
+                    .expect("metadata")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[test]
+    fn enrolment_arguments_keep_the_one_time_token_out_of_runtime_defaults() {
+        let arguments = Arguments::try_parse_from([
+            "spool-agent",
+            "--control-plane-url",
+            "http://127.0.0.1:8080",
+            "--enrolment-token",
+            "spl_enr_secret",
+        ])
+        .expect("arguments");
+        assert_eq!(arguments.enrolment_token.as_deref(), Some("spl_enr_secret"));
+        assert!(arguments.agent_id.is_none());
+        assert!(arguments.device_key_file.is_none());
+    }
 
     #[tokio::test]
     async fn delayed_content_stream_renews_until_materialized() {
