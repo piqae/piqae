@@ -154,6 +154,12 @@ pub struct SyncedPrinter {
     pub capabilities: PrinterCapabilities,
 }
 
+#[derive(Clone, Debug)]
+pub struct StoredAgentCommandBatch {
+    pub cursor: Option<String>,
+    pub commands: Vec<serde_json::Value>,
+}
+
 #[derive(Debug, Error)]
 pub enum StorageError {
     #[error("resource not found")]
@@ -542,6 +548,95 @@ impl PostgresStore {
         }
         transaction.commit().await?;
         Ok(())
+    }
+
+    pub async fn enqueue_agent_command(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        command: &serde_json::Value,
+    ) -> Result<String, StorageError> {
+        let cursor: i64 = sqlx::query_scalar(
+            "INSERT INTO agent_commands (workspace_id, environment_id, agent_id, command)
+             SELECT $1,$2,$3,$4
+             WHERE EXISTS (
+                 SELECT 1 FROM agents
+                 WHERE id = $3 AND workspace_id = $1 AND environment_id = $2
+                   AND revoked_at IS NULL
+             )
+             RETURNING cursor",
+        )
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(agent_id.to_string())
+        .bind(command)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(StorageError::NotFound)?;
+        Ok(cursor.to_string())
+    }
+
+    pub async fn sync_agent_commands(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        acknowledged_cursor: Option<i64>,
+        limit: i64,
+    ) -> Result<StoredAgentCommandBatch, StorageError> {
+        let mut transaction = self.pool.begin().await?;
+        if let Some(cursor) = acknowledged_cursor {
+            sqlx::query(
+                "UPDATE agent_commands SET acknowledged_at = now()
+                 WHERE workspace_id = $1 AND environment_id = $2 AND agent_id = $3
+                   AND cursor <= $4 AND delivered_at IS NOT NULL
+                   AND acknowledged_at IS NULL",
+            )
+            .bind(workspace_id.to_string())
+            .bind(environment_id.to_string())
+            .bind(agent_id.to_string())
+            .bind(cursor)
+            .execute(&mut *transaction)
+            .await?;
+        }
+        let rows = sqlx::query(
+            "WITH pending AS (
+                 SELECT cursor FROM agent_commands
+                 WHERE workspace_id = $1 AND environment_id = $2 AND agent_id = $3
+                   AND acknowledged_at IS NULL
+                 ORDER BY cursor
+                 LIMIT $4
+                 FOR UPDATE
+             )
+             UPDATE agent_commands AS command
+             SET delivered_at = COALESCE(command.delivered_at, now())
+             FROM pending
+             WHERE command.cursor = pending.cursor
+             RETURNING command.cursor, command.command",
+        )
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(agent_id.to_string())
+        .bind(limit.clamp(1, 100))
+        .fetch_all(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+
+        let mut commands = rows
+            .into_iter()
+            .map(|row| {
+                Ok((
+                    row.try_get::<i64, _>("cursor")?,
+                    row.try_get::<serde_json::Value, _>("command")?,
+                ))
+            })
+            .collect::<Result<Vec<_>, sqlx::Error>>()?;
+        commands.sort_unstable_by_key(|(cursor, _)| *cursor);
+        Ok(StoredAgentCommandBatch {
+            cursor: commands.last().map(|(cursor, _)| cursor.to_string()),
+            commands: commands.into_iter().map(|(_, command)| command).collect(),
+        })
     }
 
     pub async fn list_agents(
@@ -1428,6 +1523,70 @@ impl PostgresStore {
             .await?;
         }
 
+        transaction.commit().await?;
+        Ok(job)
+    }
+
+    pub async fn request_job_cancellation(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        job_id: JobId,
+        command: &serde_json::Value,
+    ) -> Result<Job, StorageError> {
+        let mut transaction = self.pool.begin().await?;
+        let row = sqlx::query(
+            "SELECT payload, state, state_sequence, agent_id FROM jobs
+             WHERE id = $1 AND workspace_id = $2 AND environment_id = $3
+             FOR UPDATE",
+        )
+        .bind(job_id.to_string())
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(StorageError::NotFound)?;
+        let state: String = row.try_get("state")?;
+        let mut job = job_from_row(row.try_get("payload")?, &state)?;
+        validate_transition(job.state, JobState::CancelRequested)
+            .map_err(|_| StorageError::InvalidTransition)?;
+        let sequence = u64::try_from(row.try_get::<i64, _>("state_sequence")? + 1)
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        job.state = JobState::CancelRequested;
+        let event = JobEvent {
+            id: EventId::new(),
+            job_id,
+            sequence,
+            state: JobState::CancelRequested,
+            reason: None,
+            message: Some("Cancellation requested by API caller".into()),
+            agent_id: None,
+            native_job_id: None,
+            occurred_at: Utc::now(),
+        };
+        insert_event(&mut transaction, &job, &event).await?;
+        sqlx::query(
+            "UPDATE jobs SET payload = $2, state = 'cancel_requested',
+                 state_sequence = $3, updated_at = now()
+             WHERE id = $1",
+        )
+        .bind(job_id.to_string())
+        .bind(serde_json::to_value(&job)?)
+        .bind(i64::try_from(sequence).map_err(|error| {
+            StorageError::InvalidData(format!("event sequence overflow: {error}"))
+        })?)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "INSERT INTO agent_commands (workspace_id, environment_id, agent_id, command)
+             VALUES ($1,$2,$3,$4)",
+        )
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(row.try_get::<String, _>("agent_id")?)
+        .bind(command)
+        .execute(&mut *transaction)
+        .await?;
         transaction.commit().await?;
         Ok(job)
     }

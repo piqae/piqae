@@ -10,10 +10,12 @@ use spool_domain::{
     AgentId, EnvironmentId, EventId, Job, JobEvent, JobFailureReason, JobId, JobState,
     PrinterCapabilities, PrinterId, PrinterState, WorkspaceId, validate_transition,
 };
+use spool_protocol::agent::AgentCommand;
 use spool_storage_postgres::{
     AgentAuthenticationRecord, CreateJobResult as PgCreateJobResult, EnrolledAgent, JobLease,
-    PostgresStore, StorageError, StoredAgent, StoredApiKey, StoredPrinter, StoredTenantEvent,
-    StoredUpload, StoredWebhook, StoredWebhookDelivery, SyncedPrinter, WebhookDeliveryWork,
+    PostgresStore, StorageError, StoredAgent, StoredAgentCommandBatch, StoredApiKey, StoredPrinter,
+    StoredTenantEvent, StoredUpload, StoredWebhook, StoredWebhookDelivery, SyncedPrinter,
+    WebhookDeliveryWork,
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -27,6 +29,12 @@ use uuid::Uuid;
 pub enum CreateResult {
     Created(Job),
     Existing(Job),
+}
+
+#[derive(Clone, Debug)]
+pub struct AgentCommandBatch {
+    pub cursor: Option<String>,
+    pub commands: Vec<AgentCommand>,
 }
 
 #[derive(Debug, Error)]
@@ -103,6 +111,21 @@ pub trait Repository: Send + Sync + 'static {
         version: &str,
         printers: Option<&[SyncedPrinter]>,
     ) -> Result<(), RepositoryError>;
+    async fn enqueue_agent_command(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        command: &AgentCommand,
+    ) -> Result<String, RepositoryError>;
+    async fn sync_agent_commands(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        acknowledged_cursor: Option<&str>,
+        limit: i64,
+    ) -> Result<AgentCommandBatch, RepositoryError>;
     async fn list_agents(
         &self,
         workspace_id: WorkspaceId,
@@ -254,6 +277,12 @@ pub trait Repository: Send + Sync + 'static {
         message: Option<String>,
         agent_id: Option<AgentId>,
         native_job_id: Option<String>,
+    ) -> Result<Job, RepositoryError>;
+    async fn request_job_cancellation(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        job_id: JobId,
     ) -> Result<Job, RepositoryError>;
     async fn claim_jobs(
         &self,
@@ -430,6 +459,56 @@ impl Repository for PostgresStore {
         )
         .await
         .map_err(Into::into)
+    }
+
+    async fn enqueue_agent_command(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        command: &AgentCommand,
+    ) -> Result<String, RepositoryError> {
+        Self::enqueue_agent_command(
+            self,
+            workspace_id,
+            environment_id,
+            agent_id,
+            &serde_json::to_value(command)
+                .map_err(|error| RepositoryError::Persistence(error.to_string()))?,
+        )
+        .await
+        .map_err(Into::into)
+    }
+
+    async fn sync_agent_commands(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        acknowledged_cursor: Option<&str>,
+        limit: i64,
+    ) -> Result<AgentCommandBatch, RepositoryError> {
+        let acknowledged_cursor = acknowledged_cursor
+            .map(str::parse::<i64>)
+            .transpose()
+            .map_err(|error| RepositoryError::Persistence(error.to_string()))?;
+        let StoredAgentCommandBatch { cursor, commands } = Self::sync_agent_commands(
+            self,
+            workspace_id,
+            environment_id,
+            agent_id,
+            acknowledged_cursor,
+            limit,
+        )
+        .await?;
+        Ok(AgentCommandBatch {
+            cursor,
+            commands: commands
+                .into_iter()
+                .map(serde_json::from_value)
+                .collect::<Result<_, _>>()
+                .map_err(|error| RepositoryError::Persistence(error.to_string()))?,
+        })
     }
 
     async fn list_agents(
@@ -750,6 +829,24 @@ impl Repository for PostgresStore {
             .map_err(Into::into)
     }
 
+    async fn request_job_cancellation(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        job_id: JobId,
+    ) -> Result<Job, RepositoryError> {
+        Self::request_job_cancellation(
+            self,
+            workspace_id,
+            environment_id,
+            job_id,
+            &serde_json::to_value(AgentCommand::CancelJob { job_id })
+                .map_err(|error| RepositoryError::Persistence(error.to_string()))?,
+        )
+        .await
+        .map_err(Into::into)
+    }
+
     async fn claim_jobs(
         &self,
         workspace_id: WorkspaceId,
@@ -922,6 +1019,14 @@ struct MemoryJob {
     events: Vec<JobEvent>,
 }
 
+#[derive(Clone, Debug)]
+struct MemoryAgentCommand {
+    cursor: u64,
+    command: AgentCommand,
+    delivered: bool,
+    acknowledged: bool,
+}
+
 #[derive(Debug, Default)]
 struct MemoryState {
     api_keys: HashMap<String, (WorkspaceId, EnvironmentId, StoredApiKey, String)>,
@@ -937,6 +1042,8 @@ struct MemoryState {
     uploads: HashMap<String, (WorkspaceId, EnvironmentId, StoredUpload)>,
     agent_nonces: HashMap<(AgentId, String), DateTime<Utc>>,
     agent_event_receipts: HashSet<(AgentId, EventId)>,
+    agent_commands: HashMap<AgentId, Vec<MemoryAgentCommand>>,
+    next_agent_command_cursor: u64,
     leases: HashMap<JobId, (AgentId, Uuid, String, DateTime<Utc>)>,
     idempotency: HashMap<(WorkspaceId, EnvironmentId, String), (Vec<u8>, JobId)>,
     compatibility: HashMap<(WorkspaceId, EnvironmentId, String, String), i64>,
@@ -1173,6 +1280,81 @@ impl Repository for MemoryRepository {
             }
         }
         Ok(())
+    }
+
+    async fn enqueue_agent_command(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        command: &AgentCommand,
+    ) -> Result<String, RepositoryError> {
+        let mut state = self.state.write().await;
+        state
+            .agents
+            .get(&agent_id)
+            .filter(|(workspace, environment, _)| {
+                *workspace == workspace_id && *environment == environment_id
+            })
+            .ok_or(RepositoryError::NotFound)?;
+        state.next_agent_command_cursor = state.next_agent_command_cursor.saturating_add(1);
+        let cursor = state.next_agent_command_cursor;
+        state
+            .agent_commands
+            .entry(agent_id)
+            .or_default()
+            .push(MemoryAgentCommand {
+                cursor,
+                command: command.clone(),
+                delivered: false,
+                acknowledged: false,
+            });
+        Ok(cursor.to_string())
+    }
+
+    async fn sync_agent_commands(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        acknowledged_cursor: Option<&str>,
+        limit: i64,
+    ) -> Result<AgentCommandBatch, RepositoryError> {
+        let mut state = self.state.write().await;
+        state
+            .agents
+            .get(&agent_id)
+            .filter(|(workspace, environment, _)| {
+                *workspace == workspace_id && *environment == environment_id
+            })
+            .ok_or(RepositoryError::NotFound)?;
+        let acknowledged_cursor = acknowledged_cursor
+            .map(str::parse::<i64>)
+            .transpose()
+            .map_err(|error| RepositoryError::Persistence(error.to_string()))?;
+        let commands = state.agent_commands.entry(agent_id).or_default();
+        if let Some(cursor) = acknowledged_cursor {
+            for command in commands.iter_mut().filter(|command| {
+                command.delivered
+                    && !command.acknowledged
+                    && i64::try_from(command.cursor).is_ok_and(|value| value <= cursor)
+            }) {
+                command.acknowledged = true;
+            }
+        }
+        let pending = commands
+            .iter_mut()
+            .filter(|command| !command.acknowledged)
+            .take(usize::try_from(limit.clamp(1, 100)).unwrap_or(100))
+            .map(|command| {
+                command.delivered = true;
+                (command.cursor, command.command.clone())
+            })
+            .collect::<Vec<_>>();
+        Ok(AgentCommandBatch {
+            cursor: pending.last().map(|(cursor, _)| cursor.to_string()),
+            commands: pending.into_iter().map(|(_, command)| command).collect(),
+        })
     }
 
     async fn list_agents(
@@ -1725,6 +1907,55 @@ impl Repository for MemoryRepository {
             occurred_at: Utc::now(),
         });
         Ok(record.job.clone())
+    }
+
+    async fn request_job_cancellation(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        job_id: JobId,
+    ) -> Result<Job, RepositoryError> {
+        let mut state = self.state.write().await;
+        let (job, assigned_agent) = {
+            let record = state
+                .jobs
+                .get_mut(&job_id)
+                .ok_or(RepositoryError::NotFound)?;
+            if record.job.workspace_id != workspace_id
+                || record.job.environment_id != environment_id
+            {
+                return Err(RepositoryError::NotFound);
+            }
+            validate_transition(record.job.state, JobState::CancelRequested)
+                .map_err(|_| RepositoryError::InvalidTransition)?;
+            record.job.state = JobState::CancelRequested;
+            record.sequence += 1;
+            record.events.push(JobEvent {
+                id: EventId::new(),
+                job_id,
+                sequence: record.sequence,
+                state: JobState::CancelRequested,
+                reason: None,
+                message: Some("Cancellation requested by API caller".into()),
+                agent_id: None,
+                native_job_id: None,
+                occurred_at: Utc::now(),
+            });
+            (record.job.clone(), record.agent_id)
+        };
+        state.next_agent_command_cursor = state.next_agent_command_cursor.saturating_add(1);
+        let cursor = state.next_agent_command_cursor;
+        state
+            .agent_commands
+            .entry(assigned_agent)
+            .or_default()
+            .push(MemoryAgentCommand {
+                cursor,
+                command: AgentCommand::CancelJob { job_id },
+                delivered: false,
+                acknowledged: false,
+            });
+        Ok(job)
     }
 
     async fn claim_jobs(

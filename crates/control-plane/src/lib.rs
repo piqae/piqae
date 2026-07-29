@@ -234,10 +234,12 @@ mod tests {
     use rand::rngs::OsRng;
     use sha2::{Digest, Sha256};
     use spool_auth::Scope;
-    use spool_domain::{AgentId, EnvironmentId, PrinterId, WorkspaceId};
+    use spool_domain::{AgentId, EnvironmentId, JobId, JobState, PrinterId, WorkspaceId};
     use spool_protocol::agent::{
-        AgentAcceptJobRequest, AgentHealth, AgentSyncRequest, AgentSyncResponse, QueueSnapshot,
+        AgentAcceptJobRequest, AgentCommand, AgentHealth, AgentSyncRequest, AgentSyncResponse,
+        QueueSnapshot,
     };
+    use std::str::FromStr;
     use tower::ServiceExt;
 
     struct TestApplication {
@@ -336,6 +338,53 @@ mod tests {
             )
             .body(Body::from(body))
             .expect("valid signed request")
+    }
+
+    async fn sync_test_agent(
+        application: &TestApplication,
+        acknowledged_command_cursor: Option<String>,
+    ) -> AgentSyncResponse {
+        let now = Utc::now();
+        let request = AgentSyncRequest {
+            agent_id: application.agent_id,
+            protocol_version: 1,
+            agent_version: "test".into(),
+            printer_revision: 0,
+            acknowledged_command_cursor,
+            event_cursor: None,
+            queue: QueueSnapshot {
+                queued_jobs: 0,
+                active_jobs: 0,
+                content_bytes: 0,
+                accepts_jobs: false,
+            },
+            health: AgentHealth {
+                started_at: now,
+                observed_at: now,
+                sqlite_integrity_ok: true,
+                executor_crashes: 0,
+                last_error_code: None,
+            },
+            printers: None,
+            events: Vec::new(),
+        };
+        let body = serde_json::to_vec(&request).expect("sync JSON");
+        let response = application
+            .router
+            .clone()
+            .oneshot(signed_request(application, "POST", "/v1/agent/sync", body))
+            .await
+            .expect("sync response");
+        assert_eq!(response.status(), StatusCode::OK);
+        serde_json::from_slice(
+            &response
+                .into_body()
+                .collect()
+                .await
+                .expect("sync body")
+                .to_bytes(),
+        )
+        .expect("sync response JSON")
     }
 
     #[tokio::test]
@@ -749,6 +798,188 @@ mod tests {
             .to_bytes();
         let id: i64 = serde_json::from_slice(&body).expect("numeric ID");
         assert!(id > 0);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn cancellation_is_redelivered_until_the_agent_acknowledges_its_cursor() {
+        let application = application().await;
+        let created = application
+            .router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/jobs")
+                    .header("authorization", "Bearer spl_test_integration")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"printer_id":"{}","title":"Cancel me","content_type":"pdf","content":{{"type":"base64","data":"cHJpbnQ="}}}}"#,
+                        application.printer_id
+                    )))
+                    .expect("valid request"),
+            )
+            .await
+            .expect("create response");
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let created: serde_json::Value = serde_json::from_slice(
+            &created
+                .into_body()
+                .collect()
+                .await
+                .expect("create body")
+                .to_bytes(),
+        )
+        .expect("create JSON");
+        let job_id =
+            JobId::from_str(created["id"].as_str().expect("job ID")).expect("typed job ID");
+
+        assert!(matches!(
+            application
+                .repository
+                .request_job_cancellation(
+                    application.tenant.workspace_id,
+                    EnvironmentId::new(),
+                    job_id,
+                )
+                .await,
+            Err(crate::repository::RepositoryError::NotFound)
+        ));
+        let rerouted_agent = AgentId::new();
+        application
+            .repository
+            .add_printer(
+                application.tenant.workspace_id,
+                application.tenant.environment_id,
+                application.printer_id,
+                rerouted_agent,
+            )
+            .await;
+
+        let cancelled = application
+            .router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/jobs/{job_id}/cancel"))
+                    .header("authorization", "Bearer spl_test_integration")
+                    .body(Body::empty())
+                    .expect("valid request"),
+            )
+            .await
+            .expect("cancel response");
+        assert_eq!(cancelled.status(), StatusCode::ACCEPTED);
+
+        let first = sync_test_agent(&application, None).await;
+        assert!(matches!(
+            first.commands.as_slice(),
+            [AgentCommand::CancelJob { job_id: command_job_id }] if *command_job_id == job_id
+        ));
+        let cursor = first.command_cursor.expect("command cursor");
+        let rerouted = application
+            .repository
+            .sync_agent_commands(
+                application.tenant.workspace_id,
+                application.tenant.environment_id,
+                rerouted_agent,
+                None,
+                100,
+            )
+            .await
+            .expect("rerouted agent command batch");
+        assert!(rerouted.commands.is_empty());
+
+        let retry = sync_test_agent(&application, None).await;
+        assert_eq!(retry.command_cursor.as_deref(), Some(cursor.as_str()));
+        assert_eq!(retry.commands.len(), 1);
+
+        let acknowledged = sync_test_agent(&application, Some(cursor.clone())).await;
+        assert!(acknowledged.commands.is_empty());
+        assert!(acknowledged.command_cursor.is_none());
+
+        application
+            .repository
+            .transition_job(
+                application.tenant.workspace_id,
+                application.tenant.environment_id,
+                job_id,
+                JobState::Cancelled,
+                None,
+                Some("Cancellation completed".into()),
+                Some(application.agent_id),
+                None,
+            )
+            .await
+            .expect("terminal cancellation");
+        assert!(matches!(
+            application
+                .repository
+                .request_job_cancellation(
+                    application.tenant.workspace_id,
+                    application.tenant.environment_id,
+                    job_id,
+                )
+                .await,
+            Err(crate::repository::RepositoryError::InvalidTransition)
+        ));
+        let after_rejected_cancel = application
+            .repository
+            .sync_agent_commands(
+                application.tenant.workspace_id,
+                application.tenant.environment_id,
+                application.agent_id,
+                Some(&cursor),
+                100,
+            )
+            .await
+            .expect("no command after rejected cancellation");
+        assert!(after_rejected_cancel.commands.is_empty());
+    }
+
+    #[tokio::test]
+    async fn command_acknowledgement_cannot_skip_an_undelivered_command() {
+        let application = application().await;
+        for command in [AgentCommand::Pause, AgentCommand::Resume] {
+            application
+                .repository
+                .enqueue_agent_command(
+                    application.tenant.workspace_id,
+                    application.tenant.environment_id,
+                    application.agent_id,
+                    &command,
+                )
+                .await
+                .expect("queued command");
+        }
+        let first = application
+            .repository
+            .sync_agent_commands(
+                application.tenant.workspace_id,
+                application.tenant.environment_id,
+                application.agent_id,
+                None,
+                1,
+            )
+            .await
+            .expect("first bounded batch");
+        assert!(matches!(first.commands.as_slice(), [AgentCommand::Pause]));
+
+        let remaining = application
+            .repository
+            .sync_agent_commands(
+                application.tenant.workspace_id,
+                application.tenant.environment_id,
+                application.agent_id,
+                Some("9223372036854775807"),
+                100,
+            )
+            .await
+            .expect("bounded acknowledgement");
+        assert!(matches!(
+            remaining.commands.as_slice(),
+            [AgentCommand::Resume]
+        ));
     }
 
     #[tokio::test]

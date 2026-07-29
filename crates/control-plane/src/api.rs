@@ -917,15 +917,10 @@ pub async fn cancel_job(
     let tenant = authenticate_native(&state, &headers, Scope::JobsWrite).await?;
     let job = state
         .repository
-        .transition_job(
+        .request_job_cancellation(
             tenant.workspace_id,
             tenant.environment_id,
             parse_job_id(&job_id)?,
-            JobState::CancelRequested,
-            None,
-            Some("Cancellation requested by API caller".into()),
-            None,
-            None,
         )
         .await?;
     state.publish(tenant, "job.updated", &job).await?;
@@ -947,6 +942,16 @@ pub async fn agent_sync(
         return Err(AppError::invalid(
             "invalid_agent_sync",
             "The sync protocol or event batch is outside supported limits.",
+        ));
+    }
+    if request
+        .acknowledged_command_cursor
+        .as_deref()
+        .is_some_and(|cursor| cursor.parse::<i64>().is_err())
+    {
+        return Err(AppError::invalid(
+            "invalid_agent_command_cursor",
+            "The acknowledged command cursor is invalid.",
         ));
     }
     let tenant = identity.tenant;
@@ -989,6 +994,16 @@ pub async fn agent_sync(
             Err(error) => return Err(error.into()),
         }
     }
+    let command_batch = state
+        .repository
+        .sync_agent_commands(
+            tenant.workspace_id,
+            tenant.environment_id,
+            request.agent_id,
+            request.acknowledged_command_cursor.as_deref(),
+            100,
+        )
+        .await?;
     let leases = if request.queue.accepts_jobs {
         state
             .repository
@@ -1056,8 +1071,8 @@ pub async fn agent_sync(
     Ok(Json(AgentSyncResponse {
         server_time: Utc::now(),
         acknowledged_event_cursor: request.events.last().map(|event| event.id),
-        command_cursor: request.acknowledged_command_cursor,
-        commands: Vec::new(),
+        command_cursor: command_batch.cursor,
+        commands: command_batch.commands,
         candidate_jobs,
         next_poll_after_ms: 1_000,
     }))
