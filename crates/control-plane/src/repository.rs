@@ -14,9 +14,10 @@ use spool_protocol::agent::AgentCommand;
 use spool_storage_postgres::{
     AgentAuthenticationRecord, CreateJobResult as PgCreateJobResult, EnrolledAgent, JobLease,
     NewDeviceAuthorization, NodeUpdatePolicy, NodeUpdateState, PostgresStore, StorageError,
-    StoredAgent, StoredAgentCommandBatch, StoredApiKey, StoredDeviceAuthorization,
-    StoredNodeUpdate, StoredPlatformAccount, StoredPrinter, StoredStock, StoredTarget,
-    StoredTargetBinding, StoredTenantEvent, StoredUpload, StoredWebhook, StoredWebhookDelivery,
+    StoredAgent, StoredAgentCommandBatch, StoredApiKey, StoredBillingSummary,
+    StoredDeviceAuthorization, StoredNodeUpdate, StoredPlatformAccount, StoredPrinter, StoredStock,
+    StoredTarget, StoredTargetBinding, StoredTenantEvent, StoredUpload, StoredUsageSummary,
+    StoredWebhook, StoredWebhookDelivery, StripeBillingEvent, StripeProjectionResult,
     SyncedPrinter, UpsertedPlatformAccount, WebhookDeliveryWork,
 };
 use std::{
@@ -49,6 +50,12 @@ pub enum RepositoryError {
     ConcurrentStateChange,
     #[error("invalid state transition")]
     InvalidTransition,
+    #[error("cloud free-plan quota exceeded")]
+    QuotaExceeded,
+    #[error("cloud billing blocks new jobs")]
+    BillingBlocked,
+    #[error("cloud node quota exceeded")]
+    NodeQuotaExceeded,
     #[error("persistence failure: {0}")]
     Persistence(String),
 }
@@ -60,6 +67,9 @@ impl From<StorageError> for RepositoryError {
             StorageError::IdempotencyConflict => Self::IdempotencyConflict,
             StorageError::ConcurrentStateChange => Self::ConcurrentStateChange,
             StorageError::InvalidTransition => Self::InvalidTransition,
+            StorageError::QuotaExceeded => Self::QuotaExceeded,
+            StorageError::BillingBlocked => Self::BillingBlocked,
+            StorageError::NodeQuotaExceeded => Self::NodeQuotaExceeded,
             other => Self::Persistence(other.to_string()),
         }
     }
@@ -97,6 +107,29 @@ pub trait Repository: Send + Sync + 'static {
         _external_id: &str,
         _request_id: &str,
     ) -> Result<(), RepositoryError> {
+        Err(RepositoryError::NotFound)
+    }
+    async fn usage_summary(
+        &self,
+        _workspace_id: WorkspaceId,
+        _period_start: DateTime<Utc>,
+        _period_end: DateTime<Utc>,
+    ) -> Result<StoredUsageSummary, RepositoryError> {
+        Err(RepositoryError::NotFound)
+    }
+    async fn billing_summary(
+        &self,
+        _workspace_id: WorkspaceId,
+        _period_start: DateTime<Utc>,
+        _period_end: DateTime<Utc>,
+    ) -> Result<StoredBillingSummary, RepositoryError> {
+        Err(RepositoryError::NotFound)
+    }
+    async fn project_stripe_billing_event(
+        &self,
+        _event: &StripeBillingEvent,
+        _request_id: &str,
+    ) -> Result<StripeProjectionResult, RepositoryError> {
         Err(RepositoryError::NotFound)
     }
     async fn environment_kind(
@@ -321,6 +354,13 @@ pub trait Repository: Send + Sync + 'static {
         &self,
         device_code_hash: &str,
     ) -> Result<EnrolledAgent, RepositoryError>;
+    async fn exchange_device_authorization_with_billing(
+        &self,
+        device_code_hash: &str,
+        _enforce_cloud_billing: bool,
+    ) -> Result<EnrolledAgent, RepositoryError> {
+        self.exchange_device_authorization(device_code_hash).await
+    }
     async fn enrol_agent(
         &self,
         secret_hash: &str,
@@ -332,6 +372,31 @@ pub trait Repository: Send + Sync + 'static {
         version: &str,
         protocol_version: u16,
     ) -> Result<EnrolledAgent, RepositoryError>;
+    #[allow(clippy::too_many_arguments)]
+    async fn enrol_agent_with_billing(
+        &self,
+        secret_hash: &str,
+        public_key: &[u8],
+        name: &str,
+        hostname: &str,
+        platform: &str,
+        architecture: &str,
+        version: &str,
+        protocol_version: u16,
+        _enforce_cloud_billing: bool,
+    ) -> Result<EnrolledAgent, RepositoryError> {
+        self.enrol_agent(
+            secret_hash,
+            public_key,
+            name,
+            hostname,
+            platform,
+            architecture,
+            version,
+            protocol_version,
+        )
+        .await
+    }
     async fn list_webhooks(
         &self,
         workspace_id: WorkspaceId,
@@ -410,6 +475,12 @@ pub trait Repository: Send + Sync + 'static {
         actual_sha256: &str,
         actual_bytes: i64,
     ) -> Result<StoredUpload, RepositoryError>;
+    async fn delete_upload(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        upload_id: &str,
+    ) -> Result<(), RepositoryError>;
     async fn resolve_printer_agent(
         &self,
         workspace_id: WorkspaceId,
@@ -423,6 +494,17 @@ pub trait Repository: Send + Sync + 'static {
         idempotency_key: Option<&str>,
         request_bytes: &[u8],
     ) -> Result<CreateResult, RepositoryError>;
+    async fn create_cloud_job(
+        &self,
+        job: &Job,
+        agent_id: AgentId,
+        idempotency_key: Option<&str>,
+        request_bytes: &[u8],
+        _enforce_cloud_billing: bool,
+    ) -> Result<CreateResult, RepositoryError> {
+        self.create_job(job, agent_id, idempotency_key, request_bytes)
+            .await
+    }
     #[allow(
         clippy::too_many_lines,
         reason = "atomic in-memory parity keeps every reroute fence under one write lock"
@@ -604,6 +686,38 @@ impl Repository for PostgresStore {
         request_id: &str,
     ) -> Result<(), RepositoryError> {
         PostgresStore::archive_platform_account(self, service_account_id, external_id, request_id)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn usage_summary(
+        &self,
+        workspace_id: WorkspaceId,
+        period_start: DateTime<Utc>,
+        period_end: DateTime<Utc>,
+    ) -> Result<StoredUsageSummary, RepositoryError> {
+        PostgresStore::usage_summary(self, workspace_id, period_start, period_end)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn billing_summary(
+        &self,
+        workspace_id: WorkspaceId,
+        period_start: DateTime<Utc>,
+        period_end: DateTime<Utc>,
+    ) -> Result<StoredBillingSummary, RepositoryError> {
+        PostgresStore::billing_summary(self, workspace_id, period_start, period_end)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn project_stripe_billing_event(
+        &self,
+        event: &StripeBillingEvent,
+        request_id: &str,
+    ) -> Result<StripeProjectionResult, RepositoryError> {
+        PostgresStore::project_stripe_billing_event(self, event, request_id)
             .await
             .map_err(Into::into)
     }
@@ -1080,6 +1194,20 @@ impl Repository for PostgresStore {
             .map_err(Into::into)
     }
 
+    async fn exchange_device_authorization_with_billing(
+        &self,
+        device_code_hash: &str,
+        enforce_cloud_billing: bool,
+    ) -> Result<EnrolledAgent, RepositoryError> {
+        Self::exchange_device_authorization_with_billing(
+            self,
+            device_code_hash,
+            enforce_cloud_billing,
+        )
+        .await
+        .map_err(Into::into)
+    }
+
     async fn resolve_printer_agent(
         &self,
         workspace_id: WorkspaceId,
@@ -1112,6 +1240,34 @@ impl Repository for PostgresStore {
             architecture,
             version,
             protocol_version,
+        )
+        .await
+        .map_err(Into::into)
+    }
+
+    async fn enrol_agent_with_billing(
+        &self,
+        secret_hash: &str,
+        public_key: &[u8],
+        name: &str,
+        hostname: &str,
+        platform: &str,
+        architecture: &str,
+        version: &str,
+        protocol_version: u16,
+        enforce_cloud_billing: bool,
+    ) -> Result<EnrolledAgent, RepositoryError> {
+        Self::enrol_agent_with_billing(
+            self,
+            secret_hash,
+            public_key,
+            name,
+            hostname,
+            platform,
+            architecture,
+            version,
+            protocol_version,
+            enforce_cloud_billing,
         )
         .await
         .map_err(Into::into)
@@ -1277,6 +1433,17 @@ impl Repository for PostgresStore {
         .map_err(Into::into)
     }
 
+    async fn delete_upload(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        upload_id: &str,
+    ) -> Result<(), RepositoryError> {
+        PostgresStore::delete_upload(self, workspace_id, environment_id, upload_id)
+            .await
+            .map_err(Into::into)
+    }
+
     async fn create_job(
         &self,
         job: &Job,
@@ -1285,6 +1452,29 @@ impl Repository for PostgresStore {
         request_bytes: &[u8],
     ) -> Result<CreateResult, RepositoryError> {
         match PostgresStore::create_job(self, job, agent_id, idempotency_key, request_bytes).await?
+        {
+            PgCreateJobResult::Created(job) => Ok(CreateResult::Created(job)),
+            PgCreateJobResult::Existing(job) => Ok(CreateResult::Existing(job)),
+        }
+    }
+
+    async fn create_cloud_job(
+        &self,
+        job: &Job,
+        agent_id: AgentId,
+        idempotency_key: Option<&str>,
+        request_bytes: &[u8],
+        enforce_cloud_billing: bool,
+    ) -> Result<CreateResult, RepositoryError> {
+        match PostgresStore::create_cloud_job(
+            self,
+            job,
+            agent_id,
+            idempotency_key,
+            request_bytes,
+            enforce_cloud_billing,
+        )
+        .await?
         {
             PgCreateJobResult::Created(job) => Ok(CreateResult::Created(job)),
             PgCreateJobResult::Existing(job) => Ok(CreateResult::Existing(job)),
@@ -2923,6 +3113,26 @@ impl Repository for MemoryRepository {
             .ok_or(RepositoryError::NotFound)?;
         upload.state = "complete".into();
         Ok(upload.clone())
+    }
+
+    async fn delete_upload(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        upload_id: &str,
+    ) -> Result<(), RepositoryError> {
+        let mut state = self.state.write().await;
+        let removable = state
+            .uploads
+            .get(upload_id)
+            .is_some_and(|(workspace, environment, _)| {
+                *workspace == workspace_id && *environment == environment_id
+            });
+        if !removable {
+            return Err(RepositoryError::NotFound);
+        }
+        state.uploads.remove(upload_id);
+        Ok(())
     }
 
     async fn resolve_printer_agent(

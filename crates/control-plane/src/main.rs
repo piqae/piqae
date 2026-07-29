@@ -12,13 +12,16 @@ use spool_control_plane::{
         CombinedAuthenticator, LocalSessionAuthenticator, OidcAuthenticator, OidcConfiguration,
         PostgresAuthenticator, StaticAuthenticator, TenantContext,
     },
+    billing_usage_worker::BillingUsageWorker,
     identity::LocalIdentityState,
     repository::Repository,
     router,
     webhook_worker::WebhookWorker,
 };
 use spool_domain::{EnvironmentId, WorkspaceId};
-use spool_object_store::{FileObjectStore, ObjectStore, S3Configuration, S3ObjectStore};
+use spool_object_store::{
+    FileObjectStore, GcsConfiguration, GcsObjectStore, ObjectStore, S3Configuration, S3ObjectStore,
+};
 use spool_storage_postgres::PostgresStore;
 use std::{env, net::SocketAddr, str::FromStr, sync::Arc};
 use tracing::Instrument;
@@ -27,6 +30,9 @@ use tracing::Instrument;
 async fn main() -> Result<()> {
     if env::args().nth(1).as_deref() == Some("healthcheck") {
         return healthcheck().await;
+    }
+    if env::args().nth(1).as_deref() == Some("migrate") {
+        return migrate_only().await;
     }
     let observability = observability::init()?;
     let run_span = tracing::info_span!(
@@ -49,7 +55,9 @@ async fn main() -> Result<()> {
     result.and(shutdown_result)
 }
 
+#[allow(clippy::too_many_lines)]
 async fn run() -> Result<()> {
+    let service_role = ServiceRole::from_environment()?;
     let database_url = env::var("SPOOL_DATABASE_URL")
         .or_else(|_| env::var("DATABASE_URL"))
         .context("SPOOL_DATABASE_URL or DATABASE_URL is required")?;
@@ -66,7 +74,9 @@ async fn run() -> Result<()> {
     let store = PostgresStore::connect(&database_url, 20)
         .await
         .context("connect to PostgreSQL")?;
-    store.migrate().await.context("run PostgreSQL migrations")?;
+    if startup_migrations_enabled() {
+        store.migrate().await.context("run PostgreSQL migrations")?;
+    }
     let repository: Arc<dyn Repository> = Arc::new(store.clone());
     let object_store = build_object_store().await?;
     let bootstrap = if let Some(bootstrap_key) = bootstrap_key {
@@ -111,44 +121,143 @@ async fn run() -> Result<()> {
         PostgresAuthenticator::new(store.clone()),
         local_identity
             .as_ref()
-            .map(|_| LocalSessionAuthenticator::new(store)),
+            .map(|_| LocalSessionAuthenticator::new(store.clone())),
         bootstrap,
         oidc,
     );
+    let capabilities = deployment_capabilities();
     let mut application = AppState::new_with_resources(
         repository,
         Arc::new(authenticator),
         webhook_key,
         object_store,
     )
-    .with_capabilities(deployment_capabilities());
+    .with_capabilities(capabilities.clone());
+    if capabilities.billing.enabled {
+        application = application.with_stripe_webhook_secret(
+            env::var("STRIPE_WEBHOOK_SECRET")
+                .or_else(|_| env::var("SPOOL_STRIPE_WEBHOOK_SECRET"))
+                .context("STRIPE_WEBHOOK_SECRET is required when Cloud billing is enabled")?,
+        );
+    }
+    let billing_usage_worker = if capabilities.billing.enabled && service_role.runs_workers() {
+        Some(BillingUsageWorker::new(
+            store,
+            env::var("STRIPE_SECRET_KEY")
+                .or_else(|_| env::var("SPOOL_STRIPE_SECRET_KEY"))
+                .context("STRIPE_SECRET_KEY is required by the Cloud billing worker")?,
+            env::var("STRIPE_METER_EVENT_NAME")
+                .or_else(|_| env::var("SPOOL_STRIPE_METER_EVENT_NAME"))
+                .unwrap_or_else(|_| "spool_print_overage_blocks".into()),
+        ))
+    } else {
+        None
+    };
     if let Some(local_identity) = local_identity {
         application = application.with_local_identity(local_identity);
     }
-    let webhook_worker = WebhookWorker::new(application.clone());
-    let _webhook_worker = tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_millis(500));
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        loop {
-            interval.tick().await;
-            match webhook_worker.run_once(25).await {
-                Ok(0) => {}
-                Ok(count) => tracing::debug!(count, "processed webhook deliveries"),
-                Err(error) => tracing::error!(%error, "webhook worker batch failed"),
+    let _webhook_worker = if service_role.runs_workers() {
+        let webhook_worker = WebhookWorker::new(application.clone());
+        Some(tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_millis(500));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                match webhook_worker.run_once(25).await {
+                    Ok(0) => {}
+                    Ok(count) => tracing::debug!(count, "processed webhook deliveries"),
+                    Err(error) => tracing::error!(%error, "webhook worker batch failed"),
+                }
             }
-        }
-    });
+        }))
+    } else {
+        None
+    };
+    let _billing_usage_worker = billing_usage_worker.map(spawn_billing_usage_worker);
     let address: SocketAddr = listen
         .parse()
         .context("invalid SPOOL_BIND or SPOOL_LISTEN")?;
     let listener = tokio::net::TcpListener::bind(address)
         .await
         .context("bind HTTP listener")?;
-    tracing::info!(%address, "spool server listening");
+    tracing::info!(%address, role = service_role.as_str(), "spool server listening");
     axum::serve(listener, router(application))
         .with_graceful_shutdown(shutdown_signal())
         .await
         .context("serve HTTP")
+}
+
+fn spawn_billing_usage_worker(worker: BillingUsageWorker) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            match worker.run_once(25).await {
+                Ok(0) => {}
+                Ok(count) => tracing::info!(count, "submitted Stripe usage meter events"),
+                Err(error) => {
+                    tracing::error!(error.type = "stripe_usage_export", %error);
+                }
+            }
+        }
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ServiceRole {
+    Api,
+    Sync,
+    Worker,
+    All,
+}
+
+impl ServiceRole {
+    fn from_environment() -> Result<Self> {
+        match env::var("SPOOL_SERVICE_ROLE")
+            .unwrap_or_else(|_| "all".into())
+            .as_str()
+        {
+            "api" => Ok(Self::Api),
+            "sync" => Ok(Self::Sync),
+            "worker" => Ok(Self::Worker),
+            "all" => Ok(Self::All),
+            other => anyhow::bail!(
+                "unsupported SPOOL_SERVICE_ROLE `{other}`; expected api, sync, worker, or all"
+            ),
+        }
+    }
+
+    const fn runs_workers(self) -> bool {
+        matches!(self, Self::Worker | Self::All)
+    }
+
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Api => "api",
+            Self::Sync => "sync",
+            Self::Worker => "worker",
+            Self::All => "all",
+        }
+    }
+}
+
+fn startup_migrations_enabled() -> bool {
+    if let Ok(value) = env::var("SPOOL_RUN_MIGRATIONS_ON_STARTUP") {
+        return value == "true";
+    }
+    !(env::var("SPOOL_DEPLOYMENT").as_deref() == Ok("cloud")
+        && env::var("SPOOL_ENVIRONMENT").as_deref() == Ok("production"))
+}
+
+async fn migrate_only() -> Result<()> {
+    let database_url = env::var("SPOOL_DATABASE_URL")
+        .or_else(|_| env::var("DATABASE_URL"))
+        .context("SPOOL_DATABASE_URL or DATABASE_URL is required")?;
+    let store = PostgresStore::connect(&database_url, 2)
+        .await
+        .context("connect to PostgreSQL")?;
+    store.migrate().await.context("run PostgreSQL migrations")
 }
 
 fn local_identity_enabled() -> bool {
@@ -205,6 +314,10 @@ fn build_oidc_authenticator(store: &PostgresStore) -> Result<Option<OidcAuthenti
             OidcAuthenticator::new(
                 store.clone(),
                 OidcConfiguration {
+                    provider: env::var("SPOOL_IDENTITY_PROVIDER")
+                        .ok()
+                        .filter(|value| matches!(value.as_str(), "workos" | "oidc"))
+                        .unwrap_or_else(|| "oidc".into()),
                     issuer: env::var("SPOOL_OIDC_ISSUER")
                         .context("SPOOL_OIDC_ISSUER is required for OIDC")?,
                     audience: env::var("SPOOL_OIDC_AUDIENCE")
@@ -261,6 +374,12 @@ async fn build_object_store() -> Result<Arc<dyn ObjectStore>> {
             allow_http: env::var("SPOOL_S3_ALLOW_HTTP").as_deref() == Ok("true"),
             virtual_hosted_style: env::var("SPOOL_S3_VIRTUAL_HOSTED_STYLE").as_deref()
                 == Ok("true"),
+        })?)),
+        "gcs" => Ok(Arc::new(GcsObjectStore::new_gcs(GcsConfiguration {
+            bucket: env::var("SPOOL_GCS_BUCKET").context("SPOOL_GCS_BUCKET is required")?,
+            service_account_path: env::var("GOOGLE_APPLICATION_CREDENTIALS")
+                .ok()
+                .filter(|value| !value.is_empty()),
         })?)),
         "filesystem" => Ok(Arc::new(
             FileObjectStore::new(

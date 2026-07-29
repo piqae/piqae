@@ -3083,6 +3083,7 @@ dependencies = [
  "ed25519-dalek",
  "futures",
  "hex",
+ "hmac",
  "http",
  "http-body-util",
  "jsonwebtoken",

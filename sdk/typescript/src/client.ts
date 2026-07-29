@@ -2,6 +2,7 @@ import type {
   Agent,
   AgentEnrolment,
   ApiKey,
+  BillingSummary,
   BootstrappedLocalOwner,
   CreateApiKey,
   CreateDeviceAuthorization,
@@ -36,6 +37,7 @@ import type {
   TargetBinding,
   TargetReadiness,
   Upload,
+  UsageSummary,
   Webhook,
   Workspace,
   WorkspaceMember
@@ -155,6 +157,19 @@ export class SpoolClient {
       this.request<CreatedApiKey>('POST', '/v1/api-keys', { body: input }),
     revoke: (id: string) =>
       this.request<ApiKey>('DELETE', `/v1/api-keys/${encodeURIComponent(id)}`)
+  };
+
+  readonly billing = {
+    summary: () => this.request<BillingSummary>('GET', '/v1/billing/summary')
+  };
+
+  readonly usage = {
+    retrieve: (month?: string) =>
+      this.request<UsageSummary>(
+        'GET',
+        '/v1/usage',
+        month === undefined ? {} : { query: { month } }
+      )
   };
 
   readonly agents = {
@@ -335,7 +350,7 @@ export class SpoolClient {
     options: {
       body?: unknown;
       idempotencyKey?: string;
-      query?: ListOptions;
+      query?: ListOptions | Record<string, string | number | boolean | undefined>;
       headers?: Record<string, string>;
     } = {}
   ): Promise<T> {

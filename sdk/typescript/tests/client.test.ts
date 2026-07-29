@@ -172,6 +172,57 @@ describe('SpoolClient', () => {
     expect(revokeInit?.method).toBe('DELETE');
   });
 
+  it('retrieves the effective billing period and tenant usage without mutation APIs', async () => {
+    const usage = {
+      period_start: '2026-07-01T00:00:00Z',
+      period_end: '2026-08-01T00:00:00Z',
+      accepted_live_jobs: 42,
+      active_nodes: 2
+    };
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        Response.json({
+          enabled: true,
+          managed_by_platform: false,
+          plan: 'pro',
+          billing_interval: 'monthly',
+          subscription_status: 'active',
+          grace_ends_at: null,
+          accept_new_cloud_jobs: true,
+          entitlement: {
+            included_live_jobs: 25_000,
+            node_limit: 25,
+            metadata_retention_days: 90,
+            document_retention_hours: 168,
+            overage_job_unit: 1_000,
+            overage_price_cents: 25
+          },
+          usage,
+          overage_live_jobs: 0
+        })
+      )
+      .mockResolvedValueOnce(Response.json(usage));
+    const client = new SpoolClient({
+      apiKey: 'spl_live_usage',
+      fetch: fetcher,
+      baseUrl: 'https://print.example.test'
+    });
+
+    const summary = await client.billing.summary();
+    const july = await client.usage.retrieve('2026-07');
+
+    expect(summary.entitlement?.included_live_jobs).toBe(25_000);
+    expect(july.accepted_live_jobs).toBe(42);
+    expect(String(fetcher.mock.calls[0]?.[0])).toBe(
+      'https://print.example.test/v1/billing/summary'
+    );
+    expect(String(fetcher.mock.calls[1]?.[0])).toBe(
+      'https://print.example.test/v1/usage?month=2026-07'
+    );
+    expect(fetcher.mock.calls.every(([, init]) => init?.method === 'GET')).toBe(true);
+  });
+
   it('uses canonical node routes and keeps pairing codes out of query strings', async () => {
     const fetcher = vi
       .fn<typeof fetch>()

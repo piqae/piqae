@@ -480,7 +480,7 @@ pub async fn enrol_agent(
     let secret_hash = format!("{:x}", Sha256::digest(request.token.as_bytes()));
     let enrolled = state
         .repository
-        .enrol_agent(
+        .enrol_agent_with_billing(
             &secret_hash,
             &public_key,
             &request.name,
@@ -489,6 +489,7 @@ pub async fn enrol_agent(
             &request.architecture,
             &request.agent_version,
             request.protocol_version,
+            state.capabilities.billing.enabled,
         )
         .await?;
     Ok((
@@ -944,7 +945,7 @@ pub async fn create_job(
     let destination = resolve_job_destination(&state, tenant, &request).await?;
     let request_bytes = serde_json::to_vec(&request)?;
     let now = Utc::now();
-    let content =
+    let persisted =
         persist_job_content(&state, tenant, request.content_type, request.content).await?;
     let mut metadata = request.metadata;
     metadata.extend(destination.metadata);
@@ -956,7 +957,7 @@ pub async fn create_job(
         title: request.title,
         source: request.source,
         content_kind: request.content_type,
-        content,
+        content: persisted.source,
         options: request.options,
         metadata,
         deliveries: request.deliveries,
@@ -973,11 +974,20 @@ pub async fn create_job(
             "Idempotency-Key must be between 8 and 255 bytes.",
         ));
     }
-    match state
+    let created = state
         .repository
-        .create_job(&job, destination.agent_id, idempotency, &request_bytes)
-        .await?
-    {
+        .create_cloud_job(
+            &job,
+            destination.agent_id,
+            idempotency,
+            &request_bytes,
+            state.capabilities.billing.enabled,
+        )
+        .await;
+    if created.is_err() || matches!(&created, Ok(CreateResult::Existing(_))) {
+        cleanup_owned_upload(&state, tenant, persisted.owned_upload.as_ref()).await;
+    }
+    match created? {
         CreateResult::Existing(existing) => {
             Ok((StatusCode::OK, Json(JobResponse::from(existing))).into_response())
         }
@@ -1188,12 +1198,17 @@ async fn recover_waiting_target_jobs(
     Ok(())
 }
 
+pub(crate) struct PersistedJobContent {
+    pub source: ContentSource,
+    pub owned_upload: Option<StoredUpload>,
+}
+
 pub(crate) async fn persist_job_content(
     state: &AppState,
     tenant: TenantContext,
     content_kind: ContentKind,
     content: ContentSource,
-) -> Result<ContentSource, AppError> {
+) -> Result<PersistedJobContent, AppError> {
     match content {
         ContentSource::Upload { upload_id } => {
             let upload = state
@@ -1210,7 +1225,10 @@ pub(crate) async fn persist_job_content(
                     "The upload is incomplete or does not match the job content type.",
                 ));
             }
-            Ok(ContentSource::Upload { upload_id })
+            Ok(PersistedJobContent {
+                source: ContentSource::Upload { upload_id },
+                owned_upload: None,
+            })
         }
         ContentSource::Base64 { data } => {
             let decoded = base64::engine::general_purpose::STANDARD
@@ -1260,7 +1278,10 @@ pub(crate) async fn persist_job_content(
                     expected_bytes,
                 )
                 .await?;
-            Ok(ContentSource::Upload { upload_id: id })
+            Ok(PersistedJobContent {
+                source: ContentSource::Upload { upload_id: id },
+                owned_upload: Some(upload),
+            })
         }
         ContentSource::Uri {
             uri,
@@ -1272,11 +1293,44 @@ pub(crate) async fn persist_job_content(
                     "Authenticated URI content is not persisted; upload the content instead.",
                 ));
             }
-            Ok(ContentSource::Uri {
-                uri,
-                authentication: None,
+            Ok(PersistedJobContent {
+                source: ContentSource::Uri {
+                    uri,
+                    authentication: None,
+                },
+                owned_upload: None,
             })
         }
+    }
+}
+
+pub(crate) async fn cleanup_owned_upload(
+    state: &AppState,
+    tenant: TenantContext,
+    upload: Option<&StoredUpload>,
+) {
+    let Some(upload) = upload else {
+        return;
+    };
+    if state.object_store.delete(&upload.object_key).await.is_err() {
+        tracing::warn!(
+            error.type = "job_upload_cleanup_object_failed",
+            upload.id = %upload.id,
+            "could not remove unreferenced inline job content"
+        );
+        return;
+    }
+    if state
+        .repository
+        .delete_upload(tenant.workspace_id, tenant.environment_id, &upload.id)
+        .await
+        .is_err()
+    {
+        tracing::warn!(
+            error.type = "job_upload_cleanup_record_failed",
+            upload.id = %upload.id,
+            "could not remove unreferenced inline upload record"
+        );
     }
 }
 

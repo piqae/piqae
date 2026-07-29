@@ -2,6 +2,8 @@
 
 pub mod api;
 pub mod authentication;
+pub mod billing;
+pub mod billing_usage_worker;
 pub mod compatibility;
 pub mod device_auth;
 pub mod error;
@@ -46,6 +48,7 @@ pub struct AppState {
     pub object_store: Arc<dyn ObjectStore>,
     pub capabilities: DeploymentCapabilities,
     pub local_identity: Option<identity::LocalIdentityState>,
+    pub stripe_webhook_secret: Option<Arc<str>>,
 }
 
 impl fmt::Debug for AppState {
@@ -98,6 +101,7 @@ impl AppState {
             object_store,
             capabilities: DeploymentCapabilities::default(),
             local_identity: None,
+            stripe_webhook_secret: None,
         }
     }
 
@@ -110,6 +114,12 @@ impl AppState {
     #[must_use]
     pub fn with_local_identity(mut self, identity: identity::LocalIdentityState) -> Self {
         self.local_identity = Some(identity);
+        self
+    }
+
+    #[must_use]
+    pub fn with_stripe_webhook_secret(mut self, secret: impl Into<Arc<str>>) -> Self {
+        self.stripe_webhook_secret = Some(secret.into());
         self
     }
 
@@ -215,6 +225,12 @@ pub fn router(state: AppState) -> Router {
             get(platform::get)
                 .put(platform::upsert)
                 .delete(platform::archive),
+        )
+        .route("/v1/billing/summary", get(billing::summary))
+        .route("/v1/usage", get(billing::usage))
+        .route(
+            "/v1/integrations/stripe/webhook",
+            post(billing::stripe_webhook),
         )
         .route(
             "/v1/api-keys",

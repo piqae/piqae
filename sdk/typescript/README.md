@@ -59,6 +59,21 @@ const job = await spool.jobs.create(
 console.log(job.id, job.state);
 ```
 
+Usage is counted only when a Live job is first accepted by the operating-system
+spooler. Read the effective subscription period and its immutable usage ledger
+without duplicating billing rules in your application:
+
+```ts
+const billing = await spool.billing.summary();
+const july = await spool.usage.retrieve('2026-07');
+
+console.log(billing.plan, billing.usage.accepted_live_jobs);
+console.log(july.period_start, july.period_end);
+```
+
+Test jobs and idempotent retries do not increment usage. Self-hosted deployments
+report managed billing as disabled and make no Stripe calls.
+
 For private PDFs, declare the exact length and SHA-256 digest, then stream the
 binary body without Base64:
 

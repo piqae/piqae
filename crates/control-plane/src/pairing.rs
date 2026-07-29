@@ -222,7 +222,10 @@ pub async fn exchange(
 ) -> Result<Json<DeviceAuthorizationExchange>, AppError> {
     let enrolled = state
         .repository
-        .exchange_device_authorization(&digest(&device_code))
+        .exchange_device_authorization_with_billing(
+            &digest(&device_code),
+            state.capabilities.billing.enabled,
+        )
         .await?;
     Ok(Json(DeviceAuthorizationExchange {
         node_id: enrolled.agent_id,

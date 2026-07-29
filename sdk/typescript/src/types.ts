@@ -46,6 +46,47 @@ export interface DeploymentMeta {
   platform: { accounts: boolean };
 }
 
+export interface UsageSummary {
+  /** Inclusive start of the requested UTC or Stripe subscription period. */
+  period_start: string;
+  /** Exclusive end of the requested UTC or Stripe subscription period. */
+  period_end: string;
+  /** Live jobs counted exactly once at operating-system spooler acceptance. */
+  accepted_live_jobs: number;
+  active_nodes: number;
+}
+
+export interface BillingEntitlement {
+  included_live_jobs: number;
+  node_limit: number;
+  metadata_retention_days: number;
+  document_retention_hours: number;
+  overage_job_unit: number | null;
+  overage_price_cents: number | null;
+}
+
+export interface BillingSummary {
+  /** False for self-hosted and local-only deployments. */
+  enabled: boolean;
+  /** True when the owning platform workspace holds this workspace's subscription. */
+  managed_by_platform: boolean;
+  plan: 'free' | 'pro' | null;
+  billing_interval: 'monthly' | 'annual' | null;
+  subscription_status:
+    | 'active'
+    | 'trialing'
+    | 'past_due'
+    | 'unpaid'
+    | 'paused'
+    | 'cancelled'
+    | null;
+  grace_ends_at: string | null;
+  accept_new_cloud_jobs: boolean;
+  entitlement: BillingEntitlement | null;
+  usage: UsageSummary;
+  overage_live_jobs: number;
+}
+
 export type UploadMediaType = 'application/pdf' | 'application/octet-stream';
 
 export interface CreateUpload {

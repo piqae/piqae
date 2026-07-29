@@ -68,6 +68,17 @@ impl AppError {
     }
 
     #[must_use]
+    pub fn billing_disabled() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "billing_disabled",
+            message: "Cloud billing is disabled for this deployment.".into(),
+            retryable: false,
+            compatibility: false,
+        }
+    }
+
+    #[must_use]
     pub fn unauthorized() -> Self {
         Self {
             status: StatusCode::UNAUTHORIZED,
@@ -147,6 +158,27 @@ impl From<RepositoryError> for AppError {
                 status: StatusCode::CONFLICT,
                 code: "invalid_job_state",
                 message: "The job state no longer permits this operation.".into(),
+                retryable: false,
+                compatibility: false,
+            },
+            RepositoryError::QuotaExceeded => Self {
+                status: StatusCode::PAYMENT_REQUIRED,
+                code: "quota_exceeded",
+                message: "The Free plan accepted-job quota has been reached.".into(),
+                retryable: false,
+                compatibility: false,
+            },
+            RepositoryError::BillingBlocked => Self {
+                status: StatusCode::PAYMENT_REQUIRED,
+                code: "billing_blocked",
+                message: "Billing status does not permit new Cloud jobs.".into(),
+                retryable: false,
+                compatibility: false,
+            },
+            RepositoryError::NodeQuotaExceeded => Self {
+                status: StatusCode::PAYMENT_REQUIRED,
+                code: "node_quota_exceeded",
+                message: "The plan's active node limit has been reached.".into(),
                 retryable: false,
                 compatibility: false,
             },

@@ -30,6 +30,7 @@ ed25519-dalek.workspace = true
 futures.workspace = true
 http.workspace = true
 hex.workspace = true
+hmac = "0.12"
 jsonwebtoken = "9"
 opentelemetry = { version = "0.32", default-features = false, features = ["trace"], optional = true }
 opentelemetry-http = { version = "0.32", default-features = false, optional = true }

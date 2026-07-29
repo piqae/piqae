@@ -512,6 +512,7 @@ impl Authenticator for CombinedAuthenticator {
 
 #[derive(Clone, Debug)]
 pub struct OidcConfiguration {
+    pub provider: String,
     pub issuer: String,
     pub audience: Option<String>,
     pub binding_claim: Option<String>,
@@ -553,7 +554,8 @@ impl OidcAuthenticator {
         store: PostgresStore,
         configuration: OidcConfiguration,
     ) -> Result<Self, AuthenticationError> {
-        if configuration.issuer.is_empty()
+        if !matches!(configuration.provider.as_str(), "workos" | "oidc")
+            || configuration.issuer.is_empty()
             || configuration.jwks_url.is_empty()
             || configuration.organization_claim.is_empty()
             || configuration.permissions_claim.is_empty()
@@ -617,7 +619,11 @@ impl OidcAuthenticator {
             .ok_or(AuthenticationError)?;
         let (workspace_id, environment_id) = self
             .store
-            .provision_oidc_tenant(organization_id, &self.configuration.environment_kind)
+            .provision_oidc_tenant(
+                &self.configuration.provider,
+                organization_id,
+                &self.configuration.environment_kind,
+            )
             .await
             .map_err(|_| AuthenticationError)?;
         let permissions = if self.configuration.allow_unrestricted {

@@ -2,7 +2,7 @@
 
 use apache_object_store::{
     ObjectStore as ApacheObjectStore, ObjectStoreExt, aws::AmazonS3Builder,
-    path::Path as ObjectPath,
+    gcp::GoogleCloudStorageBuilder, path::Path as ObjectPath,
 };
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -58,6 +58,14 @@ pub struct S3Configuration {
     pub virtual_hosted_style: bool,
 }
 
+pub type GcsObjectStore = S3ObjectStore;
+
+#[derive(Debug, Clone)]
+pub struct GcsConfiguration {
+    pub bucket: String,
+    pub service_account_path: Option<String>,
+}
+
 impl S3ObjectStore {
     pub fn new(configuration: S3Configuration) -> Result<Self, ObjectStoreError> {
         let mut builder = AmazonS3Builder::new()
@@ -76,6 +84,37 @@ impl S3ObjectStore {
         Ok(Self {
             inner: Arc::new(inner),
         })
+    }
+
+    /// Build a native GCS JSON API client. With no explicit key path the
+    /// underlying client uses Application Default Credentials, including the
+    /// Cloud Run metadata identity.
+    pub fn new_gcs(configuration: GcsConfiguration) -> Result<Self, ObjectStoreError> {
+        let mut builder =
+            GoogleCloudStorageBuilder::from_env().with_bucket_name(configuration.bucket);
+        if let Some(path) = configuration.service_account_path {
+            builder = builder.with_service_account_path(path);
+        }
+        let inner = builder
+            .build()
+            .map_err(|error| ObjectStoreError::S3(error.to_string()))?;
+        Ok(Self {
+            inner: Arc::new(inner),
+        })
+    }
+}
+
+#[cfg(test)]
+mod gcs_configuration_tests {
+    use super::{GcsConfiguration, GcsObjectStore};
+
+    #[test]
+    fn gcs_builder_accepts_application_default_credentials() {
+        let store = GcsObjectStore::new_gcs(GcsConfiguration {
+            bucket: "spool-test-bucket".into(),
+            service_account_path: None,
+        });
+        assert!(store.is_ok());
     }
 }
 

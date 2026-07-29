@@ -2,7 +2,7 @@
 
 use crate::{
     AppState,
-    api::{authenticate_compatibility, parse_job_id, persist_job_content},
+    api::{authenticate_compatibility, cleanup_owned_upload, parse_job_id, persist_job_content},
     error::AppError,
     repository::{CreateResult, RepositoryError},
 };
@@ -216,6 +216,7 @@ fn merge_profile_options(
         .map_err(|_| AppError::service_unavailable("profile_options_invalid").compatibility())
 }
 
+#[allow(clippy::too_many_lines)]
 pub(crate) async fn create_print_job(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -241,7 +242,7 @@ pub(crate) async fn create_print_job(
         )
         .compatibility());
     }
-    let content = persist_job_content(&state, tenant, content_kind, content)
+    let persisted = persist_job_content(&state, tenant, content_kind, content)
         .await
         .map_err(AppError::compatibility)?;
     let now = Utc::now();
@@ -264,7 +265,7 @@ pub(crate) async fn create_print_job(
         title: request.title,
         source: request.source,
         content_kind,
-        content,
+        content: persisted.source,
         options: if content_kind == ContentKind::Raw {
             JobOptions::default()
         } else if let Some(profile) = &profile {
@@ -283,9 +284,18 @@ pub(crate) async fn create_print_job(
         .and_then(|value| value.to_str().ok());
     let created = state
         .repository
-        .create_job(&job, agent_id, idempotency, &body)
-        .await
-        .map_err(|error| AppError::from(error).compatibility())?;
+        .create_cloud_job(
+            &job,
+            agent_id,
+            idempotency,
+            &body,
+            state.capabilities.billing.enabled,
+        )
+        .await;
+    if created.is_err() || matches!(&created, Ok(CreateResult::Existing(_))) {
+        cleanup_owned_upload(&state, tenant, persisted.owned_upload.as_ref()).await;
+    }
+    let created = created.map_err(|error| AppError::from(error).compatibility())?;
     let created_job = match &created {
         CreateResult::Created(job) | CreateResult::Existing(job) => job,
     };

@@ -23,6 +23,35 @@ use std::collections::BTreeMap;
 use thiserror::Error;
 use uuid::Uuid;
 
+#[derive(Clone, Copy)]
+struct PlanDefaults {
+    included_jobs: i64,
+    node_limit: i32,
+    metadata_retention_days: i32,
+    document_retention_hours: i32,
+    overage_unit: Option<i64>,
+    overage_cents: Option<i64>,
+}
+
+const OVERAGE_BLOCK_JOBS: i64 = 1_000;
+const FREE_PLAN: PlanDefaults = PlanDefaults {
+    included_jobs: 100,
+    node_limit: 1,
+    metadata_retention_days: 7,
+    document_retention_hours: 24,
+    overage_unit: None,
+    overage_cents: None,
+};
+const PRO_PLAN: PlanDefaults = PlanDefaults {
+    included_jobs: 25_000,
+    node_limit: 25,
+    metadata_retention_days: 90,
+    document_retention_hours: 168,
+    overage_unit: Some(OVERAGE_BLOCK_JOBS),
+    overage_cents: Some(25),
+};
+const PRO_ANNUAL_INCLUDED_JOBS: i64 = 300_000;
+
 #[derive(Clone, Debug)]
 pub struct PostgresStore {
     pool: PgPool,
@@ -154,6 +183,73 @@ pub struct StoredPlatformAccount {
 pub struct UpsertedPlatformAccount {
     pub account: StoredPlatformAccount,
     pub created: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct StoredUsageSummary {
+    pub period_start: DateTime<Utc>,
+    pub period_end: DateTime<Utc>,
+    pub accepted_live_jobs: i64,
+    pub active_nodes: i64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct StoredBillingEntitlement {
+    pub included_live_jobs: i64,
+    pub node_limit: i32,
+    pub metadata_retention_days: i32,
+    pub document_retention_hours: i32,
+    pub overage_job_unit: Option<i64>,
+    pub overage_price_cents: Option<i64>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct StoredBillingSummary {
+    pub enabled: bool,
+    pub managed_by_platform: bool,
+    pub plan: Option<String>,
+    pub billing_interval: Option<String>,
+    pub subscription_status: Option<String>,
+    pub grace_ends_at: Option<DateTime<Utc>>,
+    pub accept_new_cloud_jobs: bool,
+    pub entitlement: Option<StoredBillingEntitlement>,
+    pub usage: StoredUsageSummary,
+    pub overage_live_jobs: i64,
+}
+
+#[derive(Clone, Debug)]
+pub struct StripeBillingEvent {
+    pub id: String,
+    pub event_type: String,
+    pub created_at: DateTime<Utc>,
+    pub payload_sha256: String,
+    pub workspace_reference: Option<String>,
+    pub customer_id: Option<String>,
+    pub subscription_id: Option<String>,
+    pub plan: Option<String>,
+    pub billing_interval: Option<String>,
+    pub status: Option<String>,
+    pub current_period_start: Option<DateTime<Utc>>,
+    pub current_period_end: Option<DateTime<Utc>>,
+    pub cancel_at_period_end: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StripeProjectionResult {
+    Applied,
+    Duplicate,
+}
+
+#[derive(Clone, Debug)]
+pub struct ClaimedUsageExport {
+    pub id: String,
+    pub workspace_id: WorkspaceId,
+    pub period_start: DateTime<Utc>,
+    pub period_end: DateTime<Utc>,
+    pub overage_blocks: i64,
+    pub stripe_customer_id: String,
+    pub stripe_event_identifier: String,
+    pub claim_token: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -414,6 +510,12 @@ pub enum StorageError {
     ConcurrentStateChange,
     #[error("invalid state transition")]
     InvalidTransition,
+    #[error("cloud free-plan quota exceeded")]
+    QuotaExceeded,
+    #[error("cloud billing blocks new jobs")]
+    BillingBlocked,
+    #[error("cloud node quota exceeded")]
+    NodeQuotaExceeded,
     #[error("stored data is invalid: {0}")]
     InvalidData(String),
     #[error("database operation failed: {0}")]
@@ -489,10 +591,14 @@ impl PostgresStore {
 
     pub async fn provision_oidc_tenant(
         &self,
+        provider: &str,
         organization_id: &str,
         environment_kind: &str,
     ) -> Result<(WorkspaceId, EnvironmentId), StorageError> {
-        if organization_id.is_empty() || !matches!(environment_kind, "test" | "live") {
+        if !matches!(provider, "workos" | "oidc")
+            || organization_id.is_empty()
+            || !matches!(environment_kind, "test" | "live")
+        {
             return Err(StorageError::InvalidData(
                 "invalid OIDC tenant mapping".into(),
             ));
@@ -503,8 +609,10 @@ impl PostgresStore {
             .execute(&mut *transaction)
             .await?;
         let workspace_id = if let Some(id) = sqlx::query_scalar::<_, String>(
-            "SELECT id FROM workspaces WHERE workos_organization_id = $1",
+            "SELECT id FROM workspaces
+             WHERE identity_provider = $1 AND identity_organization_id = $2",
         )
+        .bind(provider)
         .bind(organization_id)
         .fetch_optional(&mut *transaction)
         .await?
@@ -515,44 +623,71 @@ impl PostgresStore {
         } else {
             let id = WorkspaceId::new();
             sqlx::query(
-                "INSERT INTO workspaces (id, name, slug, workos_organization_id)
-                 VALUES ($1,$2,lower(replace($1, '_', '-')),$2)",
+                "INSERT INTO workspaces (
+                    id, name, slug, workos_organization_id,
+                    identity_provider, identity_organization_id
+                 ) VALUES (
+                    $1,$2,lower(replace($1, '_', '-')),
+                    CASE WHEN $3 = 'workos' THEN $2 ELSE NULL END,
+                    $3,$2
+                 )",
             )
             .bind(id.to_string())
             .bind(organization_id)
+            .bind(provider)
             .execute(&mut *transaction)
             .await?;
             id
         };
-        let environment_id = if let Some(id) = sqlx::query_scalar::<_, String>(
-            "SELECT id FROM environments WHERE workspace_id = $1 AND kind = $2",
+        let mut selected_environment = None;
+        for kind in ["test", "live"] {
+            let id = if let Some(id) = sqlx::query_scalar::<_, String>(
+                "SELECT id FROM environments WHERE workspace_id = $1 AND kind = $2",
+            )
+            .bind(workspace_id.to_string())
+            .bind(kind)
+            .fetch_optional(&mut *transaction)
+            .await?
+            {
+                id.parse().map_err(|error| {
+                    StorageError::InvalidData(format!("environment id `{id}`: {error}"))
+                })?
+            } else {
+                let id = EnvironmentId::new();
+                sqlx::query(
+                    "INSERT INTO environments (id, workspace_id, kind, name)
+                     VALUES ($1,$2,$3,$4)",
+                )
+                .bind(id.to_string())
+                .bind(workspace_id.to_string())
+                .bind(kind)
+                .bind(if kind == "live" { "Live" } else { "Test" })
+                .execute(&mut *transaction)
+                .await?;
+                id
+            };
+            if kind == environment_kind {
+                selected_environment = Some(id);
+            }
+        }
+        sqlx::query(
+            "INSERT INTO workspace_entitlements (
+                workspace_id, plan, included_jobs, node_limit,
+                metadata_retention_days, document_retention_hours,
+                accept_new_cloud_jobs, job_overage_unit, job_overage_cents
+             ) VALUES ($1,'free',$2,$3,$4,$5,true,NULL,NULL)
+             ON CONFLICT (workspace_id) DO NOTHING",
         )
         .bind(workspace_id.to_string())
-        .bind(environment_kind)
-        .fetch_optional(&mut *transaction)
-        .await?
-        {
-            id.parse().map_err(|error| {
-                StorageError::InvalidData(format!("environment id `{id}`: {error}"))
-            })?
-        } else {
-            let id = EnvironmentId::new();
-            sqlx::query(
-                "INSERT INTO environments (id, workspace_id, kind, name)
-                 VALUES ($1,$2,$3,$4)",
-            )
-            .bind(id.to_string())
-            .bind(workspace_id.to_string())
-            .bind(environment_kind)
-            .bind(if environment_kind == "live" {
-                "Live"
-            } else {
-                "Test"
-            })
-            .execute(&mut *transaction)
-            .await?;
-            id
-        };
+        .bind(FREE_PLAN.included_jobs)
+        .bind(FREE_PLAN.node_limit)
+        .bind(FREE_PLAN.metadata_retention_days)
+        .bind(FREE_PLAN.document_retention_hours)
+        .execute(&mut *transaction)
+        .await?;
+        let environment_id = selected_environment.ok_or_else(|| {
+            StorageError::InvalidData("OIDC environment was not provisioned".into())
+        })?;
         transaction.commit().await?;
         Ok((workspace_id, environment_id))
     }
@@ -1210,6 +1345,528 @@ impl PostgresStore {
         )
         .await?;
         transaction.commit().await?;
+        Ok(())
+    }
+
+    pub async fn usage_summary(
+        &self,
+        workspace_id: WorkspaceId,
+        period_start: DateTime<Utc>,
+        period_end: DateTime<Utc>,
+    ) -> Result<StoredUsageSummary, StorageError> {
+        if period_end <= period_start {
+            return Err(StorageError::InvalidData("invalid usage period".into()));
+        }
+        let row = sqlx::query(
+            "SELECT
+                COALESCE((
+                    SELECT sum(ledger.units)
+                    FROM usage_ledger ledger
+                    WHERE ledger.workspace_id = $1
+                      AND ledger.kind = 'print_job_accepted'
+                      AND ledger.occurred_at >= $2 AND ledger.occurred_at < $3
+                ), 0)::bigint AS accepted_live_jobs,
+                (
+                    SELECT count(*)
+                    FROM agents agent
+                    WHERE agent.workspace_id = $1
+                      AND agent.revoked_at IS NULL
+                      AND agent.last_seen_at >= $2 AND agent.last_seen_at < $3
+                )::bigint AS active_nodes",
+        )
+        .bind(workspace_id.to_string())
+        .bind(period_start)
+        .bind(period_end)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(StoredUsageSummary {
+            period_start,
+            period_end,
+            accepted_live_jobs: row.try_get("accepted_live_jobs")?,
+            active_nodes: row.try_get("active_nodes")?,
+        })
+    }
+
+    pub async fn billing_summary(
+        &self,
+        workspace_id: WorkspaceId,
+        fallback_period_start: DateTime<Utc>,
+        fallback_period_end: DateTime<Utc>,
+    ) -> Result<StoredBillingSummary, StorageError> {
+        if fallback_period_end <= fallback_period_start {
+            return Err(StorageError::InvalidData("invalid billing period".into()));
+        }
+        let owner = billing_owner(&self.pool, workspace_id).await?;
+        let subscription = sqlx::query(
+            "SELECT status, billing_interval, current_period_start, current_period_end, grace_ends_at
+             FROM billing_subscriptions WHERE workspace_id = $1",
+        )
+        .bind(owner.workspace_id.to_string())
+        .fetch_optional(&self.pool)
+        .await?;
+        let (
+            subscription_status,
+            billing_interval,
+            current_period_start,
+            current_period_end,
+            grace_ends_at,
+        ) = if let Some(row) = subscription {
+            (
+                Some(row.try_get::<String, _>("status")?),
+                Some(row.try_get::<String, _>("billing_interval")?),
+                row.try_get::<Option<DateTime<Utc>>, _>("current_period_start")?,
+                row.try_get::<Option<DateTime<Utc>>, _>("current_period_end")?,
+                row.try_get::<Option<DateTime<Utc>>, _>("grace_ends_at")?,
+            )
+        } else {
+            (None, None, None, None, None)
+        };
+        let (period_start, period_end) = match (current_period_start, current_period_end) {
+            (Some(start), Some(end)) if end > start => (start, end),
+            _ => (fallback_period_start, fallback_period_end),
+        };
+        let mut entitlement = ensure_billing_entitlement(&self.pool, owner.workspace_id).await?;
+        if entitlement.plan == "pro" && billing_interval.as_deref() == Some("annual") {
+            entitlement.included_live_jobs = PRO_ANNUAL_INCLUDED_JOBS;
+        }
+        let usage = if owner.managed_by_platform {
+            self.usage_summary(workspace_id, period_start, period_end)
+                .await?
+        } else {
+            billing_owner_usage(&self.pool, owner.workspace_id, period_start, period_end).await?
+        };
+        let subscription_allows_jobs = subscription_status.as_deref().is_none_or(|status| {
+            matches!(status, "active" | "trialing")
+                || (status == "past_due" && grace_ends_at.is_some_and(|end| end > Utc::now()))
+        });
+        let accept_new_cloud_jobs = entitlement.accept_new_cloud_jobs && subscription_allows_jobs;
+        let overage_live_jobs = if owner.managed_by_platform {
+            0
+        } else {
+            usage
+                .accepted_live_jobs
+                .saturating_sub(entitlement.included_live_jobs)
+        };
+        Ok(StoredBillingSummary {
+            enabled: true,
+            managed_by_platform: owner.managed_by_platform,
+            plan: Some(entitlement.plan),
+            billing_interval,
+            subscription_status,
+            grace_ends_at,
+            accept_new_cloud_jobs,
+            entitlement: Some(StoredBillingEntitlement {
+                included_live_jobs: entitlement.included_live_jobs,
+                node_limit: entitlement.node_limit,
+                metadata_retention_days: entitlement.metadata_retention_days,
+                document_retention_hours: entitlement.document_retention_hours,
+                overage_job_unit: entitlement.overage_job_unit,
+                overage_price_cents: entitlement.overage_price_cents,
+            }),
+            usage,
+            overage_live_jobs,
+        })
+    }
+
+    pub async fn project_stripe_billing_event(
+        &self,
+        event: &StripeBillingEvent,
+        request_id: &str,
+    ) -> Result<StripeProjectionResult, StorageError> {
+        if event.id.is_empty()
+            || event.event_type.is_empty()
+            || event.payload_sha256.len() != 64
+            || event
+                .plan
+                .as_deref()
+                .is_some_and(|plan| !matches!(plan, "free" | "pro"))
+            || event
+                .billing_interval
+                .as_deref()
+                .is_some_and(|interval| !matches!(interval, "monthly" | "annual"))
+            || event.status.as_deref().is_some_and(|status| {
+                !matches!(
+                    status,
+                    "active" | "trialing" | "past_due" | "unpaid" | "paused" | "cancelled"
+                )
+            })
+        {
+            return Err(StorageError::InvalidData(
+                "invalid Stripe billing projection".into(),
+            ));
+        }
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 9))")
+            .bind(&event.id)
+            .execute(&mut *transaction)
+            .await?;
+        if let Some(stored_hash) = sqlx::query_scalar::<_, String>(
+            "SELECT payload_sha256 FROM billing_webhook_receipts WHERE event_id = $1",
+        )
+        .bind(&event.id)
+        .fetch_optional(&mut *transaction)
+        .await?
+        {
+            transaction.commit().await?;
+            return if stored_hash == event.payload_sha256 {
+                Ok(StripeProjectionResult::Duplicate)
+            } else {
+                Err(StorageError::IdempotencyConflict)
+            };
+        }
+        let workspace: String = if let Some(reference) = &event.workspace_reference {
+            sqlx::query_scalar(
+                "SELECT id FROM workspaces
+                 WHERE platform_service_account_id IS NULL
+                   AND (
+                       id = $1
+                       OR (identity_provider = 'workos' AND identity_organization_id = $1)
+                       OR workos_organization_id = $1
+                   )
+                 ORDER BY CASE WHEN id = $1 THEN 0 ELSE 1 END
+                 LIMIT 1",
+            )
+            .bind(reference)
+            .fetch_optional(&mut *transaction)
+            .await?
+            .ok_or(StorageError::NotFound)?
+        } else if let Some(customer_id) = &event.customer_id {
+            sqlx::query_scalar(
+                "SELECT workspace_id FROM billing_customers WHERE stripe_customer_id = $1",
+            )
+            .bind(customer_id)
+            .fetch_optional(&mut *transaction)
+            .await?
+            .ok_or(StorageError::NotFound)?
+        } else {
+            return Err(StorageError::InvalidData(
+                "Stripe event has no workspace binding".into(),
+            ));
+        };
+        let workspace_id = workspace.parse().map_err(|error| {
+            StorageError::InvalidData(format!("workspace id `{workspace}`: {error}"))
+        })?;
+        if let Some(customer_id) = &event.customer_id {
+            sqlx::query(
+                "INSERT INTO billing_customers (
+                    workspace_id, stripe_customer_id
+                 ) VALUES ($1,$2)
+                 ON CONFLICT (workspace_id) DO UPDATE
+                 SET stripe_customer_id = EXCLUDED.stripe_customer_id, updated_at = now()",
+            )
+            .bind(&workspace)
+            .bind(customer_id)
+            .execute(&mut *transaction)
+            .await?;
+        }
+        let projected_plan = if event.status.is_some() {
+            if let Some(plan) = &event.plan {
+                Some(plan.clone())
+            } else {
+                sqlx::query_scalar("SELECT plan FROM billing_subscriptions WHERE workspace_id = $1")
+                    .bind(&workspace)
+                    .fetch_optional(&mut *transaction)
+                    .await?
+            }
+        } else {
+            None
+        };
+        let projected_interval = if event.status.is_some() {
+            if let Some(interval) = &event.billing_interval {
+                Some(interval.clone())
+            } else {
+                sqlx::query_scalar(
+                    "SELECT billing_interval FROM billing_subscriptions WHERE workspace_id = $1",
+                )
+                .bind(&workspace)
+                .fetch_optional(&mut *transaction)
+                .await?
+            }
+        } else {
+            None
+        };
+        if let (Some(plan), Some(status)) = (&projected_plan, &event.status) {
+            snapshot_previous_usage_period(&mut transaction, workspace_id, &workspace, event)
+                .await?;
+            let grace_ends_at =
+                (status == "past_due").then(|| event.created_at + chrono::Duration::days(7));
+            let projected = sqlx::query(
+                "INSERT INTO billing_subscriptions (
+                    workspace_id, stripe_subscription_id, plan, billing_interval, status,
+                    current_period_start, current_period_end, grace_ends_at,
+                    cancel_at_period_end, stripe_event_id, stripe_event_created_at
+                 ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+                 ON CONFLICT (workspace_id) DO UPDATE SET
+                    stripe_subscription_id = COALESCE(
+                        EXCLUDED.stripe_subscription_id,
+                        billing_subscriptions.stripe_subscription_id
+                    ),
+                    plan = EXCLUDED.plan,
+                    billing_interval = EXCLUDED.billing_interval,
+                    status = EXCLUDED.status,
+                    current_period_start = COALESCE(
+                        EXCLUDED.current_period_start,
+                        billing_subscriptions.current_period_start
+                    ),
+                    current_period_end = COALESCE(
+                        EXCLUDED.current_period_end,
+                        billing_subscriptions.current_period_end
+                    ),
+                    grace_ends_at = CASE
+                        WHEN EXCLUDED.status = 'past_due'
+                            THEN COALESCE(
+                                billing_subscriptions.grace_ends_at,
+                                EXCLUDED.grace_ends_at
+                            )
+                        ELSE NULL
+                    END,
+                    cancel_at_period_end = EXCLUDED.cancel_at_period_end,
+                    stripe_event_id = EXCLUDED.stripe_event_id,
+                    stripe_event_created_at = EXCLUDED.stripe_event_created_at,
+                    updated_at = now()
+                 WHERE billing_subscriptions.stripe_event_created_at IS NULL
+                    OR (
+                        billing_subscriptions.stripe_event_created_at,
+                        COALESCE(billing_subscriptions.stripe_event_id, '')
+                    ) <= (EXCLUDED.stripe_event_created_at, EXCLUDED.stripe_event_id)
+                 RETURNING workspace_id",
+            )
+            .bind(&workspace)
+            .bind(&event.subscription_id)
+            .bind(plan)
+            .bind(projected_interval.as_deref().unwrap_or("monthly"))
+            .bind(status)
+            .bind(event.current_period_start)
+            .bind(event.current_period_end)
+            .bind(grace_ends_at)
+            .bind(event.cancel_at_period_end)
+            .bind(&event.id)
+            .bind(event.created_at)
+            .fetch_optional(&mut *transaction)
+            .await?;
+            if projected.is_some() {
+                upsert_plan_entitlement(&mut transaction, workspace_id, plan).await?;
+            }
+        }
+        sqlx::query(
+            "INSERT INTO billing_webhook_receipts (
+                event_id, event_type, payload_sha256, stripe_created_at
+             ) VALUES ($1,$2,$3,$4)",
+        )
+        .bind(&event.id)
+        .bind(&event.event_type)
+        .bind(&event.payload_sha256)
+        .bind(event.created_at)
+        .execute(&mut *transaction)
+        .await?;
+        insert_platform_audit_event(
+            &mut transaction,
+            workspace_id,
+            None,
+            "stripe_webhook",
+            None,
+            "billing.subscription_projected",
+            event.subscription_id.as_deref().unwrap_or(&event.id),
+            serde_json::json!({
+                "event_type": event.event_type,
+                "plan": event.plan,
+                "status": event.status
+            }),
+            Some(request_id),
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(StripeProjectionResult::Applied)
+    }
+
+    pub async fn prepare_due_usage_exports(&self, now: DateTime<Utc>) -> Result<u64, StorageError> {
+        let result = sqlx::query(
+            "WITH due AS (
+                SELECT
+                    subscription.workspace_id,
+                    subscription.current_period_start AS period_start,
+                    subscription.current_period_end AS period_end,
+                    CASE
+                        WHEN subscription.billing_interval = 'annual' THEN $3::bigint
+                        ELSE entitlement.included_jobs
+                    END AS included_jobs,
+                    COALESCE(entitlement.job_overage_unit, $4)::bigint AS overage_unit
+                FROM billing_subscriptions subscription
+                JOIN billing_customers customer
+                  ON customer.workspace_id = subscription.workspace_id
+                JOIN workspace_entitlements entitlement
+                  ON entitlement.workspace_id = subscription.workspace_id
+                WHERE subscription.plan = 'pro'
+                  AND subscription.current_period_start IS NOT NULL
+                  AND subscription.current_period_end IS NOT NULL
+                  AND subscription.current_period_end <= $1
+            ),
+            billed_workspaces AS (
+                SELECT due.workspace_id AS owner_workspace_id,
+                       due.workspace_id AS billed_workspace_id
+                FROM due
+                UNION
+                SELECT due.workspace_id, child.id
+                FROM due
+                JOIN platform_service_accounts account
+                  ON account.owner_workspace_id = due.workspace_id
+                 AND account.revoked_at IS NULL
+                JOIN workspaces child
+                  ON child.platform_service_account_id = account.id
+            ),
+            metered AS (
+                SELECT
+                    due.*,
+                    COALESCE(sum(ledger.units), 0)::bigint AS accepted_jobs
+                FROM due
+                JOIN billed_workspaces billed
+                  ON billed.owner_workspace_id = due.workspace_id
+                LEFT JOIN usage_ledger ledger
+                  ON ledger.workspace_id = billed.billed_workspace_id
+                 AND ledger.kind = 'print_job_accepted'
+                 AND ledger.occurred_at >= due.period_start
+                 AND ledger.occurred_at < due.period_end
+                GROUP BY
+                    due.workspace_id, due.period_start, due.period_end,
+                    due.included_jobs, due.overage_unit
+            )
+            INSERT INTO usage_exports (
+                id, workspace_id, period_start, period_end, units,
+                stripe_event_identifier, state
+            )
+            SELECT
+                $2 || '_' || metered.workspace_id || '_' ||
+                    extract(epoch FROM metered.period_start)::bigint::text,
+                metered.workspace_id,
+                metered.period_start,
+                metered.period_end,
+                (
+                    greatest(metered.accepted_jobs - metered.included_jobs, 0)
+                    + metered.overage_unit - 1
+                ) / metered.overage_unit,
+                'spool-overage-' || metered.workspace_id || '-' ||
+                    extract(epoch FROM metered.period_start)::bigint::text,
+                'pending'
+            FROM metered
+            WHERE metered.accepted_jobs > metered.included_jobs
+            ON CONFLICT (workspace_id, period_start, period_end) DO NOTHING",
+        )
+        .bind(now)
+        .bind(EventId::new().to_string())
+        .bind(PRO_ANNUAL_INCLUDED_JOBS)
+        .bind(OVERAGE_BLOCK_JOBS)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
+    pub async fn claim_usage_export(
+        &self,
+        now: DateTime<Utc>,
+    ) -> Result<Option<ClaimedUsageExport>, StorageError> {
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query(
+            "UPDATE usage_exports
+             SET state = 'failed', claim_token = NULL, claimed_at = NULL,
+                 next_attempt_at = $1
+             WHERE state = 'submitting'
+               AND claimed_at < $1 - interval '10 minutes'",
+        )
+        .bind(now)
+        .execute(&mut *transaction)
+        .await?;
+        let claim_token = EventId::new().to_string();
+        let row = sqlx::query(
+            "WITH candidate AS (
+                SELECT export.id
+                FROM usage_exports export
+                WHERE export.state IN ('pending', 'failed')
+                  AND export.attempts < 10
+                  AND (export.next_attempt_at IS NULL OR export.next_attempt_at <= $1)
+                  AND EXISTS (
+                      SELECT 1 FROM billing_customers customer
+                      WHERE customer.workspace_id = export.workspace_id
+                  )
+                ORDER BY export.created_at
+                FOR UPDATE SKIP LOCKED
+                LIMIT 1
+             )
+             UPDATE usage_exports export
+             SET state = 'submitting', attempts = attempts + 1,
+                 claim_token = $2, claimed_at = $1, last_error_code = NULL
+             FROM candidate, billing_customers customer
+             WHERE export.id = candidate.id
+               AND customer.workspace_id = export.workspace_id
+             RETURNING
+                export.id, export.workspace_id, export.period_start, export.period_end,
+                export.units, export.stripe_event_identifier,
+                customer.stripe_customer_id, export.claim_token",
+        )
+        .bind(now)
+        .bind(&claim_token)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let workspace: String = row.try_get("workspace_id")?;
+        Ok(Some(ClaimedUsageExport {
+            id: row.try_get("id")?,
+            workspace_id: workspace.parse().map_err(|error| {
+                StorageError::InvalidData(format!("workspace id `{workspace}`: {error}"))
+            })?,
+            period_start: row.try_get("period_start")?,
+            period_end: row.try_get("period_end")?,
+            overage_blocks: row.try_get("units")?,
+            stripe_customer_id: row.try_get("stripe_customer_id")?,
+            stripe_event_identifier: row.try_get("stripe_event_identifier")?,
+            claim_token: row.try_get("claim_token")?,
+        }))
+    }
+
+    pub async fn complete_usage_export(
+        &self,
+        export_id: &str,
+        claim_token: &str,
+    ) -> Result<(), StorageError> {
+        let updated = sqlx::query(
+            "UPDATE usage_exports
+             SET state = 'submitted', submitted_at = now(),
+                 claim_token = NULL, claimed_at = NULL, next_attempt_at = NULL
+             WHERE id = $1 AND claim_token = $2 AND state = 'submitting'",
+        )
+        .bind(export_id)
+        .bind(claim_token)
+        .execute(&self.pool)
+        .await?;
+        if updated.rows_affected() != 1 {
+            return Err(StorageError::ConcurrentStateChange);
+        }
+        Ok(())
+    }
+
+    pub async fn fail_usage_export(
+        &self,
+        export_id: &str,
+        claim_token: &str,
+        error_code: &str,
+    ) -> Result<(), StorageError> {
+        let updated = sqlx::query(
+            "UPDATE usage_exports
+             SET state = 'failed', last_error_code = $3,
+                 claim_token = NULL, claimed_at = NULL,
+                 next_attempt_at = now() + interval '5 minutes'
+             WHERE id = $1 AND claim_token = $2 AND state = 'submitting'",
+        )
+        .bind(export_id)
+        .bind(claim_token)
+        .bind(error_code)
+        .execute(&self.pool)
+        .await?;
+        if updated.rows_affected() != 1 {
+            return Err(StorageError::ConcurrentStateChange);
+        }
         Ok(())
     }
 
@@ -2627,14 +3284,27 @@ impl PostgresStore {
         &self,
         device_code_hash: &str,
     ) -> Result<EnrolledAgent, StorageError> {
+        self.exchange_device_authorization_with_billing(device_code_hash, false)
+            .await
+    }
+
+    pub async fn exchange_device_authorization_with_billing(
+        &self,
+        device_code_hash: &str,
+        enforce_cloud_billing: bool,
+    ) -> Result<EnrolledAgent, StorageError> {
         let mut transaction = self.pool.begin().await?;
         let row = sqlx::query(
             "SELECT id, workspace_id, environment_id, device_public_key,
                     installation_id, proposed_name, hostname, platform,
-                    architecture, agent_version, protocol_version
+                    architecture, agent_version, protocol_version, state,
+                    enrolled_agent_id
              FROM device_authorizations
-             WHERE device_code_hash = $1 AND state = 'approved'
-               AND expires_at > now() AND consumed_at IS NULL
+             WHERE device_code_hash = $1
+               AND (
+                   (state = 'approved' AND expires_at > now() AND consumed_at IS NULL)
+                   OR (state = 'consumed' AND enrolled_agent_id IS NOT NULL)
+               )
              FOR UPDATE",
         )
         .bind(device_code_hash)
@@ -2650,6 +3320,73 @@ impl PostgresStore {
         let environment_id: EnvironmentId = environment_text.parse().map_err(|error| {
             StorageError::InvalidData(format!("environment id `{environment_text}`: {error}"))
         })?;
+        if row.try_get::<String, _>("state")? == "consumed" {
+            let existing: String = row.try_get("enrolled_agent_id")?;
+            transaction.commit().await?;
+            return Ok(EnrolledAgent {
+                agent_id: existing.parse().map_err(|error| {
+                    StorageError::InvalidData(format!("agent id `{existing}`: {error}"))
+                })?,
+                workspace_id,
+                environment_id,
+            });
+        }
+        let installation_id: String = row.try_get("installation_id")?;
+        if let Some(existing) = sqlx::query_scalar::<_, String>(
+            "SELECT id FROM agents
+             WHERE workspace_id = $1 AND environment_id = $2
+               AND installation_id = $3 AND revoked_at IS NULL
+             FOR UPDATE",
+        )
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(&installation_id)
+        .fetch_optional(&mut *transaction)
+        .await?
+        {
+            sqlx::query(
+                "UPDATE agents SET
+                    name = $4, public_key = $5, os = $6, architecture = $7,
+                    version = $8, protocol_version = $9, state = 'offline',
+                    last_seen_at = now(),
+                    metadata = jsonb_build_object(
+                        'hostname', $10::text, 'pairing', 'browser'
+                    )
+                 WHERE id = $1 AND workspace_id = $2 AND environment_id = $3",
+            )
+            .bind(&existing)
+            .bind(workspace_id.to_string())
+            .bind(environment_id.to_string())
+            .bind(row.try_get::<String, _>("proposed_name")?)
+            .bind(row.try_get::<Vec<u8>, _>("device_public_key")?)
+            .bind(row.try_get::<String, _>("platform")?)
+            .bind(row.try_get::<String, _>("architecture")?)
+            .bind(row.try_get::<String, _>("agent_version")?)
+            .bind(row.try_get::<i32, _>("protocol_version")?)
+            .bind(row.try_get::<String, _>("hostname")?)
+            .execute(&mut *transaction)
+            .await?;
+            sqlx::query(
+                "UPDATE device_authorizations
+                 SET state = 'consumed', consumed_at = now(), enrolled_agent_id = $2
+                 WHERE id = $1 AND state = 'approved'",
+            )
+            .bind(&authorization_id)
+            .bind(&existing)
+            .execute(&mut *transaction)
+            .await?;
+            transaction.commit().await?;
+            return Ok(EnrolledAgent {
+                agent_id: existing.parse().map_err(|error| {
+                    StorageError::InvalidData(format!("agent id `{existing}`: {error}"))
+                })?,
+                workspace_id,
+                environment_id,
+            });
+        }
+        if enforce_cloud_billing {
+            enforce_node_admission(&mut transaction, workspace_id).await?;
+        }
         let agent_id = AgentId::new();
         sqlx::query(
             "INSERT INTO agents (
@@ -2665,7 +3402,7 @@ impl PostgresStore {
         .bind(workspace_id.to_string())
         .bind(environment_id.to_string())
         .bind(row.try_get::<String, _>("proposed_name")?)
-        .bind(row.try_get::<String, _>("installation_id")?)
+        .bind(installation_id)
         .bind(row.try_get::<Vec<u8>, _>("device_public_key")?)
         .bind(row.try_get::<String, _>("platform")?)
         .bind(row.try_get::<String, _>("architecture")?)
@@ -2676,10 +3413,11 @@ impl PostgresStore {
         .await?;
         sqlx::query(
             "UPDATE device_authorizations
-             SET state = 'consumed', consumed_at = now()
+             SET state = 'consumed', consumed_at = now(), enrolled_agent_id = $2
              WHERE id = $1 AND state = 'approved'",
         )
         .bind(authorization_id)
+        .bind(agent_id.to_string())
         .execute(&mut *transaction)
         .await?;
         transaction.commit().await?;
@@ -2701,10 +3439,38 @@ impl PostgresStore {
         version: &str,
         protocol_version: u16,
     ) -> Result<EnrolledAgent, StorageError> {
+        self.enrol_agent_with_billing(
+            secret_hash,
+            public_key,
+            name,
+            hostname,
+            platform,
+            architecture,
+            version,
+            protocol_version,
+            false,
+        )
+        .await
+    }
+
+    pub async fn enrol_agent_with_billing(
+        &self,
+        secret_hash: &str,
+        public_key: &[u8],
+        name: &str,
+        hostname: &str,
+        platform: &str,
+        architecture: &str,
+        version: &str,
+        protocol_version: u16,
+        enforce_cloud_billing: bool,
+    ) -> Result<EnrolledAgent, StorageError> {
         let mut transaction = self.pool.begin().await?;
         let row = sqlx::query(
-            "SELECT id, workspace_id, environment_id FROM enrolment_tokens
-             WHERE secret_hash = $1 AND consumed_at IS NULL AND expires_at > now()
+            "SELECT id, workspace_id, environment_id, consumed_at
+             FROM enrolment_tokens
+             WHERE secret_hash = $1
+               AND (expires_at > now() OR consumed_at IS NOT NULL)
              FOR UPDATE",
         )
         .bind(secret_hash)
@@ -2720,8 +3486,62 @@ impl PostgresStore {
         let environment_id: EnvironmentId = environment_text.parse().map_err(|error| {
             StorageError::InvalidData(format!("environment id `{environment_text}`: {error}"))
         })?;
-        let agent_id = AgentId::new();
         let installation_id = format!("{}:{:x}", hostname, Sha256::digest(public_key));
+        if let Some(existing) = sqlx::query_scalar::<_, String>(
+            "SELECT id FROM agents
+             WHERE workspace_id = $1 AND environment_id = $2
+               AND installation_id = $3 AND revoked_at IS NULL
+             FOR UPDATE",
+        )
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(&installation_id)
+        .fetch_optional(&mut *transaction)
+        .await?
+        {
+            sqlx::query(
+                "UPDATE agents SET name = $4, public_key = $5, os = $6,
+                    architecture = $7, version = $8, protocol_version = $9,
+                    state = 'connected', last_seen_at = now()
+                 WHERE id = $1 AND workspace_id = $2 AND environment_id = $3",
+            )
+            .bind(&existing)
+            .bind(workspace_id.to_string())
+            .bind(environment_id.to_string())
+            .bind(name)
+            .bind(public_key)
+            .bind(platform)
+            .bind(architecture)
+            .bind(version)
+            .bind(i32::from(protocol_version))
+            .execute(&mut *transaction)
+            .await?;
+            sqlx::query(
+                "UPDATE enrolment_tokens
+                 SET consumed_at = COALESCE(consumed_at, now()) WHERE id = $1",
+            )
+            .bind(token_id)
+            .execute(&mut *transaction)
+            .await?;
+            transaction.commit().await?;
+            return Ok(EnrolledAgent {
+                agent_id: existing.parse().map_err(|error| {
+                    StorageError::InvalidData(format!("agent id `{existing}`: {error}"))
+                })?,
+                workspace_id,
+                environment_id,
+            });
+        }
+        if row
+            .try_get::<Option<DateTime<Utc>>, _>("consumed_at")?
+            .is_some()
+        {
+            return Err(StorageError::NotFound);
+        }
+        if enforce_cloud_billing {
+            enforce_node_admission(&mut transaction, workspace_id).await?;
+        }
+        let agent_id = AgentId::new();
         sqlx::query(
             "INSERT INTO agents (
                 id, workspace_id, environment_id, name, installation_id, public_key,
@@ -3134,12 +3954,51 @@ impl PostgresStore {
         })
     }
 
+    pub async fn delete_upload(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        upload_id: &str,
+    ) -> Result<(), StorageError> {
+        let deleted = sqlx::query(
+            "DELETE FROM uploads
+             WHERE id = $1 AND workspace_id = $2 AND environment_id = $3
+               AND NOT EXISTS (
+                   SELECT 1 FROM jobs
+                   WHERE jobs.workspace_id = uploads.workspace_id
+                     AND jobs.environment_id = uploads.environment_id
+                     AND jobs.payload->'content'->>'upload_id' = uploads.id
+               )",
+        )
+        .bind(upload_id)
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .execute(&self.pool)
+        .await?;
+        if deleted.rows_affected() != 1 {
+            return Err(StorageError::NotFound);
+        }
+        Ok(())
+    }
+
     pub async fn create_job(
         &self,
         job: &Job,
         agent_id: AgentId,
         idempotency_key: Option<&str>,
         request_bytes: &[u8],
+    ) -> Result<CreateJobResult, StorageError> {
+        self.create_cloud_job(job, agent_id, idempotency_key, request_bytes, false)
+            .await
+    }
+
+    pub async fn create_cloud_job(
+        &self,
+        job: &Job,
+        agent_id: AgentId,
+        idempotency_key: Option<&str>,
+        request_bytes: &[u8],
+        enforce_cloud_billing: bool,
     ) -> Result<CreateJobResult, StorageError> {
         let mut transaction = self.pool.begin().await?;
         let request_hash = format!("{:x}", Sha256::digest(request_bytes));
@@ -3156,6 +4015,10 @@ impl PostgresStore {
         {
             transaction.commit().await?;
             return Ok(CreateJobResult::Existing(existing));
+        }
+        if enforce_cloud_billing {
+            enforce_cloud_job_admission(&mut transaction, job.workspace_id, job.environment_id)
+                .await?;
         }
 
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
@@ -3714,13 +4577,15 @@ impl PostgresStore {
         .await?;
 
         if event.state == JobState::AcceptedBySpooler {
+            lock_billing_period(&mut transaction, workspace_id).await?;
             sqlx::query(
                 "INSERT INTO usage_ledger (
                     id, workspace_id, environment_id, job_id, kind, units, occurred_at
                  )
                  SELECT $1,$2,$3,$4,'print_job_accepted',1,$5
                  WHERE EXISTS (
-                   SELECT 1 FROM environments WHERE id = $3 AND kind = 'live'
+                   SELECT 1 FROM environments
+                   WHERE id = $3 AND workspace_id = $2 AND kind = 'live'
                  )
                  ON CONFLICT (job_id) WHERE kind = 'print_job_accepted' AND job_id IS NOT NULL
                  DO NOTHING",
@@ -4363,6 +5228,490 @@ fn workspace_from_row(row: &PgRow) -> Result<StoredWorkspace, StorageError> {
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
     })
+}
+
+struct BillingOwner {
+    workspace_id: WorkspaceId,
+    managed_by_platform: bool,
+}
+
+struct BillingEntitlementRecord {
+    plan: String,
+    included_live_jobs: i64,
+    node_limit: i32,
+    metadata_retention_days: i32,
+    document_retention_hours: i32,
+    accept_new_cloud_jobs: bool,
+    overage_job_unit: Option<i64>,
+    overage_price_cents: Option<i64>,
+}
+
+async fn lock_billing_period(
+    transaction: &mut Transaction<'_, Postgres>,
+    workspace_id: WorkspaceId,
+) -> Result<WorkspaceId, StorageError> {
+    let owner: String = sqlx::query_scalar(
+        "SELECT COALESCE(account.owner_workspace_id, workspace.id)
+         FROM workspaces workspace
+         LEFT JOIN platform_service_accounts account
+           ON account.id = workspace.platform_service_account_id
+          AND account.revoked_at IS NULL
+         WHERE workspace.id = $1",
+    )
+    .bind(workspace_id.to_string())
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(StorageError::NotFound)?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 10))")
+        .bind(format!("{owner}:{}", Utc::now().format("%Y-%m")))
+        .execute(&mut **transaction)
+        .await?;
+    owner
+        .parse()
+        .map_err(|error| StorageError::InvalidData(format!("workspace id `{owner}`: {error}")))
+}
+
+async fn enforce_cloud_job_admission(
+    transaction: &mut Transaction<'_, Postgres>,
+    workspace_id: WorkspaceId,
+    environment_id: EnvironmentId,
+) -> Result<(), StorageError> {
+    let environment_kind: String =
+        sqlx::query_scalar("SELECT kind FROM environments WHERE id = $1 AND workspace_id = $2")
+            .bind(environment_id.to_string())
+            .bind(workspace_id.to_string())
+            .fetch_optional(&mut **transaction)
+            .await?
+            .ok_or(StorageError::NotFound)?;
+    if environment_kind == "test" {
+        return Ok(());
+    }
+    if environment_kind != "live" {
+        return Err(StorageError::InvalidData("invalid environment kind".into()));
+    }
+    let owner = lock_billing_period(transaction, workspace_id).await?;
+    sqlx::query(
+        "INSERT INTO workspace_entitlements (
+            workspace_id, plan, included_jobs, node_limit,
+            metadata_retention_days, document_retention_hours,
+            accept_new_cloud_jobs, job_overage_unit, job_overage_cents
+         ) VALUES ($1,'free',$2,$3,$4,$5,true,NULL,NULL)
+         ON CONFLICT (workspace_id) DO NOTHING",
+    )
+    .bind(owner.to_string())
+    .bind(FREE_PLAN.included_jobs)
+    .bind(FREE_PLAN.node_limit)
+    .bind(FREE_PLAN.metadata_retention_days)
+    .bind(FREE_PLAN.document_retention_hours)
+    .execute(&mut **transaction)
+    .await?;
+    let row = sqlx::query(
+        "SELECT entitlement.plan, entitlement.included_jobs,
+                entitlement.accept_new_cloud_jobs,
+                subscription.status, subscription.grace_ends_at
+         FROM workspace_entitlements entitlement
+         LEFT JOIN billing_subscriptions subscription
+           ON subscription.workspace_id = entitlement.workspace_id
+         WHERE entitlement.workspace_id = $1
+         FOR SHARE OF entitlement",
+    )
+    .bind(owner.to_string())
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(StorageError::NotFound)?;
+    let plan: String = row.try_get("plan")?;
+    let accept_new_cloud_jobs: bool = row.try_get("accept_new_cloud_jobs")?;
+    let subscription_status: Option<String> = row.try_get("status")?;
+    let grace_ends_at: Option<DateTime<Utc>> = row.try_get("grace_ends_at")?;
+    let subscription_allows = subscription_status.as_deref().is_none_or(|status| {
+        matches!(status, "active" | "trialing")
+            || (status == "past_due" && grace_ends_at.is_some_and(|end| end > Utc::now()))
+    });
+    if !accept_new_cloud_jobs || !subscription_allows {
+        return Err(StorageError::BillingBlocked);
+    }
+    if plan == "pro" {
+        return Ok(());
+    }
+    if plan != "free" {
+        return Err(StorageError::InvalidData("unsupported billing plan".into()));
+    }
+    let included_jobs: i64 = row.try_get("included_jobs")?;
+    let accepted_jobs: i64 = sqlx::query_scalar(
+        "WITH billed_workspaces AS (
+            SELECT $1::text AS workspace_id
+            UNION
+            SELECT child.id
+            FROM platform_service_accounts account
+            JOIN workspaces child
+              ON child.platform_service_account_id = account.id
+            WHERE account.owner_workspace_id = $1
+              AND account.revoked_at IS NULL
+         )
+         SELECT COALESCE(sum(ledger.units), 0)::bigint
+         FROM usage_ledger ledger
+         JOIN billed_workspaces billed ON billed.workspace_id = ledger.workspace_id
+         WHERE ledger.kind = 'print_job_accepted'
+           AND ledger.occurred_at >= date_trunc('month', now())
+           AND ledger.occurred_at < date_trunc('month', now()) + interval '1 month'",
+    )
+    .bind(owner.to_string())
+    .fetch_one(&mut **transaction)
+    .await?;
+    if accepted_jobs >= included_jobs {
+        return Err(StorageError::QuotaExceeded);
+    }
+    Ok(())
+}
+
+async fn enforce_node_admission(
+    transaction: &mut Transaction<'_, Postgres>,
+    workspace_id: WorkspaceId,
+) -> Result<(), StorageError> {
+    let owner: String = sqlx::query_scalar(
+        "SELECT COALESCE(account.owner_workspace_id, workspace.id)
+         FROM workspaces workspace
+         LEFT JOIN platform_service_accounts account
+           ON account.id = workspace.platform_service_account_id
+          AND account.revoked_at IS NULL
+         WHERE workspace.id = $1",
+    )
+    .bind(workspace_id.to_string())
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(StorageError::NotFound)?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 11))")
+        .bind(&owner)
+        .execute(&mut **transaction)
+        .await?;
+    sqlx::query(
+        "INSERT INTO workspace_entitlements (
+            workspace_id, plan, included_jobs, node_limit,
+            metadata_retention_days, document_retention_hours,
+            accept_new_cloud_jobs, job_overage_unit, job_overage_cents
+         ) VALUES ($1,'free',$2,$3,$4,$5,true,NULL,NULL)
+         ON CONFLICT (workspace_id) DO NOTHING",
+    )
+    .bind(&owner)
+    .bind(FREE_PLAN.included_jobs)
+    .bind(FREE_PLAN.node_limit)
+    .bind(FREE_PLAN.metadata_retention_days)
+    .bind(FREE_PLAN.document_retention_hours)
+    .execute(&mut **transaction)
+    .await?;
+    let node_limit: i64 = sqlx::query_scalar(
+        "SELECT node_limit::bigint FROM workspace_entitlements WHERE workspace_id = $1",
+    )
+    .bind(&owner)
+    .fetch_one(&mut **transaction)
+    .await?;
+    let active_nodes: i64 = sqlx::query_scalar(
+        "WITH billed_workspaces AS (
+            SELECT $1::text AS workspace_id
+            UNION
+            SELECT child.id
+            FROM platform_service_accounts account
+            JOIN workspaces child
+              ON child.platform_service_account_id = account.id
+            WHERE account.owner_workspace_id = $1
+              AND account.revoked_at IS NULL
+         )
+         SELECT count(*)::bigint
+         FROM agents agent
+         JOIN billed_workspaces billed ON billed.workspace_id = agent.workspace_id
+         WHERE agent.revoked_at IS NULL",
+    )
+    .bind(&owner)
+    .fetch_one(&mut **transaction)
+    .await?;
+    if active_nodes >= node_limit {
+        return Err(StorageError::NodeQuotaExceeded);
+    }
+    Ok(())
+}
+
+async fn snapshot_previous_usage_period(
+    transaction: &mut Transaction<'_, Postgres>,
+    workspace_id: WorkspaceId,
+    workspace: &str,
+    event: &StripeBillingEvent,
+) -> Result<(), StorageError> {
+    let (Some(next_start), Some(next_end)) = (event.current_period_start, event.current_period_end)
+    else {
+        return Ok(());
+    };
+    let Some(current) = sqlx::query(
+        "SELECT
+            plan, billing_interval, current_period_start, current_period_end,
+            stripe_event_created_at, stripe_event_id
+         FROM billing_subscriptions
+         WHERE workspace_id = $1
+         FOR UPDATE",
+    )
+    .bind(workspace)
+    .fetch_optional(&mut **transaction)
+    .await?
+    else {
+        return Ok(());
+    };
+    let current_event_at =
+        current.try_get::<Option<DateTime<Utc>>, _>("stripe_event_created_at")?;
+    let current_event_id = current.try_get::<Option<String>, _>("stripe_event_id")?;
+    let incoming_is_current = current_event_at.is_none_or(|created_at| {
+        (created_at, current_event_id.as_deref().unwrap_or(""))
+            <= (event.created_at, event.id.as_str())
+    });
+    let previous_period = (
+        current.try_get::<Option<DateTime<Utc>>, _>("current_period_start")?,
+        current.try_get::<Option<DateTime<Utc>>, _>("current_period_end")?,
+    );
+    if !incoming_is_current || current.try_get::<String, _>("plan")? != "pro" {
+        return Ok(());
+    }
+    if let (Some(previous_start), Some(previous_end)) = previous_period
+        && (previous_start, previous_end) != (next_start, next_end)
+    {
+        materialize_usage_export(
+            transaction,
+            workspace_id,
+            previous_start,
+            previous_end,
+            &current.try_get::<String, _>("billing_interval")?,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+async fn materialize_usage_export(
+    transaction: &mut Transaction<'_, Postgres>,
+    workspace_id: WorkspaceId,
+    period_start: DateTime<Utc>,
+    period_end: DateTime<Utc>,
+    billing_interval: &str,
+) -> Result<(), StorageError> {
+    if period_end <= period_start {
+        return Err(StorageError::InvalidData(
+            "invalid Stripe usage export period".into(),
+        ));
+    }
+    let identifier = format!("spool-overage-{workspace_id}-{}", period_start.timestamp());
+    sqlx::query(
+        "WITH billed_workspaces AS (
+            SELECT $1::text AS workspace_id
+            UNION
+            SELECT child.id
+            FROM platform_service_accounts account
+            JOIN workspaces child
+              ON child.platform_service_account_id = account.id
+            WHERE account.owner_workspace_id = $1
+              AND account.revoked_at IS NULL
+         ),
+         metered AS (
+            SELECT
+                COALESCE(sum(ledger.units), 0)::bigint AS accepted_jobs,
+                CASE
+                    WHEN $4 = 'annual' THEN $7::bigint
+                    ELSE entitlement.included_jobs
+                END AS included_jobs,
+                COALESCE(entitlement.job_overage_unit, $8)::bigint AS overage_unit
+            FROM workspace_entitlements entitlement
+            JOIN billed_workspaces billed ON true
+            LEFT JOIN usage_ledger ledger
+              ON ledger.workspace_id = billed.workspace_id
+             AND ledger.kind = 'print_job_accepted'
+             AND ledger.occurred_at >= $2
+             AND ledger.occurred_at < $3
+            WHERE entitlement.workspace_id = $1
+            GROUP BY entitlement.included_jobs, entitlement.job_overage_unit
+         )
+         INSERT INTO usage_exports (
+            id, workspace_id, period_start, period_end, units,
+            stripe_event_identifier, state
+         )
+         SELECT
+            $5,$1,$2,$3,
+            (
+                greatest(metered.accepted_jobs - metered.included_jobs, 0)
+                + metered.overage_unit - 1
+            ) / metered.overage_unit,
+            $6,'pending'
+         FROM metered
+         WHERE metered.accepted_jobs > metered.included_jobs
+         ON CONFLICT (workspace_id, period_start, period_end) DO NOTHING",
+    )
+    .bind(workspace_id.to_string())
+    .bind(period_start)
+    .bind(period_end)
+    .bind(billing_interval)
+    .bind(EventId::new().to_string())
+    .bind(identifier)
+    .bind(PRO_ANNUAL_INCLUDED_JOBS)
+    .bind(OVERAGE_BLOCK_JOBS)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
+async fn billing_owner(
+    pool: &PgPool,
+    workspace_id: WorkspaceId,
+) -> Result<BillingOwner, StorageError> {
+    let row = sqlx::query(
+        "SELECT
+            COALESCE(account.owner_workspace_id, workspace.id) AS billing_workspace_id,
+            account.owner_workspace_id IS NOT NULL AS managed_by_platform
+         FROM workspaces workspace
+         LEFT JOIN platform_service_accounts account
+           ON account.id = workspace.platform_service_account_id
+          AND account.revoked_at IS NULL
+         WHERE workspace.id = $1",
+    )
+    .bind(workspace_id.to_string())
+    .fetch_optional(pool)
+    .await?
+    .ok_or(StorageError::NotFound)?;
+    let owner: String = row.try_get("billing_workspace_id")?;
+    Ok(BillingOwner {
+        workspace_id: owner.parse().map_err(|error| {
+            StorageError::InvalidData(format!("workspace id `{owner}`: {error}"))
+        })?,
+        managed_by_platform: row.try_get("managed_by_platform")?,
+    })
+}
+
+async fn ensure_billing_entitlement(
+    pool: &PgPool,
+    workspace_id: WorkspaceId,
+) -> Result<BillingEntitlementRecord, StorageError> {
+    sqlx::query(
+        "INSERT INTO workspace_entitlements (
+            workspace_id, plan, included_jobs, node_limit,
+            metadata_retention_days, document_retention_hours,
+            accept_new_cloud_jobs, job_overage_unit, job_overage_cents
+         )
+         SELECT $1,'free',$2,$3,$4,$5,true,NULL,NULL
+         WHERE EXISTS (
+             SELECT 1 FROM workspaces
+             WHERE id = $1 AND platform_service_account_id IS NULL
+         )
+         ON CONFLICT (workspace_id) DO NOTHING",
+    )
+    .bind(workspace_id.to_string())
+    .bind(FREE_PLAN.included_jobs)
+    .bind(FREE_PLAN.node_limit)
+    .bind(FREE_PLAN.metadata_retention_days)
+    .bind(FREE_PLAN.document_retention_hours)
+    .execute(pool)
+    .await?;
+    let row = sqlx::query(
+        "SELECT plan, included_jobs, node_limit, metadata_retention_days,
+                document_retention_hours, accept_new_cloud_jobs,
+                job_overage_unit, job_overage_cents
+         FROM workspace_entitlements WHERE workspace_id = $1",
+    )
+    .bind(workspace_id.to_string())
+    .fetch_optional(pool)
+    .await?
+    .ok_or(StorageError::NotFound)?;
+    Ok(BillingEntitlementRecord {
+        plan: row.try_get("plan")?,
+        included_live_jobs: row.try_get("included_jobs")?,
+        node_limit: row.try_get("node_limit")?,
+        metadata_retention_days: row.try_get("metadata_retention_days")?,
+        document_retention_hours: row.try_get("document_retention_hours")?,
+        accept_new_cloud_jobs: row.try_get("accept_new_cloud_jobs")?,
+        overage_job_unit: row.try_get("job_overage_unit")?,
+        overage_price_cents: row.try_get("job_overage_cents")?,
+    })
+}
+
+async fn billing_owner_usage(
+    pool: &PgPool,
+    owner_workspace_id: WorkspaceId,
+    period_start: DateTime<Utc>,
+    period_end: DateTime<Utc>,
+) -> Result<StoredUsageSummary, StorageError> {
+    let row = sqlx::query(
+        "WITH billed_workspaces AS (
+            SELECT $1::text AS workspace_id
+            UNION
+            SELECT child.id
+            FROM platform_service_accounts account
+            JOIN workspaces child
+              ON child.platform_service_account_id = account.id
+            WHERE account.owner_workspace_id = $1
+              AND account.revoked_at IS NULL
+         )
+         SELECT
+            COALESCE((
+                SELECT sum(ledger.units)
+                FROM usage_ledger ledger
+                JOIN billed_workspaces billed ON billed.workspace_id = ledger.workspace_id
+                WHERE ledger.kind = 'print_job_accepted'
+                  AND ledger.occurred_at >= $2 AND ledger.occurred_at < $3
+            ), 0)::bigint AS accepted_live_jobs,
+            (
+                SELECT count(*)
+                FROM agents agent
+                JOIN billed_workspaces billed ON billed.workspace_id = agent.workspace_id
+                WHERE agent.revoked_at IS NULL
+                  AND agent.last_seen_at >= $2 AND agent.last_seen_at < $3
+            )::bigint AS active_nodes",
+    )
+    .bind(owner_workspace_id.to_string())
+    .bind(period_start)
+    .bind(period_end)
+    .fetch_one(pool)
+    .await?;
+    Ok(StoredUsageSummary {
+        period_start,
+        period_end,
+        accepted_live_jobs: row.try_get("accepted_live_jobs")?,
+        active_nodes: row.try_get("active_nodes")?,
+    })
+}
+
+async fn upsert_plan_entitlement(
+    transaction: &mut Transaction<'_, Postgres>,
+    workspace_id: WorkspaceId,
+    plan: &str,
+) -> Result<(), StorageError> {
+    let defaults = match plan {
+        "free" => FREE_PLAN,
+        "pro" => PRO_PLAN,
+        _ => {
+            return Err(StorageError::InvalidData("unsupported billing plan".into()));
+        }
+    };
+    sqlx::query(
+        "INSERT INTO workspace_entitlements (
+            workspace_id, plan, included_jobs, node_limit,
+            metadata_retention_days, document_retention_hours,
+            accept_new_cloud_jobs, job_overage_unit, job_overage_cents
+         ) VALUES ($1,$2,$3,$4,$5,$6,true,$7,$8)
+         ON CONFLICT (workspace_id) DO UPDATE SET
+            plan = EXCLUDED.plan,
+            included_jobs = EXCLUDED.included_jobs,
+            node_limit = EXCLUDED.node_limit,
+            metadata_retention_days = EXCLUDED.metadata_retention_days,
+            document_retention_hours = EXCLUDED.document_retention_hours,
+            accept_new_cloud_jobs = true,
+            job_overage_unit = EXCLUDED.job_overage_unit,
+            job_overage_cents = EXCLUDED.job_overage_cents,
+            updated_at = now()",
+    )
+    .bind(workspace_id.to_string())
+    .bind(plan)
+    .bind(defaults.included_jobs)
+    .bind(defaults.node_limit)
+    .bind(defaults.metadata_retention_days)
+    .bind(defaults.document_retention_hours)
+    .bind(defaults.overage_unit)
+    .bind(defaults.overage_cents)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
 }
 
 fn platform_account_from_row(row: &PgRow) -> Result<StoredPlatformAccount, StorageError> {

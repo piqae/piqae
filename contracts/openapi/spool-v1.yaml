@@ -24,6 +24,8 @@ tags:
     description: Self-hosted local-owner sessions and tenant identity projections.
   - name: Platform
     description: Manage customer workspaces from a trusted platform backend or owner dashboard.
+  - name: Billing
+    description: Inspect canonical Cloud entitlements, accepted-job usage, and Stripe projections.
   - name: Jobs
     description: Register and observe durable print jobs.
   - name: Printers
@@ -218,6 +220,7 @@ paths:
             application/json:
               schema: { type: integer, minimum: 1 }
         "400": { $ref: "#/components/responses/Error" }
+        "402": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
     get:
       summary: List PrintNode-compatible print jobs
@@ -613,6 +616,81 @@ paths:
         "401": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
+  /v1/billing/summary:
+    get:
+      summary: Inspect the workspace billing projection and current-period usage
+      description: |
+        Returns the canonical Free or Pro entitlement for Spool Cloud. For a
+        platform owner workspace, accepted-job usage includes its owned customer
+        workspaces. Self-hosted deployments return `enabled: false` and never
+        enforce Cloud limits.
+      tags: [Billing]
+      operationId: getBillingSummary
+      responses:
+        "200":
+          description: Billing state for the authenticated workspace.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BillingSummary" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /v1/usage:
+    get:
+      summary: Inspect immutable accepted-job usage for the authenticated workspace
+      description: |
+        Counts each Live-environment job exactly once when an agent reports
+        `accepted_by_spooler`. Test jobs, retries, and later delivery states do
+        not add usage. This tenant-scoped endpoint never exposes sibling
+        platform-customer usage.
+      tags: [Billing]
+      operationId: getUsage
+      parameters:
+        - name: month
+          in: query
+          required: false
+          description: UTC calendar month. Defaults to the current month.
+          schema:
+            type: string
+            pattern: '^[0-9]{4}-(0[1-9]|1[0-2])$'
+      responses:
+        "200":
+          description: Tenant-scoped accepted-job usage.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UsageSummary" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+  /v1/integrations/stripe/webhook:
+    post:
+      summary: Project a signed Stripe billing event
+      description: |
+        Spool Cloud only. The raw request is verified against
+        `Stripe-Signature`; event IDs are idempotent and an older event cannot
+        overwrite a newer subscription projection.
+      tags: [Billing]
+      operationId: projectStripeWebhook
+      security: []
+      parameters:
+        - name: Stripe-Signature
+          in: header
+          required: true
+          schema: { type: string, maxLength: 4096 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "200":
+          description: Event accepted or previously projected.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/StripeWebhookReceipt" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
   /v1/device-authorizations:
     post:
       summary: Start browser pairing for a node
@@ -724,6 +802,7 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/DeviceAuthorizationExchange" }
+        "402": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
   /v1/api-keys:
     get:
@@ -811,6 +890,12 @@ paths:
             schema:
               $ref: "#/components/schemas/CreateJob"
       responses:
+        "200":
+          description: Idempotent retry of an existing durable job.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Job"
         "201":
           description: Job registered durably.
           content:
@@ -818,6 +903,8 @@ paths:
               schema:
                 $ref: "#/components/schemas/Job"
         "400":
+          $ref: "#/components/responses/Error"
+        "402":
           $ref: "#/components/responses/Error"
         "409":
           $ref: "#/components/responses/Error"
@@ -1399,6 +1486,8 @@ paths:
               schema:
                 $ref: "#/components/schemas/EnrolResponse"
         "400":
+          $ref: "#/components/responses/Error"
+        "402":
           $ref: "#/components/responses/Error"
         "404":
           $ref: "#/components/responses/Error"
@@ -2149,6 +2238,77 @@ components:
           additionalProperties:
             type: string
             maxLength: 500
+    UsageSummary:
+      type: object
+      additionalProperties: false
+      required:
+        [period_start, period_end, accepted_live_jobs, active_nodes]
+      properties:
+        period_start: { type: string, format: date-time }
+        period_end: { type: string, format: date-time }
+        accepted_live_jobs: { type: integer, format: int64, minimum: 0 }
+        active_nodes: { type: integer, minimum: 0 }
+    BillingEntitlement:
+      type: object
+      additionalProperties: false
+      required:
+        - included_live_jobs
+        - node_limit
+        - metadata_retention_days
+        - document_retention_hours
+        - overage_job_unit
+        - overage_price_cents
+      properties:
+        included_live_jobs: { type: integer, format: int64, minimum: 0 }
+        node_limit: { type: integer, minimum: 1 }
+        metadata_retention_days: { type: integer, minimum: 1 }
+        document_retention_hours: { type: integer, minimum: 0 }
+        overage_job_unit: { type: [integer, "null"], format: int64, minimum: 1 }
+        overage_price_cents: { type: [integer, "null"], format: int64, minimum: 0 }
+    BillingSummary:
+      type: object
+      additionalProperties: false
+      required:
+        - enabled
+        - managed_by_platform
+        - plan
+        - billing_interval
+        - subscription_status
+        - grace_ends_at
+        - accept_new_cloud_jobs
+        - entitlement
+        - usage
+        - overage_live_jobs
+      properties:
+        enabled:
+          type: boolean
+          description: False for self-hosted and local-only deployments.
+        managed_by_platform:
+          type: boolean
+          description: Whether an owning platform workspace pays for this workspace.
+        plan: { type: [string, "null"], enum: [free, pro, null] }
+        billing_interval:
+          type: [string, "null"]
+          enum: [monthly, annual, null]
+          description: The Stripe subscription period used for usage and overage accounting.
+        subscription_status:
+          type: [string, "null"]
+          enum: [active, trialing, past_due, unpaid, paused, cancelled, null]
+        grace_ends_at: { type: [string, "null"], format: date-time }
+        accept_new_cloud_jobs: { type: boolean }
+        entitlement:
+          oneOf:
+            - $ref: "#/components/schemas/BillingEntitlement"
+            - type: "null"
+        usage: { $ref: "#/components/schemas/UsageSummary" }
+        overage_live_jobs: { type: integer, format: int64, minimum: 0 }
+    StripeWebhookReceipt:
+      type: object
+      additionalProperties: false
+      required: [received, duplicate]
+      properties:
+        received: { type: boolean, const: true }
+        duplicate: { type: boolean }
     CompatibilityWhoAmI:
       type: object
       required: [id, email, canCreateSubAccounts, credits, numComputers, totalPrints, versions]
