@@ -42,6 +42,9 @@ $env:SPOOL_CONTROL_PLANE_URL = $null
 $env:SPOOL_AGENT_ID = $null
 $env:SPOOL_DEVICE_KEY_FILE = $null
 $env:SPOOL_DASHBOARD_URL = $null
+$env:SPOOL_UPDATE_POLICY = "disabled"
+$env:SPOOL_UPDATE_FEED_URL = $null
+$env:SPOOL_UPDATE_ED25519_PUBLIC_KEY = $null
 
 if ($config.control_plane_url) {
     $env:SPOOL_CONTROL_PLANE_URL = $config.control_plane_url
@@ -50,6 +53,22 @@ if ($config.control_plane_url) {
 }
 if ($config.dashboard_url) {
     $env:SPOOL_DASHBOARD_URL = $config.dashboard_url
+}
+
+$updateConfigPath = Join-Path $InstallDirectory "update-config.json"
+if (Test-Path -LiteralPath $updateConfigPath) {
+    $updateConfig = Get-Content -Raw -LiteralPath $updateConfigPath | ConvertFrom-Json
+    $updateRegistry = Get-ItemProperty -Path "HKCU:\Software\Spool\Updates" -ErrorAction SilentlyContinue
+    $updatePolicy = if ($updateRegistry.Policy) { $updateRegistry.Policy } else { "disabled" }
+    if ($updatePolicy -in @("notify", "automatic") -and
+        $updateConfig.release_signed -and
+        $updateConfig.automatic_checks_supported -and
+        $updateConfig.feed_url -and
+        $updateConfig.ed25519_public_key) {
+        $env:SPOOL_UPDATE_POLICY = $updatePolicy
+        $env:SPOOL_UPDATE_FEED_URL = $updateConfig.feed_url
+        $env:SPOOL_UPDATE_ED25519_PUBLIC_KEY = $updateConfig.ed25519_public_key
+    }
 }
 
 New-Item -ItemType Directory -Force -Path (Join-Path $StateDirectory "logs") | Out-Null

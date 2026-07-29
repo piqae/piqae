@@ -7,8 +7,8 @@ through the current user's `Run` registry key.
 
 It does not register `spool-agent.exe` with the Service Control Manager. The
 agent is currently a console process and does not implement the SCM lifecycle.
-Machine-wide unattended printing, signed distribution, automatic updates, and
-service-session-to-user-session profile UI are not claimed by this package.
+Machine-wide unattended printing and service-session-to-user-session profile UI
+are not claimed by this package.
 
 ## Install and connect
 
@@ -64,6 +64,7 @@ settings and is never substituted for a pinned native profile.
 - Stop: Start menu → **Spool → Stop Spool**
 - Local API: `http://127.0.0.1:39100`
 - Logs: `%LOCALAPPDATA%\Spool\logs`
+- Update policy: Start menu → **Spool → Update policy**
 - Uninstall: Windows Settings → Apps → Installed apps → Spool
 
 To remove state after uninstall, first confirm no jobs or enrolled identity must
@@ -90,3 +91,37 @@ SHA-256 is
 `88276459349b291c41f10422dad0210f007c04d919c8fa56472b6b7c6406adf4`.
 The PDFium binary and all licenses from that distribution are included in the
 installer.
+
+## Signing and updates
+
+The dedicated `windows-release.yml` workflow has two explicit modes:
+
+- **Signed release** requires an Authenticode PFX/password, RFC 3161 timestamp
+  URL, WinSparkle Ed25519 private/public key pair, and HTTPS appcast URL. It
+  signs every Spool executable, the Inno-generated uninstaller, and the final
+  installer; verifies Authenticode; signs the final installer bytes with
+  WinSparkle's official companion tool; and generates an appcast.
+- **Unsigned preview** is produced when all signing credentials are absent. Its
+  artifact name includes `unsigned-preview`; its installed update configuration
+  contains no feed or public key, and update policy cannot be enabled.
+
+Partially configured signing fails the workflow. The workflow never silently
+downgrades an intended signed release to unsigned.
+
+WinSparkle 0.9.4's binary distribution is fetched only for its release signing
+tool and is verified against SHA-256
+`6037df37fc263bd1650a1c4949681a9d40ffe991d01f35892a406cb5d103c976`.
+The runtime DLL is not installed yet because the Rust tray has not implemented
+the WinSparkle C API lifecycle. The per-user registry policy and environment
+configuration are integration hooks, not a claim that automatic updates
+currently execute.
+
+Every workflow artifact includes SHA-256 checksums and an SPDX SBOM. GitHub
+build provenance is requested for both preview and signed artifacts. A GitHub
+release is published only for a signed build; absence of signing credentials
+always leaves a downloadable workflow artifact and never creates a release.
+
+`WINDOWS_UPDATE_FEED_URL` must identify an operator-controlled stable HTTPS
+location. Publishing a GitHub release attaches the generated appcast as release
+evidence, but does not deploy or replace the appcast at that stable URL. Feed
+deployment and rollback remain an explicit release-operations step.

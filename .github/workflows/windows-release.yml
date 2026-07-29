@@ -1,0 +1,387 @@
+name: Windows release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: SemVer release version without a leading v
+        required: true
+        default: 0.1.0-preview.1
+      publish:
+        description: Publish a GitHub release (signed builds only)
+        type: boolean
+        required: true
+        default: false
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  package:
+    name: Package x86_64 Windows
+    runs-on: windows-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      TARGET: x86_64-pc-windows-msvc
+      WINDOWS_PFX_BASE64: ${{ secrets.WINDOWS_AUTHENTICODE_PFX_BASE64 }}
+      WINDOWS_PFX_PASSWORD: ${{ secrets.WINDOWS_AUTHENTICODE_PFX_PASSWORD }}
+      WINDOWS_TIMESTAMP_URL: ${{ vars.WINDOWS_RFC3161_TIMESTAMP_URL }}
+      WINSPARKLE_PRIVATE_KEY_BASE64: ${{ secrets.WINSPARKLE_ED25519_PRIVATE_KEY_BASE64 }}
+      WINSPARKLE_PUBLIC_KEY: ${{ vars.WINSPARKLE_ED25519_PUBLIC_KEY }}
+      WINDOWS_UPDATE_FEED_URL: ${{ vars.WINDOWS_UPDATE_FEED_URL }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test Windows packaging scripts
+        shell: pwsh
+        run: '& "packaging/windows/Test-WindowsPackaging.ps1"'
+
+      - name: Resolve version and signing mode
+        id: release
+        shell: pwsh
+        run: |
+          $version = if ("${{ github.ref_type }}" -eq "tag") {
+            "${{ github.ref_name }}".TrimStart("v")
+          } else {
+            "${{ inputs.version }}"
+          }
+          if ($version -notmatch "^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$") {
+            throw "Version must be SemVer-like and must not include a leading v."
+          }
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+          $requirements = [ordered]@{
+            authenticode_certificate = $env:WINDOWS_PFX_BASE64
+            authenticode_password = $env:WINDOWS_PFX_PASSWORD
+            timestamp_url = $env:WINDOWS_TIMESTAMP_URL
+            winsparkle_private_key = $env:WINSPARKLE_PRIVATE_KEY_BASE64
+            winsparkle_public_key = $env:WINSPARKLE_PUBLIC_KEY
+            update_feed_url = $env:WINDOWS_UPDATE_FEED_URL
+          }
+          $present = @($requirements.GetEnumerator() | Where-Object { $_.Value }).Count
+          if ($present -eq 0) {
+            "signed=false" >> $env:GITHUB_OUTPUT
+            "artifact_name=spool-windows-x86_64-unsigned-preview" >> $env:GITHUB_OUTPUT
+            "UNSIGNED PREVIEW: no Authenticode or update-signing credentials were supplied." |
+              Out-File -Encoding ascii "SIGNING-STATUS.txt"
+          } elseif ($present -eq $requirements.Count) {
+            if (-not $env:WINDOWS_TIMESTAMP_URL.StartsWith("https://")) {
+              throw "WINDOWS_RFC3161_TIMESTAMP_URL must use HTTPS."
+            }
+            if (-not $env:WINDOWS_UPDATE_FEED_URL.StartsWith("https://")) {
+              throw "WINDOWS_UPDATE_FEED_URL must use HTTPS."
+            }
+            "signed=true" >> $env:GITHUB_OUTPUT
+            "artifact_name=spool-windows-x86_64-signed" >> $env:GITHUB_OUTPUT
+            "SIGNED RELEASE: Authenticode and WinSparkle Ed25519 gates are configured." |
+              Out-File -Encoding ascii "SIGNING-STATUS.txt"
+          } else {
+            $missing = $requirements.GetEnumerator() |
+              Where-Object { -not $_.Value } |
+              ForEach-Object Key
+            throw "Signing configuration is partial. Missing: $($missing -join ', ')"
+          }
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.88.0
+          targets: x86_64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-release-x86_64
+
+      - name: Build Windows binaries
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: >-
+          cargo build --locked --release --target ${{ env.TARGET }} --bins
+          -p spool-agent
+          -p spoolctl
+          -p spool-executor-windows
+          -p spool-shell-windows
+
+      - name: Stage release files
+        shell: pwsh
+        run: |
+          $source = "target\$env:TARGET\release"
+          $stage = "artifacts\stage"
+          New-Item -ItemType Directory -Force "$stage\service", "$stage\LICENSES" | Out-Null
+          Copy-Item `
+            "$source\spool-agent.exe", `
+            "$source\spoolctl.exe", `
+            "$source\spool-executor-windows.exe", `
+            "$source\spool-profile-host-windows.exe", `
+            "$source\spool-shell-windows.exe" `
+            $stage
+          Copy-Item "packaging\windows\*" "$stage\service" -Recurse
+          Copy-Item "LICENSE", "NOTICE", "README.md", "SIGNING-STATUS.txt" $stage
+          Copy-Item "LICENSES\*" "$stage\LICENSES" -Recurse
+          & "packaging/windows/Fetch-Pdfium.ps1" -DestinationDirectory $stage
+
+      - name: Write update configuration
+        shell: pwsh
+        run: |
+          $output = "artifacts\stage\update-config.json"
+          if ("${{ steps.release.outputs.signed }}" -eq "true") {
+            & "packaging/windows/New-UpdateConfig.ps1" `
+              -OutputPath $output `
+              -SignedRelease `
+              -FeedUrl $env:WINDOWS_UPDATE_FEED_URL `
+              -Ed25519PublicKey $env:WINSPARKLE_PUBLIC_KEY
+          } else {
+            & "packaging/windows/New-UpdateConfig.ps1" -OutputPath $output
+          }
+
+      - name: Fetch pinned WinSparkle signing tool
+        if: steps.release.outputs.signed == 'true'
+        id: winsparkle
+        shell: pwsh
+        run: |
+          $uri = "https://github.com/vslavik/winsparkle/releases/download/v0.9.4/WinSparkle-0.9.4.zip"
+          $expected = "6037df37fc263bd1650a1c4949681a9d40ffe991d01f35892a406cb5d103c976"
+          $archive = Join-Path $env:RUNNER_TEMP "WinSparkle-0.9.4.zip"
+          $directory = Join-Path $env:RUNNER_TEMP "WinSparkle-0.9.4"
+          Invoke-WebRequest -UseBasicParsing -Uri $uri -OutFile $archive
+          $actual = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
+          if ($actual -cne $expected) {
+            throw "WinSparkle archive digest mismatch: expected $expected, received $actual"
+          }
+          Expand-Archive -LiteralPath $archive -DestinationPath $directory
+          $tool = Join-Path $directory "WinSparkle-0.9.4\bin\winsparkle-tool.exe"
+          if (-not (Test-Path -LiteralPath $tool)) {
+            throw "Pinned WinSparkle signing tool is missing."
+          }
+          "tool=$tool" >> $env:GITHUB_OUTPUT
+          Copy-Item `
+            (Join-Path $directory "WinSparkle-0.9.4\COPYING"), `
+            (Join-Path $directory "WinSparkle-0.9.4\COPYING.expat") `
+            "artifacts\stage\LICENSES"
+
+      - name: Authenticode-sign staged Spool binaries
+        if: steps.release.outputs.signed == 'true'
+        id: authenticode
+        shell: pwsh
+        run: |
+          $certificate = Join-Path $env:RUNNER_TEMP "spool-authenticode.pfx"
+          [IO.File]::WriteAllBytes(
+            $certificate,
+            [Convert]::FromBase64String($env:WINDOWS_PFX_BASE64)
+          )
+          $signTool = Get-ChildItem `
+            "${env:ProgramFiles(x86)}\Windows Kits\10\bin" `
+            -Filter "signtool.exe" `
+            -Recurse |
+            Where-Object { $_.FullName -match "\\x64\\signtool\.exe$" } |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1 -ExpandProperty FullName
+          if (-not $signTool) {
+            throw "Windows SDK signtool.exe was not found."
+          }
+          "certificate=$certificate" >> $env:GITHUB_OUTPUT
+          "signtool=$signTool" >> $env:GITHUB_OUTPUT
+          $binaries = Get-ChildItem "artifacts\stage\spool-*.exe"
+          foreach ($binary in $binaries) {
+            & $signTool sign `
+              /fd SHA256 `
+              /td SHA256 `
+              /tr $env:WINDOWS_TIMESTAMP_URL `
+              /f $certificate `
+              /p $env:WINDOWS_PFX_PASSWORD `
+              $binary.FullName
+            if ($LASTEXITCODE -ne 0) {
+              throw "Authenticode signing failed for $($binary.Name)."
+            }
+            $signature = Get-AuthenticodeSignature -LiteralPath $binary.FullName
+            if ($signature.Status -ne "Valid") {
+              throw "Authenticode verification failed for $($binary.Name): $($signature.Status)"
+            }
+          }
+
+      - name: Verify preview binaries are not represented as signed
+        if: steps.release.outputs.signed != 'true'
+        shell: pwsh
+        run: |
+          foreach ($binary in Get-ChildItem "artifacts\stage\spool-*.exe") {
+            $signature = Get-AuthenticodeSignature -LiteralPath $binary.FullName
+            if ($signature.Status -eq "Valid") {
+              throw "$($binary.Name) is signed but this workflow selected unsigned-preview mode."
+            }
+          }
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup --yes --no-progress
+
+      - name: Compile installer
+        shell: pwsh
+        run: |
+          $source = (Resolve-Path "artifacts\stage").Path
+          $output = New-Item -ItemType Directory -Force "artifacts\release"
+          $updateConfig = (Resolve-Path "artifacts\stage\update-config.json").Path
+          $compiler = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          $arguments = @(
+            "/DSourceDir=$source"
+            "/DOutputDir=$($output.FullName)"
+            "/DAppVersion=${{ steps.release.outputs.version }}"
+            "/DUpdateConfigFile=$updateConfig"
+            "packaging\windows\Spool.iss"
+          )
+          if ("${{ steps.release.outputs.signed }}" -eq "true") {
+            $signCommand = (
+              '"{0}" sign /fd SHA256 /td SHA256 /tr "{1}" /f "{2}" /p "{3}" $f' -f
+              "${{ steps.authenticode.outputs.signtool }}",
+              $env:WINDOWS_TIMESTAMP_URL,
+              "${{ steps.authenticode.outputs.certificate }}",
+              $env:WINDOWS_PFX_PASSWORD
+            )
+            $arguments = @(
+              "/Sspoolsign=$signCommand",
+              "/DInnoSignToolName=spoolsign"
+            ) + $arguments
+          }
+          & $compiler @arguments
+          if ($LASTEXITCODE -ne 0) {
+            throw "Inno Setup failed with exit code $LASTEXITCODE"
+          }
+
+      - name: Verify installer Authenticode signature
+        if: steps.release.outputs.signed == 'true'
+        shell: pwsh
+        run: |
+          $installer = "artifacts\release\spool-windows-x86_64-setup.exe"
+          $signature = Get-AuthenticodeSignature -LiteralPath $installer
+          if ($signature.Status -ne "Valid") {
+            throw "Installer Authenticode verification failed: $($signature.Status)"
+          }
+
+      - name: Verify preview installer is unsigned
+        if: steps.release.outputs.signed != 'true'
+        shell: pwsh
+        run: |
+          $installer = "artifacts\release\spool-windows-x86_64-setup.exe"
+          $signature = Get-AuthenticodeSignature -LiteralPath $installer
+          if ($signature.Status -eq "Valid") {
+            throw "Installer is signed but this workflow selected unsigned-preview mode."
+          }
+
+      - name: Generate signed WinSparkle appcast
+        if: steps.release.outputs.signed == 'true'
+        shell: pwsh
+        run: |
+          $installer = Resolve-Path "artifacts\release\spool-windows-x86_64-setup.exe"
+          $privateKey = Join-Path $env:RUNNER_TEMP "winsparkle-ed25519.key"
+          [IO.File]::WriteAllBytes(
+            $privateKey,
+            [Convert]::FromBase64String($env:WINSPARKLE_PRIVATE_KEY_BASE64)
+          )
+          $publicKeyOutput = & "${{ steps.winsparkle.outputs.tool }}" public-key `
+            --private-key-file $privateKey |
+            Out-String
+          if ($LASTEXITCODE -ne 0 -or -not $publicKeyOutput.Contains($env:WINSPARKLE_PUBLIC_KEY)) {
+            throw "WinSparkle private key does not match WINSPARKLE_ED25519_PUBLIC_KEY."
+          }
+          $signatureOutput = & "${{ steps.winsparkle.outputs.tool }}" sign `
+            --private-key-file $privateKey `
+            $installer.Path |
+            Out-String
+          if ($LASTEXITCODE -ne 0) {
+            throw "WinSparkle update signing failed."
+          }
+          if ($signatureOutput -notmatch 'sparkle:edSignature="([^"]+)"') {
+            throw "WinSparkle tool did not return an Ed25519 signature."
+          }
+          $signature = $Matches[1]
+          $installerLength = (Get-Item -LiteralPath $installer.Path).Length
+          $tag = "v${{ steps.release.outputs.version }}"
+          $download = "https://github.com/${{ github.repository }}/releases/download/$tag/spool-windows-x86_64-setup.exe"
+          $notes = "https://github.com/${{ github.repository }}/releases/tag/$tag"
+          & "packaging/windows/New-WinSparkleAppcast.ps1" `
+            -OutputPath "artifacts\release\appcast-windows.xml" `
+            -Version "${{ steps.release.outputs.version }}" `
+            -DownloadUrl $download `
+            -Length $installerLength `
+            -Ed25519Signature $signature `
+            -PublishedAt ([datetime]::UtcNow) `
+            -ReleaseNotesUrl $notes
+
+      - name: Generate SPDX SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          path: artifacts/stage
+          format: spdx-json
+          output-file: artifacts/release/SBOM.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: Write checksums and release status
+        shell: pwsh
+        run: |
+          Copy-Item "SIGNING-STATUS.txt" "artifacts\release\SIGNING-STATUS.txt"
+          $files = Get-ChildItem "artifacts\release" -File |
+            Where-Object Name -ne "SHA256SUMS"
+          $lines = foreach ($file in $files) {
+            $hash = (Get-FileHash -Algorithm SHA256 $file.FullName).Hash.ToLowerInvariant()
+            "$hash  $($file.Name)"
+          }
+          $lines | Out-File -Encoding ascii "artifacts\release\SHA256SUMS"
+
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: artifacts/release/*
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.release.outputs.artifact_name }}
+          path: artifacts/release/*
+          if-no-files-found: error
+
+      - name: Publish signed GitHub release
+        if: >-
+          steps.release.outputs.signed == 'true' &&
+          (github.ref_type == 'tag' || inputs.publish == true)
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = if ("${{ github.ref_type }}" -eq "tag") {
+            "${{ github.ref_name }}"
+          } else {
+            "v${{ steps.release.outputs.version }}"
+          }
+          $arguments = @(
+            "release", "create", $tag,
+            "artifacts/release/spool-windows-x86_64-setup.exe",
+            "artifacts/release/appcast-windows.xml",
+            "artifacts/release/SBOM.spdx.json",
+            "artifacts/release/SHA256SUMS",
+            "artifacts/release/SIGNING-STATUS.txt",
+            "--title", "Spool $tag",
+            "--generate-notes"
+          )
+          if ("${{ github.ref_type }}" -eq "tag") {
+            $arguments += "--verify-tag"
+          } else {
+            $arguments += @("--target", "${{ github.sha }}")
+          }
+          & gh @arguments
+
+      - name: Remove temporary signing material
+        if: always() && steps.release.outputs.signed == 'true'
+        shell: pwsh
+        run: |
+          Remove-Item `
+            (Join-Path $env:RUNNER_TEMP "spool-authenticode.pfx"), `
+            (Join-Path $env:RUNNER_TEMP "winsparkle-ed25519.key") `
+            -Force `
+            -ErrorAction SilentlyContinue

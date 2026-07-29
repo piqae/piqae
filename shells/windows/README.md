@@ -50,3 +50,25 @@ manufacturer PostScript/private controls such as OKI media sensing, feed,
 registration, and finishing settings when the installed driver exposes them.
 The resulting public and private DEVMODE bytes are stored as an immutable
 revision; editing restores the exact prior revision and creates another.
+
+## Update integration boundary
+
+Windows release packaging can install a WinSparkle-compatible `update-config.json`
+and exports these values to the tray process:
+
+- `SPOOL_UPDATE_POLICY`
+- `SPOOL_UPDATE_FEED_URL`
+- `SPOOL_UPDATE_ED25519_PUBLIC_KEY`
+
+The current Rust tray does **not** load `WinSparkle.dll` or call its C API.
+Consequently, storing `notify` or `automatic` policy is only a forward-compatible
+per-user policy hook; it does not perform a network check or install an update.
+Unsigned preview packages contain no feed or public key and force the effective
+policy to `disabled`.
+
+Before enabling runtime checks, the shell must dynamically load a pinned
+WinSparkle runtime, call `win_sparkle_set_appcast_url()` and
+`win_sparkle_set_eddsa_public_key()`, honor the current-user policy, expose a
+manual **Check for updates** action, and cover initialization/shutdown with
+Windows integration tests. It must never initialize WinSparkle without both an
+HTTPS feed and an Ed25519 public key.

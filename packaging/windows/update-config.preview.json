@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "provider": "winsparkle",
+  "release_signed": false,
+  "feed_url": null,
+  "ed25519_public_key": null,
+  "shell_integration_available": false,
+  "automatic_checks_supported": false,
+  "note": "Unsigned preview build. Automatic update checks are disabled."
+}
