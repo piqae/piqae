@@ -1,59 +1,51 @@
 # Local agent control contract
 
-The Spool agent is headless. Native shells and the embedded local UI are
-replaceable clients of a narrow, versioned control contract; they never open
-SQLite, render documents, contact the hosted control plane, or hold the device
-private key.
+The Spool agent is headless. Native shells are optional clients; they do not
+open SQLite, render documents, contact the hosted control plane, or hold the
+device private key.
 
-## Transport
+## V1 implementation
 
-- Windows production transport: a named pipe restricted to the installing
-  user or the local Administrators group in machine mode.
-- macOS and Linux: a Unix-domain socket inside a mode `0700` directory. The
-  socket is mode `0600`.
-- Every request is a four-byte big-endian length followed by UTF-8 JSON.
-- Messages larger than 64 KiB are rejected before their body is allocated.
-- Protocol V1 accepts only protocol `1`; releases must support N and N-1 after
-  a V2 exists.
-- Each agent start generates a 256-bit session challenge. The shell obtains it
-  through an OS-ACL-protected bootstrap file or inherited installer channel.
-  The agent retains only its SHA-256 digest and compares candidates without an
-  early exit.
+The current agent exposes `crates/local-api` on loopback HTTP, defaulting to
+`127.0.0.1:39100`. This surface is an API only: there is no embedded local web
+UI at the loopback root.
 
-The Rust contract and codec live in `crates/local-ipc`.
+The server refuses non-loopback binds, caps request bodies at 72 MiB, and
+requires the startup-generated bearer token for every operational route.
+`/health` is the only unauthenticated route and exposes no private data. The
+token is stored as `local.token` under the configured agent data directory.
+Handlers send commands over a bounded Tokio channel and cannot access SQLite or
+print drivers directly.
 
-## Operations
+Implemented V1 operations are status, printers, pause, resume, and local job
+submission. See `crates/local-api` for the exact route contract.
 
-- `status`
-- `printers`
-- `pause`
-- `resume`
-- `restart_agent`
-- `export_support_bundle`
-- `reenrol`
+Shell capabilities are intentionally described narrowly:
 
-Re-enrolment includes an explicit confirmation string. Quitting a tray shell
-does not stop or pause the agent.
+- Linux Preview shell reads status from loopback HTTP using `local.token`.
+- macOS Preview shell currently displays `Agent status unavailable`; it is not
+  connected to the control API.
+- Windows shell is an icon-only foundation and is Disabled for release.
+- Linux and macOS show **Open Spool** only when `SPOOL_DASHBOARD_URL` contains
+  an explicit HTTP(S) dashboard URL. They never open the loopback API root as
+  though it were a UI.
 
-## Loopback HTTP
+## Target transport, not implemented in V1
 
-The embedded local Svelte UI uses `crates/local-api` on
-`127.0.0.1:39100`. It refuses non-loopback binds, caps bodies to 64 KiB, and
-requires the same session challenge as a bearer token for every operational
-route. `/health` is the only unauthenticated route and exposes no data.
+The desired production transport is a named pipe with an installer-scoped ACL
+on Windows and a mode `0600` Unix-domain socket in a mode `0700` directory on
+macOS and Linux. The target protocol uses length-prefixed JSON, a 64 KiB
+message limit, protocol versioning, and an OS-ACL-protected session challenge.
+The Rust contract and codec foundations live in `crates/local-ipc`.
 
-The loopback API sends commands over a bounded Tokio channel to the agent loop.
-Handlers cannot access SQLite or print drivers directly.
+Target operations also include restart, support-bundle export, and re-enrolment.
+These are roadmap contract entries, not working V1 shell actions. Re-enrolment
+will require an explicit confirmation string. Quitting a tray shell never stops
+or pauses the agent.
 
-## Shell release status
+## Release gates
 
-The V1 repository contains native shell/package foundations:
-
-- Windows Win32 notification-area process.
-- macOS AppKit status item.
-- Linux StatusNotifier/AppIndicator process.
-
-A shell is shipped only after clean install, login startup, IPC ACL, upgrade,
-accessibility, and signed-package gates pass. Otherwise the agent remains fully
-headless and the shell is marked Preview or omitted from that installer.
-
+A shell moves out of Preview/Disabled only after clean install, login startup,
+transport ACL, upgrade, accessibility, and signed-package gates pass. Until
+then, the source-built agent remains fully headless and no shell or installer
+is described as production or signed.

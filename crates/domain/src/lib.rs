@@ -6,7 +6,7 @@ mod printer;
 
 pub use id::{AgentId, EnvironmentId, EventId, JobId, ParseTypedIdError, PrinterId, WorkspaceId};
 pub use job::{
-    ContentKind, ContentSource, Job, JobEvent, JobFailureReason, JobOptions, JobState,
-    StateTransitionError, UriAuthentication, validate_transition,
+    ContentKind, ContentSource, Duplex, Job, JobEvent, JobFailureReason, JobOptions, JobState,
+    Rotation, StateTransitionError, UriAuthentication, validate_transition,
 };
 pub use printer::{PrinterCapabilities, PrinterState};

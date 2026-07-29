@@ -33,25 +33,28 @@ mod linux {
 
         fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
             use ksni::menu::{MenuItem, StandardItem};
-            vec![
+            let mut items = vec![
                 StandardItem {
                     label: self.status.clone(),
                     enabled: false,
                     ..Default::default()
                 }
                 .into(),
-                MenuItem::Separator,
-                StandardItem {
-                    label: "Open Spool".into(),
-                    activate: Box::new(|_| {
-                        let _ = Command::new("xdg-open")
-                            .arg("http://127.0.0.1:39100")
-                            .spawn();
-                    }),
-                    ..Default::default()
-                }
-                .into(),
-            ]
+            ];
+            if let Some(dashboard_url) = dashboard_url() {
+                items.push(MenuItem::Separator);
+                items.push(
+                    StandardItem {
+                        label: "Open Spool".into(),
+                        activate: Box::new(move |_| {
+                            let _ = Command::new("xdg-open").arg(&dashboard_url).spawn();
+                        }),
+                        ..Default::default()
+                    }
+                    .into(),
+                );
+            }
+            items
         }
     }
 
@@ -101,6 +104,17 @@ mod linux {
         } else {
             "Offline"
         }
+    }
+
+    fn dashboard_url() -> Option<String> {
+        let value = std::env::var("SPOOL_DASHBOARD_URL").ok()?;
+        let value = value.trim();
+        if value.contains(['\r', '\n'])
+            || !(value.starts_with("https://") || value.starts_with("http://"))
+        {
+            return None;
+        }
+        Some(value.to_owned())
     }
 }
 

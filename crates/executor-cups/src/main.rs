@@ -23,7 +23,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg(unix)]
 mod platform {
-    use spool_domain::{PrinterCapabilities, PrinterState};
+    use spool_domain::{Duplex, PrinterCapabilities, PrinterState, Rotation};
     use spool_protocol::executor::{
         DiscoveredPrinter, ExecutorError, ExecutorOperation, ExecutorResult, NativeJobObservation,
         NativeJobState,
@@ -267,17 +267,15 @@ mod platform {
         let path = c_string(content_path)?;
         let mut cups_options: *mut CupsOption = ptr::null_mut();
         let mut option_count = 0_i32;
-        add_option(
-            &mut option_count,
-            &mut cups_options,
-            "copies",
-            &options.copies.unwrap_or(1).to_string(),
-        )?;
-        if let Some(paper) = &options.paper {
-            add_option(&mut option_count, &mut cups_options, "media", paper)?;
+        let mapped_options = cups_job_options(raw, options);
+        for (name, value) in &mapped_options {
+            // Validate every value before CUPS allocates the first option, so
+            // an embedded NUL cannot leave a partially built array behind.
+            c_string(name)?;
+            c_string(value)?;
         }
-        if raw {
-            add_option(&mut option_count, &mut cups_options, "raw", "true")?;
+        for (name, value) in &mapped_options {
+            add_option(&mut option_count, &mut cups_options, name, value)?;
         }
 
         // SAFETY: All C strings and the option array remain alive for the
@@ -300,6 +298,79 @@ mod platform {
         Ok(ExecutorResult::Submitted {
             native_job_id: Some(job_id.to_string()),
         })
+    }
+
+    fn cups_job_options(raw: bool, options: &spool_domain::JobOptions) -> Vec<(String, String)> {
+        if raw {
+            return vec![("raw".into(), "true".into())];
+        }
+
+        let mut mapped = Vec::new();
+        if let Some(value) = &options.bin {
+            mapped.push(("media-source".into(), value.clone()));
+        }
+        if let Some(value) = options.collate {
+            mapped.push((
+                "multiple-document-handling".into(),
+                if value {
+                    "separate-documents-collated-copies"
+                } else {
+                    "separate-documents-uncollated-copies"
+                }
+                .into(),
+            ));
+        }
+        if let Some(value) = options.color {
+            mapped.push((
+                "print-color-mode".into(),
+                if value { "color" } else { "monochrome" }.into(),
+            ));
+        }
+        if let Some(value) = options.copies {
+            mapped.push(("copies".into(), value.to_string()));
+        }
+        if let Some(value) = &options.dpi {
+            mapped.push(("printer-resolution".into(), value.clone()));
+        }
+        if let Some(value) = options.duplex {
+            mapped.push((
+                "sides".into(),
+                match value {
+                    Duplex::OneSided => "one-sided",
+                    Duplex::LongEdge => "two-sided-long-edge",
+                    Duplex::ShortEdge => "two-sided-short-edge",
+                }
+                .into(),
+            ));
+        }
+        if let Some(value) = options.fit_to_page {
+            mapped.push(("fit-to-page".into(), value.to_string()));
+        }
+        if let Some(value) = &options.media {
+            mapped.push(("media-type".into(), value.clone()));
+        }
+        if let Some(value) = options.nup {
+            mapped.push(("number-up".into(), value.to_string()));
+        }
+        if let Some(value) = &options.pages {
+            mapped.push(("page-ranges".into(), value.clone()));
+        }
+        if let Some(value) = &options.paper {
+            mapped.push(("media".into(), value.clone()));
+        }
+        if let Some(value) = options.rotate {
+            mapped.push((
+                "orientation-requested".into(),
+                match value {
+                    Rotation::Deg0 => "3",
+                    Rotation::Deg90 => "4",
+                    Rotation::Deg180 => "6",
+                    Rotation::Deg270 => "5",
+                }
+                .into(),
+            ));
+        }
+        mapped
     }
 
     fn add_option(
@@ -375,6 +446,58 @@ mod platform {
             assert_eq!(cups_observation(8).state, NativeJobState::Failed);
             assert_eq!(cups_observation(42).state, NativeJobState::Unknown);
             assert_eq!(missing_observation().state, NativeJobState::Missing);
+        }
+
+        #[test]
+        fn pdf_options_map_to_standard_ipp_names() {
+            let options = spool_domain::JobOptions {
+                bin: Some("tray-1".into()),
+                collate: Some(true),
+                color: Some(false),
+                copies: Some(2),
+                dpi: Some("300dpi".into()),
+                duplex: Some(Duplex::LongEdge),
+                fit_to_page: Some(true),
+                media: Some("labels".into()),
+                nup: Some(2),
+                pages: Some("1,3-5".into()),
+                paper: Some("iso_a4_210x297mm".into()),
+                rotate: Some(Rotation::Deg90),
+            };
+            assert_eq!(
+                cups_job_options(false, &options),
+                vec![
+                    ("media-source".into(), "tray-1".into()),
+                    (
+                        "multiple-document-handling".into(),
+                        "separate-documents-collated-copies".into()
+                    ),
+                    ("print-color-mode".into(), "monochrome".into()),
+                    ("copies".into(), "2".into()),
+                    ("printer-resolution".into(), "300dpi".into()),
+                    ("sides".into(), "two-sided-long-edge".into()),
+                    ("fit-to-page".into(), "true".into()),
+                    ("media-type".into(), "labels".into()),
+                    ("number-up".into(), "2".into()),
+                    ("page-ranges".into(), "1,3-5".into()),
+                    ("media".into(), "iso_a4_210x297mm".into()),
+                    ("orientation-requested".into(), "4".into()),
+                ]
+            );
+        }
+
+        #[test]
+        fn raw_jobs_ignore_rendering_options() {
+            let options = spool_domain::JobOptions {
+                copies: Some(99),
+                paper: Some("A4".into()),
+                duplex: Some(Duplex::LongEdge),
+                ..Default::default()
+            };
+            assert_eq!(
+                cups_job_options(true, &options),
+                vec![("raw".into(), "true".into())]
+            );
         }
     }
 }

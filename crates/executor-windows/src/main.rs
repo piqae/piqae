@@ -1,5 +1,4 @@
 use spool_executor_protocol::{read_frame, write_frame};
-#[cfg(not(windows))]
 use spool_protocol::executor::ExecutorError;
 use spool_protocol::executor::{ExecutorRequest, ExecutorResponse};
 
@@ -21,6 +20,75 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         },
     )?;
     Ok(())
+}
+
+#[cfg(any(windows, test))]
+fn sumatra_settings(options: &spool_domain::JobOptions) -> Result<Vec<String>, ExecutorError> {
+    use spool_domain::{Duplex, Rotation};
+
+    let mut unsupported = Vec::new();
+    if options.dpi.is_some() {
+        unsupported.push("dpi");
+    }
+    if options.media.is_some() {
+        unsupported.push("media");
+    }
+    if options.nup.is_some() {
+        unsupported.push("nup");
+    }
+    if !unsupported.is_empty() {
+        return Err(ExecutorError {
+            code: "windows_pdf_option_unsupported".into(),
+            message: format!(
+                "SumatraPDF does not support requested option(s): {}",
+                unsupported.join(", ")
+            ),
+            retryable: false,
+            handoff_may_have_succeeded: false,
+        });
+    }
+
+    let mut settings = Vec::new();
+    if let Some(pages) = &options.pages {
+        settings.push(pages.clone());
+    }
+    if let Some(copies) = options.copies {
+        settings.push(format!("{copies}x"));
+    }
+    if let Some(color) = options.color {
+        settings.push(if color { "color" } else { "monochrome" }.into());
+    }
+    if let Some(collate) = options.collate {
+        settings.push(if collate { "collate" } else { "nocollate" }.into());
+    }
+    if let Some(duplex) = options.duplex {
+        settings.push(
+            match duplex {
+                Duplex::OneSided => "simplex",
+                Duplex::LongEdge => "duplexlong",
+                Duplex::ShortEdge => "duplexshort",
+            }
+            .into(),
+        );
+    }
+    if let Some(bin) = &options.bin {
+        settings.push(format!("bin={bin}"));
+    }
+    if let Some(paper) = &options.paper {
+        settings.push(format!("paper={paper}"));
+    }
+    if let Some(fit_to_page) = options.fit_to_page {
+        settings.push(if fit_to_page { "fit" } else { "noscale" }.into());
+    }
+    if let Some(rotation) = options.rotate {
+        match rotation {
+            Rotation::Deg0 => {}
+            Rotation::Deg90 => settings.push("rotate=90".into()),
+            Rotation::Deg180 => settings.push("rotate=180".into()),
+            Rotation::Deg270 => settings.push("rotate=270".into()),
+        }
+    }
+    Ok(settings)
 }
 
 #[cfg(windows)]
@@ -331,6 +399,7 @@ mod platform {
         content_path: &str,
         options: &spool_domain::JobOptions,
     ) -> Result<ExecutorResult, ExecutorError> {
+        let settings = super::sumatra_settings(options)?;
         ensure_printer(printer)?;
         let helper = std::env::var_os("SPOOL_WINDOWS_PDF_HELPER").ok_or_else(|| ExecutorError {
             code: "windows_pdf_helper_unconfigured".into(),
@@ -338,28 +407,6 @@ mod platform {
             retryable: false,
             handoff_may_have_succeeded: false,
         })?;
-        let mut settings = Vec::new();
-        if let Some(pages) = &options.pages {
-            settings.push(pages.clone());
-        }
-        if let Some(copies) = options.copies {
-            settings.push(format!("{copies}x"));
-        }
-        if let Some(color) = options.color {
-            settings.push(if color { "color" } else { "monochrome" }.into());
-        }
-        if let Some(collate) = options.collate {
-            settings.push(if collate { "collate" } else { "nocollate" }.into());
-        }
-        if let Some(bin) = &options.bin {
-            settings.push(format!("bin={bin}"));
-        }
-        if let Some(paper) = &options.paper {
-            settings.push(format!("paper={paper}"));
-        }
-        if options.fit_to_page == Some(false) {
-            settings.push("noscale".into());
-        }
 
         let mut command = std::process::Command::new(helper);
         command.arg("-print-to").arg(printer);
@@ -458,6 +505,56 @@ mod platform {
             retryable: false,
             handoff_may_have_succeeded: handoff,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use spool_domain::{Duplex, JobOptions, Rotation};
+
+    #[test]
+    fn documented_sumatra_options_are_mapped() {
+        let options = JobOptions {
+            bin: Some("Tray 1".into()),
+            collate: Some(true),
+            color: Some(false),
+            copies: Some(2),
+            duplex: Some(Duplex::LongEdge),
+            fit_to_page: Some(true),
+            pages: Some("1,3-5".into()),
+            paper: Some("A4".into()),
+            rotate: Some(Rotation::Deg180),
+            ..Default::default()
+        };
+        assert_eq!(
+            sumatra_settings(&options).expect("settings"),
+            [
+                "1,3-5",
+                "2x",
+                "monochrome",
+                "collate",
+                "duplexlong",
+                "bin=Tray 1",
+                "paper=A4",
+                "fit",
+                "rotate=180",
+            ]
+        );
+    }
+
+    #[test]
+    fn unsupported_sumatra_options_fail_before_handoff() {
+        let options = JobOptions {
+            dpi: Some("300x300".into()),
+            media: Some("Labels".into()),
+            nup: Some(2),
+            ..Default::default()
+        };
+        let error = sumatra_settings(&options).expect_err("unsupported");
+        assert_eq!(error.code, "windows_pdf_option_unsupported");
+        assert!(error.message.contains("dpi, media, nup"));
+        assert!(!error.handoff_may_have_succeeded);
     }
 }
 

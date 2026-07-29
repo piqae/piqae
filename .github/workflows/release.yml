@@ -28,14 +28,14 @@ jobs:
             extra_packages: -p spool-executor-windows -p spool-shell-windows
             executor_binary: spool-executor-windows
             shell_binary: spool-shell-windows
-          - os: macos-14
+          - os: macos-15
             target: aarch64-apple-darwin
             artifact: spool-macos-aarch64
             extension: ""
             extra_packages: -p spool-executor-cups
             executor_binary: spool-executor-cups
             shell_binary: ""
-          - os: macos-13
+          - os: macos-15-intel
             target: x86_64-apple-darwin
             artifact: spool-macos-x86_64
             extension: ""
@@ -45,6 +45,13 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             artifact: spool-linux-x86_64
+            extension: ""
+            extra_packages: -p spool-executor-cups -p spool-shell-linux
+            executor_binary: spool-executor-cups
+            shell_binary: spool-shell-linux
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            artifact: spool-linux-aarch64
             extension: ""
             extra_packages: -p spool-executor-cups -p spool-shell-linux
             executor_binary: spool-executor-cups
@@ -63,6 +70,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: release-${{ matrix.target }}
+      - name: Install Linux CUPS development library
+        if: runner.os == 'Linux'
+        shell: bash
+        run: sudo apt-get update && sudo apt-get install --yes libcups2-dev
       - name: Build native binaries
         shell: bash
         run: cargo build --locked --release --target "${{ matrix.target }}" -p spool-agent -p spoolctl ${{ matrix.extra_packages }}
@@ -73,7 +84,7 @@ jobs:
       - name: Stage native bundle
         shell: bash
         run: |
-          mkdir -p "artifacts/${{ matrix.artifact }}"
+          mkdir -p "artifacts/${{ matrix.artifact }}/docs" "artifacts/${{ matrix.artifact }}/service"
           cp "target/${{ matrix.target }}/release/spool-agent${{ matrix.extension }}" "artifacts/${{ matrix.artifact }}/"
           cp "target/${{ matrix.target }}/release/spoolctl${{ matrix.extension }}" "artifacts/${{ matrix.artifact }}/"
           cp "target/${{ matrix.target }}/release/${{ matrix.executor_binary }}${{ matrix.extension }}" "artifacts/${{ matrix.artifact }}/"
@@ -84,6 +95,23 @@ jobs:
             cp "shells/macos/.build/release/SpoolMenu" "artifacts/${{ matrix.artifact }}/"
           fi
           cp README.md LICENSE "artifacts/${{ matrix.artifact }}/"
+          cp packaging/README.md "artifacts/${{ matrix.artifact }}/PACKAGING.md"
+          cp release/native-bundle-status.md "artifacts/${{ matrix.artifact }}/NATIVE-BUNDLE-STATUS.md"
+          cp release/support-matrix.yaml "artifacts/${{ matrix.artifact }}/SUPPORT-MATRIX.yaml"
+          cp docs/operations/agent-service-installation.md "artifacts/${{ matrix.artifact }}/docs/"
+          case "${{ runner.os }}" in
+            Linux) cp -R packaging/linux/. "artifacts/${{ matrix.artifact }}/service/" ;;
+            macOS) cp -R packaging/macos/. "artifacts/${{ matrix.artifact }}/service/" ;;
+            Windows) cp -R packaging/windows/. "artifacts/${{ matrix.artifact }}/service/" ;;
+          esac
+      - name: Generate native SPDX SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          path: artifacts/${{ matrix.artifact }}
+          format: spdx-json
+          output-file: artifacts/${{ matrix.artifact }}/SBOM.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
       - name: Archive Unix bundle
         if: runner.os != 'Windows'
         shell: bash
@@ -92,6 +120,21 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: Compress-Archive -Path "artifacts/${{ matrix.artifact }}" -DestinationPath "artifacts/${{ matrix.artifact }}.zip"
+      - name: Write Unix bundle checksum
+        if: runner.os != 'Windows'
+        shell: bash
+        working-directory: artifacts
+        run: |
+          archive="${{ matrix.artifact }}.tar.gz"
+          shasum -a 256 "$archive" > "$archive.sha256"
+      - name: Write Windows bundle checksum
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $archive = "artifacts/${{ matrix.artifact }}.zip"
+          $hash = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
+          "$hash  $([System.IO.Path]::GetFileName($archive))" |
+            Out-File -Encoding ascii "$archive.sha256"
       - uses: actions/attest-build-provenance@v2
         with:
           subject-path: artifacts/${{ matrix.artifact }}.*

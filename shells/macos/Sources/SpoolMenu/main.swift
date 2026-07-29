@@ -15,12 +15,15 @@ final class SpoolMenuDelegate: NSObject, NSApplicationDelegate {
         let status = NSMenuItem(title: "Agent status unavailable", action: nil, keyEquivalent: "")
         status.isEnabled = false
         menu.addItem(status)
+        if dashboardURL() != nil {
+            menu.addItem(.separator())
+            menu.addItem(
+                withTitle: "Open Spool",
+                action: #selector(openDashboard),
+                keyEquivalent: "o"
+            ).target = self
+        }
         menu.addItem(.separator())
-        menu.addItem(
-            withTitle: "Open Spool",
-            action: #selector(openDashboard),
-            keyEquivalent: "o"
-        ).target = self
         menu.addItem(
             withTitle: "Quit Menu",
             action: #selector(quitMenu),
@@ -31,8 +34,20 @@ final class SpoolMenuDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func openDashboard() {
-        guard let url = URL(string: "http://127.0.0.1:39100") else { return }
+        guard let url = dashboardURL() else { return }
         NSWorkspace.shared.open(url)
+    }
+
+    private func dashboardURL() -> URL? {
+        guard
+            let value = ProcessInfo.processInfo.environment["SPOOL_DASHBOARD_URL"],
+            let url = URL(string: value),
+            ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
+            url.host != nil
+        else {
+            return nil
+        }
+        return url
     }
 
     @objc private func quitMenu() {
@@ -46,4 +61,3 @@ let delegate = SpoolMenuDelegate()
 application.delegate = delegate
 application.setActivationPolicy(.accessory)
 application.run()
-

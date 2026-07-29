@@ -29,7 +29,10 @@ platforms:
   windows_x86_64:
     required: true
     default_tier: disabled
-  macos_universal:
+  macos_aarch64:
+    required: false
+    default_tier: preview
+  macos_x86_64:
     required: false
     default_tier: preview
   linux_x86_64:
