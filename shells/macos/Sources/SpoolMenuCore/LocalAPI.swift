@@ -140,6 +140,9 @@ public struct LocalPrintProfile: Codable, Equatable, Identifiable, Sendable {
     public let revision: UInt64?
     public let name: String
     public let isDefault: Bool?
+    public let status: String?
+    public let stockID: String?
+    public let lastValidatedUnixMS: Int64?
 
     public var id: String { profileID }
 
@@ -148,6 +151,9 @@ public struct LocalPrintProfile: Codable, Equatable, Identifiable, Sendable {
         case revision
         case name
         case isDefault = "is_default"
+        case status
+        case stockID = "stock_id"
+        case lastValidatedUnixMS = "last_validated_unix_ms"
     }
 }
 
@@ -209,8 +215,21 @@ private struct TestPageRequest: Encodable {
     }
 }
 
+private struct ProfileCaptureSessionRequest: Encodable {
+    let operation: LocalProfileCaptureOperation
+    let profileID: String?
+    let expectedRevision: UInt64?
+
+    enum CodingKeys: String, CodingKey {
+        case operation
+        case profileID = "profile_id"
+        case expectedRevision = "expected_revision"
+    }
+}
+
 public final class LocalAPIClient: @unchecked Sendable {
     private static let maximumResponseBytes = 1024 * 1024
+    private static let maximumCaptureResponseBytes = 8 * 1024 * 1024
 
     public let configuration: LocalAPIConfiguration
     private let session: URLSession
@@ -284,15 +303,69 @@ public final class LocalAPIClient: @unchecked Sendable {
         )
     }
 
+    public func createProfileCaptureSession(
+        printerID: String,
+        operation: LocalProfileCaptureOperation,
+        profileID: String? = nil,
+        expectedRevision: UInt64? = nil
+    ) async throws -> LocalProfileCaptureSession {
+        if operation != .create, profileID == nil {
+            throw LocalAPIError.invalidConfiguration(
+                "Editing or cloning requires a profile identifier."
+            )
+        }
+        return try await request(
+            method: "POST",
+            path: "/v1/local/printers/\(try pathComponent(printerID))/profile-capture-sessions",
+            body: try encoder.encode(
+                ProfileCaptureSessionRequest(
+                    operation: operation,
+                    profileID: profileID,
+                    expectedRevision: expectedRevision
+                )
+            ),
+            maximumResponseBytes: Self.maximumCaptureResponseBytes
+        )
+    }
+
+    public func completeProfileCapture(
+        session: LocalProfileCaptureSession,
+        completion: LocalProfileCaptureCompletion
+    ) async throws -> LocalPrintProfile {
+        try await request(
+            method: "POST",
+            path: "/v1/local/profile-capture-sessions/"
+                + "\(try pathComponent(session.sessionID))/complete",
+            body: try encoder.encode(completion),
+            additionalHeaders: ["X-Spool-Capture-Token": session.captureToken]
+        )
+    }
+
+    public func cancelProfileCapture(session: LocalProfileCaptureSession) async throws {
+        try await sendWithoutResponse(
+            method: "DELETE",
+            path: "/v1/local/profile-capture-sessions/\(try pathComponent(session.sessionID))",
+            additionalHeaders: ["X-Spool-Capture-Token": session.captureToken]
+        )
+    }
+
     private var decoder: JSONDecoder { JSONDecoder() }
     private var encoder: JSONEncoder { JSONEncoder() }
 
     private func request<Response: Decodable>(
         method: String = "GET",
         path: String,
-        body: Data? = nil
+        body: Data? = nil,
+        additionalHeaders: [String: String] = [:],
+        maximumResponseBytes: Int = LocalAPIClient.maximumResponseBytes
     ) async throws -> Response {
-        let data = try await requestData(method: method, path: path, body: body)
+        let data = try await requestData(
+            method: method,
+            path: path,
+            body: body,
+            additionalHeaders: additionalHeaders,
+            maximumResponseBytes: maximumResponseBytes
+        )
         do {
             return try decoder.decode(Response.self, from: data)
         } catch {
@@ -303,15 +376,23 @@ public final class LocalAPIClient: @unchecked Sendable {
     private func sendWithoutResponse(
         method: String,
         path: String,
-        body: Data? = nil
+        body: Data? = nil,
+        additionalHeaders: [String: String] = [:]
     ) async throws {
-        _ = try await requestData(method: method, path: path, body: body)
+        _ = try await requestData(
+            method: method,
+            path: path,
+            body: body,
+            additionalHeaders: additionalHeaders
+        )
     }
 
     private func requestData(
         method: String = "GET",
         path: String,
-        body: Data? = nil
+        body: Data? = nil,
+        additionalHeaders: [String: String] = [:],
+        maximumResponseBytes: Int = LocalAPIClient.maximumResponseBytes
     ) async throws -> Data {
         var request = URLRequest(url: endpoint(path))
         request.httpMethod = method
@@ -319,6 +400,9 @@ public final class LocalAPIClient: @unchecked Sendable {
         request.cachePolicy = .reloadIgnoringLocalCacheData
         request.setValue("Bearer \(try readToken())", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
+        for (name, value) in additionalHeaders {
+            request.setValue(value, forHTTPHeaderField: name)
+        }
         if let body {
             request.httpBody = body
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -328,7 +412,7 @@ public final class LocalAPIClient: @unchecked Sendable {
         guard let http = response as? HTTPURLResponse else {
             throw LocalAPIError.invalidResponse
         }
-        if http.expectedContentLength > Self.maximumResponseBytes {
+        if http.expectedContentLength > maximumResponseBytes {
             throw LocalAPIError.responseTooLarge
         }
         var data = Data()
@@ -336,7 +420,7 @@ public final class LocalAPIClient: @unchecked Sendable {
             data.reserveCapacity(Int(http.expectedContentLength))
         }
         for try await byte in bytes {
-            guard data.count < Self.maximumResponseBytes else {
+            guard data.count < maximumResponseBytes else {
                 throw LocalAPIError.responseTooLarge
             }
             data.append(byte)

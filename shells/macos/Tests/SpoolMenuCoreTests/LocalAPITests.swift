@@ -3,6 +3,30 @@ import XCTest
 @testable import SpoolMenuCore
 
 final class LocalAPITests: XCTestCase {
+    func testProfileMenuStateDistinguishesUnsupportedFromEmpty() throws {
+        XCTAssertEqual(
+            ProfileMenuState(profiles: nil, agentAvailable: true),
+            .unavailable
+        )
+        XCTAssertEqual(
+            ProfileMenuState(profiles: [], agentAvailable: true),
+            .empty
+        )
+
+        let profile = try JSONDecoder().decode(
+            LocalPrintProfile.self,
+            from: Data(
+                """
+                {"profile_id":"prf_1","revision":2,"name":"A4 colour","is_default":false}
+                """.utf8
+            )
+        )
+        XCTAssertEqual(
+            ProfileMenuState(profiles: [profile], agentAvailable: true),
+            .available(profileCount: 1)
+        )
+    }
+
     func testConfigurationUsesExplicitEnvironment() throws {
         let configuration = try LocalAPIConfiguration(
             environment: [
@@ -166,6 +190,126 @@ final class LocalAPITests: XCTestCase {
             profileID: "profile_a4"
         )
         XCTAssertEqual(accepted.jobID, "job_test")
+    }
+
+    func testProfileCaptureSessionRoutesAndCaptureToken() async throws {
+        let tokenFile = FileManager.default.temporaryDirectory
+            .appendingPathComponent("spool-menu-\(UUID().uuidString).token")
+        try Data("agent-secret\n".utf8).write(to: tokenFile, options: .atomic)
+        defer { try? FileManager.default.removeItem(at: tokenFile) }
+
+        let sessionConfiguration = URLSessionConfiguration.ephemeral
+        sessionConfiguration.protocolClasses = [StubURLProtocol.self]
+        let client = LocalAPIClient(
+            configuration: try LocalAPIConfiguration(
+                baseURL: XCTUnwrap(URL(string: "http://127.0.0.1:39100")),
+                tokenFile: tokenFile
+            ),
+            session: URLSession(configuration: sessionConfiguration)
+        )
+
+        StubURLProtocol.handler = { request in
+            XCTAssertEqual(request.httpMethod, "POST")
+            XCTAssertEqual(
+                request.url?.path,
+                "/v1/local/printers/prn_hp/profile-capture-sessions"
+            )
+            XCTAssertEqual(
+                try JSONSerialization.jsonObject(with: try Self.body(of: request))
+                    as? [String: String],
+                ["operation": "create"]
+            )
+            return Self.response(
+                for: request,
+                status: 201,
+                body: """
+                {
+                  "session_id":"pcs_1",
+                  "capture_token":"capture-secret",
+                  "expires_unix_ms":9999999999999,
+                  "operation":"create",
+                  "printer_id":"prn_hp",
+                  "native_id":"HP OfficeJet",
+                  "printer_name":"HP OfficeJet"
+                }
+                """
+            )
+        }
+        let captureSession = try await client.createProfileCaptureSession(
+            printerID: "prn_hp",
+            operation: .create
+        )
+
+        let completion = LocalProfileCaptureCompletion(
+            name: "A4 colour",
+            nativeDigest: "sha256:test",
+            nativeBlob: Data("native-envelope".utf8),
+            driverFingerprint: LocalMacDriverFingerprint(
+                driverName: "AirPrint",
+                architecture: "arm64",
+                nativeQueueID: "HP OfficeJet",
+                deviceFingerprint: "sha256:device"
+            ),
+            summary: LocalProfileSummary(
+                paper: "iso_a4_210x297mm",
+                dimensionsMM: [210, 297],
+                details: ["localized_paper": "A4"]
+            ),
+            stockID: nil,
+            safeOverrides: ["copies"]
+        )
+
+        StubURLProtocol.handler = { request in
+            XCTAssertEqual(request.httpMethod, "POST")
+            XCTAssertEqual(
+                request.url?.path,
+                "/v1/local/profile-capture-sessions/pcs_1/complete"
+            )
+            XCTAssertEqual(
+                request.value(forHTTPHeaderField: "X-Spool-Capture-Token"),
+                "capture-secret"
+            )
+            let object = try XCTUnwrap(
+                try JSONSerialization.jsonObject(with: try Self.body(of: request))
+                    as? [String: Any]
+            )
+            XCTAssertEqual(object["name"] as? String, "A4 colour")
+            XCTAssertEqual(object["native_kind"] as? String, "macos_printcore")
+            XCTAssertNotNil(object["native_blob_base64"] as? String)
+            return Self.response(
+                for: request,
+                status: 201,
+                body: """
+                {
+                  "profile_id":"prf_a4",
+                  "revision":1,
+                  "name":"A4 colour",
+                  "is_default":false,
+                  "status":"needs_test"
+                }
+                """
+            )
+        }
+        let profile = try await client.completeProfileCapture(
+            session: captureSession,
+            completion: completion
+        )
+        XCTAssertEqual(profile.profileID, "prf_a4")
+        XCTAssertEqual(profile.status, "needs_test")
+
+        StubURLProtocol.handler = { request in
+            XCTAssertEqual(request.httpMethod, "DELETE")
+            XCTAssertEqual(
+                request.url?.path,
+                "/v1/local/profile-capture-sessions/pcs_1"
+            )
+            XCTAssertEqual(
+                request.value(forHTTPHeaderField: "X-Spool-Capture-Token"),
+                "capture-secret"
+            )
+            return Self.response(for: request, status: 204, body: "")
+        }
+        try await client.cancelProfileCapture(session: captureSession)
     }
 
     func testRejectsUnsafeResourceIdentifiersBeforeRequest() async throws {

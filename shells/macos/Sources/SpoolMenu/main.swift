@@ -1,5 +1,6 @@
 import AppKit
 import SpoolMenuCore
+import SpoolProfileHost
 
 private struct RecentJob: Sendable {
     let jobID: String
@@ -12,6 +13,18 @@ private enum QueueLoadResult: Sendable {
     case loaded([LocalQueueJob])
     case unsupported
     case unavailable
+}
+
+private final class ProfileActionContext: NSObject {
+    let printerID: String
+    let profileID: String?
+    let revision: UInt64?
+
+    init(printerID: String, profileID: String? = nil, revision: UInt64? = nil) {
+        self.printerID = printerID
+        self.profileID = profileID
+        self.revision = revision
+    }
 }
 
 @MainActor
@@ -268,10 +281,83 @@ final class SpoolMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
 
             printerMenu.addItem(.separator())
+            addProfileItems(for: printer, to: printerMenu)
+            printerMenu.addItem(.separator())
             addDriverTestItem(for: printer, to: printerMenu)
             root.submenu = printerMenu
             menu.addItem(root)
         }
+    }
+
+    private func addProfileItems(for printer: LocalPrinter, to printerMenu: NSMenu) {
+        let profiles = profilesForPrinter(printer)
+        printerMenu.addItem(informational("PROFILES (\(profiles.count))"))
+
+        for profile in profiles {
+            let revision = profile.revision.map { " · r\($0)" } ?? ""
+            let profileRoot = NSMenuItem(
+                title: profile.name + (profile.isDefault == true ? " — Default" : ""),
+                action: nil,
+                keyEquivalent: ""
+            )
+            profileRoot.image = symbol(
+                profile.status == "ready" ? "checkmark.seal" : "slider.horizontal.3",
+                description: profile.name
+            )
+            let profileMenu = NSMenu()
+            let status = profile.status?
+                .replacingOccurrences(of: "_", with: " ")
+                .capitalized ?? "Saved"
+            profileMenu.addItem(informational("\(status)\(revision)"))
+
+            let edit = profileMenu.addItem(
+                withTitle: "Edit Native Settings…",
+                action: #selector(editProfile(_:)),
+                keyEquivalent: ""
+            )
+            edit.target = self
+            edit.representedObject = ProfileActionContext(
+                printerID: printer.printerID,
+                profileID: profile.profileID,
+                revision: profile.revision
+            )
+            edit.image = symbol("slider.horizontal.3", description: "Edit native settings")
+
+            let clone = profileMenu.addItem(
+                withTitle: "Clone as New Profile…",
+                action: #selector(cloneProfile(_:)),
+                keyEquivalent: ""
+            )
+            clone.target = self
+            clone.representedObject = ProfileActionContext(
+                printerID: printer.printerID,
+                profileID: profile.profileID,
+                revision: profile.revision
+            )
+            clone.image = symbol("plus.square.on.square", description: "Clone profile")
+            profileRoot.submenu = profileMenu
+            printerMenu.addItem(profileRoot)
+        }
+
+        if profiles.isEmpty {
+            printerMenu.addItem(
+                informational(
+                    profilesSupported
+                        ? "No saved profiles"
+                        : "Profile listing requires an updated agent"
+                )
+            )
+        }
+
+        let add = printerMenu.addItem(
+            withTitle: "Add Profile…",
+            action: #selector(addProfile(_:)),
+            keyEquivalent: ""
+        )
+        add.target = self
+        add.representedObject = ProfileActionContext(printerID: printer.printerID)
+        add.image = symbol("plus", description: "Add print profile")
+        add.isEnabled = client != nil && status != nil
     }
 
     private func addDriverTestItem(for printer: LocalPrinter, to printerMenu: NSMenu) {
@@ -387,6 +473,82 @@ final class SpoolMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         performAction(successMessage: nil) { client in
             try await client.setExposure(printerID: printerID, exposed: !exposed)
+        }
+    }
+
+    @objc private func addProfile(_ sender: NSMenuItem) {
+        guard let context = sender.representedObject as? ProfileActionContext else { return }
+        beginProfileCapture(context: context, operation: .create)
+    }
+
+    @objc private func editProfile(_ sender: NSMenuItem) {
+        guard let context = sender.representedObject as? ProfileActionContext else { return }
+        beginProfileCapture(context: context, operation: .edit)
+    }
+
+    @objc private func cloneProfile(_ sender: NSMenuItem) {
+        guard let context = sender.representedObject as? ProfileActionContext else { return }
+        beginProfileCapture(context: context, operation: .clone)
+    }
+
+    private func beginProfileCapture(
+        context: ProfileActionContext,
+        operation: LocalProfileCaptureOperation
+    ) {
+        guard
+            let client,
+            let printer = printers.first(where: { $0.printerID == context.printerID })
+        else {
+            return
+        }
+        actionTask?.cancel()
+        actionTask = Task { [weak self] in
+            guard let self else { return }
+            var session: LocalProfileCaptureSession?
+            do {
+                let openedSession = try await client.createProfileCaptureSession(
+                    printerID: printer.printerID,
+                    operation: operation,
+                    profileID: context.profileID,
+                    expectedRevision: context.revision
+                )
+                session = openedSession
+                guard !Task.isCancelled else {
+                    try? await client.cancelProfileCapture(session: openedSession)
+                    return
+                }
+
+                let capturer = MacPrintProfileCapturer()
+                guard let completion = try capturer.capture(session: openedSession) else {
+                    try? await client.cancelProfileCapture(session: openedSession)
+                    return
+                }
+                let saved = try await client.completeProfileCapture(
+                    session: openedSession,
+                    completion: completion
+                )
+                showAlert(
+                    title: "Profile saved",
+                    message:
+                        "\(saved.name) is available for \(printer.name)"
+                        + (saved.revision.map { " as revision \($0)." } ?? "."),
+                    style: .informational
+                )
+                refresh()
+            } catch is CancellationError {
+                if let session {
+                    try? await client.cancelProfileCapture(session: session)
+                }
+            } catch {
+                if let session {
+                    try? await client.cancelProfileCapture(session: session)
+                }
+                showAlert(
+                    title: "Spool could not save the profile",
+                    message: error.localizedDescription
+                )
+                refresh()
+            }
         }
     }
 

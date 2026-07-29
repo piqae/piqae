@@ -7,7 +7,15 @@ let package = Package(
     products: [.executable(name: "SpoolMenu", targets: ["SpoolMenu"])],
     targets: [
         .target(name: "SpoolMenuCore"),
-        .executableTarget(name: "SpoolMenu", dependencies: ["SpoolMenuCore"]),
+        .target(name: "SpoolProfileHost", dependencies: ["SpoolMenuCore"]),
+        .executableTarget(
+            name: "SpoolMenu",
+            dependencies: ["SpoolMenuCore", "SpoolProfileHost"]
+        ),
         .testTarget(name: "SpoolMenuCoreTests", dependencies: ["SpoolMenuCore"]),
+        .testTarget(
+            name: "SpoolProfileHostTests",
+            dependencies: ["SpoolMenuCore", "SpoolProfileHost"]
+        ),
     ]
 )
