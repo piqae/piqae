@@ -265,6 +265,18 @@ compute failover cannot make a database writable. Fence writers before
 cross-region database promotion, rotate the connection secret, reconcile lag,
 and rehearse failback. Replication is not a zero-RPO guarantee.
 
+### Job lifecycle reliability
+
+Spool treats PostgreSQL/object storage and node SQLite/content files as two
+separate durable boundaries. Node pickup uses short leases; local acceptance
+is replayable and idempotent; a native `spool_intent` is persisted before
+CUPS/Winspool handoff. Failures proven to occur before handoff may retry.
+Ambiguous handoff becomes `delivery_uncertain` and is never blindly retried.
+Cross-node reassignment is safe only before durable local acceptance and only
+to an equivalent ready profile/stock binding. Automatic reassignment of an
+already-created waiting job is not yet implemented, so multi-node failover is
+Preview rather than Supported.
+
 ### Monitoring
 
 Monitor API latency/errors/readiness; job depth/oldest age/retries/expiry/
@@ -308,6 +320,7 @@ Entry points:
 - docs/nodes/windows.md
 - docs/nodes/linux-headless.md
 - docs/nodes/pairing.md
+- docs/operations/reliability-and-job-lifecycle.md
 - docs/nodes/updates.md
 - docs/nodes/diagnostics.md
 - docs/printing/printers.md
