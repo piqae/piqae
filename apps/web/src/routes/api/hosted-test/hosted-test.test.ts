@@ -10,10 +10,12 @@ vi.mock('$lib/server/dashboard-data', () => ({
   dashboardSdk: () => ({ jobs: { create: createJob } })
 }));
 vi.mock('$lib/server/local-agent', () => ({
+  LocalAgentConfigurationError: class LocalAgentConfigurationError extends Error {},
   createA4TestPdf: () => 'pdf-base64',
   localAgentError: () =>
     Response.json({ code: 'local_agent_unavailable', message: 'Local agent unavailable.' }, { status: 502 }),
-  localAgentRequest: agentRequest
+  localAgentRequest: agentRequest,
+  relayLocalAgent: (response: Response) => response
 }));
 
 import { POST } from './+server';
@@ -100,5 +102,41 @@ describe('hosted A4 test', () => {
     expect(response.status).toBe(409);
     expect(await response.json()).toMatchObject({ code: 'a4_profile_required' });
     expect(createJob).not.toHaveBeenCalled();
+  });
+
+  it('preserves a local profile lookup failure', async () => {
+    agentRequest.mockResolvedValue(
+      Response.json(
+        { code: 'printer_not_found', message: 'The selected printer was not found.' },
+        { status: 422 }
+      )
+    );
+
+    const response = await POST(
+      event({ printer_id: 'prt_missing', profile_id: 'prof_a4', confirmed: true })
+    );
+
+    expect(response.status).toBe(422);
+    expect(await response.json()).toMatchObject({ code: 'printer_not_found' });
+    expect(createJob).not.toHaveBeenCalled();
+  });
+
+  it('returns 400 for malformed JSON', async () => {
+    const malformedEvent = {
+      request: new Request('https://spool.test/api/hosted-test', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: '{'
+      }),
+      fetch: vi.fn(),
+      url: new URL('https://spool.test/api/hosted-test'),
+      locals: {}
+    } as never;
+
+    const response = await POST(malformedEvent);
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ code: 'invalid_request' });
+    expect(agentRequest).not.toHaveBeenCalled();
   });
 });

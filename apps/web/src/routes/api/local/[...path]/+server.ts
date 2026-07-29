@@ -44,10 +44,50 @@ function pathFor(method: string, path: string): string | null {
   return null;
 }
 
-async function requestBody(request: Request): Promise<string | undefined> {
-  const body = await request.text();
-  if (body.length > 65_536) throw new TypeError('Local management requests are limited to 64 KiB.');
-  return body || undefined;
+const maximumBodyBytes = 65_536;
+
+class RequestBodyTooLarge extends Error {}
+
+async function requestBody(request: Request): Promise<ArrayBuffer | undefined> {
+  const declaredLength = Number(request.headers.get('content-length'));
+  if (Number.isFinite(declaredLength) && declaredLength > maximumBodyBytes) {
+    throw new RequestBodyTooLarge();
+  }
+  const reader = request.body?.getReader();
+  if (!reader) return undefined;
+  const chunks: Uint8Array[] = [];
+  let length = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    length += value.byteLength;
+    if (length > maximumBodyBytes) {
+      await reader.cancel();
+      throw new RequestBodyTooLarge();
+    }
+    chunks.push(value);
+  }
+  if (length === 0) return undefined;
+  const body = new Uint8Array(length);
+  let offset = 0;
+  for (const chunk of chunks) {
+    body.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return body.buffer;
+}
+
+function proxyError(error: unknown): Response {
+  if (error instanceof RequestBodyTooLarge) {
+    return Response.json(
+      {
+        code: 'request_too_large',
+        message: 'Local management requests are limited to 64 KiB.'
+      },
+      { status: 413, headers: { 'cache-control': 'no-store, private' } }
+    );
+  }
+  return localAgentError(error);
 }
 
 export const GET: RequestHandler = async ({ params, fetch }) => {
@@ -68,7 +108,7 @@ export const POST: RequestHandler = async ({ params, fetch, request }) => {
       await localAgentRequest(fetch, path, { method: 'POST', body: await requestBody(request) })
     );
   } catch (error) {
-    return localAgentError(error);
+    return proxyError(error);
   }
 };
 
@@ -80,7 +120,7 @@ export const PUT: RequestHandler = async ({ params, fetch, request }) => {
       await localAgentRequest(fetch, path, { method: 'PUT', body: await requestBody(request) })
     );
   } catch (error) {
-    return localAgentError(error);
+    return proxyError(error);
   }
 };
 
@@ -97,6 +137,6 @@ export const DELETE: RequestHandler = async ({ params, fetch, request, url }) =>
       await localAgentRequest(fetch, path, { method: 'DELETE', body: await requestBody(request) })
     );
   } catch (error) {
-    return localAgentError(error);
+    return proxyError(error);
   }
 };

@@ -6,7 +6,8 @@ import {
   createA4TestPdf,
   LocalAgentConfigurationError,
   localAgentError,
-  localAgentRequest
+  localAgentRequest,
+  relayLocalAgent
 } from '$lib/server/local-agent';
 
 interface LocalProfile {
@@ -24,7 +25,15 @@ export const POST: RequestHandler = async (event) => {
   }
 
   try {
-    const value: unknown = await event.request.json();
+    let value: unknown;
+    try {
+      value = await event.request.json();
+    } catch {
+      return Response.json(
+        { code: 'invalid_request', message: 'The request body must be valid JSON.' },
+        { status: 400 }
+      );
+    }
     if (!value || typeof value !== 'object') {
       return Response.json({ code: 'invalid_request', message: 'Select a printer and profile.' }, { status: 400 });
     }
@@ -42,7 +51,7 @@ export const POST: RequestHandler = async (event) => {
       event.fetch,
       `/v1/local/printers/${encodeURIComponent(printerId)}/profiles`
     );
-    if (!profileResponse.ok) return await localAgentError(new Error('Profile lookup failed.'));
+    if (!profileResponse.ok) return relayLocalAgent(profileResponse);
     const profiles = (await profileResponse.json()) as LocalProfile[];
     const profile = profiles.find((candidate) => candidate.profile_id === profileId);
     if (!profile) {
