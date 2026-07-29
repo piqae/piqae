@@ -104,7 +104,8 @@ export async function dashboardMeta(
         invitations: false
       },
       billing: { enabled: false },
-      updates: { officialFeed: false, customFeed: !hosted }
+      updates: { officialFeed: false, customFeed: !hosted },
+      platform: { accounts: false }
     };
   }
 }

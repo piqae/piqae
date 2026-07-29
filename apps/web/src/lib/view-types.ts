@@ -138,6 +138,20 @@ export interface DashboardApiKey {
   createdAt: string;
 }
 
+export interface DashboardAccount {
+  id: string;
+  externalId: string;
+  name: string;
+  status: 'active' | 'suspended' | 'cancelled';
+  metadata: Record<string, string>;
+  environments: {
+    testId: string;
+    liveId: string;
+  };
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface DashboardMeta {
   deployment: 'cloud' | 'self_hosted' | 'local';
   version: string;
@@ -148,6 +162,7 @@ export interface DashboardMeta {
   };
   billing: { enabled: boolean };
   updates: { officialFeed: boolean; customFeed: boolean };
+  platform: { accounts: boolean };
 }
 
 export interface DashboardOverview {

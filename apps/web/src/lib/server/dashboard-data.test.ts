@@ -56,7 +56,8 @@ describe('dashboard data source selection', () => {
           invitations: false
         },
         billing: { enabled: false },
-        updates: { official_feed: false, custom_feed: true }
+        updates: { official_feed: false, custom_feed: true },
+        platform: { accounts: true }
       })
     );
 
@@ -73,7 +74,8 @@ describe('dashboard data source selection', () => {
       version: '1.2.3',
       auth: { provider: 'oidc', workspaceSwitching: true, invitations: false },
       billing: { enabled: false },
-      updates: { officialFeed: false, customFeed: true }
+      updates: { officialFeed: false, customFeed: true },
+      platform: { accounts: true }
     });
     const [url, init] = fetcher.mock.calls[0] ?? [];
     expect(String(url)).toBe('https://api.spool.test/v1/meta');
@@ -89,6 +91,28 @@ describe('dashboard data source selection', () => {
       })
     ).toThrow(/does not contain an OIDC access token/);
     expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it('safely defaults optional platform capabilities to disabled', async () => {
+    fetcher.mockResolvedValueOnce(
+      Response.json({
+        deployment: 'cloud',
+        version: '1.2.3',
+        auth: { provider: 'workos' },
+        billing: {},
+        updates: {}
+      })
+    );
+
+    const meta = await dashboardMeta({
+      ...baseEvent,
+      locals: {
+        authMode: 'workos',
+        auth: { accessToken: oidcAccessToken }
+      } as never
+    });
+
+    expect(meta.platform.accounts).toBe(false);
   });
 
   it('allows an explicit server-only service key in local/self-host mode', async () => {
@@ -178,6 +202,58 @@ describe('dashboard data source selection', () => {
       }
     ]);
     expect(JSON.stringify(result)).not.toContain('secret');
+  });
+
+  it('loads customer accounts with the human dashboard bearer only on the server', async () => {
+    fetcher.mockResolvedValueOnce(
+      Response.json([
+        {
+          id: 'wsp_01',
+          external_id: 'customer:north-star',
+          name: 'North Star Coffee',
+          status: 'active',
+          metadata: { plan: 'Pro' },
+          environments: {
+            test: { id: 'env_test_01', kind: 'test' },
+            live: { id: 'env_live_01', kind: 'live' }
+          },
+          created_at: '2026-07-28T12:00:00.000Z',
+          updated_at: '2026-07-29T12:00:00.000Z'
+        }
+      ])
+    );
+    const source = dashboardSource({
+      ...baseEvent,
+      locals: {
+        authMode: 'workos',
+        auth: { accessToken: oidcAccessToken }
+      } as never
+    });
+
+    const result = await source.api.accounts();
+
+    expect(result.data).toEqual([
+      {
+        id: 'wsp_01',
+        externalId: 'customer:north-star',
+        name: 'North Star Coffee',
+        status: 'active',
+        metadata: { plan: 'Pro' },
+        environments: {
+          testId: 'env_test_01',
+          liveId: 'env_live_01'
+        },
+        createdAt: '2026-07-28T12:00:00.000Z',
+        updatedAt: '2026-07-29T12:00:00.000Z'
+      }
+    ]);
+    const [url, init] = fetcher.mock.calls[0] ?? [];
+    const headers = new Headers(init?.headers);
+    expect(String(url)).toBe('https://api.spool.test/v1/platform/accounts');
+    expect(headers.get('authorization')).toBe(`Bearer ${oidcAccessToken}`);
+    expect(headers.has('x-spool-environment-id')).toBe(false);
+    expect(headers.has('x-spool-workspace-id')).toBe(false);
+    expect(JSON.stringify(result)).not.toContain(oidcAccessToken);
   });
 
   it('uses deterministic demo data only after explicit opt-in', async () => {

@@ -1,5 +1,6 @@
 import { SpoolClient } from '@spool/sdk';
 import type {
+  DashboardAccount,
   DashboardAgent,
   DashboardApiKey,
   DashboardJob,
@@ -22,6 +23,8 @@ export interface DashboardApi {
   jobEvents(id: string): Promise<DashboardPage<DashboardJobEvent>>;
   webhooks(): Promise<DashboardPage<DashboardWebhook>>;
   apiKeys(): Promise<DashboardPage<DashboardApiKey>>;
+  accounts(): Promise<DashboardPage<DashboardAccount>>;
+  account(externalId: string): Promise<DashboardAccount | null>;
 }
 
 const page = <T>(data: T[]): DashboardPage<T> => ({ data, nextCursor: null });
@@ -35,7 +38,8 @@ export const mockApi: DashboardApi = {
       version: '0.1.0',
       auth: { provider: 'none', workspaceSwitching: false, invitations: false },
       billing: { enabled: false },
-      updates: { officialFeed: true, customFeed: true }
+      updates: { officialFeed: true, customFeed: true },
+      platform: { accounts: true }
     }),
   overview: () =>
     delay({
@@ -74,7 +78,10 @@ export const mockApi: DashboardApi = {
   jobEvents: (id) =>
     delay(page(demo.jobEvents.map((event) => ({ ...event, jobId: id })))),
   webhooks: () => delay(page(demo.webhooks)),
-  apiKeys: () => delay(page(demo.apiKeys))
+  apiKeys: () => delay(page(demo.apiKeys)),
+  accounts: () => delay(page(demo.accounts)),
+  account: (externalId) =>
+    delay(demo.accounts.find((account) => account.externalId === externalId) ?? null)
 };
 
 /**
@@ -194,6 +201,15 @@ export function createLiveApi(
     contentRetained: true
   });
 
+  const platformRequest = async (path: string): Promise<Response> =>
+    fetcher(`${baseUrl.replace(/\/$/, '')}${path}`, {
+      headers: {
+        accept: 'application/json',
+        'x-spool-dashboard': '1',
+        ...(apiKey ? { authorization: `Bearer ${apiKey}` } : {})
+      }
+    });
+
   return {
     meta: async () => {
       const response = await fetcher(`${baseUrl.replace(/\/$/, '')}/v1/meta`, {
@@ -293,7 +309,28 @@ export function createLiveApi(
             lastUsedAt: apiKey.last_used_at,
             createdAt: apiKey.created_at
           }))
-      )
+      ),
+    accounts: async () => {
+      const response = await platformRequest('/v1/platform/accounts');
+      if (!response.ok) {
+        throw new Error(`Spool customer account request failed with HTTP ${response.status}.`);
+      }
+      const value: unknown = await response.json();
+      if (!Array.isArray(value)) {
+        throw new Error('Spool customer account response was not a list.');
+      }
+      return page(value.map(parseDashboardAccount));
+    },
+    account: async (externalId) => {
+      const response = await platformRequest(
+        `/v1/platform/accounts/${encodeURIComponent(externalId)}`
+      );
+      if (response.status === 404) return null;
+      if (!response.ok) {
+        throw new Error(`Spool customer account request failed with HTTP ${response.status}.`);
+      }
+      return parseDashboardAccount(await response.json());
+    }
   };
 }
 
@@ -302,6 +339,7 @@ export function parseDashboardMeta(value: unknown): DashboardMeta {
   const auth = isRecord(raw.auth) ? raw.auth : {};
   const billing = isRecord(raw.billing) ? raw.billing : {};
   const updates = isRecord(raw.updates) ? raw.updates : {};
+  const platform = isRecord(raw.platform) ? raw.platform : {};
   const deployment = ['cloud', 'self_hosted', 'local'].includes(String(raw.deployment))
     ? (raw.deployment as DashboardMeta['deployment'])
     : 'self_hosted';
@@ -322,7 +360,49 @@ export function parseDashboardMeta(value: unknown): DashboardMeta {
     updates: {
       officialFeed: updates.official_feed === true,
       customFeed: updates.custom_feed === true
-    }
+    },
+    platform: { accounts: platform.accounts === true }
+  };
+}
+
+export function parseDashboardAccount(value: unknown): DashboardAccount {
+  if (!isRecord(value)) throw new Error('Spool customer account response was invalid.');
+  const environments = isRecord(value.environments) ? value.environments : {};
+  const testEnvironment = isRecord(environments.test) ? environments.test : {};
+  const liveEnvironment = isRecord(environments.live) ? environments.live : {};
+  const metadata = isRecord(value.metadata) ? value.metadata : {};
+  const status = ['active', 'suspended', 'cancelled'].includes(String(value.status))
+    ? (value.status as DashboardAccount['status'])
+    : null;
+  const requiredStrings = [
+    value.id,
+    value.external_id,
+    value.name,
+    value.created_at,
+    value.updated_at,
+    testEnvironment.id,
+    liveEnvironment.id
+  ];
+  if (!status || requiredStrings.some((item) => typeof item !== 'string' || item === '')) {
+    throw new Error('Spool customer account response was invalid.');
+  }
+  const safeMetadata = Object.fromEntries(
+    Object.entries(metadata).filter(
+      (entry): entry is [string, string] => typeof entry[1] === 'string'
+    )
+  );
+  return {
+    id: value.id as string,
+    externalId: value.external_id as string,
+    name: value.name as string,
+    status,
+    metadata: safeMetadata,
+    environments: {
+      testId: testEnvironment.id as string,
+      liveId: liveEnvironment.id as string
+    },
+    createdAt: value.created_at as string,
+    updatedAt: value.updated_at as string
   };
 }
 

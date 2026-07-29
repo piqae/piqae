@@ -3,6 +3,7 @@
   import { invalidateAll } from '$app/navigation';
   import { onMount } from 'svelte';
   import type { Snippet } from 'svelte';
+  import { dashboardNavigation } from '$lib/dashboard-navigation';
   import type { DashboardMeta } from '$lib/view-types';
   import Icon from './Icon.svelte';
 
@@ -15,13 +16,7 @@
   let interactive = $state(false);
   let theme = $state<'dark' | 'light'>('dark');
 
-  const nav = [
-    { href: '/dashboard', label: 'Overview', icon: 'activity' },
-    { href: '/dashboard/jobs', label: 'Jobs', icon: 'jobs' },
-    { href: '/dashboard/printers', label: 'Printers', icon: 'printers' },
-    { href: '/dashboard/nodes', label: 'Nodes', icon: 'agents' },
-    { href: '/dashboard/developers', label: 'Developers', icon: 'api' }
-  ] as const;
+  const nav = $derived(dashboardNavigation(meta));
 
   const utility = [
     { href: '/dashboard/settings', label: 'Settings', icon: 'settings' }

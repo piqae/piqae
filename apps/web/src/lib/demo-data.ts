@@ -1,4 +1,5 @@
 import type {
+  DashboardAccount,
   DashboardAgent,
   DashboardApiKey,
   DashboardJob,
@@ -457,5 +458,47 @@ export const apiKeys: DashboardApiKey[] = [
     scopes: ['jobs:read', 'jobs:write', 'printers:read'],
     lastUsedAt: ago(412),
     createdAt: ago(14_980)
+  }
+];
+
+export const accounts: DashboardAccount[] = [
+  {
+    id: 'wsp_customer_north',
+    externalId: 'customer:north-star',
+    name: 'North Star Coffee',
+    status: 'active',
+    metadata: { plan: 'Pro', region: 'New Zealand' },
+    environments: {
+      testId: 'env_test_north',
+      liveId: 'env_live_north'
+    },
+    createdAt: ago(86_400),
+    updatedAt: ago(8)
+  },
+  {
+    id: 'wsp_customer_atlas',
+    externalId: 'customer:atlas-studio',
+    name: 'Atlas Design Studio',
+    status: 'active',
+    metadata: { plan: 'Pro', integration: 'Design editor' },
+    environments: {
+      testId: 'env_test_atlas',
+      liveId: 'env_live_atlas'
+    },
+    createdAt: ago(42_200),
+    updatedAt: ago(94)
+  },
+  {
+    id: 'wsp_customer_field',
+    externalId: 'customer:field-goods',
+    name: 'Field Goods',
+    status: 'suspended',
+    metadata: { plan: 'Free', reason: 'Payment review' },
+    environments: {
+      testId: 'env_test_field',
+      liveId: 'env_live_field'
+    },
+    createdAt: ago(21_540),
+    updatedAt: ago(1_320)
   }
 ];
