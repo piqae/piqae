@@ -148,8 +148,7 @@ fn dev(root: &Path, target: &str) -> TaskResult {
         }
         "agent" => {
             let data_directory = env::var_os("SPOOL_STATE_DIR")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| root.join(".spool-dev"));
+                .map_or_else(|| root.join(".spool-dev"), PathBuf::from);
             fs::create_dir_all(&data_directory).map_err(|error| {
                 TaskError(format!(
                     "cannot create {}: {error}",
