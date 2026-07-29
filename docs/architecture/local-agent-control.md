@@ -25,7 +25,9 @@ Shell capabilities are intentionally described narrowly:
 - Linux Preview shell reads status from loopback HTTP using `local.token`.
 - macOS Preview shell currently displays `Agent status unavailable`; it is not
   connected to the control API.
-- Windows shell is an icon-only foundation and is Disabled for release.
+- Windows development shell reads authenticated loopback status, lists queues
+  and profiles, and opens native create/edit/clone profile capture. It remains
+  Disabled for production release.
 - Linux and macOS show **Open Spool** only when `SPOOL_DASHBOARD_URL` contains
   an explicit HTTP(S) dashboard URL. They never open the loopback API root as
   though it were a UI.

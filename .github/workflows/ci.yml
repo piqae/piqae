@@ -99,3 +99,56 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: swift build --package-path shells/macos
+
+  windows-installer:
+    name: Windows development installer
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.88.0
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-installer
+      - name: Build Windows binaries
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: >-
+          cargo build --locked --release --target x86_64-pc-windows-msvc --bins
+          -p spool-agent
+          -p spoolctl
+          -p spool-executor-windows
+          -p spool-shell-windows
+      - name: Stage installer input
+        shell: pwsh
+        run: |
+          $source = "target\x86_64-pc-windows-msvc\release"
+          $stage = "artifacts\spool-windows-x86_64"
+          New-Item -ItemType Directory -Force "$stage\service", "$stage\LICENSES" | Out-Null
+          Copy-Item "$source\spool-agent.exe", "$source\spoolctl.exe", "$source\spool-executor-windows.exe", "$source\spool-profile-host-windows.exe", "$source\spool-shell-windows.exe" $stage
+          Copy-Item "packaging\windows\*" "$stage\service" -Recurse
+          Copy-Item "LICENSE", "README.md" $stage
+          Copy-Item "LICENSES\*" "$stage\LICENSES" -Recurse
+          & "packaging/windows/Fetch-Pdfium.ps1" -DestinationDirectory $stage
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup --yes --no-progress
+      - name: Compile installer
+        shell: pwsh
+        run: |
+          $source = (Resolve-Path "artifacts\spool-windows-x86_64").Path
+          $output = (Resolve-Path "artifacts").Path
+          $compiler = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          & $compiler "/DSourceDir=$source" "/DOutputDir=$output" "/DAppVersion=0.1.0-ci.$env:GITHUB_RUN_NUMBER" "packaging\windows\Spool.iss"
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed with exit code $LASTEXITCODE" }
+          $installer = "artifacts\spool-windows-x86_64-setup.exe"
+          $hash = (Get-FileHash -Algorithm SHA256 $installer).Hash.ToLowerInvariant()
+          "$hash  $([System.IO.Path]::GetFileName($installer))" |
+            Out-File -Encoding ascii "$installer.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: spool-windows-installer
+          path: artifacts/spool-windows-x86_64-setup.exe*
+          if-no-files-found: error

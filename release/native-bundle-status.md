@@ -7,7 +7,7 @@ The native release archives are unsigned source-built artifacts.
 | Linux | Preview | Preview; loopback status | Preview systemd template | No |
 | macOS aarch64 | Preview | Preview; status unavailable | Preview LaunchDaemon template | No |
 | macOS x86_64 | Preview | Preview; status unavailable | Preview LaunchDaemon template | No |
-| Windows | Disabled | Disabled; icon only | None | No |
+| Windows | Development only | Development; status and native profile capture | Per-user login launcher; no SCM service | Unsigned Inno Setup package |
 
 Every archive includes its platform template/readme, the detailed installation
 notes, support matrix, SPDX JSON SBOM, and a SHA-256 sidecar. The checksum

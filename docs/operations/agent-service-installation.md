@@ -54,12 +54,14 @@ The menu-bar shell is a separate user application and currently cannot read
 agent status. It shows a dashboard action only when `SPOOL_DASHBOARD_URL` is an
 explicit HTTP(S) URL. There is no notarised package or signed update channel.
 
-## Windows Disabled
+## Windows development installation
 
-There is no Windows Service template because the agent is not an SCM service.
-Do not register it with `sc.exe`. See the bundled `windows/README.md` for the
-exact missing gates. Interactive developer execution does not change the
-Disabled support tier.
+The unsigned Inno Setup package installs a per-user login process under
+`%LOCALAPPDATA%\Programs\Spool`; it does not register a Windows Service because
+the agent is not an SCM service. Do not register it with `sc.exe`. See the
+bundled `windows/README.md` for setup, one-time enrolment, ACL, uninstall, and
+exact replay limitations. A testable installer does not change the Disabled
+production support tier.
 
 ## Rollback and support data
 

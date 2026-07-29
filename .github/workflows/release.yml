@@ -76,7 +76,9 @@ jobs:
         run: sudo apt-get update && sudo apt-get install --yes libcups2-dev
       - name: Build native binaries
         shell: bash
-        run: cargo build --locked --release --target "${{ matrix.target }}" -p spool-agent -p spoolctl ${{ matrix.extra_packages }}
+        env:
+          RUSTFLAGS: ${{ runner.os == 'Windows' && '-C target-feature=+crt-static' || '' }}
+        run: cargo build --locked --release --target "${{ matrix.target }}" -p spool-agent -p spoolctl ${{ matrix.extra_packages }} --bins
       - name: Build macOS menu shell
         if: runner.os == 'macOS'
         shell: bash
@@ -90,6 +92,9 @@ jobs:
           cp "target/${{ matrix.target }}/release/${{ matrix.executor_binary }}${{ matrix.extension }}" "artifacts/${{ matrix.artifact }}/"
           if [ -n "${{ matrix.shell_binary }}" ]; then
             cp "target/${{ matrix.target }}/release/${{ matrix.shell_binary }}${{ matrix.extension }}" "artifacts/${{ matrix.artifact }}/"
+          fi
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cp "target/${{ matrix.target }}/release/spool-profile-host-windows.exe" "artifacts/${{ matrix.artifact }}/"
           fi
           if [ "${{ runner.os }}" = "macOS" ]; then
             cp "shells/macos/.build/release/SpoolMenu" "artifacts/${{ matrix.artifact }}/"
@@ -105,6 +110,25 @@ jobs:
             macOS) cp -R packaging/macos/. "artifacts/${{ matrix.artifact }}/service/" ;;
             Windows) cp -R packaging/windows/. "artifacts/${{ matrix.artifact }}/service/" ;;
           esac
+      - name: Stage pinned PDFium runtime
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: '& "packaging/windows/Fetch-Pdfium.ps1" -DestinationDirectory "artifacts/${{ matrix.artifact }}"'
+      - name: Install Inno Setup
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: choco install innosetup --yes --no-progress
+      - name: Build Windows development installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          PACKAGE_VERSION: ${{ inputs.version || github.ref_name }}
+        run: |
+          $source = (Resolve-Path "artifacts/${{ matrix.artifact }}").Path
+          $output = (Resolve-Path "artifacts").Path
+          $compiler = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          & $compiler "/DSourceDir=$source" "/DOutputDir=$output" "/DAppVersion=$env:PACKAGE_VERSION" "packaging/windows/Spool.iss"
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed with exit code $LASTEXITCODE" }
       - name: Generate native SPDX SBOM
         uses: anchore/sbom-action@v0
         with:
@@ -132,17 +156,21 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $archive = "artifacts/${{ matrix.artifact }}.zip"
-          $hash = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
-          "$hash  $([System.IO.Path]::GetFileName($archive))" |
-            Out-File -Encoding ascii "$archive.sha256"
+          foreach ($artifact in @(
+            "artifacts/${{ matrix.artifact }}.zip",
+            "artifacts/${{ matrix.artifact }}-setup.exe"
+          )) {
+            $hash = (Get-FileHash -Algorithm SHA256 $artifact).Hash.ToLowerInvariant()
+            "$hash  $([System.IO.Path]::GetFileName($artifact))" |
+              Out-File -Encoding ascii "$artifact.sha256"
+          }
       - uses: actions/attest-build-provenance@v2
         with:
-          subject-path: artifacts/${{ matrix.artifact }}.*
+          subject-path: artifacts/${{ matrix.artifact }}*
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
-          path: artifacts/${{ matrix.artifact }}.*
+          path: artifacts/${{ matrix.artifact }}*
           if-no-files-found: error
 
   server:
