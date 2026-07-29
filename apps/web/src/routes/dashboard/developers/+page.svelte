@@ -6,7 +6,7 @@
   const meta = $derived(data.meta);
 </script>
 
-<svelte:head><title>Developers · Spool</title></svelte:head>
+<svelte:head><title>Developers · Piqae</title></svelte:head>
 
 {#snippet actions()}
   <a class="button primary" href="/docs/quickstart"><Icon name="bolt" size={13} /> Quickstart</a>

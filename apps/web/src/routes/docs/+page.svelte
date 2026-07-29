@@ -17,13 +17,13 @@ await customer.printPdf({
 </script>
 
 <svelte:head>
-  <title>Documentation · Spool</title>
-  <meta name="description" content="Build reliable local and remote printing with Spool." />
+  <title>Documentation · Piqae</title>
+  <meta name="description" content="Build reliable local and remote printing with Piqae." />
 </svelte:head>
 
 <div class="home">
   <header>
-    <span>Spool documentation</span>
+    <span>Piqae documentation</span>
     <h1>Printing infrastructure<br />without the mystery.</h1>
     <p>
       Add reliable local and remote printing to your product with one small SDK, durable queues,

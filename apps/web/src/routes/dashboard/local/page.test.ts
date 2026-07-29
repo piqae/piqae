@@ -24,7 +24,7 @@ describe('local node dashboard', () => {
     expect(screen.getByRole('button', { name: 'Validate profile' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Print local test' })).toBeDisabled();
     expect(screen.queryByText('New profile')).not.toBeInTheDocument();
-    expect(screen.getByText(/Use the Spool menu bar app/)).toBeInTheDocument();
+    expect(screen.getByText(/Use the Piqae menu bar app/)).toBeInTheDocument();
     expect(screen.getAllByText('Local durable queue').length).toBeGreaterThan(0);
     expect(screen.getByText('macOS / CUPS')).toBeInTheDocument();
     expect(screen.getByRole('switch', { name: 'Hide Office Laser' })).toBeChecked();

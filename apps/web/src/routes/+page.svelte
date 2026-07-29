@@ -4,53 +4,28 @@
   import MarketingShell from '$lib/components/marketing/MarketingShell.svelte';
   import PricingCards from '$lib/components/marketing/PricingCards.svelte';
   import Seo from '$lib/components/marketing/Seo.svelte';
+  import WorkflowExplorer from '$lib/components/marketing/WorkflowExplorer.svelte';
   import type { CloudPricingCatalog } from '$lib/marketing/types';
 
   let { data }: { data: { pricing: CloudPricingCatalog } } = $props();
-
-  const workflows = [
-    {
-      label: 'Shipping',
-      title: 'Keep orders moving out the door.',
-      body: 'Route packing slips and shipping labels from your order workflow to the right station, even across locations.',
-      visual: 'shipping'
-    },
-    {
-      label: 'Production',
-      title: 'Put the right label on the right product.',
-      body: 'Use local driver settings for the paper sizes, media, trays, and vendor options your operation already relies on.',
-      visual: 'production'
-    },
-    {
-      label: 'Service',
-      title: 'Turn live orders into local action.',
-      body: 'Send receipts, tickets, and work documents where people need them without adding another dashboard to the task.',
-      visual: 'service'
-    },
-    {
-      label: 'Platforms',
-      title: 'Give every customer printing built in.',
-      body: 'Offer full-service printing inside your product with separated customer workspaces, agents, printers, and usage.',
-      visual: 'platform'
-    }
-  ];
 </script>
 
 <Seo
-  title="Spool — Open printing infrastructure"
-  description="Build reliable PDF and RAW printing into any product with a simple API, a lightweight local agent, and your choice of Spool Cloud or self-hosting."
+  title="Piqae — Open printing infrastructure"
+  description="Build reliable PDF and RAW printing into any product with a simple API, a lightweight local agent, and your choice of Piqae Cloud or self-hosting."
   path="/"
   structuredData={[
     {
       '@context': 'https://schema.org',
       '@type': 'Organization',
-      name: 'Spool',
-      sameAs: ['https://github.com/C4CoffeeCo/spool']
+      name: 'Piqae',
+      url: 'https://piqae.com',
+      sameAs: ['https://github.com/C4CoffeeCo/piqae']
     },
     {
       '@context': 'https://schema.org',
       '@type': 'SoftwareApplication',
-      name: 'Spool',
+      name: 'Piqae',
       applicationCategory: 'DeveloperApplication',
       operatingSystem: 'Windows, macOS, Linux',
       license: 'https://www.apache.org/licenses/LICENSE-2.0'
@@ -65,7 +40,7 @@
       <h1 class="m-display">Reliable printing, built into your product.</h1>
       <p class="m-lede">
         Connect your application to printers anywhere with one API and a lightweight local agent.
-        Use Spool as a complete service, run it yourself, or make it the headless print layer
+        Use Piqae as a complete service, run it yourself, or make it the headless print layer
         behind your own product.
       </p>
       <div class="m-actions">
@@ -84,7 +59,7 @@
       <span>Clear status at every handoff</span>
       <p>
         See when a job is queued, on its way, or accepted by the local print system. Because
-        software cannot always confirm what happened on paper, Spool keeps that final boundary
+        software cannot always confirm what happened on paper, Piqae keeps that final boundary
         clear too.
       </p>
     </div>
@@ -106,7 +81,7 @@
         <article>
           <span>02</span>
           <h3>Reach the right site</h3>
-          <p>Spool routes it to the enrolled agent beside the selected printer, with recovery built in.</p>
+          <p>Piqae routes it to the enrolled agent beside the selected printer, with recovery built in.</p>
         </article>
         <article>
           <span>03</span>
@@ -117,48 +92,7 @@
     </div>
   </section>
 
-  <section class="workflow-section">
-    <div class="m-container workflow-layout">
-      <div class="workflow-sticky">
-        <span class="m-eyebrow">Built for real work</span>
-        <h2 class="m-heading">Keep every workflow moving.</h2>
-        <p>
-          One print layer can support the documents people depend on across operations, customer
-          service, and the software you sell.
-        </p>
-        <a href="/how-it-works">See everything Spool can do →</a>
-      </div>
-      <div class="workflow-cards">
-        {#each workflows as workflow}
-          <article>
-            <div class="workflow-visual {workflow.visual}" role="img" aria-label="{workflow.label} printing workflow">
-              <div class="visual-window">
-                <span class="visual-kicker">{workflow.label}</span>
-                {#if workflow.visual === 'shipping'}
-                  <div class="shipping-label"><i></i><b>SP-1048</b><span></span><span></span><small>CHC → AKL</small></div>
-                {:else if workflow.visual === 'production'}
-                  <div class="bag-label"><small>C4 COFFEE</small><strong>ETHIOPIA</strong><span>Washed · Filter</span></div>
-                {:else if workflow.visual === 'service'}
-                  <div class="ticket"><span>ORDER READY</span><strong>#018</strong><small>Print station 02</small></div>
-                {:else}
-                  <div class="platform-ui">
-                    <span><i></i> Customer workspace</span>
-                    <strong>3 printers online</strong>
-                    <small>Printing is part of your app</small>
-                  </div>
-                {/if}
-              </div>
-            </div>
-            <div class="workflow-copy">
-              <span>{workflow.label}</span>
-              <h3>{workflow.title}</h3>
-              <p>{workflow.body}</p>
-            </div>
-          </article>
-        {/each}
-      </div>
-    </div>
-  </section>
+  <WorkflowExplorer />
 
   <section class="global-section">
     <div class="global-frame">
@@ -190,7 +124,7 @@
         <span class="m-eyebrow">Headless printing</span>
         <h2 class="m-heading">Your product. Now with printing built in.</h2>
         <p class="m-lede">
-          Keep your interface, your customer relationships, and your workflow. Spool provides the
+          Keep your interface, your customer relationships, and your workflow. Piqae provides the
           print infrastructure behind the scenes, from customer onboarding to local handoff.
         </p>
         <ul class="m-list">
@@ -204,7 +138,7 @@
           <a class="m-button" href="/pricing#pro">See Pro pricing</a>
         </div>
       </div>
-      <div class="api-stage" aria-label="Example of an application creating a print job with the Spool API">
+      <div class="api-stage" aria-label="Example of an application creating a print job with the Piqae API">
         <div class="api-top">
           <span><i></i><i></i><i></i></span>
           <strong>orders.ts</strong>
@@ -233,7 +167,7 @@
         <span class="m-eyebrow">Clear operational insight</span>
         <h2 class="m-heading">Know what happened, fast.</h2>
         <p class="m-lede">
-          Follow each job from your application to the local print system. Spool turns queue,
+          Follow each job from your application to the local print system. Piqae turns queue,
           agent, and driver events into a timeline your team can understand and act on.
         </p>
         <a class="m-button dark" href="/how-it-works#status">Explore job status</a>
@@ -266,7 +200,7 @@
       <div class="deployment-grid">
         <article class="m-card">
           <span class="mode">Fastest start</span>
-          <h3>Spool Cloud</h3>
+          <h3>Piqae Cloud</h3>
           <p>We operate the service, queues, and updates so your team can focus on the product.</p>
           <a href="/pricing">See Cloud pricing →</a>
         </article>
@@ -296,7 +230,7 @@
           measured rollout around the endpoints and printers you already use.
         </p>
         <div class="m-actions">
-          <a class="m-button primary" href="/compare/printnode">Compare Spool and PrintNode</a>
+          <a class="m-button primary" href="/compare/printnode">Compare Piqae and PrintNode</a>
           <a class="m-button" href="/tools/printnode-cost-calculator">Estimate your cost</a>
         </div>
       </div>
@@ -313,14 +247,14 @@
     </div>
   </section>
 
-  <section class="m-section pricing-section">
+  <section class="pricing-section">
     <div class="m-container">
-      <div class="centered">
-        <span class="m-eyebrow">Simple Cloud pricing</span>
-        <h2 class="m-heading">Start free. Grow when your printing does.</h2>
-        <p>Unlimited dashboard users, clear usage allowances, and free self-hosted software.</p>
+      <div class="pricing-intro">
+        <span class="m-eyebrow">Pricing</span>
+        <h2 class="m-heading">One plan for every print workflow.</h2>
+        <p>Start free, move to Pro when you need more volume, or run Piqae yourself.</p>
       </div>
-      <PricingCards plans={data.pricing.plans} />
+      <PricingCards homepage plans={data.pricing.plans} />
       <p class="pricing-foot">
         Displayed prices are USD excluding tax. Stripe confirms the final charge at checkout.
         Public sale remains gated by cost and release readiness.
@@ -341,7 +275,7 @@
         <span class="m-eyebrow">Why we built it</span>
         <h2 class="m-heading">Built where every label matters.</h2>
         <p>
-          Spool began at C4 Coffee, where coffee bags, shipping labels, and daily production all
+          Piqae began at C4 Coffee, where coffee bags, shipping labels, and daily production all
           depend on software reaching the right printer at the right moment.
         </p>
         <p>
@@ -437,134 +371,6 @@
   .steps span { color: var(--m-violet-dark); font: 11px var(--font-mono); }
   .steps h3 { margin: 25px 0 8px; font-size: 19px; letter-spacing: -0.03em; }
   .steps p { margin: 0; color: var(--m-muted); }
-  .workflow-section { padding: clamp(85px, 11vw, 150px) 0; background: #eeeeeb; }
-  .workflow-layout {
-    display: grid;
-    grid-template-columns: minmax(280px, .72fr) minmax(0, 1.28fr);
-    align-items: start;
-    gap: clamp(45px, 9vw, 130px);
-  }
-  .workflow-sticky {
-    position: sticky;
-    top: 92px;
-    padding-bottom: 30px;
-  }
-  .workflow-sticky p {
-    max-width: 470px;
-    margin: 24px 0;
-    color: var(--m-muted);
-    font-size: 17px;
-  }
-  .workflow-sticky > a {
-    color: var(--m-violet-dark);
-    font-size: 13px;
-    font-weight: 680;
-  }
-  .workflow-cards { display: grid; gap: clamp(55px, 9vw, 110px); }
-  .workflow-cards article { display: grid; gap: 25px; }
-  .workflow-visual {
-    min-height: 470px;
-    display: grid;
-    place-items: center;
-    overflow: hidden;
-    border-radius: 26px;
-    background: #bed8ff;
-  }
-  .workflow-visual.production { background: #e7daaf; }
-  .workflow-visual.service { background: #bce8d5; }
-  .workflow-visual.platform { background: #cfd0ff; }
-  .visual-window {
-    width: min(78%, 430px);
-    min-height: 300px;
-    display: flex;
-    flex-direction: column;
-    padding: 22px;
-    border-radius: 20px;
-    background: #fff;
-    box-shadow: 0 35px 80px rgb(20 20 20 / .17);
-    transform: rotate(-2deg);
-  }
-  .production .visual-window,
-  .platform .visual-window { transform: rotate(2deg); }
-  .visual-kicker {
-    color: var(--m-faint);
-    font-size: 10px;
-    font-weight: 720;
-    letter-spacing: .08em;
-    text-transform: uppercase;
-  }
-  .shipping-label,
-  .bag-label,
-  .ticket,
-  .platform-ui {
-    width: min(90%, 310px);
-    min-height: 190px;
-    display: flex;
-    flex-direction: column;
-    justify-content: center;
-    align-self: center;
-    padding: 26px;
-    margin: auto 0;
-    border: 1px solid #111;
-    color: #111;
-  }
-  .shipping-label i {
-    width: 58px;
-    height: 58px;
-    align-self: flex-end;
-    background:
-      linear-gradient(90deg, #111 12%, transparent 12% 22%, #111 22% 29%, transparent 29% 42%, #111 42% 56%, transparent 56% 66%, #111 66% 74%, transparent 74% 83%, #111 83%);
-  }
-  .shipping-label b,
-  .bag-label strong,
-  .ticket strong {
-    margin-top: auto;
-    font-size: 34px;
-    letter-spacing: -.055em;
-  }
-  .shipping-label > span {
-    height: 7px;
-    margin-top: 7px;
-    background: #111;
-  }
-  .shipping-label > span:nth-of-type(2) { width: 70%; }
-  .shipping-label small,
-  .bag-label span,
-  .ticket small,
-  .platform-ui small { margin-top: 9px; color: #666; font-size: 10px; }
-  .bag-label { align-items: center; border-width: 2px; text-align: center; }
-  .bag-label small { letter-spacing: .14em; }
-  .bag-label strong { margin: auto 0 0; font-size: 42px; }
-  .ticket { border-style: dashed; text-align: center; }
-  .ticket > span { font: 11px var(--font-mono); }
-  .ticket strong { margin: 22px 0 4px; font-size: 58px; }
-  .platform-ui { gap: 11px; border: 0; border-radius: 14px; background: #111; color: white; }
-  .platform-ui span { color: #aaa; font: 10px var(--font-mono); }
-  .platform-ui span i {
-    width: 6px;
-    height: 6px;
-    display: inline-block;
-    margin-right: 6px;
-    border-radius: 50%;
-    background: var(--m-green);
-  }
-  .platform-ui strong { margin-top: auto; font-size: 24px; }
-  .platform-ui small { color: #888; }
-  .workflow-copy > span {
-    color: var(--m-violet-dark);
-    font-size: 11px;
-    font-weight: 720;
-    letter-spacing: .07em;
-    text-transform: uppercase;
-  }
-  .workflow-copy h3 {
-    max-width: 560px;
-    margin: 10px 0;
-    font-size: clamp(29px, 3.4vw, 45px);
-    line-height: 1;
-    letter-spacing: -.055em;
-  }
-  .workflow-copy p { max-width: 570px; margin: 0; color: var(--m-muted); font-size: 16px; }
   .global-section {
     overflow: hidden;
     padding: 0;
@@ -572,7 +378,7 @@
   }
   .global-frame {
     position: relative;
-    min-height: 860px;
+    min-height: 920px;
     overflow: hidden;
     background:
       radial-gradient(circle at 23% 52%, rgb(0 106 255 / .19), transparent 39%),
@@ -595,7 +401,7 @@
   .global-content {
     position: relative;
     z-index: 2;
-    min-height: 860px;
+    min-height: 920px;
     display: flex;
     align-items: center;
     justify-content: flex-end;
@@ -866,11 +672,36 @@
   .migration-card li.active {
     border-color: rgb(0 106 255 / .35); background: rgb(0 106 255 / .1); color: white;
   }
-  .pricing-section { background: #f7f6f2; }
-  .centered { max-width: 760px; margin: 0 auto; text-align: center; }
-  .centered .m-eyebrow { justify-content: center; }
-  .centered p { color: var(--m-muted); }
-  .pricing-foot { margin: 20px 0 0; text-align: center; color: var(--m-faint); font-size: 11px; }
+  .pricing-section {
+    min-height: min(900px, 100svh);
+    padding: clamp(92px, 10vw, 128px) 0 clamp(92px, 10vw, 120px);
+    background: #050505;
+    color: white;
+  }
+  .pricing-intro { max-width: 850px; }
+  .pricing-intro .m-eyebrow {
+    margin-bottom: 30px;
+    color: #8c8c8c;
+    font: 600 13px/1 var(--font-mono);
+    letter-spacing: .09em;
+    text-transform: uppercase;
+  }
+  .pricing-intro .m-heading {
+    color: white;
+    font-size: clamp(42px, 5.2vw, 66px);
+  }
+  .pricing-intro p {
+    max-width: 700px;
+    margin: 24px 0 0;
+    color: #b5b5b5;
+    font-size: 17px;
+  }
+  .pricing-foot {
+    max-width: 760px;
+    margin: 58px 0 0;
+    color: #858585;
+    font-size: 11px;
+  }
   .origin { background: #eeece6; }
   .origin-grid { display: grid; grid-template-columns: 1fr 1fr; align-items: center; gap: clamp(42px, 8vw, 110px); }
   .photo-frame {
@@ -905,14 +736,10 @@
   .final-cta .m-actions { flex: none; }
   .final-cta .m-button:not(.primary) { border-color: var(--m-border-light); background: transparent; color: white; }
   @media (max-width: 900px) {
-    .workflow-layout,
     .headless-grid,
     .decisions-grid,
     .switch-grid,
     .origin-grid { grid-template-columns: 1fr; }
-    .workflow-sticky { position: static; }
-    .workflow-cards { gap: 65px; }
-    .workflow-visual { min-height: 430px; }
     .global-frame,
     .global-content { min-height: 1050px; }
     .global-frame::after {
@@ -935,9 +762,6 @@
     .section-heading { align-items: flex-start; flex-direction: column; }
     .steps, .deployment-grid { grid-template-columns: 1fr; }
     .steps { gap: 30px; }
-    .workflow-visual { min-height: 360px; }
-    .visual-window { min-height: 250px; }
-    .shipping-label, .bag-label, .ticket, .platform-ui { min-height: 160px; }
     .api-stage pre { min-height: 285px; font-size: 11px; }
     .api-result { align-items: start; grid-template-columns: 1fr; gap: 4px; padding-block: 12px; }
     .photo-frame { min-height: 420px; }

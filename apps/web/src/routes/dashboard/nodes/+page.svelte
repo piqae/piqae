@@ -49,7 +49,7 @@
   }
 </script>
 
-<svelte:head><title>Nodes · Spool</title></svelte:head>
+<svelte:head><title>Nodes · Piqae</title></svelte:head>
 
 {#snippet actions()}
   <a class="button" href="/dashboard/local"><Icon name="printers" size={13} /> This device</a>

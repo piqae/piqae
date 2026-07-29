@@ -1,9 +1,9 @@
 <svg width="1200" height="630" viewBox="0 0 1200 630" xmlns="http://www.w3.org/2000/svg">
   <rect width="1200" height="630" fill="#0B0B0F"/>
-  <circle cx="990" cy="55" r="340" fill="#7657F6" fill-opacity=".2"/>
+  <circle cx="990" cy="55" r="340" fill="#006AFF" fill-opacity=".22"/>
   <rect x="84" y="80" width="54" height="54" rx="15" fill="#F7F6F2"/>
   <path d="M103 101h16M103 107h16M103 113h16" stroke="#17161B" stroke-width="3" stroke-linecap="round"/>
-  <text x="160" y="124" fill="#F7F6F2" font-family="Inter,Arial,sans-serif" font-size="42" font-weight="700">Spool</text>
+  <text x="160" y="124" fill="#F7F6F2" font-family="Inter,Arial,sans-serif" font-size="42" font-weight="700">Piqae</text>
   <text x="84" y="315" fill="#F7F6F2" font-family="Inter,Arial,sans-serif" font-size="74" font-weight="600" letter-spacing="-4">Printing infrastructure</text>
   <text x="84" y="395" fill="#F7F6F2" font-family="Inter,Arial,sans-serif" font-size="74" font-weight="600" letter-spacing="-4">without the black box.</text>
   <text x="88" y="485" fill="#A8A6B0" font-family="Inter,Arial,sans-serif" font-size="28">Cloud, self-hosted, or local-only.</text>

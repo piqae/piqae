@@ -4,8 +4,8 @@
 </script>
 
 <Seo
-  title="Open-source printing infrastructure — Spool"
-  description="Audit, modify, and self-host Spool under the Apache-2.0 licence. Keep local and self-hosted printing first-class."
+  title="Open-source printing infrastructure — Piqae"
+  description="Audit, modify, and self-host Piqae under the Apache-2.0 licence. Keep local and self-hosted printing first-class."
   path="/open-source"
 />
 
@@ -19,7 +19,7 @@
         Choose managed Cloud for convenience or run the complete platform in your own environment.
       </p>
       <div class="m-actions">
-        <a class="m-button primary" href="https://github.com/C4CoffeeCo/spool">View on GitHub</a>
+        <a class="m-button primary" href="https://github.com/C4CoffeeCo/piqae">View on GitHub</a>
         <a class="m-button" href="/docs/self-hosting">Self-hosting guide</a>
       </div>
     </div>
@@ -62,7 +62,7 @@
         <h2>Use it commercially. Modify it. Operate it yourself.</h2>
         <p>The licence file in the repository is authoritative; this page is not legal advice.</p>
       </div>
-      <a class="m-button primary" href="https://github.com/C4CoffeeCo/spool/blob/main/LICENSE">Read the licence</a>
+      <a class="m-button primary" href="https://github.com/C4CoffeeCo/piqae/blob/main/LICENSE">Read the licence</a>
     </div>
   </section>
 </MarketingShell>

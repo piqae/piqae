@@ -5,9 +5,11 @@
 
   let {
     condensed = false,
+    homepage = false,
     plans
   }: {
     condensed?: boolean;
+    homepage?: boolean;
     plans: PricingDisplay[];
   } = $props();
   let interval = $state<BillingInterval>('monthly');
@@ -49,22 +51,91 @@
 
 <div id="pro" class="pricing-anchor" aria-hidden="true"></div>
 
-<div class="pricing-controls" role="group" aria-label="Billing interval">
-  <button
-    type="button"
-    aria-pressed={interval === 'monthly'}
-    class:active={interval === 'monthly'}
-    onclick={() => (interval = 'monthly')}
-  >Monthly</button>
-  <button
-    type="button"
-    aria-pressed={interval === 'annual'}
-    class:active={interval === 'annual'}
-    onclick={() => (interval = 'annual')}
-  >
-    Annual <span>2 months free</span>
-  </button>
-</div>
+{#if homepage}
+  <div class="pricing-controls home" role="group" aria-label="Billing interval">
+    <button
+      type="button"
+      aria-pressed={interval === 'monthly'}
+      class:active={interval === 'monthly'}
+      onclick={() => (interval = 'monthly')}
+    >Monthly</button>
+    <button
+      type="button"
+      aria-pressed={interval === 'annual'}
+      class:active={interval === 'annual'}
+      onclick={() => (interval = 'annual')}
+    >
+      Annual <span>2 months free</span>
+    </button>
+  </div>
+
+  <div class="home-pricing-grid">
+    {#each plans as item}
+      <article class="home-plan" class:featured={item.plan === 'pro'}>
+        <div class="home-plan-header">
+          <div class="home-plan-title">
+            <h3>Piqae {item.name}</h3>
+            {#if item.badge}<span class="badge">{item.badge}</span>{/if}
+          </div>
+          <p>{item.headline}</p>
+        </div>
+        <div class="home-plan-cost">
+          <div>
+            <strong>{priceFor(item).amount}</strong><span>/mo.</span>
+          </div>
+          {#if priceFor(item).note}
+            <small>{priceFor(item).note}</small>
+          {:else}
+            <small aria-hidden="true">&nbsp;</small>
+          {/if}
+          <p>
+            {wholeNumber.format(acceptedJobsFor(item).amount)} accepted jobs
+            <span>
+              {acceptedJobsFor(item).period === 'per annual billing period' ? 'per year' : 'per month'}
+              · {wholeNumber.format(item.includedNodes)} {item.includedNodes === 1 ? 'node' : 'nodes'}
+            </span>
+          </p>
+        </div>
+        <a
+          class="home-plan-cta"
+          class:primary={item.plan === 'pro'}
+          href={`/start?plan=${item.plan}&interval=${interval}&source=home-pricing`}
+        >
+          {item.cta}
+        </a>
+      </article>
+    {/each}
+
+    <article class="home-plan self-hosted">
+      <div class="home-plan-header">
+        <div class="home-plan-title"><h3>Self-hosted</h3></div>
+        <p>Run the complete Apache-2.0 stack in your own environment.</p>
+      </div>
+      <div class="home-plan-cost">
+        <div><strong>$0</strong></div>
+        <small>software licence</small>
+        <p>Unlimited self-hosted jobs <span>· Your infrastructure</span></p>
+      </div>
+      <a class="home-plan-cta" href="/open-source">Explore self-hosting</a>
+    </article>
+  </div>
+{:else}
+  <div class="pricing-controls" role="group" aria-label="Billing interval">
+    <button
+      type="button"
+      aria-pressed={interval === 'monthly'}
+      class:active={interval === 'monthly'}
+      onclick={() => (interval = 'monthly')}
+    >Monthly</button>
+    <button
+      type="button"
+      aria-pressed={interval === 'annual'}
+      class:active={interval === 'annual'}
+      onclick={() => (interval = 'annual')}
+    >
+      Annual <span>2 months free</span>
+    </button>
+  </div>
 
 {#if condensed}
   <div class="pricing-grid">
@@ -100,7 +171,7 @@
       <thead>
         <tr>
           <th scope="col" class="row-label">
-            <span>Spool Cloud</span>
+            <span>Piqae Cloud</span>
             <strong>Compare plans</strong>
           </th>
           {#each plans as item}
@@ -224,6 +295,7 @@
       </article>
     {/each}
   </div>
+{/if}
 {/if}
 
 <style>
@@ -414,10 +486,150 @@
   .mobile-plans dl div { display: flex; justify-content: space-between; gap: 18px; }
   .mobile-plans dt { color: var(--m-muted); font-size: 11px; }
   .mobile-plans dd { margin: 0; color: var(--m-ink); font-size: 11px; font-weight: 650; text-align: right; }
+  .pricing-controls.home {
+    margin: 68px 0 34px auto;
+    border-color: rgb(255 255 255 / .18);
+    background: #171717;
+  }
+  .pricing-controls.home button { color: #a3a3a3; }
+  .pricing-controls.home button.active {
+    background: white;
+    color: #050505;
+    box-shadow: none;
+  }
+  .pricing-controls.home span { color: #74aaff; }
+  .home-pricing-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 20px;
+  }
+  .home-pricing-grid article,
+  .home-pricing-grid article.featured {
+    min-height: 405px;
+    padding: 0 30px;
+    border: 0;
+    border-left: 1px solid rgb(255 255 255 / .78);
+    border-radius: 0;
+    background: transparent;
+    color: white;
+    box-shadow: none;
+  }
+  .home-plan-header {
+    min-height: 127px;
+    padding-bottom: 30px;
+    border-bottom: 1px solid rgb(255 255 255 / .42);
+  }
+  .home-plan-title {
+    min-height: 30px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 14px;
+  }
+  .home-plan-title h3 {
+    color: white;
+    font-family: var(--m-font-display);
+    font-size: 23px;
+    font-weight: 600;
+    letter-spacing: -.025em;
+  }
+  .home-plan-title .badge {
+    flex: none;
+    margin: 0;
+    padding: 5px 9px;
+    border-radius: 5px;
+    background: #242424;
+    color: #d8d8d8;
+    font: 600 10px/1 var(--font-mono);
+    letter-spacing: .08em;
+    text-transform: uppercase;
+  }
+  .home-plan-header p {
+    min-height: 48px;
+    margin: 10px 0 0;
+    color: #8b8b8b;
+    font-size: 15px;
+    line-height: 1.5;
+  }
+  .home-plan-cost {
+    flex: 1;
+    padding-top: 40px;
+  }
+  .home-plan-cost > div {
+    display: flex;
+    align-items: baseline;
+    flex-wrap: wrap;
+  }
+  .home-plan-cost strong {
+    color: white;
+    font-family: var(--m-font-editorial);
+    font-size: clamp(45px, 4.5vw, 62px);
+    font-weight: 400;
+    letter-spacing: -.045em;
+    line-height: .95;
+  }
+  .home-plan-cost > div > span {
+    margin-left: 2px;
+    color: white;
+    font-family: var(--m-font-editorial);
+    font-size: clamp(24px, 2.3vw, 34px);
+    letter-spacing: -.035em;
+  }
+  .home-plan-cost small {
+    min-height: 20px;
+    display: block;
+    margin-top: 10px;
+    color: #777;
+    font-size: 11px;
+  }
+  .home-plan-cost p {
+    margin: 22px 0 0;
+    color: #aaa;
+    font-size: 12px;
+  }
+  .home-plan-cost p span { color: #8b8b8b; }
+  .home-plan-cta {
+    width: fit-content;
+    min-height: 48px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    align-self: flex-start;
+    padding: 0 23px;
+    border-radius: 99px;
+    background: white;
+    color: #006aff;
+    font-size: 14px;
+    font-weight: 650;
+    transition:
+      transform 180ms ease,
+      background-color 180ms ease;
+  }
+  .home-plan-cta.primary { background: #006aff; color: white; }
+  .home-plan-cta:hover { transform: translateY(-1px); background: #e7efff; }
+  .home-plan-cta.primary:hover { background: #1878ff; }
   @media (max-width: 1050px) {
     .pricing-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .home-pricing-grid {
+      gap: 12px;
+    }
+    .home-pricing-grid article,
+    .home-pricing-grid article.featured { padding-inline: 22px; }
   }
   @media (max-width: 720px) {
+    .pricing-controls.home { margin: 48px 0 28px; }
+    .home-pricing-grid { grid-template-columns: 1fr; gap: 0; }
+    .home-pricing-grid article,
+    .home-pricing-grid article.featured {
+      min-height: 0;
+      padding: 36px 0;
+      border-top: 1px solid rgb(255 255 255 / .45);
+      border-left: 0;
+    }
+    .home-plan-header { min-height: 0; }
+    .home-plan-cost { padding-block: 34px; }
+    .home-plan-cost strong { font-size: 56px; }
+    .home-plan-cost > div > span { font-size: 30px; }
     .plan-table-wrap { display: none; }
     .mobile-plans { display: grid; grid-template-columns: 1fr; }
   }

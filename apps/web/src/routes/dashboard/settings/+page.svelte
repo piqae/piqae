@@ -6,7 +6,7 @@
   let privateUris = $state(true);
 </script>
 
-<svelte:head><title>Settings · Spool</title></svelte:head>
+<svelte:head><title>Settings · Piqae</title></svelte:head>
 
 <PageHeader
   title="Settings"
@@ -26,7 +26,7 @@
 
   <div class="settings-content">
     <section class="panel" id="general">
-      <header><h2>Deployment</h2><p>Capabilities reported by this Spool control plane.</p></header>
+      <header><h2>Deployment</h2><p>Capabilities reported by this Piqae control plane.</p></header>
       <div class="form-body">
         <label class="field"><span>Mode</span><input class="input" value={data.meta.deployment.replace('_', ' ')} disabled /></label>
         <label class="field"><span>Authentication</span><input class="input" value={data.meta.auth.provider.replace('_', ' ')} disabled /></label>

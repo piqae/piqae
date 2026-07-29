@@ -5,7 +5,7 @@
   const guides = [
     {
       label: 'Direct comparison',
-      title: 'Spool vs PrintNode',
+      title: 'Piqae vs PrintNode',
       body: 'Compare deployment, source access, pricing shape, formats, agent model, and current maturity.',
       href: '/compare/printnode',
       live: true
@@ -33,14 +33,14 @@
     },
     {
       label: 'Architecture',
-      title: 'Spool vs QZ Tray',
+      title: 'Piqae vs QZ Tray',
       body: 'Understand the difference between browser-local hardware access and durable remote print infrastructure.',
       href: '/compare/qz-tray',
       live: false
     },
     {
       label: 'Print management',
-      title: 'Spool vs ezeep',
+      title: 'Piqae vs ezeep',
       body: 'Compare API-first infrastructure with a user and endpoint-oriented cloud print platform.',
       href: '/compare/ezeep',
       live: false
@@ -49,7 +49,7 @@
 </script>
 
 <Seo
-  title="Compare Spool — Printing APIs and infrastructure"
+  title="Compare Piqae — Printing APIs and infrastructure"
   description="Factual product comparisons, a PrintNode migration guide, and a sourced cost calculator for teams evaluating printing infrastructure."
   path="/compare"
 />
@@ -87,7 +87,7 @@
       </div>
       <div>
         <p>We use official primary sources for competitor facts and show when they were checked.</p>
-        <p>We include reasons to choose the other product, not only reasons to choose Spool.</p>
+        <p>We include reasons to choose the other product, not only reasons to choose Piqae.</p>
         <p>Numeric claims expire after 90 days and stay out of search until they are reviewed.</p>
         <p>“Spooler accepted” never becomes a claim that a document physically printed.</p>
       </div>

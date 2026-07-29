@@ -40,7 +40,7 @@
   {/if}
   <header class="site-header">
     <div class="header-inner">
-      <a class="brand" href="/" aria-label="Spool home"><Logo /></a>
+      <a class="brand" href="/" aria-label="Piqae home"><Logo /></a>
       <nav id="primary-navigation" class:open aria-label="Primary navigation">
         {#each nav as item}
           <a href={item.href} onclick={() => (open = false)}>{item.label}</a>
@@ -90,24 +90,24 @@
         <a href="/docs">Documentation</a>
         <a href="/docs/quickstart">Quickstart</a>
         <a href="/open-source">Open source</a>
-        <a href="https://github.com/C4CoffeeCo/spool">GitHub</a>
+        <a href="https://github.com/C4CoffeeCo/piqae">GitHub</a>
       </div>
       <div>
         <strong>Compare</strong>
-        <a href="/compare/printnode">Spool vs PrintNode</a>
+        <a href="/compare/printnode">Piqae vs PrintNode</a>
         <a href="/alternatives/printnode">PrintNode alternatives</a>
         <a href="/migrate/printnode">Migration guide</a>
         <a href="/tools/printnode-cost-calculator">Cost calculator</a>
       </div>
       <div>
         <strong>Company</strong>
-        <a href="/about">Why we built Spool</a>
+        <a href="/about">Why we built Piqae</a>
         <a href="/security">Trust and security</a>
         <a href={contactHref}>Contact</a>
       </div>
     </div>
     <div class="footer-bottom m-container">
-      <span>© {year} Spool. Working name pending clearance.</span>
+      <span>© {year} Piqae.</span>
       <span>Apache-2.0 · Built in Ōtautahi Christchurch, New Zealand</span>
     </div>
   </footer>

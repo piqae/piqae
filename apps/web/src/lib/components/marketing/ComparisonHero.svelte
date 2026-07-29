@@ -23,7 +23,7 @@
     <h1 class="m-title">{title}</h1>
     <p class="m-lede">{description}</p>
     <div class="m-actions">
-      <a class="m-button primary" href="/start?plan=free&source=comparison">Start with Spool</a>
+      <a class="m-button primary" href="/start?plan=free&source=comparison">Start with Piqae</a>
       <a class="m-button" href="/tools/printnode-cost-calculator">Compare costs</a>
     </div>
     <p class="source">

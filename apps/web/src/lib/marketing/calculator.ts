@@ -188,7 +188,7 @@ export function estimateSpool(
     monthlyCents: selected.cost.monthlyCents,
     annualCents: selected.cost.annualCents,
     available: true,
-    note: `Based on Spool pricing catalog ${catalog.version}; Stripe confirms the final charge at checkout.`
+    note: `Based on Piqae pricing catalog ${catalog.version}; Stripe confirms the final charge at checkout.`
   };
 }
 

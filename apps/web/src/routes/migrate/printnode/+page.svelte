@@ -7,7 +7,7 @@
 
   const phases = [
     ['Inventory', 'Record every endpoint, credential, printer, content format, option, status dependency, and retry policy your current integration uses.'],
-    ['Map', 'Compare those behaviours with Spool’s tested compatibility matrix. Treat gaps as explicit work, not assumptions.'],
+    ['Map', 'Compare those behaviours with Piqae’s tested compatibility matrix. Treat gaps as explicit work, not assumptions.'],
     ['Prepare', 'Enroll a separate agent, map printer identities, create scoped credentials, and define success and rollback thresholds.'],
     ['Canary', 'Route a bounded, non-critical job set. Compare API responses, native queue results, webhooks, and operational recovery.'],
     ['Expand', 'Increase traffic in stages while preserving the old base URL and credentials for immediate rollback.'],
@@ -16,7 +16,7 @@
 </script>
 
 <Seo
-  title="Migrate from PrintNode to Spool"
+  title="Migrate from PrintNode to Piqae"
   description="A staged PrintNode migration guide covering endpoint inventory, compatibility mapping, printer canaries, observability, and rollback."
   path="/migrate/printnode"
   noindex={claimsExpired}
@@ -28,7 +28,7 @@
       <span class="m-eyebrow">PrintNode migration</span>
       <h1 class="m-title">Change the print path without betting the operation.</h1>
       <p class="m-lede">
-        Spool supports a migration-critical subset of the PrintNode printing API. Use that
+        Piqae supports a migration-critical subset of the PrintNode printing API. Use that
         compatibility to canary deliberately—not to assume every historical behaviour matches.
       </p>
       <div class="m-actions">
@@ -50,7 +50,7 @@
             <tr><td>Print jobs</td><td>Migration-critical subset</td><td>Test request and state fixtures</td></tr>
             <tr><td>whoami, ping, noop</td><td>Covered subset</td><td>Run client health checks</td></tr>
             <tr><td>Scales</td><td>Not claimed</td><td>Keep existing path or build separately</td></tr>
-            <tr><td>Integrator subaccount APIs</td><td>Not claimed as compatible</td><td>Map to Spool workspaces explicitly</td></tr>
+            <tr><td>Integrator subaccount APIs</td><td>Not claimed as compatible</td><td>Map to Piqae workspaces explicitly</td></tr>
             <tr><td>Historical response quirks</td><td>Not universally replicated</td><td>Fixture-test your exact client</td></tr>
           </tbody>
         </table>

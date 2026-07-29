@@ -15,7 +15,7 @@
     structuredData?: Record<string, unknown> | Record<string, unknown>[];
   } = $props();
 
-  const siteName = 'Spool';
+  const siteName = 'Piqae';
   const origin = import.meta.env.PUBLIC_SITE_URL?.replace(/\/$/, '');
   const canonical = $derived(origin ? `${origin}${path}` : null);
   const indexable = $derived(

@@ -4,8 +4,8 @@
 </script>
 
 <Seo
-  title="Spool security and trust"
-  description="Understand Spool's tenant boundaries, signed agent identity, durable queues, document handling, and deliberately scoped delivery claims."
+  title="Piqae security and trust"
+  description="Understand Piqae's tenant boundaries, signed agent identity, durable queues, document handling, and deliberately scoped delivery claims."
   path="/security"
 />
 
@@ -15,7 +15,7 @@
       <span class="m-eyebrow">Security and trust</span>
       <h1 class="m-title">Built for the documents your business depends on.</h1>
       <p class="m-lede">
-        Spool protects credentials, gives every enrolled agent its own identity, separates
+        Piqae protects credentials, gives every enrolled agent its own identity, separates
         customer workspaces, and keeps sensitive print data out of marketing analytics.
       </p>
     </div>
@@ -53,7 +53,7 @@
     <div class="m-narrow m-prose">
       <h2>Deployment responsibility</h2>
       <p>
-        Spool Cloud operates the managed control plane. Self-hosted operators are responsible for
+        Piqae Cloud operates the managed control plane. Self-hosted operators are responsible for
         their database, object storage, network, identity configuration, retention, upgrades, and
         backups. The native agent remains inside the printer network in either model.
       </p>
@@ -65,7 +65,7 @@
       </p>
       <div class="m-actions">
         <a class="m-button primary" href="/docs/security">Read security documentation</a>
-        <a class="m-button" href="https://github.com/C4CoffeeCo/spool/security">Report a vulnerability</a>
+        <a class="m-button" href="https://github.com/C4CoffeeCo/piqae/security">Report a vulnerability</a>
       </div>
     </div>
   </section>

@@ -48,7 +48,7 @@ const job = await account.printPdf({
   }
 </script>
 
-<svelte:head><title>{account?.name ?? 'Customer'} · Spool</title></svelte:head>
+<svelte:head><title>{account?.name ?? 'Customer'} · Piqae</title></svelte:head>
 
 <a class="back" href="/dashboard/accounts"><span aria-hidden="true">←</span> Customers</a>
 
@@ -58,7 +58,7 @@ const job = await account.printPdf({
     description="This deployment does not expose the optional platform accounts capability."
   />
 {:else if data.dataError}
-  <PageHeader title="Customer unavailable" description="Spool could not load this customer." />
+  <PageHeader title="Customer unavailable" description="Piqae could not load this customer." />
   <DataError error={data.dataError} />
 {:else if !account}
   <PageHeader title="Customer not found" description="No customer matches this external ID." />

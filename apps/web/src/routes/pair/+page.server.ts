@@ -70,7 +70,7 @@ async function decide(
   if (!id || !/^[2-9A-HJ-NP-Z]{4}-[2-9A-HJ-NP-Z]{4}$/.test(userCode)) {
     return fail(400, {
       decision,
-      error: 'Enter the eight-character code displayed by the Spool node.'
+      error: 'Enter the eight-character code displayed by the Piqae node.'
     });
   }
   try {

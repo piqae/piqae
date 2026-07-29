@@ -23,7 +23,7 @@
   );
 </script>
 
-<svelte:head><title>Printers · Spool</title></svelte:head>
+<svelte:head><title>Printers · Piqae</title></svelte:head>
 
 {#snippet actions()}
   <button class="button" disabled title="Capability refresh mutation is not implemented"><Icon name="activity" size={13} /> Refresh capabilities</button>

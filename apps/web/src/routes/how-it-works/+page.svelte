@@ -13,8 +13,8 @@
 </script>
 
 <Seo
-  title="How Spool works — From your app to any printer"
-  description="See how Spool connects your application to remote printers through one API, resilient queues, a lightweight local agent, and installed OS drivers."
+  title="How Piqae works — From your app to any printer"
+  description="See how Piqae connects your application to remote printers through one API, resilient queues, a lightweight local agent, and installed OS drivers."
   path="/how-it-works"
 />
 
@@ -24,7 +24,7 @@
       <span class="m-eyebrow">How it works</span>
       <h1 class="m-title">From your app to the right printer—without the guesswork.</h1>
       <p class="m-lede">
-        One API connects your workflow to printers at every site. Spool manages the journey, the
+        One API connects your workflow to printers at every site. Piqae manages the journey, the
         local agent works with installed drivers, and your application gets clear status back.
       </p>
       <div class="m-actions">
@@ -53,7 +53,7 @@
         <span>02 · Server queue</span>
         <h2>Keep it moving safely.</h2>
         <p>
-          Spool stores the job before routing it to an eligible printer and agent, so a brief
+          Piqae stores the job before routing it to an eligible printer and agent, so a brief
           outage does not mean starting the workflow again.
         </p>
         <a href="/docs/jobs">Job API →</a>
@@ -71,7 +71,7 @@
         <span>04 · Native handoff</span>
         <h2>Keep every local capability.</h2>
         <p>
-          Spool reads printer options from Windows or CUPS. PDF follows the native print path,
+          Piqae reads printer options from Windows or CUPS. PDF follows the native print path,
           while RAW bytes reach the driver unchanged.
         </p>
         <a href="/docs/printers">Printer capabilities →</a>
@@ -118,12 +118,12 @@
       <div class="topologies">
         <article class="m-card">
           <span>Cloud</span>
-          <code>Your app → Spool Cloud → agent → OS</code>
+          <code>Your app → Piqae Cloud → agent → OS</code>
           <p>Managed control plane and billing, with the native execution boundary on your network.</p>
         </article>
         <article class="m-card">
           <span>Self-hosted</span>
-          <code>Your app → your Spool stack → agent → OS</code>
+          <code>Your app → your Piqae stack → agent → OS</code>
           <p>Operate the control plane and storage yourself under the Apache-2.0 licence.</p>
         </article>
         <article class="m-card">

@@ -83,7 +83,7 @@
 {#if choice === null && import.meta.env.PUBLIC_POSTHOG_KEY}
   <aside class="consent" aria-label="Analytics preference">
     <div>
-      <strong>Help improve Spool</strong>
+      <strong>Help improve Piqae</strong>
       <p>
         Allow anonymous product-marketing analytics. Session replay is off and print data is never
         collected. <a href="/security#analytics">Details</a>

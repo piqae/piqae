@@ -6,16 +6,16 @@
   const auth = createAuthBoundary('hosted');
 </script>
 
-<svelte:head><title>Sign in · Spool</title></svelte:head>
+<svelte:head><title>Sign in · Piqae</title></svelte:head>
 
 <main>
   <section class="login-card">
     <a class="brand" href="/">
       <span><Icon name="printers" size={16} strokeWidth={2} /></span>
-      Spool
+      Piqae
     </a>
     <div class="copy">
-      <h1>Sign in to Spool</h1>
+      <h1>Sign in to Piqae</h1>
       <p>Manage your print fleet, queues, API keys, and live delivery state.</p>
     </div>
     {#if data.authMode === 'local'}
@@ -54,7 +54,7 @@
   </section>
   <footer>
     <a href="/docs">Documentation</a>
-    <a href="https://github.com/C4CoffeeCo/spool">Open source</a>
+    <a href="https://github.com/C4CoffeeCo/piqae">Open source</a>
     <a href="/docs/self-host">Self-host</a>
   </footer>
 </main>

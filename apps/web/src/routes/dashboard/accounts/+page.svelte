@@ -19,7 +19,7 @@
   );
 </script>
 
-<svelte:head><title>Customers · Spool</title></svelte:head>
+<svelte:head><title>Customers · Piqae</title></svelte:head>
 
 <PageHeader
   title="Customers"

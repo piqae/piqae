@@ -4,7 +4,7 @@ Spool accepts Apache-2.0 contributions with DCO sign-off. Start a deterministic
 virtual node and fake printers from a fresh checkout:
 
 ```console
-git clone https://github.com/C4CoffeeCo/spool.git
+git clone https://github.com/C4CoffeeCo/piqae.git
 cd spool
 cargo xtask doctor
 cargo xtask dev

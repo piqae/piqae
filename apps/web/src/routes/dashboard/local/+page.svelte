@@ -486,7 +486,7 @@
   });
 </script>
 
-<svelte:head><title>Local node · Spool</title></svelte:head>
+<svelte:head><title>Local node · Piqae</title></svelte:head>
 
 {#snippet actions()}
   <button class="button" onclick={() => refresh(true)} disabled={demo || loading}>
@@ -504,7 +504,7 @@
 <PageHeader
   eyebrow="This Mac"
   title="Local node"
-  description="Native driver profiles, local queue truth, and real-time delivery from Spool to this Mac."
+  description="Native driver profiles, local queue truth, and real-time delivery from Piqae to this Mac."
   {actions}
 />
 
@@ -537,7 +537,7 @@
   <article class="panel metric">
     <span>Discovered queues</span>
     <strong>{printers.length}</strong>
-    <small>{exposedCount} exposed to Spool</small>
+    <small>{exposedCount} exposed to Piqae</small>
   </article>
   <article class="panel metric">
     <span>Local durable queue</span>
@@ -634,7 +634,7 @@
             </div>
           </article>
         {:else}
-          <p class="empty compact">No profiles yet. Add one from the Spool menu bar app.</p>
+          <p class="empty compact">No profiles yet. Add one from the Piqae menu bar app.</p>
         {/each}
       </div>
       <div class="profile-detail">
@@ -690,20 +690,20 @@
           <div class="native-setup">
             <span class="printer-icon"><Icon name="printers" size={16} /></span>
             <strong>Create profiles in the native app</strong>
-            <p>Open the Spool icon in the macOS menu bar, choose this printer, then Add profile. The real driver panel captures paper, trays, finishing, marks, calibration, and vendor settings as one immutable revision.</p>
+            <p>Open the Piqae icon in the macOS menu bar, choose this printer, then Add profile. The real driver panel captures paper, trays, finishing, marks, calibration, and vendor settings as one immutable revision.</p>
           </div>
         {/if}
       </div>
     </div>
     <div class="native-guidance">
-      <div><strong>Add, edit, or clone a profile</strong><span>Use the Spool menu bar app. Editing creates a new immutable revision through the printer’s native driver panel.</span></div>
-      <span class="shortcut">Spool menu bar → Printers → {selectedPrinter?.name ?? 'Printer'} → Add profile</span>
+      <div><strong>Add, edit, or clone a profile</strong><span>Use the Piqae menu bar app. Editing creates a new immutable revision through the printer’s native driver panel.</span></div>
+      <span class="shortcut">Piqae menu bar → Printers → {selectedPrinter?.name ?? 'Printer'} → Add profile</span>
     </div>
   </section>
 
   <section>
     <div class="section-heading">
-      <div><h2>Queue truth</h2><p>Spool’s durable queue beside the native OS spooler.</p></div>
+      <div><h2>Queue truth</h2><p>Piqae’s durable queue beside the native OS spooler.</p></div>
       <button class="button ghost small" onclick={refreshQueue} disabled={demo || !selectedPrinter}>Refresh</button>
     </div>
     <div class="panel queues">
@@ -720,7 +720,7 @@
         {:else}<p class="empty compact">No jobs reported by the OS queue.</p>{/each}
       </div>
       <div class="diagnostic">
-        <div><strong>Two independent queue views</strong><small>The durable Spool job remains visible beside the macOS/CUPS handoff for accurate failure tracing.</small></div>
+        <div><strong>Two independent queue views</strong><small>The durable Piqae job remains visible beside the macOS/CUPS handoff for accurate failure tracing.</small></div>
         <button class="button small" onclick={refreshQueue} disabled={demo || !selectedPrinter}>Refresh queue</button>
       </div>
     </div>

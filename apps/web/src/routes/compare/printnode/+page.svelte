@@ -11,8 +11,8 @@
 </script>
 
 <Seo
-  title="Spool vs PrintNode — A factual printing API comparison"
-  description="Compare Spool and PrintNode across deployment, open source access, API migration, agents, print formats, pricing, and product maturity."
+  title="Piqae vs PrintNode — A factual printing API comparison"
+  description="Compare Piqae and PrintNode across deployment, open source access, API migration, agents, print formats, pricing, and product maturity."
   path="/compare/printnode"
   noindex={claimsExpired}
   structuredData={{
@@ -21,16 +21,16 @@
     itemListElement: [
       { '@type': 'ListItem', position: 1, name: 'Home', item: '/' },
       { '@type': 'ListItem', position: 2, name: 'Compare', item: '/compare' },
-      { '@type': 'ListItem', position: 3, name: 'Spool vs PrintNode', item: '/compare/printnode' }
+      { '@type': 'ListItem', position: 3, name: 'Piqae vs PrintNode', item: '/compare/printnode' }
     ]
   }}
 />
 
 <MarketingShell announcement={claimsExpired ? 'Comparison evidence is past its review date and excluded from search' : undefined}>
   <ComparisonHero
-    eyebrow="Spool vs PrintNode"
+    eyebrow="Piqae vs PrintNode"
     title="Two remote print APIs, with different control boundaries."
-    description="PrintNode is an established hosted service with mature desktop clients. Spool is an Apache-2.0 alternative built around open deployment, durable edge ownership, and explicit status semantics."
+    description="PrintNode is an established hosted service with mature desktop clients. Piqae is an Apache-2.0 alternative built around open deployment, durable edge ownership, and explicit status semantics."
     verified="29 July 2026"
     source="https://www.printnode.com/en"
   />
@@ -38,7 +38,7 @@
   <section class="best-for m-section-compact">
     <div class="m-container m-grid-2">
       <article class="m-card">
-        <span>Spool may fit better when</span>
+        <span>Piqae may fit better when</span>
         <h2>You need control of the whole print path.</h2>
         <ul class="m-list">
           <li>Self-hosting or local-only operation is a requirement.</li>
@@ -52,7 +52,7 @@
         <h2>You need a mature hosted client today.</h2>
         <ul class="m-list">
           <li>You require its current signed desktop coverage and production history.</li>
-          <li>You depend on scales or historical API behaviours outside Spool’s tested subset.</li>
+          <li>You depend on scales or historical API behaviours outside Piqae’s tested subset.</li>
           <li>You prefer an established hosted vendor over operating open infrastructure.</li>
           <li>Your integration already works and migration has no meaningful return.</li>
         </ul>
@@ -65,7 +65,7 @@
       <span class="m-eyebrow">Like-for-like view</span>
       <div class="m-table-wrap">
         <table class="m-table">
-          <thead><tr><th>Area</th><th>Spool</th><th>PrintNode</th></tr></thead>
+          <thead><tr><th>Area</th><th>Piqae</th><th>PrintNode</th></tr></thead>
           <tbody>
             <tr><td>Source model</td><td>Apache-2.0 open source</td><td>Hosted proprietary service and clients</td></tr>
             <tr><td>Deployment</td><td>Cloud, self-hosted, or local-only</td><td>PrintNode-hosted service with local client</td></tr>
@@ -82,7 +82,7 @@
         PrintNode facts: <a href="https://www.printnode.com/en/features">features</a>,
         <a href="https://www.printnode.com/en/download">downloads</a>, and
         <a href="https://www.printnode.com/en/docs/api/curl">API documentation</a>.
-        Spool status comes from the repository support matrix. Checked 29 July 2026.
+        Piqae status comes from the repository support matrix. Checked 29 July 2026.
       </p>
     </div>
   </section>
@@ -92,12 +92,12 @@
       <span class="m-eyebrow">Public list pricing</span>
       <h2 class="m-heading">Compare the unit before comparing the number.</h2>
       <p class="intro">
-        Spool has one Free plan and one paid Pro plan. PrintNode uses several job-volume tiers,
+        Piqae has one Free plan and one paid Pro plan. PrintNode uses several job-volume tiers,
         with different computer and subaccount allowances.
       </p>
       <div class="m-table-wrap">
         <table class="m-table">
-          <thead><tr><th>Example tier</th><th>Spool displayed price</th><th>PrintNode public price</th></tr></thead>
+          <thead><tr><th>Example tier</th><th>Piqae displayed price</th><th>PrintNode public price</th></tr></thead>
           <tbody>
             {#each data.pricing.plans as plan}
               <tr>
@@ -119,7 +119,7 @@
       </div>
       <p class="m-source">
         PrintNode USD list prices from <a href="https://www.printnode.com/en/pricing">its pricing page</a>,
-        checked 29 July 2026. Taxes, negotiated terms, and overages can change the result. Spool
+        checked 29 July 2026. Taxes, negotiated terms, and overages can change the result. Piqae
         values come from server catalog {data.pricing.version}; checkout must match that catalog.
       </p>
       <div class="m-actions">
@@ -131,15 +131,15 @@
 
   <section class="limits m-section">
     <div class="m-narrow m-prose">
-      <h2>Spool’s current limitation is release maturity.</h2>
+      <h2>Piqae’s current limitation is release maturity.</h2>
       <p>
         The source repository marks Windows and signed packaging disabled and macOS/CUPS
-        platforms preview. Until those gates pass, Spool should be evaluated with virtual
+        platforms preview. Until those gates pass, Piqae should be evaluated with virtual
         printers and controlled canaries—not described as a production-equivalent replacement.
       </p>
       <h2>Migration compatibility is deliberately scoped.</h2>
       <p>
-        Spool covers the migration-critical printing subset documented in its compatibility guide.
+        Piqae covers the migration-critical printing subset documented in its compatibility guide.
         Scales, integrator subaccount APIs, billing APIs, and every historical response quirk are
         not claimed as complete.
       </p>

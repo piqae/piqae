@@ -5,7 +5,7 @@
 </script>
 
 <Seo
-  title="Spool vs QZ Tray — Draft architecture comparison"
+  title="Piqae vs QZ Tray — Draft architecture comparison"
   description="A draft comparison of durable remote printing infrastructure and browser-to-local hardware access."
   path="/compare/qz-tray"
   noindex
@@ -13,9 +13,9 @@
 
 <MarketingShell announcement="Draft comparison — excluded from search until hands-on and legal review">
   <ComparisonHero
-    eyebrow="Draft · Spool vs QZ Tray"
+    eyebrow="Draft · Piqae vs QZ Tray"
     title="Remote print infrastructure and browser-local hardware access solve different layers."
-    description="Spool coordinates durable jobs across a control plane and native agents. QZ Tray focuses on connecting web applications to local printers and other hardware."
+    description="Piqae coordinates durable jobs across a control plane and native agents. QZ Tray focuses on connecting web applications to local printers and other hardware."
     verified="29 July 2026"
     source="https://qz.io/"
   />
@@ -23,7 +23,7 @@
     <div class="m-container">
       <div class="m-table-wrap">
         <table class="m-table">
-          <thead><tr><th>Question</th><th>Spool</th><th>QZ Tray</th></tr></thead>
+          <thead><tr><th>Question</th><th>Piqae</th><th>QZ Tray</th></tr></thead>
           <tbody>
             <tr><td>Primary layer</td><td>Durable API, control plane, and remote agent</td><td>Browser-to-local hardware bridge</td></tr>
             <tr><td>Open-source posture</td><td>Apache-2.0 stack</td><td>LGPL project with commercial signing/support options</td></tr>
@@ -36,4 +36,3 @@
     </div>
   </section>
 </MarketingShell>
-

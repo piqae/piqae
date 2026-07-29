@@ -3,6 +3,10 @@
 
 .marketing {
   color-scheme: light;
+  --m-font-editorial: Georgia, 'Times New Roman', Times, serif;
+  --m-font-display: 'Instrument Sans Variable', 'Inter Variable', Inter, ui-sans-serif, system-ui,
+    sans-serif;
+  --m-font-body: 'Inter Variable', Inter, ui-sans-serif, system-ui, sans-serif;
   --m-canvas: #f6f6f4;
   --m-canvas-soft: #eeeeeb;
   --m-paper: #ffffff;
@@ -21,7 +25,7 @@
   min-height: 100vh;
   background: var(--m-canvas);
   color: var(--m-ink);
-  font-family: 'Inter Variable', Inter, ui-sans-serif, system-ui, sans-serif;
+  font-family: var(--m-font-body);
   font-optical-sizing: auto;
   font-size: 15px;
   line-height: 1.6;
@@ -34,7 +38,7 @@
 }
 
 .marketing :is(h1, h2, h3) {
-  font-family: 'Instrument Sans Variable', 'Inter Variable', Inter, ui-sans-serif, system-ui, sans-serif;
+  font-family: var(--m-font-display);
   font-variation-settings: 'wdth' 100;
 }
 
@@ -77,11 +81,11 @@
 .marketing .m-heading {
   margin: 0;
   color: var(--m-ink);
-  font-family: 'Instrument Sans Variable', 'Inter Variable', Inter, ui-sans-serif, system-ui, sans-serif;
-  font-weight: 650;
-  letter-spacing: -0.06em;
+  font-family: var(--m-font-editorial);
+  font-weight: 400;
+  letter-spacing: -0.035em;
   text-wrap: balance;
-  font-variation-settings: 'wdth' 100;
+  font-variation-settings: normal;
 }
 
 .marketing .m-display {

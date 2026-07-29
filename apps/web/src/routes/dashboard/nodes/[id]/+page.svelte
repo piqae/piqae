@@ -7,7 +7,7 @@
   let { data } = $props();
 </script>
 
-<svelte:head><title>{data.node?.name ?? 'Node unavailable'} · Spool</title></svelte:head>
+<svelte:head><title>{data.node?.name ?? 'Node unavailable'} · Piqae</title></svelte:head>
 
 {#if data.dataError}
   <PageHeader eyebrow="Node" title="Node unavailable" description={data.dataError.code} />

@@ -28,7 +28,7 @@ export function createAuthBoundary(mode: AuthMode = 'hosted'): AuthBoundary {
     viewer: async () => {
       const response = await fetch('/auth/session', { headers: { accept: 'application/json' } });
       if (response.status === 401) return null;
-      if (!response.ok) throw new Error('Unable to load the current Spool session');
+      if (!response.ok) throw new Error('Unable to load the current Piqae session');
       return (await response.json()) as Viewer;
     },
     signInUrl: (returnTo) => `/auth/login${parameter(returnTo)}`,

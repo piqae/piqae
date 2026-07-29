@@ -9,7 +9,7 @@ export const GET: RequestHandler = async (event) => {
     return json({
       id: 'usr_demo',
       email: 'developer@spool.local',
-      name: 'Spool Developer',
+      name: 'Piqae Developer',
       workspaceId: 'wrk_demo',
       roles: ['owner']
     });

@@ -55,7 +55,7 @@
 </script>
 
 <svelte:head>
-  <title>Billing · Spool</title>
+  <title>Billing · Piqae</title>
   <meta name="robots" content="noindex,nofollow" />
 </svelte:head>
 

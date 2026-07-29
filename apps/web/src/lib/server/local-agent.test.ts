@@ -74,6 +74,6 @@ describe('local agent server adapter', () => {
     const bytes = Buffer.from(createA4TestPdf(), 'base64');
     expect(bytes.subarray(0, 8).toString()).toBe('%PDF-1.4');
     expect(bytes.toString()).toContain('/MediaBox [0 0 595 842]');
-    expect(bytes.toString()).toContain('Spool A4 printer test');
+    expect(bytes.toString()).toContain('Piqae A4 printer test');
   });
 });

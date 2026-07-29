@@ -11,11 +11,11 @@
     {
       '@context': 'https://schema.org',
       '@type': 'Product',
-      name: 'Spool Cloud',
+      name: 'Piqae Cloud',
       category: 'Printing API',
       offers: data.pricing.plans.map((plan) => ({
         '@type': 'Offer',
-        name: `Spool Cloud ${plan.name}`,
+        name: `Piqae Cloud ${plan.name}`,
         priceCurrency: 'USD',
         price: (plan.monthlyCents / 100).toFixed(2),
         availability: 'https://schema.org/PreOrder',
@@ -55,7 +55,7 @@
           name: 'Can pricing shown here differ from checkout?',
           acceptedAnswer: {
             '@type': 'Answer',
-            text: 'The server-owned Spool catalog controls plan amounts and limits. Checkout verifies the matching Stripe price before showing tax and the final charge.'
+            text: 'The server-owned Piqae catalog controls plan amounts and limits. Checkout verifies the matching Stripe price before showing tax and the final charge.'
           }
         }
       ]
@@ -64,8 +64,8 @@
 </script>
 
 <Seo
-  title="Spool pricing — Cloud and self-hosted printing"
-  description="Start free, pay for jobs accepted by the operating-system spooler, or run the Apache-2.0 Spool stack on your own infrastructure."
+  title="Piqae pricing — Cloud and self-hosted printing"
+  description="Start free, pay for jobs accepted by the operating-system spooler, or run the Apache-2.0 Piqae stack on your own infrastructure."
   path="/pricing"
   structuredData={pricingStructuredData}
 />
@@ -76,7 +76,7 @@
       <span class="m-eyebrow">Pricing</span>
       <h1 class="m-title">Start free. Scale without surprises.</h1>
       <p class="m-lede">
-        Choose managed Spool Cloud or run the open-source stack yourself. Cloud plans include
+        Choose managed Piqae Cloud or run the open-source stack yourself. Cloud plans include
         unlimited workspace members and count each job only when the local print system accepts it.
       </p>
     </div>
@@ -128,7 +128,7 @@
         <article class="m-card">
           <h3>Node allowance</h3>
           <p>
-            A node is one enrolled computer running Spool. Workspace members and printers do not
+            A node is one enrolled computer running Piqae. Workspace members and printers do not
             consume the node allowance.
           </p>
         </article>

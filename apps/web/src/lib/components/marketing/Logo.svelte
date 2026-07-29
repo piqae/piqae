@@ -5,7 +5,7 @@
 <span class="logo-mark" aria-hidden="true">
   <span></span><span></span><span></span>
 </span>
-{#if !compact}<span class="wordmark">Spool</span>{/if}
+{#if !compact}<span class="wordmark">Piqae</span>{/if}
 
 <style>
   .logo-mark {
@@ -26,7 +26,7 @@
     border-radius: 999px;
   }
   .logo-mark span:nth-child(1) { transform: translateY(-5px); }
-  .logo-mark span:nth-child(2) { border-color: #9f8afb; }
+  .logo-mark span:nth-child(2) { border-color: #006aff; }
   .logo-mark span:nth-child(3) { transform: translateY(5px); }
   .wordmark {
     font-size: 17px;
@@ -34,4 +34,3 @@
     letter-spacing: -0.035em;
   }
 </style>
-

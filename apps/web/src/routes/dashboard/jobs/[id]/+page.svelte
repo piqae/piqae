@@ -34,7 +34,7 @@
   }
 </script>
 
-<svelte:head><title>{job?.title ?? 'Job unavailable'} · Spool</title></svelte:head>
+<svelte:head><title>{job?.title ?? 'Job unavailable'} · Piqae</title></svelte:head>
 
 {#if data.dataError}
   <PageHeader eyebrow="Print job" title="Job unavailable" description={data.dataError.code} />
@@ -64,7 +64,7 @@
   <section class="uncertain">
     <span class="uncertain-icon"><Icon name="warning" size={16} /></span>
     <div>
-      <strong>Spool cannot safely determine whether this job printed</strong>
+      <strong>Piqae cannot safely determine whether this job printed</strong>
       <p>
         The node restarted between the OS handoff and recording its native job ID. Automatic retry
         is disabled to prevent a duplicate.
@@ -151,14 +151,14 @@
     <header class="dialog-header">
       <div>
         <h2 id="cancel-job-title">Cancel this print job?</h2>
-        <p>Spool will send a cancellation request to the node’s durable local queue.</p>
+        <p>Piqae will send a cancellation request to the node’s durable local queue.</p>
       </div>
       <button class="icon-button" type="button" aria-label="Close cancellation dialog" onclick={closeCancellation}>×</button>
     </header>
     <div class="dialog-body">
       <p class="confirm-copy">
         Cancel <strong>{job.title}</strong>? If the operating system has already handed the document
-        to the printer, cancellation may not stop physical output. Spool will not create an
+        to the printer, cancellation may not stop physical output. Piqae will not create an
         automatic duplicate.
       </p>
       {#if data.dashboardMode === 'demo'}

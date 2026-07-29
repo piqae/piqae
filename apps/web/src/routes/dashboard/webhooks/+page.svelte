@@ -58,7 +58,7 @@
   }
 </script>
 
-<svelte:head><title>Webhooks · Spool</title></svelte:head>
+<svelte:head><title>Webhooks · Piqae</title></svelte:head>
 
 {#snippet actions()}
   <button class="button primary" onclick={openCreate}><Icon name="plus" size={13} /> Add endpoint</button>
@@ -76,7 +76,7 @@
 <section class="notice">
   <Icon name="bolt" size={14} />
   <p>
-    Spool signs the exact request body using HMAC-SHA256. Always verify
+    Piqae signs the exact request body using HMAC-SHA256. Always verify
     <code>Spool-Signature</code> before processing an event.
   </p>
   <a href="/docs/webhooks">Read guide <Icon name="arrow-right" size={11} /></a>
@@ -185,7 +185,7 @@
     <header class="dialog-header">
       <div>
         <h2 id="create-webhook-title">Add webhook endpoint</h2>
-        <p>Events are signed and retried until Spool receives a successful response.</p>
+        <p>Events are signed and retried until Piqae receives a successful response.</p>
       </div>
       <button class="icon-button" type="button" aria-label="Close webhook dialog" onclick={closeCreate}>×</button>
     </header>
@@ -252,7 +252,7 @@
     <header class="dialog-header">
       <div>
         <h2 id="delete-webhook-title">Revoke webhook endpoint?</h2>
-        <p>Spool will stop sending new deliveries to this endpoint.</p>
+        <p>Piqae will stop sending new deliveries to this endpoint.</p>
       </div>
       <button class="icon-button" type="button" aria-label="Close revoke dialog" onclick={closeDelete}>×</button>
     </header>

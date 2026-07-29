@@ -4,18 +4,18 @@
 </script>
 
 <Seo
-  title="Why we built Spool — The C4 Coffee story"
-  description="Spool grew from C4 Coffee's need to print coffee bag labels, shipping labels, and operational work reliably."
+  title="Why we built Piqae — The C4 Coffee story"
+  description="Piqae grew from C4 Coffee's need to print coffee bag labels, shipping labels, and operational work reliably."
   path="/about"
 />
 
 <MarketingShell>
   <section class="m-page-hero">
     <div class="m-container">
-      <span class="m-eyebrow">Why we built Spool</span>
+      <span class="m-eyebrow">Why we built Piqae</span>
       <h1 class="m-title">Built where every label matters.</h1>
       <p class="m-lede">
-        Spool began inside C4 Coffee, where coffee bag labels, shipping labels, and daily
+        Piqae began inside C4 Coffee, where coffee bag labels, shipping labels, and daily
         production depend on software reaching the right printer at the right moment.
       </p>
     </div>
@@ -39,7 +39,7 @@
       </p>
       <h2>Made for the reality behind the screen.</h2>
       <p>
-        Real sites have changing networks, computers, drivers, and queues. Spool grew into a
+        Real sites have changing networks, computers, drivers, and queues. Piqae grew into a
         dependable bridge that can recover cleanly, avoid careless duplicates, and show people
         when a job needs attention.
       </p>
@@ -50,7 +50,7 @@
       </p>
       <h2>Open source keeps the choice with you.</h2>
       <p>
-        Spool is Apache-2.0. Teams can inspect the software at the most sensitive part of the path,
+        Piqae is Apache-2.0. Teams can inspect the software at the most sensitive part of the path,
         run the control plane themselves, and keep a credible exit from the managed service.
       </p>
       <div class="m-actions">

@@ -4,7 +4,7 @@
 </script>
 
 <svelte:head>
-  <title>{data.doc.title} · Spool Docs</title>
+  <title>{data.doc.title} · Piqae Docs</title>
   <meta name="description" content={data.doc.description} />
 </svelte:head>
 

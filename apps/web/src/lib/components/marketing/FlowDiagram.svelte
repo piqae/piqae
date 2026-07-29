@@ -2,7 +2,7 @@
   let { compact = false }: { compact?: boolean } = $props();
   const steps = [
     { label: 'Application', detail: 'PDF or RAW' },
-    { label: 'Spool API', detail: 'Idempotent request' },
+    { label: 'Piqae API', detail: 'Idempotent request' },
     { label: 'Durable queue', detail: 'Lease + recovery' },
     { label: 'Native agent', detail: 'Local handoff' },
     { label: 'OS spooler', detail: 'Accepted ≠ printed' }

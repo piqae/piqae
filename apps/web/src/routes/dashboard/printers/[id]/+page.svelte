@@ -7,7 +7,7 @@
   let { data } = $props();
 </script>
 
-<svelte:head><title>{data.printer?.name ?? 'Printer unavailable'} · Spool</title></svelte:head>
+<svelte:head><title>{data.printer?.name ?? 'Printer unavailable'} · Piqae</title></svelte:head>
 
 {#if data.dataError}
   <PageHeader eyebrow="Printer" title="Printer unavailable" description={data.dataError.code} />
@@ -60,17 +60,17 @@
         {/if}
       </div>
       <div class="profile-actions">
-        <button class="button compact" disabled title="Open the Spool tray application on this node to edit native driver settings">
+        <button class="button compact" disabled title="Open the Piqae tray application on this node to edit native driver settings">
           Edit on node
         </button>
-        <button class="button compact" disabled title="Test profiles from the Spool tray application on this node">
+        <button class="button compact" disabled title="Test profiles from the Piqae tray application on this node">
           Test
         </button>
       </div>
     </article>
   {:else}
     <div class="empty-state profile-empty">
-      No print profiles. Open the Spool tray application on this node and choose Add profile.
+      No print profiles. Open the Piqae tray application on this node and choose Add profile.
     </div>
   {/each}
 </section>

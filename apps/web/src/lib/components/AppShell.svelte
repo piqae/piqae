@@ -101,9 +101,9 @@
 <div class="shell">
   <aside id="primary-sidebar" class:open={sidebarOpen}>
     <div class="workspace">
-      <a class="brand" href="/dashboard" onclick={closeSidebar} aria-label="Spool overview">
+      <a class="brand" href="/dashboard" onclick={closeSidebar} aria-label="Piqae overview">
         <span class="logo"><Icon name="printers" size={14} strokeWidth={2} /></span>
-        <span>Spool</span>
+        <span>Piqae</span>
       </a>
       <button
         class="workspace-switch"
@@ -115,7 +115,7 @@
       >
         <span class="avatar">SP</span>
         <span class="workspace-name">
-          <strong>Spool</strong>
+          <strong>Piqae</strong>
           <small>{meta.deployment.replace('_', ' ')}</small>
         </span>
         <Icon name="chevron-down" size={13} />
@@ -182,7 +182,7 @@
       </button>
       <a class="mobile-brand" href="/dashboard">
         <span class="logo"><Icon name="printers" size={13} strokeWidth={2} /></span>
-        Spool
+        Piqae
       </a>
       <span></span>
     </div>

@@ -29,7 +29,7 @@
   );
 </script>
 
-<svelte:head><title>Jobs · Spool</title></svelte:head>
+<svelte:head><title>Jobs · Piqae</title></svelte:head>
 
 {#snippet actions()}
   <a class="button primary" href="/docs/quickstart"><Icon name="plus" size={13} /> Print via API</a>

@@ -13,7 +13,7 @@
   <header class="topbar">
     <a class="brand" href="/dashboard">
       <span class="logo"><Icon name="printers" size={14} strokeWidth={2} /></span>
-      <strong>Spool</strong>
+      <strong>Piqae</strong>
       <span class="divider"></span>
       <span>Docs</span>
     </a>
@@ -24,7 +24,7 @@
     </label>
     <nav>
       <a href="/dashboard">Dashboard</a>
-      <a href="https://github.com/C4CoffeeCo/spool">GitHub <Icon name="external" size={11} /></a>
+      <a href="https://github.com/C4CoffeeCo/piqae">GitHub <Icon name="external" size={11} /></a>
     </nav>
     <button class="menu" onclick={() => (open = !open)} aria-label="Toggle documentation menu">
       <Icon name="menu" size={16} />
@@ -50,7 +50,7 @@
       </section>
     {/each}
     <footer>
-      <span>Spool v0.1</span>
+      <span>Piqae v0.1</span>
       <a href="/docs/quickstart">API status <span class="dot"></span></a>
     </footer>
   </aside>

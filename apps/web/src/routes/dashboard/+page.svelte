@@ -16,7 +16,7 @@
 </script>
 
 <svelte:head>
-  <title>Overview · Spool</title>
+  <title>Overview · Piqae</title>
   <meta name="description" content="Current print nodes, printers, jobs, and actionable conditions." />
 </svelte:head>
 
@@ -70,12 +70,12 @@
     <ol>
       <li class:complete={setupStep > 1} class:current={setupStep === 1}>
         <span>{setupStep > 1 ? '✓' : '1'}</span>
-        <div><strong>Add a node</strong><small>Install Spool on the computer connected to your printer.</small></div>
+        <div><strong>Add a node</strong><small>Install Piqae on the computer connected to your printer.</small></div>
         <a href="/dashboard/nodes">Open nodes <Icon name="arrow-right" size={11} /></a>
       </li>
       <li class:complete={setupStep > 2} class:current={setupStep === 2}>
         <span>{setupStep > 2 ? '✓' : '2'}</span>
-        <div><strong>Confirm a printer</strong><small>Spool discovers installed queues and their native profiles.</small></div>
+        <div><strong>Confirm a printer</strong><small>Piqae discovers installed queues and their native profiles.</small></div>
         <a href="/dashboard/printers">View printers <Icon name="arrow-right" size={11} /></a>
       </li>
       <li class:complete={setupStep > 3} class:current={setupStep === 3}>

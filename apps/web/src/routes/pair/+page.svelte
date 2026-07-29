@@ -14,14 +14,14 @@
 </script>
 
 <svelte:head>
-  <title>Pair a node · Spool</title>
+  <title>Pair a node · Piqae</title>
   <meta name="robots" content="noindex,nofollow" />
 </svelte:head>
 
 <main>
   <a class="brand" href="/dashboard">
     <span><Icon name="printers" size={15} /></span>
-    Spool
+    Piqae
   </a>
 
   <section class="pair-card">
@@ -41,7 +41,7 @@
     {:else if data.authorization}
       <div class="eyebrow">Browser pairing</div>
       <h1>Connect this node?</h1>
-      <p>Only approve if the details match the computer where you started Spool.</p>
+      <p>Only approve if the details match the computer where you started Piqae.</p>
 
       <dl>
         <div><dt>Name</dt><dd>{data.authorization.proposed_name}</dd></div>
@@ -75,13 +75,13 @@
       </form>
     {:else}
       <div class="eyebrow">Browser pairing</div>
-      <h1>Start from the Spool app</h1>
+      <h1>Start from the Piqae app</h1>
       <p>
-        Open Spool on the printer computer and choose <strong>Connect node</strong>. The app will
+        Open Piqae on the printer computer and choose <strong>Connect node</strong>. The app will
         return here with a short-lived request.
       </p>
       {#if data.loadError}<p class="error" role="alert">{data.loadError}</p>{/if}
-      <a class="button" href="/downloads">Download Spool</a>
+      <a class="button" href="/downloads">Download Piqae</a>
     {/if}
   </section>
 

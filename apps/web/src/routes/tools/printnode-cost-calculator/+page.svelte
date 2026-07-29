@@ -65,8 +65,8 @@
 </script>
 
 <Seo
-  title="PrintNode cost calculator — Compare with Spool"
-  description="Estimate monthly and annual Spool and PrintNode list-price costs using jobs, connected agents, customer tenants, and expected growth."
+  title="PrintNode cost calculator — Compare with Piqae"
+  description="Estimate monthly and annual Piqae and PrintNode list-price costs using jobs, connected agents, customer tenants, and expected growth."
   path="/tools/printnode-cost-calculator"
   noindex={snapshotExpired}
 />
@@ -103,7 +103,7 @@
           <div class="suffix"><input type="number" min="0" max="500" bind:value={growthPercent} /><i>%</i></div>
         </label>
         <fieldset>
-          <legend>Spool billing interval</legend>
+          <legend>Piqae billing interval</legend>
           <div class="interval">
             <button type="button" class:active={interval === 'monthly'} onclick={() => (interval = 'monthly')}>Monthly</button>
             <button type="button" class:active={interval === 'annual'} onclick={() => (interval = 'annual')}>Annual</button>
@@ -134,7 +134,7 @@
           </div>
           <div class="result-cards">
             <article>
-              <div><span>Spool</span><small>{spool.plan}</small></div>
+              <div><span>Piqae</span><small>{spool.plan}</small></div>
               <strong>{formatUsd(spool.monthlyCents)}<i>/mo</i></strong>
               <p>{formatUsd(spool.annualCents)} estimated annually</p>
             </article>
@@ -150,7 +150,7 @@
             <p>Expected growth is applied to job volume before selecting a plan. Taxes, negotiated terms, migration work, and support costs are excluded.</p>
           </div>
           <div class="m-actions">
-            <a class="m-button primary" href="/start?plan=free&source=calculator">Start with Spool</a>
+            <a class="m-button primary" href="/start?plan=free&source=calculator">Start with Piqae</a>
             <a class="m-button" href="/migrate/printnode">Plan the migration</a>
           </div>
         {/if}
@@ -170,7 +170,7 @@
           <span>stored pricing evidence</span>
         {/if}, observed
         {data.printNodeSnapshot.observedAt} and due for review
-        {data.printNodeSnapshot.reviewDueAt}. Spool values come from server catalog
+        {data.printNodeSnapshot.reviewDueAt}. Piqae values come from server catalog
         {data.spoolPricing.version}.
       </p>
       <p>

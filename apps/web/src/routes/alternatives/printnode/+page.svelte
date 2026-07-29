@@ -19,7 +19,7 @@
       <span class="m-eyebrow">PrintNode alternative</span>
       <h1 class="m-title">An alternative is useful only when it changes your constraints.</h1>
       <p class="m-lede">
-        Spool is not a reason to migrate a working print system by itself. It becomes relevant when
+        Piqae is not a reason to migrate a working print system by itself. It becomes relevant when
         open source, deployment control, queue ownership, or multi-tenant economics materially
         change the decision.
       </p>
@@ -34,9 +34,9 @@
     <div class="m-container">
       <span class="m-eyebrow">Five deciding questions</span>
       {#each [
-        ['Must the control plane run in your environment?', 'If yes, a hosted-only operating model is a structural mismatch. Spool keeps self-hosting first-class.'],
-        ['Do you need to inspect or modify the edge software?', 'Spool’s durable agent and native boundaries are available under Apache-2.0.'],
-        ['Does ambiguous delivery need an explicit workflow?', 'Spool preserves uncertainty instead of treating a native handoff as physical proof.'],
+        ['Must the control plane run in your environment?', 'If yes, a hosted-only operating model is a structural mismatch. Piqae keeps self-hosting first-class.'],
+        ['Do you need to inspect or modify the edge software?', 'Piqae’s durable agent and native boundaries are available under Apache-2.0.'],
+        ['Does ambiguous delivery need an explicit workflow?', 'Piqae preserves uncertainty instead of treating a native handoff as physical proof.'],
         ['Are you operating many customer tenants?', 'Pro includes platform customer accounts, while workspace boundaries preserve each customer’s operating context.'],
         ['Is the migration risk lower than the expected benefit?', 'If not, keep the current system. A controlled canary and tested rollback are requirements, not optional polish.']
       ] as item, index}
@@ -52,7 +52,7 @@
   <section class="decision m-section">
     <div class="m-container m-grid-2">
       <article class="m-card">
-        <span>Evaluate Spool when</span>
+        <span>Evaluate Piqae when</span>
         <ul class="m-list">
           <li>A credible self-hosted exit is a procurement requirement.</li>
           <li>Your application needs PDF and RAW through one durable job model.</li>
@@ -63,7 +63,7 @@
       <article class="m-card">
         <span>Stay with PrintNode when</span>
         <ul class="m-list">
-          <li>You need generally available signed clients before Spool passes its gates.</li>
+          <li>You need generally available signed clients before Piqae passes its gates.</li>
           <li>Your workflow relies on PrintNode scales or unsupported API quirks.</li>
           <li>Self-hosting and source access do not create meaningful value.</li>
           <li>The migration effort is larger than the operating or commercial benefit.</li>

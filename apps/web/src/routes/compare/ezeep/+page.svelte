@@ -5,7 +5,7 @@
 </script>
 
 <Seo
-  title="Spool vs ezeep — Draft cloud printing comparison"
+  title="Piqae vs ezeep — Draft cloud printing comparison"
   description="A draft comparison of API-first printing infrastructure and user-oriented cloud print management."
   path="/compare/ezeep"
   noindex
@@ -13,9 +13,9 @@
 
 <MarketingShell announcement="Draft comparison — excluded from search until hands-on and legal review">
   <ComparisonHero
-    eyebrow="Draft · Spool vs ezeep"
+    eyebrow="Draft · Piqae vs ezeep"
     title="API infrastructure and user print management start from different buyers."
-    description="Spool centres software-controlled jobs and durable edge ownership. ezeep presents cloud printing for users, endpoints, and managed workplace scenarios alongside developer APIs."
+    description="Piqae centres software-controlled jobs and durable edge ownership. ezeep presents cloud printing for users, endpoints, and managed workplace scenarios alongside developer APIs."
     verified="29 July 2026"
     source="https://www.ezeep.com/pricing"
   />
@@ -23,7 +23,7 @@
     <div class="m-container">
       <div class="m-table-wrap">
         <table class="m-table">
-          <thead><tr><th>Question</th><th>Spool</th><th>ezeep</th></tr></thead>
+          <thead><tr><th>Question</th><th>Piqae</th><th>ezeep</th></tr></thead>
           <tbody>
             <tr><td>Primary buyer</td><td>Software teams and integrators</td><td>Workplace and user print management</td></tr>
             <tr><td>Deployment control</td><td>Cloud, self-hosted, local-only</td><td>Vendor cloud service and connector model</td></tr>

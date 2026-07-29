@@ -82,7 +82,7 @@ export const POST: RequestHandler = async (event) => {
     const job = await client.jobs.create(
       {
         printer_id: printerId,
-        title: 'Spool A4 end-to-end test',
+        title: 'Piqae A4 end-to-end test',
         source: 'spool-dashboard',
         content_type: 'pdf',
         content: { type: 'base64', data: createA4TestPdf() },

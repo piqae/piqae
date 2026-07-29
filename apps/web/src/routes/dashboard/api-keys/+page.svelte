@@ -62,7 +62,7 @@
   }
 </script>
 
-<svelte:head><title>API keys · Spool</title></svelte:head>
+<svelte:head><title>API keys · Piqae</title></svelte:head>
 
 {#snippet actions()}
   <button class="button primary" onclick={openCreate}><Icon name="plus" size={13} /> Create secret key</button>
@@ -81,7 +81,7 @@
   <Icon name="api" size={15} />
   <div>
     <strong>Secret values are shown once</strong>
-    <p>Spool stores a one-way hash. Rotate a key immediately if its value is exposed.</p>
+    <p>Piqae stores a one-way hash. Rotate a key immediately if its value is exposed.</p>
   </div>
   <a href="/docs/api-keys">Security guide <Icon name="arrow-right" size={11} /></a>
 </section>

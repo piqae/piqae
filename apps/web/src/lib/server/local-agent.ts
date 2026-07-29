@@ -125,7 +125,7 @@ export function localAgentError(error: unknown): Response {
       code: configuration ? 'local_agent_not_configured' : 'local_agent_unavailable',
       message: configuration
         ? error.message
-        : 'The local agent did not respond. Confirm that Spool is running on this Mac.'
+        : 'The local agent did not respond. Confirm that Piqae is running on this Mac.'
     },
     {
       status: configuration ? error.status : 502,
@@ -146,7 +146,7 @@ export async function relayLocalAgent(response: Response): Promise<Response> {
 
 export function createA4TestPdf(): string {
   const stream =
-    'BT\n/F1 22 Tf\n72 758 Td\n(Spool A4 printer test) Tj\n0 -34 Td\n/F1 11 Tf\n(Local driver and queue are working.) Tj\nET\n';
+    'BT\n/F1 22 Tf\n72 758 Td\n(Piqae A4 printer test) Tj\n0 -34 Td\n/F1 11 Tf\n(Local driver and queue are working.) Tj\nET\n';
   const objects = [
     '<< /Type /Catalog /Pages 2 0 R >>',
     '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',

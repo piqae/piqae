@@ -23,8 +23,8 @@
 </script>
 
 <Seo
-  title="Download the Spool native agent"
-  description="See current Windows, macOS, and Linux Spool agent availability, signing state, checksums, minimum versions, and release notes."
+  title="Download the Piqae native agent"
+  description="See current Windows, macOS, and Linux Piqae agent availability, signing state, checksums, minimum versions, and release notes."
   path="/downloads"
 />
 
@@ -35,8 +35,8 @@
       <span class="eyebrow">Native nodes · {data.manifest.channel}</span>
       <h1 id="downloads-title">Connect a printer computer</h1>
       <p>
-        Install Spool where the printer’s real driver already works. The node keeps its durable
-        queue locally, captures native driver profiles, and connects to cloud or self-hosted Spool.
+        Install Piqae where the printer’s real driver already works. The node keeps its durable
+        queue locally, captures native driver profiles, and connects to cloud or self-hosted Piqae.
       </p>
     </div>
     {#if data.recommendedArtifactId}
@@ -125,7 +125,7 @@
       </p>
     </div>
     <ol>
-      <li><span>1</span><div><strong>Install</strong><small>Run Spool as the user who owns the printer driver.</small></div></li>
+      <li><span>1</span><div><strong>Install</strong><small>Run Piqae as the user who owns the printer driver.</small></div></li>
       <li><span>2</span><div><strong>Connect node</strong><small>Choose Connect node from the tray or menu app.</small></div></li>
       <li><span>3</span><div><strong>Match and approve</strong><small>Confirm the computer details and one-time code in the browser.</small></div></li>
     </ol>
@@ -150,7 +150,7 @@
       <div class="history-list panel">
         {#each data.manifest.olderReleases as release}
           <a href={release.releaseUrl} target="_blank" rel="noreferrer">
-            <div><strong>Spool v{release.version}</strong><span>{release.notes.join(' · ')}</span></div>
+            <div><strong>Piqae v{release.version}</strong><span>{release.notes.join(' · ')}</span></div>
             <div><span class="status warning">{statusLabel(release.status)}</span><time datetime={release.publishedAt}>{formatDate(release.publishedAt)}</time></div>
           </a>
         {/each}

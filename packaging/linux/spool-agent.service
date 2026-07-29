@@ -1,6 +1,6 @@
 [Unit]
 Description=Spool headless print agent
-Documentation=https://github.com/C4CoffeeCo/spool
+Documentation=https://github.com/C4CoffeeCo/piqae
 Wants=network-online.target
 After=network-online.target cups.service
 

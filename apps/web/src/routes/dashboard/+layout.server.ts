@@ -15,7 +15,7 @@ export const load: LayoutServerLoad = async (event) => {
       viewer: {
         id: 'usr_demo',
         email: 'developer@spool.local',
-        name: 'Spool Developer',
+        name: 'Piqae Developer',
         organizationId: 'org_demo',
         role: 'owner'
       }
