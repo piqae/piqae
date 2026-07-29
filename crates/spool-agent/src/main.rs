@@ -1774,14 +1774,18 @@ async fn run_cloud_sync_loop(
 ) {
     let started_at = Utc::now();
     let mut failures = 0_u32;
+    let mut last_printer_refresh: Option<tokio::time::Instant> = None;
     loop {
         resume_pending_cloud_accepts(&cloud, &mut store).await;
+        let refresh_printers =
+            last_printer_refresh.is_none_or(|last| last.elapsed() >= Duration::from_secs(15 * 60));
         let request = match prepare_sync_request(
             &mut store,
             &printer_discovery,
             cloud.agent_id,
             started_at,
             paused.load(Ordering::Relaxed),
+            refresh_printers,
         )
         .await
         {
@@ -1793,6 +1797,9 @@ async fn run_cloud_sync_loop(
                 continue;
             }
         };
+        if request.printers.is_some() {
+            last_printer_refresh = Some(tokio::time::Instant::now());
+        }
         let delay = match cloud.client.sync(&cloud.identity, &request).await {
             Ok(response) => {
                 sync_succeeded(
@@ -1821,13 +1828,18 @@ async fn prepare_sync_request(
     agent_id: AgentId,
     started_at: chrono::DateTime<Utc>,
     paused: bool,
+    refresh_printers: bool,
 ) -> Result<AgentSyncRequest> {
-    let printers = match discover_cloud_printers(store, printer_discovery).await {
-        Ok(printers) => Some(printers),
-        Err(error) => {
-            warn!(%error, "native printer inventory refresh failed");
-            None
+    let printers = if refresh_printers {
+        match discover_cloud_printers(store, printer_discovery).await {
+            Ok(printers) => Some(printers),
+            Err(error) => {
+                warn!(%error, "native printer inventory refresh failed");
+                None
+            }
         }
+    } else {
+        None
     };
     Ok(sync_request(store, agent_id, started_at, paused, printers)?)
 }
@@ -1868,7 +1880,7 @@ async fn sync_succeeded(response: AgentSyncResponse, context: SyncContext<'_>) -
             warn!(%error, "job offer could not be durably accepted");
         }
     }
-    Duration::from_millis(next_poll_after_ms.clamp(250, 30_000))
+    Duration::from_millis(next_poll_after_ms.clamp(250, 60_000))
 }
 
 fn apply_event_acknowledgement(store: &mut AgentStore, cursor: Option<EventId>) {

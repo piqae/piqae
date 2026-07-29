@@ -9,7 +9,7 @@ use crate::{
 };
 use axum::{
     Json,
-    body::Bytes,
+    body::{Body, Bytes},
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::{
@@ -19,6 +19,7 @@ use axum::{
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{Duration, Utc};
+use futures::StreamExt;
 use rand::{RngCore, rngs::OsRng};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -27,15 +28,15 @@ use spool_domain::{
     AgentId, ContentKind, ContentSource, Job, JobEvent, JobId, JobOptions, JobState, PrinterId,
     PrinterState,
 };
-use spool_object_store::digest_hex;
+use spool_object_store::{ObjectByteStream, ObjectStoreError, digest_hex};
 use spool_protocol::agent::{
     AgentAcceptJobRequest, AgentAcceptJobResponse, AgentReleaseLeaseRequest,
     AgentRenewLeaseRequest, AgentRenewLeaseResponse, AgentSyncRequest, AgentSyncResponse,
     ContentDescriptor, EnrolRequest, EnrolResponse, JobOffer,
 };
 use spool_storage_postgres::{
-    StoredAgent, StoredApiKey, StoredPrinter, StoredUpload, StoredWebhook, StoredWebhookDelivery,
-    SyncedPrinter,
+    StoredAgent, StoredApiKey, StoredPrinter, StoredTargetBinding, StoredUpload, StoredWebhook,
+    StoredWebhookDelivery, SyncedPrinter,
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -373,6 +374,22 @@ pub async fn list_printers(
     }))
 }
 
+pub async fn get_printer(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(printer_id): Path<String>,
+) -> Result<Json<StoredPrinter>, AppError> {
+    let tenant = authenticate_native(&state, &headers, Scope::PrintersRead).await?;
+    let printer_id = PrinterId::from_str(&printer_id)
+        .map_err(|_| AppError::invalid("invalid_printer_id", "The printer ID is invalid."))?;
+    Ok(Json(
+        state
+            .repository
+            .get_printer(tenant.workspace_id, tenant.environment_id, printer_id)
+            .await?,
+    ))
+}
+
 #[derive(Debug, Deserialize)]
 pub struct CreateEnrolmentRequest {
     name: String,
@@ -647,8 +664,13 @@ pub struct CreateUploadRequest {
 pub struct UploadResponse {
     #[serde(flatten)]
     upload: StoredUpload,
-    upload_url: Option<String>,
+    upload_url: String,
+    upload_method: &'static str,
+    upload_headers: BTreeMap<String, String>,
+    requires_completion: bool,
 }
+
+const MAX_UPLOAD_BYTES: i64 = 50 * 1024 * 1024;
 
 pub async fn create_upload(
     State(state): State<AppState>,
@@ -659,7 +681,7 @@ pub async fn create_upload(
     if !matches!(
         request.media_type.as_str(),
         "application/pdf" | "application/octet-stream"
-    ) || !(1..=52_428_800).contains(&request.byte_length)
+    ) || !(1..=MAX_UPLOAD_BYTES).contains(&request.byte_length)
         || request.sha256.len() != 64
         || !request.sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
     {
@@ -685,7 +707,10 @@ pub async fn create_upload(
     Ok((
         StatusCode::CREATED,
         Json(UploadResponse {
-            upload_url: Some(format!("/v1/uploads/{id}/content")),
+            upload_url: format!("/v1/uploads/{id}/content"),
+            upload_method: "PUT",
+            upload_headers: BTreeMap::from([("content-type".into(), upload.media_type.clone())]),
+            requires_completion: false,
             upload,
         }),
     )
@@ -696,30 +721,52 @@ pub async fn upload_content(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(upload_id): Path<String>,
-    body: Bytes,
+    body: Body,
 ) -> Result<Json<StoredUpload>, AppError> {
     let tenant = authenticate_native(&state, &headers, Scope::JobsWrite).await?;
     let upload = state
         .repository
         .get_upload(tenant.workspace_id, tenant.environment_id, &upload_id)
         .await?;
-    if upload.state != "pending"
-        || upload.expires_at <= Utc::now()
-        || i64::try_from(body.len()).unwrap_or(i64::MAX) != upload.expected_bytes
-    {
+    if upload.state != "pending" || upload.expires_at <= Utc::now() {
         return Err(AppError::invalid(
             "upload_not_writable",
-            "Upload is expired, complete, or has the wrong byte length.",
+            "Upload is expired or already complete.",
         ));
     }
+    if headers
+        .get(axum::http::header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<i64>().ok())
+        .is_some_and(|length| length != upload.expected_bytes)
+    {
+        return Err(AppError::invalid(
+            "upload_length_mismatch",
+            "Content-Length does not match the declared upload byte length.",
+        ));
+    }
+    let stream: ObjectByteStream = Box::pin(
+        body.into_data_stream()
+            .map(|result| result.map_err(|error| ObjectStoreError::Stream(error.to_string()))),
+    );
     state
         .object_store
-        .put(&upload.object_key, body, Some(&upload.expected_sha256))
+        .put_stream(
+            &upload.object_key,
+            stream,
+            &upload.expected_sha256,
+            u64::try_from(upload.expected_bytes)
+                .map_err(|_| AppError::invalid("invalid_upload", "Upload length is invalid."))?,
+        )
         .await
         .map_err(|error| match error {
-            spool_object_store::ObjectStoreError::DigestMismatch => {
+            ObjectStoreError::DigestMismatch => {
                 AppError::invalid("upload_digest_mismatch", "Upload digest does not match.")
             }
+            ObjectStoreError::LengthMismatch => AppError::invalid(
+                "upload_length_mismatch",
+                "Upload byte length does not match.",
+            ),
             _ => AppError::service_unavailable("object_store_unavailable"),
         })?;
     Ok(Json(
@@ -763,19 +810,24 @@ pub async fn complete_upload(
             "Upload is expired, complete, or does not match its declared metadata.",
         ));
     }
-    let bytes = state
+    let verified = state
         .object_store
-        .get(&upload.object_key)
+        .verify(
+            &upload.object_key,
+            &upload.expected_sha256,
+            u64::try_from(upload.expected_bytes)
+                .map_err(|_| AppError::invalid("invalid_upload", "Upload length is invalid."))?,
+        )
         .await
-        .map_err(|_| AppError::service_unavailable("object_store_unavailable"))?;
-    let actual_sha256 = digest_hex(&bytes);
-    let actual_bytes = i64::try_from(bytes.len()).unwrap_or(i64::MAX);
-    if !request.sha256.eq_ignore_ascii_case(&actual_sha256) || request.byte_length != actual_bytes {
-        return Err(AppError::invalid(
-            "upload_verification_failed",
-            "Stored object does not match completion metadata.",
-        ));
-    }
+        .map_err(|error| match error {
+            ObjectStoreError::DigestMismatch | ObjectStoreError::LengthMismatch => {
+                AppError::invalid(
+                    "upload_verification_failed",
+                    "Stored object does not match completion metadata.",
+                )
+            }
+            _ => AppError::service_unavailable("object_store_unavailable"),
+        })?;
     Ok(Json(
         state
             .repository
@@ -783,9 +835,25 @@ pub async fn complete_upload(
                 tenant.workspace_id,
                 tenant.environment_id,
                 &upload_id,
-                &actual_sha256,
-                actual_bytes,
+                &verified.sha256,
+                i64::try_from(verified.bytes).map_err(|_| {
+                    AppError::invalid("invalid_upload", "Upload length is invalid.")
+                })?,
             )
+            .await?,
+    ))
+}
+
+pub async fn get_upload(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(upload_id): Path<String>,
+) -> Result<Json<StoredUpload>, AppError> {
+    let tenant = authenticate_native(&state, &headers, Scope::JobsWrite).await?;
+    Ok(Json(
+        state
+            .repository
+            .get_upload(tenant.workspace_id, tenant.environment_id, &upload_id)
             .await?,
     ))
 }
@@ -937,6 +1005,7 @@ struct ResolvedJobDestination {
     printer_id: PrinterId,
     agent_id: AgentId,
     metadata: BTreeMap<String, String>,
+    binding: Option<StoredTargetBinding>,
 }
 
 async fn resolve_job_destination(
@@ -968,9 +1037,10 @@ async fn resolve_job_destination(
                 printer_id,
                 agent_id,
                 metadata: BTreeMap::new(),
+                binding: None,
             })
         }
-        (None, Some(target_id)) => resolve_ready_target_destination(state, tenant, target_id).await,
+        (None, Some(target_id)) => resolve_target_destination(state, tenant, target_id, true).await,
         _ => Err(AppError::invalid(
             "invalid_destination",
             "Provide exactly one printer_id or target_id.",
@@ -978,10 +1048,11 @@ async fn resolve_job_destination(
     }
 }
 
-async fn resolve_ready_target_destination(
+async fn resolve_target_destination(
     state: &AppState,
     tenant: TenantContext,
     target_id: &str,
+    allow_offline: bool,
 ) -> Result<ResolvedJobDestination, AppError> {
     let target = state
         .repository
@@ -1001,13 +1072,15 @@ async fn resolve_ready_target_destination(
         .repository
         .list_target_bindings(tenant.workspace_id, tenant.environment_id, target_id)
         .await?;
+    let mut configured_fallback = None;
     for binding in bindings.into_iter().filter(|binding| binding.enabled) {
-        if !agents
-            .iter()
-            .any(|agent| agent.id == binding.agent_id && crate::routing::agent_is_connected(agent))
-        {
+        let agent_exists = agents.iter().any(|agent| agent.id == binding.agent_id);
+        if !agent_exists {
             continue;
         }
+        let agent_ready = agents
+            .iter()
+            .any(|agent| agent.id == binding.agent_id && crate::routing::agent_is_connected(agent));
         let Ok(printer) = state
             .repository
             .get_printer(
@@ -1019,7 +1092,7 @@ async fn resolve_ready_target_destination(
         else {
             continue;
         };
-        if printer.agent_id != binding.agent_id || printer.state != PrinterState::Online {
+        if printer.agent_id != binding.agent_id {
             continue;
         }
         let Some(profile) = printer.profiles.iter().find(|profile| {
@@ -1036,26 +1109,83 @@ async fn resolve_ready_target_destination(
         };
         let mut metadata = BTreeMap::from([
             ("spool.target_id".into(), target.id.clone()),
-            ("spool.binding_id".into(), binding.id),
+            ("spool.binding_id".into(), binding.id.clone()),
             ("spool.profile_id".into(), profile.profile_id.clone()),
             (
                 "spool.profile_revision".into(),
                 profile.revision.to_string(),
             ),
         ]);
-        if let Some(stock_id) = &target.stock_id {
+        if let Some(stock_id) = target.stock_id.as_ref().or(profile.stock_id.as_ref()) {
             metadata.insert("spool.stock_id".into(), stock_id.clone());
         }
-        return Ok(ResolvedJobDestination {
+        let destination = ResolvedJobDestination {
             printer_id: printer.id,
             agent_id: printer.agent_id,
             metadata,
-        });
+            binding: Some(binding),
+        };
+        if agent_ready && printer.state == PrinterState::Online {
+            return Ok(destination);
+        }
+        if allow_offline && configured_fallback.is_none() {
+            configured_fallback = Some(destination);
+        }
+    }
+    if let Some(destination) = configured_fallback {
+        return Ok(destination);
     }
     Err(AppError::conflict(
         "target_not_ready",
-        "The target is disabled or has no ready binding.",
+        if allow_offline {
+            "The target has no valid configured binding."
+        } else {
+            "The target has no online ready binding."
+        },
     ))
+}
+
+async fn recover_waiting_target_jobs(
+    state: &AppState,
+    tenant: TenantContext,
+) -> Result<(), AppError> {
+    let jobs = state
+        .repository
+        .list_reroutable_target_jobs(tenant.workspace_id, tenant.environment_id, 100)
+        .await?;
+    for job in jobs {
+        let Some(target_id) = job.metadata.get("spool.target_id") else {
+            continue;
+        };
+        let Ok(destination) = resolve_target_destination(state, tenant, target_id, false).await
+        else {
+            continue;
+        };
+        let Some(binding) = destination.binding.as_ref() else {
+            continue;
+        };
+        match state
+            .repository
+            .reroute_job_before_acceptance(
+                tenant.workspace_id,
+                tenant.environment_id,
+                job.id,
+                target_id,
+                binding,
+                "standby_recovery",
+            )
+            .await
+        {
+            Ok(Some(rerouted)) => {
+                state
+                    .publish(tenant, "job.routing_attempted", &rerouted)
+                    .await?;
+            }
+            Ok(None) | Err(RepositoryError::ConcurrentStateChange) => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
 }
 
 pub(crate) async fn persist_job_content(
@@ -1086,7 +1216,9 @@ pub(crate) async fn persist_job_content(
             let decoded = base64::engine::general_purpose::STANDARD
                 .decode(data)
                 .map_err(|_| AppError::invalid("invalid_base64_content", "Content is invalid."))?;
-            if decoded.is_empty() || decoded.len() > 52_428_800 {
+            if decoded.is_empty()
+                || decoded.len() > usize::try_from(MAX_UPLOAD_BYTES).unwrap_or(50 * 1024 * 1024)
+            {
                 return Err(AppError::invalid(
                     "invalid_content_size",
                     "Content must contain between 1 byte and 50 MiB.",
@@ -1321,6 +1453,7 @@ pub async fn agent_sync(
             printers.as_deref(),
         )
         .await?;
+    recover_waiting_target_jobs(&state, tenant).await?;
     for event in &request.events {
         match state
             .repository
@@ -1411,14 +1544,80 @@ pub async fn agent_sync(
             content,
         });
     }
+    let has_immediate_work = !request.events.is_empty()
+        || request.queue.queued_jobs > 0
+        || request.queue.active_jobs > 0
+        || !command_batch.commands.is_empty()
+        || !candidate_jobs.is_empty();
+    let next_poll_after_ms = adaptive_poll_after_ms(&request, has_immediate_work);
     Ok(Json(AgentSyncResponse {
         server_time: Utc::now(),
         acknowledged_event_cursor: request.events.last().map(|event| event.id),
         command_cursor: command_batch.cursor,
         commands: command_batch.commands,
         candidate_jobs,
-        next_poll_after_ms: 1_000,
+        next_poll_after_ms,
     }))
+}
+
+fn adaptive_poll_after_ms(request: &AgentSyncRequest, has_immediate_work: bool) -> u64 {
+    let uptime = request
+        .health
+        .observed_at
+        .signed_duration_since(request.health.started_at)
+        .num_seconds();
+    // Stable per-agent/per-minute jitter avoids synchronized idle fleets without
+    // requiring a new protocol field or nondeterministic test seam.
+    let minute = request.health.observed_at.timestamp() / 60;
+    let seed = request
+        .agent_id
+        .to_string()
+        .bytes()
+        .fold(minute.unsigned_abs(), |value, byte| {
+            value.wrapping_mul(31).wrapping_add(u64::from(byte))
+        });
+    adaptive_poll_with_jitter(uptime, has_immediate_work, seed)
+}
+
+fn adaptive_poll_with_jitter(uptime_seconds: i64, has_immediate_work: bool, seed: u64) -> u64 {
+    if has_immediate_work {
+        return 1_000;
+    }
+    let base = if uptime_seconds < 15 * 60 {
+        15_000_i64
+    } else {
+        60_000_i64
+    };
+    let jitter_percent = i64::try_from(seed % 41).unwrap_or(20) - 20;
+    u64::try_from(base + (base * jitter_percent / 100))
+        .unwrap_or(15_000)
+        .clamp(1_000, 60_000)
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::items_after_test_module,
+    reason = "adaptive polling tests stay adjacent to the private policy helper"
+)]
+mod adaptive_poll_tests {
+    use super::adaptive_poll_with_jitter;
+
+    #[test]
+    fn active_work_always_returns_the_fast_interval() {
+        assert_eq!(adaptive_poll_with_jitter(86_400, true, u64::MAX), 1_000);
+    }
+
+    #[test]
+    fn recent_idle_agents_poll_between_twelve_and_eighteen_seconds() {
+        assert_eq!(adaptive_poll_with_jitter(60, false, 0), 12_000);
+        assert_eq!(adaptive_poll_with_jitter(60, false, 40), 18_000);
+    }
+
+    #[test]
+    fn long_idle_agents_back_off_to_at_most_one_minute() {
+        assert_eq!(adaptive_poll_with_jitter(3_600, false, 0), 48_000);
+        assert_eq!(adaptive_poll_with_jitter(3_600, false, 40), 60_000);
+    }
 }
 
 pub async fn accept_agent_job(
@@ -1559,20 +1758,20 @@ pub async fn get_agent_content(
     }
     let content = state
         .object_store
-        .get(&upload.object_key)
+        .get_stream(&upload.object_key)
         .await
         .map_err(|_| AppError::service_unavailable("object_store_unavailable"))?;
-    Ok((
-        [
-            (axum::http::header::CONTENT_TYPE, upload.media_type),
-            (
-                axum::http::HeaderName::from_static("digest"),
-                format!("sha-256={}", upload.expected_sha256),
-            ),
-        ],
-        content,
-    )
-        .into_response())
+    let stream =
+        content.map(|result| result.map_err(|error| std::io::Error::other(error.to_string())));
+    Response::builder()
+        .header(axum::http::header::CONTENT_TYPE, upload.media_type)
+        .header(
+            axum::http::header::CONTENT_LENGTH,
+            upload.expected_bytes.to_string(),
+        )
+        .header("digest", format!("sha-256={}", upload.expected_sha256))
+        .body(Body::from_stream(stream))
+        .map_err(|_| AppError::service_unavailable("content_response_failed"))
 }
 
 pub async fn stream_events(

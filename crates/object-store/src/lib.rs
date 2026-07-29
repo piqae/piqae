@@ -6,10 +6,16 @@ use apache_object_store::{
 };
 use async_trait::async_trait;
 use bytes::Bytes;
+use futures::{Stream, StreamExt, stream};
 use sha2::{Digest, Sha256};
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use std::{collections::HashMap, path::PathBuf, pin::Pin, sync::Arc};
 use thiserror::Error;
+use tokio::io::AsyncWriteExt;
 use tokio::sync::RwLock;
+use tokio_util::io::ReaderStream;
+
+pub type ObjectByteStream =
+    Pin<Box<dyn Stream<Item = Result<Bytes, ObjectStoreError>> + Send + 'static>>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredObject {
@@ -24,6 +30,10 @@ pub enum ObjectStoreError {
     NotFound,
     #[error("object digest did not match the supplied digest")]
     DigestMismatch,
+    #[error("object length did not match the supplied length")]
+    LengthMismatch,
+    #[error("object byte stream failed: {0}")]
+    Stream(String),
     #[error("invalid object key")]
     InvalidKey,
     #[error("object store I/O failed: {0}")]
@@ -105,6 +115,73 @@ impl ObjectStore for S3ObjectStore {
             .map_err(|error| ObjectStoreError::S3(error.to_string()))
     }
 
+    async fn put_stream(
+        &self,
+        key: &str,
+        mut content: ObjectByteStream,
+        expected_sha256: &str,
+        expected_bytes: u64,
+    ) -> Result<StoredObject, ObjectStoreError> {
+        validate_key(key)?;
+        let mut writer = apache_object_store::buffered::BufWriter::new(
+            Arc::clone(&self.inner),
+            ObjectPath::from(key),
+        );
+        let mut hasher = Sha256::new();
+        let mut bytes = 0_u64;
+        while let Some(chunk) = content.next().await {
+            let chunk = match chunk {
+                Ok(chunk) => chunk,
+                Err(error) => {
+                    let _ = writer.abort().await;
+                    return Err(error);
+                }
+            };
+            bytes = bytes
+                .checked_add(chunk.len() as u64)
+                .ok_or(ObjectStoreError::LengthMismatch)?;
+            if bytes > expected_bytes {
+                let _ = writer.abort().await;
+                return Err(ObjectStoreError::LengthMismatch);
+            }
+            hasher.update(&chunk);
+            if let Err(error) = writer.put(chunk).await {
+                let _ = writer.abort().await;
+                return Err(ObjectStoreError::S3(error.to_string()));
+            }
+        }
+        let sha256 = format!("{:x}", hasher.finalize());
+        if bytes != expected_bytes {
+            let _ = writer.abort().await;
+            return Err(ObjectStoreError::LengthMismatch);
+        }
+        if !expected_sha256.eq_ignore_ascii_case(&sha256) {
+            let _ = writer.abort().await;
+            return Err(ObjectStoreError::DigestMismatch);
+        }
+        writer
+            .shutdown()
+            .await
+            .map_err(|error| ObjectStoreError::S3(error.to_string()))?;
+        Ok(StoredObject {
+            key: key.to_owned(),
+            sha256,
+            bytes,
+        })
+    }
+
+    async fn get_stream(&self, key: &str) -> Result<ObjectByteStream, ObjectStoreError> {
+        validate_key(key)?;
+        let stream = self
+            .inner
+            .get(&ObjectPath::from(key))
+            .await
+            .map_err(|error| ObjectStoreError::S3(error.to_string()))?
+            .into_stream()
+            .map(|result| result.map_err(|error| ObjectStoreError::S3(error.to_string())));
+        Ok(Box::pin(stream))
+    }
+
     async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
         validate_key(key)?;
         self.inner
@@ -132,6 +209,23 @@ pub trait ObjectStore: Send + Sync + 'static {
         expected_sha256: Option<&str>,
     ) -> Result<StoredObject, ObjectStoreError>;
     async fn get(&self, key: &str) -> Result<Bytes, ObjectStoreError>;
+    async fn put_stream(
+        &self,
+        key: &str,
+        content: ObjectByteStream,
+        expected_sha256: &str,
+        expected_bytes: u64,
+    ) -> Result<StoredObject, ObjectStoreError>;
+    async fn get_stream(&self, key: &str) -> Result<ObjectByteStream, ObjectStoreError>;
+    async fn verify(
+        &self,
+        key: &str,
+        expected_sha256: &str,
+        expected_bytes: u64,
+    ) -> Result<StoredObject, ObjectStoreError> {
+        let content = self.get_stream(key).await?;
+        verify_stream(key, content, expected_sha256, expected_bytes).await
+    }
     async fn delete(&self, key: &str) -> Result<(), ObjectStoreError>;
     async fn exists(&self, key: &str) -> Result<bool, ObjectStoreError>;
 }
@@ -183,6 +277,27 @@ impl ObjectStore for MemoryObjectStore {
             .get(key)
             .cloned()
             .ok_or(ObjectStoreError::NotFound)
+    }
+
+    async fn put_stream(
+        &self,
+        key: &str,
+        content: ObjectByteStream,
+        expected_sha256: &str,
+        expected_bytes: u64,
+    ) -> Result<StoredObject, ObjectStoreError> {
+        let (object, chunks) =
+            collect_verified_stream(key, content, expected_sha256, expected_bytes).await?;
+        self.objects
+            .write()
+            .await
+            .insert(key.to_owned(), chunks.concat().into());
+        Ok(object)
+    }
+
+    async fn get_stream(&self, key: &str) -> Result<ObjectByteStream, ObjectStoreError> {
+        let content = self.get(key).await?;
+        Ok(Box::pin(stream::once(async move { Ok(content) })))
     }
 
     async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
@@ -254,6 +369,79 @@ impl ObjectStore for FileObjectStore {
         }
     }
 
+    async fn put_stream(
+        &self,
+        key: &str,
+        mut content: ObjectByteStream,
+        expected_sha256: &str,
+        expected_bytes: u64,
+    ) -> Result<StoredObject, ObjectStoreError> {
+        let path = self.path_for(key)?;
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        let temporary = path.with_extension(format!("{}.spool-part", ulid_fragment()));
+        let mut output = tokio::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temporary)
+            .await?;
+        let result = async {
+            let mut hasher = Sha256::new();
+            let mut bytes = 0_u64;
+            while let Some(chunk) = content.next().await {
+                let chunk = chunk?;
+                bytes = bytes
+                    .checked_add(chunk.len() as u64)
+                    .ok_or(ObjectStoreError::LengthMismatch)?;
+                if bytes > expected_bytes {
+                    return Err(ObjectStoreError::LengthMismatch);
+                }
+                hasher.update(&chunk);
+                output.write_all(&chunk).await?;
+            }
+            output.flush().await?;
+            let sha256 = format!("{:x}", hasher.finalize());
+            if bytes != expected_bytes {
+                return Err(ObjectStoreError::LengthMismatch);
+            }
+            if !expected_sha256.eq_ignore_ascii_case(&sha256) {
+                return Err(ObjectStoreError::DigestMismatch);
+            }
+            Ok(StoredObject {
+                key: key.to_owned(),
+                sha256,
+                bytes,
+            })
+        }
+        .await;
+        drop(output);
+        match result {
+            Ok(object) => {
+                tokio::fs::rename(&temporary, &path).await?;
+                Ok(object)
+            }
+            Err(error) => {
+                let _ = tokio::fs::remove_file(&temporary).await;
+                Err(error)
+            }
+        }
+    }
+
+    async fn get_stream(&self, key: &str) -> Result<ObjectByteStream, ObjectStoreError> {
+        let path = self.path_for(key)?;
+        let file = tokio::fs::File::open(path).await.map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                ObjectStoreError::NotFound
+            } else {
+                ObjectStoreError::Io(error)
+            }
+        })?;
+        Ok(Box::pin(
+            ReaderStream::new(file).map(|result| result.map_err(ObjectStoreError::Io)),
+        ))
+    }
+
     async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
         let path = self.path_for(key)?;
         match tokio::fs::remove_file(path).await {
@@ -266,6 +454,86 @@ impl ObjectStore for FileObjectStore {
     async fn exists(&self, key: &str) -> Result<bool, ObjectStoreError> {
         Ok(tokio::fs::try_exists(self.path_for(key)?).await?)
     }
+}
+
+async fn verify_stream(
+    key: &str,
+    mut content: ObjectByteStream,
+    expected_sha256: &str,
+    expected_bytes: u64,
+) -> Result<StoredObject, ObjectStoreError> {
+    validate_key(key)?;
+    let mut hasher = Sha256::new();
+    let mut bytes = 0_u64;
+    while let Some(chunk) = content.next().await {
+        let chunk = chunk?;
+        bytes = bytes
+            .checked_add(chunk.len() as u64)
+            .ok_or(ObjectStoreError::LengthMismatch)?;
+        if bytes > expected_bytes {
+            return Err(ObjectStoreError::LengthMismatch);
+        }
+        hasher.update(&chunk);
+    }
+    let sha256 = format!("{:x}", hasher.finalize());
+    if bytes != expected_bytes {
+        return Err(ObjectStoreError::LengthMismatch);
+    }
+    if !expected_sha256.eq_ignore_ascii_case(&sha256) {
+        return Err(ObjectStoreError::DigestMismatch);
+    }
+    Ok(StoredObject {
+        key: key.to_owned(),
+        sha256,
+        bytes,
+    })
+}
+
+async fn collect_verified_stream(
+    key: &str,
+    mut content: ObjectByteStream,
+    expected_sha256: &str,
+    expected_bytes: u64,
+) -> Result<(StoredObject, Vec<Bytes>), ObjectStoreError> {
+    let mut chunks = Vec::new();
+    let mut hasher = Sha256::new();
+    let mut bytes = 0_u64;
+    while let Some(chunk) = content.next().await {
+        let chunk = chunk?;
+        bytes = bytes
+            .checked_add(chunk.len() as u64)
+            .ok_or(ObjectStoreError::LengthMismatch)?;
+        if bytes > expected_bytes {
+            return Err(ObjectStoreError::LengthMismatch);
+        }
+        hasher.update(&chunk);
+        chunks.push(chunk);
+    }
+    let sha256 = format!("{:x}", hasher.finalize());
+    if bytes != expected_bytes {
+        return Err(ObjectStoreError::LengthMismatch);
+    }
+    if !expected_sha256.eq_ignore_ascii_case(&sha256) {
+        return Err(ObjectStoreError::DigestMismatch);
+    }
+    Ok((
+        StoredObject {
+            key: key.to_owned(),
+            sha256,
+            bytes,
+        },
+        chunks,
+    ))
+}
+
+fn ulid_fragment() -> String {
+    format!("{}-{}", std::process::id(), chrono_like_timestamp())
+}
+
+fn chrono_like_timestamp() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos())
 }
 
 #[cfg(test)]
@@ -299,5 +567,38 @@ mod tests {
             store.put("../outside", Bytes::new(), None).await,
             Err(ObjectStoreError::InvalidKey)
         ));
+    }
+
+    #[tokio::test]
+    async fn streamed_put_is_bounded_digest_checked_and_readable() {
+        let store = MemoryObjectStore::default();
+        let expected = Bytes::from_static(b"large-document");
+        let digest = digest_hex(&expected);
+        let chunks: ObjectByteStream = Box::pin(stream::iter([
+            Ok(Bytes::from_static(b"large-")),
+            Ok(Bytes::from_static(b"document")),
+        ]));
+        let stored = store
+            .put_stream("workspace/streamed", chunks, &digest, 14)
+            .await
+            .expect("valid bounded stream");
+        assert_eq!(stored.bytes, 14);
+        assert_eq!(
+            store
+                .get("workspace/streamed")
+                .await
+                .expect("stored object"),
+            expected
+        );
+
+        let oversized: ObjectByteStream =
+            Box::pin(stream::once(async { Ok(Bytes::from_static(b"too-long")) }));
+        assert!(matches!(
+            store
+                .put_stream("workspace/rejected", oversized, &digest, 2)
+                .await,
+            Err(ObjectStoreError::LengthMismatch)
+        ));
+        assert!(!store.exists("workspace/rejected").await.expect("exists"));
     }
 }

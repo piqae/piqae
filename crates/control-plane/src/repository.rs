@@ -392,6 +392,25 @@ pub trait Repository: Send + Sync + 'static {
         idempotency_key: Option<&str>,
         request_bytes: &[u8],
     ) -> Result<CreateResult, RepositoryError>;
+    #[allow(
+        clippy::too_many_lines,
+        reason = "atomic in-memory parity keeps every reroute fence under one write lock"
+    )]
+    async fn reroute_job_before_acceptance(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        job_id: JobId,
+        target_id: &str,
+        binding: &StoredTargetBinding,
+        reason: &str,
+    ) -> Result<Option<Job>, RepositoryError>;
+    async fn list_reroutable_target_jobs(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        limit: i64,
+    ) -> Result<Vec<Job>, RepositoryError>;
     async fn get_job(
         &self,
         workspace_id: WorkspaceId,
@@ -1189,6 +1208,39 @@ impl Repository for PostgresStore {
             PgCreateJobResult::Created(job) => Ok(CreateResult::Created(job)),
             PgCreateJobResult::Existing(job) => Ok(CreateResult::Existing(job)),
         }
+    }
+
+    async fn reroute_job_before_acceptance(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        job_id: JobId,
+        target_id: &str,
+        binding: &StoredTargetBinding,
+        reason: &str,
+    ) -> Result<Option<Job>, RepositoryError> {
+        PostgresStore::reroute_job_before_acceptance(
+            self,
+            workspace_id,
+            environment_id,
+            job_id,
+            target_id,
+            binding,
+            reason,
+        )
+        .await
+        .map_err(Into::into)
+    }
+
+    async fn list_reroutable_target_jobs(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        limit: i64,
+    ) -> Result<Vec<Job>, RepositoryError> {
+        PostgresStore::list_reroutable_target_jobs(self, workspace_id, environment_id, limit)
+            .await
+            .map_err(Into::into)
     }
 
     async fn get_job(
@@ -2845,6 +2897,159 @@ impl Repository for MemoryRepository {
             },
         );
         Ok(CreateResult::Created(job.clone()))
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "atomic in-memory parity keeps every reroute fence under one write lock"
+    )]
+    async fn reroute_job_before_acceptance(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        job_id: JobId,
+        target_id: &str,
+        binding: &StoredTargetBinding,
+        reason: &str,
+    ) -> Result<Option<Job>, RepositoryError> {
+        if !matches!(reason, "node_recovered" | "standby_recovery") {
+            return Err(RepositoryError::Persistence(
+                "unsupported routing attempt reason".into(),
+            ));
+        }
+        let mut state = self.state.write().await;
+        let has_acceptance = state.job_acceptances.contains_key(&job_id);
+        let has_active_lease = state
+            .leases
+            .get(&job_id)
+            .is_some_and(|(_, _, _, expiry)| *expiry > Utc::now());
+        if has_acceptance || has_active_lease {
+            return Ok(None);
+        }
+        let destination_is_valid =
+            state
+                .targets
+                .get(target_id)
+                .is_some_and(|(workspace, environment, target)| {
+                    *workspace == workspace_id && *environment == environment_id && target.enabled
+                })
+                && state.target_bindings.get(&binding.id).is_some_and(
+                    |(workspace, environment, stored)| {
+                        *workspace == workspace_id
+                            && *environment == environment_id
+                            && stored.target_id == target_id
+                            && stored.enabled
+                            && stored.printer_id == binding.printer_id
+                            && stored.agent_id == binding.agent_id
+                            && stored.profile_id == binding.profile_id
+                            && stored.profile_revision == binding.profile_revision
+                    },
+                );
+        if !destination_is_valid {
+            return Err(RepositoryError::ConcurrentStateChange);
+        }
+        let target_stock = state
+            .targets
+            .get(target_id)
+            .and_then(|(_, _, target)| target.stock_id.clone());
+        let intended_stock = state
+            .jobs
+            .get(&job_id)
+            .and_then(|record| record.job.metadata.get("spool.stock_id").cloned());
+        if target_stock.is_some() && target_stock != intended_stock {
+            return Ok(None);
+        }
+        let profile_is_valid = state.printers.get(&binding.printer_id).is_some_and(
+            |(workspace, environment, printer)| {
+                *workspace == workspace_id
+                    && *environment == environment_id
+                    && printer.agent_id == binding.agent_id
+                    && printer.profiles.iter().any(|profile| {
+                        profile.profile_id == binding.profile_id
+                            && (profile.profile_id.as_str(), profile.revision)
+                                == (binding.profile_id.as_str(), binding.profile_revision)
+                            && profile.published
+                            && matches!(profile.status.as_deref(), None | Some("ready"))
+                            && profile.stock_id == intended_stock
+                    })
+            },
+        );
+        if !profile_is_valid {
+            return Ok(None);
+        }
+        let job = {
+            let record = state
+                .jobs
+                .get_mut(&job_id)
+                .ok_or(RepositoryError::NotFound)?;
+            if record.job.workspace_id != workspace_id
+                || record.job.environment_id != environment_id
+                || !matches!(
+                    record.job.state,
+                    JobState::WaitingForAgent | JobState::FailedRetryable
+                )
+                || record
+                    .job
+                    .metadata
+                    .get("spool.target_id")
+                    .map(String::as_str)
+                    != Some(target_id)
+                || record.job.metadata.get("spool.stock_id") != intended_stock.as_ref()
+                || (record.agent_id == binding.agent_id
+                    && record.job.printer_id == binding.printer_id)
+            {
+                return Ok(None);
+            }
+            record.agent_id = binding.agent_id;
+            record.job.printer_id = binding.printer_id;
+            record
+                .job
+                .metadata
+                .insert("spool.binding_id".into(), binding.id.clone());
+            record
+                .job
+                .metadata
+                .insert("spool.profile_id".into(), binding.profile_id.clone());
+            record.job.metadata.insert(
+                "spool.profile_revision".into(),
+                binding.profile_revision.to_string(),
+            );
+            record.job.clone()
+        };
+        state.leases.remove(&job_id);
+        Ok(Some(job))
+    }
+
+    async fn list_reroutable_target_jobs(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        limit: i64,
+    ) -> Result<Vec<Job>, RepositoryError> {
+        let state = self.state.read().await;
+        let mut jobs = state
+            .jobs
+            .values()
+            .filter(|record| {
+                record.job.workspace_id == workspace_id
+                    && record.job.environment_id == environment_id
+                    && matches!(
+                        record.job.state,
+                        JobState::WaitingForAgent | JobState::FailedRetryable
+                    )
+                    && record.job.expires_at > Utc::now()
+                    && record.job.metadata.contains_key("spool.target_id")
+                    && !state.job_acceptances.contains_key(&record.job.id)
+                    && state
+                        .leases
+                        .get(&record.job.id)
+                        .is_none_or(|(_, _, _, expiry)| *expiry <= Utc::now())
+            })
+            .map(|record| record.job.clone())
+            .collect::<Vec<_>>();
+        jobs.sort_by_key(|job| (job.created_at, job.id));
+        jobs.truncate(usize::try_from(limit.clamp(1, 100)).unwrap_or(100));
+        Ok(jobs)
     }
 
     async fn get_job(

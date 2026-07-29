@@ -190,6 +190,10 @@ impl Default for DeploymentCapabilities {
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "the V1 modular-monolith route table is intentionally centralized"
+)]
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/v1/health", get(api::health))
@@ -208,6 +212,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/agents", get(api::list_agents))
         .merge(node_operator_router())
         .route("/v1/printers", get(api::list_printers))
+        .route("/v1/printers/{printer_id}", get(api::get_printer))
         .route(
             "/v1/stocks",
             get(routing::list_stocks).post(routing::create_stock),
@@ -239,6 +244,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/agent-enrolments", post(api::create_agent_enrolment))
         .route("/v1/agents/enrol", post(api::enrol_agent))
         .route("/v1/uploads", post(api::create_upload))
+        .route("/v1/uploads/{upload_id}", get(api::get_upload))
         .route(
             "/v1/uploads/{upload_id}/content",
             axum::routing::put(api::upload_content),
@@ -451,6 +457,23 @@ mod tests {
         }
 
         async fn get(&self, _key: &str) -> Result<Bytes, ObjectStoreError> {
+            Err(ObjectStoreError::S3("unavailable".into()))
+        }
+
+        async fn put_stream(
+            &self,
+            _key: &str,
+            _content: spool_object_store::ObjectByteStream,
+            _expected_sha256: &str,
+            _expected_bytes: u64,
+        ) -> Result<StoredObject, ObjectStoreError> {
+            Err(ObjectStoreError::S3("unavailable".into()))
+        }
+
+        async fn get_stream(
+            &self,
+            _key: &str,
+        ) -> Result<spool_object_store::ObjectByteStream, ObjectStoreError> {
             Err(ObjectStoreError::S3("unavailable".into()))
         }
 

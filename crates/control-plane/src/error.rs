@@ -57,6 +57,16 @@ impl AppError {
         }
     }
 
+    pub fn payload_too_large(code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::PAYLOAD_TOO_LARGE,
+            code,
+            message: message.into(),
+            retryable: false,
+            compatibility: false,
+        }
+    }
+
     #[must_use]
     pub fn unauthorized() -> Self {
         Self {

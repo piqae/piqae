@@ -975,16 +975,38 @@ impl PostgresStore {
         let result = sqlx::query(
             "UPDATE agents SET state = 'connected', version = $4, last_seen_at = now()
              WHERE id = $1 AND workspace_id = $2 AND environment_id = $3
-               AND revoked_at IS NULL",
+               AND revoked_at IS NULL
+               AND (
+                 state IS DISTINCT FROM 'connected'
+                 OR version IS DISTINCT FROM $4
+                 OR last_seen_at IS NULL
+                 OR last_seen_at < now() - interval '55 seconds'
+                 OR $5::boolean
+               )",
         )
         .bind(agent_id.to_string())
         .bind(workspace_id.to_string())
         .bind(environment_id.to_string())
         .bind(version)
+        .bind(printers.is_some())
         .execute(&mut *transaction)
         .await?;
-        if result.rows_affected() != 1 {
-            return Err(StorageError::NotFound);
+        if result.rows_affected() == 0 {
+            let exists: bool = sqlx::query_scalar(
+                "SELECT EXISTS (
+                    SELECT 1 FROM agents
+                    WHERE id = $1 AND workspace_id = $2 AND environment_id = $3
+                      AND revoked_at IS NULL
+                 )",
+            )
+            .bind(agent_id.to_string())
+            .bind(workspace_id.to_string())
+            .bind(environment_id.to_string())
+            .fetch_one(&mut *transaction)
+            .await?;
+            if !exists {
+                return Err(StorageError::NotFound);
+            }
         }
         if let Some(printers) = printers {
             sqlx::query(
@@ -2541,6 +2563,269 @@ impl PostgresStore {
 
         transaction.commit().await?;
         Ok(CreateJobResult::Created(job.clone()))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn reroute_job_before_acceptance(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        job_id: JobId,
+        target_id: &str,
+        binding: &StoredTargetBinding,
+        reason: &str,
+    ) -> Result<Option<Job>, StorageError> {
+        if !matches!(reason, "node_recovered" | "standby_recovery") {
+            return Err(StorageError::InvalidData(
+                "unsupported routing attempt reason".into(),
+            ));
+        }
+        let mut transaction = self.pool.begin().await?;
+        let row = sqlx::query(
+            "SELECT payload, state, agent_id, printer_id, lease_until
+             FROM jobs
+             WHERE id = $1 AND workspace_id = $2 AND environment_id = $3
+             FOR UPDATE",
+        )
+        .bind(job_id.to_string())
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(StorageError::NotFound)?;
+        let state: String = row.try_get("state")?;
+        if !matches!(state.as_str(), "waiting_for_agent" | "failed_retryable") {
+            transaction.commit().await?;
+            return Ok(None);
+        }
+        let lease_until: Option<DateTime<Utc>> = row.try_get("lease_until")?;
+        if lease_until.is_some_and(|expiry| expiry > Utc::now()) {
+            transaction.commit().await?;
+            return Ok(None);
+        }
+        let accepted: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                SELECT 1 FROM job_acceptances
+                WHERE job_id = $1 AND workspace_id = $2 AND environment_id = $3
+             )",
+        )
+        .bind(job_id.to_string())
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .fetch_one(&mut *transaction)
+        .await?;
+        if accepted {
+            transaction.commit().await?;
+            return Ok(None);
+        }
+
+        let mut job = job_from_row(row.try_get("payload")?, &state)?;
+        if job.metadata.get("spool.target_id").map(String::as_str) != Some(target_id) {
+            transaction.commit().await?;
+            return Ok(None);
+        }
+        let from_agent_text: String = row.try_get("agent_id")?;
+        let from_printer_text: String = row.try_get("printer_id")?;
+        if from_agent_text == binding.agent_id.to_string()
+            && from_printer_text == binding.printer_id.to_string()
+        {
+            transaction.commit().await?;
+            return Ok(None);
+        }
+
+        let destination = sqlx::query(
+            "SELECT target.stock_id, printer.profiles
+             FROM targets AS target
+             JOIN target_bindings AS binding
+               ON binding.target_id = target.id
+              AND binding.workspace_id = target.workspace_id
+              AND binding.environment_id = target.environment_id
+             JOIN printers AS printer
+               ON printer.id = binding.printer_id
+              AND printer.workspace_id = binding.workspace_id
+              AND printer.environment_id = binding.environment_id
+              AND printer.agent_id = binding.agent_id
+             JOIN agents AS agent
+               ON agent.id = binding.agent_id
+              AND agent.workspace_id = binding.workspace_id
+              AND agent.environment_id = binding.environment_id
+             WHERE target.id = $1 AND target.workspace_id = $2
+               AND target.environment_id = $3 AND target.enabled
+               AND binding.id = $4 AND binding.enabled
+               AND binding.printer_id = $5 AND binding.agent_id = $6
+               AND binding.profile_id = $7 AND binding.profile_revision = $8
+               AND printer.removed_at IS NULL AND agent.revoked_at IS NULL
+             FOR SHARE OF target, binding, printer, agent",
+        )
+        .bind(target_id)
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(&binding.id)
+        .bind(binding.printer_id.to_string())
+        .bind(binding.agent_id.to_string())
+        .bind(&binding.profile_id)
+        .bind(i64::try_from(binding.profile_revision).map_err(|error| {
+            StorageError::InvalidData(format!("profile revision is too large: {error}"))
+        })?)
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(StorageError::ConcurrentStateChange)?;
+        let stock_id: Option<String> = destination.try_get("stock_id")?;
+        let intended_stock = job.metadata.get("spool.stock_id").cloned();
+        if stock_id.is_some() && intended_stock.as_ref() != stock_id.as_ref() {
+            transaction.commit().await?;
+            return Ok(None);
+        }
+        let profiles: Vec<PrinterProfileSnapshot> =
+            serde_json::from_value(destination.try_get("profiles")?)?;
+        let profile_matches = profiles.iter().any(|profile| {
+            (profile.profile_id.as_str(), profile.revision)
+                == (binding.profile_id.as_str(), binding.profile_revision)
+                && profile.published
+                && matches!(profile.status.as_deref(), None | Some("ready"))
+                && profile.stock_id == intended_stock
+        });
+        if !profile_matches {
+            transaction.commit().await?;
+            return Ok(None);
+        }
+
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(binding.printer_id.to_string())
+            .execute(&mut *transaction)
+            .await?;
+        let per_printer_sequence: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(MAX(per_printer_sequence), 0) + 1
+             FROM jobs WHERE printer_id = $1",
+        )
+        .bind(binding.printer_id.to_string())
+        .fetch_one(&mut *transaction)
+        .await?;
+
+        let from_binding_id = job.metadata.get("spool.binding_id").cloned();
+        job.printer_id = binding.printer_id;
+        job.metadata
+            .insert("spool.binding_id".into(), binding.id.clone());
+        job.metadata
+            .insert("spool.profile_id".into(), binding.profile_id.clone());
+        job.metadata.insert(
+            "spool.profile_revision".into(),
+            binding.profile_revision.to_string(),
+        );
+        let updated = sqlx::query(
+            "UPDATE jobs
+             SET printer_id = $4, agent_id = $5, payload = $6,
+                 per_printer_sequence = $7,
+                 lease_owner = NULL, lease_id = NULL,
+                 lease_token_hash = NULL, lease_until = NULL, updated_at = now()
+             WHERE id = $1 AND workspace_id = $2 AND environment_id = $3
+               AND state IN ('waiting_for_agent', 'failed_retryable')
+               AND (lease_until IS NULL OR lease_until <= now())
+               AND NOT EXISTS (
+                   SELECT 1 FROM job_acceptances AS acceptance
+                   WHERE acceptance.job_id = jobs.id
+                     AND acceptance.workspace_id = jobs.workspace_id
+                     AND acceptance.environment_id = jobs.environment_id
+               )",
+        )
+        .bind(job_id.to_string())
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(binding.printer_id.to_string())
+        .bind(binding.agent_id.to_string())
+        .bind(serde_json::to_value(&job)?)
+        .bind(per_printer_sequence)
+        .execute(&mut *transaction)
+        .await?;
+        if updated.rows_affected() != 1 {
+            transaction.rollback().await?;
+            return Ok(None);
+        }
+
+        let attempt_id = format!("jra_{}", ulid::Ulid::new());
+        sqlx::query(
+            "INSERT INTO job_routing_attempts (
+                id, workspace_id, environment_id, job_id, target_id,
+                from_binding_id, to_binding_id, from_agent_id, to_agent_id,
+                from_printer_id, to_printer_id, reason
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)",
+        )
+        .bind(&attempt_id)
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(job_id.to_string())
+        .bind(target_id)
+        .bind(from_binding_id)
+        .bind(&binding.id)
+        .bind(&from_agent_text)
+        .bind(binding.agent_id.to_string())
+        .bind(&from_printer_text)
+        .bind(binding.printer_id.to_string())
+        .bind(reason)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "INSERT INTO routing_outbox (
+                id, workspace_id, environment_id, aggregate_type, aggregate_id,
+                event_type, payload
+             ) VALUES ($1,$2,$3,'job',$4,'job.routing_attempted',$5)",
+        )
+        .bind(EventId::new().to_string())
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(job_id.to_string())
+        .bind(serde_json::json!({
+            "attempt_id": attempt_id,
+            "job_id": job_id,
+            "target_id": target_id,
+            "from_agent_id": from_agent_text,
+            "to_agent_id": binding.agent_id,
+            "from_printer_id": from_printer_text,
+            "to_printer_id": binding.printer_id,
+            "to_binding_id": binding.id,
+            "reason": reason,
+            "occurred_at": Utc::now(),
+        }))
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(Some(job))
+    }
+
+    pub async fn list_reroutable_target_jobs(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        limit: i64,
+    ) -> Result<Vec<Job>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT job.payload, job.state
+             FROM jobs AS job
+             WHERE job.workspace_id = $1 AND job.environment_id = $2
+               AND job.state IN ('waiting_for_agent', 'failed_retryable')
+               AND job.expires_at > now()
+               AND job.payload->'metadata'->>'spool.target_id' IS NOT NULL
+               AND (job.lease_until IS NULL OR job.lease_until <= now())
+               AND NOT EXISTS (
+                   SELECT 1 FROM job_acceptances AS acceptance
+                   WHERE acceptance.job_id = job.id
+                     AND acceptance.workspace_id = job.workspace_id
+                     AND acceptance.environment_id = job.environment_id
+               )
+             ORDER BY job.created_at, job.id
+             LIMIT $3",
+        )
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(limit.clamp(1, 100))
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                let state: String = row.try_get("state")?;
+                job_from_row(row.try_get("payload")?, &state)
+            })
+            .collect()
     }
 
     pub async fn get_job(
