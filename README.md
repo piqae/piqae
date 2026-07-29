@@ -1,9 +1,11 @@
-# Open print relay
+# Spool
 
-This repository is the planning workspace for an open-source, low-resource,
-self-hostable alternative to PrintNode.
+Spool is open-source, low-resource local and remote printing infrastructure. It
+uses installed operating-system printers and drivers, keeps a durable queue at
+both the service and device edges, and never equates a spooler handoff with
+proof that paper physically printed.
 
-The intended product is:
+The repository now contains:
 
 - a headless agent for Windows, macOS, Linux, and low-power Linux devices;
 - a local-first mode that needs no control-plane server;
@@ -14,8 +16,59 @@ The intended product is:
 - durable, observable delivery through the control-plane queue, agent queue,
   and operating-system spooler.
 
-The project is currently in the design and validation stage. No implementation
-exists yet.
+Working V1 source implementations of the shared agent, queues, control plane,
+compatibility API, SDK, dashboard, documentation app, native executor
+processes, and tray/menu shells live in this monorepo. Platform support remains
+evidence-gated: source existing is not the same as a signed, physically
+verified release.
+
+## Quick start
+
+Requirements are Rust 1.88, Node.js 22 or newer, pnpm 11.4, and Docker for the
+self-hosted stack.
+
+```sh
+cargo test --workspace --locked
+pnpm install --frozen-lockfile
+pnpm check
+pnpm test
+```
+
+Run the dashboard with visibly labelled deterministic data:
+
+```sh
+SPOOL_AUTH_MODE=demo PUBLIC_SPOOL_DASHBOARD_MODE=demo \
+  pnpm --filter @spool/web dev
+```
+
+Run the local agent against the disposable test executor:
+
+```sh
+cargo build -p spool-agent -p spool-fake-executor
+cargo run -p spool-agent -- \
+  --mode local \
+  --data-dir .spool-dev \
+  --executor process \
+  --executor-path target/debug/spool-fake-executor
+```
+
+The operational API binds only to loopback. Its randomly generated bearer token
+is stored as mode `0600` in `.spool-dev/local.token`. Use
+`GET /v1/local/printers`, `POST /v1/jobs`, and `GET /v1/local/status` to exercise
+the local durable print path.
+
+For the API-only self-hosted stack:
+
+```sh
+cp deploy/self-host/.env.example deploy/self-host/.env
+docker compose --env-file deploy/self-host/.env \
+  -f deploy/self-host/docker-compose.yml up -d
+```
+
+See [self-hosting](docs/operations/self-hosting.md), the
+[PrintNode migration guide](docs/api/printnode-migration.md), and the
+[OpenAPI contract](contracts/openapi/spool-v1.yaml) before connecting real
+printers.
 
 ## Documentation
 
@@ -37,21 +90,20 @@ exists yet.
 16. [Linear-aligned visual system](docs/15-linear-aligned-visual-system.md)
 17. [Research sources](docs/references.md)
 
-## Current recommendation
+## Architecture
 
-Build one Rust agent core with small platform-specific printing adapters, not
-three unrelated desktop applications. Compile it into clean native artifacts
-for Windows, macOS, and Linux. The service owns identity, SQLite, queueing,
-networking, printing, and recovery. V0.1 tray/menu applications are thin native
-platform shells and never own job state. Include them for Windows, macOS, and
-supported Linux desktops. Do not ship Electron or a bundled Chromium runtime.
+Spool uses one Rust agent core with small platform-specific executor processes,
+not three unrelated desktop applications. The service owns identity, SQLite,
+queueing, networking, printing, and recovery. Tray/menu applications are thin
+native shells and never own job state. Spool does not ship Electron or a bundled
+Chromium runtime.
 
-Use SvelteKit and TypeScript for the first control plane and dashboard, deployed
-to Vercel with WorkOS AuthKit, Neon PostgreSQL, and private object storage.
-Agents initially long-poll or poll a durable PostgreSQL job queue over HTTPS.
-Do not require a broker or permanent WebSocket gateway for the first vertical
-slice. A dedicated Go connection service can be introduced later if measured
-latency or fleet scale requires it.
+The Rust control plane uses PostgreSQL leases, durable per-agent commands,
+event/outbox tables, and S3-compatible object storage. Agents use signed HTTPS
+polling; there is no required broker or permanent socket gateway. The SvelteKit
+dashboard targets Vercel or a standard Node container and uses the official
+WorkOS AuthKit integration in hosted mode. The canonical TypeScript SDK and
+`spoolctl` cover the native API.
 
 The hosted and loopback web interfaces use an intentionally close Linear-like
 visual language: calm warm-neutral surfaces, dense alignment, restrained
@@ -60,16 +112,20 @@ This is visual-style alignment, not a copy of Linear's product layout, UX,
 brand, icons, wording, or assets. The native tray/menu shells continue to follow
 their operating-system conventions.
 
-The target is a narrow but production-operated v0.1 in 48 hours, built through
-parallel workstreams with one contract/state-machine owner and hard integration,
-security, recovery, and physical-printer release gates. The detailed decision is
-in [the 48-hour production plan](docs/14-long-term-native-architecture-and-48-hour-production.md).
+The first release target is the subset that replaces this organisation's
+PrintNode usage. The compatibility surface is not represented as universal
+PrintNode parity: scales, integrator subaccounts, billing, and additional
+historical response quirks remain later layers and do not weaken the reliable
+print path.
 
-The first production goal should be the subset that replaces this
-organisation's PrintNode usage. Public PrintNode API compatibility can then be
-expanded systematically. Scale support, integrator subaccounts, delegated
-authentication, and billing are later parity layers and must not delay the
-reliable print path.
+## Release truth
+
+The checked-in [support matrix](release/support-matrix.yaml) is authoritative.
+Windows, CUPS, and all signed installers remain Disabled or Preview until their
+physical-printer, service restart, driver-option, code-signing, and update
+gates pass. Windows PDF currently requires a separately installed and explicitly
+configured SumatraPDF helper; see the
+[backend notes](docs/architecture/windows-pdf-helper.md).
 
 ## Important semantic limit
 

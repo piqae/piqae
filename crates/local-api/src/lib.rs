@@ -1,4 +1,4 @@
-//! Loopback operational API used by the embedded local UI.
+//! Authenticated loopback operational API for local integrations and shells.
 //!
 //! Printing remains owned by the agent loop. HTTP handlers exchange bounded
 //! commands with that loop and never access `SQLite` or device credentials.
