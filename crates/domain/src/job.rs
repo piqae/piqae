@@ -1,6 +1,7 @@
 use crate::{AgentId, EnvironmentId, EventId, JobId, PrinterId, WorkspaceId};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use thiserror::Error;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -47,6 +48,9 @@ pub struct JobOptions {
     pub pages: Option<String>,
     pub paper: Option<String>,
     pub rotate: Option<Rotation>,
+    /// Driver-specific selections validated against the current native
+    /// capability snapshot before local submission.
+    pub native_options: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -218,6 +222,8 @@ pub struct Job {
     pub content_kind: ContentKind,
     pub content: ContentSource,
     pub options: JobOptions,
+    #[serde(default)]
+    pub metadata: BTreeMap<String, String>,
     pub deliveries: u16,
     pub state: JobState,
     pub created_at: DateTime<Utc>,

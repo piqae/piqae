@@ -6,7 +6,11 @@
 
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
-use spool_domain::{EventId, PrinterId};
+use spool_domain::{
+    EventId, JobOptions, NativePrinterOption, PRINTER_PROFILE_SCHEMA_VERSION, PrinterCapabilities,
+    PrinterCapabilityProfile, PrinterId,
+};
+use std::collections::BTreeMap;
 use std::path::Path;
 use thiserror::Error;
 
@@ -30,6 +34,12 @@ pub enum StorageError {
     },
     #[error("invalid durable local event: {0}")]
     InvalidLocalEvent(String),
+    #[error("printer {0} was not found")]
+    PrinterNotFound(String),
+    #[error("printer profile revision conflict: expected {expected}, current {current}")]
+    ProfileRevisionConflict { expected: u64, current: u64 },
+    #[error("invalid printer profile: {0}")]
+    InvalidPrinterProfile(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -84,8 +94,33 @@ pub struct StoredPrinter {
     pub native_id: String,
     pub name: String,
     pub state: String,
+    pub is_default: bool,
+    pub exposed: bool,
     pub capabilities_json: String,
+    pub native_options_json: String,
+    pub profile_revision: u64,
     pub observed_unix_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredPrinterProfile {
+    pub printer_id: String,
+    pub revision: u64,
+    pub schema_version: u16,
+    pub portable_json: String,
+    pub native_options_json: String,
+    pub observed_unix_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredNamedProfile {
+    pub profile_id: String,
+    pub printer_id: String,
+    pub revision: u64,
+    pub name: String,
+    pub is_default: bool,
+    pub options_json: String,
+    pub updated_unix_ms: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -173,6 +208,20 @@ impl AgentStore {
                 [],
             )?;
         }
+        let has_is_default: bool = connection.query_row(
+            "SELECT EXISTS (
+               SELECT 1 FROM pragma_table_info('printers') WHERE name = 'is_default'
+             )",
+            [],
+            |row| row.get(0),
+        )?;
+        if !has_is_default {
+            connection.execute(
+                "ALTER TABLE printers ADD COLUMN is_default INTEGER NOT NULL
+                 DEFAULT 0 CHECK (is_default IN (0, 1))",
+                [],
+            )?;
+        }
         Ok(Self { connection })
     }
 
@@ -237,6 +286,7 @@ impl AgentStore {
         native_id: &str,
         name: &str,
         state: &str,
+        is_default: bool,
         capabilities_json: &str,
         observed_unix_ms: i64,
     ) -> Result<StoredPrinter, StorageError> {
@@ -253,14 +303,24 @@ impl AgentStore {
             .optional()?
             .unwrap_or_else(|| PrinterId::new().to_string());
         transaction.execute(
-            "INSERT INTO printers(printer_id, native_id, name, state, observed_unix_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5)
+            "INSERT INTO printers(
+               printer_id, native_id, name, state, is_default, observed_unix_ms
+             )
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
              ON CONFLICT(printer_id) DO UPDATE SET
                native_id = excluded.native_id,
                name = excluded.name,
                state = excluded.state,
+               is_default = excluded.is_default,
                observed_unix_ms = excluded.observed_unix_ms",
-            params![printer_id, native_id, name, state, observed_unix_ms],
+            params![
+                printer_id,
+                native_id,
+                name,
+                state,
+                is_default,
+                observed_unix_ms
+            ],
         )?;
         transaction.execute(
             "INSERT INTO printer_capabilities(
@@ -277,9 +337,359 @@ impl AgentStore {
             native_id: native_id.to_owned(),
             name: name.to_owned(),
             state: state.to_owned(),
+            is_default,
+            exposed: false,
             capabilities_json: capabilities_json.to_owned(),
+            native_options_json: "{}".into(),
+            profile_revision: 0,
             observed_unix_ms,
         })
+    }
+
+    /// Persists a new immutable profile revision when capabilities change.
+    ///
+    /// `expected_revision` enables optimistic concurrency for administrator
+    /// edits. Discovery passes `None` and receives the existing revision when
+    /// the profile payload is unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unknown printer, invalid profile, stale
+    /// revision, or failed transaction.
+    pub fn store_printer_profile(
+        &mut self,
+        printer_id: &str,
+        expected_revision: Option<u64>,
+        portable_json: &str,
+        native_options_json: &str,
+        observed_unix_ms: i64,
+    ) -> Result<StoredPrinterProfile, StorageError> {
+        let portable: PrinterCapabilities = serde_json::from_str(portable_json)?;
+        let native_options: BTreeMap<String, NativePrinterOption> =
+            serde_json::from_str(native_options_json)?;
+        PrinterCapabilityProfile::draft(portable, native_options)
+            .validate()
+            .map_err(|error| StorageError::InvalidPrinterProfile(error.to_string()))?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let exists: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM printers WHERE printer_id = ?1)",
+            [printer_id],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            return Err(StorageError::PrinterNotFound(printer_id.to_owned()));
+        }
+        let current = transaction
+            .query_row(
+                "SELECT revision, schema_version, portable_json,
+                        native_options_json, observed_unix_ms
+                 FROM printer_capability_snapshots
+                 WHERE printer_id = ?1 ORDER BY revision DESC LIMIT 1",
+                [printer_id],
+                |row| {
+                    Ok(StoredPrinterProfile {
+                        printer_id: printer_id.to_owned(),
+                        revision: row.get(0)?,
+                        schema_version: row.get(1)?,
+                        portable_json: row.get(2)?,
+                        native_options_json: row.get(3)?,
+                        observed_unix_ms: row.get(4)?,
+                    })
+                },
+            )
+            .optional()?;
+        let current_revision = current.as_ref().map_or(0, |profile| profile.revision);
+        if let Some(expected) = expected_revision
+            && expected != current_revision
+        {
+            return Err(StorageError::ProfileRevisionConflict {
+                expected,
+                current: current_revision,
+            });
+        }
+        if let Some(profile) = current
+            && profile.schema_version == PRINTER_PROFILE_SCHEMA_VERSION
+            && profile.portable_json == portable_json
+            && profile.native_options_json == native_options_json
+        {
+            transaction.commit()?;
+            return Ok(profile);
+        }
+        let revision = current_revision.saturating_add(1);
+        transaction.execute(
+            "INSERT INTO printer_capability_snapshots(
+               printer_id, revision, schema_version, portable_json,
+               native_options_json, observed_unix_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                printer_id,
+                revision,
+                PRINTER_PROFILE_SCHEMA_VERSION,
+                portable_json,
+                native_options_json,
+                observed_unix_ms
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(StoredPrinterProfile {
+            printer_id: printer_id.to_owned(),
+            revision,
+            schema_version: PRINTER_PROFILE_SCHEMA_VERSION,
+            portable_json: portable_json.to_owned(),
+            native_options_json: native_options_json.to_owned(),
+            observed_unix_ms,
+        })
+    }
+
+    /// Creates a named print profile at revision one.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid options, an empty name, an unknown
+    /// printer, or failed transaction.
+    pub fn create_named_profile(
+        &mut self,
+        printer_id: &str,
+        name: &str,
+        is_default: bool,
+        options_json: &str,
+        updated_unix_ms: i64,
+    ) -> Result<StoredNamedProfile, StorageError> {
+        validate_named_profile(name, options_json)?;
+        if self.printer(printer_id)?.is_none() {
+            return Err(StorageError::PrinterNotFound(printer_id.to_owned()));
+        }
+        let profile_id = format!("prf_{}", PrinterId::new());
+        self.insert_named_profile(
+            &profile_id,
+            printer_id,
+            1,
+            name,
+            is_default,
+            options_json,
+            false,
+            updated_unix_ms,
+        )?;
+        self.named_profile(printer_id, &profile_id)?
+            .ok_or_else(|| StorageError::InvalidPrinterProfile("profile insert failed".into()))
+    }
+
+    /// Appends a named print profile revision using optimistic concurrency.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid options, unknown profile, stale revision,
+    /// or failed transaction.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "keeps immutable profile revision fields explicit at the storage boundary"
+    )]
+    pub fn update_named_profile(
+        &mut self,
+        printer_id: &str,
+        profile_id: &str,
+        expected_revision: u64,
+        name: &str,
+        is_default: bool,
+        options_json: &str,
+        updated_unix_ms: i64,
+    ) -> Result<StoredNamedProfile, StorageError> {
+        validate_named_profile(name, options_json)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current = query_named_profile(&transaction, printer_id, profile_id)?
+            .ok_or_else(|| StorageError::InvalidPrinterProfile("profile was not found".into()))?;
+        if current.revision != expected_revision {
+            return Err(StorageError::ProfileRevisionConflict {
+                expected: expected_revision,
+                current: current.revision,
+            });
+        }
+        insert_named_profile_tx(
+            &transaction,
+            profile_id,
+            printer_id,
+            current.revision + 1,
+            name.trim(),
+            is_default,
+            options_json,
+            false,
+            updated_unix_ms,
+        )?;
+        transaction.commit()?;
+        self.named_profile(printer_id, profile_id)?
+            .ok_or_else(|| StorageError::InvalidPrinterProfile("profile update failed".into()))
+    }
+
+    /// Appends a tombstone revision for a named profile.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unknown profile, stale revision, or failed
+    /// transaction.
+    pub fn delete_named_profile(
+        &mut self,
+        printer_id: &str,
+        profile_id: &str,
+        expected_revision: u64,
+        updated_unix_ms: i64,
+    ) -> Result<(), StorageError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current = query_named_profile(&transaction, printer_id, profile_id)?
+            .ok_or_else(|| StorageError::InvalidPrinterProfile("profile was not found".into()))?;
+        if current.revision != expected_revision {
+            return Err(StorageError::ProfileRevisionConflict {
+                expected: expected_revision,
+                current: current.revision,
+            });
+        }
+        insert_named_profile_tx(
+            &transaction,
+            profile_id,
+            printer_id,
+            current.revision + 1,
+            &current.name,
+            false,
+            &current.options_json,
+            true,
+            updated_unix_ms,
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Returns all active named profiles for a printer.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `SQLite` cannot execute or decode the query.
+    pub fn named_profiles(
+        &self,
+        printer_id: &str,
+    ) -> Result<Vec<StoredNamedProfile>, StorageError> {
+        let mut statement = self.connection.prepare(
+            "SELECT p.profile_id, p.printer_id, p.revision, p.name,
+                    p.is_default, p.options_json, p.updated_unix_ms
+             FROM printer_profiles p
+             WHERE p.printer_id = ?1
+               AND p.revision = (
+                 SELECT MAX(latest.revision) FROM printer_profiles latest
+                 WHERE latest.profile_id = p.profile_id
+               )
+               AND p.deleted = 0
+             ORDER BY p.is_default DESC, p.name, p.profile_id",
+        )?;
+        let rows = statement.query_map([printer_id], named_profile_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Returns one active named profile.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `SQLite` cannot execute or decode the query.
+    pub fn named_profile(
+        &self,
+        printer_id: &str,
+        profile_id: &str,
+    ) -> Result<Option<StoredNamedProfile>, StorageError> {
+        self.connection
+            .query_row(
+                NAMED_PROFILE_QUERY,
+                params![printer_id, profile_id],
+                named_profile_from_row,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn insert_named_profile(
+        &mut self,
+        profile_id: &str,
+        printer_id: &str,
+        revision: u64,
+        name: &str,
+        is_default: bool,
+        options_json: &str,
+        deleted: bool,
+        updated_unix_ms: i64,
+    ) -> Result<(), StorageError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        insert_named_profile_tx(
+            &transaction,
+            profile_id,
+            printer_id,
+            revision,
+            name.trim(),
+            is_default,
+            options_json,
+            deleted,
+            updated_unix_ms,
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Changes whether a discovered queue may receive jobs or be advertised.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unknown printer or failed transaction.
+    pub fn set_printer_exposed(
+        &mut self,
+        printer_id: &str,
+        exposed: bool,
+        updated_unix_ms: i64,
+    ) -> Result<(), StorageError> {
+        let exists: bool = self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM printers WHERE printer_id = ?1)",
+            [printer_id],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            return Err(StorageError::PrinterNotFound(printer_id.to_owned()));
+        }
+        self.connection.execute(
+            "INSERT INTO printer_exposure(printer_id, exposed, updated_unix_ms)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(printer_id) DO UPDATE SET
+               exposed = excluded.exposed,
+               updated_unix_ms = excluded.updated_unix_ms",
+            params![printer_id, exposed, updated_unix_ms],
+        )?;
+        Ok(())
+    }
+
+    /// Returns one persisted printer and its latest immutable profile.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `SQLite` cannot execute or decode the query.
+    pub fn printer(&self, printer_id: &str) -> Result<Option<StoredPrinter>, StorageError> {
+        self.connection
+            .query_row(STORED_PRINTER_QUERY, [printer_id], stored_printer_from_row)
+            .optional()
+            .map_err(Into::into)
+    }
+
+    /// Returns persisted printer inventory ordered by friendly name.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `SQLite` cannot execute or decode the query.
+    pub fn printers(&self) -> Result<Vec<StoredPrinter>, StorageError> {
+        let query = format!("{STORED_PRINTER_QUERY} ORDER BY p.name, p.printer_id");
+        let mut statement = self.connection.prepare(&query)?;
+        let rows = statement.query_map([Option::<String>::None], stored_printer_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
     /// Resolves a cloud logical printer ID to the current native queue key.
@@ -624,6 +1034,58 @@ impl AgentStore {
                     let queued = row.get::<_, u32>(0)?;
                     let active = row.get::<_, u32>(1)?;
                     Ok(QueueCounts { queued, active })
+                },
+            )
+            .map_err(Into::into)
+    }
+
+    /// Returns the newest local jobs for one logical printer.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `SQLite` cannot execute or decode the query.
+    pub fn jobs_for_printer(
+        &self,
+        printer_id: &str,
+        limit: usize,
+    ) -> Result<Vec<LocalJob>, StorageError> {
+        let bounded = i64::try_from(limit.clamp(1, 500)).unwrap_or(500);
+        let mut statement = self.connection.prepare(
+            "SELECT job_id, submission_id, printer_id, printer_native_id,
+                    printer_sequence, title, content_sha256, content_path,
+                    content_kind, options_json, state, expires_unix_ms,
+                    native_job_id
+             FROM jobs WHERE printer_id = ?1
+             ORDER BY printer_sequence DESC LIMIT ?2",
+        )?;
+        let rows = statement.query_map(params![printer_id, bounded], row_to_job)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Returns exact local queue counts for one logical printer.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `SQLite` cannot execute the aggregate query.
+    pub fn printer_queue_counts(&self, printer_id: &str) -> Result<QueueCounts, StorageError> {
+        self.connection
+            .query_row(
+                "SELECT
+                   COUNT(*) FILTER (
+                     WHERE state IN ('queued_local', 'failed_retryable')
+                   ),
+                   COUNT(*) FILTER (
+                     WHERE state IN ('preparing', 'rendering', 'spool_intent',
+                                     'accepted_by_spooler', 'spooling',
+                                     'printing', 'blocked')
+                   )
+                 FROM jobs WHERE printer_id = ?1",
+                [printer_id],
+                |row| {
+                    Ok(QueueCounts {
+                        queued: row.get(0)?,
+                        active: row.get(1)?,
+                    })
                 },
             )
             .map_err(Into::into)
@@ -1365,6 +1827,159 @@ fn query_job(connection: &Connection, job_id: &str) -> Result<Option<LocalJob>, 
         .optional()
 }
 
+const STORED_PRINTER_QUERY: &str = "
+    SELECT p.printer_id, p.native_id, p.name, p.state, p.is_default,
+           COALESCE(e.exposed, 0),
+           COALESCE(profile.portable_json, legacy.capabilities_json, '{}'),
+           COALESCE(profile.native_options_json, '{}'),
+           COALESCE(profile.revision, 0),
+           p.observed_unix_ms
+    FROM printers p
+    LEFT JOIN printer_exposure e ON e.printer_id = p.printer_id
+    LEFT JOIN printer_capabilities legacy
+      ON legacy.printer_id = p.printer_id AND legacy.revision = 'current'
+    LEFT JOIN printer_capability_snapshots profile
+      ON profile.printer_id = p.printer_id
+     AND profile.revision = (
+       SELECT MAX(latest.revision) FROM printer_capability_snapshots latest
+       WHERE latest.printer_id = p.printer_id
+     )
+    WHERE (?1 IS NULL OR p.printer_id = ?1)";
+
+fn stored_printer_from_row(row: &rusqlite::Row<'_>) -> Result<StoredPrinter, rusqlite::Error> {
+    Ok(StoredPrinter {
+        printer_id: row.get(0)?,
+        native_id: row.get(1)?,
+        name: row.get(2)?,
+        state: row.get(3)?,
+        is_default: row.get(4)?,
+        exposed: row.get(5)?,
+        capabilities_json: row.get(6)?,
+        native_options_json: row.get(7)?,
+        profile_revision: row.get(8)?,
+        observed_unix_ms: row.get(9)?,
+    })
+}
+
+fn named_profile_from_row(row: &rusqlite::Row<'_>) -> Result<StoredNamedProfile, rusqlite::Error> {
+    Ok(StoredNamedProfile {
+        profile_id: row.get(0)?,
+        printer_id: row.get(1)?,
+        revision: row.get(2)?,
+        name: row.get(3)?,
+        is_default: row.get(4)?,
+        options_json: row.get(5)?,
+        updated_unix_ms: row.get(6)?,
+    })
+}
+
+const NAMED_PROFILE_QUERY: &str = "
+    SELECT profile_id, printer_id, revision, name, is_default,
+           options_json, updated_unix_ms
+    FROM printer_profiles
+    WHERE printer_id = ?1 AND profile_id = ?2
+      AND revision = (
+        SELECT MAX(latest.revision) FROM printer_profiles latest
+        WHERE latest.profile_id = ?2
+      )
+      AND deleted = 0
+    ORDER BY revision DESC LIMIT 1";
+
+fn query_named_profile(
+    connection: &Connection,
+    printer_id: &str,
+    profile_id: &str,
+) -> Result<Option<StoredNamedProfile>, rusqlite::Error> {
+    connection
+        .query_row(
+            NAMED_PROFILE_QUERY,
+            params![printer_id, profile_id],
+            named_profile_from_row,
+        )
+        .optional()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn insert_named_profile_tx(
+    transaction: &Connection,
+    profile_id: &str,
+    printer_id: &str,
+    revision: u64,
+    name: &str,
+    is_default: bool,
+    options_json: &str,
+    deleted: bool,
+    updated_unix_ms: i64,
+) -> Result<(), StorageError> {
+    if is_default {
+        let previous: Vec<_> = {
+            let mut statement = transaction.prepare(
+                "SELECT p.profile_id, p.revision, p.name, p.options_json
+                 FROM printer_profiles p
+                 WHERE p.printer_id = ?1 AND p.profile_id <> ?2
+                   AND p.is_default = 1 AND p.deleted = 0
+                   AND p.revision = (
+                     SELECT MAX(latest.revision) FROM printer_profiles latest
+                     WHERE latest.profile_id = p.profile_id
+                   )",
+            )?;
+            statement
+                .query_map(params![printer_id, profile_id], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, u64>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        for (old_id, old_revision, old_name, old_options) in previous {
+            transaction.execute(
+                "INSERT INTO printer_profiles(
+                   profile_id, printer_id, revision, name, is_default,
+                   options_json, deleted, updated_unix_ms
+                 ) VALUES (?1, ?2, ?3, ?4, 0, ?5, 0, ?6)",
+                params![
+                    old_id,
+                    printer_id,
+                    old_revision + 1,
+                    old_name,
+                    old_options,
+                    updated_unix_ms
+                ],
+            )?;
+        }
+    }
+    transaction.execute(
+        "INSERT INTO printer_profiles(
+           profile_id, printer_id, revision, name, is_default,
+           options_json, deleted, updated_unix_ms
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            profile_id,
+            printer_id,
+            revision,
+            name,
+            is_default,
+            options_json,
+            deleted,
+            updated_unix_ms
+        ],
+    )?;
+    Ok(())
+}
+
+fn validate_named_profile(name: &str, options_json: &str) -> Result<(), StorageError> {
+    if name.trim().is_empty() {
+        return Err(StorageError::InvalidPrinterProfile(
+            "profile name cannot be empty".into(),
+        ));
+    }
+    let _: JobOptions = serde_json::from_str(options_json)?;
+    Ok(())
+}
+
 fn upsert_cloud_accept_intent(
     connection: &Connection,
     job: &LocalJob,
@@ -1705,13 +2320,21 @@ mod tests {
     fn printer_inventory_preserves_logical_to_native_mapping() {
         let mut store = AgentStore::in_memory().unwrap();
         let first = store
-            .upsert_printer("native-queue", "Office", "online", r#"{"color":true}"#, 10)
+            .upsert_printer(
+                "native-queue",
+                "Office",
+                "online",
+                true,
+                r#"{"color":true}"#,
+                10,
+            )
             .unwrap();
         let refreshed = store
             .upsert_printer(
                 "native-queue",
                 "Office renamed",
                 "busy",
+                false,
                 r#"{"color":false}"#,
                 20,
             )
@@ -1725,5 +2348,162 @@ mod tests {
             Some("native-queue")
         );
         assert_eq!(refreshed.name, "Office renamed");
+    }
+
+    #[test]
+    fn printer_exposure_defaults_off_and_profile_revisions_are_immutable() {
+        let mut store = AgentStore::in_memory().unwrap();
+        let printer = store
+            .upsert_printer(
+                "native",
+                "Office",
+                "online",
+                true,
+                &serde_json::to_string(&PrinterCapabilities::default()).unwrap(),
+                10,
+            )
+            .unwrap();
+        assert!(!store.printer(&printer.printer_id).unwrap().unwrap().exposed);
+        let first = store
+            .store_printer_profile(
+                &printer.printer_id,
+                None,
+                &serde_json::to_string(&PrinterCapabilities::default()).unwrap(),
+                "{}",
+                10,
+            )
+            .unwrap();
+        let unchanged = store
+            .store_printer_profile(&printer.printer_id, None, &first.portable_json, "{}", 20)
+            .unwrap();
+        assert_eq!(first.revision, unchanged.revision);
+
+        let changed = PrinterCapabilities {
+            color: true,
+            ..Default::default()
+        };
+        let second = store
+            .store_printer_profile(
+                &printer.printer_id,
+                Some(first.revision),
+                &serde_json::to_string(&changed).unwrap(),
+                "{}",
+                30,
+            )
+            .unwrap();
+        assert_eq!(second.revision, first.revision + 1);
+        assert!(matches!(
+            store.store_printer_profile(
+                &printer.printer_id,
+                Some(first.revision),
+                &second.portable_json,
+                "{}",
+                40
+            ),
+            Err(StorageError::ProfileRevisionConflict { .. })
+        ));
+
+        store
+            .set_printer_exposed(&printer.printer_id, true, 50)
+            .unwrap();
+        let stored = store.printer(&printer.printer_id).unwrap().unwrap();
+        assert!(stored.exposed);
+        assert_eq!(stored.profile_revision, second.revision);
+        assert!(stored.is_default);
+    }
+
+    #[test]
+    fn named_profiles_are_multi_profile_versioned_and_tombstoned() {
+        let mut store = AgentStore::in_memory().unwrap();
+        let printer = store
+            .upsert_printer(
+                "native",
+                "Office",
+                "online",
+                false,
+                &serde_json::to_string(&PrinterCapabilities::default()).unwrap(),
+                10,
+            )
+            .unwrap();
+        let colour = store
+            .create_named_profile(
+                &printer.printer_id,
+                "A4 Colour",
+                true,
+                &serde_json::to_string(&JobOptions::default()).unwrap(),
+                20,
+            )
+            .unwrap();
+        let black_mark = store
+            .create_named_profile(
+                &printer.printer_id,
+                "Black Mark",
+                false,
+                &serde_json::to_string(&JobOptions::default()).unwrap(),
+                21,
+            )
+            .unwrap();
+        assert_ne!(colour.profile_id, black_mark.profile_id);
+        assert_eq!(store.named_profiles(&printer.printer_id).unwrap().len(), 2);
+        let updated = store
+            .update_named_profile(
+                &printer.printer_id,
+                &black_mark.profile_id,
+                black_mark.revision,
+                "Black Mark Labels",
+                true,
+                &black_mark.options_json,
+                30,
+            )
+            .unwrap();
+        assert_eq!(updated.revision, 2);
+        let profiles = store.named_profiles(&printer.printer_id).unwrap();
+        assert_eq!(
+            profiles.iter().filter(|profile| profile.is_default).count(),
+            1
+        );
+        assert_eq!(
+            profiles
+                .iter()
+                .find(|profile| profile.profile_id == colour.profile_id)
+                .unwrap()
+                .revision,
+            2
+        );
+        store
+            .delete_named_profile(
+                &printer.printer_id,
+                &updated.profile_id,
+                updated.revision,
+                40,
+            )
+            .unwrap();
+        assert!(
+            store
+                .named_profile(&printer.printer_id, &updated.profile_id)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn per_printer_queue_counts_are_not_truncated_by_detail_limits() {
+        let mut store = AgentStore::in_memory().unwrap();
+        for index in 0..501 {
+            store
+                .accept_job(&job(&format!("job-{index}"), "large-queue", index))
+                .unwrap();
+        }
+        assert_eq!(
+            store.printer_queue_counts("large-queue").unwrap(),
+            QueueCounts {
+                queued: 501,
+                active: 0
+            }
+        );
+        assert_eq!(
+            store.jobs_for_printer("large-queue", 200).unwrap().len(),
+            200
+        );
     }
 }

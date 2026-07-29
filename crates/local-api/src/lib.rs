@@ -5,13 +5,15 @@
 
 use axum::{
     Json, Router,
-    extract::State,
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{get, post, put},
 };
-use serde::Serialize;
-use spool_local_ipc::{LocalPrinter, LocalStatus, SessionAuthenticator};
+use serde::{Deserialize, Serialize};
+use spool_local_ipc::{
+    LocalPrinter, LocalPrinterProfile, LocalPrinterQueue, LocalStatus, SessionAuthenticator,
+};
 use std::{net::SocketAddr, sync::Arc};
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
@@ -24,6 +26,41 @@ pub enum ControlRequest {
     },
     Printers {
         respond_to: oneshot::Sender<Vec<LocalPrinter>>,
+    },
+    SetPrinterExposure {
+        printer_id: String,
+        exposed: bool,
+        respond_to: oneshot::Sender<Result<LocalPrinter, ControlFailure>>,
+    },
+    Profiles {
+        printer_id: String,
+        respond_to: oneshot::Sender<Result<Vec<LocalPrinterProfile>, ControlFailure>>,
+    },
+    CreateProfile {
+        printer_id: String,
+        request: ProfileCreate,
+        respond_to: oneshot::Sender<Result<LocalPrinterProfile, ControlFailure>>,
+    },
+    UpdateProfile {
+        printer_id: String,
+        profile_id: String,
+        request: ProfileUpdate,
+        respond_to: oneshot::Sender<Result<LocalPrinterProfile, ControlFailure>>,
+    },
+    DeleteProfile {
+        printer_id: String,
+        profile_id: String,
+        expected_revision: u64,
+        respond_to: oneshot::Sender<Result<(), ControlFailure>>,
+    },
+    PrinterQueue {
+        printer_id: String,
+        respond_to: oneshot::Sender<Result<LocalPrinterQueue, ControlFailure>>,
+    },
+    TestPage {
+        printer_id: String,
+        profile_id: String,
+        respond_to: oneshot::Sender<Result<LocalJobAccepted, ControlFailure>>,
     },
     Pause {
         respond_to: oneshot::Sender<Result<(), ControlFailure>>,
@@ -46,7 +83,8 @@ pub struct ControlFailure {
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct LocalCreateJob {
     pub printer_id: String,
-    pub printer_native_id: String,
+    #[serde(default)]
+    pub printer_native_id: Option<String>,
     pub title: String,
     pub content_kind: spool_domain::ContentKind,
     pub content: LocalContent,
@@ -66,6 +104,42 @@ pub enum LocalContent {
 pub struct LocalJobAccepted {
     pub job_id: String,
     pub state: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ExposureUpdate {
+    pub exposed: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProfileCreate {
+    pub name: String,
+    #[serde(default)]
+    pub is_default: bool,
+    #[serde(default)]
+    pub options: spool_domain::JobOptions,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProfileUpdate {
+    pub expected_revision: u64,
+    pub name: String,
+    #[serde(default)]
+    pub is_default: bool,
+    #[serde(default)]
+    pub options: spool_domain::JobOptions,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DeleteProfileQuery {
+    pub expected_revision: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct TestPageRequest {
+    pub profile_id: String,
 }
 
 #[derive(Debug, Error)]
@@ -107,6 +181,20 @@ pub fn router(state: LocalApiState) -> Router {
         .route("/health", get(health))
         .route("/v1/local/status", get(status))
         .route("/v1/local/printers", get(printers))
+        .route(
+            "/v1/local/printers/{printer_id}/exposure",
+            put(set_printer_exposure),
+        )
+        .route(
+            "/v1/local/printers/{printer_id}/profiles",
+            get(profiles).post(create_profile),
+        )
+        .route(
+            "/v1/local/printers/{printer_id}/profiles/{profile_id}",
+            put(update_profile).delete(delete_profile),
+        )
+        .route("/v1/local/printers/{printer_id}/queue", get(printer_queue))
+        .route("/v1/local/printers/{printer_id}/test-page", post(test_page))
         .route("/v1/local/pause", post(pause))
         .route("/v1/local/resume", post(resume))
         .route("/v1/jobs", post(submit_job))
@@ -171,6 +259,132 @@ async fn printers(State(state): State<LocalApiState>, headers: HeaderMap) -> Res
         .map_or_else(|_| unavailable(), |printers| Json(printers).into_response())
 }
 
+async fn set_printer_exposure(
+    State(state): State<LocalApiState>,
+    Path(printer_id): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<ExposureUpdate>,
+) -> Response {
+    request_response(
+        state,
+        headers,
+        |respond_to| ControlRequest::SetPrinterExposure {
+            printer_id,
+            exposed: request.exposed,
+            respond_to,
+        },
+        StatusCode::OK,
+    )
+    .await
+}
+
+async fn profiles(
+    State(state): State<LocalApiState>,
+    Path(printer_id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    request_response(
+        state,
+        headers,
+        |respond_to| ControlRequest::Profiles {
+            printer_id,
+            respond_to,
+        },
+        StatusCode::OK,
+    )
+    .await
+}
+
+async fn create_profile(
+    State(state): State<LocalApiState>,
+    Path(printer_id): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<ProfileCreate>,
+) -> Response {
+    request_response(
+        state,
+        headers,
+        |respond_to| ControlRequest::CreateProfile {
+            printer_id,
+            request,
+            respond_to,
+        },
+        StatusCode::CREATED,
+    )
+    .await
+}
+
+async fn update_profile(
+    State(state): State<LocalApiState>,
+    Path((printer_id, profile_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    Json(request): Json<ProfileUpdate>,
+) -> Response {
+    request_response(
+        state,
+        headers,
+        |respond_to| ControlRequest::UpdateProfile {
+            printer_id,
+            profile_id,
+            request,
+            respond_to,
+        },
+        StatusCode::OK,
+    )
+    .await
+}
+
+async fn delete_profile(
+    State(state): State<LocalApiState>,
+    Path((printer_id, profile_id)): Path<(String, String)>,
+    Query(query): Query<DeleteProfileQuery>,
+    headers: HeaderMap,
+) -> Response {
+    control_action(state, headers, |respond_to| ControlRequest::DeleteProfile {
+        printer_id,
+        profile_id,
+        expected_revision: query.expected_revision,
+        respond_to,
+    })
+    .await
+}
+
+async fn printer_queue(
+    State(state): State<LocalApiState>,
+    Path(printer_id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    request_response(
+        state,
+        headers,
+        |respond_to| ControlRequest::PrinterQueue {
+            printer_id,
+            respond_to,
+        },
+        StatusCode::OK,
+    )
+    .await
+}
+
+async fn test_page(
+    State(state): State<LocalApiState>,
+    Path(printer_id): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<TestPageRequest>,
+) -> Response {
+    request_response(
+        state,
+        headers,
+        |respond_to| ControlRequest::TestPage {
+            printer_id,
+            profile_id: request.profile_id,
+            respond_to,
+        },
+        StatusCode::ACCEPTED,
+    )
+    .await
+}
+
 async fn pause(State(state): State<LocalApiState>, headers: HeaderMap) -> Response {
     control_action(state, headers, |respond_to| ControlRequest::Pause {
         respond_to,
@@ -226,8 +440,36 @@ async fn control_action(
     }
     match receive.await {
         Ok(Ok(())) => StatusCode::NO_CONTENT.into_response(),
-        Ok(Err(failure)) => (StatusCode::CONFLICT, Json(failure)).into_response(),
+        Ok(Err(failure)) => (failure_status(&failure.code), Json(failure)).into_response(),
         Err(_) => unavailable(),
+    }
+}
+
+async fn request_response<T: Serialize>(
+    state: LocalApiState,
+    headers: HeaderMap,
+    operation: impl FnOnce(oneshot::Sender<Result<T, ControlFailure>>) -> ControlRequest,
+    success: StatusCode,
+) -> Response {
+    if !authenticate(&state, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let (send, receive) = oneshot::channel();
+    if state.control.send(operation(send)).await.is_err() {
+        return unavailable();
+    }
+    match receive.await {
+        Ok(Ok(value)) => (success, Json(value)).into_response(),
+        Ok(Err(failure)) => (failure_status(&failure.code), Json(failure)).into_response(),
+        Err(_) => unavailable(),
+    }
+}
+
+fn failure_status(code: &str) -> StatusCode {
+    match code {
+        "printer_not_found" | "profile_not_found" => StatusCode::NOT_FOUND,
+        "profile_revision_conflict" => StatusCode::CONFLICT,
+        _ => StatusCode::UNPROCESSABLE_ENTITY,
     }
 }
 
@@ -311,6 +553,45 @@ mod tests {
             .expect("response");
         responder.await.expect("responder");
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn authenticated_profile_create_dispatches_bounded_control_request() {
+        let (state, mut receive) = test_state();
+        let responder = tokio::spawn(async move {
+            if let Some(ControlRequest::CreateProfile {
+                printer_id,
+                request,
+                respond_to,
+            }) = receive.recv().await
+            {
+                assert_eq!(printer_id, "ptr_test");
+                assert_eq!(request.name, "A4 Colour");
+                let _ = respond_to.send(Ok(LocalPrinterProfile {
+                    profile_id: "prf_test".into(),
+                    revision: 1,
+                    name: request.name,
+                    is_default: true,
+                    options: request.options,
+                }));
+            }
+        });
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/local/printers/ptr_test/profiles")
+                    .header("authorization", "Bearer secret")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"name":"A4 Colour","is_default":true,"options":{}}"#,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        responder.await.expect("responder");
+        assert_eq!(response.status(), StatusCode::CREATED);
     }
 
     #[tokio::test]

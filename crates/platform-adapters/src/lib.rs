@@ -90,7 +90,14 @@ impl PlatformAdapter for FakePlatformAdapter {
                 .find(|printer| printer.native_id == native_printer_id)
                 .map(|printer| ExecutorResult::Capabilities {
                     capabilities: printer.capabilities.clone(),
+                    native_options: printer.native_options.clone(),
                 })
+                .ok_or_else(|| not_found(&native_printer_id)),
+            ExecutorOperation::ListJobs { native_printer_id } => self
+                .printers
+                .iter()
+                .any(|printer| printer.native_id == native_printer_id)
+                .then(|| ExecutorResult::Jobs { jobs: Vec::new() })
                 .ok_or_else(|| not_found(&native_printer_id)),
             ExecutorOperation::Submit {
                 native_printer_id, ..
@@ -176,6 +183,7 @@ mod tests {
                 is_default: true,
                 state: PrinterState::Online,
                 capabilities: PrinterCapabilities::default(),
+                native_options: std::collections::BTreeMap::new(),
             }],
             submitted_jobs: 0,
         };

@@ -13,22 +13,26 @@ use spool_agent_core::{
 };
 use spool_agent_storage::{
     AcceptedJob, AgentStore, CloudAcceptIntent, PendingEvent, QueueCounts, StorageError,
+    StoredNamedProfile, StoredPrinter,
 };
 use spool_domain::{AgentId, ContentKind, EventId, JobEvent, JobFailureReason, JobId, JobState};
 use spool_executor_supervisor::{ExecutorSupervisor, SupervisedExecutor};
 use spool_local_api::{
     ControlFailure, ControlRequest, LocalApiState, LocalContent, LocalCreateJob, LocalJobAccepted,
+    ProfileCreate, ProfileUpdate,
 };
-use spool_local_ipc::{ConnectionState, LocalPrinter, LocalStatus, SessionAuthenticator};
+use spool_local_ipc::{
+    ConnectionState, LocalNativeQueueJob, LocalPrinter, LocalPrinterProfile, LocalPrinterQueue,
+    LocalPrinterQueueCounts, LocalQueueJob, LocalStatus, SessionAuthenticator,
+};
 use spool_protocol::{
     CURRENT_PROTOCOL_VERSION,
     agent::{
         AgentAcceptJobRequest, AgentCommand, AgentHealth, AgentReleaseLeaseRequest,
         AgentRenewLeaseRequest, AgentSyncRequest, AgentSyncResponse, ContentDescriptor, JobOffer,
-        PrinterSnapshot, QueueSnapshot,
+        PrinterProfileSnapshot, PrinterSnapshot, QueueSnapshot,
     },
-    executor::NativeJobObservation,
-    executor::{DiscoveredPrinter, ExecutorOperation, ExecutorResult},
+    executor::{DiscoveredPrinter, ExecutorOperation, ExecutorResult, NativeJobObservation},
 };
 use std::{
     future::Future,
@@ -128,7 +132,7 @@ enum PrinterDiscovery {
 }
 
 impl RuntimeExecutor {
-    async fn printers(&self) -> Result<Vec<LocalPrinter>, ControlFailure> {
+    async fn discover_printers(&self) -> Result<Vec<DiscoveredPrinter>, ControlFailure> {
         let printers = match self {
             Self::Disabled => Vec::new(),
             Self::Fake(_) => vec![DiscoveredPrinter {
@@ -137,6 +141,7 @@ impl RuntimeExecutor {
                 is_default: true,
                 state: spool_domain::PrinterState::Online,
                 capabilities: spool_domain::PrinterCapabilities::default(),
+                native_options: std::collections::BTreeMap::new(),
             }],
             Self::Process(executor) => match executor
                 .execute_operation(
@@ -155,18 +160,32 @@ impl RuntimeExecutor {
                 }
             },
         };
-        Ok(printers
-            .into_iter()
-            .map(|printer| LocalPrinter {
-                printer_id: printer.native_id,
-                name: printer.name,
-                state: serde_json::to_value(printer.state)
-                    .ok()
-                    .and_then(|value| value.as_str().map(ToOwned::to_owned))
-                    .unwrap_or_else(|| "unknown".into()),
-                is_default: printer.is_default,
-            })
-            .collect())
+        Ok(printers)
+    }
+
+    async fn native_queue(
+        &self,
+        native_printer_id: &str,
+    ) -> Result<Vec<spool_protocol::executor::NativeQueueJob>, ControlFailure> {
+        match self {
+            Self::Disabled | Self::Fake(_) => Ok(Vec::new()),
+            Self::Process(executor) => match executor
+                .execute_operation(
+                    ExecutorOperation::ListJobs {
+                        native_printer_id: native_printer_id.to_owned(),
+                    },
+                    Utc::now().timestamp_millis() + 2_000,
+                )
+                .await
+                .map_err(|error| control_failure(&error.code, &error.message))?
+            {
+                ExecutorResult::Jobs { jobs } => Ok(jobs),
+                _ => Err(control_failure(
+                    "unexpected_executor_response",
+                    "executor returned the wrong queue result",
+                )),
+            },
+        }
     }
 }
 
@@ -347,6 +366,10 @@ async fn control_loop(
     warn!("local control channel closed");
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "keeps the exhaustive authenticated control command dispatch in one audit point"
+)]
 async fn handle_control_request(
     request: ControlRequest,
     engine: &mut AgentEngine<RuntimeExecutor>,
@@ -376,7 +399,7 @@ async fn handle_control_request(
                 paused: paused.load(Ordering::Relaxed),
             });
         }
-        ControlRequest::Printers { respond_to } => match engine.executor_mut().printers().await {
+        ControlRequest::Printers { respond_to } => match refresh_local_printers(engine).await {
             Ok(printers) => {
                 let _ = respond_to.send(printers);
             }
@@ -385,6 +408,81 @@ async fn handle_control_request(
                 let _ = respond_to.send(Vec::new());
             }
         },
+        ControlRequest::SetPrinterExposure {
+            printer_id,
+            exposed,
+            respond_to,
+        } => {
+            let result = engine
+                .store_mut()
+                .set_printer_exposed(&printer_id, exposed, Utc::now().timestamp_millis())
+                .map_err(storage_control_failure)
+                .and_then(|()| local_printer(engine.store(), &printer_id));
+            let _ = respond_to.send(result);
+        }
+        ControlRequest::Profiles {
+            printer_id,
+            respond_to,
+        } => {
+            let result = local_profiles(engine.store(), &printer_id);
+            let _ = respond_to.send(result);
+        }
+        ControlRequest::CreateProfile {
+            printer_id,
+            request,
+            respond_to,
+        } => {
+            let result = create_profile(engine.store_mut(), &printer_id, &request);
+            let _ = respond_to.send(result);
+        }
+        ControlRequest::UpdateProfile {
+            printer_id,
+            profile_id,
+            request,
+            respond_to,
+        } => {
+            let result = update_profile(engine.store_mut(), &printer_id, &profile_id, &request);
+            let _ = respond_to.send(result);
+        }
+        ControlRequest::DeleteProfile {
+            printer_id,
+            profile_id,
+            expected_revision,
+            respond_to,
+        } => {
+            let result = engine
+                .store_mut()
+                .delete_named_profile(
+                    &printer_id,
+                    &profile_id,
+                    expected_revision,
+                    Utc::now().timestamp_millis(),
+                )
+                .map_err(storage_control_failure);
+            let _ = respond_to.send(result);
+        }
+        ControlRequest::PrinterQueue {
+            printer_id,
+            respond_to,
+        } => {
+            let result = printer_queue(engine, &printer_id).await;
+            let _ = respond_to.send(result);
+        }
+        ControlRequest::TestPage {
+            printer_id,
+            profile_id,
+            respond_to,
+        } => {
+            let result = submit_test_page(
+                engine,
+                content_store,
+                &printer_id,
+                &profile_id,
+                paused.load(Ordering::Relaxed),
+            )
+            .await;
+            let _ = respond_to.send(result);
+        }
         ControlRequest::Pause { respond_to } => {
             let result = engine
                 .store_mut()
@@ -431,6 +529,18 @@ async fn submit_local_job(
             "the agent is not accepting new local jobs",
         ));
     }
+    let printer = resolve_exposed_printer(engine.store(), &request.printer_id)?;
+    if let Some(claimed_native_id) = &request.printer_native_id
+        && claimed_native_id != &printer.native_id
+    {
+        return Err(control_failure(
+            "printer_native_id_mismatch",
+            "native printer IDs are resolved by the agent and cannot be overridden",
+        ));
+    }
+    validate_options(&printer, &request.options)?;
+    let mut request = request;
+    request.printer_native_id = Some(printer.native_id);
     let input: Box<dyn tokio::io::AsyncRead + Unpin + Send> = match &request.content {
         LocalContent::Base64 { data } => {
             let bytes = STANDARD
@@ -453,6 +563,446 @@ async fn submit_local_job(
     accept_stored_local_job(engine, request, stored).await
 }
 
+async fn refresh_local_printers(
+    engine: &mut AgentEngine<RuntimeExecutor>,
+) -> Result<Vec<LocalPrinter>, ControlFailure> {
+    let discovered = engine.executor_mut().discover_printers().await?;
+    let observed_unix_ms = Utc::now().timestamp_millis();
+    for printer in discovered {
+        let state = enum_string(printer.state);
+        let capabilities_json = serde_json::to_string(&printer.capabilities)
+            .map_err(|error| control_failure("capabilities_invalid", &error.to_string()))?;
+        let native_options_json = serde_json::to_string(&printer.native_options)
+            .map_err(|error| control_failure("capabilities_invalid", &error.to_string()))?;
+        let stored = engine
+            .store_mut()
+            .upsert_printer(
+                &printer.native_id,
+                &printer.name,
+                &state,
+                printer.is_default,
+                &capabilities_json,
+                observed_unix_ms,
+            )
+            .map_err(storage_control_failure)?;
+        engine
+            .store_mut()
+            .store_printer_profile(
+                &stored.printer_id,
+                None,
+                &capabilities_json,
+                &native_options_json,
+                observed_unix_ms,
+            )
+            .map_err(storage_control_failure)?;
+    }
+    engine
+        .store()
+        .printers()
+        .map_err(storage_control_failure)?
+        .into_iter()
+        .map(|printer| local_printer_from_stored(engine.store(), printer))
+        .collect()
+}
+
+fn local_printer(store: &AgentStore, printer_id: &str) -> Result<LocalPrinter, ControlFailure> {
+    let printer = store
+        .printer(printer_id)
+        .map_err(storage_control_failure)?
+        .ok_or_else(|| control_failure("printer_not_found", "printer was not found"))?;
+    local_printer_from_stored(store, printer)
+}
+
+fn local_printer_from_stored(
+    store: &AgentStore,
+    printer: StoredPrinter,
+) -> Result<LocalPrinter, ControlFailure> {
+    let counts = store
+        .printer_queue_counts(&printer.printer_id)
+        .map_err(storage_control_failure)?;
+    let queue_counts = LocalPrinterQueueCounts {
+        queued: counts.queued,
+        active: counts.active,
+    };
+    Ok(LocalPrinter {
+        printer_id: printer.printer_id.clone(),
+        native_id: printer.native_id,
+        name: printer.name,
+        state: printer.state,
+        is_default: printer.is_default,
+        exposed: printer.exposed,
+        capability_revision: printer.profile_revision,
+        capabilities: serde_json::from_str(&printer.capabilities_json)
+            .map_err(|error| control_failure("capabilities_invalid", &error.to_string()))?,
+        native_options: serde_json::from_str(&printer.native_options_json)
+            .map_err(|error| control_failure("capabilities_invalid", &error.to_string()))?,
+        profiles: local_profiles(store, &printer.printer_id)?,
+        queue_counts,
+    })
+}
+
+fn local_profiles(
+    store: &AgentStore,
+    printer_id: &str,
+) -> Result<Vec<LocalPrinterProfile>, ControlFailure> {
+    store
+        .named_profiles(printer_id)
+        .map_err(storage_control_failure)?
+        .into_iter()
+        .map(local_profile)
+        .collect()
+}
+
+fn local_profile(profile: StoredNamedProfile) -> Result<LocalPrinterProfile, ControlFailure> {
+    Ok(LocalPrinterProfile {
+        profile_id: profile.profile_id,
+        revision: profile.revision,
+        name: profile.name,
+        is_default: profile.is_default,
+        options: serde_json::from_str(&profile.options_json)
+            .map_err(|error| control_failure("profile_invalid", &error.to_string()))?,
+    })
+}
+
+fn create_profile(
+    store: &mut AgentStore,
+    printer_id: &str,
+    request: &ProfileCreate,
+) -> Result<LocalPrinterProfile, ControlFailure> {
+    let printer = store
+        .printer(printer_id)
+        .map_err(storage_control_failure)?
+        .ok_or_else(|| control_failure("printer_not_found", "printer was not found"))?;
+    validate_options(&printer, &request.options)?;
+    let options_json = serde_json::to_string(&request.options)
+        .map_err(|error| control_failure("profile_invalid", &error.to_string()))?;
+    local_profile(
+        store
+            .create_named_profile(
+                printer_id,
+                &request.name,
+                request.is_default,
+                &options_json,
+                Utc::now().timestamp_millis(),
+            )
+            .map_err(storage_control_failure)?,
+    )
+}
+
+fn update_profile(
+    store: &mut AgentStore,
+    printer_id: &str,
+    profile_id: &str,
+    request: &ProfileUpdate,
+) -> Result<LocalPrinterProfile, ControlFailure> {
+    let printer = store
+        .printer(printer_id)
+        .map_err(storage_control_failure)?
+        .ok_or_else(|| control_failure("printer_not_found", "printer was not found"))?;
+    validate_options(&printer, &request.options)?;
+    let options_json = serde_json::to_string(&request.options)
+        .map_err(|error| control_failure("profile_invalid", &error.to_string()))?;
+    local_profile(
+        store
+            .update_named_profile(
+                printer_id,
+                profile_id,
+                request.expected_revision,
+                &request.name,
+                request.is_default,
+                &options_json,
+                Utc::now().timestamp_millis(),
+            )
+            .map_err(storage_control_failure)?,
+    )
+}
+
+fn resolve_exposed_printer(
+    store: &AgentStore,
+    printer_id: &str,
+) -> Result<StoredPrinter, ControlFailure> {
+    let printer = store
+        .printer(printer_id)
+        .map_err(storage_control_failure)?
+        .ok_or_else(|| control_failure("printer_not_found", "printer was not found"))?;
+    if !printer.exposed {
+        return Err(control_failure(
+            "printer_not_exposed",
+            "printer exposure must be explicitly enabled before submission",
+        ));
+    }
+    Ok(printer)
+}
+
+fn validate_options(
+    printer: &StoredPrinter,
+    options: &spool_domain::JobOptions,
+) -> Result<(), ControlFailure> {
+    let capabilities: spool_domain::PrinterCapabilities =
+        serde_json::from_str(&printer.capabilities_json)
+            .map_err(|error| control_failure("capabilities_invalid", &error.to_string()))?;
+    let native_options: std::collections::BTreeMap<String, spool_domain::NativePrinterOption> =
+        serde_json::from_str(&printer.native_options_json)
+            .map_err(|error| control_failure("capabilities_invalid", &error.to_string()))?;
+    let supports = |values: &[String], value: &Option<String>| {
+        value
+            .as_ref()
+            .is_none_or(|selected| values.is_empty() || values.contains(selected))
+    };
+    if options.copies == Some(0)
+        || capabilities.copies > 0
+            && options
+                .copies
+                .is_some_and(|copies| copies > capabilities.copies)
+        || !supports(&capabilities.bins, &options.bin)
+        || !supports(&capabilities.dpis, &options.dpi)
+        || !supports(&capabilities.medias, &options.media)
+        || options.paper.as_ref().is_some_and(|paper| {
+            !capabilities.papers.is_empty() && !capabilities.papers.contains_key(paper)
+        })
+        || options
+            .nup
+            .is_some_and(|nup| !capabilities.nup.is_empty() && !capabilities.nup.contains(&nup))
+        || options.duplex.is_some() && !capabilities.duplex
+        || options.color == Some(true) && !capabilities.color
+    {
+        return Err(control_failure(
+            "unsupported_profile_option",
+            "one or more portable options are not supported by the current capability revision",
+        ));
+    }
+    for (key, selected) in &options.native_options {
+        let definition = native_options.get(key).ok_or_else(|| {
+            control_failure(
+                "unknown_native_option",
+                &format!("native option {key} is not advertised by the driver"),
+            )
+        })?;
+        if !definition.choices.is_empty()
+            && !definition
+                .choices
+                .iter()
+                .any(|choice| choice.value == *selected)
+        {
+            return Err(control_failure(
+                "unsupported_native_value",
+                &format!("native option {key} does not allow value {selected}"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+async fn printer_queue(
+    engine: &mut AgentEngine<RuntimeExecutor>,
+    printer_id: &str,
+) -> Result<LocalPrinterQueue, ControlFailure> {
+    let printer = engine
+        .store()
+        .printer(printer_id)
+        .map_err(storage_control_failure)?
+        .ok_or_else(|| control_failure("printer_not_found", "printer was not found"))?;
+    let local_jobs = engine
+        .store()
+        .jobs_for_printer(printer_id, 200)
+        .map_err(storage_control_failure)?
+        .into_iter()
+        .map(|job| LocalQueueJob {
+            job_id: job.job_id,
+            sequence: job.printer_sequence,
+            title: job.title,
+            state: job.state,
+            native_job_id: job.native_job_id,
+        })
+        .collect();
+    let native_jobs = engine
+        .executor_mut()
+        .native_queue(&printer.native_id)
+        .await?
+        .into_iter()
+        .map(|job| LocalNativeQueueJob {
+            native_job_id: job.native_job_id,
+            title: job.title,
+            user: job.user,
+            state: enum_string(job.state),
+            native_code: job.native_code,
+            size_kib: job.size_kib,
+            created_unix_ms: job.created_unix_ms,
+            processing_unix_ms: job.processing_unix_ms,
+            completed_unix_ms: job.completed_unix_ms,
+        })
+        .collect();
+    Ok(LocalPrinterQueue {
+        printer_id: printer_id.to_owned(),
+        local_jobs,
+        native_jobs,
+    })
+}
+
+async fn submit_test_page(
+    engine: &mut AgentEngine<RuntimeExecutor>,
+    content_store: &ContentStore,
+    printer_id: &str,
+    profile_id: &str,
+    paused: bool,
+) -> Result<LocalJobAccepted, ControlFailure> {
+    if paused {
+        return Err(control_failure("agent_paused", "the agent is paused"));
+    }
+    let printer = resolve_exposed_printer(engine.store(), printer_id)?;
+    let profile = engine
+        .store()
+        .named_profile(printer_id, profile_id)
+        .map_err(storage_control_failure)?
+        .ok_or_else(|| control_failure("profile_not_found", "print profile was not found"))?;
+    let mut options: spool_domain::JobOptions = serde_json::from_str(&profile.options_json)
+        .map_err(|error| control_failure("profile_invalid", &error.to_string()))?;
+    let capabilities: spool_domain::PrinterCapabilities =
+        serde_json::from_str(&printer.capabilities_json)
+            .map_err(|error| control_failure("capabilities_invalid", &error.to_string()))?;
+    let native_definitions: std::collections::BTreeMap<String, spool_domain::NativePrinterOption> =
+        serde_json::from_str(&printer.native_options_json)
+            .map_err(|error| control_failure("capabilities_invalid", &error.to_string()))?;
+    let a4 = capabilities
+        .papers
+        .keys()
+        .find(|paper| {
+            let normalized = paper.to_ascii_lowercase();
+            normalized.contains("a4") || normalized.contains("210x297")
+        })
+        .cloned()
+        .ok_or_else(|| {
+            control_failure(
+                "a4_not_supported",
+                "the current printer capability revision does not advertise A4",
+            )
+        })?;
+    if options.paper.as_ref().is_some_and(|paper| !is_a4(paper)) {
+        return Err(control_failure(
+            "test_profile_not_a4",
+            "the selected profile has a non-A4 portable paper selection",
+        ));
+    }
+    for (key, selected) in &options.native_options {
+        if is_native_page_size_key(key) && !is_a4(selected) {
+            return Err(control_failure(
+                "test_profile_not_a4",
+                &format!("native page-size option {key} selects non-A4 stock"),
+            ));
+        }
+    }
+    options.paper = Some(a4);
+    if !options
+        .native_options
+        .keys()
+        .any(|key| is_native_page_size_key(key))
+        && let Some((key, choice)) = native_definitions.iter().find_map(|(key, definition)| {
+            is_native_page_size_key(key).then(|| {
+                definition
+                    .choices
+                    .iter()
+                    .find(|choice| is_a4(&choice.value))
+                    .map(|choice| (key.clone(), choice.value.clone()))
+            })?
+        })
+    {
+        options.native_options.insert(key, choice);
+    }
+    validate_options(&printer, &options)?;
+    let stored = content_store
+        .put(std::io::Cursor::new(a4_test_pdf()))
+        .await
+        .map_err(|error| control_failure("content_store_failed", &error.to_string()))?;
+    accept_stored_local_job(
+        engine,
+        LocalCreateJob {
+            printer_id: printer_id.to_owned(),
+            printer_native_id: Some(printer.native_id),
+            title: "Spool A4 diagnostic".into(),
+            content_kind: ContentKind::Pdf,
+            content: LocalContent::Base64 {
+                data: String::new(),
+            },
+            options,
+            expires_unix_ms: Some(Utc::now().timestamp_millis() + 300_000),
+        },
+        stored,
+    )
+    .await
+}
+
+fn is_a4(value: &str) -> bool {
+    let normalized = value.to_ascii_lowercase();
+    normalized.contains("a4") || normalized.contains("210x297")
+}
+
+fn is_native_page_size_key(key: &str) -> bool {
+    matches!(
+        key.to_ascii_lowercase().as_str(),
+        "pagesize" | "pageregion" | "media" | "media-size" | "media-size-name"
+    )
+}
+
+fn a4_test_pdf() -> Vec<u8> {
+    let content = b"BT /F1 22 Tf 72 760 Td (Spool A4 diagnostic) Tj /F1 11 Tf 0 -30 Td (Local queue and driver test) Tj 0 -22 Td (No external content was used.) Tj ET";
+    let objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>".to_vec(),
+        [format!("<< /Length {} >>\nstream\n", content.len()).into_bytes(), content.to_vec(), b"\nendstream".to_vec()].concat(),
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_vec(),
+    ];
+    let mut pdf = b"%PDF-1.4\n%\xE2\xE3\xCF\xD3\n".to_vec();
+    let mut offsets = Vec::new();
+    for (index, object) in objects.iter().enumerate() {
+        offsets.push(pdf.len());
+        pdf.extend_from_slice(format!("{} 0 obj\n", index + 1).as_bytes());
+        pdf.extend_from_slice(object);
+        pdf.extend_from_slice(b"\nendobj\n");
+    }
+    let xref = pdf.len();
+    pdf.extend_from_slice(
+        format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes(),
+    );
+    for offset in offsets {
+        pdf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    pdf.extend_from_slice(
+        format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+            objects.len() + 1
+        )
+        .as_bytes(),
+    );
+    pdf
+}
+
+fn enum_string<T: serde::Serialize>(value: T) -> String {
+    serde_json::to_value(value)
+        .ok()
+        .and_then(|value| value.as_str().map(ToOwned::to_owned))
+        .unwrap_or_else(|| "unknown".into())
+}
+
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "matches map_err's owned error signature throughout the agent boundary"
+)]
+fn storage_control_failure(error: StorageError) -> ControlFailure {
+    match error {
+        StorageError::PrinterNotFound(_) => {
+            control_failure("printer_not_found", &error.to_string())
+        }
+        StorageError::ProfileRevisionConflict { .. } => {
+            control_failure("profile_revision_conflict", &error.to_string())
+        }
+        StorageError::InvalidPrinterProfile(_) => {
+            control_failure("profile_invalid", &error.to_string())
+        }
+        _ => control_failure("local_storage_failed", &error.to_string()),
+    }
+}
+
 async fn accept_stored_local_job(
     engine: &mut AgentEngine<RuntimeExecutor>,
     request: LocalCreateJob,
@@ -466,7 +1016,12 @@ async fn accept_stored_local_job(
             job_id: job_id.clone(),
             submission_id: format!("sub_{}", uuid::Uuid::new_v4()),
             printer_id: request.printer_id,
-            printer_native_id: request.printer_native_id,
+            printer_native_id: request.printer_native_id.ok_or_else(|| {
+                control_failure(
+                    "printer_not_resolved",
+                    "the logical printer has no resolved native queue",
+                )
+            })?,
             title: request.title,
             content_sha256: stored.sha256,
             content_path: stored.path.to_string_lossy().into_owned(),
@@ -759,7 +1314,7 @@ async fn accept_offer(
         },
     )
     .await;
-    if result.is_err() {
+    if let Err(error) = &result {
         let has_durable_intent = store
             .pending_cloud_accepts()?
             .iter()
@@ -773,7 +1328,16 @@ async fn accept_offer(
                     &AgentReleaseLeaseRequest {
                         lease_id,
                         lease_token,
-                        reason: "acceptance_failed".into(),
+                        reason: if error.to_string().contains("printer_not_exposed") {
+                            "printer_not_exposed"
+                        } else if error.to_string().contains("unsupported_profile_option")
+                            || error.to_string().contains("native option")
+                        {
+                            "unsupported_profile_option"
+                        } else {
+                            "acceptance_failed"
+                        }
+                        .into(),
                     },
                 )
                 .await;
@@ -790,6 +1354,15 @@ async fn accept_offer_under_lease(
     offer: JobOffer,
 ) -> Result<()> {
     let job_id = offer.job.id;
+    let logical_printer_id = offer.job.printer_id.to_string();
+    let printer = store
+        .printer(&logical_printer_id)?
+        .with_context(|| format!("printer_not_found: {logical_printer_id}"))?;
+    if !printer.exposed {
+        anyhow::bail!("printer_not_exposed: {logical_printer_id}");
+    }
+    validate_options(&printer, &offer.job.options)
+        .map_err(|failure| anyhow::anyhow!("{}: {}", failure.code, failure.message))?;
     let stored = materialize_descriptor(
         cloud,
         content_store,
@@ -800,19 +1373,13 @@ async fn accept_offer_under_lease(
         offer.content,
     )
     .await?;
-    let logical_printer_id = offer.job.printer_id.to_string();
-    let native_printer_id = store
-        .native_printer_id(&logical_printer_id)?
-        .with_context(|| {
-            format!("printer {logical_printer_id} has no durable native queue mapping")
-        })?;
     let accepted_unix_ms = Utc::now().timestamp_millis();
     let local = store.prepare_cloud_job(
         &AcceptedJob {
             job_id: job_id.to_string(),
             submission_id: format!("sub_{job_id}"),
             printer_id: logical_printer_id,
-            printer_native_id: native_printer_id,
+            printer_native_id: printer.native_id,
             title: offer.job.title,
             content_sha256: stored.sha256.clone(),
             content_path: stored.path.to_string_lossy().into_owned(),
@@ -1067,6 +1634,7 @@ async fn discover_cloud_printers(
             is_default: true,
             state: spool_domain::PrinterState::Online,
             capabilities: spool_domain::PrinterCapabilities::default(),
+            native_options: std::collections::BTreeMap::new(),
         }],
         PrinterDiscovery::Process(executor) => match executor
             .execute_operation(
@@ -1081,7 +1649,7 @@ async fn discover_cloud_printers(
         },
     };
     let observed_unix_ms = Utc::now().timestamp_millis();
-    discovered
+    let snapshots = discovered
         .into_iter()
         .map(|printer| {
             let state = serde_json::to_string(&printer.state)?;
@@ -1090,19 +1658,51 @@ async fn discover_cloud_printers(
                 &printer.native_id,
                 &printer.name,
                 state.trim_matches('"'),
+                printer.is_default,
                 &capabilities,
                 observed_unix_ms,
             )?;
-            Ok(PrinterSnapshot {
+            let native_options = serde_json::to_string(&printer.native_options)?;
+            let profile = store.store_printer_profile(
+                &stored.printer_id,
+                None,
+                &capabilities,
+                &native_options,
+                observed_unix_ms,
+            )?;
+            if !store
+                .printer(&stored.printer_id)?
+                .is_some_and(|printer| printer.exposed)
+            {
+                return Ok(None);
+            }
+            let profiles = store
+                .named_profiles(&stored.printer_id)?
+                .into_iter()
+                .map(|profile| {
+                    Ok(PrinterProfileSnapshot {
+                        profile_id: profile.profile_id,
+                        revision: profile.revision,
+                        name: profile.name,
+                        is_default: profile.is_default,
+                        options: serde_json::from_str(&profile.options_json)?,
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            Ok(Some(PrinterSnapshot {
                 id: stored.printer_id.parse()?,
                 native_id: stored.native_id,
                 name: stored.name,
                 state: printer.state,
                 is_default: printer.is_default,
                 capabilities: printer.capabilities,
-            })
+                exposed: true,
+                capability_revision: profile.revision,
+                profiles,
+            }))
         })
-        .collect()
+        .collect::<Result<Vec<Option<PrinterSnapshot>>>>()?;
+    Ok(snapshots.into_iter().flatten().collect())
 }
 
 fn protocol_event(
@@ -1439,5 +2039,26 @@ mod tests {
             accepted_unix_ms: 1,
             cloud_managed: true,
         }
+    }
+
+    #[test]
+    fn diagnostic_pdf_is_a4_and_has_a_valid_cross_reference() {
+        let pdf = a4_test_pdf();
+        assert!(pdf.starts_with(b"%PDF-1.4"));
+        let media_box = b"/MediaBox [0 0 595 842]";
+        assert!(
+            pdf.windows(media_box.len())
+                .any(|window| window == media_box)
+        );
+        assert!(pdf.ends_with(b"%%EOF\n"));
+        let text = String::from_utf8_lossy(&pdf);
+        let xref = text
+            .lines()
+            .rev()
+            .nth(1)
+            .expect("startxref offset")
+            .parse::<usize>()
+            .expect("numeric offset");
+        assert_eq!(&pdf[xref..xref + 4], b"xref");
     }
 }

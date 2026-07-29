@@ -163,4 +163,19 @@ pub struct PrinterSnapshot {
     pub state: PrinterState,
     pub is_default: bool,
     pub capabilities: PrinterCapabilities,
+    #[serde(default)]
+    pub exposed: bool,
+    #[serde(default)]
+    pub capability_revision: u64,
+    #[serde(default)]
+    pub profiles: Vec<PrinterProfileSnapshot>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct PrinterProfileSnapshot {
+    pub profile_id: String,
+    pub revision: u64,
+    pub name: String,
+    pub is_default: bool,
+    pub options: spool_domain::JobOptions,
 }

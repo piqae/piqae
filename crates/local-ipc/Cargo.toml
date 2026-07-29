@@ -13,6 +13,7 @@ rand.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+spool-domain.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 uuid.workspace = true
@@ -22,4 +23,3 @@ tempfile = "3.20.0"
 
 [lints]
 workspace = true
-

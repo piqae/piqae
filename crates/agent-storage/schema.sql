@@ -6,6 +6,9 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 INSERT OR IGNORE INTO schema_migrations (version, applied_unix_ms)
 VALUES (1, CAST(unixepoch('subsec') * 1000 AS INTEGER));
 
+INSERT OR IGNORE INTO schema_migrations (version, applied_unix_ms)
+VALUES (2, CAST(unixepoch('subsec') * 1000 AS INTEGER));
+
 CREATE TABLE IF NOT EXISTS identity (
   key TEXT PRIMARY KEY,
   value BLOB NOT NULL,
@@ -23,6 +26,7 @@ CREATE TABLE IF NOT EXISTS printers (
   native_id TEXT NOT NULL UNIQUE,
   name TEXT NOT NULL,
   state TEXT NOT NULL,
+  is_default INTEGER NOT NULL DEFAULT 0 CHECK (is_default IN (0, 1)),
   observed_unix_ms INTEGER NOT NULL
 );
 
@@ -38,6 +42,37 @@ CREATE TABLE IF NOT EXISTS printer_sequences (
   printer_id TEXT PRIMARY KEY,
   next_sequence INTEGER NOT NULL CHECK (next_sequence > 0)
 );
+
+CREATE TABLE IF NOT EXISTS printer_exposure (
+  printer_id TEXT PRIMARY KEY REFERENCES printers(printer_id) ON DELETE CASCADE,
+  exposed INTEGER NOT NULL DEFAULT 0 CHECK (exposed IN (0, 1)),
+  updated_unix_ms INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS printer_capability_snapshots (
+  printer_id TEXT NOT NULL REFERENCES printers(printer_id) ON DELETE CASCADE,
+  revision INTEGER NOT NULL CHECK (revision > 0),
+  schema_version INTEGER NOT NULL,
+  portable_json TEXT NOT NULL CHECK (json_valid(portable_json)),
+  native_options_json TEXT NOT NULL CHECK (json_valid(native_options_json)),
+  observed_unix_ms INTEGER NOT NULL,
+  PRIMARY KEY (printer_id, revision)
+);
+
+CREATE TABLE IF NOT EXISTS printer_profiles (
+  profile_id TEXT NOT NULL,
+  printer_id TEXT NOT NULL REFERENCES printers(printer_id) ON DELETE CASCADE,
+  revision INTEGER NOT NULL CHECK (revision > 0),
+  name TEXT NOT NULL CHECK (length(trim(name)) > 0),
+  is_default INTEGER NOT NULL DEFAULT 0 CHECK (is_default IN (0, 1)),
+  options_json TEXT NOT NULL CHECK (json_valid(options_json)),
+  deleted INTEGER NOT NULL DEFAULT 0 CHECK (deleted IN (0, 1)),
+  updated_unix_ms INTEGER NOT NULL,
+  PRIMARY KEY (profile_id, revision)
+);
+
+CREATE INDEX IF NOT EXISTS printer_profiles_latest
+  ON printer_profiles (printer_id, profile_id, revision DESC);
 
 CREATE TABLE IF NOT EXISTS content_files (
   sha256 TEXT PRIMARY KEY,

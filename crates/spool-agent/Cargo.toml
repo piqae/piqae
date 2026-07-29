@@ -20,6 +20,7 @@ clap.workspace = true
 futures.workspace = true
 hex.workspace = true
 reqwest.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 spool-agent-client = { path = "../agent-client", version = "0.1.0" }
 spool-agent-core = { path = "../agent-core", version = "0.1.0" }

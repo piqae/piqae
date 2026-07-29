@@ -32,6 +32,7 @@ fn execute(operation: ExecutorOperation) -> Result<ExecutorResult, ExecutorError
         }),
         ExecutorOperation::GetPrinterState { native_printer_id }
         | ExecutorOperation::GetPrinterCapabilities { native_printer_id }
+        | ExecutorOperation::ListJobs { native_printer_id }
             if native_printer_id != "fake-printer" =>
         {
             Err(not_found())
@@ -41,7 +42,9 @@ fn execute(operation: ExecutorOperation) -> Result<ExecutorResult, ExecutorError
         }),
         ExecutorOperation::GetPrinterCapabilities { .. } => Ok(ExecutorResult::Capabilities {
             capabilities: PrinterCapabilities::default(),
+            native_options: std::collections::BTreeMap::new(),
         }),
+        ExecutorOperation::ListJobs { .. } => Ok(ExecutorResult::Jobs { jobs: Vec::new() }),
         ExecutorOperation::Submit {
             native_printer_id, ..
         } if native_printer_id != "fake-printer" => Err(not_found()),
@@ -93,6 +96,7 @@ fn fake_printer() -> DiscoveredPrinter {
         is_default: true,
         state: PrinterState::Online,
         capabilities: PrinterCapabilities::default(),
+        native_options: std::collections::BTreeMap::new(),
     }
 }
 

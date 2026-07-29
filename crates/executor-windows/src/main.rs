@@ -128,7 +128,12 @@ mod platform {
                 ensure_printer(&native_printer_id)?;
                 Ok(ExecutorResult::Capabilities {
                     capabilities: PrinterCapabilities::default(),
+                    native_options: std::collections::BTreeMap::new(),
                 })
+            }
+            ExecutorOperation::ListJobs { native_printer_id } => {
+                ensure_printer(&native_printer_id)?;
+                Ok(ExecutorResult::Jobs { jobs: Vec::new() })
             }
             ExecutorOperation::Submit {
                 native_printer_id,
@@ -308,6 +313,7 @@ mod platform {
                     is_default: false,
                     state: PrinterState::Unknown,
                     capabilities: PrinterCapabilities::default(),
+                    native_options: std::collections::BTreeMap::new(),
                 })
                 .collect();
             Ok(ExecutorResult::Printers { printers })

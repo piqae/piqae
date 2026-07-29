@@ -142,6 +142,7 @@ pub(crate) async fn create_print_job(
         } else {
             request.options
         },
+        metadata: std::collections::BTreeMap::new(),
         deliveries: request.qty,
         state: JobState::Registered,
         created_at: now,

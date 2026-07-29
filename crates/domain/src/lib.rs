@@ -9,4 +9,7 @@ pub use job::{
     ContentKind, ContentSource, Duplex, Job, JobEvent, JobFailureReason, JobOptions, JobState,
     Rotation, StateTransitionError, UriAuthentication, validate_transition,
 };
-pub use printer::{PrinterCapabilities, PrinterState};
+pub use printer::{
+    NativePrinterChoice, NativePrinterOption, PRINTER_PROFILE_SCHEMA_VERSION, PrinterCapabilities,
+    PrinterCapabilityProfile, PrinterProfileError, PrinterState,
+};

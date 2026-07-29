@@ -7,6 +7,8 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use spool_domain::{JobOptions, NativePrinterOption, PrinterCapabilities};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -35,14 +37,14 @@ pub enum LocalOperation {
     Reenrol { confirmation: String },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LocalResponse {
     pub protocol: u16,
     pub request_id: Uuid,
     pub result: Result<LocalResult, LocalFailure>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum LocalResult {
     Status(LocalStatus),
@@ -73,12 +75,63 @@ pub enum ConnectionState {
     Degraded,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LocalPrinter {
     pub printer_id: String,
+    pub native_id: String,
     pub name: String,
     pub state: String,
     pub is_default: bool,
+    pub exposed: bool,
+    pub capability_revision: u64,
+    pub capabilities: PrinterCapabilities,
+    pub native_options: BTreeMap<String, NativePrinterOption>,
+    pub profiles: Vec<LocalPrinterProfile>,
+    pub queue_counts: LocalPrinterQueueCounts,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalPrinterProfile {
+    pub profile_id: String,
+    pub revision: u64,
+    pub name: String,
+    pub is_default: bool,
+    pub options: JobOptions,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalPrinterQueueCounts {
+    pub queued: u32,
+    pub active: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalPrinterQueue {
+    pub printer_id: String,
+    pub local_jobs: Vec<LocalQueueJob>,
+    pub native_jobs: Vec<LocalNativeQueueJob>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalQueueJob {
+    pub job_id: String,
+    pub sequence: i64,
+    pub title: String,
+    pub state: String,
+    pub native_job_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalNativeQueueJob {
+    pub native_job_id: String,
+    pub title: String,
+    pub user: Option<String>,
+    pub state: String,
+    pub native_code: Option<String>,
+    pub size_kib: Option<u64>,
+    pub created_unix_ms: Option<i64>,
+    pub processing_unix_ms: Option<i64>,
+    pub completed_unix_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
