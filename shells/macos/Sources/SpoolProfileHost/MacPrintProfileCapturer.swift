@@ -33,7 +33,11 @@ public final class MacPrintProfileCapturer {
         )
         let panel = NSPrintPanel()
         panel.setDefaultButtonTitle("Save Profile")
-        panel.jobStyleHint = .allPresets
+        // A job-style hint opts into Apple's simplified accordion panel. On
+        // current macOS that interface scrolls section-by-section, which is a
+        // poor fit for inspecting complex vendor driver panes. Nil selects the
+        // standard Print panel and preserves continuous scrolling/navigation.
+        panel.jobStyleHint = nil
         panel.options = [
             .showsCopies,
             .showsPaperSize,

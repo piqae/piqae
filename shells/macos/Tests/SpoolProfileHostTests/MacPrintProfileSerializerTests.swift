@@ -96,7 +96,7 @@ final class MacPrintProfileSerializerTests: XCTestCase {
             XCTAssertGreaterThanOrEqual(field.frame.width, 260)
             XCTAssertGreaterThan(field.frame.height, 20)
         }
-        XCTAssertEqual(controller.preferredContentSize, NSSize(width: 500, height: 144))
+        XCTAssertEqual(controller.preferredContentSize, NSSize(width: 460, height: 116))
     }
 }
 

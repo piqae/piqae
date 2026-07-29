@@ -42,10 +42,10 @@ final class ProfileAccessoryController: NSViewController, NSPrintPanelAccessoriz
     }
 
     override func loadView() {
-        nameField.placeholderString = "A4 colour, Tray 1"
+        nameField.placeholderString = "A4 colour · Tray 1"
         nameField.setAccessibilityLabel("Profile name")
         nameField.lineBreakMode = .byTruncatingTail
-        stockField.placeholderString = "Optional stock ID"
+        stockField.placeholderString = "Optional · e.g. LABEL-100X150"
         stockField.setAccessibilityLabel("Stock ID")
         stockField.lineBreakMode = .byTruncatingTail
         let overrides = NSStackView(views: [copiesCheckbox, pagesCheckbox])
@@ -54,11 +54,11 @@ final class ProfileAccessoryController: NSViewController, NSPrintPanelAccessoriz
         overrides.setAccessibilityLabel("Safe API overrides")
 
         let grid = NSGridView(views: [
-            [formLabel("Profile name:"), nameField],
-            [formLabel("Stock:"), stockField],
-            [formLabel("API overrides:"), overrides],
+            [formLabel("Name"), nameField],
+            [formLabel("Stock ID"), stockField],
+            [formLabel("Per-job changes"), overrides],
         ])
-        grid.rowSpacing = 8
+        grid.rowSpacing = 6
         grid.columnSpacing = 10
         grid.column(at: 0).xPlacement = .trailing
         grid.column(at: 1).xPlacement = .fill
@@ -66,24 +66,25 @@ final class ProfileAccessoryController: NSViewController, NSPrintPanelAccessoriz
 
         let note = NSTextField(
             wrappingLabelWithString:
-                "The printer driver controls paper, tray, colour, quality, and vendor settings. "
-                + "Spool saves them without printing."
+                "All other driver settings are captured exactly and locked to this profile."
         )
+        note.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         note.textColor = .secondaryLabelColor
-        note.maximumNumberOfLines = 0
-        note.preferredMaxLayoutWidth = 456
+        note.maximumNumberOfLines = 1
+        note.lineBreakMode = .byTruncatingTail
+        note.preferredMaxLayoutWidth = 420
 
         let stack = NSStackView(views: [grid, note])
         stack.orientation = .vertical
         stack.alignment = .width
-        stack.spacing = 10
-        stack.edgeInsets = NSEdgeInsets(top: 12, left: 12, bottom: 12, right: 12)
+        stack.spacing = 8
+        stack.edgeInsets = NSEdgeInsets(top: 8, left: 8, bottom: 8, right: 8)
         stack.translatesAutoresizingMaskIntoConstraints = false
 
         // NSPrintPanel queries the accessory's initial frame before completing
         // Auto Layout. Give it a stable intrinsic host size so controls do not
         // collapse and trigger layout churn while its settings list scrolls.
-        let container = NSView(frame: NSRect(x: 0, y: 0, width: 500, height: 144))
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 460, height: 116))
         container.addSubview(stack)
         NSLayoutConstraint.activate([
             stack.leadingAnchor.constraint(equalTo: container.leadingAnchor),
@@ -119,6 +120,8 @@ final class ProfileAccessoryController: NSViewController, NSPrintPanelAccessoriz
     private func formLabel(_ label: String) -> NSTextField {
         let labelView = NSTextField(labelWithString: label)
         labelView.alignment = .right
+        labelView.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        labelView.textColor = .secondaryLabelColor
         labelView.setContentHuggingPriority(.required, for: .horizontal)
         return labelView
     }
