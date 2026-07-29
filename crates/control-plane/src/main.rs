@@ -39,19 +39,9 @@ async fn main() -> Result<()> {
     let webhook_key = parse_webhook_key(
         &env::var("SPOOL_WEBHOOK_MASTER_KEY").context("SPOOL_WEBHOOK_MASTER_KEY is required")?,
     )?;
-    let bootstrap_key = env::var("SPOOL_BOOTSTRAP_API_KEY").ok();
-    let workspace_id = env::var("SPOOL_BOOTSTRAP_WORKSPACE_ID")
+    let bootstrap_key = env::var("SPOOL_BOOTSTRAP_API_KEY")
         .ok()
-        .map(|value| WorkspaceId::from_str(&value))
-        .transpose()
-        .context("invalid SPOOL_BOOTSTRAP_WORKSPACE_ID")?
-        .unwrap_or_default();
-    let environment_id = env::var("SPOOL_BOOTSTRAP_ENVIRONMENT_ID")
-        .ok()
-        .map(|value| EnvironmentId::from_str(&value))
-        .transpose()
-        .context("invalid SPOOL_BOOTSTRAP_ENVIRONMENT_ID")?
-        .unwrap_or_default();
+        .filter(|value| !value.is_empty());
 
     let store = PostgresStore::connect(&database_url, 20)
         .await
@@ -60,14 +50,25 @@ async fn main() -> Result<()> {
     let repository: Arc<dyn Repository> = Arc::new(store.clone());
     let object_store = build_object_store().await?;
     let bootstrap = if let Some(bootstrap_key) = bootstrap_key {
+        let workspace_id = WorkspaceId::from_str(
+            &env::var("SPOOL_BOOTSTRAP_WORKSPACE_ID")
+                .context("SPOOL_BOOTSTRAP_WORKSPACE_ID is required with bootstrap auth")?,
+        )
+        .context("invalid SPOOL_BOOTSTRAP_WORKSPACE_ID")?;
+        let environment_id = EnvironmentId::from_str(
+            &env::var("SPOOL_BOOTSTRAP_ENVIRONMENT_ID")
+                .context("SPOOL_BOOTSTRAP_ENVIRONMENT_ID is required with bootstrap auth")?,
+        )
+        .context("invalid SPOOL_BOOTSTRAP_ENVIRONMENT_ID")?;
+        store
+            .ensure_bootstrap_tenant(workspace_id, environment_id)
+            .await
+            .context("seed bootstrap tenant")?;
         let authenticator = StaticAuthenticator::default();
         authenticator
             .insert(
                 &bootstrap_key,
-                TenantContext {
-                    workspace_id,
-                    environment_id,
-                },
+                TenantContext::unrestricted(workspace_id, environment_id),
             )
             .await;
         Some(authenticator)
@@ -98,7 +99,7 @@ async fn main() -> Result<()> {
     let listener = tokio::net::TcpListener::bind(address)
         .await
         .context("bind HTTP listener")?;
-    tracing::info!(%address, %workspace_id, %environment_id, "spool server listening");
+    tracing::info!(%address, "spool server listening");
     axum::serve(listener, router(application))
         .with_graceful_shutdown(shutdown_signal())
         .await

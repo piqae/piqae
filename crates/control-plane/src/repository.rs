@@ -12,10 +12,13 @@ use spool_domain::{
 };
 use spool_storage_postgres::{
     AgentAuthenticationRecord, CreateJobResult as PgCreateJobResult, EnrolledAgent, JobLease,
-    PostgresStore, StorageError, StoredAgent, StoredPrinter, StoredUpload, StoredWebhook,
-    StoredWebhookDelivery, WebhookDeliveryWork,
+    PostgresStore, StorageError, StoredAgent, StoredPrinter, StoredTenantEvent, StoredUpload,
+    StoredWebhook, StoredWebhookDelivery, SyncedPrinter, WebhookDeliveryWork,
 };
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 use thiserror::Error;
 use tokio::sync::RwLock;
 use uuid::Uuid;
@@ -65,6 +68,14 @@ pub trait Repository: Send + Sync + 'static {
         nonce: &str,
         expires_at: DateTime<Utc>,
     ) -> Result<(), RepositoryError>;
+    async fn sync_agent_presence(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        version: &str,
+        printers: Option<&[SyncedPrinter]>,
+    ) -> Result<(), RepositoryError>;
     async fn list_agents(
         &self,
         workspace_id: WorkspaceId,
@@ -74,6 +85,7 @@ pub trait Repository: Send + Sync + 'static {
         &self,
         workspace_id: WorkspaceId,
         environment_id: EnvironmentId,
+        after: Option<PrinterId>,
         limit: i64,
     ) -> Result<Vec<StoredPrinter>, RepositoryError>;
     async fn create_enrolment(
@@ -134,6 +146,13 @@ pub trait Repository: Send + Sync + 'static {
         event_type: &str,
         payload: &serde_json::Value,
     ) -> Result<String, RepositoryError>;
+    async fn list_tenant_events(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        after: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<StoredTenantEvent>, RepositoryError>;
     async fn claim_webhook_deliveries(
         &self,
         limit: i64,
@@ -189,6 +208,7 @@ pub trait Repository: Send + Sync + 'static {
         &self,
         workspace_id: WorkspaceId,
         environment_id: EnvironmentId,
+        after: Option<JobId>,
         limit: i64,
     ) -> Result<Vec<Job>, RepositoryError>;
     async fn list_job_events(
@@ -239,6 +259,22 @@ pub trait Repository: Send + Sync + 'static {
         lease_id: Uuid,
         lease_token: &str,
     ) -> Result<(), RepositoryError>;
+    async fn validate_agent_lease(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        job_id: JobId,
+        lease_id: Uuid,
+        lease_token: &str,
+    ) -> Result<(), RepositoryError>;
+    async fn apply_agent_event(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        event: &JobEvent,
+    ) -> Result<Option<Job>, RepositoryError>;
     async fn accept_agent_job(
         &self,
         workspace_id: WorkspaceId,
@@ -292,6 +328,26 @@ impl Repository for PostgresStore {
             .map_err(Into::into)
     }
 
+    async fn sync_agent_presence(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        version: &str,
+        printers: Option<&[SyncedPrinter]>,
+    ) -> Result<(), RepositoryError> {
+        Self::sync_agent_presence(
+            self,
+            workspace_id,
+            environment_id,
+            agent_id,
+            version,
+            printers,
+        )
+        .await
+        .map_err(Into::into)
+    }
+
     async fn list_agents(
         &self,
         workspace_id: WorkspaceId,
@@ -306,9 +362,10 @@ impl Repository for PostgresStore {
         &self,
         workspace_id: WorkspaceId,
         environment_id: EnvironmentId,
+        after: Option<PrinterId>,
         limit: i64,
     ) -> Result<Vec<StoredPrinter>, RepositoryError> {
-        Self::list_printers(self, workspace_id, environment_id, limit)
+        Self::list_printers(self, workspace_id, environment_id, after, limit)
             .await
             .map_err(Into::into)
     }
@@ -447,6 +504,18 @@ impl Repository for PostgresStore {
             .map_err(Into::into)
     }
 
+    async fn list_tenant_events(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        after: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<StoredTenantEvent>, RepositoryError> {
+        Self::list_tenant_events(self, workspace_id, environment_id, after, limit)
+            .await
+            .map_err(Into::into)
+    }
+
     async fn claim_webhook_deliveries(
         &self,
         limit: i64,
@@ -547,9 +616,10 @@ impl Repository for PostgresStore {
         &self,
         workspace_id: WorkspaceId,
         environment_id: EnvironmentId,
+        after: Option<JobId>,
         limit: i64,
     ) -> Result<Vec<Job>, RepositoryError> {
-        PostgresStore::list_jobs(self, workspace_id, environment_id, limit)
+        PostgresStore::list_jobs(self, workspace_id, environment_id, after, limit)
             .await
             .map_err(Into::into)
     }
@@ -663,6 +733,40 @@ impl Repository for PostgresStore {
         .map_err(Into::into)
     }
 
+    async fn validate_agent_lease(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        job_id: JobId,
+        lease_id: Uuid,
+        lease_token: &str,
+    ) -> Result<(), RepositoryError> {
+        Self::validate_agent_lease(
+            self,
+            workspace_id,
+            environment_id,
+            agent_id,
+            job_id,
+            lease_id,
+            lease_token,
+        )
+        .await
+        .map_err(Into::into)
+    }
+
+    async fn apply_agent_event(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        event: &JobEvent,
+    ) -> Result<Option<Job>, RepositoryError> {
+        Self::apply_agent_event(self, workspace_id, environment_id, agent_id, event)
+            .await
+            .map_err(Into::into)
+    }
+
     async fn accept_agent_job(
         &self,
         workspace_id: WorkspaceId,
@@ -744,8 +848,10 @@ struct MemoryState {
     webhooks: HashMap<String, (WorkspaceId, EnvironmentId, StoredWebhook, Vec<u8>)>,
     webhook_deliveries: HashMap<String, (WorkspaceId, EnvironmentId, StoredWebhookDelivery)>,
     webhook_work: HashMap<String, WebhookDeliveryWork>,
+    tenant_events: Vec<(WorkspaceId, EnvironmentId, StoredTenantEvent)>,
     uploads: HashMap<String, (WorkspaceId, EnvironmentId, StoredUpload)>,
     agent_nonces: HashMap<(AgentId, String), DateTime<Utc>>,
+    agent_event_receipts: HashSet<(AgentId, EventId)>,
     leases: HashMap<JobId, (AgentId, Uuid, String, DateTime<Utc>)>,
     idempotency: HashMap<(WorkspaceId, EnvironmentId, String), (Vec<u8>, JobId)>,
     compatibility: HashMap<(WorkspaceId, EnvironmentId, String, String), i64>,
@@ -840,12 +946,57 @@ impl Repository for MemoryRepository {
         expires_at: DateTime<Utc>,
     ) -> Result<(), RepositoryError> {
         let mut state = self.state.write().await;
+        state.agent_nonces.retain(|_, expiry| *expiry > Utc::now());
         if state
             .agent_nonces
             .insert((agent_id, nonce.to_owned()), expires_at)
             .is_some()
         {
             return Err(RepositoryError::ConcurrentStateChange);
+        }
+        Ok(())
+    }
+
+    async fn sync_agent_presence(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        version: &str,
+        printers: Option<&[SyncedPrinter]>,
+    ) -> Result<(), RepositoryError> {
+        let mut state = self.state.write().await;
+        let (_, _, agent) = state
+            .agents
+            .get_mut(&agent_id)
+            .filter(|(workspace, environment, _)| {
+                *workspace == workspace_id && *environment == environment_id
+            })
+            .ok_or(RepositoryError::NotFound)?;
+        agent.state = "connected".into();
+        agent.version = version.into();
+        agent.last_seen_at = Utc::now();
+        if let Some(printers) = printers {
+            state
+                .printers
+                .retain(|_, (_, _, printer)| printer.agent_id != agent_id);
+            for printer in printers {
+                state.printers.insert(
+                    printer.id,
+                    (
+                        workspace_id,
+                        environment_id,
+                        StoredPrinter {
+                            id: printer.id,
+                            agent_id,
+                            name: printer.name.clone(),
+                            state: printer.state,
+                            capabilities: printer.capabilities.clone(),
+                            updated_at: Utc::now(),
+                        },
+                    ),
+                );
+            }
         }
         Ok(())
     }
@@ -872,9 +1023,10 @@ impl Repository for MemoryRepository {
         &self,
         workspace_id: WorkspaceId,
         environment_id: EnvironmentId,
+        after: Option<PrinterId>,
         limit: i64,
     ) -> Result<Vec<StoredPrinter>, RepositoryError> {
-        Ok(self
+        let mut printers = self
             .state
             .read()
             .await
@@ -884,8 +1036,15 @@ impl Repository for MemoryRepository {
                 *workspace == workspace_id && *environment == environment_id
             })
             .map(|(_, _, printer)| printer.clone())
-            .take(usize::try_from(limit.clamp(1, 500)).unwrap_or(500))
-            .collect())
+            .collect::<Vec<_>>();
+        printers.sort_by_key(|printer| std::cmp::Reverse((printer.updated_at, printer.id)));
+        if let Some(cursor) = after
+            && let Some(position) = printers.iter().position(|printer| printer.id == cursor)
+        {
+            printers.drain(..=position);
+        }
+        printers.truncate(usize::try_from(limit.clamp(1, 500)).unwrap_or(500));
+        Ok(printers)
     }
 
     async fn create_enrolment(
@@ -1094,7 +1253,39 @@ impl Repository for MemoryRepository {
                 },
             );
         }
+        state.tenant_events.push((
+            workspace_id,
+            environment_id,
+            StoredTenantEvent {
+                id: event_id.clone(),
+                event_type: event_type.into(),
+                payload: payload.clone(),
+            },
+        ));
         Ok(event_id)
+    }
+
+    async fn list_tenant_events(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        after: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<StoredTenantEvent>, RepositoryError> {
+        Ok(self
+            .state
+            .read()
+            .await
+            .tenant_events
+            .iter()
+            .filter(|(workspace, environment, event)| {
+                *workspace == workspace_id
+                    && *environment == environment_id
+                    && after.is_none_or(|cursor| event.id.as_str() > cursor)
+            })
+            .map(|(_, _, event)| event.clone())
+            .take(usize::try_from(limit.clamp(1, 500)).unwrap_or(500))
+            .collect())
     }
 
     async fn claim_webhook_deliveries(
@@ -1279,6 +1470,7 @@ impl Repository for MemoryRepository {
         &self,
         workspace_id: WorkspaceId,
         environment_id: EnvironmentId,
+        after: Option<JobId>,
         limit: i64,
     ) -> Result<Vec<Job>, RepositoryError> {
         let mut jobs = self
@@ -1294,6 +1486,11 @@ impl Repository for MemoryRepository {
             .map(|record| record.job.clone())
             .collect::<Vec<_>>();
         jobs.sort_by_key(|job| std::cmp::Reverse((job.created_at, job.id)));
+        if let Some(cursor) = after
+            && let Some(position) = jobs.iter().position(|job| job.id == cursor)
+        {
+            jobs.drain(..=position);
+        }
         jobs.truncate(usize::try_from(limit.clamp(1, 500)).unwrap_or(500));
         Ok(jobs)
     }
@@ -1459,6 +1656,67 @@ impl Repository for MemoryRepository {
         .await?;
         self.state.write().await.leases.remove(&job_id);
         Ok(())
+    }
+
+    async fn validate_agent_lease(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        job_id: JobId,
+        lease_id: Uuid,
+        lease_token: &str,
+    ) -> Result<(), RepositoryError> {
+        let state = self.state.read().await;
+        let record = state.jobs.get(&job_id).ok_or(RepositoryError::NotFound)?;
+        let valid_tenant =
+            record.job.workspace_id == workspace_id && record.job.environment_id == environment_id;
+        let valid_lease = state.leases.get(&job_id).is_some_and(
+            |(stored_agent, stored_id, stored_token, expiry)| {
+                *stored_agent == agent_id
+                    && *stored_id == lease_id
+                    && stored_token == lease_token
+                    && *expiry > Utc::now()
+            },
+        );
+        if !valid_tenant || !valid_lease {
+            return Err(RepositoryError::ConcurrentStateChange);
+        }
+        Ok(())
+    }
+
+    async fn apply_agent_event(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        event: &JobEvent,
+    ) -> Result<Option<Job>, RepositoryError> {
+        let mut state = self.state.write().await;
+        let receipt = (agent_id, event.id);
+        if state.agent_event_receipts.contains(&receipt) {
+            return Ok(None);
+        }
+        let record = state
+            .jobs
+            .get_mut(&event.job_id)
+            .filter(|record| {
+                record.job.workspace_id == workspace_id
+                    && record.job.environment_id == environment_id
+                    && record.agent_id == agent_id
+            })
+            .ok_or(RepositoryError::NotFound)?;
+        validate_transition(record.job.state, event.state)
+            .map_err(|_| RepositoryError::InvalidTransition)?;
+        record.sequence += 1;
+        record.job.state = event.state;
+        let mut stored = event.clone();
+        stored.sequence = record.sequence;
+        stored.agent_id = Some(agent_id);
+        record.events.push(stored);
+        let job = record.job.clone();
+        state.agent_event_receipts.insert(receipt);
+        Ok(Some(job))
     }
 
     async fn accept_agent_job(

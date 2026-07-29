@@ -2,7 +2,7 @@
 
 use crate::{
     AppState,
-    api::{authenticate_compatibility, parse_job_id},
+    api::{authenticate_compatibility, parse_job_id, persist_job_content},
     error::AppError,
     repository::CreateResult,
 };
@@ -15,6 +15,7 @@ use axum::{
 };
 use chrono::{Duration, Utc};
 use serde::{Deserialize, Serialize};
+use spool_auth::Scope;
 use spool_domain::{ContentKind, ContentSource, Job, JobOptions, JobState, PrinterId};
 use std::{collections::HashMap, str::FromStr};
 
@@ -34,7 +35,7 @@ pub(crate) async fn whoami(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<WhoAmI>, AppError> {
-    authenticate_compatibility(&state, &headers).await?;
+    authenticate_compatibility(&state, &headers, Scope::JobsRead).await?;
     Ok(Json(WhoAmI {
         id: 1,
         email: "spool@self-hosted.invalid",
@@ -50,7 +51,7 @@ pub(crate) async fn ping(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<&'static str, AppError> {
-    authenticate_compatibility(&state, &headers).await?;
+    authenticate_compatibility(&state, &headers, Scope::JobsRead).await?;
     Ok("pong")
 }
 
@@ -58,7 +59,7 @@ pub(crate) async fn noop(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<StatusCode, AppError> {
-    authenticate_compatibility(&state, &headers).await?;
+    authenticate_compatibility(&state, &headers, Scope::JobsRead).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -92,7 +93,7 @@ pub(crate) async fn create_print_job(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, AppError> {
-    let tenant = authenticate_compatibility(&state, &headers).await?;
+    let tenant = authenticate_compatibility(&state, &headers, Scope::JobsWrite).await?;
     let request = decode_request(&headers, &body)?;
     if request.title.trim().is_empty() || !(1..=100).contains(&request.qty) {
         return Err(
@@ -119,6 +120,9 @@ pub(crate) async fn create_print_job(
         .await
         .map_err(|error| AppError::from(error).compatibility())?;
     let (content_kind, content) = compatibility_content(&request)?;
+    let content = persist_job_content(&state, tenant, content_kind, content)
+        .await
+        .map_err(AppError::compatibility)?;
     let now = Utc::now();
     let job = Job {
         id: spool_domain::JobId::new(),
@@ -147,13 +151,16 @@ pub(crate) async fn create_print_job(
         .create_job(&job, agent_id, idempotency, &body)
         .await
         .map_err(|error| AppError::from(error).compatibility())?;
+    let created_job = match &created {
+        CreateResult::Created(job) | CreateResult::Existing(job) => job,
+    };
     if matches!(created, CreateResult::Created(_)) {
         state
             .repository
             .transition_job(
                 tenant.workspace_id,
                 tenant.environment_id,
-                job.id,
+                created_job.id,
                 JobState::WaitingForAgent,
                 None,
                 Some("Waiting for PrintNode-compatible client delivery".into()),
@@ -169,7 +176,7 @@ pub(crate) async fn create_print_job(
             tenant.workspace_id,
             tenant.environment_id,
             "job",
-            &job.id.to_string(),
+            &created_job.id.to_string(),
         )
         .await
         .map_err(|error| AppError::from(error).compatibility())?;
@@ -218,12 +225,13 @@ pub(crate) async fn list_print_jobs(
     headers: HeaderMap,
     Query(query): Query<CompatibilityListQuery>,
 ) -> Result<Json<Vec<CompatibilityJob>>, AppError> {
-    let tenant = authenticate_compatibility(&state, &headers).await?;
+    let tenant = authenticate_compatibility(&state, &headers, Scope::JobsRead).await?;
     let mut jobs = state
         .repository
         .list_jobs(
             tenant.workspace_id,
             tenant.environment_id,
+            None,
             query.limit.clamp(1, 500),
         )
         .await
@@ -274,7 +282,7 @@ pub(crate) async fn get_print_jobs(
     headers: HeaderMap,
     Path(set): Path<String>,
 ) -> Result<Json<Vec<CompatibilityJob>>, AppError> {
-    let tenant = authenticate_compatibility(&state, &headers).await?;
+    let tenant = authenticate_compatibility(&state, &headers, Scope::JobsRead).await?;
     let mut response = Vec::new();
     for value in parse_integer_set(&set)? {
         let native = state
@@ -329,7 +337,7 @@ pub(crate) async fn get_print_job_states(
     headers: HeaderMap,
     set: Option<Path<String>>,
 ) -> Result<Json<Vec<CompatibilityState>>, AppError> {
-    let tenant = authenticate_compatibility(&state, &headers).await?;
+    let tenant = authenticate_compatibility(&state, &headers, Scope::JobsRead).await?;
     let jobs = if let Some(Path(set)) = set {
         let mut jobs = Vec::new();
         for value in parse_integer_set(&set)? {
@@ -356,7 +364,7 @@ pub(crate) async fn get_print_job_states(
         let mut jobs = Vec::new();
         for job in state
             .repository
-            .list_jobs(tenant.workspace_id, tenant.environment_id, 500)
+            .list_jobs(tenant.workspace_id, tenant.environment_id, None, 500)
             .await
             .map_err(|error| AppError::from(error).compatibility())?
         {
@@ -413,7 +421,7 @@ pub(crate) async fn list_computers(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<CompatibilityComputer>>, AppError> {
-    let tenant = authenticate_compatibility(&state, &headers).await?;
+    let tenant = authenticate_compatibility(&state, &headers, Scope::AgentsRead).await?;
     let mut response = Vec::new();
     for agent in state
         .repository
@@ -449,11 +457,11 @@ pub(crate) async fn list_printers(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<CompatibilityPrinter>>, AppError> {
-    let tenant = authenticate_compatibility(&state, &headers).await?;
+    let tenant = authenticate_compatibility(&state, &headers, Scope::PrintersRead).await?;
     let mut response = Vec::new();
     for printer in state
         .repository
-        .list_printers(tenant.workspace_id, tenant.environment_id, 500)
+        .list_printers(tenant.workspace_id, tenant.environment_id, None, 500)
         .await
         .map_err(|error| AppError::from(error).compatibility())?
     {
@@ -600,9 +608,10 @@ const fn compatibility_state(state: JobState) -> &'static str {
         | JobState::Spooling
         | JobState::Printing
         | JobState::Blocked
-        | JobState::CompletedReported
-        | JobState::DeliveryUncertain => "done",
+        | JobState::CompletedReported => "done",
+        JobState::DeliveryUncertain | JobState::FailedRetryable | JobState::FailedTerminal => {
+            "error"
+        }
         JobState::CancelRequested | JobState::Cancelled | JobState::Expired => "expired",
-        JobState::FailedRetryable | JobState::FailedTerminal => "error",
     }
 }

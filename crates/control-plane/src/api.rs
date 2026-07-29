@@ -22,6 +22,7 @@ use chrono::{Duration, Utc};
 use rand::{RngCore, rngs::OsRng};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use spool_auth::Scope;
 use spool_domain::{
     ContentKind, ContentSource, Job, JobEvent, JobId, JobOptions, JobState, PrinterId,
 };
@@ -32,7 +33,7 @@ use spool_protocol::agent::{
     ContentDescriptor, EnrolRequest, EnrolResponse, JobOffer,
 };
 use spool_storage_postgres::{
-    StoredAgent, StoredPrinter, StoredUpload, StoredWebhook, StoredWebhookDelivery,
+    StoredAgent, StoredPrinter, StoredUpload, StoredWebhook, StoredWebhookDelivery, SyncedPrinter,
 };
 use std::{convert::Infallible, str::FromStr};
 
@@ -58,7 +59,7 @@ pub async fn list_agents(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<StoredAgent>>, AppError> {
-    let tenant = authenticate_native(&state, &headers).await?;
+    let tenant = authenticate_native(&state, &headers, Scope::AgentsRead).await?;
     Ok(Json(
         state
             .repository
@@ -72,11 +73,17 @@ pub async fn list_printers(
     headers: HeaderMap,
     Query(query): Query<ListQuery>,
 ) -> Result<Json<Page<StoredPrinter>>, AppError> {
-    let tenant = authenticate_native(&state, &headers).await?;
+    let tenant = authenticate_native(&state, &headers, Scope::PrintersRead).await?;
     let limit = query.limit.clamp(1, 500);
+    let after = query
+        .after
+        .as_deref()
+        .map(PrinterId::from_str)
+        .transpose()
+        .map_err(|_| AppError::invalid("invalid_cursor", "The pagination cursor is invalid."))?;
     let mut printers = state
         .repository
-        .list_printers(tenant.workspace_id, tenant.environment_id, limit + 1)
+        .list_printers(tenant.workspace_id, tenant.environment_id, after, limit + 1)
         .await?;
     let has_more = printers.len() > usize::try_from(limit).unwrap_or(500);
     printers.truncate(usize::try_from(limit).unwrap_or(500));
@@ -113,7 +120,7 @@ pub async fn create_agent_enrolment(
     headers: HeaderMap,
     Json(request): Json<CreateEnrolmentRequest>,
 ) -> Result<Response, AppError> {
-    let tenant = authenticate_native(&state, &headers).await?;
+    let tenant = authenticate_native(&state, &headers, Scope::AgentsWrite).await?;
     if request.name.trim().is_empty()
         || request.name.len() > 120
         || !(60..=3_600).contains(&request.expires_in_seconds)
@@ -207,7 +214,7 @@ pub async fn list_webhooks(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<StoredWebhook>>, AppError> {
-    let tenant = authenticate_native(&state, &headers).await?;
+    let tenant = authenticate_native(&state, &headers, Scope::WebhooksRead).await?;
     Ok(Json(
         state
             .repository
@@ -234,7 +241,7 @@ pub async fn create_webhook(
     headers: HeaderMap,
     Json(request): Json<CreateWebhookRequest>,
 ) -> Result<Response, AppError> {
-    let tenant = authenticate_native(&state, &headers).await?;
+    let tenant = authenticate_native(&state, &headers, Scope::WebhooksWrite).await?;
     validate_webhook_url(&request.url)?;
     if request.events.is_empty()
         || request.events.len() > 50
@@ -277,7 +284,7 @@ pub async fn delete_webhook(
     headers: HeaderMap,
     Path(webhook_id): Path<String>,
 ) -> Result<StatusCode, AppError> {
-    let tenant = authenticate_native(&state, &headers).await?;
+    let tenant = authenticate_native(&state, &headers, Scope::WebhooksWrite).await?;
     state
         .repository
         .delete_webhook(tenant.workspace_id, tenant.environment_id, &webhook_id)
@@ -297,7 +304,7 @@ pub async fn list_webhook_deliveries(
     headers: HeaderMap,
     Path(webhook_id): Path<String>,
 ) -> Result<Json<Vec<StoredWebhookDelivery>>, AppError> {
-    let tenant = authenticate_native(&state, &headers).await?;
+    let tenant = authenticate_native(&state, &headers, Scope::WebhooksRead).await?;
     Ok(Json(
         state
             .repository
@@ -311,7 +318,7 @@ pub async fn replay_webhook_delivery(
     headers: HeaderMap,
     Path(delivery_id): Path<String>,
 ) -> Result<StatusCode, AppError> {
-    let tenant = authenticate_native(&state, &headers).await?;
+    let tenant = authenticate_native(&state, &headers, Scope::WebhooksWrite).await?;
     state
         .repository
         .replay_webhook_delivery(tenant.workspace_id, tenant.environment_id, &delivery_id)
@@ -372,7 +379,7 @@ pub async fn create_upload(
     headers: HeaderMap,
     Json(request): Json<CreateUploadRequest>,
 ) -> Result<Response, AppError> {
-    let tenant = authenticate_native(&state, &headers).await?;
+    let tenant = authenticate_native(&state, &headers, Scope::JobsWrite).await?;
     if !matches!(
         request.media_type.as_str(),
         "application/pdf" | "application/octet-stream"
@@ -415,7 +422,7 @@ pub async fn upload_content(
     Path(upload_id): Path<String>,
     body: Bytes,
 ) -> Result<Json<StoredUpload>, AppError> {
-    let tenant = authenticate_native(&state, &headers).await?;
+    let tenant = authenticate_native(&state, &headers, Scope::JobsWrite).await?;
     let upload = state
         .repository
         .get_upload(tenant.workspace_id, tenant.environment_id, &upload_id)
@@ -465,11 +472,21 @@ pub async fn complete_upload(
     Path(upload_id): Path<String>,
     Json(request): Json<CompleteUploadRequest>,
 ) -> Result<Json<StoredUpload>, AppError> {
-    let tenant = authenticate_native(&state, &headers).await?;
+    let tenant = authenticate_native(&state, &headers, Scope::JobsWrite).await?;
     let upload = state
         .repository
         .get_upload(tenant.workspace_id, tenant.environment_id, &upload_id)
         .await?;
+    if upload.state != "pending"
+        || upload.expires_at <= Utc::now()
+        || !request.sha256.eq_ignore_ascii_case(&upload.expected_sha256)
+        || request.byte_length != upload.expected_bytes
+    {
+        return Err(AppError::invalid(
+            "upload_not_completable",
+            "Upload is expired, complete, or does not match its declared metadata.",
+        ));
+    }
     let bytes = state
         .object_store
         .get(&upload.object_key)
@@ -556,7 +573,6 @@ impl From<Job> for JobResponse {
 pub struct ListQuery {
     #[serde(default = "default_limit")]
     limit: i64,
-    #[allow(dead_code)]
     after: Option<String>,
 }
 
@@ -576,7 +592,7 @@ pub async fn create_job(
     headers: HeaderMap,
     Json(request): Json<CreateJobRequest>,
 ) -> Result<Response, AppError> {
-    let tenant = authenticate_native(&state, &headers).await?;
+    let tenant = authenticate_native(&state, &headers, Scope::JobsWrite).await?;
     validate_create(&request)?;
     let printer_id = PrinterId::from_str(&request.printer_id)
         .map_err(|_| AppError::invalid("invalid_printer_id", "The printer ID is invalid."))?;
@@ -586,6 +602,8 @@ pub async fn create_job(
         .await?;
     let request_bytes = serde_json::to_vec(&request)?;
     let now = Utc::now();
+    let content =
+        persist_job_content(&state, tenant, request.content_type, request.content).await?;
     let job = Job {
         id: JobId::new(),
         workspace_id: tenant.workspace_id,
@@ -594,7 +612,7 @@ pub async fn create_job(
         title: request.title,
         source: request.source,
         content_kind: request.content_type,
-        content: request.content,
+        content,
         options: request.options,
         deliveries: request.deliveries,
         state: JobState::Registered,
@@ -633,7 +651,97 @@ pub async fn create_job(
                 )
                 .await?;
             state.publish(tenant, "job.updated", &queued).await?;
-            Ok((StatusCode::CREATED, Json(JobResponse::from(created))).into_response())
+            Ok((StatusCode::CREATED, Json(JobResponse::from(queued))).into_response())
+        }
+    }
+}
+
+pub(crate) async fn persist_job_content(
+    state: &AppState,
+    tenant: TenantContext,
+    content_kind: ContentKind,
+    content: ContentSource,
+) -> Result<ContentSource, AppError> {
+    match content {
+        ContentSource::Upload { upload_id } => {
+            let upload = state
+                .repository
+                .get_upload(tenant.workspace_id, tenant.environment_id, &upload_id)
+                .await?;
+            let expected_media_type = match content_kind {
+                ContentKind::Pdf => "application/pdf",
+                ContentKind::Raw => "application/octet-stream",
+            };
+            if upload.state != "complete" || upload.media_type != expected_media_type {
+                return Err(AppError::invalid(
+                    "invalid_job_upload",
+                    "The upload is incomplete or does not match the job content type.",
+                ));
+            }
+            Ok(ContentSource::Upload { upload_id })
+        }
+        ContentSource::Base64 { data } => {
+            let decoded = base64::engine::general_purpose::STANDARD
+                .decode(data)
+                .map_err(|_| AppError::invalid("invalid_base64_content", "Content is invalid."))?;
+            if decoded.is_empty() || decoded.len() > 52_428_800 {
+                return Err(AppError::invalid(
+                    "invalid_content_size",
+                    "Content must contain between 1 byte and 50 MiB.",
+                ));
+            }
+            let id = format!("upl_{}", ulid::Ulid::new());
+            let sha256 = digest_hex(&decoded);
+            let expected_bytes = i64::try_from(decoded.len())
+                .map_err(|_| AppError::invalid("invalid_content_size", "Content is too large."))?;
+            let upload = StoredUpload {
+                id: id.clone(),
+                object_key: format!("{}/{}/{}", tenant.workspace_id, tenant.environment_id, id),
+                media_type: match content_kind {
+                    ContentKind::Pdf => "application/pdf",
+                    ContentKind::Raw => "application/octet-stream",
+                }
+                .into(),
+                expected_sha256: sha256.clone(),
+                expected_bytes,
+                state: "pending".into(),
+                expires_at: Utc::now() + Duration::days(14),
+            };
+            state
+                .repository
+                .create_upload(&upload, tenant.workspace_id, tenant.environment_id)
+                .await?;
+            state
+                .object_store
+                .put(&upload.object_key, Bytes::from(decoded), Some(&sha256))
+                .await
+                .map_err(|_| AppError::service_unavailable("object_store_unavailable"))?;
+            state
+                .repository
+                .complete_upload(
+                    tenant.workspace_id,
+                    tenant.environment_id,
+                    &id,
+                    &sha256,
+                    expected_bytes,
+                )
+                .await?;
+            Ok(ContentSource::Upload { upload_id: id })
+        }
+        ContentSource::Uri {
+            uri,
+            authentication,
+        } => {
+            if authentication.is_some() {
+                return Err(AppError::invalid(
+                    "uri_credentials_not_supported",
+                    "Authenticated URI content is not persisted; upload the content instead.",
+                ));
+            }
+            Ok(ContentSource::Uri {
+                uri,
+                authentication: None,
+            })
         }
     }
 }
@@ -643,11 +751,17 @@ pub async fn list_jobs(
     headers: HeaderMap,
     Query(query): Query<ListQuery>,
 ) -> Result<Json<Page<JobResponse>>, AppError> {
-    let tenant = authenticate_native(&state, &headers).await?;
+    let tenant = authenticate_native(&state, &headers, Scope::JobsRead).await?;
     let limit = query.limit.clamp(1, 500);
+    let after = query
+        .after
+        .as_deref()
+        .map(JobId::from_str)
+        .transpose()
+        .map_err(|_| AppError::invalid("invalid_cursor", "The pagination cursor is invalid."))?;
     let mut jobs = state
         .repository
-        .list_jobs(tenant.workspace_id, tenant.environment_id, limit + 1)
+        .list_jobs(tenant.workspace_id, tenant.environment_id, after, limit + 1)
         .await?;
     let has_more = jobs.len() > usize::try_from(limit).unwrap_or(500);
     jobs.truncate(usize::try_from(limit).unwrap_or(500));
@@ -666,7 +780,7 @@ pub async fn get_job(
     headers: HeaderMap,
     Path(job_id): Path<String>,
 ) -> Result<Json<JobResponse>, AppError> {
-    let tenant = authenticate_native(&state, &headers).await?;
+    let tenant = authenticate_native(&state, &headers, Scope::JobsRead).await?;
     let id = parse_job_id(&job_id)?;
     let job = state
         .repository
@@ -680,7 +794,7 @@ pub async fn list_job_events(
     headers: HeaderMap,
     Path(job_id): Path<String>,
 ) -> Result<Json<Vec<JobEvent>>, AppError> {
-    let tenant = authenticate_native(&state, &headers).await?;
+    let tenant = authenticate_native(&state, &headers, Scope::JobsRead).await?;
     let events = state
         .repository
         .list_job_events(
@@ -697,7 +811,7 @@ pub async fn cancel_job(
     headers: HeaderMap,
     Path(job_id): Path<String>,
 ) -> Result<Response, AppError> {
-    let tenant = authenticate_native(&state, &headers).await?;
+    let tenant = authenticate_native(&state, &headers, Scope::JobsWrite).await?;
     let job = state
         .repository
         .transition_job(
@@ -715,6 +829,7 @@ pub async fn cancel_job(
     Ok((StatusCode::ACCEPTED, Json(JobResponse::from(job))).into_response())
 }
 
+#[allow(clippy::too_many_lines)]
 pub async fn agent_sync(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -725,24 +840,49 @@ pub async fn agent_sync(
     if request.agent_id != identity.agent_id {
         return Err(AppError::device_unauthorized("agent_identity_mismatch"));
     }
+    if request.protocol_version != 1 || request.events.len() > 1_000 {
+        return Err(AppError::invalid(
+            "invalid_agent_sync",
+            "The sync protocol or event batch is outside supported limits.",
+        ));
+    }
     let tenant = identity.tenant;
+    let printers = request.printers.as_ref().map(|printers| {
+        printers
+            .iter()
+            .map(|printer| SyncedPrinter {
+                id: printer.id,
+                native_id: printer.native_id.clone(),
+                name: printer.name.clone(),
+                state: printer.state,
+                is_default: printer.is_default,
+                capabilities: printer.capabilities.clone(),
+            })
+            .collect::<Vec<_>>()
+    });
+    state
+        .repository
+        .sync_agent_presence(
+            tenant.workspace_id,
+            tenant.environment_id,
+            request.agent_id,
+            &request.agent_version,
+            printers.as_deref(),
+        )
+        .await?;
     for event in &request.events {
         match state
             .repository
-            .transition_job(
+            .apply_agent_event(
                 tenant.workspace_id,
                 tenant.environment_id,
-                event.job_id,
-                event.state,
-                event.reason.clone(),
-                event.message.clone(),
-                Some(request.agent_id),
-                event.native_job_id.clone(),
+                request.agent_id,
+                event,
             )
             .await
         {
-            Ok(job) => state.publish(tenant, "job.updated", &job).await?,
-            Err(RepositoryError::ConcurrentStateChange) => {}
+            Ok(Some(job)) => state.publish(tenant, "job.updated", &job).await?,
+            Ok(None) | Err(RepositoryError::ConcurrentStateChange) => {}
             Err(error) => return Err(error.into()),
         }
     }
@@ -768,6 +908,9 @@ pub async fn agent_sync(
                     .repository
                     .get_upload(tenant.workspace_id, tenant.environment_id, upload_id)
                     .await?;
+                if upload.state != "complete" {
+                    return Err(AppError::service_unavailable("job_upload_is_not_complete"));
+                }
                 ContentDescriptor::Download {
                     url: format!("/v1/agent/jobs/{}/content", lease.job.id),
                     sha256: upload.expected_sha256,
@@ -810,7 +953,7 @@ pub async fn agent_sync(
         command_cursor: request.acknowledged_command_cursor,
         commands: Vec::new(),
         candidate_jobs,
-        next_poll_after_ms: 250,
+        next_poll_after_ms: 1_000,
     }))
 }
 
@@ -902,25 +1045,37 @@ pub async fn get_agent_content(
 ) -> Result<Response, AppError> {
     let path = format!("/v1/agent/jobs/{job_id}/content");
     let identity = authenticate_agent(&state, &headers, "GET", &path, &[]).await?;
+    let lease_id = headers
+        .get("x-spool-lease-id")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| uuid::Uuid::parse_str(value).ok())
+        .ok_or_else(|| AppError::device_unauthorized("missing_agent_lease"))?;
+    let lease_token = headers
+        .get("x-spool-lease-token")
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| AppError::device_unauthorized("missing_agent_lease"))?;
+    let parsed_job_id = parse_job_id(&job_id)?;
+    state
+        .repository
+        .validate_agent_lease(
+            identity.tenant.workspace_id,
+            identity.tenant.environment_id,
+            identity.agent_id,
+            parsed_job_id,
+            lease_id,
+            lease_token,
+        )
+        .await
+        .map_err(|_| AppError::device_unauthorized("invalid_agent_lease"))?;
     let job = state
         .repository
         .get_job(
             identity.tenant.workspace_id,
             identity.tenant.environment_id,
-            parse_job_id(&job_id)?,
+            parsed_job_id,
         )
         .await?;
-    let target_agent = state
-        .repository
-        .resolve_printer_agent(
-            identity.tenant.workspace_id,
-            identity.tenant.environment_id,
-            job.printer_id,
-        )
-        .await?;
-    if target_agent != identity.agent_id {
-        return Err(AppError::device_unauthorized("agent_job_mismatch"));
-    }
     let ContentSource::Upload { upload_id } = job.content else {
         return Err(AppError::invalid(
             "content_not_downloadable",
@@ -935,6 +1090,9 @@ pub async fn get_agent_content(
             &upload_id,
         )
         .await?;
+    if upload.state != "complete" {
+        return Err(AppError::device_unauthorized("job_upload_is_not_complete"));
+    }
     let content = state
         .object_store
         .get(&upload.object_key)
@@ -957,23 +1115,40 @@ pub async fn stream_events(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Sse<impl futures::Stream<Item = Result<Event, Infallible>>>, AppError> {
-    let tenant = authenticate_native(&state, &headers).await?;
-    let mut receiver = state.events.subscribe();
+    let tenant = authenticate_native(&state, &headers, Scope::JobsRead).await?;
+    let repository = state.repository.clone();
+    let mut cursor = headers
+        .get("last-event-id")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
     let stream = async_stream::stream! {
         loop {
-            match receiver.recv().await {
-                Ok(event) if event.tenant.workspace_id == tenant.workspace_id
-                    && event.tenant.environment_id == tenant.environment_id => {
+            match repository
+                .list_tenant_events(
+                    tenant.workspace_id,
+                    tenant.environment_id,
+                    cursor.as_deref(),
+                    100,
+                )
+                .await
+            {
+                Ok(events) if events.is_empty() => {
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                }
+                Ok(events) => {
+                    for event in events {
+                        cursor = Some(event.id.clone());
                         yield Ok(Event::default()
                             .id(event.id)
                             .event(event.event_type)
-                            .data(event.data.to_string()));
+                            .data(event.payload.to_string()));
+                    }
                 }
-                Ok(_) => {}
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                Err(error) => {
+                    tracing::warn!(%error, "event stream poll failed");
                     yield Ok(Event::default().event("resync_required").data("{}"));
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                 }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
         }
     };
@@ -983,31 +1158,41 @@ pub async fn stream_events(
 pub(crate) async fn authenticate_native(
     state: &AppState,
     headers: &HeaderMap,
+    required_scope: Scope,
 ) -> Result<TenantContext, AppError> {
     let authorization = headers
         .get("authorization")
         .and_then(|value| value.to_str().ok())
         .ok_or_else(AppError::unauthorized)?;
-    state
+    let tenant = state
         .authenticator
         .authenticate_bearer(authorization)
         .await
-        .map_err(|_| AppError::unauthorized())
+        .map_err(|_| AppError::unauthorized())?;
+    if !tenant.allows(&required_scope) {
+        return Err(AppError::forbidden());
+    }
+    Ok(tenant)
 }
 
 pub(crate) async fn authenticate_compatibility(
     state: &AppState,
     headers: &HeaderMap,
+    required_scope: Scope,
 ) -> Result<TenantContext, AppError> {
     let authorization = headers
         .get("authorization")
         .and_then(|value| value.to_str().ok())
         .ok_or_else(AppError::compatibility_unauthorized)?;
-    state
+    let tenant = state
         .authenticator
         .authenticate_basic(authorization)
         .await
-        .map_err(|_| AppError::compatibility_unauthorized())
+        .map_err(|_| AppError::compatibility_unauthorized())?;
+    if !tenant.allows(&required_scope) {
+        return Err(AppError::forbidden().compatibility());
+    }
+    Ok(tenant)
 }
 
 fn validate_create(request: &CreateJobRequest) -> Result<(), AppError> {

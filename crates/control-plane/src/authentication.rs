@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use sha2::{Digest, Sha256};
-use spool_auth::{api_key_lookup_prefix, verify_api_key};
+use spool_auth::{Scope, api_key_lookup_prefix, verify_api_key};
 use spool_domain::{EnvironmentId, WorkspaceId};
 use spool_storage_postgres::PostgresStore;
 use std::{collections::HashMap, sync::Arc};
@@ -13,6 +13,66 @@ use tokio::sync::RwLock;
 pub struct TenantContext {
     pub workspace_id: WorkspaceId,
     pub environment_id: EnvironmentId,
+    permissions: Permissions,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct Permissions(u16);
+
+impl Permissions {
+    const ALL: Self = Self(u16::MAX);
+
+    fn from_names(names: &[String]) -> Self {
+        let mut value = 0;
+        for name in names {
+            value |= match name.as_str() {
+                "agents_read" => 1 << 0,
+                "agents_write" => 1 << 1,
+                "printers_read" => 1 << 2,
+                "printers_write" => 1 << 3,
+                "jobs_read" => 1 << 4,
+                "jobs_write" => 1 << 5,
+                "webhooks_read" => 1 << 6,
+                "webhooks_write" => 1 << 7,
+                "usage_read" => 1 << 8,
+                "audit_read" => 1 << 9,
+                _ => 0,
+            };
+        }
+        Self(value)
+    }
+
+    const fn allows(self, scope: &Scope) -> bool {
+        let bit = match scope {
+            Scope::AgentsRead => 1 << 0,
+            Scope::AgentsWrite => 1 << 1,
+            Scope::PrintersRead => 1 << 2,
+            Scope::PrintersWrite => 1 << 3,
+            Scope::JobsRead => 1 << 4,
+            Scope::JobsWrite => 1 << 5,
+            Scope::WebhooksRead => 1 << 6,
+            Scope::WebhooksWrite => 1 << 7,
+            Scope::UsageRead => 1 << 8,
+            Scope::AuditRead => 1 << 9,
+        };
+        self.0 & bit != 0
+    }
+}
+
+impl TenantContext {
+    #[must_use]
+    pub const fn unrestricted(workspace_id: WorkspaceId, environment_id: EnvironmentId) -> Self {
+        Self {
+            workspace_id,
+            environment_id,
+            permissions: Permissions::ALL,
+        }
+    }
+
+    #[must_use]
+    pub const fn allows(self, scope: &Scope) -> bool {
+        self.permissions.allows(scope)
+    }
 }
 
 #[derive(Debug, Error)]
@@ -111,6 +171,7 @@ impl PostgresAuthenticator {
         Ok(TenantContext {
             workspace_id: record.workspace_id,
             environment_id: record.environment_id,
+            permissions: Permissions::from_names(&record.scopes),
         })
     }
 }

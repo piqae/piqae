@@ -60,6 +60,17 @@ impl AppError {
     }
 
     #[must_use]
+    pub fn forbidden() -> Self {
+        Self {
+            status: StatusCode::FORBIDDEN,
+            code: "insufficient_scope",
+            message: "The API key does not grant the required scope.".into(),
+            retryable: false,
+            compatibility: false,
+        }
+    }
+
+    #[must_use]
     pub fn compatibility_unauthorized() -> Self {
         Self {
             compatibility: true,

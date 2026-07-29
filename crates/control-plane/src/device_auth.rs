@@ -84,10 +84,7 @@ pub async fn authenticate_agent(
         .map_err(|_| AppError::device_unauthorized("agent_nonce_replayed"))?;
     Ok(AgentIdentity {
         agent_id,
-        tenant: TenantContext {
-            workspace_id: record.workspace_id,
-            environment_id: record.environment_id,
-        },
+        tenant: TenantContext::unrestricted(record.workspace_id, record.environment_id),
     })
 }
 

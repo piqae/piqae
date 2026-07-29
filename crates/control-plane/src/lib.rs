@@ -21,7 +21,6 @@ use spool_webhooks::WebhookSecretBox;
 use std::{fmt, sync::Arc};
 use tokio::sync::broadcast;
 use tower_http::{compression::CompressionLayer, trace::TraceLayer};
-use ulid::Ulid;
 
 #[derive(Clone, Debug)]
 pub struct PublishedEvent {
@@ -104,7 +103,8 @@ impl AppState {
     ) -> Result<(), repository::RepositoryError> {
         let data = serde_json::to_value(data)
             .map_err(|error| repository::RepositoryError::Persistence(error.to_string()))?;
-        self.repository
+        let id = self
+            .repository
             .enqueue_webhook_event(
                 tenant.workspace_id,
                 tenant.environment_id,
@@ -113,7 +113,7 @@ impl AppState {
             )
             .await?;
         let _ = self.events.send(PublishedEvent {
-            id: format!("evt_{}", Ulid::new()),
+            id,
             tenant,
             event_type: event_type.into(),
             data,
@@ -238,10 +238,7 @@ mod tests {
     async fn application() -> TestApplication {
         let repository = MemoryRepository::default();
         let authenticator = StaticAuthenticator::default();
-        let tenant = TenantContext {
-            workspace_id: WorkspaceId::new(),
-            environment_id: EnvironmentId::new(),
-        };
+        let tenant = TenantContext::unrestricted(WorkspaceId::new(), EnvironmentId::new());
         let printer_id = PrinterId::new();
         let agent_id = AgentId::new();
         let signing_key = SigningKey::generate(&mut OsRng);
@@ -325,13 +322,14 @@ mod tests {
             .expect("body")
             .to_bytes();
         let json: serde_json::Value = serde_json::from_slice(&body).expect("JSON");
-        assert_eq!(json["state"], "registered");
+        assert_eq!(json["state"], "waiting_for_agent");
         assert!(json.get("content").is_none());
         let stored = application
             .repository
             .list_jobs(
                 application.tenant.workspace_id,
                 application.tenant.environment_id,
+                None,
                 10,
             )
             .await
@@ -471,11 +469,8 @@ mod tests {
             lease_id: offer.lease_id,
             lease_token: offer.lease_token.clone(),
             content_sha256: match &offer.content {
-                spool_protocol::agent::ContentDescriptor::InlineBase64 {
-                    sha256: Some(sha256),
-                    ..
-                } => sha256.clone(),
-                _ => panic!("expected inline content"),
+                spool_protocol::agent::ContentDescriptor::Download { sha256, .. } => sha256.clone(),
+                _ => panic!("expected materialized download content"),
             },
             local_sequence: 1,
         };
