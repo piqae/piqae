@@ -35,13 +35,23 @@ pub fn init() -> Result<ObservabilityGuard> {
 }
 
 impl ObservabilityGuard {
-    pub fn shutdown(mut self) -> Result<()> {
+    // The Result is meaningful in OTLP builds, where flushing can fail. Keep
+    // one call shape for both feature sets so main has no telemetry-specific
+    // control flow.
+    #[allow(clippy::missing_const_for_fn, clippy::unnecessary_wraps)]
+    pub fn shutdown(self) -> Result<()> {
         #[cfg(feature = "otlp")]
-        if let Some(provider) = self.provider.take() {
-            provider
-                .shutdown()
-                .context("flush OpenTelemetry trace provider")?;
+        {
+            let mut this = self;
+            if let Some(provider) = this.provider.take() {
+                provider
+                    .shutdown()
+                    .context("flush OpenTelemetry trace provider")?;
+            }
         }
+
+        #[cfg(not(feature = "otlp"))]
+        let _ = self;
 
         Ok(())
     }
