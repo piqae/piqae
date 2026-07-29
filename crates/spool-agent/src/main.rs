@@ -22,7 +22,8 @@ use spool_protocol::{
     CURRENT_PROTOCOL_VERSION,
     agent::{
         AgentAcceptJobRequest, AgentCommand, AgentHealth, AgentReleaseLeaseRequest,
-        AgentSyncRequest, AgentSyncResponse, ContentDescriptor, JobOffer, QueueSnapshot,
+        AgentSyncRequest, AgentSyncResponse, ContentDescriptor, JobOffer, PrinterSnapshot,
+        QueueSnapshot,
     },
     executor::{DiscoveredPrinter, ExecutorOperation, ExecutorResult},
 };
@@ -103,6 +104,13 @@ struct CloudConfiguration {
 enum RuntimeExecutor {
     Disabled,
     Fake(FakeExecutor),
+    Process(SupervisedExecutor),
+}
+
+#[derive(Debug, Clone)]
+enum PrinterDiscovery {
+    Disabled,
+    Fake,
     Process(SupervisedExecutor),
 }
 
@@ -192,17 +200,24 @@ async fn main() -> Result<()> {
     let challenge = load_or_create_private_token(&arguments.data_dir.join("local.token"))?;
     let content_store = ContentStore::open(arguments.data_dir.join("content")).await?;
     let cloud_content_store = content_store.clone();
-    let executor = match arguments.executor {
-        ExecutorMode::Disabled => RuntimeExecutor::Disabled,
-        ExecutorMode::Fake => RuntimeExecutor::Fake(FakeExecutor::default()),
+    let (executor, printer_discovery) = match arguments.executor {
+        ExecutorMode::Disabled => (RuntimeExecutor::Disabled, PrinterDiscovery::Disabled),
+        ExecutorMode::Fake => (
+            RuntimeExecutor::Fake(FakeExecutor::default()),
+            PrinterDiscovery::Fake,
+        ),
         ExecutorMode::Process => {
-            RuntimeExecutor::Process(SupervisedExecutor::new(ExecutorSupervisor::new(
+            let supervised = SupervisedExecutor::new(ExecutorSupervisor::new(
                 arguments
                     .executor_path
                     .clone()
                     .context("--executor-path is required with --executor=process")?,
                 Duration::from_secs(120),
-            )))
+            ));
+            (
+                RuntimeExecutor::Process(supervised.clone()),
+                PrinterDiscovery::Process(supervised),
+            )
         }
     };
     let engine = AgentEngine::new(store, executor, SystemClock);
@@ -229,6 +244,7 @@ async fn main() -> Result<()> {
             cloud,
             database_path.clone(),
             cloud_content_store,
+            printer_discovery,
             Arc::clone(&connection),
             Arc::clone(&paused),
         ));
@@ -484,10 +500,11 @@ async fn cloud_sync_loop(
     cloud: CloudConfiguration,
     database_path: PathBuf,
     content_store: ContentStore,
+    printer_discovery: PrinterDiscovery,
     connection: Arc<RwLock<ConnectionState>>,
     paused: Arc<AtomicBool>,
 ) {
-    let mut store = match AgentStore::open(&database_path) {
+    let store = match AgentStore::open(&database_path) {
         Ok(store) => store,
         Err(error) => {
             error!(%error, "cloud sync cannot open the agent database");
@@ -495,15 +512,37 @@ async fn cloud_sync_loop(
             return;
         }
     };
+    run_cloud_sync_loop(
+        cloud,
+        store,
+        content_store,
+        printer_discovery,
+        connection,
+        paused,
+    )
+    .await;
+}
+
+async fn run_cloud_sync_loop(
+    cloud: CloudConfiguration,
+    mut store: AgentStore,
+    content_store: ContentStore,
+    printer_discovery: PrinterDiscovery,
+    connection: Arc<RwLock<ConnectionState>>,
+    paused: Arc<AtomicBool>,
+) {
     let started_at = Utc::now();
     let mut failures = 0_u32;
     loop {
-        let request = match sync_request(
-            &store,
+        let request = match prepare_sync_request(
+            &mut store,
+            &printer_discovery,
             cloud.agent_id,
             started_at,
             paused.load(Ordering::Relaxed),
-        ) {
+        )
+        .await
+        {
             Ok(request) => request,
             Err(error) => {
                 error!(%error, "cloud sync cannot read queue health");
@@ -529,6 +568,23 @@ async fn cloud_sync_loop(
         };
         tokio::time::sleep(delay).await;
     }
+}
+
+async fn prepare_sync_request(
+    store: &mut AgentStore,
+    printer_discovery: &PrinterDiscovery,
+    agent_id: AgentId,
+    started_at: chrono::DateTime<Utc>,
+    paused: bool,
+) -> Result<AgentSyncRequest> {
+    let printers = match discover_cloud_printers(store, printer_discovery).await {
+        Ok(printers) => Some(printers),
+        Err(error) => {
+            warn!(%error, "native printer inventory refresh failed");
+            None
+        }
+    };
+    Ok(sync_request(store, agent_id, started_at, paused, printers)?)
 }
 
 async fn sync_succeeded(
@@ -625,7 +681,16 @@ async fn accept_offer(
     offer: JobOffer,
 ) -> Result<()> {
     let job_id = offer.job.id;
-    let stored = match materialize_descriptor(content_store, offer.content).await {
+    let stored = match materialize_descriptor(
+        cloud,
+        content_store,
+        job_id,
+        offer.lease_id,
+        &offer.lease_token,
+        offer.content,
+    )
+    .await
+    {
         Ok(stored) => stored,
         Err(error) => {
             let _ = cloud
@@ -643,13 +708,17 @@ async fn accept_offer(
             return Err(error);
         }
     };
+    let logical_printer_id = offer.job.printer_id.to_string();
+    let native_printer_id = store
+        .native_printer_id(&logical_printer_id)?
+        .with_context(|| {
+            format!("printer {logical_printer_id} has no durable native queue mapping")
+        })?;
     let local = store.accept_job(&AcceptedJob {
         job_id: job_id.to_string(),
         submission_id: format!("sub_{job_id}"),
-        printer_id: offer.job.printer_id.to_string(),
-        // The inventory contract does not yet include the agent-native queue
-        // key; retain the logical ID and fail closed if it does not resolve.
-        printer_native_id: offer.job.printer_id.to_string(),
+        printer_id: logical_printer_id,
+        printer_native_id: native_printer_id,
         title: offer.job.title,
         content_sha256: stored.sha256.clone(),
         content_path: stored.path.to_string_lossy().into_owned(),
@@ -680,7 +749,11 @@ async fn accept_offer(
 }
 
 async fn materialize_descriptor(
+    cloud: &CloudConfiguration,
     content_store: &ContentStore,
+    job_id: JobId,
+    lease_id: uuid::Uuid,
+    lease_token: &str,
     descriptor: ContentDescriptor,
 ) -> Result<spool_agent_core::StoredContent> {
     match descriptor {
@@ -705,11 +778,24 @@ async fn materialize_descriptor(
                 Ok(content_store.put(std::io::Cursor::new(decoded)).await?)
             }
         }
-        ContentDescriptor::Download { url, sha256, bytes } => {
+        ContentDescriptor::Download {
+            url: _,
+            sha256,
+            bytes,
+        } => {
             if bytes > ContentStore::MAX_CONTENT_BYTES {
                 anyhow::bail!("offered content exceeds local limit");
             }
-            let response = reqwest::get(url).await?.error_for_status()?;
+            let response = cloud
+                .client
+                .download_content(&cloud.identity, job_id, lease_id, lease_token)
+                .await?;
+            if response
+                .content_length()
+                .is_some_and(|length| length > ContentStore::MAX_CONTENT_BYTES)
+            {
+                anyhow::bail!("download response exceeds local limit");
+            }
             let stream = response.bytes_stream().map_err(std::io::Error::other);
             let path = content_store
                 .put_verified(&sha256, StreamReader::new(stream))
@@ -771,6 +857,7 @@ fn sync_request(
     agent_id: AgentId,
     started_at: chrono::DateTime<Utc>,
     paused: bool,
+    printers: Option<Vec<PrinterSnapshot>>,
 ) -> Result<AgentSyncRequest, StorageError> {
     let counts = store.queue_counts()?;
     let events = store
@@ -783,7 +870,7 @@ fn sync_request(
         agent_id,
         protocol_version: CURRENT_PROTOCOL_VERSION,
         agent_version: env!("CARGO_PKG_VERSION").to_owned(),
-        printer_revision: 0,
+        printer_revision: printers.as_ref().map_or(0, |items| items.len() as u64),
         acknowledged_command_cursor: store.setting("command_cursor")?,
         event_cursor,
         queue: QueueSnapshot {
@@ -799,9 +886,59 @@ fn sync_request(
             executor_crashes: 0,
             last_error_code: None,
         },
-        printers: None,
+        printers,
         events,
     })
+}
+
+async fn discover_cloud_printers(
+    store: &mut AgentStore,
+    discovery: &PrinterDiscovery,
+) -> Result<Vec<PrinterSnapshot>> {
+    let discovered = match discovery {
+        PrinterDiscovery::Disabled => Vec::new(),
+        PrinterDiscovery::Fake => vec![DiscoveredPrinter {
+            native_id: "fake-printer".into(),
+            name: "Spool deterministic fake printer".into(),
+            is_default: true,
+            state: spool_domain::PrinterState::Online,
+            capabilities: spool_domain::PrinterCapabilities::default(),
+        }],
+        PrinterDiscovery::Process(executor) => match executor
+            .execute_operation(
+                ExecutorOperation::DiscoverPrinters,
+                Utc::now().timestamp_millis() + 30_000,
+            )
+            .await
+            .map_err(|error| anyhow::anyhow!("{}: {}", error.code, error.message))?
+        {
+            ExecutorResult::Printers { printers } => printers,
+            _ => anyhow::bail!("executor returned the wrong discovery result"),
+        },
+    };
+    let observed_unix_ms = Utc::now().timestamp_millis();
+    discovered
+        .into_iter()
+        .map(|printer| {
+            let state = serde_json::to_string(&printer.state)?;
+            let capabilities = serde_json::to_string(&printer.capabilities)?;
+            let stored = store.upsert_printer(
+                &printer.native_id,
+                &printer.name,
+                state.trim_matches('"'),
+                &capabilities,
+                observed_unix_ms,
+            )?;
+            Ok(PrinterSnapshot {
+                id: stored.printer_id.parse()?,
+                native_id: stored.native_id,
+                name: stored.name,
+                state: printer.state,
+                is_default: printer.is_default,
+                capabilities: printer.capabilities,
+            })
+        })
+        .collect()
 }
 
 fn protocol_event(

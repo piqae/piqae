@@ -6,7 +6,7 @@
 
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
-use spool_domain::EventId;
+use spool_domain::{EventId, PrinterId};
 use std::path::Path;
 use thiserror::Error;
 
@@ -75,6 +75,16 @@ pub struct PendingEvent {
     pub reason: Option<String>,
     pub message: Option<String>,
     pub details_json: String,
+    pub observed_unix_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredPrinter {
+    pub printer_id: String,
+    pub native_id: String,
+    pub name: String,
+    pub state: String,
+    pub capabilities_json: String,
     pub observed_unix_ms: i64,
 }
 
@@ -181,6 +191,78 @@ impl AgentStore {
             params![key, encoded],
         )?;
         Ok(())
+    }
+
+    /// Upserts a discovered native printer while preserving its logical ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if capabilities are not valid JSON or `SQLite` cannot
+    /// atomically persist the inventory record.
+    pub fn upsert_printer(
+        &mut self,
+        native_id: &str,
+        name: &str,
+        state: &str,
+        capabilities_json: &str,
+        observed_unix_ms: i64,
+    ) -> Result<StoredPrinter, StorageError> {
+        let _: serde_json::Value = serde_json::from_str(capabilities_json)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let printer_id = transaction
+            .query_row(
+                "SELECT printer_id FROM printers WHERE native_id = ?1",
+                [native_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .unwrap_or_else(|| PrinterId::new().to_string());
+        transaction.execute(
+            "INSERT INTO printers(printer_id, native_id, name, state, observed_unix_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(printer_id) DO UPDATE SET
+               native_id = excluded.native_id,
+               name = excluded.name,
+               state = excluded.state,
+               observed_unix_ms = excluded.observed_unix_ms",
+            params![printer_id, native_id, name, state, observed_unix_ms],
+        )?;
+        transaction.execute(
+            "INSERT INTO printer_capabilities(
+               printer_id, revision, capabilities_json, observed_unix_ms
+             ) VALUES (?1, 'current', ?2, ?3)
+             ON CONFLICT(printer_id, revision) DO UPDATE SET
+               capabilities_json = excluded.capabilities_json,
+               observed_unix_ms = excluded.observed_unix_ms",
+            params![printer_id, capabilities_json, observed_unix_ms],
+        )?;
+        transaction.commit()?;
+        Ok(StoredPrinter {
+            printer_id,
+            native_id: native_id.to_owned(),
+            name: name.to_owned(),
+            state: state.to_owned(),
+            capabilities_json: capabilities_json.to_owned(),
+            observed_unix_ms,
+        })
+    }
+
+    /// Resolves a cloud logical printer ID to the current native queue key.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `SQLite` cannot execute or decode the query.
+    pub fn native_printer_id(&self, printer_id: &str) -> Result<Option<String>, StorageError> {
+        self.connection
+            .query_row(
+                "SELECT native_id FROM printers WHERE printer_id = ?1",
+                [printer_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
     }
 
     /// Atomically accepts local responsibility for a job. Duplicate delivery
@@ -907,5 +989,31 @@ mod tests {
             store.setting("command_cursor").unwrap().as_deref(),
             Some("cursor-with-\"quotes\"")
         );
+    }
+
+    #[test]
+    fn printer_inventory_preserves_logical_to_native_mapping() {
+        let mut store = AgentStore::in_memory().unwrap();
+        let first = store
+            .upsert_printer("native-queue", "Office", "online", r#"{"color":true}"#, 10)
+            .unwrap();
+        let refreshed = store
+            .upsert_printer(
+                "native-queue",
+                "Office renamed",
+                "busy",
+                r#"{"color":false}"#,
+                20,
+            )
+            .unwrap();
+        assert_eq!(first.printer_id, refreshed.printer_id);
+        assert_eq!(
+            store
+                .native_printer_id(&first.printer_id)
+                .unwrap()
+                .as_deref(),
+            Some("native-queue")
+        );
+        assert_eq!(refreshed.name, "Office renamed");
     }
 }

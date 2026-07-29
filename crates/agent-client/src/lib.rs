@@ -229,6 +229,50 @@ impl AgentClient {
         .await
     }
 
+    /// Opens the authenticated content stream protected by an active lease.
+    ///
+    /// The opaque lease token is sent only as a request header and is never
+    /// retained in an error value.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for signing, transport, URL, header, or HTTP status
+    /// failures.
+    pub async fn download_content(
+        &self,
+        identity: &DeviceIdentity,
+        job_id: JobId,
+        lease_id: Uuid,
+        lease_token: &str,
+    ) -> Result<reqwest::Response, ClientError> {
+        let path = format!("v1/agent/jobs/{job_id}/content");
+        let request_path = format!("/{path}");
+        let mut headers = identity.signed_headers(
+            "GET",
+            &request_path,
+            &[],
+            Utc::now().timestamp_millis(),
+            Uuid::new_v4(),
+        )?;
+        insert_header(&mut headers, "x-spool-lease-id", &lease_id.to_string())?;
+        insert_header(&mut headers, "x-spool-lease-token", lease_token)?;
+        let response = self
+            .client
+            .get(self.base_url.join(&path)?)
+            .headers(headers)
+            .send()
+            .await?;
+        let status = response.status();
+        if !status.is_success() {
+            let bytes = response.bytes().await?;
+            return Err(ClientError::Status {
+                status: status.as_u16(),
+                body: String::from_utf8_lossy(&bytes).chars().take(1024).collect(),
+            });
+        }
+        Ok(response)
+    }
+
     async fn post_json<Req: Serialize + Sync, Res: serde::de::DeserializeOwned>(
         &self,
         path: &str,
@@ -274,6 +318,7 @@ mod tests {
     use super::*;
     use base64::engine::general_purpose::STANDARD_NO_PAD;
     use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     #[test]
     fn signed_headers_cover_method_path_time_nonce_and_body() {
@@ -306,5 +351,77 @@ mod tests {
             identity.signing_key.verifying_key().as_bytes()
         );
         assert_eq!(identity.secret_bytes().len(), 32);
+    }
+
+    #[tokio::test]
+    async fn content_download_is_signed_and_lease_capability_is_not_in_errors() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let address = listener.local_addr().expect("address");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let mut request = vec![0_u8; 16 * 1024];
+            let read = stream.read(&mut request).await.expect("read");
+            request.truncate(read);
+            stream
+                .write_all(
+                    b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 6\r\nConnection: close\r\n\r\ndenied",
+                )
+                .await
+                .expect("response");
+            String::from_utf8(request).expect("HTTP request")
+        });
+
+        let agent_id = AgentId::new();
+        let identity = DeviceIdentity::from_secret_bytes(agent_id, &[9_u8; 32]);
+        let job_id = JobId::new();
+        let lease_id = Uuid::new_v4();
+        let lease_token = "opaque-secret-lease-capability";
+        let client =
+            AgentClient::new(Url::parse(&format!("http://{address}/")).expect("control-plane URL"))
+                .expect("client");
+        let error = client
+            .download_content(&identity, job_id, lease_id, lease_token)
+            .await
+            .expect_err("401 must fail");
+        let request = server.await.expect("server");
+        let headers = parse_http_headers(&request);
+
+        assert!(request.starts_with(&format!("GET /v1/agent/jobs/{job_id}/content HTTP/1.1\r\n")));
+        assert_eq!(headers["x-spool-agent-id"], agent_id.to_string());
+        assert_eq!(headers["x-spool-lease-id"], lease_id.to_string());
+        assert_eq!(headers["x-spool-lease-token"], lease_token);
+        assert_eq!(
+            headers["x-spool-body-sha256"],
+            format!("{:x}", Sha256::digest([]))
+        );
+        assert!(!format!("{error:?}").contains(lease_token));
+
+        let nonce = Uuid::parse_str(&headers["x-spool-nonce"]).expect("nonce");
+        let canonical = format!(
+            "GET\n/v1/agent/jobs/{job_id}/content\n{}\n{}\n{}",
+            headers["x-spool-timestamp"], nonce, headers["x-spool-body-sha256"]
+        );
+        let signature = Signature::from_slice(
+            &STANDARD_NO_PAD
+                .decode(&headers["x-spool-signature"])
+                .expect("signature encoding"),
+        )
+        .expect("signature");
+        identity
+            .signing_key
+            .verifying_key()
+            .verify(canonical.as_bytes(), &signature)
+            .expect("valid content request signature");
+    }
+
+    fn parse_http_headers(request: &str) -> std::collections::HashMap<String, String> {
+        request
+            .lines()
+            .skip(1)
+            .filter_map(|line| line.split_once(':'))
+            .map(|(name, value)| (name.to_ascii_lowercase(), value.trim().to_owned()))
+            .collect()
     }
 }
