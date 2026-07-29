@@ -4,7 +4,7 @@ use crate::{
     AppState,
     api::{authenticate_compatibility, parse_job_id, persist_job_content},
     error::AppError,
-    repository::CreateResult,
+    repository::{CreateResult, RepositoryError},
 };
 use axum::{
     Json,
@@ -17,7 +17,7 @@ use chrono::{Duration, Utc};
 use serde::{Deserialize, Serialize};
 use spool_auth::Scope;
 use spool_domain::{AgentId, ContentKind, ContentSource, Job, JobOptions, JobState, PrinterId};
-use spool_storage_postgres::{StoredAgent, StoredPrinter};
+use spool_storage_postgres::{PrinterProfileSnapshot, StoredAgent, StoredPrinter};
 use std::{
     collections::{HashMap, HashSet},
     str::FromStr,
@@ -92,6 +92,139 @@ const fn compatibility_expiry() -> i64 {
     1_209_600
 }
 
+const PROFILE_TARGET_RESOURCE: &str = "profile_target";
+
+async fn resolve_compatibility_destination(
+    state: &AppState,
+    tenant: crate::authentication::TenantContext,
+    compatibility_id: i64,
+) -> Result<(StoredPrinter, Option<PrinterProfileSnapshot>), AppError> {
+    match state
+        .repository
+        .resolve_compatibility_id(
+            tenant.workspace_id,
+            tenant.environment_id,
+            "printer",
+            compatibility_id,
+        )
+        .await
+    {
+        Ok(native) => {
+            let printer_id = PrinterId::from_str(&native).map_err(|_| {
+                AppError::invalid("InvalidPrinter", "The printer does not exist.").compatibility()
+            })?;
+            let printer = state
+                .repository
+                .list_printers(tenant.workspace_id, tenant.environment_id, None, 500)
+                .await
+                .map_err(|error| AppError::from(error).compatibility())?
+                .into_iter()
+                .find(|printer| printer.id == printer_id)
+                .ok_or_else(|| {
+                    AppError::invalid("InvalidPrinter", "The printer does not exist.")
+                        .compatibility()
+                })?;
+            return Ok((printer, None));
+        }
+        Err(RepositoryError::NotFound) => {}
+        Err(error) => return Err(AppError::from(error).compatibility()),
+    }
+
+    let resource = state
+        .repository
+        .resolve_compatibility_id(
+            tenant.workspace_id,
+            tenant.environment_id,
+            PROFILE_TARGET_RESOURCE,
+            compatibility_id,
+        )
+        .await
+        .map_err(|error| AppError::from(error).compatibility())?;
+    let mut parts = resource.split(':');
+    let printer_id = parts
+        .next()
+        .and_then(|value| PrinterId::from_str(value).ok())
+        .ok_or_else(|| {
+            AppError::invalid("InvalidPrinter", "The profile target is invalid.").compatibility()
+        })?;
+    let profile_id = parts
+        .next()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            AppError::invalid("InvalidPrinter", "The profile target is invalid.").compatibility()
+        })?;
+    let revision = parts
+        .next()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|_| parts.next().is_none())
+        .ok_or_else(|| {
+            AppError::invalid("InvalidPrinter", "The profile target is invalid.").compatibility()
+        })?;
+    let printer = state
+        .repository
+        .list_printers(tenant.workspace_id, tenant.environment_id, None, 500)
+        .await
+        .map_err(|error| AppError::from(error).compatibility())?
+        .into_iter()
+        .find(|printer| printer.id == printer_id)
+        .ok_or_else(|| {
+            AppError::invalid("InvalidPrinter", "The printer does not exist.").compatibility()
+        })?;
+    let profile = printer
+        .profiles
+        .iter()
+        .find(|profile| {
+            profile.profile_id == profile_id
+                && profile.revision == revision
+                && profile.published
+                && profile
+                    .status
+                    .as_deref()
+                    .is_none_or(|status| status == "ready")
+        })
+        .cloned()
+        .ok_or_else(|| {
+            AppError::invalid(
+                "InvalidPrinter",
+                "The published print profile is no longer ready.",
+            )
+            .compatibility()
+        })?;
+    Ok((printer, Some(profile)))
+}
+
+fn merge_profile_options(
+    profile: &PrinterProfileSnapshot,
+    requested: &JobOptions,
+) -> Result<JobOptions, AppError> {
+    let mut resolved = serde_json::to_value(&profile.options)
+        .map_err(|_| AppError::service_unavailable("profile_options_invalid"))?;
+    let requested = serde_json::to_value(requested)
+        .map_err(|_| AppError::invalid("InvalidRequest", "The print options are invalid."))?;
+    let resolved = resolved
+        .as_object_mut()
+        .ok_or_else(|| AppError::service_unavailable("profile_options_invalid").compatibility())?;
+    let requested = requested.as_object().ok_or_else(|| {
+        AppError::invalid("InvalidRequest", "The print options are invalid.").compatibility()
+    })?;
+    for (key, value) in requested {
+        let present = !value.is_null() && !value.as_object().is_some_and(serde_json::Map::is_empty);
+        if !present {
+            continue;
+        }
+        if !profile.safe_overrides.iter().any(|allowed| allowed == key) {
+            return Err(AppError::invalid(
+                "ProfileOverrideNotAllowed",
+                &format!("The selected print profile does not allow `{key}` to be overridden."),
+            )
+            .compatibility());
+        }
+        resolved.insert(key.clone(), value.clone());
+    }
+    serde_json::from_value(serde_json::Value::Object(resolved.clone()))
+        .map_err(|_| AppError::service_unavailable("profile_options_invalid").compatibility())
+}
+
 pub(crate) async fn create_print_job(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -105,29 +238,33 @@ pub(crate) async fn create_print_job(
                 .compatibility(),
         );
     }
-    let native_printer = state
-        .repository
-        .resolve_compatibility_id(
-            tenant.workspace_id,
-            tenant.environment_id,
-            "printer",
-            request.printer_id,
-        )
-        .await
-        .map_err(|error| AppError::from(error).compatibility())?;
-    let printer_id = PrinterId::from_str(&native_printer).map_err(|_| {
-        AppError::invalid("InvalidPrinter", "The printer does not exist.").compatibility()
-    })?;
-    let agent_id = state
-        .repository
-        .resolve_printer_agent(tenant.workspace_id, tenant.environment_id, printer_id)
-        .await
-        .map_err(|error| AppError::from(error).compatibility())?;
+    let (printer, profile) =
+        resolve_compatibility_destination(&state, tenant, request.printer_id).await?;
+    let printer_id = printer.id;
+    let agent_id = printer.agent_id;
     let (content_kind, content) = compatibility_content(&request)?;
+    if content_kind == ContentKind::Raw && profile.is_some() {
+        return Err(AppError::invalid(
+            "InvalidPrinter",
+            "Rendered print profiles cannot be used for RAW jobs.",
+        )
+        .compatibility());
+    }
     let content = persist_job_content(&state, tenant, content_kind, content)
         .await
         .map_err(AppError::compatibility)?;
     let now = Utc::now();
+    let mut metadata = std::collections::BTreeMap::new();
+    if let Some(profile) = &profile {
+        metadata.insert("spool.profile_id".into(), profile.profile_id.clone());
+        metadata.insert(
+            "spool.profile_revision".into(),
+            profile.revision.to_string(),
+        );
+        if let Some(stock_id) = &profile.stock_id {
+            metadata.insert("spool.stock_id".into(), stock_id.clone());
+        }
+    }
     let job = Job {
         id: spool_domain::JobId::new(),
         workspace_id: tenant.workspace_id,
@@ -139,10 +276,12 @@ pub(crate) async fn create_print_job(
         content,
         options: if content_kind == ContentKind::Raw {
             JobOptions::default()
+        } else if let Some(profile) = &profile {
+            merge_profile_options(profile, &request.options)?
         } else {
             request.options
         },
-        metadata: std::collections::BTreeMap::new(),
+        metadata,
         deliveries: request.qty,
         state: JobState::Registered,
         created_at: now,
@@ -724,7 +863,32 @@ pub(crate) async fn list_printers(
             )
             .await
             .map_err(|error| AppError::from(error).compatibility())?;
-        response.push(compatibility_printer(&state, tenant, printer, id).await?);
+        response.push(compatibility_printer(&state, tenant, printer.clone(), id).await?);
+        for profile in printer
+            .profiles
+            .iter()
+            .filter(|profile| {
+                profile.published
+                    && profile.status.as_deref().is_none_or(|status| status == "ready")
+            })
+            .cloned()
+        {
+            let resource = profile_target_resource_id(printer.id, &profile);
+            let profile_id = state
+                .repository
+                .compatibility_id(
+                    tenant.workspace_id,
+                    tenant.environment_id,
+                    PROFILE_TARGET_RESOURCE,
+                    &resource,
+                )
+                .await
+                .map_err(|error| AppError::from(error).compatibility())?;
+            response.push(
+                compatibility_profile_printer(&state, tenant, &printer, profile, profile_id)
+                    .await?,
+            );
+        }
     }
     paginate_compatibility(&mut response, &query, |printer| printer.id)?;
     Ok(Json(response))
@@ -736,28 +900,15 @@ pub(crate) async fn get_printers(
     Path(set): Path<String>,
 ) -> Result<Json<Vec<CompatibilityPrinter>>, AppError> {
     let tenant = authenticate_compatibility(&state, &headers, Scope::PrintersRead).await?;
-    let available = state
-        .repository
-        .list_printers(tenant.workspace_id, tenant.environment_id, None, 500)
-        .await
-        .map_err(|error| AppError::from(error).compatibility())?
-        .into_iter()
-        .map(|printer| (printer.id, printer))
-        .collect::<HashMap<_, _>>();
     let mut response = Vec::new();
     for id in parse_integer_set(&set)? {
-        let native = state
-            .repository
-            .resolve_compatibility_id(tenant.workspace_id, tenant.environment_id, "printer", id)
-            .await
-            .map_err(|error| AppError::from(error).compatibility())?;
-        let printer_id = PrinterId::from_str(&native).map_err(|_| {
-            AppError::invalid("InvalidPrinter", "The printer does not exist.").compatibility()
-        })?;
-        let printer = available.get(&printer_id).cloned().ok_or_else(|| {
-            AppError::invalid("InvalidPrinter", "The printer does not exist.").compatibility()
-        })?;
-        response.push(compatibility_printer(&state, tenant, printer, id).await?);
+        let (printer, profile) = resolve_compatibility_destination(&state, tenant, id).await?;
+        response.push(match profile {
+            Some(profile) => {
+                compatibility_profile_printer(&state, tenant, &printer, profile, id).await?
+            }
+            None => compatibility_printer(&state, tenant, printer, id).await?,
+        });
     }
     Ok(Json(response))
 }
@@ -816,7 +967,32 @@ async fn filtered_computer_printers(
             )
             .await
             .map_err(|error| AppError::from(error).compatibility())?;
-        response.push(compatibility_printer(state, tenant, printer, id).await?);
+        response.push(compatibility_printer(state, tenant, printer.clone(), id).await?);
+        for profile in printer
+            .profiles
+            .iter()
+            .filter(|profile| {
+                profile.published
+                    && profile.status.as_deref().is_none_or(|status| status == "ready")
+            })
+            .cloned()
+        {
+            let resource = profile_target_resource_id(printer.id, &profile);
+            let profile_id = state
+                .repository
+                .compatibility_id(
+                    tenant.workspace_id,
+                    tenant.environment_id,
+                    PROFILE_TARGET_RESOURCE,
+                    &resource,
+                )
+                .await
+                .map_err(|error| AppError::from(error).compatibility())?;
+            response.push(
+                compatibility_profile_printer(state, tenant, &printer, profile, profile_id)
+                    .await?,
+            );
+        }
     }
     paginate_compatibility(&mut response, &query, |printer| printer.id)?;
     Ok(Json(response))
@@ -848,6 +1024,82 @@ async fn compatibility_printer(
             _ => "offline",
         },
         capabilities: printer.capabilities,
+    })
+}
+
+fn profile_target_resource_id(
+    printer_id: PrinterId,
+    profile: &PrinterProfileSnapshot,
+) -> String {
+    format!(
+        "{printer_id}:{}:{}",
+        profile.profile_id, profile.revision
+    )
+}
+
+fn profile_capabilities(
+    printer: &StoredPrinter,
+    profile: &PrinterProfileSnapshot,
+) -> spool_domain::PrinterCapabilities {
+    let mut capabilities = printer.capabilities.clone();
+    let allows = |option: &str| {
+        profile
+            .safe_overrides
+            .iter()
+            .any(|allowed| allowed == option)
+    };
+    if let Some(paper) = &profile.options.paper {
+        let dimensions = capabilities.papers.get(paper).copied().unwrap_or([None, None]);
+        capabilities.papers = std::collections::BTreeMap::from([(paper.clone(), dimensions)]);
+    }
+    if let Some(bin) = &profile.options.bin {
+        capabilities.bins = vec![bin.clone()];
+    }
+    if let Some(media) = &profile.options.media {
+        capabilities.medias = vec![media.clone()];
+    }
+    if let Some(dpi) = &profile.options.dpi {
+        capabilities.dpis = vec![dpi.clone()];
+    }
+    if !allows("copies") {
+        capabilities.copies = 1;
+    }
+    if !allows("color") {
+        capabilities.color = profile.options.color.unwrap_or(false);
+    }
+    if !allows("duplex") {
+        capabilities.duplex = false;
+    }
+    capabilities
+}
+
+async fn compatibility_profile_printer(
+    state: &AppState,
+    tenant: crate::authentication::TenantContext,
+    printer: &StoredPrinter,
+    profile: PrinterProfileSnapshot,
+    id: i64,
+) -> Result<CompatibilityPrinter, AppError> {
+    let computer_id = state
+        .repository
+        .compatibility_id(
+            tenant.workspace_id,
+            tenant.environment_id,
+            "computer",
+            &printer.agent_id.to_string(),
+        )
+        .await
+        .map_err(|error| AppError::from(error).compatibility())?;
+    Ok(CompatibilityPrinter {
+        id,
+        name: format!("{} — {}", printer.name, profile.name),
+        computer: CompatibilityComputerReference { id: computer_id },
+        is_default: profile.is_default,
+        state: match printer.state {
+            spool_domain::PrinterState::Online | spool_domain::PrinterState::Busy => "online",
+            _ => "offline",
+        },
+        capabilities: profile_capabilities(printer, &profile),
     })
 }
 
@@ -900,14 +1152,8 @@ async fn resolve_printer_set(
         .collect::<HashSet<_>>();
     let mut result = HashSet::new();
     for id in parse_integer_set(set)? {
-        let native = state
-            .repository
-            .resolve_compatibility_id(tenant.workspace_id, tenant.environment_id, "printer", id)
-            .await
-            .map_err(|error| AppError::from(error).compatibility())?;
-        let printer_id = PrinterId::from_str(&native).map_err(|_| {
-            AppError::invalid("InvalidPrinter", "The printer does not exist.").compatibility()
-        })?;
+        let (printer, _) = resolve_compatibility_destination(state, tenant, id).await?;
+        let printer_id = printer.id;
         if !available.contains(&printer_id) {
             return Err(
                 AppError::invalid("InvalidPrinter", "The printer does not exist.").compatibility(),
@@ -1036,5 +1282,94 @@ const fn compatibility_state(state: JobState) -> &'static str {
             "error"
         }
         JobState::CancelRequested | JobState::Cancelled | JobState::Expired => "expired",
+    }
+}
+
+#[cfg(test)]
+mod profile_target_tests {
+    use super::*;
+    use spool_domain::{AgentId, PrinterCapabilities, PrinterState};
+
+    fn profile() -> PrinterProfileSnapshot {
+        PrinterProfileSnapshot {
+            profile_id: "prf_a4_colour".into(),
+            revision: 4,
+            name: "A4 colour".into(),
+            is_default: true,
+            options: JobOptions {
+                paper: Some("A4".into()),
+                color: Some(true),
+                copies: Some(1),
+                ..JobOptions::default()
+            },
+            status: Some("ready".into()),
+            native_kind: Some("macos_printcore".into()),
+            native_digest: Some("sha256:fixture".into()),
+            driver_fingerprint: None,
+            summary: None,
+            stock_id: Some("stk_a4".into()),
+            safe_overrides: vec!["copies".into(), "pages".into()],
+            last_validated_at: None,
+            last_test_job_id: None,
+            published: true,
+        }
+    }
+
+    #[test]
+    fn profile_target_merges_only_allowlisted_options() {
+        let resolved = merge_profile_options(
+            &profile(),
+            &JobOptions {
+                copies: Some(3),
+                pages: Some("1".into()),
+                ..JobOptions::default()
+            },
+        )
+        .expect("safe overrides");
+        assert_eq!(resolved.paper.as_deref(), Some("A4"));
+        assert_eq!(resolved.copies, Some(3));
+        assert_eq!(resolved.pages.as_deref(), Some("1"));
+
+        assert!(
+            merge_profile_options(
+                &profile(),
+                &JobOptions {
+                    paper: Some("Letter".into()),
+                    ..JobOptions::default()
+                }
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn virtual_printer_capabilities_are_constrained_to_profile() {
+        let printer = StoredPrinter {
+            id: PrinterId::new(),
+            agent_id: AgentId::new(),
+            name: "Office printer".into(),
+            state: PrinterState::Online,
+            capabilities: PrinterCapabilities {
+                bins: vec!["Tray 1".into(), "Tray 2".into()],
+                color: true,
+                copies: 99,
+                duplex: true,
+                dpis: vec!["300".into(), "600".into()],
+                papers: std::collections::BTreeMap::from([
+                    ("A4".into(), [Some(210_000), Some(297_000)]),
+                    ("Letter".into(), [Some(215_900), Some(279_400)]),
+                ]),
+                ..PrinterCapabilities::default()
+            },
+            capability_revision: 1,
+            native_options: std::collections::BTreeMap::new(),
+            profiles: Vec::new(),
+            updated_at: Utc::now(),
+        };
+        let capabilities = profile_capabilities(&printer, &profile());
+        assert_eq!(capabilities.papers.len(), 1);
+        assert!(capabilities.papers.contains_key("A4"));
+        assert_eq!(capabilities.copies, 99);
+        assert!(!capabilities.duplex);
     }
 }

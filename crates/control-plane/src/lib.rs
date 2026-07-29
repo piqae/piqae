@@ -266,8 +266,9 @@ mod tests {
     use sha2::{Digest, Sha256};
     use spool_auth::Scope;
     use spool_domain::{
-        AgentId, EnvironmentId, JobId, JobOptions, JobState, NativePrinterChoice,
-        NativePrinterOption, PrinterCapabilities, PrinterId, PrinterState, WorkspaceId,
+        AgentId, DriverFingerprint, EnvironmentId, JobId, JobOptions, JobState,
+        NativePrinterChoice, NativePrinterOption, NativeProfileKind, PrinterCapabilities,
+        PrinterId, PrinterState, ProfileStatus, ProfileSummary, SafeProfileOverride, WorkspaceId,
     };
     use spool_object_store::{ObjectStoreError, StoredObject};
     use spool_protocol::agent::{
@@ -569,6 +570,19 @@ mod tests {
                     native_options: selected_native_options,
                     ..JobOptions::default()
                 },
+                status: ProfileStatus::Ready,
+                native_kind: Some(NativeProfileKind::CupsOptions),
+                native_digest: Some("sha256:test-profile".into()),
+                driver_fingerprint: DriverFingerprint::default(),
+                summary: ProfileSummary {
+                    paper: Some("A4".into()),
+                    ..ProfileSummary::default()
+                },
+                stock_id: Some("stk_shipping".into()),
+                safe_overrides: vec![SafeProfileOverride::Copies, SafeProfileOverride::Pages],
+                last_validated_unix_ms: None,
+                last_test_job_id: None,
+                published: true,
             }],
         }
     }
@@ -649,6 +663,55 @@ mod tests {
             printer["profiles"][0]["options"]["native_options"]["StapleLocation"],
             "UpperLeft"
         );
+        assert_eq!(printer["profiles"][0]["status"], "ready");
+        assert_eq!(printer["profiles"][0]["native_kind"], "cups_options");
+        assert_eq!(printer["profiles"][0]["stock_id"], "stk_shipping");
+        assert_eq!(printer["profiles"][0]["published"], true);
+
+        let (status, compatibility_printers) = compatibility_json(
+            &application.router,
+            compatibility_request("GET", "/printers", None),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let compatibility_printers = compatibility_printers
+            .as_array()
+            .expect("compatibility printers");
+        assert_eq!(compatibility_printers.len(), 2);
+        let profile_printer = compatibility_printers
+            .iter()
+            .find(|printer| printer["name"] == "Office Laser — A4 shipping")
+            .expect("virtual profile printer");
+        assert_eq!(profile_printer["capabilities"]["papers"].as_object().unwrap().len(), 1);
+        let virtual_id = profile_printer["id"].as_i64().expect("virtual printer ID");
+
+        let (status, created) = compatibility_json(
+            &application.router,
+            compatibility_request(
+                "POST",
+                "/printjobs",
+                Some(format!(
+                    r#"{{"printerId":{virtual_id},"title":"Profile job","contentType":"pdf_base64","content":"JVBERi0=","options":{{"copies":2}}}}"#
+                )),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert!(created.is_i64());
+
+        let rejected = application
+            .router
+            .clone()
+            .oneshot(compatibility_request(
+                "POST",
+                "/printjobs",
+                Some(format!(
+                    r#"{{"printerId":{virtual_id},"title":"Unsafe profile job","contentType":"pdf_base64","content":"JVBERi0=","options":{{"paper":"Letter"}}}}"#
+                )),
+            ))
+            .await
+            .expect("profile override response");
+        assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

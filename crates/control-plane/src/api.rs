@@ -984,6 +984,37 @@ pub async fn agent_sync(
                         name: profile.name.clone(),
                         is_default: profile.is_default,
                         options: profile.options.clone(),
+                        status: serde_json::to_value(profile.status)
+                            .ok()
+                            .and_then(|value| value.as_str().map(ToOwned::to_owned)),
+                        native_kind: profile.native_kind.and_then(|kind| {
+                            serde_json::to_value(kind)
+                                .ok()
+                                .and_then(|value| value.as_str().map(ToOwned::to_owned))
+                        }),
+                        native_digest: profile.native_digest.clone(),
+                        driver_fingerprint: (!profile.driver_fingerprint.driver_name.is_empty()
+                            || !profile.driver_fingerprint.native_queue_id.is_empty())
+                        .then(|| serde_json::to_value(&profile.driver_fingerprint))
+                        .transpose()
+                        .ok()
+                        .flatten(),
+                        summary: Some(serde_json::to_value(&profile.summary).unwrap_or_default()),
+                        stock_id: profile.stock_id.clone(),
+                        safe_overrides: profile
+                            .safe_overrides
+                            .iter()
+                            .filter_map(|value| {
+                                serde_json::to_value(value)
+                                    .ok()
+                                    .and_then(|value| value.as_str().map(ToOwned::to_owned))
+                            })
+                            .collect(),
+                        last_validated_at: profile
+                            .last_validated_unix_ms
+                            .and_then(chrono::DateTime::<Utc>::from_timestamp_millis),
+                        last_test_job_id: profile.last_test_job_id.clone(),
+                        published: profile.published,
                     })
                     .collect(),
             })

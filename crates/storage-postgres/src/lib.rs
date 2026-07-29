@@ -103,6 +103,26 @@ pub struct PrinterProfileSnapshot {
     pub name: String,
     pub is_default: bool,
     pub options: JobOptions,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub native_kind: Option<String>,
+    #[serde(default)]
+    pub native_digest: Option<String>,
+    #[serde(default)]
+    pub driver_fingerprint: Option<serde_json::Value>,
+    #[serde(default)]
+    pub summary: Option<serde_json::Value>,
+    #[serde(default)]
+    pub stock_id: Option<String>,
+    #[serde(default)]
+    pub safe_overrides: Vec<String>,
+    #[serde(default)]
+    pub last_validated_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub last_test_job_id: Option<String>,
+    #[serde(default)]
+    pub published: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
