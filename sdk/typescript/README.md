@@ -22,5 +22,34 @@ const job = await spool.jobs.create(
 console.log(job.id, job.state);
 ```
 
+For private PDFs, declare the exact length and SHA-256 digest, then stream the
+binary body without Base64:
+
+```ts
+const file = new Blob([pdfBytes], { type: 'application/pdf' });
+const upload = await spool.uploads.createAndPut(
+  {
+    media_type: 'application/pdf',
+    byte_length: file.size,
+    sha256: pdfSha256
+  },
+  file
+);
+
+await spool.jobs.create(
+  {
+    target_id: 'tgt_01K...',
+    title: 'Order 481 label',
+    content_type: 'pdf',
+    content: { type: 'upload', upload_id: upload.id }
+  },
+  'order-481-label'
+);
+```
+
+`stocks`, `printers`, and `targets` expose portable geometry, immutable profile
+summaries, safe overrides, and current target readiness. Vendor-native settings
+are display-only facts captured by the node.
+
 Set `baseUrl` for self-hosted deployments or
 `http://127.0.0.1:39100` for local-only mode.

@@ -6,6 +6,11 @@ import type {
   CreateApiKey,
   CreateDeviceAuthorization,
   CreateJob,
+  CreateStock,
+  CreateTarget,
+  CreateTargetBinding,
+  CreateUpload,
+  CreatedUpload,
   CreatedDeviceAuthorization,
   DeploymentMeta,
   DeviceAuthorizationExchange,
@@ -21,8 +26,15 @@ import type {
   LocalOwnerSession,
   NodeUpdate,
   NodeUpdatePolicy,
+  PatchStock,
+  PatchTarget,
   Page,
   Printer,
+  Stock,
+  Target,
+  TargetBinding,
+  TargetReadiness,
+  Upload,
   Webhook,
   Workspace,
   WorkspaceMember
@@ -192,7 +204,66 @@ export class SpoolClient {
 
   readonly printers = {
     list: (options?: ListOptions) =>
-      this.request<Page<Printer>>('GET', '/v1/printers', options ? { query: options } : {})
+      this.request<Page<Printer>>('GET', '/v1/printers', options ? { query: options } : {}),
+    retrieve: (id: string) =>
+      this.request<Printer>('GET', `/v1/printers/${encodeURIComponent(id)}`)
+  };
+
+  readonly stocks = {
+    list: () => this.request<Stock[]>('GET', '/v1/stocks'),
+    create: (input: CreateStock) =>
+      this.request<Stock>('POST', '/v1/stocks', { body: input }),
+    update: (id: string, input: PatchStock) =>
+      this.request<Stock>('PATCH', `/v1/stocks/${encodeURIComponent(id)}`, { body: input })
+  };
+
+  readonly targets = {
+    list: () => this.request<Target[]>('GET', '/v1/targets'),
+    create: (input: CreateTarget) =>
+      this.request<Target>('POST', '/v1/targets', { body: input }),
+    update: (id: string, input: PatchTarget) =>
+      this.request<Target>('PATCH', `/v1/targets/${encodeURIComponent(id)}`, { body: input }),
+    bindings: (id: string) =>
+      this.request<TargetBinding[]>(
+        'GET',
+        `/v1/targets/${encodeURIComponent(id)}/bindings`
+      ),
+    bind: (id: string, input: CreateTargetBinding) =>
+      this.request<TargetBinding>(
+        'POST',
+        `/v1/targets/${encodeURIComponent(id)}/bindings`,
+        { body: input }
+      ),
+    unbind: (targetId: string, bindingId: string) =>
+      this.request<void>(
+        'DELETE',
+        `/v1/targets/${encodeURIComponent(targetId)}/bindings/${encodeURIComponent(bindingId)}`
+      ),
+    readiness: (id: string) =>
+      this.request<TargetReadiness>(
+        'GET',
+        `/v1/targets/${encodeURIComponent(id)}/readiness`
+      )
+  };
+
+  readonly uploads = {
+    create: (input: CreateUpload) =>
+      this.request<CreatedUpload>('POST', '/v1/uploads', { body: input }),
+    retrieve: (id: string) =>
+      this.request<Upload>('GET', `/v1/uploads/${encodeURIComponent(id)}`),
+    put: (upload: CreatedUpload, content: BodyInit) => this.putUpload(upload, content),
+    complete: (id: string, sha256: string, byteLength: number) =>
+      this.request<Upload>('POST', `/v1/uploads/${encodeURIComponent(id)}/complete`, {
+        body: { sha256, byte_length: byteLength }
+      }),
+    createAndPut: async (input: CreateUpload, content: BodyInit) => {
+      const upload = await this.uploads.create(input);
+      const stored = await this.uploads.put(upload, content);
+      if (upload.requires_completion) {
+        return this.uploads.complete(upload.id, input.sha256, input.byte_length);
+      }
+      return stored ?? this.uploads.retrieve(upload.id);
+    }
   };
 
   readonly jobs = {
@@ -279,5 +350,43 @@ export class SpoolClient {
     const text = await response.text();
     if (text === '') return undefined as T;
     return JSON.parse(text) as T;
+  }
+
+  private async putUpload(upload: CreatedUpload, content: BodyInit): Promise<Upload | undefined> {
+    const relative = !/^[a-z][a-z\d+\-.]*:/i.test(upload.upload_url);
+    const url = new URL(upload.upload_url, `${this.baseUrl}/`);
+    const headers: Record<string, string> = {
+      ...(upload.upload_headers ?? {})
+    };
+    if (!headers['content-type']) headers['content-type'] = upload.media_type;
+    if (relative) {
+      Object.assign(headers, this.defaultHeaders);
+      const dynamicToken = await this.accessToken?.();
+      const authorization = this.apiKey ?? dynamicToken;
+      if (authorization) headers.authorization = `Bearer ${authorization}`;
+    }
+    const response = await this.fetcher(url, {
+      method: upload.upload_method ?? 'PUT',
+      headers,
+      body: content
+    });
+    if (!response.ok) {
+      let body: ErrorEnvelope | undefined;
+      try {
+        body = (await response.json()) as ErrorEnvelope;
+      } catch {
+        // Signed storage URLs can return provider-specific text or XML.
+      }
+      throw new SpoolError(
+        response.status,
+        body?.error ?? {
+          code: 'upload_failed',
+          message: response.statusText || 'Document upload failed',
+          retryable: response.status >= 500
+        }
+      );
+    }
+    const text = await response.text();
+    return text === '' ? undefined : (JSON.parse(text) as Upload);
   }
 }

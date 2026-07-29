@@ -845,6 +845,26 @@ paths:
           $ref: "#/components/responses/Error"
         "403":
           $ref: "#/components/responses/Error"
+  /v1/printers/{printer_id}:
+    parameters:
+      - name: printer_id
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      summary: Retrieve a printer with capability and profile snapshots
+      tags: [Printers]
+      operationId: getPrinter
+      responses:
+        "200":
+          description: Printer in the authenticated workspace and environment.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Printer" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
   /v1/stocks:
     get:
       summary: List stocks
@@ -1313,6 +1333,23 @@ paths:
           $ref: "#/components/responses/Error"
         "403":
           $ref: "#/components/responses/Error"
+  /v1/uploads/{upload_id}:
+    parameters:
+      - $ref: "#/components/parameters/UploadId"
+    get:
+      summary: Retrieve upload state
+      description: Use after a transport interruption to determine whether the upload completed.
+      tags: [Jobs]
+      operationId: getUpload
+      responses:
+        "200":
+          description: Upload in the authenticated workspace and environment.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Upload" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
   /v1/uploads/{upload_id}/content:
     parameters:
       - $ref: "#/components/parameters/UploadId"
@@ -2258,10 +2295,20 @@ components:
       allOf:
         - $ref: "#/components/schemas/Upload"
         - type: object
-          required: [upload_url]
+          required: [upload_url, upload_method, upload_headers, requires_completion]
           properties:
             upload_url:
-              type: [string, "null"]
+              type: string
+              description: Relative authenticated proxy URL or an absolute, time-limited object-store URL.
+            upload_method:
+              type: string
+              enum: [PUT]
+            upload_headers:
+              type: object
+              additionalProperties: { type: string }
+            requires_completion:
+              type: boolean
+              description: Direct object-store uploads require POST complete; proxy uploads complete during PUT.
     EnrolRequest:
       type: object
       additionalProperties: false
@@ -2746,7 +2793,7 @@ components:
         name: { type: string, minLength: 1, maxLength: 120 }
         sku: { type: string, maxLength: 120 }
         description: { type: string, maxLength: 2000 }
-        attributes: { type: object, additionalProperties: true }
+        attributes: { $ref: "#/components/schemas/StockAttributes" }
     PatchStock:
       type: object
       additionalProperties: false
@@ -2754,7 +2801,7 @@ components:
         name: { type: string, minLength: 1, maxLength: 120 }
         sku: { type: string, maxLength: 120 }
         description: { type: string, maxLength: 2000 }
-        attributes: { type: object, additionalProperties: true }
+        attributes: { $ref: "#/components/schemas/StockAttributes" }
         archived: { type: boolean }
     Stock:
       type: object
@@ -2764,10 +2811,38 @@ components:
         name: { type: string }
         sku: { type: [string, "null"] }
         description: { type: [string, "null"] }
-        attributes: { type: object, additionalProperties: true }
+        attributes: { $ref: "#/components/schemas/StockAttributes" }
         archived: { type: boolean }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
+    StockAttributes:
+      type: object
+      description: Portable design facts only. Vendor-native settings remain opaque in the node profile.
+      additionalProperties: true
+      properties:
+        kind:
+          type: string
+          enum: [sheet, label, roll, continuous, envelope, card]
+        width_mm: { type: number, exclusiveMinimum: 0 }
+        height_mm: { type: number, exclusiveMinimum: 0 }
+        length_mm: { type: number, exclusiveMinimum: 0 }
+        orientation:
+          type: string
+          enum: [portrait, landscape, either]
+        gap_mm: { type: number, minimum: 0 }
+        mark_interval_mm: { type: number, exclusiveMinimum: 0 }
+        bleed_mm: { type: number, minimum: 0 }
+        safe_area_mm:
+          type: object
+          additionalProperties: false
+          required: [top, right, bottom, left]
+          properties:
+            top: { type: number, minimum: 0 }
+            right: { type: number, minimum: 0 }
+            bottom: { type: number, minimum: 0 }
+            left: { type: number, minimum: 0 }
+        source: { type: string }
+        media: { type: string }
     CreateTarget:
       type: object
       additionalProperties: false

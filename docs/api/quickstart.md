@@ -36,6 +36,8 @@ polling until a terminal state, and handle `delivery_uncertain` manually.
 
 URI sources must remain available until the node downloads them. Prefer upload
 objects for private or short-lived content. Never put keys in query strings.
+See [uploads and design applications](uploads-and-design-apps.md) for binary
+uploads, stock geometry, immutable profile summaries, and target readiness.
 
 The machine-readable contract is
 [`contracts/openapi/spool-v1.yaml`](../../contracts/openapi/spool-v1.yaml).

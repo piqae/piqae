@@ -226,4 +226,124 @@ describe('SpoolClient', () => {
     expect(String(exchangeUrl)).not.toContain('spl_owner_once');
     expect(JSON.parse(String(exchangeInit?.body))).toEqual({ credential: 'spl_owner_once' });
   });
+
+  it('exposes typed stocks, target bindings, and readiness', async () => {
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        Response.json([
+          {
+            id: 'stk_01',
+            name: '62 × 29 label',
+            sku: 'LABEL-62-29',
+            description: null,
+            attributes: { kind: 'label', width_mm: 62, height_mm: 29, gap_mm: 3 },
+            archived: false,
+            created_at: '2026-07-29T00:00:00Z',
+            updated_at: '2026-07-29T00:00:00Z'
+          }
+        ])
+      )
+      .mockResolvedValueOnce(Response.json([]))
+      .mockResolvedValueOnce(
+        Response.json({
+          target_id: 'tgt_01',
+          status: 'target_has_no_ready_binding',
+          selected_binding_id: null,
+          bindings: []
+        })
+      );
+    const client = new SpoolClient({
+      apiKey: 'spl_live_design_app',
+      fetch: fetcher,
+      baseUrl: 'https://print.example.test'
+    });
+
+    const stocks = await client.stocks.list();
+    await client.targets.bindings('tgt_01');
+    const readiness = await client.targets.readiness('tgt_01');
+
+    expect(stocks[0]?.attributes).toMatchObject({
+      kind: 'label',
+      width_mm: 62,
+      height_mm: 29
+    });
+    expect(readiness.status).toBe('target_has_no_ready_binding');
+    expect(String(fetcher.mock.calls[1]?.[0])).toBe(
+      'https://print.example.test/v1/targets/tgt_01/bindings'
+    );
+  });
+
+  it('uploads declared content through the authenticated proxy without base64', async () => {
+    const created = {
+      id: 'upl_01',
+      object_key: 'hidden/object',
+      media_type: 'application/pdf',
+      expected_sha256: 'a'.repeat(64),
+      expected_bytes: 4,
+      state: 'pending',
+      expires_at: '2026-07-29T01:00:00Z',
+      upload_url: '/v1/uploads/upl_01/content',
+      upload_method: 'PUT',
+      upload_headers: { 'content-type': 'application/pdf' },
+      requires_completion: false
+    } as const;
+    const completed = { ...created, state: 'complete' } as const;
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(Response.json(created, { status: 201 }))
+      .mockResolvedValueOnce(Response.json(completed));
+    const client = new SpoolClient({
+      apiKey: 'spl_live_upload',
+      fetch: fetcher,
+      baseUrl: 'https://print.example.test'
+    });
+
+    const result = await client.uploads.createAndPut(
+      {
+        media_type: 'application/pdf',
+        byte_length: 4,
+        sha256: 'a'.repeat(64)
+      },
+      new Blob(['%PDF'], { type: 'application/pdf' })
+    );
+
+    const [uploadUrl, uploadInit] = fetcher.mock.calls[1] ?? [];
+    expect(String(uploadUrl)).toBe('https://print.example.test/v1/uploads/upl_01/content');
+    expect(uploadInit?.body).toBeInstanceOf(Blob);
+    expect(new Headers(uploadInit?.headers).get('authorization')).toBe(
+      'Bearer spl_live_upload'
+    );
+    expect(result.state).toBe('complete');
+  });
+
+  it('never forwards a Spool API key to an absolute signed upload URL', async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(null, { status: 200 }));
+    const client = new SpoolClient({
+      apiKey: 'spl_live_must_not_leak',
+      fetch: fetcher,
+      baseUrl: 'https://print.example.test'
+    });
+
+    await client.uploads.put(
+      {
+        id: 'upl_01',
+        object_key: 'hidden/object',
+        media_type: 'application/pdf',
+        expected_sha256: 'a'.repeat(64),
+        expected_bytes: 4,
+        state: 'pending',
+        expires_at: '2026-07-29T01:00:00Z',
+        upload_url: 'https://storage.example.test/signed',
+        upload_method: 'PUT',
+        upload_headers: { 'x-upload-token': 'opaque' },
+        requires_completion: true
+      },
+      new Blob(['%PDF'])
+    );
+
+    const headers = new Headers(fetcher.mock.calls[0]?.[1]?.headers);
+    expect(headers.get('authorization')).toBeNull();
+    expect(headers.get('x-upload-token')).toBe('opaque');
+  });
 });

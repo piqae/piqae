@@ -3,6 +3,7 @@
 - [Quickstart](quickstart.md)
 - [Authentication](authentication.md)
 - [Idempotency](idempotency.md)
+- [Uploads and design applications](uploads-and-design-apps.md)
 - [Webhooks](webhooks.md)
 - [PrintNode migration](printnode-migration.md)
 

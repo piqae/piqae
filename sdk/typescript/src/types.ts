@@ -45,6 +45,39 @@ export interface DeploymentMeta {
   updates: { official_feed: boolean; custom_feed: boolean };
 }
 
+export type UploadMediaType = 'application/pdf' | 'application/octet-stream';
+
+export interface CreateUpload {
+  media_type: UploadMediaType;
+  /** Exact byte length. The server rejects content that differs. */
+  byte_length: number;
+  /** Lower- or upper-case hexadecimal SHA-256 digest. */
+  sha256: string;
+}
+
+export interface Upload {
+  id: SpoolId;
+  /** Storage implementation detail. Do not persist or construct this value. */
+  object_key: string;
+  media_type: UploadMediaType;
+  expected_sha256: string;
+  expected_bytes: number;
+  state: 'pending' | 'complete' | 'expired';
+  expires_at: string;
+}
+
+export interface CreatedUpload extends Upload {
+  /** Relative proxy URL or absolute, time-limited object-store URL. */
+  upload_url: string;
+  upload_method?: 'PUT';
+  upload_headers?: Record<string, string>;
+  /**
+   * Direct object-store uploads require an explicit completion call. Proxy
+   * uploads are verified and completed by their PUT response.
+   */
+  requires_completion?: boolean;
+}
+
 export interface Workspace {
   id: SpoolId;
   name: string;
@@ -312,6 +345,132 @@ export interface PrintProfileSummary {
   native?: Record<string, string>;
 }
 
+export interface StockSafeAreaMm {
+  top: number;
+  right: number;
+  bottom: number;
+  left: number;
+}
+
+/**
+ * Portable, design-facing stock facts. Vendor-native controls remain opaque
+ * inside the node profile and cannot be edited through this object.
+ */
+export interface StockAttributes {
+  kind?: 'sheet' | 'label' | 'roll' | 'continuous' | 'envelope' | 'card' | string;
+  width_mm?: number;
+  height_mm?: number;
+  length_mm?: number;
+  orientation?: 'portrait' | 'landscape' | 'either';
+  gap_mm?: number;
+  mark_interval_mm?: number;
+  bleed_mm?: number;
+  safe_area_mm?: StockSafeAreaMm;
+  source?: string;
+  media?: string;
+  [key: string]: unknown;
+}
+
+export interface Stock {
+  id: SpoolId;
+  name: string;
+  sku: string | null;
+  description: string | null;
+  attributes: StockAttributes;
+  archived: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateStock {
+  name: string;
+  sku?: string;
+  description?: string;
+  attributes?: StockAttributes;
+}
+
+export interface PatchStock {
+  name?: string;
+  sku?: string;
+  description?: string;
+  attributes?: StockAttributes;
+  archived?: boolean;
+}
+
+export interface Target {
+  id: SpoolId;
+  name: string;
+  description: string | null;
+  stock_id: SpoolId | null;
+  enabled: boolean;
+  routing_policy: 'primary_then_standby';
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateTarget {
+  name: string;
+  description?: string;
+  stock_id?: SpoolId;
+  enabled?: boolean;
+  routing_policy?: 'primary_then_standby';
+}
+
+export interface PatchTarget {
+  name?: string;
+  description?: string;
+  stock_id?: SpoolId;
+  clear_stock?: boolean;
+  enabled?: boolean;
+  routing_policy?: 'primary_then_standby';
+}
+
+export interface TargetBinding {
+  id: SpoolId;
+  target_id: SpoolId;
+  printer_id: SpoolId;
+  agent_id: SpoolId;
+  profile_id: SpoolId;
+  profile_revision: number;
+  role: 'primary' | 'standby';
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateTargetBinding {
+  printer_id: SpoolId;
+  profile_id: SpoolId;
+  profile_revision: number;
+  role: 'primary' | 'standby';
+  enabled?: boolean;
+}
+
+export type BindingReadinessStatus =
+  | 'ready'
+  | 'disabled'
+  | 'node_offline'
+  | 'destination_offline'
+  | 'destination_missing'
+  | 'needs_operator'
+  | 'profile_stale'
+  | 'driver_mismatch'
+  | 'dependency_missing'
+  | 'busy';
+
+export interface BindingReadiness {
+  binding: TargetBinding;
+  status: BindingReadinessStatus;
+  reasons: string[];
+}
+
+export interface TargetReadiness {
+  target_id: SpoolId;
+  status: 'ready' | 'target_has_no_ready_binding';
+  selected_binding_id: SpoolId | null;
+  bindings: BindingReadiness[];
+}
+
 export interface JobOptions {
   bin?: string;
   collate?: boolean;
@@ -334,11 +493,7 @@ export type JobContent =
   | { type: 'base64'; data: string }
   | { type: 'uri'; uri: string };
 
-export interface CreateJob {
-  /** Concrete printer destination. Provide exactly one destination field. */
-  printer_id?: SpoolId;
-  /** Logical primary/standby destination. Provide exactly one destination field. */
-  target_id?: SpoolId;
+export interface CreateJobBase {
   title: string;
   source?: string | null;
   content_type: 'pdf' | 'raw';
@@ -349,6 +504,12 @@ export interface CreateJob {
   metadata?: Record<string, string>;
 }
 
+export type CreateJob = CreateJobBase &
+  (
+    | { printer_id: SpoolId; target_id?: never }
+    | { target_id: SpoolId; printer_id?: never }
+  );
+
 export interface Job {
   id: SpoolId;
   printer_id: SpoolId;
@@ -357,6 +518,7 @@ export interface Job {
   content_type: 'pdf' | 'raw';
   deliveries: number;
   state: JobState;
+  metadata?: Record<string, string>;
   created_at: string;
   expires_at: string;
 }
