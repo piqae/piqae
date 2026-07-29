@@ -8,8 +8,11 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use spool_agent_storage::{AcceptedJob, AgentStore, LocalJob, StorageError};
-use spool_domain::{EventId, JobOptions, JobState, validate_transition};
-use spool_protocol::executor::{NativeJobObservation, NativeJobState};
+use spool_domain::{
+    DriverFingerprint, EventId, JobOptions, JobState, NativeProfileKind, SafeProfileOverride,
+    validate_transition,
+};
+use spool_protocol::executor::{NativeJobObservation, NativeJobState, NativeProfilePayload};
 use std::{
     collections::VecDeque,
     path::{Path, PathBuf},
@@ -30,6 +33,8 @@ pub enum AgentError {
     ContentTooLarge { limit: u64 },
     #[error("invalid stored print options: {0}")]
     InvalidOptions(#[from] serde_json::Error),
+    #[error("invalid pinned native profile: {0}")]
+    InvalidNativeProfile(String),
     #[error("invalid local state {0}")]
     InvalidState(String),
     #[error("invalid state transition from {from:?} to {to:?}")]
@@ -45,6 +50,7 @@ pub struct LocalSubmission {
     pub content_path: PathBuf,
     pub content_kind: String,
     pub options: JobOptions,
+    pub native_profile: Option<NativeProfilePayload>,
     pub deadline_unix_ms: i64,
 }
 
@@ -366,6 +372,7 @@ impl<E: Executor, C: Clock> AgentEngine<E, C> {
         )?;
 
         let options: JobOptions = serde_json::from_str(&job.options_json)?;
+        let native_profile = self.native_profile_for_job(&job)?;
         let submission = LocalSubmission {
             job_id: job.job_id.clone(),
             submission_id: job.submission_id,
@@ -374,6 +381,7 @@ impl<E: Executor, C: Clock> AgentEngine<E, C> {
             content_path: Path::new(&job.content_path).to_path_buf(),
             content_kind: job.content_kind,
             options,
+            native_profile,
             deadline_unix_ms: self.clock.unix_ms() + self.execution_deadline_ms,
         };
 
@@ -476,6 +484,63 @@ impl<E: Executor, C: Clock> AgentEngine<E, C> {
                 Ok(())
             }
         }
+    }
+
+    fn native_profile_for_job(
+        &self,
+        job: &LocalJob,
+    ) -> Result<Option<NativeProfilePayload>, AgentError> {
+        let (profile_id, revision) = match (&job.profile_id, job.profile_revision) {
+            (None, None) => return Ok(None),
+            (Some(profile_id), Some(revision)) => (profile_id, revision),
+            _ => {
+                return Err(AgentError::InvalidNativeProfile(format!(
+                    "job {} has an incomplete profile revision pin",
+                    job.job_id
+                )));
+            }
+        };
+        let metadata = self
+            .store
+            .named_profile_revision(&job.printer_id, profile_id, revision)?
+            .ok_or_else(|| {
+                AgentError::InvalidNativeProfile(format!(
+                    "profile {profile_id} revision {revision} is missing"
+                ))
+            })?;
+        let native = self
+            .store
+            .native_profile_blob(profile_id, revision)?
+            .ok_or_else(|| {
+                AgentError::InvalidNativeProfile(format!(
+                    "native payload for profile {profile_id} revision {revision} is missing"
+                ))
+            })?;
+        if metadata.native_blob_id.as_deref() != Some(native.blob_id.as_str())
+            || metadata.native_digest.as_deref() != Some(native.digest.as_str())
+            || metadata.native_kind != native.native_kind
+        {
+            return Err(AgentError::InvalidNativeProfile(format!(
+                "profile {profile_id} revision {revision} metadata does not match its immutable payload"
+            )));
+        }
+        let kind = serde_json::from_value::<NativeProfileKind>(serde_json::Value::String(
+            native.native_kind,
+        ))?;
+        let safe_overrides =
+            serde_json::from_str::<Vec<SafeProfileOverride>>(&metadata.safe_overrides_json)?;
+        let driver_fingerprint =
+            serde_json::from_str::<DriverFingerprint>(&metadata.driver_fingerprint_json)?;
+        Ok(Some(NativeProfilePayload {
+            profile_id: profile_id.clone(),
+            revision,
+            kind,
+            schema_version: native.schema_version,
+            digest: native.digest,
+            blob: native.native_blob,
+            safe_overrides,
+            driver_fingerprint,
+        }))
     }
 
     async fn reconcile_cancellation(
@@ -860,6 +925,103 @@ mod tests {
                 .as_deref(),
             Some("fake-1")
         );
+    }
+
+    #[tokio::test]
+    async fn submission_uses_the_exact_pinned_native_profile_revision() {
+        let mut store = AgentStore::in_memory().expect("store");
+        let printer = store
+            .upsert_printer("native", "HP", "online", true, "{}", 1)
+            .expect("printer");
+        store
+            .create_profile_capture_session(
+                "capture-1",
+                "token-1",
+                &printer.printer_id,
+                None,
+                None,
+                "create",
+                "user",
+                1_000,
+                1,
+            )
+            .expect("capture session");
+        let first_blob = br#"{"options":{"media":"iso_a4_210x297mm"}}"#.to_vec();
+        let first = spool_agent_storage::NativeProfileCapture {
+            name: "A4".into(),
+            is_default: true,
+            options_json: "{}".into(),
+            status: "ready".into(),
+            native_kind: "cups_options".into(),
+            native_schema_version: spool_domain::NATIVE_PROFILE_SCHEMA_VERSION,
+            native_digest: format!("sha256:{:x}", Sha256::digest(&first_blob)),
+            native_blob: first_blob.clone(),
+            driver_fingerprint_json: serde_json::to_string(&DriverFingerprint {
+                platform: "macos".into(),
+                driver_name: "HP".into(),
+                native_queue_id: "native".into(),
+                ..Default::default()
+            })
+            .expect("fingerprint"),
+            summary_json: "{}".into(),
+            stock_id: None,
+            dependencies_json: "[]".into(),
+            safe_overrides_json: r#"["copies"]"#.into(),
+            published: true,
+        };
+        let revision_one = store
+            .commit_profile_capture("capture-1", "token-1", "user", &first, 2)
+            .expect("first revision");
+
+        let mut accepted = accepted("job-profile", "pdf");
+        accepted.printer_id.clone_from(&printer.printer_id);
+        let mut engine = AgentEngine::new(store, FakeExecutor::default(), FixedClock(10));
+        engine.accept(&accepted).expect("accept");
+        engine
+            .store_mut()
+            .pin_job_profile(
+                "job-profile",
+                None,
+                None,
+                &revision_one.profile_id,
+                revision_one.revision,
+                None,
+                None,
+            )
+            .expect("pin revision");
+
+        engine
+            .store_mut()
+            .create_profile_capture_session(
+                "capture-2",
+                "token-2",
+                &printer.printer_id,
+                Some(&revision_one.profile_id),
+                Some(revision_one.revision),
+                "edit",
+                "user",
+                1_000,
+                3,
+            )
+            .expect("edit session");
+        let second_blob = br#"{"options":{"media":"na_letter_8.5x11in"}}"#.to_vec();
+        let mut second = first;
+        second.name = "Letter".into();
+        second.native_digest = format!("sha256:{:x}", Sha256::digest(&second_blob));
+        second.native_blob = second_blob;
+        let revision_two = engine
+            .store_mut()
+            .commit_profile_capture("capture-2", "token-2", "user", &second, 4)
+            .expect("second revision");
+        assert_eq!(revision_two.revision, revision_one.revision + 1);
+
+        engine.run_once().await.expect("run");
+        let submitted = &engine.executor_mut().submitted[0];
+        let profile = submitted.native_profile.as_ref().expect("native profile");
+        assert_eq!(profile.profile_id, revision_one.profile_id);
+        assert_eq!(profile.revision, revision_one.revision);
+        assert_eq!(profile.blob, first_blob);
+        assert_eq!(profile.safe_overrides, vec![SafeProfileOverride::Copies]);
     }
 
     #[tokio::test]

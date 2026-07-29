@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use spool_domain::{
-    ContentKind, JobId, JobOptions, NativePrinterOption, PrinterCapabilities, PrinterState,
+    ContentKind, DriverFingerprint, JobId, JobOptions, NativePrinterOption, NativeProfileKind,
+    PrinterCapabilities, PrinterState, SafeProfileOverride,
 };
 use std::collections::BTreeMap;
 use uuid::Uuid;
@@ -10,6 +11,24 @@ pub struct ExecutorRequest {
     pub request_id: Uuid,
     pub deadline_unix_ms: i64,
     pub operation: ExecutorOperation,
+}
+
+/// An immutable, locally-held native profile revision pinned to one job.
+///
+/// Native configuration never travels through the control plane. The agent
+/// loads the exact revision selected by routing and sends it only to the
+/// sandboxed local executor that performs the operating-system handoff.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct NativeProfilePayload {
+    pub profile_id: String,
+    pub revision: u64,
+    pub kind: NativeProfileKind,
+    pub schema_version: u16,
+    pub digest: String,
+    pub blob: Vec<u8>,
+    #[serde(default)]
+    pub safe_overrides: Vec<SafeProfileOverride>,
+    pub driver_fingerprint: DriverFingerprint,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -36,6 +55,10 @@ pub enum ExecutorOperation {
         content_kind: ContentKind,
         content_path: String,
         options: JobOptions,
+        /// Exact native profile revision selected before local execution.
+        /// `None` preserves direct printer submissions without a profile.
+        #[serde(default)]
+        native_profile: Option<NativeProfilePayload>,
     },
     Observe {
         native_printer_id: String,

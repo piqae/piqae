@@ -200,6 +200,7 @@ impl Executor for SupervisedExecutor {
                 content_kind,
                 content_path: submission.content_path.to_string_lossy().into_owned(),
                 options: submission.options,
+                native_profile: submission.native_profile,
             },
         };
         match self.supervisor.execute(&request).await {

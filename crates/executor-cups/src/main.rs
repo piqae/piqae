@@ -23,13 +23,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg(unix)]
 mod platform {
+    use serde::{Deserialize, Deserializer, de};
+    use sha2::{Digest, Sha256};
     use spool_domain::{
-        Duplex, NativePrinterChoice, NativePrinterOption, PrinterCapabilities, PrinterState,
-        Rotation,
+        Duplex, JobOptions, NativePrinterChoice, NativePrinterOption, NativeProfileKind,
+        PrinterCapabilities, PrinterState, Rotation, SafeProfileOverride,
     };
     use spool_protocol::executor::{
         DiscoveredPrinter, ExecutorError, ExecutorOperation, ExecutorResult, NativeJobObservation,
-        NativeJobState, NativeQueueJob,
+        NativeJobState, NativeProfilePayload, NativeQueueJob,
     };
     use std::{
         collections::BTreeMap,
@@ -132,6 +134,7 @@ mod platform {
                 content_kind,
                 content_path,
                 options,
+                native_profile,
                 ..
             } => submit(
                 &native_printer_id,
@@ -139,6 +142,7 @@ mod platform {
                 &content_path,
                 content_kind == spool_domain::ContentKind::Raw,
                 &options,
+                native_profile.as_ref(),
             ),
             ExecutorOperation::Observe {
                 native_printer_id,
@@ -634,20 +638,347 @@ mod platform {
         })
     }
 
+    fn ensure_printer_instance(base: &str, instance: &str) -> Result<(), ExecutorError> {
+        // SAFETY: CUPS owns the destination array. Names are compared while
+        // the allocation is alive and it is released exactly once.
+        let found = unsafe {
+            let mut destinations: *mut CupsDest = ptr::null_mut();
+            let count = cups_get_dests(&mut destinations);
+            if count < 0 {
+                return Err(last_error("cups_discovery_failed", false));
+            }
+            let length =
+                usize::try_from(count).map_err(|_| last_error("cups_discovery_failed", false))?;
+            let records = records_or_empty(destinations, length)
+                .ok_or_else(|| last_error("cups_discovery_failed", false))?;
+            let found = records.iter().any(|destination| {
+                !destination.name.is_null()
+                    && !destination.instance.is_null()
+                    && CStr::from_ptr(destination.name).to_bytes() == base.as_bytes()
+                    && CStr::from_ptr(destination.instance).to_bytes() == instance.as_bytes()
+            });
+            if !destinations.is_null() {
+                cups_free_dests(count, destinations);
+            }
+            found
+        };
+        found.then_some(()).ok_or_else(|| ExecutorError {
+            code: "profile_destination_missing".into(),
+            message: format!("CUPS instance {base}/{instance} was not found"),
+            retryable: false,
+            handoff_may_have_succeeded: false,
+        })
+    }
+
+    const MAX_CUPS_PROFILE_BYTES: usize = 64 * 1024;
+    const MAX_CUPS_PROFILE_OPTIONS: usize = 256;
+    const MAX_CUPS_OPTION_NAME_BYTES: usize = 255;
+    const MAX_CUPS_OPTION_VALUE_BYTES: usize = 4096;
+
+    #[derive(Debug, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct CupsProfileDocument {
+        #[serde(default)]
+        instance: Option<String>,
+        #[serde(deserialize_with = "deserialize_unique_options")]
+        options: BTreeMap<String, String>,
+    }
+
+    fn deserialize_unique_options<'de, D>(
+        deserializer: D,
+    ) -> Result<BTreeMap<String, String>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct UniqueOptions;
+
+        impl<'de> de::Visitor<'de> for UniqueOptions {
+            type Value = BTreeMap<String, String>;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a map of unique CUPS option names to string values")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: de::MapAccess<'de>,
+            {
+                let mut options = BTreeMap::new();
+                while let Some((name, value)) = map.next_entry::<String, String>()? {
+                    if options.insert(name.clone(), value).is_some() {
+                        return Err(de::Error::custom(format!("duplicate CUPS option {name:?}")));
+                    }
+                }
+                Ok(options)
+            }
+        }
+
+        deserializer.deserialize_map(UniqueOptions)
+    }
+
+    fn prepare_submission(
+        printer: &str,
+        raw: bool,
+        requested: &JobOptions,
+        profile: Option<&NativeProfilePayload>,
+    ) -> Result<(String, Vec<(String, String)>), ExecutorError> {
+        let Some(profile) = profile else {
+            return Ok((printer.to_owned(), cups_job_options(raw, requested)));
+        };
+        if raw {
+            return Err(profile_error(
+                "native_profile_raw_unsupported",
+                "RAW jobs cannot use a rendered native print profile",
+            ));
+        }
+        if profile.kind == NativeProfileKind::MacosPrintcore {
+            return Err(profile_error(
+                "native_profile_backend_unavailable",
+                "the CUPS executor cannot replay a macOS PrintCore profile",
+            ));
+        }
+        if !matches!(
+            profile.kind,
+            NativeProfileKind::CupsOptions | NativeProfileKind::CupsInstance
+        ) {
+            return Err(profile_error(
+                "native_profile_backend_unavailable",
+                "this native profile kind is not supported by the CUPS executor",
+            ));
+        }
+        if profile.schema_version != spool_domain::NATIVE_PROFILE_SCHEMA_VERSION {
+            return Err(profile_error(
+                "native_profile_schema_unsupported",
+                format!(
+                    "unsupported native profile schema {}; expected {}",
+                    profile.schema_version,
+                    spool_domain::NATIVE_PROFILE_SCHEMA_VERSION
+                ),
+            ));
+        }
+        verify_profile_digest(profile)?;
+        if profile.driver_fingerprint.native_queue_id != printer {
+            return Err(profile_error(
+                "profile_destination_mismatch",
+                format!(
+                    "profile belongs to CUPS queue {}, not {printer}",
+                    profile.driver_fingerprint.native_queue_id
+                ),
+            ));
+        }
+        let document = parse_cups_profile(&profile.blob)?;
+        let destination = match profile.kind {
+            NativeProfileKind::CupsOptions => {
+                if document.instance.is_some() {
+                    return Err(profile_error(
+                        "native_profile_invalid",
+                        "cups_options profiles cannot select a saved CUPS instance",
+                    ));
+                }
+                printer.to_owned()
+            }
+            NativeProfileKind::CupsInstance => {
+                let instance = document.instance.as_deref().ok_or_else(|| {
+                    profile_error(
+                        "native_profile_invalid",
+                        "cups_instance profiles require an instance name",
+                    )
+                })?;
+                validate_instance_name(instance)?;
+                format!("{printer}/{instance}")
+            }
+            _ => unreachable!("profile kind was checked above"),
+        };
+        enforce_safe_overrides(requested, &profile.safe_overrides)?;
+        let mut merged: Vec<(String, String)> = document.options.into_iter().collect();
+        for (name, value) in cups_job_options(false, requested) {
+            if let Some(existing) = merged
+                .iter_mut()
+                .find(|(existing, _)| existing.eq_ignore_ascii_case(&name))
+            {
+                existing.1 = value;
+            } else {
+                merged.push((name, value));
+            }
+        }
+        Ok((destination, merged))
+    }
+
+    fn parse_cups_profile(blob: &[u8]) -> Result<CupsProfileDocument, ExecutorError> {
+        if blob.len() > MAX_CUPS_PROFILE_BYTES {
+            return Err(profile_error(
+                "native_profile_too_large",
+                format!("CUPS profile exceeds the {MAX_CUPS_PROFILE_BYTES} byte executor limit"),
+            ));
+        }
+        let document: CupsProfileDocument = serde_json::from_slice(blob).map_err(|error| {
+            profile_error(
+                "native_profile_invalid",
+                format!("CUPS profile is not valid schema-1 JSON: {error}"),
+            )
+        })?;
+        if document.options.len() > MAX_CUPS_PROFILE_OPTIONS {
+            return Err(profile_error(
+                "native_profile_too_many_options",
+                format!("CUPS profile has more than {MAX_CUPS_PROFILE_OPTIONS} options"),
+            ));
+        }
+        let mut case_folded = std::collections::BTreeSet::new();
+        for (name, value) in &document.options {
+            if name.is_empty()
+                || name.len() > MAX_CUPS_OPTION_NAME_BYTES
+                || value.len() > MAX_CUPS_OPTION_VALUE_BYTES
+                || name.bytes().any(|byte| byte.is_ascii_control())
+                || value.bytes().any(|byte| byte == 0)
+            {
+                return Err(profile_error(
+                    "native_profile_invalid_option",
+                    format!("CUPS profile contains an invalid option named {name:?}"),
+                ));
+            }
+            let folded = name.to_ascii_lowercase();
+            if !case_folded.insert(folded) {
+                return Err(profile_error(
+                    "native_profile_invalid_option",
+                    format!("CUPS profile contains duplicate option {name:?}"),
+                ));
+            }
+            if name.eq_ignore_ascii_case("raw") {
+                return Err(profile_error(
+                    "native_profile_invalid_option",
+                    "a rendered CUPS profile cannot enable RAW mode",
+                ));
+            }
+        }
+        Ok(document)
+    }
+
+    fn enforce_safe_overrides(
+        requested: &JobOptions,
+        allowed: &[SafeProfileOverride],
+    ) -> Result<(), ExecutorError> {
+        if !requested.native_options.is_empty() {
+            return Err(profile_error(
+                "profile_override_not_allowed",
+                "driver-specific native_options cannot override an immutable native profile",
+            ));
+        }
+        for (is_requested, field) in [
+            (requested.bin.is_some(), SafeProfileOverride::Bin),
+            (requested.collate.is_some(), SafeProfileOverride::Collate),
+            (requested.color.is_some(), SafeProfileOverride::Color),
+            (requested.copies.is_some(), SafeProfileOverride::Copies),
+            (requested.dpi.is_some(), SafeProfileOverride::Dpi),
+            (requested.duplex.is_some(), SafeProfileOverride::Duplex),
+            (
+                requested.fit_to_page.is_some(),
+                SafeProfileOverride::FitToPage,
+            ),
+            (requested.media.is_some(), SafeProfileOverride::Media),
+            (requested.nup.is_some(), SafeProfileOverride::Nup),
+            (requested.pages.is_some(), SafeProfileOverride::Pages),
+            (requested.paper.is_some(), SafeProfileOverride::Paper),
+            (requested.rotate.is_some(), SafeProfileOverride::Rotate),
+        ] {
+            if is_requested && !allowed.contains(&field) {
+                return Err(profile_error(
+                    "profile_override_not_allowed",
+                    format!(
+                        "profile does not allow {} to be changed per job",
+                        override_name(field)
+                    ),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    const fn override_name(value: SafeProfileOverride) -> &'static str {
+        match value {
+            SafeProfileOverride::Bin => "bin",
+            SafeProfileOverride::Collate => "collate",
+            SafeProfileOverride::Color => "color",
+            SafeProfileOverride::Copies => "copies",
+            SafeProfileOverride::Dpi => "dpi",
+            SafeProfileOverride::Duplex => "duplex",
+            SafeProfileOverride::FitToPage => "fit_to_page",
+            SafeProfileOverride::Media => "media",
+            SafeProfileOverride::Nup => "nup",
+            SafeProfileOverride::Pages => "pages",
+            SafeProfileOverride::Paper => "paper",
+            SafeProfileOverride::Rotate => "rotate",
+        }
+    }
+
+    fn validate_instance_name(instance: &str) -> Result<(), ExecutorError> {
+        if instance.is_empty()
+            || instance.len() > MAX_CUPS_OPTION_NAME_BYTES
+            || instance
+                .bytes()
+                .any(|byte| byte.is_ascii_control() || byte == b'/')
+        {
+            return Err(profile_error(
+                "native_profile_invalid",
+                "CUPS instance name is invalid",
+            ));
+        }
+        Ok(())
+    }
+
+    fn verify_profile_digest(profile: &NativeProfilePayload) -> Result<(), ExecutorError> {
+        let actual = format!("sha256:{:x}", Sha256::digest(&profile.blob));
+        if !constant_time_equal(actual.as_bytes(), profile.digest.as_bytes()) {
+            return Err(profile_error(
+                "native_profile_digest_mismatch",
+                "native profile digest does not match its immutable payload",
+            ));
+        }
+        Ok(())
+    }
+
+    fn constant_time_equal(left: &[u8], right: &[u8]) -> bool {
+        if left.len() != right.len() {
+            return false;
+        }
+        left.iter()
+            .zip(right)
+            .fold(0_u8, |difference, (left, right)| {
+                difference | (left ^ right)
+            })
+            == 0
+    }
+
+    fn profile_error(code: &str, message: impl Into<String>) -> ExecutorError {
+        ExecutorError {
+            code: code.into(),
+            message: message.into(),
+            retryable: false,
+            handoff_may_have_succeeded: false,
+        }
+    }
+
     fn submit(
         printer: &str,
         title: &str,
         content_path: &str,
         raw: bool,
-        options: &spool_domain::JobOptions,
+        options: &JobOptions,
+        native_profile: Option<&NativeProfilePayload>,
     ) -> Result<ExecutorResult, ExecutorError> {
         ensure_printer(printer)?;
-        let printer = c_string(printer)?;
+        let (submission_destination, mapped_options) =
+            prepare_submission(printer, raw, options, native_profile)?;
+        if let Some(instance) = submission_destination
+            .strip_prefix(printer)
+            .and_then(|suffix| suffix.strip_prefix('/'))
+        {
+            ensure_printer_instance(printer, instance)?;
+        }
+        let printer = c_string(&submission_destination)?;
         let title = c_string(title)?;
         let path = c_string(content_path)?;
         let mut cups_options: *mut CupsOption = ptr::null_mut();
         let mut option_count = 0_i32;
-        let mapped_options = cups_job_options(raw, options);
         for (name, value) in &mapped_options {
             // Validate every value before CUPS allocates the first option, so
             // an embedded NUL cannot leave a partially built array behind.
@@ -903,6 +1234,150 @@ mod platform {
                 cups_job_options(true, &options),
                 vec![("raw".into(), "true".into())]
             );
+        }
+
+        fn cups_profile(
+            kind: NativeProfileKind,
+            instance: Option<&str>,
+            options: &[(&str, &str)],
+            safe_overrides: Vec<SafeProfileOverride>,
+        ) -> NativeProfilePayload {
+            let blob = serde_json::to_vec(&serde_json::json!({
+                "instance": instance,
+                "options": options.iter().copied().collect::<BTreeMap<_, _>>()
+            }))
+            .expect("profile JSON");
+            NativeProfilePayload {
+                profile_id: "profile-a4".into(),
+                revision: 7,
+                kind,
+                schema_version: spool_domain::NATIVE_PROFILE_SCHEMA_VERSION,
+                digest: format!("sha256:{:x}", Sha256::digest(&blob)),
+                blob,
+                safe_overrides,
+                driver_fingerprint: spool_domain::DriverFingerprint {
+                    platform: "macos".into(),
+                    driver_name: "Fixture".into(),
+                    native_queue_id: "HP".into(),
+                    ..Default::default()
+                },
+            }
+        }
+
+        #[test]
+        fn cups_profile_options_are_replayed_and_only_safe_overrides_replace_them() {
+            let profile = cups_profile(
+                NativeProfileKind::CupsOptions,
+                None,
+                &[
+                    ("media", "iso_a4_210x297mm"),
+                    ("print-color-mode", "color"),
+                    ("copies", "1"),
+                ],
+                vec![SafeProfileOverride::Copies],
+            );
+            let requested = JobOptions {
+                copies: Some(3),
+                ..Default::default()
+            };
+            let (destination, options) =
+                prepare_submission("HP", false, &requested, Some(&profile)).expect("replay");
+            assert_eq!(destination, "HP");
+            assert_eq!(
+                options,
+                vec![
+                    ("copies".into(), "3".into()),
+                    ("media".into(), "iso_a4_210x297mm".into()),
+                    ("print-color-mode".into(), "color".into()),
+                ]
+            );
+        }
+
+        #[test]
+        fn cups_profile_rejects_unsafe_and_native_overrides_before_handoff() {
+            let profile = cups_profile(
+                NativeProfileKind::CupsOptions,
+                None,
+                &[("media", "iso_a4_210x297mm")],
+                vec![SafeProfileOverride::Copies],
+            );
+            let unsafe_paper = JobOptions {
+                paper: Some("na_letter_8.5x11in".into()),
+                ..Default::default()
+            };
+            let error = prepare_submission("HP", false, &unsafe_paper, Some(&profile))
+                .expect_err("paper is immutable");
+            assert_eq!(error.code, "profile_override_not_allowed");
+
+            let mut native = JobOptions::default();
+            native
+                .native_options
+                .insert("OKIBlackMark".into(), "On".into());
+            let error = prepare_submission("HP", false, &native, Some(&profile))
+                .expect_err("vendor setting is immutable");
+            assert_eq!(error.code, "profile_override_not_allowed");
+        }
+
+        #[test]
+        fn cups_instance_is_addressed_without_changing_global_defaults() {
+            let profile = cups_profile(
+                NativeProfileKind::CupsInstance,
+                Some("labels"),
+                &[("media-type", "labels")],
+                Vec::new(),
+            );
+            let (destination, options) =
+                prepare_submission("HP", false, &JobOptions::default(), Some(&profile))
+                    .expect("instance replay");
+            assert_eq!(destination, "HP/labels");
+            assert_eq!(options, vec![("media-type".into(), "labels".into())]);
+        }
+
+        #[test]
+        fn profile_integrity_queue_identity_and_raw_policy_are_enforced() {
+            let mut profile = cups_profile(
+                NativeProfileKind::CupsOptions,
+                None,
+                &[("media", "A4")],
+                Vec::new(),
+            );
+            profile.blob.push(b' ');
+            let error = prepare_submission("HP", false, &JobOptions::default(), Some(&profile))
+                .expect_err("tampered");
+            assert_eq!(error.code, "native_profile_digest_mismatch");
+
+            let profile = cups_profile(
+                NativeProfileKind::CupsOptions,
+                None,
+                &[("media", "A4")],
+                Vec::new(),
+            );
+            let error = prepare_submission("Other", false, &JobOptions::default(), Some(&profile))
+                .expect_err("wrong queue");
+            assert_eq!(error.code, "profile_destination_mismatch");
+            let error = prepare_submission("HP", true, &JobOptions::default(), Some(&profile))
+                .expect_err("raw profile");
+            assert_eq!(error.code, "native_profile_raw_unsupported");
+        }
+
+        #[test]
+        fn printcore_profile_is_never_silently_downgraded_to_cups_defaults() {
+            let profile = cups_profile(NativeProfileKind::MacosPrintcore, None, &[], Vec::new());
+            let error = prepare_submission("HP", false, &JobOptions::default(), Some(&profile))
+                .expect_err("unsupported backend");
+            assert_eq!(error.code, "native_profile_backend_unavailable");
+        }
+
+        #[test]
+        fn duplicate_cups_option_names_are_rejected_instead_of_last_write_winning() {
+            let mut profile = cups_profile(NativeProfileKind::CupsOptions, None, &[], Vec::new());
+            profile.blob =
+                br#"{"options":{"media":"iso_a4_210x297mm","media":"na_letter_8.5x11in"}}"#
+                    .to_vec();
+            profile.digest = format!("sha256:{:x}", Sha256::digest(&profile.blob));
+            let error = prepare_submission("HP", false, &JobOptions::default(), Some(&profile))
+                .expect_err("duplicate option");
+            assert_eq!(error.code, "native_profile_invalid");
         }
 
         #[test]
