@@ -272,10 +272,14 @@ impl Authenticator for CombinedAuthenticator {
 #[derive(Clone, Debug)]
 pub struct OidcConfiguration {
     pub issuer: String,
-    pub audience: String,
+    pub audience: Option<String>,
+    pub binding_claim: Option<String>,
+    pub binding_value: Option<String>,
     pub jwks_url: String,
     pub organization_claim: String,
+    pub permissions_claim: String,
     pub environment_kind: String,
+    pub allow_unrestricted: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -309,10 +313,13 @@ impl OidcAuthenticator {
         configuration: OidcConfiguration,
     ) -> Result<Self, AuthenticationError> {
         if configuration.issuer.is_empty()
-            || configuration.audience.is_empty()
             || configuration.jwks_url.is_empty()
             || configuration.organization_claim.is_empty()
+            || configuration.permissions_claim.is_empty()
             || !matches!(configuration.environment_kind.as_str(), "test" | "live")
+            || (configuration.audience.is_some()
+                == (configuration.binding_claim.is_some() && configuration.binding_value.is_some()))
+            || configuration.binding_claim.is_some() != configuration.binding_value.is_some()
         {
             return Err(AuthenticationError);
         }
@@ -347,11 +354,20 @@ impl OidcAuthenticator {
         let key = DecodingKey::from_jwk(&jwk).map_err(|_| AuthenticationError)?;
         let mut validation = Validation::new(header.alg);
         validation.set_issuer(&[self.configuration.issuer.as_str()]);
-        validation.set_audience(&[self.configuration.audience.as_str()]);
+        if let Some(audience) = &self.configuration.audience {
+            validation.set_audience(&[audience.as_str()]);
+        }
         validation.validate_exp = true;
         let claims = decode::<OidcClaims>(token, &key, &validation)
             .map_err(|_| AuthenticationError)?
             .claims;
+        if let (Some(claim), Some(expected)) = (
+            &self.configuration.binding_claim,
+            &self.configuration.binding_value,
+        ) && claims.values.get(claim).and_then(serde_json::Value::as_str) != Some(expected)
+        {
+            return Err(AuthenticationError);
+        }
         let organization_id = claims
             .values
             .get(&self.configuration.organization_claim)
@@ -363,7 +379,29 @@ impl OidcAuthenticator {
             .provision_oidc_tenant(organization_id, &self.configuration.environment_kind)
             .await
             .map_err(|_| AuthenticationError)?;
-        Ok(TenantContext::unrestricted(workspace_id, environment_id))
+        let permissions = if self.configuration.allow_unrestricted {
+            Permissions::ALL
+        } else {
+            claims
+                .values
+                .get(&self.configuration.permissions_claim)
+                .and_then(serde_json::Value::as_array)
+                .map(|values| {
+                    Permissions::from_names(
+                        &values
+                            .iter()
+                            .filter_map(serde_json::Value::as_str)
+                            .map(str::to_owned)
+                            .collect::<Vec<_>>(),
+                    )
+                })
+                .unwrap_or_default()
+        };
+        Ok(TenantContext {
+            workspace_id,
+            environment_id,
+            permissions,
+        })
     }
 
     async fn key_for_id(
@@ -414,5 +452,22 @@ impl Authenticator for OidcAuthenticator {
         _authorization: &str,
     ) -> Result<TenantContext, AuthenticationError> {
         Err(AuthenticationError)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn oidc_scope_mapping_denies_mutations_by_default() {
+        let tenant = TenantContext {
+            workspace_id: WorkspaceId::new(),
+            environment_id: EnvironmentId::new(),
+            permissions: Permissions::from_names(&["jobs_read".into()]),
+        };
+        assert!(tenant.allows(&Scope::JobsRead));
+        assert!(!tenant.allows(&Scope::JobsWrite));
+        assert!(!tenant.allows(&Scope::WebhooksWrite));
     }
 }

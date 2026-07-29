@@ -122,14 +122,35 @@ fn build_oidc_authenticator(store: &PostgresStore) -> Result<Option<OidcAuthenti
                     issuer: env::var("SPOOL_OIDC_ISSUER")
                         .context("SPOOL_OIDC_ISSUER is required for OIDC")?,
                     audience: env::var("SPOOL_OIDC_AUDIENCE")
-                        .or_else(|_| env::var("SPOOL_OIDC_CLIENT_ID"))
-                        .context("SPOOL_OIDC_AUDIENCE is required for OIDC")?,
+                        .ok()
+                        .filter(|value| !value.is_empty()),
+                    binding_claim: env::var("SPOOL_OIDC_BINDING_CLAIM")
+                        .ok()
+                        .filter(|value| !value.is_empty())
+                        .or_else(|| {
+                            env::var("SPOOL_OIDC_CLIENT_ID")
+                                .ok()
+                                .filter(|value| !value.is_empty())
+                                .map(|_| "client_id".into())
+                        }),
+                    binding_value: env::var("SPOOL_OIDC_BINDING_VALUE")
+                        .ok()
+                        .filter(|value| !value.is_empty())
+                        .or_else(|| {
+                            env::var("SPOOL_OIDC_CLIENT_ID")
+                                .ok()
+                                .filter(|value| !value.is_empty())
+                        }),
                     jwks_url: env::var("SPOOL_OIDC_JWKS_URL")
                         .context("SPOOL_OIDC_JWKS_URL is required for OIDC")?,
                     organization_claim: env::var("SPOOL_OIDC_ORGANIZATION_CLAIM")
                         .unwrap_or_else(|_| "org_id".into()),
+                    permissions_claim: env::var("SPOOL_OIDC_PERMISSIONS_CLAIM")
+                        .unwrap_or_else(|_| "permissions".into()),
                     environment_kind: env::var("SPOOL_OIDC_ENVIRONMENT")
                         .unwrap_or_else(|_| "live".into()),
+                    allow_unrestricted: env::var("SPOOL_OIDC_ALLOW_UNRESTRICTED").as_deref()
+                        == Ok("true"),
                 },
             )
             .map_err(|_| anyhow::anyhow!("invalid OIDC configuration"))?,
