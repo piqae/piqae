@@ -122,7 +122,7 @@
     <header class="dialog-header">
       <div>
         <h2 id="enrolment-title">Add a node</h2>
-        <p>Create a one-time credential, then connect the native app on the printer computer.</p>
+        <p>Install the native app, then approve its short-lived browser pairing request.</p>
       </div>
       <button
         class="icon-button"
@@ -139,9 +139,23 @@
     <div class="dialog-body">
       <ol class="onboarding-steps" aria-label="Add node steps">
         <li><span>1</span><div><strong>Install</strong><small><a href="/downloads">Download the native node</a> on the printer computer.</small></div></li>
-        <li><span>2</span><div><strong>Connect</strong><small>Create this one-time token and paste it into the native app.</small></div></li>
-        <li><span>3</span><div><strong>Print</strong><small>Confirm the discovered printer, then send an A4 test.</small></div></li>
+        <li><span>2</span><div><strong>Connect node</strong><small>Choose Connect node in the native tray or menu app.</small></div></li>
+        <li><span>3</span><div><strong>Approve</strong><small>Match the computer and one-time code in the browser, then approve it.</small></div></li>
       </ol>
+
+      <section class="browser-pairing">
+        <span><Icon name="check" size={13} /></span>
+        <div>
+          <strong>Browser pairing is recommended</strong>
+          <small>The device key stays on the printer computer. The browser approves only its public identity.</small>
+        </div>
+        <a class="button" href="/pair">Pairing instructions</a>
+      </section>
+
+      <div class="manual-heading">
+        <strong>Manual token fallback</strong>
+        <span>Use only when the native app cannot open the browser pairing flow.</span>
+      </div>
       <label>
         <span>Node name</span>
         <input name="name" minlength="2" maxlength="120" required placeholder="Warehouse Mac mini" />
@@ -178,10 +192,10 @@
     <footer class="dialog-footer">
       <button class="button" type="button" onclick={closeEnrolment}>Close</button>
       <button
-        class="button primary"
+        class="button"
         type="submit"
         disabled={enrolmentPending || data.dashboardMode !== 'live'}
-      >{enrolmentPending ? 'Creating…' : 'Create node token'}</button>
+      >{enrolmentPending ? 'Creating…' : 'Create manual token'}</button>
     </footer>
   </form>
 </dialog>
@@ -490,6 +504,50 @@
     color: var(--text-secondary);
     text-decoration: underline;
     text-underline-offset: 2px;
+  }
+
+  .browser-pairing {
+    display: grid;
+    grid-template-columns: 27px 1fr auto;
+    align-items: center;
+    gap: 9px;
+    padding: 9px;
+    background: var(--success-soft);
+    border: 1px solid color-mix(in oklch, var(--success), transparent 76%);
+    border-radius: var(--radius-md);
+  }
+
+  .browser-pairing > span {
+    width: 25px;
+    height: 25px;
+    display: grid;
+    place-items: center;
+    color: var(--success);
+    background: color-mix(in oklch, var(--success), transparent 88%);
+    border-radius: 6px;
+  }
+
+  .browser-pairing > div,
+  .manual-heading {
+    display: grid;
+    gap: 2px;
+  }
+
+  .browser-pairing strong,
+  .manual-heading strong {
+    font-size: 9px;
+    font-weight: 560;
+  }
+
+  .browser-pairing small,
+  .manual-heading span {
+    color: var(--text-tertiary);
+    font-size: 8px;
+    line-height: 12px;
+  }
+
+  .manual-heading {
+    padding-top: 2px;
   }
 
   .dialog-body > label {

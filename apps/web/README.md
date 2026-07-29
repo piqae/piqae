@@ -29,6 +29,22 @@ adds authentication server-side, forwards `Last-Event-ID`, disables buffering,
 and streams bytes without placing credentials in the URL. The dashboard
 throttles event-driven data invalidation to avoid request storms.
 
+### Release downloads
+
+`/downloads` is rendered from a server-only, schema-versioned artifact
+manifest. Set `SPOOL_RELEASE_MANIFEST_JSON` to publish exact artifact URLs,
+versions, platform and architecture targets, minimum OS versions, SHA-256
+values, signing state, release notes, and older releases. The parser accepts
+only HTTPS release URLs and refuses a `supported` claim unless the artifact has
+a direct download, SHA-256, and verified platform-signing state.
+
+When the setting is absent, the checked-in manifest reflects the repository
+support matrix: Windows is Development-only and macOS/Linux are Preview, with
+no fabricated download link or checksum. Browser user-agent hints highlight a
+likely platform but never change the server-owned release status. The Add Node
+journey leads with short-lived browser pairing; manual enrolment tokens remain
+an explicit fallback in the node dialog.
+
 ### Local Mac agent
 
 The Local node page can manage a Spool agent running on the same machine as

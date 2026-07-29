@@ -58,7 +58,8 @@ test('credential and cancellation dialogs are accessible and non-mutating in dem
   const enrolment = page.getByRole('dialog', { name: 'Add a node' });
   await expect(enrolment).toBeVisible();
   await expect(enrolment.getByText('Demo mode: preview only.')).toBeVisible();
-  await expect(enrolment.getByRole('button', { name: 'Create node token' })).toBeDisabled();
+  await expect(enrolment.getByText('Browser pairing is recommended')).toBeVisible();
+  await expect(enrolment.getByRole('button', { name: 'Create manual token' })).toBeDisabled();
 
   await page.goto('/dashboard/api-keys');
   await page.getByRole('button', { name: 'Create secret key' }).click();
