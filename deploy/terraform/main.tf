@@ -96,11 +96,6 @@ resource "google_cloud_run_v2_service" "server" {
 
   depends_on = [google_project_service.run]
 
-  scaling {
-    min_instance_count = local.min_instances
-    max_instance_count = local.max_instances
-  }
-
   template {
     service_account = google_service_account.server.email
     timeout         = "60s"
@@ -109,14 +104,9 @@ resource "google_cloud_run_v2_service" "server" {
     # store interface supports end-to-end streaming.
     max_instance_request_concurrency = 4
 
-    lifecycle {
-      precondition {
-        condition = !contains(["oidc", "hybrid"], var.auth_mode) || (
-          var.oidc_jwks_url != "" &&
-          ((var.oidc_audience != "") != (var.oidc_binding_value != ""))
-        )
-        error_message = "OIDC requires oidc_jwks_url and exactly one of oidc_audience or oidc_binding_value."
-      }
+    scaling {
+      min_instance_count = local.min_instances
+      max_instance_count = local.max_instances
     }
 
     containers {
@@ -252,6 +242,16 @@ resource "google_cloud_run_v2_service" "server" {
           port = 8080
         }
       }
+    }
+  }
+
+  lifecycle {
+    precondition {
+      condition = !contains(["oidc", "hybrid"], var.auth_mode) || (
+        var.oidc_jwks_url != "" &&
+        ((var.oidc_audience != "") != (var.oidc_binding_value != ""))
+      )
+      error_message = "OIDC requires oidc_jwks_url and exactly one of oidc_audience or oidc_binding_value."
     }
   }
 

@@ -11,6 +11,10 @@ node_modules/
 build/
 **/build-node/
 **/.vercel/
+**/.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
 dist/
 coverage/
 playwright-report/
