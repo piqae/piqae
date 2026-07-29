@@ -139,6 +139,7 @@
       : null
   );
   let loading = $state(!initialDemo);
+  let refreshing = $state(false);
   let pending = $state('');
   let errorMessage = $state<string | null>(null);
   let notice = $state<string | null>(null);
@@ -209,6 +210,7 @@
   async function jsonRequest<T>(path: string, init?: RequestInit): Promise<T> {
     const response = await fetch(path, {
       ...init,
+      signal: init?.signal ?? AbortSignal.timeout(10_000),
       headers: init?.body ? { 'content-type': 'application/json', ...init.headers } : init?.headers
     });
     if (!response.ok) {
@@ -241,7 +243,8 @@
   }
 
   async function refresh(showSpinner = false) {
-    if (demo) return;
+    if (demo || refreshing) return;
+    refreshing = true;
     if (showSpinner) loading = true;
     try {
       const [nextStatus, nextPrinters] = await Promise.all([
@@ -266,6 +269,7 @@
       errorMessage = error instanceof Error ? error.message : 'The local agent is unavailable.';
     } finally {
       loading = false;
+      refreshing = false;
     }
   }
 
@@ -282,6 +286,8 @@
 
   async function setPaused(paused: boolean) {
     if (demo) return;
+    notice = null;
+    errorMessage = null;
     pending = paused ? 'pause' : 'resume';
     try {
       await jsonRequest(`/api/local/${paused ? 'pause' : 'resume'}`, { method: 'POST' });
@@ -296,6 +302,8 @@
 
   async function setExposure(printer: Printer) {
     if (demo) return;
+    notice = null;
+    errorMessage = null;
     pending = `exposure:${printer.printer_id}`;
     try {
       await jsonRequest(`/api/local/printers/${encodeURIComponent(printer.printer_id)}/exposure`, {
@@ -344,16 +352,28 @@
     profileMedia = profile.options.media ?? selectedPrinter?.capabilities.medias?.[0] ?? '';
     profileNup = profile.options.nup ?? selectedPrinter?.capabilities.nup?.[0] ?? 1;
     profileCollate = profile.options.collate ?? false;
-    nativeSelections = Object.fromEntries(
-      Object.entries(profile.options.native_options ?? {}).filter(([key]) =>
-        isAdvancedNativeOption(key)
-      )
+    const advancedDefaults = Object.fromEntries(
+      Object.entries(selectedPrinter?.native_options ?? {})
+        .filter(([key]) => isAdvancedNativeOption(key))
+        .map(([key, option]) => [key, option.default_choice ?? option.choices[0]?.value ?? ''])
     );
+    nativeSelections = {
+      ...advancedDefaults,
+      ...Object.fromEntries(
+        Object.entries(profile.options.native_options ?? {}).filter(([key]) =>
+          isAdvancedNativeOption(key)
+        )
+      )
+    };
   }
 
   function profileOptions(): ProfileOptions {
+    const copies = Number(profileCopies);
     return {
-      copies: Math.max(1, Math.min(profileCopies, selectedPrinter?.capabilities.copies ?? 99)),
+      copies: Math.max(
+        1,
+        Math.min(Number.isFinite(copies) ? copies : 1, selectedPrinter?.capabilities.copies ?? 99)
+      ),
       color: selectedPrinter?.capabilities.color ? profileColor : false,
       duplex: selectedPrinter?.capabilities.duplex ? profileDuplex : 'one-sided',
       paper: profilePaper || undefined,
@@ -499,7 +519,12 @@
   </div>
 {/if}
 {#if notice}
-  <button class="alert success" aria-label="Dismiss notification" onclick={() => (notice = null)}>
+  <button
+    class="alert success"
+    aria-live="polite"
+    aria-label="Dismiss notification"
+    onclick={() => (notice = null)}
+  >
     <Icon name="check" size={14} /><span>{notice}</span>
   </button>
 {/if}
@@ -536,7 +561,7 @@
   <table>
     <thead><tr><th>Printer</th><th>Driver state</th><th>Profile</th><th>Queue</th><th>Exposure</th><th></th></tr></thead>
     <tbody>
-      {#each printers as printer}
+      {#each printers as printer (printer.printer_id)}
         <tr class:selected={selectedPrinterId === printer.printer_id}>
           <td>
             <button class="printer-name" onclick={() => { selectedPrinterId = printer.printer_id; selectedProfileId = printer.profiles.find((profile) => profile.is_default)?.profile_id ?? printer.profiles[0]?.profile_id ?? ''; resetProfileForm(); void refreshQueue(); }}>
