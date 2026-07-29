@@ -144,10 +144,6 @@ resource "google_cloud_run_v2_service" "server" {
         value = "0.0.0.0:8080"
       }
       env {
-        name  = "SPOOL_PUBLIC_API_ORIGIN"
-        value = var.public_api_origin
-      }
-      env {
         name  = "SPOOL_AUTH_MODE"
         value = var.auth_mode
       }

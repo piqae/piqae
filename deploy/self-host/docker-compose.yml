@@ -50,6 +50,9 @@ services:
 
   server:
     image: ${SPOOL_IMAGE:-ghcr.io/c4coffeeco/spool/server:latest}
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.server
     restart: unless-stopped
     depends_on:
       postgres:
@@ -73,7 +76,6 @@ services:
       SPOOL_BOOTSTRAP_API_KEY: ${SPOOL_BOOTSTRAP_API_KEY:-}
       SPOOL_BOOTSTRAP_WORKSPACE_ID: ${SPOOL_BOOTSTRAP_WORKSPACE_ID:-}
       SPOOL_BOOTSTRAP_ENVIRONMENT_ID: ${SPOOL_BOOTSTRAP_ENVIRONMENT_ID:-}
-      SPOOL_PUBLIC_API_ORIGIN: ${SPOOL_PUBLIC_API_ORIGIN:?set SPOOL_PUBLIC_API_ORIGIN}
       SPOOL_AUTH_MODE: ${SPOOL_AUTH_MODE:-bootstrap}
       SPOOL_OIDC_ISSUER: ${SPOOL_OIDC_ISSUER:-}
       SPOOL_OIDC_AUDIENCE: ${SPOOL_OIDC_AUDIENCE:-}
@@ -85,7 +87,6 @@ services:
       SPOOL_OIDC_PERMISSIONS_CLAIM: ${SPOOL_OIDC_PERMISSIONS_CLAIM:-permissions}
       SPOOL_OIDC_ENVIRONMENT: ${SPOOL_OIDC_ENVIRONMENT:-live}
       SPOOL_OIDC_ALLOW_UNRESTRICTED: ${SPOOL_OIDC_ALLOW_UNRESTRICTED:-false}
-      SPOOL_COOKIE_KEY: ${SPOOL_COOKIE_KEY:?set SPOOL_COOKIE_KEY}
       RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
     healthcheck:
       test: ["CMD", "/usr/local/bin/spool-server", "healthcheck", "--url", "http://127.0.0.1:8080/v1/health"]
@@ -97,6 +98,9 @@ services:
   web:
     profiles: ["dashboard"]
     image: ${SPOOL_WEB_IMAGE:-ghcr.io/c4coffeeco/spool/web:latest}
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.web
     restart: unless-stopped
     depends_on:
       server:

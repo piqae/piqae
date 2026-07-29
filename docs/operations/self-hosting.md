@@ -7,9 +7,8 @@ containers, PostgreSQL 16 or newer, and an S3-compatible object store.
 
 1. Copy `deploy/self-host/.env.example` to `.env`.
 2. Replace every placeholder with randomly generated values.
-3. Set `SPOOL_PUBLIC_API_ORIGIN` to the HTTPS origin users and agents reach.
-4. Run `docker compose --env-file .env up -d`.
-5. Use the bootstrap API key only from a trusted server-side integration.
+3. Run `docker compose --env-file .env up -d --build`.
+4. Use the bootstrap API key only from a trusted server-side integration.
 
 The API-only topology has no identity-provider dependency. To include the
 optional dashboard, configure the `WORKOS_*` values and run:
@@ -18,9 +17,21 @@ optional dashboard, configure the `WORKOS_*` values and run:
 docker compose --env-file .env --profile dashboard up -d
 ```
 
-The dashboard's temporary API credential remains server-side. Until the
-generic OIDC/session exchange gate is complete, the dashboard profile requires
-WorkOS and is not a multi-tenant SaaS identity boundary.
+For WorkOS, change the control-plane `SPOOL_AUTH_MODE` to `hybrid`, configure
+the exact issuer and application JWKS URL, and bind the token with
+`SPOOL_OIDC_CLIENT_ID`. The SvelteKit server forwards the verified WorkOS
+access token directly to the control plane; it never exposes that token to
+browser JavaScript or falls back to the bootstrap key. Add the Spool
+permissions used by each role to the WorkOS `permissions` claim. A private
+self-host can instead make the explicit
+`SPOOL_OIDC_ALLOW_UNRESTRICTED=true` choice, but hosted deployments must leave
+that disabled. Dashboard readers normally need `agents_read`,
+`printers_read`, `jobs_read`, `webhooks_read`, and `api_keys_read`; grant write
+permissions only to roles that expose the matching mutation.
+
+The Compose file includes source builds as a fallback, so a checkout can start
+without a previously published registry tag. Pin released images by digest for
+repeatable production upgrades.
 
 The current V1 bootstrap API key is a deployment credential, not a one-time
 owner token. Rotate or remove it after creating durable API keys. Do not expose

@@ -54,10 +54,6 @@ variable "webhook_master_key_secret" {
   description = "Base64-encoded 32-byte key used to encrypt webhook signing secrets."
 }
 
-variable "public_api_origin" {
-  type = string
-}
-
 variable "auth_mode" {
   type        = string
   description = "Control-plane authentication mode. Hosted deployments should use oidc."
