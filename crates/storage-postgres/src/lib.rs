@@ -1840,7 +1840,8 @@ impl PostgresStore {
         if let Some(row) = sqlx::query(
             "SELECT lease_id, lease_token_hash, content_sha256, local_sequence
              FROM job_acceptances
-             WHERE job_id = $1 AND workspace_id = $2 AND environment_id = $3 AND agent_id = $4",
+             WHERE job_id = $1 AND workspace_id = $2 AND environment_id = $3 AND agent_id = $4
+             FOR UPDATE",
         )
         .bind(job_id.to_string())
         .bind(workspace_id.to_string())
@@ -1854,11 +1855,38 @@ impl PostgresStore {
             let stored_lease_id: Uuid = row.try_get("lease_id")?;
             let stored_token_hash: Option<Vec<u8>> = row.try_get("lease_token_hash")?;
             if stored_lease_id != lease_id
-                || stored_token_hash.as_deref() != Some(token_hash.as_slice())
                 || stored_sha.as_deref() != content_sha256
                 || stored_sequence != i64::try_from(local_sequence).unwrap_or(i64::MAX)
             {
                 return Err(StorageError::IdempotencyConflict);
+            }
+            match stored_token_hash {
+                Some(stored) if stored == token_hash => {}
+                Some(_) => return Err(StorageError::IdempotencyConflict),
+                None => {
+                    let state: Option<String> = sqlx::query_scalar(
+                        "SELECT state FROM jobs
+                         WHERE id = $1 AND workspace_id = $2 AND environment_id = $3
+                           AND agent_id = $4",
+                    )
+                    .bind(job_id.to_string())
+                    .bind(workspace_id.to_string())
+                    .bind(environment_id.to_string())
+                    .bind(agent_id.to_string())
+                    .fetch_optional(&mut *transaction)
+                    .await?;
+                    if state.as_deref() != Some("agent_accepted") {
+                        return Err(StorageError::IdempotencyConflict);
+                    }
+                    sqlx::query(
+                        "UPDATE job_acceptances SET lease_token_hash = $2
+                         WHERE job_id = $1 AND lease_token_hash IS NULL",
+                    )
+                    .bind(job_id.to_string())
+                    .bind(&token_hash)
+                    .execute(&mut *transaction)
+                    .await?;
+                }
             }
             transaction.commit().await?;
             return self.get_job(workspace_id, environment_id, job_id).await;

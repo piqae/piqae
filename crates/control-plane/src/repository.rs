@@ -1031,7 +1031,7 @@ struct MemoryAgentCommand {
 struct MemoryJobAcceptance {
     agent_id: AgentId,
     lease_id: Uuid,
-    lease_token: String,
+    lease_token: Option<String>,
     content_sha256: Option<String>,
     local_sequence: u64,
 }
@@ -1112,6 +1112,13 @@ impl MemoryRepository {
             .await
             .agent_public_keys
             .insert(agent_id, public_key);
+    }
+
+    #[cfg(test)]
+    pub async fn clear_acceptance_token(&self, job_id: JobId) {
+        if let Some(acceptance) = self.state.write().await.job_acceptances.get_mut(&job_id) {
+            acceptance.lease_token = None;
+        }
     }
 }
 
@@ -2147,16 +2154,34 @@ impl Repository for MemoryRepository {
         content_sha256: Option<&str>,
         local_sequence: u64,
     ) -> Result<Job, RepositoryError> {
-        if let Some(acceptance) = self.state.read().await.job_acceptances.get(&job_id) {
-            if acceptance.agent_id != agent_id
-                || acceptance.lease_id != lease_id
-                || acceptance.lease_token != lease_token
-                || acceptance.content_sha256.as_deref() != content_sha256
-                || acceptance.local_sequence != local_sequence
-            {
-                return Err(RepositoryError::IdempotencyConflict);
+        {
+            let mut state = self.state.write().await;
+            let job_is_accepted = state.jobs.get(&job_id).is_some_and(|record| {
+                record.job.workspace_id == workspace_id
+                    && record.job.environment_id == environment_id
+                    && record.job.state == JobState::AgentAccepted
+            });
+            if let Some(acceptance) = state.job_acceptances.get_mut(&job_id) {
+                if acceptance.agent_id != agent_id
+                    || acceptance.lease_id != lease_id
+                    || acceptance.content_sha256.as_deref() != content_sha256
+                    || acceptance.local_sequence != local_sequence
+                {
+                    return Err(RepositoryError::IdempotencyConflict);
+                }
+                match acceptance.lease_token.as_deref() {
+                    Some(stored) if stored == lease_token => {}
+                    None if job_is_accepted => {
+                        acceptance.lease_token = Some(lease_token.to_owned());
+                    }
+                    Some(_) | None => return Err(RepositoryError::IdempotencyConflict),
+                }
+                return state
+                    .jobs
+                    .get(&job_id)
+                    .map(|record| record.job.clone())
+                    .ok_or(RepositoryError::NotFound);
             }
-            return self.get_job(workspace_id, environment_id, job_id).await;
         }
         self.renew_agent_lease(
             workspace_id,
@@ -2192,7 +2217,7 @@ impl Repository for MemoryRepository {
             MemoryJobAcceptance {
                 agent_id,
                 lease_id,
-                lease_token: lease_token.to_owned(),
+                lease_token: Some(lease_token.to_owned()),
                 content_sha256: content_sha256.map(str::to_owned),
                 local_sequence,
             },

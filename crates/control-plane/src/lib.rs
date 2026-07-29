@@ -1135,6 +1135,10 @@ mod tests {
             .await
             .expect("accept response");
         assert_eq!(response.status(), StatusCode::OK);
+        application
+            .repository
+            .clear_acceptance_token(offer.job.id)
+            .await;
         let retry = application
             .router
             .clone()
