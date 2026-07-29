@@ -155,12 +155,13 @@ mod platform {
         let observation = unsafe {
             let mut jobs: *mut CupsJob = ptr::null_mut();
             let count = cups_get_jobs(&mut jobs, printer.as_ptr(), 0, -1);
-            if count < 0 || (count > 0 && jobs.is_null()) {
+            if count < 0 {
                 return Err(last_error("cups_observation_failed", false));
             }
             let length =
                 usize::try_from(count).map_err(|_| last_error("cups_observation_failed", false))?;
-            let records = std::slice::from_raw_parts(jobs, length);
+            let records = records_or_empty(jobs, length)
+                .ok_or_else(|| last_error("cups_observation_failed", false))?;
             let state = records
                 .iter()
                 .find(|job| {
@@ -169,7 +170,9 @@ mod platform {
                         && CStr::from_ptr(job.dest).to_bytes() == printer.as_bytes()
                 })
                 .map(|job| job.state);
-            cups_free_jobs(count, jobs);
+            if !jobs.is_null() {
+                cups_free_jobs(count, jobs);
+            }
             state.map_or_else(missing_observation, cups_observation)
         };
         Ok(ExecutorResult::Observation { observation })
@@ -207,12 +210,13 @@ mod platform {
         unsafe {
             let mut destinations: *mut CupsDest = ptr::null_mut();
             let count = cups_get_dests(&mut destinations);
-            if count < 0 || (count > 0 && destinations.is_null()) {
+            if count < 0 {
                 return Err(last_error("cups_discovery_failed", false));
             }
             let length =
                 usize::try_from(count).map_err(|_| last_error("cups_discovery_failed", false))?;
-            let slice = std::slice::from_raw_parts(destinations, length);
+            let slice = records_or_empty(destinations, length)
+                .ok_or_else(|| last_error("cups_discovery_failed", false))?;
             let printers = slice
                 .iter()
                 .filter_map(|destination| {
@@ -232,9 +236,31 @@ mod platform {
                     })
                 })
                 .collect();
-            cups_free_dests(count, destinations);
+            if !destinations.is_null() {
+                cups_free_dests(count, destinations);
+            }
             Ok(ExecutorResult::Printers { printers })
         }
+    }
+
+    /// Converts a C-owned record array without constructing a zero-length
+    /// Rust slice from a null pointer. CUPS uses `(0, NULL)` for an empty
+    /// result set on clean machines.
+    ///
+    /// # Safety
+    ///
+    /// For a non-zero `length`, `records` must point to `length` initialized,
+    /// contiguous values that remain alive for the returned lifetime.
+    unsafe fn records_or_empty<'a, T>(records: *const T, length: usize) -> Option<&'a [T]> {
+        if length == 0 {
+            return Some(&[]);
+        }
+        if records.is_null() {
+            return None;
+        }
+        // SAFETY: the caller owns the non-null pointer/length validity
+        // contract documented above.
+        Some(unsafe { std::slice::from_raw_parts(records, length) })
     }
 
     fn ensure_printer(native_id: &str) -> Result<(), ExecutorError> {
@@ -437,6 +463,20 @@ mod platform {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn null_zero_length_c_arrays_are_empty() {
+            // SAFETY: a zero-length result never dereferences the pointer.
+            let records =
+                unsafe { records_or_empty::<u8>(ptr::null(), 0) }.expect("zero-length C array");
+            assert!(records.is_empty());
+        }
+
+        #[test]
+        fn null_non_empty_c_arrays_are_rejected() {
+            // SAFETY: the helper rejects the pointer before dereferencing it.
+            assert!(unsafe { records_or_empty::<u8>(ptr::null(), 1) }.is_none());
+        }
 
         #[test]
         fn ipp_job_states_map_conservatively() {
