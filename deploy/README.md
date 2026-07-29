@@ -6,6 +6,13 @@ Spool supports two self-hosting shapes:
 - `helm/spool/`: production Kubernetes control plane using external PostgreSQL
   and S3-compatible storage.
 
+The current low-cost hosted launch shape uses one public API service and one
+private worker on Railway, with Railway PostgreSQL and S3-compatible object
+storage. It is an operational private preview, not a production or availability
+claim. See
+[`Railway low-cost private preview`](../docs/operations/railway-private-preview.md)
+for the exact configuration, migration, scaling, backup, and release limits.
+
 The Helm chart creates three independently scalable compute pools:
 
 ```text

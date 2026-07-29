@@ -4,6 +4,7 @@ WORKDIR /source
 COPY Cargo.toml Cargo.lock ./
 COPY crates crates
 COPY bins bins
+COPY xtask xtask
 COPY migrations migrations
 # Published server images include OTLP capability; runtime export remains off
 # unless standard OTEL configuration enables it. Local Compose builds override
