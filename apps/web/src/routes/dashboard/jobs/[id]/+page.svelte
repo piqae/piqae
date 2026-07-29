@@ -19,9 +19,8 @@
   <DataError error={data.dataError} />
 {:else if job}
 {#snippet actions()}
-  <button class="button">Cancel</button>
-  <button class="button"><Icon name="copy" size={13} /> Reprint</button>
-  <button class="button ghost" aria-label="More actions"><Icon name="more" size={14} /></button>
+  <button class="button" disabled title="Job cancellation UI is not implemented">Cancel</button>
+  <button class="button" disabled title="Reprint mutation is not implemented"><Icon name="copy" size={13} /> Reprint</button>
 {/snippet}
 
 <PageHeader eyebrow="Print job" title={job.title} description={job.id} {actions} />
@@ -44,7 +43,7 @@
         is disabled to prevent a duplicate.
       </p>
     </div>
-    <button class="button">Resolve</button>
+    <button class="button" disabled title="Uncertain-delivery resolution is not implemented">Resolve</button>
   </section>
 {/if}
 

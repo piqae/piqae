@@ -26,11 +26,11 @@
     <section class="panel" id="general">
       <header><h2>Workspace</h2><p>The tenancy and environment boundary shown to your team.</p></header>
       <div class="form-body">
-        <label class="field"><span>Name</span><input class="input" value="C4 Coffee" /></label>
-        <label class="field"><span>Slug</span><input class="input mono" value="c4-coffee" /></label>
+        <label class="field"><span>Name</span><input class="input" value="C4 Coffee" disabled /></label>
+        <label class="field"><span>Slug</span><input class="input mono" value="c4-coffee" disabled /></label>
         <label class="field"><span>Default region</span><input class="input" value="Sydney (syd1)" disabled /></label>
       </div>
-      <footer><button class="button primary">Save changes</button></footer>
+      <footer><button class="button primary" disabled title="Workspace mutation is not implemented">Save changes</button></footer>
     </section>
 
     <section class="panel" id="printing">
@@ -38,11 +38,11 @@
       <div class="toggle-list">
         <label>
           <span><strong>Allow RAW printing</strong><small>Permit unrendered printer-language payloads.</small></span>
-          <input type="checkbox" bind:checked={raw} />
+          <input type="checkbox" bind:checked={raw} disabled />
         </label>
         <label>
           <span><strong>Allow private URI sources</strong><small>Agents may fetch documents from private network ranges.</small></span>
-          <input type="checkbox" bind:checked={privateUris} />
+          <input type="checkbox" bind:checked={privateUris} disabled />
         </label>
         <label>
           <span><strong>Require manual uncertain resolution</strong><small>Never retry when OS handoff cannot be proven.</small></span>
@@ -56,7 +56,7 @@
       <div class="form-body">
         <label class="field">
           <span>Delete successful job content after</span>
-          <select class="input" bind:value={retention}>
+          <select class="input" bind:value={retention} disabled>
             <option value="1">1 hour</option>
             <option value="24">24 hours</option>
             <option value="72">3 days</option>
@@ -64,7 +64,7 @@
           </select>
         </label>
       </div>
-      <footer><button class="button primary">Save retention</button></footer>
+      <footer><button class="button primary" disabled title="Retention mutation is not implemented">Save retention</button></footer>
     </section>
   </div>
 </div>

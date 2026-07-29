@@ -43,4 +43,28 @@ test('documentation and hosted authentication boundaries are reachable', async (
     'href',
     '/auth/login?return_to=%2Fdashboard'
   );
+  const sessionResponse = await page.request.get('/auth/session');
+  const session = await sessionResponse.json();
+  expect(JSON.stringify(session)).not.toContain('accessToken');
+  expect(JSON.stringify(session)).not.toContain('access_token');
+});
+
+test('unimplemented dashboard mutations are visibly disabled and demo evidence is labelled', async ({
+  page
+}) => {
+  await page.goto('/dashboard/agents');
+  await expect(page.getByRole('button', { name: 'Enrol agent' })).toBeDisabled();
+
+  await page.goto('/dashboard/api-keys');
+  await expect(page.getByRole('button', { name: 'Create secret key' })).toBeDisabled();
+
+  await page.goto('/dashboard/webhooks');
+  await expect(page.getByRole('button', { name: 'Add endpoint' })).toBeDisabled();
+  await expect(page.getByRole('region', { name: 'Demo webhook delivery examples' })).toContainText(
+    'Demo only'
+  );
+
+  await page.goto('/dashboard/settings');
+  await expect(page.getByRole('button', { name: 'Save changes' })).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Save retention' })).toBeDisabled();
 });

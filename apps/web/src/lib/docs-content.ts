@@ -223,6 +223,10 @@ const spool = new SpoolClient({
         ]
       },
       {
+        heading: 'Dashboard authentication',
+        body: 'Hosted WorkOS mode forwards the verified AuthKit session access token only from the SvelteKit server to the control plane OIDC verifier. It is never exposed through a browser token endpoint. Local deployments without OIDC may set a narrowly scoped SPOOL_DASHBOARD_API_KEY as an explicit server-only fallback.'
+      },
+      {
         heading: 'Build the self-hosted web artifact',
         code: `pnpm --filter @spool/web build:self-host
 node apps/web/build-node`,

@@ -11,6 +11,11 @@ export interface DashboardSource {
   mode: DashboardMode;
 }
 
+export interface DashboardConnection {
+  baseUrl: string;
+  bearerToken: string;
+}
+
 export interface DashboardLoadError {
   title: string;
   message: string;
@@ -26,19 +31,34 @@ function configuredMode(): DashboardMode {
   throw new Error('PUBLIC_SPOOL_DASHBOARD_MODE must be live or demo');
 }
 
-export function dashboardSource(event: Pick<RequestEvent, 'fetch' | 'url'>): DashboardSource {
+export function dashboardConnection(
+  event: Pick<RequestEvent, 'url' | 'locals'>
+): DashboardConnection {
+  const baseUrl = publicEnv.PUBLIC_SPOOL_API_URL || event.url.origin;
+  let bearerToken: string | undefined;
+
+  if (event.locals.authMode === 'workos') {
+    bearerToken = event.locals.auth?.accessToken;
+    if (!bearerToken) {
+      throw new Error('The verified hosted session does not contain an OIDC access token.');
+    }
+  } else {
+    bearerToken = privateEnv.SPOOL_DASHBOARD_API_KEY;
+    if (!bearerToken) {
+      throw new Error(
+        'Local live dashboard authentication requires the server-only SPOOL_DASHBOARD_API_KEY.'
+      );
+    }
+  }
+
+  return { baseUrl, bearerToken };
+}
+
+export function dashboardSource(event: Pick<RequestEvent, 'fetch' | 'url' | 'locals'>): DashboardSource {
   const mode = configuredMode();
   if (mode === 'demo') return { mode, api: mockApi };
-
-  const baseUrl = publicEnv.PUBLIC_SPOOL_API_URL || event.url.origin;
-  const apiKey = privateEnv.SPOOL_DASHBOARD_API_KEY;
-  if (!apiKey) {
-    throw new Error(
-      'Live dashboard authentication is unavailable. Configure the server-only ' +
-        'SPOOL_DASHBOARD_API_KEY until control-plane session exchange is implemented.'
-    );
-  }
-  return { mode, api: createLiveApi(event.fetch, baseUrl, apiKey) };
+  const { baseUrl, bearerToken } = dashboardConnection(event);
+  return { mode, api: createLiveApi(event.fetch, baseUrl, bearerToken) };
 }
 
 export function dashboardMode(): DashboardMode {

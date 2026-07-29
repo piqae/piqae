@@ -184,6 +184,13 @@ button {
   transform: translateY(1px);
 }
 
+.button:disabled,
+button:disabled {
+  opacity: 0.48;
+  cursor: not-allowed;
+  transform: none;
+}
+
 .button.primary {
   color: white;
   background: var(--accent);

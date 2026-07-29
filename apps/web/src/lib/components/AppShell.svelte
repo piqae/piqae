@@ -1,5 +1,7 @@
 <script lang="ts">
   import { page } from '$app/state';
+  import { invalidateAll } from '$app/navigation';
+  import { onMount } from 'svelte';
   import type { Snippet } from 'svelte';
   import Icon from './Icon.svelte';
 
@@ -37,6 +39,35 @@
   function closeSidebar() {
     sidebarOpen = false;
   }
+
+  onMount(() => {
+    if (mode !== 'live') return;
+    const source = new EventSource('/api/events');
+    let refreshTimer: ReturnType<typeof setTimeout> | undefined;
+    const scheduleRefresh = () => {
+      if (refreshTimer) return;
+      refreshTimer = setTimeout(() => {
+        refreshTimer = undefined;
+        void invalidateAll();
+      }, 500);
+    };
+    for (const eventName of [
+      'job.updated',
+      'agent.enrolled',
+      'agent.updated',
+      'printer.updated',
+      'webhook.created',
+      'webhook.deleted',
+      'resync_required'
+    ]) {
+      source.addEventListener(eventName, scheduleRefresh);
+    }
+    source.addEventListener('open', scheduleRefresh);
+    return () => {
+      source.close();
+      if (refreshTimer) clearTimeout(refreshTimer);
+    };
+  });
 </script>
 
 <svelte:head>
@@ -58,7 +89,7 @@
         <span class="logo"><Icon name="printers" size={14} strokeWidth={2} /></span>
         <span>Spool</span>
       </a>
-      <button class="workspace-switch" aria-label="Switch workspace">
+      <button class="workspace-switch" aria-label="Current workspace" disabled title="Workspace switching is not available yet">
         <span class="avatar">C4</span>
         <span class="workspace-name">
           <strong>C4 Coffee</strong>

@@ -32,7 +32,7 @@
 <svelte:head><title>Jobs · Spool</title></svelte:head>
 
 {#snippet actions()}
-  <button class="button primary"><Icon name="plus" size={13} /> Print job</button>
+  <a class="button primary" href="/docs/quickstart"><Icon name="plus" size={13} /> Print via API</a>
 {/snippet}
 
 <PageHeader
@@ -96,7 +96,7 @@
           </td>
           <td class="muted">{job.authority.replaceAll('_', ' ')}</td>
           <td class="right muted numeric"><RelativeTime value={job.updatedAt} /></td>
-          <td class="action"><button aria-label={`Actions for ${job.title}`}><Icon name="more" size={14} /></button></td>
+          <td class="action"><a class="row-details" aria-label={`View ${job.title}`} href={`/dashboard/jobs/${job.id}`}><Icon name="arrow-right" size={13} /></a></td>
         </tr>
       {:else}
         <tr>
@@ -269,19 +269,16 @@
     padding: 0 6px;
   }
 
-  .action button {
+  .row-details {
     width: 25px;
     height: 25px;
     display: grid;
     place-items: center;
     color: var(--text-tertiary);
-    background: transparent;
-    border: 0;
     border-radius: var(--radius-sm);
-    cursor: pointer;
   }
 
-  .action button:hover {
+  .row-details:hover {
     color: var(--text-primary);
     background: var(--surface-hover);
   }

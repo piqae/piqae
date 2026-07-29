@@ -17,7 +17,7 @@
 <svelte:head><title>API keys · Spool</title></svelte:head>
 
 {#snippet actions()}
-  <button class="button primary"><Icon name="plus" size={13} /> Create secret key</button>
+  <button class="button primary" disabled title="API-key management is not implemented"><Icon name="plus" size={13} /> Create secret key</button>
 {/snippet}
 
 <PageHeader
@@ -56,7 +56,7 @@
           <td><span class="scope-count">{key.scopes.length} scopes</span></td>
           <td class="muted">{#if key.lastUsedAt}<RelativeTime value={key.lastUsedAt} />{:else}Never{/if}</td>
           <td class="muted"><RelativeTime value={key.createdAt} /></td>
-          <td class="action"><button aria-label={`Actions for ${key.name}`}><Icon name="more" size={14} /></button></td>
+          <td class="action"><button disabled title="API-key management is not implemented" aria-label={`Actions for ${key.name}`}><Icon name="more" size={14} /></button></td>
         </tr>
       {/each}
       {#if apiKeys.length === 0 && !data.dataError}

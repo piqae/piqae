@@ -24,7 +24,7 @@
 <svelte:head><title>Printers · Spool</title></svelte:head>
 
 {#snippet actions()}
-  <button class="button"><Icon name="activity" size={13} /> Refresh capabilities</button>
+  <button class="button" disabled title="Capability refresh mutation is not implemented"><Icon name="activity" size={13} /> Refresh capabilities</button>
 {/snippet}
 
 <PageHeader
@@ -96,7 +96,7 @@
           </td>
           <td class="numeric">{printer.queueDepth}</td>
           <td class="right muted numeric"><RelativeTime value={printer.lastSeenAt} /></td>
-          <td class="action"><button aria-label={`Actions for ${printer.name}`}><Icon name="more" size={14} /></button></td>
+          <td class="action"><a class="row-details" aria-label={`View ${printer.name}`} href={`/dashboard/printers/${printer.id}`}><Icon name="arrow-right" size={13} /></a></td>
         </tr>
       {/each}
     </tbody>
@@ -266,19 +266,16 @@
     padding: 0 6px;
   }
 
-  .action button {
+  .row-details {
     width: 25px;
     height: 25px;
     display: grid;
     place-items: center;
     color: var(--text-tertiary);
-    background: transparent;
-    border: 0;
     border-radius: var(--radius-sm);
-    cursor: pointer;
   }
 
-  .action button:hover {
+  .row-details:hover {
     color: var(--text-primary);
     background: var(--surface-hover);
   }

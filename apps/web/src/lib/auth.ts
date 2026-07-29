@@ -13,7 +13,6 @@ export interface AuthBoundary {
   viewer(): Promise<Viewer | null>;
   signInUrl(returnTo?: string): string;
   signOutUrl(returnTo?: string): string;
-  accessToken(): Promise<string | undefined>;
 }
 
 /**
@@ -33,12 +32,6 @@ export function createAuthBoundary(mode: AuthMode = 'hosted'): AuthBoundary {
       return (await response.json()) as Viewer;
     },
     signInUrl: (returnTo) => `/auth/login${parameter(returnTo)}`,
-    signOutUrl: (returnTo) => `/auth/logout${parameter(returnTo)}`,
-    accessToken: async () => {
-      const response = await fetch('/auth/token', { method: 'POST' });
-      if (!response.ok) return undefined;
-      const body = (await response.json()) as { access_token: string };
-      return body.access_token;
-    }
+    signOutUrl: (returnTo) => `/auth/logout${parameter(returnTo)}`
   };
 }

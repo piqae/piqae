@@ -11,7 +11,7 @@
 <svelte:head><title>Webhooks · Spool</title></svelte:head>
 
 {#snippet actions()}
-  <button class="button primary"><Icon name="plus" size={13} /> Add endpoint</button>
+  <button class="button primary" disabled title="Webhook mutation UI is not implemented"><Icon name="plus" size={13} /> Add endpoint</button>
 {/snippet}
 
 <PageHeader
@@ -57,7 +57,7 @@
           {#if webhook.lastDeliveryAt}<RelativeTime value={webhook.lastDeliveryAt} />{:else}Never{/if}
         </strong>
       </div>
-      <button aria-label={`Actions for ${webhook.description}`}><Icon name="more" size={14} /></button>
+      <button disabled title="Webhook mutation UI is not implemented" aria-label={`Actions for ${webhook.description}`}><Icon name="more" size={14} /></button>
     </article>
   {/each}
   {#if webhooks.length === 0 && !data.dataError}
@@ -65,13 +65,14 @@
   {/if}
 </div>
 
-<section class="panel attempts">
+{#if data.dashboardMode === 'demo'}
+<section class="panel attempts" aria-label="Demo webhook delivery examples">
   <header>
     <div>
-      <h2>Recent deliveries</h2>
-      <span>Request and response evidence is retained for 30 days</span>
+      <h2>Demo delivery examples</h2>
+      <span>Illustrative data — not control-plane evidence</span>
     </div>
-    <button class="button small ghost">View all</button>
+    <span class="demo-label">Demo only</span>
   </header>
   <table>
     <thead>
@@ -102,6 +103,15 @@
     </tbody>
   </table>
 </section>
+{:else}
+  <section class="panel delivery-unavailable">
+    <Icon name="activity" size={15} />
+    <div>
+      <strong>Delivery history is not connected yet</strong>
+      <p>Configured endpoints above are live. Attempt history will appear when the dashboard integrates the delivery endpoint.</p>
+    </div>
+  </section>
+{/if}
 
 <style>
   .notice {
@@ -259,6 +269,37 @@
   .attempts {
     margin-top: 12px;
     overflow-x: auto;
+  }
+
+  .demo-label {
+    padding: 2px 6px;
+    color: var(--warning);
+    background: var(--warning-soft);
+    border-radius: var(--radius-sm);
+    font-size: 8px;
+    text-transform: uppercase;
+  }
+
+  .delivery-unavailable {
+    min-height: 74px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-top: 12px;
+    padding: 13px;
+    color: var(--text-tertiary);
+  }
+
+  .delivery-unavailable strong {
+    color: var(--text-secondary);
+    font-size: 10px;
+    font-weight: 520;
+  }
+
+  .delivery-unavailable p {
+    margin: 2px 0 0;
+    color: var(--text-tertiary);
+    font-size: 9px;
   }
 
   table {

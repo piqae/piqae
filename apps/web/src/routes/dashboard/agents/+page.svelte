@@ -21,8 +21,8 @@
 <svelte:head><title>Agents · Spool</title></svelte:head>
 
 {#snippet actions()}
-  <button class="button"><Icon name="docs" size={13} /> Install guide</button>
-  <button class="button primary"><Icon name="plus" size={13} /> Enrol agent</button>
+  <a class="button" href="/docs/quickstart"><Icon name="docs" size={13} /> Install guide</a>
+  <button class="button primary" disabled title="Agent enrolment UI is not implemented"><Icon name="plus" size={13} /> Enrol agent</button>
 {/snippet}
 
 <PageHeader
@@ -50,7 +50,7 @@
           <strong>{agent.name}</strong>
           <span class="mono">{agent.id}</span>
         </div>
-        <button aria-label={`Actions for ${agent.name}`}><Icon name="more" size={14} /></button>
+        <a class="agent-details" aria-label={`View ${agent.name}`} href={`/dashboard/agents/${agent.id}`}><Icon name="arrow-right" size={13} /></a>
       </header>
       <div class="health">
         <Status value={agent.state} />
@@ -163,19 +163,16 @@
     font-size: 8px;
   }
 
-  header button {
+  .agent-details {
     width: 25px;
     height: 25px;
     display: grid;
     place-items: center;
     color: var(--text-tertiary);
-    background: transparent;
-    border: 0;
     border-radius: var(--radius-sm);
-    cursor: pointer;
   }
 
-  header button:hover {
+  .agent-details:hover {
     color: var(--text-primary);
     background: var(--surface-hover);
   }

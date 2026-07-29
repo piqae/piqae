@@ -19,10 +19,15 @@ the canonical `contracts/openapi/spool-v1.yaml` API.
 All dashboard pages load through SvelteKit server routes. Live mode is the
 default and never falls back to demo data after an error. To opt into clearly
 labelled local data, set `PUBLIC_SPOOL_DASHBOARD_MODE=demo`. Live mode reads
-`PUBLIC_SPOOL_API_URL` and the temporary server-only
-`SPOOL_DASHBOARD_API_KEY`; this credential is not included in page data or
-browser bundles. It will be removed when the control plane provides WorkOS to
-short-lived Spool token exchange.
+`PUBLIC_SPOOL_API_URL`. Hosted WorkOS sessions forward their verified OIDC
+access token directly from sealed server locals to the control plane; the
+token is never returned from an application endpoint, included in page data,
+or placed in browser bundles. `SPOOL_DASHBOARD_API_KEY` is an explicit
+server-only fallback for local/self-host deployments without user OIDC.
+Live browser updates use a same-origin `/api/events` SSE proxy. That proxy
+adds authentication server-side, forwards `Last-Event-ID`, disables buffering,
+and streams bytes without placing credentials in the URL. The dashboard
+throttles event-driven data invalidation to avoid request storms.
 
 ## Deployment targets
 
@@ -52,9 +57,12 @@ components.
 Copy `.env.example` and choose one explicit mode:
 
 - `workos` configures the official `@workos/authkit-sveltekit` integration,
-  sealed sessions, callback, sign-in/out endpoints, and protected dashboard.
+  sealed sessions, callback, sign-in/out endpoints, protected dashboard, and
+  server-side bearer forwarding to the control plane's OIDC verifier.
 - `local` does not initialize WorkOS. The self-hosted control plane or a
-  trusted reverse proxy owns the user session.
+  trusted reverse proxy owns the user session. Set a scoped
+  `SPOOL_DASHBOARD_API_KEY` only when the dashboard requires a service-key
+  fallback.
 - `demo` exposes a deterministic local viewer and must never be public.
 
 Set the WorkOS callback to `/auth/callback` and sign-in endpoint to

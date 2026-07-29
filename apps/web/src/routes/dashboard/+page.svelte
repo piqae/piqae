@@ -23,7 +23,7 @@
 
 {#snippet actions()}
   <a class="button" href="/docs/quickstart"><Icon name="docs" size={13} /> Quick start</a>
-  <button class="button primary"><Icon name="plus" size={13} /> Print job</button>
+  <a class="button primary" href="/docs/quickstart"><Icon name="plus" size={13} /> Print via API</a>
 {/snippet}
 
 <PageHeader

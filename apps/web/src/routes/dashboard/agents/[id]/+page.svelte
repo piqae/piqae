@@ -14,9 +14,8 @@
   <DataError error={data.dataError} />
 {:else if data.agent}
 {#snippet actions()}
-  <button class="button">Diagnostics</button>
-  <button class="button">Check for update</button>
-  <button class="button ghost" aria-label="More actions"><Icon name="more" size={14} /></button>
+  <button class="button" disabled title="Remote diagnostics are not implemented">Diagnostics</button>
+  <button class="button" disabled title="Remote update mutation is not implemented">Check for update</button>
 {/snippet}
 
 <PageHeader eyebrow="Agent" title={data.agent.name} description={data.agent.id} {actions} />

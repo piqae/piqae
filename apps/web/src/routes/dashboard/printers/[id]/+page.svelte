@@ -14,8 +14,8 @@
   <DataError error={data.dataError} />
 {:else if data.printer}
 {#snippet actions()}
-  <button class="button"><Icon name="jobs" size={13} /> Test print</button>
-  <button class="button">Pause queue</button>
+  <button class="button" disabled title="Test-print mutation is not implemented"><Icon name="jobs" size={13} /> Test print</button>
+  <button class="button" disabled title="Queue policy mutation is not implemented">Pause queue</button>
 {/snippet}
 
 <PageHeader eyebrow="Printer" title={data.printer.name} description={data.printer.description ?? data.printer.id} {actions} />
