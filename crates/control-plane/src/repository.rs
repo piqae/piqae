@@ -14,8 +14,8 @@ use spool_protocol::agent::AgentCommand;
 use spool_storage_postgres::{
     AgentAuthenticationRecord, CreateJobResult as PgCreateJobResult, EnrolledAgent, JobLease,
     PostgresStore, StorageError, StoredAgent, StoredAgentCommandBatch, StoredApiKey, StoredPrinter,
-    StoredTenantEvent, StoredUpload, StoredWebhook, StoredWebhookDelivery, SyncedPrinter,
-    WebhookDeliveryWork,
+    StoredStock, StoredTarget, StoredTargetBinding, StoredTenantEvent, StoredUpload, StoredWebhook,
+    StoredWebhookDelivery, SyncedPrinter, WebhookDeliveryWork,
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -138,6 +138,71 @@ pub trait Repository: Send + Sync + 'static {
         after: Option<PrinterId>,
         limit: i64,
     ) -> Result<Vec<StoredPrinter>, RepositoryError>;
+    async fn list_stocks(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+    ) -> Result<Vec<StoredStock>, RepositoryError>;
+    async fn get_stock(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        id: &str,
+    ) -> Result<StoredStock, RepositoryError>;
+    async fn create_stock(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        stock: &StoredStock,
+    ) -> Result<StoredStock, RepositoryError>;
+    async fn update_stock(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        stock: &StoredStock,
+    ) -> Result<StoredStock, RepositoryError>;
+    async fn list_targets(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+    ) -> Result<Vec<StoredTarget>, RepositoryError>;
+    async fn get_target(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        id: &str,
+    ) -> Result<StoredTarget, RepositoryError>;
+    async fn create_target(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        target: &StoredTarget,
+    ) -> Result<StoredTarget, RepositoryError>;
+    async fn update_target(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        target: &StoredTarget,
+    ) -> Result<StoredTarget, RepositoryError>;
+    async fn list_target_bindings(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        target_id: &str,
+    ) -> Result<Vec<StoredTargetBinding>, RepositoryError>;
+    async fn create_target_binding(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        binding: &StoredTargetBinding,
+    ) -> Result<StoredTargetBinding, RepositoryError>;
+    async fn delete_target_binding(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        target_id: &str,
+        binding_id: &str,
+    ) -> Result<(), RepositoryError>;
     async fn create_enrolment(
         &self,
         id: &str,
@@ -529,6 +594,126 @@ impl Repository for PostgresStore {
         limit: i64,
     ) -> Result<Vec<StoredPrinter>, RepositoryError> {
         Self::list_printers(self, workspace_id, environment_id, after, limit)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn list_stocks(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+    ) -> Result<Vec<StoredStock>, RepositoryError> {
+        Self::list_stocks(self, workspace_id, environment_id)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn get_stock(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        id: &str,
+    ) -> Result<StoredStock, RepositoryError> {
+        Self::get_stock(self, workspace_id, environment_id, id)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn create_stock(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        stock: &StoredStock,
+    ) -> Result<StoredStock, RepositoryError> {
+        Self::create_stock(self, workspace_id, environment_id, stock)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn update_stock(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        stock: &StoredStock,
+    ) -> Result<StoredStock, RepositoryError> {
+        Self::update_stock(self, workspace_id, environment_id, stock)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn list_targets(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+    ) -> Result<Vec<StoredTarget>, RepositoryError> {
+        Self::list_targets(self, workspace_id, environment_id)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn get_target(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        id: &str,
+    ) -> Result<StoredTarget, RepositoryError> {
+        Self::get_target(self, workspace_id, environment_id, id)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn create_target(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        target: &StoredTarget,
+    ) -> Result<StoredTarget, RepositoryError> {
+        Self::create_target(self, workspace_id, environment_id, target)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn update_target(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        target: &StoredTarget,
+    ) -> Result<StoredTarget, RepositoryError> {
+        Self::update_target(self, workspace_id, environment_id, target)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn list_target_bindings(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        target_id: &str,
+    ) -> Result<Vec<StoredTargetBinding>, RepositoryError> {
+        Self::list_target_bindings(self, workspace_id, environment_id, target_id)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn create_target_binding(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        binding: &StoredTargetBinding,
+    ) -> Result<StoredTargetBinding, RepositoryError> {
+        Self::create_target_binding(self, workspace_id, environment_id, binding)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn delete_target_binding(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        target_id: &str,
+        binding_id: &str,
+    ) -> Result<(), RepositoryError> {
+        Self::delete_target_binding(self, workspace_id, environment_id, target_id, binding_id)
             .await
             .map_err(Into::into)
     }
@@ -1041,6 +1226,9 @@ struct MemoryState {
     api_keys: HashMap<String, (WorkspaceId, EnvironmentId, StoredApiKey, String)>,
     jobs: HashMap<JobId, MemoryJob>,
     printers: HashMap<PrinterId, (WorkspaceId, EnvironmentId, StoredPrinter)>,
+    stocks: HashMap<String, (WorkspaceId, EnvironmentId, StoredStock)>,
+    targets: HashMap<String, (WorkspaceId, EnvironmentId, StoredTarget)>,
+    target_bindings: HashMap<String, (WorkspaceId, EnvironmentId, StoredTargetBinding)>,
     agents: HashMap<AgentId, (WorkspaceId, EnvironmentId, StoredAgent)>,
     agent_public_keys: HashMap<AgentId, Vec<u8>>,
     enrolments: HashMap<String, (WorkspaceId, EnvironmentId, String, DateTime<Utc>)>,
@@ -1424,6 +1612,272 @@ impl Repository for MemoryRepository {
         }
         printers.truncate(usize::try_from(limit.clamp(1, 500)).unwrap_or(500));
         Ok(printers)
+    }
+
+    async fn list_stocks(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+    ) -> Result<Vec<StoredStock>, RepositoryError> {
+        let mut values = self
+            .state
+            .read()
+            .await
+            .stocks
+            .values()
+            .filter(|(workspace, environment, _)| {
+                *workspace == workspace_id && *environment == environment_id
+            })
+            .map(|(_, _, stock)| stock.clone())
+            .collect::<Vec<_>>();
+        values.sort_by_key(|stock| (stock.created_at, stock.id.clone()));
+        Ok(values)
+    }
+
+    async fn get_stock(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        id: &str,
+    ) -> Result<StoredStock, RepositoryError> {
+        self.state
+            .read()
+            .await
+            .stocks
+            .get(id)
+            .filter(|(workspace, environment, _)| {
+                *workspace == workspace_id && *environment == environment_id
+            })
+            .map(|(_, _, stock)| stock.clone())
+            .ok_or(RepositoryError::NotFound)
+    }
+
+    async fn create_stock(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        stock: &StoredStock,
+    ) -> Result<StoredStock, RepositoryError> {
+        let mut state = self.state.write().await;
+        if state.stocks.contains_key(&stock.id)
+            || state
+                .stocks
+                .values()
+                .any(|(workspace, environment, existing)| {
+                    *workspace == workspace_id
+                        && *environment == environment_id
+                        && existing.name == stock.name
+                })
+        {
+            return Err(RepositoryError::ConcurrentStateChange);
+        }
+        state.stocks.insert(
+            stock.id.clone(),
+            (workspace_id, environment_id, stock.clone()),
+        );
+        Ok(stock.clone())
+    }
+
+    async fn update_stock(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        stock: &StoredStock,
+    ) -> Result<StoredStock, RepositoryError> {
+        let mut state = self.state.write().await;
+        let (_, _, existing) = state
+            .stocks
+            .get_mut(&stock.id)
+            .filter(|(workspace, environment, _)| {
+                *workspace == workspace_id && *environment == environment_id
+            })
+            .ok_or(RepositoryError::NotFound)?;
+        *existing = stock.clone();
+        Ok(stock.clone())
+    }
+
+    async fn list_targets(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+    ) -> Result<Vec<StoredTarget>, RepositoryError> {
+        let mut values = self
+            .state
+            .read()
+            .await
+            .targets
+            .values()
+            .filter(|(workspace, environment, _)| {
+                *workspace == workspace_id && *environment == environment_id
+            })
+            .map(|(_, _, target)| target.clone())
+            .collect::<Vec<_>>();
+        values.sort_by_key(|target| (target.created_at, target.id.clone()));
+        Ok(values)
+    }
+
+    async fn get_target(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        id: &str,
+    ) -> Result<StoredTarget, RepositoryError> {
+        self.state
+            .read()
+            .await
+            .targets
+            .get(id)
+            .filter(|(workspace, environment, _)| {
+                *workspace == workspace_id && *environment == environment_id
+            })
+            .map(|(_, _, target)| target.clone())
+            .ok_or(RepositoryError::NotFound)
+    }
+
+    async fn create_target(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        target: &StoredTarget,
+    ) -> Result<StoredTarget, RepositoryError> {
+        let mut state = self.state.write().await;
+        if let Some(stock_id) = target.stock_id.as_deref() {
+            state
+                .stocks
+                .get(stock_id)
+                .filter(|(workspace, environment, stock)| {
+                    *workspace == workspace_id && *environment == environment_id && !stock.archived
+                })
+                .ok_or(RepositoryError::NotFound)?;
+        }
+        if state.targets.contains_key(&target.id) {
+            return Err(RepositoryError::ConcurrentStateChange);
+        }
+        state.targets.insert(
+            target.id.clone(),
+            (workspace_id, environment_id, target.clone()),
+        );
+        Ok(target.clone())
+    }
+
+    async fn update_target(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        target: &StoredTarget,
+    ) -> Result<StoredTarget, RepositoryError> {
+        let mut state = self.state.write().await;
+        if let Some(stock_id) = target.stock_id.as_deref() {
+            state
+                .stocks
+                .get(stock_id)
+                .filter(|(workspace, environment, stock)| {
+                    *workspace == workspace_id && *environment == environment_id && !stock.archived
+                })
+                .ok_or(RepositoryError::NotFound)?;
+        }
+        let (_, _, existing) = state
+            .targets
+            .get_mut(&target.id)
+            .filter(|(workspace, environment, _)| {
+                *workspace == workspace_id && *environment == environment_id
+            })
+            .ok_or(RepositoryError::NotFound)?;
+        *existing = target.clone();
+        Ok(target.clone())
+    }
+
+    async fn list_target_bindings(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        target_id: &str,
+    ) -> Result<Vec<StoredTargetBinding>, RepositoryError> {
+        self.get_target(workspace_id, environment_id, target_id)
+            .await?;
+        let mut values = self
+            .state
+            .read()
+            .await
+            .target_bindings
+            .values()
+            .filter(|(workspace, environment, binding)| {
+                *workspace == workspace_id
+                    && *environment == environment_id
+                    && binding.target_id == target_id
+            })
+            .map(|(_, _, binding)| binding.clone())
+            .collect::<Vec<_>>();
+        values.sort_by_key(|binding| (i32::from(binding.role != "primary"), binding.created_at));
+        Ok(values)
+    }
+
+    async fn create_target_binding(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        binding: &StoredTargetBinding,
+    ) -> Result<StoredTargetBinding, RepositoryError> {
+        let mut state = self.state.write().await;
+        state
+            .targets
+            .get(&binding.target_id)
+            .filter(|(workspace, environment, _)| {
+                *workspace == workspace_id && *environment == environment_id
+            })
+            .ok_or(RepositoryError::NotFound)?;
+        let (_, _, printer) = state
+            .printers
+            .get(&binding.printer_id)
+            .filter(|(workspace, environment, _)| {
+                *workspace == workspace_id && *environment == environment_id
+            })
+            .ok_or(RepositoryError::NotFound)?;
+        let profile = printer
+            .profiles
+            .iter()
+            .find(|profile| {
+                (profile.profile_id.as_str(), profile.revision)
+                    == (binding.profile_id.as_str(), binding.profile_revision)
+            })
+            .ok_or(RepositoryError::NotFound)?;
+        if !profile.published || printer.agent_id != binding.agent_id {
+            return Err(RepositoryError::InvalidTransition);
+        }
+        if state.target_bindings.contains_key(&binding.id)
+            || state.target_bindings.values().any(|(_, _, existing)| {
+                existing.target_id == binding.target_id && existing.role == binding.role
+            })
+        {
+            return Err(RepositoryError::ConcurrentStateChange);
+        }
+        state.target_bindings.insert(
+            binding.id.clone(),
+            (workspace_id, environment_id, binding.clone()),
+        );
+        Ok(binding.clone())
+    }
+
+    async fn delete_target_binding(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        target_id: &str,
+        binding_id: &str,
+    ) -> Result<(), RepositoryError> {
+        let mut state = self.state.write().await;
+        let matches = state.target_bindings.get(binding_id).is_some_and(
+            |(workspace, environment, binding)| {
+                *workspace == workspace_id
+                    && *environment == environment_id
+                    && binding.target_id == target_id
+            },
+        );
+        if !matches {
+            return Err(RepositoryError::NotFound);
+        }
+        state.target_bindings.remove(binding_id);
+        Ok(())
     }
 
     async fn create_enrolment(

@@ -23,6 +23,8 @@ tags:
     description: Register and observe durable print jobs.
   - name: Printers
     description: Inspect installed printer queues and driver capabilities.
+  - name: Routing
+    description: Manage stocks and stable profile-backed print targets.
   - name: Agents
     description: Enrol and observe local Spool agents.
   - name: Events
@@ -609,6 +611,184 @@ paths:
           $ref: "#/components/responses/Error"
         "403":
           $ref: "#/components/responses/Error"
+  /v1/stocks:
+    get:
+      summary: List stocks
+      tags: [Routing]
+      operationId: listStocks
+      responses:
+        "200":
+          description: Stocks in the active environment.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Stock" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+    post:
+      summary: Create a stock
+      tags: [Routing]
+      operationId: createStock
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateStock" }
+      responses:
+        "201":
+          description: Stock created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Stock" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+  /v1/stocks/{stock_id}:
+    parameters:
+      - $ref: "#/components/parameters/StockId"
+    patch:
+      summary: Update a stock
+      tags: [Routing]
+      operationId: updateStock
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PatchStock" }
+      responses:
+        "200":
+          description: Updated stock.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Stock" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /v1/targets:
+    get:
+      summary: List print targets
+      tags: [Routing]
+      operationId: listTargets
+      responses:
+        "200":
+          description: Targets in the active environment.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Target" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+    post:
+      summary: Create a print target
+      tags: [Routing]
+      operationId: createTarget
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateTarget" }
+      responses:
+        "201":
+          description: Target created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Target" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /v1/targets/{target_id}:
+    parameters:
+      - $ref: "#/components/parameters/TargetId"
+    patch:
+      summary: Update a print target
+      tags: [Routing]
+      operationId: updateTarget
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PatchTarget" }
+      responses:
+        "200":
+          description: Updated target.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Target" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /v1/targets/{target_id}/bindings:
+    parameters:
+      - $ref: "#/components/parameters/TargetId"
+    get:
+      summary: List a target's profile bindings
+      tags: [Routing]
+      operationId: listTargetBindings
+      responses:
+        "200":
+          description: Ordered primary and standby bindings.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/TargetBinding" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+    post:
+      summary: Bind a published profile revision to a target
+      tags: [Routing]
+      operationId: createTargetBinding
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateTargetBinding" }
+      responses:
+        "201":
+          description: Binding created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TargetBinding" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /v1/targets/{target_id}/bindings/{binding_id}:
+    parameters:
+      - $ref: "#/components/parameters/TargetId"
+      - $ref: "#/components/parameters/BindingId"
+    delete:
+      summary: Delete a target binding
+      tags: [Routing]
+      operationId: deleteTargetBinding
+      responses:
+        "204": { description: Binding deleted. }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /v1/targets/{target_id}/readiness:
+    parameters:
+      - $ref: "#/components/parameters/TargetId"
+    get:
+      summary: Resolve target readiness from synchronized node facts
+      tags: [Routing]
+      operationId: getTargetReadiness
+      responses:
+        "200":
+          description: Current readiness projection.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TargetReadiness" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
   /v1/agents:
     get:
       summary: List agents
@@ -1187,6 +1367,27 @@ components:
       schema:
         type: string
         pattern: ^upl_[0-9A-HJKMNP-TV-Z]{26}$
+    StockId:
+      name: stock_id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: ^stk_[0-9A-HJKMNP-TV-Z]{26}$
+    TargetId:
+      name: target_id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: ^tgt_[0-9A-HJKMNP-TV-Z]{26}$
+    BindingId:
+      name: binding_id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: ^tgb_[0-9A-HJKMNP-TV-Z]{26}$
     WebhookId:
       name: webhook_id
       in: path
@@ -1915,6 +2116,120 @@ components:
         occurred_at:
           type: string
           format: date-time
+    CreateStock:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 120 }
+        sku: { type: string, maxLength: 120 }
+        description: { type: string, maxLength: 2000 }
+        attributes: { type: object, additionalProperties: true }
+    PatchStock:
+      type: object
+      additionalProperties: false
+      properties:
+        name: { type: string, minLength: 1, maxLength: 120 }
+        sku: { type: string, maxLength: 120 }
+        description: { type: string, maxLength: 2000 }
+        attributes: { type: object, additionalProperties: true }
+        archived: { type: boolean }
+    Stock:
+      type: object
+      required: [id, name, attributes, archived, created_at, updated_at]
+      properties:
+        id: { type: string, pattern: '^stk_[0-9A-HJKMNP-TV-Z]{26}$' }
+        name: { type: string }
+        sku: { type: [string, "null"] }
+        description: { type: [string, "null"] }
+        attributes: { type: object, additionalProperties: true }
+        archived: { type: boolean }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    CreateTarget:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 120 }
+        description: { type: string, maxLength: 2000 }
+        stock_id: { type: string }
+        enabled: { type: boolean, default: true }
+        routing_policy:
+          type: string
+          enum: [primary_then_standby]
+          default: primary_then_standby
+    PatchTarget:
+      type: object
+      additionalProperties: false
+      properties:
+        name: { type: string, minLength: 1, maxLength: 120 }
+        description: { type: string, maxLength: 2000 }
+        stock_id: { type: string }
+        clear_stock: { type: boolean }
+        enabled: { type: boolean }
+        routing_policy: { type: string, enum: [primary_then_standby] }
+    Target:
+      type: object
+      required: [id, name, enabled, routing_policy, created_at, updated_at]
+      properties:
+        id: { type: string, pattern: '^tgt_[0-9A-HJKMNP-TV-Z]{26}$' }
+        name: { type: string }
+        description: { type: [string, "null"] }
+        stock_id: { type: [string, "null"] }
+        enabled: { type: boolean }
+        routing_policy: { type: string, enum: [primary_then_standby] }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    CreateTargetBinding:
+      type: object
+      additionalProperties: false
+      required: [printer_id, profile_id, profile_revision, role]
+      properties:
+        printer_id: { type: string }
+        profile_id: { type: string, minLength: 1, maxLength: 120 }
+        profile_revision: { type: integer, format: int64, minimum: 1 }
+        role: { type: string, enum: [primary, standby] }
+        enabled: { type: boolean, default: true }
+    TargetBinding:
+      type: object
+      required:
+        [id, target_id, printer_id, agent_id, profile_id, profile_revision, role, enabled, created_at, updated_at]
+      properties:
+        id: { type: string, pattern: '^tgb_[0-9A-HJKMNP-TV-Z]{26}$' }
+        target_id: { type: string }
+        printer_id: { type: string }
+        agent_id: { type: string }
+        profile_id: { type: string }
+        profile_revision: { type: integer, format: int64, minimum: 1 }
+        role: { type: string, enum: [primary, standby] }
+        enabled: { type: boolean }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    BindingReadiness:
+      type: object
+      required: [binding, status, reasons]
+      properties:
+        binding: { $ref: "#/components/schemas/TargetBinding" }
+        status:
+          type: string
+          enum:
+            [ready, disabled, node_offline, destination_offline, destination_missing, needs_operator, profile_stale, driver_mismatch, dependency_missing, busy]
+        reasons:
+          type: array
+          items: { type: string }
+    TargetReadiness:
+      type: object
+      required: [target_id, status, bindings]
+      properties:
+        target_id: { type: string }
+        status:
+          type: string
+          enum: [ready, target_has_no_ready_binding]
+        selected_binding_id: { type: [string, "null"] }
+        bindings:
+          type: array
+          items: { $ref: "#/components/schemas/BindingReadiness" }
     Printer:
       type: object
       required:

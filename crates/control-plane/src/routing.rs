@@ -1,0 +1,495 @@
+#![allow(clippy::missing_errors_doc)]
+
+use crate::{AppState, api::authenticate_native, error::AppError, repository::RepositoryError};
+use axum::{
+    Json,
+    extract::{Path, State},
+    http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
+};
+use chrono::Utc;
+use serde::Deserialize;
+use spool_auth::Scope;
+use spool_domain::{PrinterId, PrinterState};
+use spool_storage_postgres::{
+    StoredBindingReadiness, StoredStock, StoredTarget, StoredTargetBinding, StoredTargetReadiness,
+};
+use std::str::FromStr;
+
+#[derive(Debug, Deserialize)]
+pub struct CreateStockRequest {
+    name: String,
+    sku: Option<String>,
+    description: Option<String>,
+    #[serde(default = "empty_object")]
+    attributes: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PatchStockRequest {
+    name: Option<String>,
+    sku: Option<String>,
+    description: Option<String>,
+    attributes: Option<serde_json::Value>,
+    archived: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateTargetRequest {
+    name: String,
+    description: Option<String>,
+    stock_id: Option<String>,
+    #[serde(default = "default_true")]
+    enabled: bool,
+    #[serde(default = "default_routing_policy")]
+    routing_policy: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PatchTargetRequest {
+    name: Option<String>,
+    description: Option<String>,
+    stock_id: Option<String>,
+    clear_stock: Option<bool>,
+    enabled: Option<bool>,
+    routing_policy: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateBindingRequest {
+    printer_id: String,
+    profile_id: String,
+    profile_revision: u64,
+    role: String,
+    #[serde(default = "default_true")]
+    enabled: bool,
+}
+
+fn empty_object() -> serde_json::Value {
+    serde_json::json!({})
+}
+
+const fn default_true() -> bool {
+    true
+}
+
+fn default_routing_policy() -> String {
+    "primary_then_standby".into()
+}
+
+pub async fn list_stocks(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<StoredStock>>, AppError> {
+    let tenant = authenticate_native(&state, &headers, Scope::PrintersRead).await?;
+    Ok(Json(
+        state
+            .repository
+            .list_stocks(tenant.workspace_id, tenant.environment_id)
+            .await?,
+    ))
+}
+
+pub async fn create_stock(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<CreateStockRequest>,
+) -> Result<Response, AppError> {
+    let tenant = authenticate_native(&state, &headers, Scope::PrintersWrite).await?;
+    let name = validate_name(&request.name, "invalid_stock")?;
+    if !request.attributes.is_object() {
+        return Err(AppError::invalid(
+            "invalid_stock",
+            "Stock attributes must be a JSON object.",
+        ));
+    }
+    let now = Utc::now();
+    let stock = StoredStock {
+        id: format!("stk_{}", ulid::Ulid::new()),
+        name,
+        sku: clean_optional(request.sku, 120, "invalid_stock")?,
+        description: clean_optional(request.description, 2_000, "invalid_stock")?,
+        attributes: request.attributes,
+        archived: false,
+        created_at: now,
+        updated_at: now,
+    };
+    let stock = state
+        .repository
+        .create_stock(tenant.workspace_id, tenant.environment_id, &stock)
+        .await?;
+    state.publish(tenant, "stock.created", &stock).await?;
+    Ok((StatusCode::CREATED, Json(stock)).into_response())
+}
+
+pub async fn patch_stock(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(stock_id): Path<String>,
+    Json(request): Json<PatchStockRequest>,
+) -> Result<Json<StoredStock>, AppError> {
+    let tenant = authenticate_native(&state, &headers, Scope::PrintersWrite).await?;
+    let mut stock = state
+        .repository
+        .get_stock(tenant.workspace_id, tenant.environment_id, &stock_id)
+        .await?;
+    if let Some(name) = request.name {
+        stock.name = validate_name(&name, "invalid_stock")?;
+    }
+    if let Some(sku) = request.sku {
+        stock.sku = clean_optional(Some(sku), 120, "invalid_stock")?;
+    }
+    if let Some(description) = request.description {
+        stock.description = clean_optional(Some(description), 2_000, "invalid_stock")?;
+    }
+    if let Some(attributes) = request.attributes {
+        if !attributes.is_object() {
+            return Err(AppError::invalid(
+                "invalid_stock",
+                "Stock attributes must be a JSON object.",
+            ));
+        }
+        stock.attributes = attributes;
+    }
+    if let Some(archived) = request.archived {
+        stock.archived = archived;
+    }
+    stock.updated_at = Utc::now();
+    let stock = state
+        .repository
+        .update_stock(tenant.workspace_id, tenant.environment_id, &stock)
+        .await?;
+    state.publish(tenant, "stock.updated", &stock).await?;
+    Ok(Json(stock))
+}
+
+pub async fn list_targets(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<StoredTarget>>, AppError> {
+    let tenant = authenticate_native(&state, &headers, Scope::PrintersRead).await?;
+    Ok(Json(
+        state
+            .repository
+            .list_targets(tenant.workspace_id, tenant.environment_id)
+            .await?,
+    ))
+}
+
+pub async fn create_target(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<CreateTargetRequest>,
+) -> Result<Response, AppError> {
+    let tenant = authenticate_native(&state, &headers, Scope::PrintersWrite).await?;
+    validate_routing_policy(&request.routing_policy)?;
+    let now = Utc::now();
+    let target = StoredTarget {
+        id: format!("tgt_{}", ulid::Ulid::new()),
+        name: validate_name(&request.name, "invalid_target")?,
+        description: clean_optional(request.description, 2_000, "invalid_target")?,
+        stock_id: clean_optional(request.stock_id, 80, "invalid_target")?,
+        enabled: request.enabled,
+        routing_policy: request.routing_policy,
+        created_at: now,
+        updated_at: now,
+    };
+    let target = state
+        .repository
+        .create_target(tenant.workspace_id, tenant.environment_id, &target)
+        .await?;
+    state.publish(tenant, "target.created", &target).await?;
+    Ok((StatusCode::CREATED, Json(target)).into_response())
+}
+
+pub async fn patch_target(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(target_id): Path<String>,
+    Json(request): Json<PatchTargetRequest>,
+) -> Result<Json<StoredTarget>, AppError> {
+    let tenant = authenticate_native(&state, &headers, Scope::PrintersWrite).await?;
+    let mut target = state
+        .repository
+        .get_target(tenant.workspace_id, tenant.environment_id, &target_id)
+        .await?;
+    if let Some(name) = request.name {
+        target.name = validate_name(&name, "invalid_target")?;
+    }
+    if let Some(description) = request.description {
+        target.description = clean_optional(Some(description), 2_000, "invalid_target")?;
+    }
+    if request.clear_stock.unwrap_or(false) {
+        target.stock_id = None;
+    } else if let Some(stock_id) = request.stock_id {
+        target.stock_id = clean_optional(Some(stock_id), 80, "invalid_target")?;
+    }
+    if let Some(enabled) = request.enabled {
+        target.enabled = enabled;
+    }
+    if let Some(routing_policy) = request.routing_policy {
+        validate_routing_policy(&routing_policy)?;
+        target.routing_policy = routing_policy;
+    }
+    target.updated_at = Utc::now();
+    let target = state
+        .repository
+        .update_target(tenant.workspace_id, tenant.environment_id, &target)
+        .await?;
+    state.publish(tenant, "target.updated", &target).await?;
+    Ok(Json(target))
+}
+
+pub async fn list_bindings(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(target_id): Path<String>,
+) -> Result<Json<Vec<StoredTargetBinding>>, AppError> {
+    let tenant = authenticate_native(&state, &headers, Scope::PrintersRead).await?;
+    Ok(Json(
+        state
+            .repository
+            .list_target_bindings(tenant.workspace_id, tenant.environment_id, &target_id)
+            .await?,
+    ))
+}
+
+pub async fn create_binding(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(target_id): Path<String>,
+    Json(request): Json<CreateBindingRequest>,
+) -> Result<Response, AppError> {
+    let tenant = authenticate_native(&state, &headers, Scope::PrintersWrite).await?;
+    if !matches!(request.role.as_str(), "primary" | "standby")
+        || request.profile_id.trim().is_empty()
+        || request.profile_id.len() > 120
+        || request.profile_revision == 0
+    {
+        return Err(AppError::invalid(
+            "invalid_target_binding",
+            "Binding role, profile ID, or revision is invalid.",
+        ));
+    }
+    let printer_id = PrinterId::from_str(&request.printer_id)
+        .map_err(|_| AppError::invalid("invalid_target_binding", "The printer ID is not valid."))?;
+    let printer = state
+        .repository
+        .list_printers(tenant.workspace_id, tenant.environment_id, None, 500)
+        .await?
+        .into_iter()
+        .find(|printer| printer.id == printer_id)
+        .ok_or(RepositoryError::NotFound)?;
+    let profile = printer
+        .profiles
+        .iter()
+        .find(|profile| {
+            (profile.profile_id.as_str(), profile.revision)
+                == (request.profile_id.trim(), request.profile_revision)
+        })
+        .ok_or(RepositoryError::NotFound)?;
+    if !profile.published {
+        return Err(AppError::invalid(
+            "invalid_target_binding",
+            "Only a published profile revision can be bound to a target.",
+        ));
+    }
+    let now = Utc::now();
+    let binding = StoredTargetBinding {
+        id: format!("tgb_{}", ulid::Ulid::new()),
+        target_id,
+        printer_id,
+        agent_id: printer.agent_id,
+        profile_id: request.profile_id.trim().to_owned(),
+        profile_revision: request.profile_revision,
+        role: request.role,
+        enabled: request.enabled,
+        created_at: now,
+        updated_at: now,
+    };
+    let binding = state
+        .repository
+        .create_target_binding(tenant.workspace_id, tenant.environment_id, &binding)
+        .await?;
+    state
+        .publish(tenant, "target.binding.created", &binding)
+        .await?;
+    Ok((StatusCode::CREATED, Json(binding)).into_response())
+}
+
+pub async fn delete_binding(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((target_id, binding_id)): Path<(String, String)>,
+) -> Result<StatusCode, AppError> {
+    let tenant = authenticate_native(&state, &headers, Scope::PrintersWrite).await?;
+    state
+        .repository
+        .delete_target_binding(
+            tenant.workspace_id,
+            tenant.environment_id,
+            &target_id,
+            &binding_id,
+        )
+        .await?;
+    state
+        .publish(
+            tenant,
+            "target.binding.deleted",
+            &serde_json::json!({"target_id": target_id, "binding_id": binding_id}),
+        )
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn target_readiness(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(target_id): Path<String>,
+) -> Result<Json<StoredTargetReadiness>, AppError> {
+    let tenant = authenticate_native(&state, &headers, Scope::PrintersRead).await?;
+    let target = state
+        .repository
+        .get_target(tenant.workspace_id, tenant.environment_id, &target_id)
+        .await?;
+    let target_stock_available = if let Some(stock_id) = target.stock_id.as_deref() {
+        !state
+            .repository
+            .get_stock(tenant.workspace_id, tenant.environment_id, stock_id)
+            .await?
+            .archived
+    } else {
+        true
+    };
+    let bindings = state
+        .repository
+        .list_target_bindings(tenant.workspace_id, tenant.environment_id, &target_id)
+        .await?;
+    let printers = state
+        .repository
+        .list_printers(tenant.workspace_id, tenant.environment_id, None, 500)
+        .await?;
+    let agents = state
+        .repository
+        .list_agents(tenant.workspace_id, tenant.environment_id)
+        .await?;
+    let mut evaluated = Vec::with_capacity(bindings.len());
+    for binding in bindings {
+        let mut reasons = Vec::new();
+        let status = if !target.enabled || !binding.enabled {
+            "disabled"
+        } else if !target_stock_available {
+            reasons.push("target_stock_is_archived".into());
+            "dependency_missing"
+        } else if !agents
+            .iter()
+            .any(|agent| agent.id == binding.agent_id && agent.state == "connected")
+        {
+            "node_offline"
+        } else if let Some(printer) = printers.iter().find(|item| item.id == binding.printer_id) {
+            if printer.agent_id != binding.agent_id {
+                reasons.push("binding_agent_changed".into());
+                "destination_missing"
+            } else if let Some(profile) = printer.profiles.iter().find(|profile| {
+                (profile.profile_id.as_str(), profile.revision)
+                    == (binding.profile_id.as_str(), binding.profile_revision)
+            }) {
+                if !profile.published {
+                    "profile_stale"
+                } else if target.stock_id.is_some() && target.stock_id != profile.stock_id {
+                    reasons.push("profile_stock_does_not_match_target".into());
+                    "dependency_missing"
+                } else if let Some(profile_status) = profile.status.as_deref() {
+                    match profile_status {
+                        "ready" => printer_readiness(printer.state),
+                        "driver_mismatch" => "driver_mismatch",
+                        "dependency_missing" => "dependency_missing",
+                        "destination_missing" => "destination_missing",
+                        "interactive_only" => "needs_operator",
+                        _ => "profile_stale",
+                    }
+                } else {
+                    printer_readiness(printer.state)
+                }
+            } else {
+                reasons.push("profile_revision_not_in_current_snapshot".into());
+                "profile_stale"
+            }
+        } else {
+            "destination_missing"
+        };
+        evaluated.push(StoredBindingReadiness {
+            binding,
+            status: status.into(),
+            reasons,
+        });
+    }
+    let selected_binding_id = evaluated
+        .iter()
+        .find(|binding| binding.status == "ready")
+        .map(|binding| binding.binding.id.clone());
+    Ok(Json(StoredTargetReadiness {
+        target_id,
+        status: if selected_binding_id.is_some() {
+            "ready"
+        } else {
+            "target_has_no_ready_binding"
+        }
+        .into(),
+        selected_binding_id,
+        bindings: evaluated,
+    }))
+}
+
+const fn printer_readiness(state: PrinterState) -> &'static str {
+    match state {
+        PrinterState::Online => "ready",
+        PrinterState::Busy => "busy",
+        PrinterState::PaperOut | PrinterState::Paused | PrinterState::Error => "needs_operator",
+        PrinterState::Offline | PrinterState::Unknown => "destination_offline",
+    }
+}
+
+fn validate_name(value: &str, code: &'static str) -> Result<String, AppError> {
+    let value = value.trim();
+    if value.is_empty() || value.len() > 120 {
+        return Err(AppError::invalid(
+            code,
+            "The resource name must contain between 1 and 120 characters.",
+        ));
+    }
+    Ok(value.to_owned())
+}
+
+fn clean_optional(
+    value: Option<String>,
+    max: usize,
+    code: &'static str,
+) -> Result<Option<String>, AppError> {
+    value
+        .map(|value| {
+            let value = value.trim();
+            if value.len() > max {
+                Err(AppError::invalid(
+                    code,
+                    "A field exceeds its maximum length.",
+                ))
+            } else if value.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(value.to_owned()))
+            }
+        })
+        .transpose()
+        .map(Option::flatten)
+}
+
+fn validate_routing_policy(value: &str) -> Result<(), AppError> {
+    if value != "primary_then_standby" {
+        return Err(AppError::invalid(
+            "invalid_target",
+            "The routing policy is not supported.",
+        ));
+    }
+    Ok(())
+}

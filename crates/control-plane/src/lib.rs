@@ -7,6 +7,7 @@ pub mod device_auth;
 pub mod error;
 pub mod repository;
 pub mod request_id;
+pub mod routing;
 pub mod webhook_worker;
 
 use authentication::{Authenticator, TenantContext};
@@ -138,6 +139,34 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/v1/agents", get(api::list_agents))
         .route("/v1/printers", get(api::list_printers))
+        .route(
+            "/v1/stocks",
+            get(routing::list_stocks).post(routing::create_stock),
+        )
+        .route(
+            "/v1/stocks/{stock_id}",
+            axum::routing::patch(routing::patch_stock),
+        )
+        .route(
+            "/v1/targets",
+            get(routing::list_targets).post(routing::create_target),
+        )
+        .route(
+            "/v1/targets/{target_id}",
+            axum::routing::patch(routing::patch_target),
+        )
+        .route(
+            "/v1/targets/{target_id}/bindings",
+            get(routing::list_bindings).post(routing::create_binding),
+        )
+        .route(
+            "/v1/targets/{target_id}/bindings/{binding_id}",
+            axum::routing::delete(routing::delete_binding),
+        )
+        .route(
+            "/v1/targets/{target_id}/readiness",
+            get(routing::target_readiness),
+        )
         .route("/v1/agent-enrolments", post(api::create_agent_enrolment))
         .route("/v1/agents/enrol", post(api::enrol_agent))
         .route("/v1/uploads", post(api::create_upload))
@@ -333,6 +362,12 @@ mod tests {
             .set_agent_public_key(agent_id, signing_key.verifying_key().to_bytes().to_vec())
             .await;
         authenticator.insert("spl_test_integration", tenant).await;
+        authenticator
+            .insert(
+                "spl_test_other",
+                TenantContext::unrestricted(WorkspaceId::new(), EnvironmentId::new()),
+            )
+            .await;
         TestApplication {
             router: router(AppState::new(
                 Arc::new(repository.clone()),
@@ -712,6 +747,163 @@ mod tests {
             .await
             .expect("profile override response");
         assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn stocks_targets_and_bindings_form_a_ready_tenant_scoped_route() {
+        let application = application().await;
+        let now = Utc::now();
+        let printer_id = PrinterId::new();
+        let sync_request = AgentSyncRequest {
+            agent_id: application.agent_id,
+            protocol_version: 1,
+            agent_version: "test-routing".into(),
+            printer_revision: 1,
+            acknowledged_command_cursor: None,
+            event_cursor: None,
+            queue: QueueSnapshot {
+                queued_jobs: 0,
+                active_jobs: 0,
+                content_bytes: 0,
+                accepts_jobs: true,
+            },
+            health: AgentHealth {
+                started_at: now,
+                observed_at: now,
+                sqlite_integrity_ok: true,
+                executor_crashes: 0,
+                last_error_code: None,
+            },
+            printers: Some(vec![profiled_printer_snapshot(printer_id)]),
+            events: Vec::new(),
+        };
+        let body = serde_json::to_vec(&sync_request).expect("sync JSON");
+        let response = application
+            .router
+            .clone()
+            .oneshot(signed_request(&application, "POST", "/v1/agent/sync", body))
+            .await
+            .expect("sync response");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let stock_response = application
+            .router
+            .clone()
+            .oneshot(api_request(
+                "POST",
+                "/v1/stocks",
+                "spl_test_integration",
+                Some(r#"{"name":"Shipping A4","sku":"A4-SHIP","attributes":{"width_mm":210}}"#),
+            ))
+            .await
+            .expect("stock response");
+        assert_eq!(stock_response.status(), StatusCode::CREATED);
+        let stock: serde_json::Value = serde_json::from_slice(
+            &stock_response
+                .into_body()
+                .collect()
+                .await
+                .expect("stock body")
+                .to_bytes(),
+        )
+        .expect("stock JSON");
+        assert!(
+            stock["id"]
+                .as_str()
+                .expect("stock id")
+                .starts_with("stk_")
+        );
+
+        let target_response = application
+            .router
+            .clone()
+            .oneshot(api_request(
+                "POST",
+                "/v1/targets",
+                "spl_test_integration",
+                Some(r#"{"name":"Shipping labels"}"#),
+            ))
+            .await
+            .expect("target response");
+        assert_eq!(target_response.status(), StatusCode::CREATED);
+        let target: serde_json::Value = serde_json::from_slice(
+            &target_response
+                .into_body()
+                .collect()
+                .await
+                .expect("target body")
+                .to_bytes(),
+        )
+        .expect("target JSON");
+        let target_id = target["id"].as_str().expect("target id");
+
+        let binding_response = application
+            .router
+            .clone()
+            .oneshot(api_request(
+                "POST",
+                &format!("/v1/targets/{target_id}/bindings"),
+                "spl_test_integration",
+                Some(&format!(
+                    r#"{{"printer_id":"{printer_id}","profile_id":"profile_shipping","profile_revision":4,"role":"primary"}}"#
+                )),
+            ))
+            .await
+            .expect("binding response");
+        assert_eq!(binding_response.status(), StatusCode::CREATED);
+
+        let readiness_response = application
+            .router
+            .clone()
+            .oneshot(api_request(
+                "GET",
+                &format!("/v1/targets/{target_id}/readiness"),
+                "spl_test_integration",
+                None,
+            ))
+            .await
+            .expect("readiness response");
+        assert_eq!(readiness_response.status(), StatusCode::OK);
+        let readiness: serde_json::Value = serde_json::from_slice(
+            &readiness_response
+                .into_body()
+                .collect()
+                .await
+                .expect("readiness body")
+                .to_bytes(),
+        )
+        .expect("readiness JSON");
+        assert_eq!(readiness["status"], "ready");
+        assert_eq!(readiness["bindings"][0]["status"], "ready");
+
+        let cross_tenant = application
+            .router
+            .clone()
+            .oneshot(api_request(
+                "GET",
+                &format!("/v1/targets/{target_id}/readiness"),
+                "spl_test_other",
+                None,
+            ))
+            .await
+            .expect("cross-tenant response");
+        assert_eq!(cross_tenant.status(), StatusCode::NOT_FOUND);
+
+        let wrong_revision = application
+            .router
+            .clone()
+            .oneshot(api_request(
+                "POST",
+                &format!("/v1/targets/{target_id}/bindings"),
+                "spl_test_integration",
+                Some(&format!(
+                    r#"{{"printer_id":"{printer_id}","profile_id":"profile_shipping","profile_revision":99,"role":"standby"}}"#
+                )),
+            ))
+            .await
+            .expect("invalid binding response");
+        assert_eq!(wrong_revision.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
