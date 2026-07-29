@@ -80,6 +80,16 @@ CREATE TABLE IF NOT EXISTS inbox_receipts (
   received_unix_ms INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS cloud_accept_intents (
+  job_id TEXT PRIMARY KEY REFERENCES jobs(job_id) ON DELETE CASCADE,
+  lease_id TEXT NOT NULL,
+  lease_token TEXT NOT NULL,
+  lease_expires_unix_ms INTEGER NOT NULL,
+  content_sha256 TEXT NOT NULL,
+  local_sequence INTEGER NOT NULL CHECK (local_sequence > 0),
+  prepared_unix_ms INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS job_submissions (
   submission_id TEXT PRIMARY KEY,
   job_id TEXT NOT NULL REFERENCES jobs(job_id) ON DELETE CASCADE,

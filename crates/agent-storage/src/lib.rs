@@ -103,6 +103,30 @@ pub struct QueueCounts {
     pub active: u32,
 }
 
+#[derive(Clone, PartialEq, Eq)]
+pub struct CloudAcceptIntent {
+    pub job_id: String,
+    pub lease_id: String,
+    pub lease_token: String,
+    pub lease_expires_unix_ms: i64,
+    pub content_sha256: String,
+    pub local_sequence: u64,
+}
+
+impl std::fmt::Debug for CloudAcceptIntent {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CloudAcceptIntent")
+            .field("job_id", &self.job_id)
+            .field("lease_id", &self.lease_id)
+            .field("lease_token", &"[REDACTED]")
+            .field("lease_expires_unix_ms", &self.lease_expires_unix_ms)
+            .field("content_sha256", &self.content_sha256)
+            .field("local_sequence", &self.local_sequence)
+            .finish()
+    }
+}
+
 #[derive(Debug)]
 pub struct AgentStore {
     connection: Connection,
@@ -368,6 +392,205 @@ impl AgentStore {
         tx.commit()?;
         self.get_job(&job.job_id)?
             .ok_or_else(|| StorageError::JobNotFound(job.job_id.clone()))
+    }
+
+    /// Durably prepares a cloud job and its exact lease acceptance request
+    /// without making the job runnable.
+    ///
+    /// A repeated offer with identical immutable job data replaces only the
+    /// lease credentials. No local event is emitted until
+    /// [`Self::activate_cloud_job`] confirms the remote acceptance.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a non-cloud job, conflicting immutable metadata,
+    /// invalid lease data, or a failed transaction.
+    pub fn prepare_cloud_job(
+        &mut self,
+        job: &AcceptedJob,
+        lease_id: &str,
+        lease_token: &str,
+        lease_expires_unix_ms: i64,
+    ) -> Result<LocalJob, StorageError> {
+        if !job.cloud_managed || lease_token.is_empty() {
+            return Err(StorageError::InvalidLocalEvent(
+                "cloud acceptance requires a managed job and lease token".into(),
+            ));
+        }
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if let Some(existing) = query_job(&transaction, &job.job_id)? {
+            let same = existing.submission_id == job.submission_id
+                && existing.printer_id == job.printer_id
+                && existing.content_sha256 == job.content_sha256
+                && existing.content_kind == job.content_kind;
+            if !same {
+                return Err(StorageError::JobConflict(job.job_id.clone()));
+            }
+            if existing.state != "cloud_accept_pending" {
+                return Err(StorageError::InvalidLocalEvent(format!(
+                    "cloud job {} is already in local state {}",
+                    job.job_id, existing.state
+                )));
+            }
+            upsert_cloud_accept_intent(
+                &transaction,
+                &existing,
+                lease_id,
+                lease_token,
+                lease_expires_unix_ms,
+                job.accepted_unix_ms,
+            )?;
+            transaction.commit()?;
+            return Ok(existing);
+        }
+
+        transaction.execute(
+            "INSERT INTO printer_sequences (printer_id, next_sequence)
+             VALUES (?1, 2)
+             ON CONFLICT (printer_id)
+             DO UPDATE SET next_sequence = next_sequence + 1",
+            [&job.printer_id],
+        )?;
+        let printer_sequence: i64 = transaction.query_row(
+            "SELECT next_sequence - 1 FROM printer_sequences WHERE printer_id = ?1",
+            [&job.printer_id],
+            |row| row.get(0),
+        )?;
+        transaction.execute(
+            "INSERT INTO inbox_receipts
+             (receipt_id, job_id, content_sha256, received_unix_ms)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                format!("accept:{}", job.job_id),
+                job.job_id,
+                job.content_sha256,
+                job.accepted_unix_ms
+            ],
+        )?;
+        transaction.execute(
+            "INSERT INTO content_files
+             (sha256, path, reference_count, verified_unix_ms)
+             VALUES (?1, ?2, 1, ?3)
+             ON CONFLICT (sha256)
+             DO UPDATE SET reference_count = reference_count + 1",
+            params![job.content_sha256, job.content_path, job.accepted_unix_ms],
+        )?;
+        transaction.execute(
+            "INSERT INTO jobs
+             (job_id, submission_id, printer_id, printer_native_id,
+              printer_sequence, title, content_sha256, content_path,
+              content_kind, options_json, state, expires_unix_ms,
+              accepted_unix_ms, updated_unix_ms, cloud_managed)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
+                     'cloud_accept_pending', ?11, ?12, ?12, 1)",
+            params![
+                job.job_id,
+                job.submission_id,
+                job.printer_id,
+                job.printer_native_id,
+                printer_sequence,
+                job.title,
+                job.content_sha256,
+                job.content_path,
+                job.content_kind,
+                job.options_json,
+                job.expires_unix_ms,
+                job.accepted_unix_ms,
+            ],
+        )?;
+        let local = query_job(&transaction, &job.job_id)?
+            .ok_or_else(|| StorageError::JobNotFound(job.job_id.clone()))?;
+        upsert_cloud_accept_intent(
+            &transaction,
+            &local,
+            lease_id,
+            lease_token,
+            lease_expires_unix_ms,
+            job.accepted_unix_ms,
+        )?;
+        transaction.commit()?;
+        self.get_job(&job.job_id)?
+            .ok_or_else(|| StorageError::JobNotFound(job.job_id.clone()))
+    }
+
+    /// Returns durable cloud accept requests that must be retried exactly.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `SQLite` cannot decode an intent.
+    pub fn pending_cloud_accepts(&self) -> Result<Vec<CloudAcceptIntent>, StorageError> {
+        let mut statement = self.connection.prepare(
+            "SELECT job_id, lease_id, lease_token, lease_expires_unix_ms,
+                    content_sha256, local_sequence
+             FROM cloud_accept_intents ORDER BY prepared_unix_ms, job_id",
+        )?;
+        let rows = statement.query_map([], row_to_cloud_accept_intent)?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Atomically makes a remotely confirmed cloud job runnable, emits its
+    /// first local event, and deletes the persisted lease capability.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a missing/unprepared job or a failed transaction.
+    pub fn activate_cloud_job(
+        &mut self,
+        job_id: &str,
+        observed_unix_ms: i64,
+    ) -> Result<LocalJob, StorageError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let job = query_job(&transaction, job_id)?
+            .ok_or_else(|| StorageError::JobNotFound(job_id.to_owned()))?;
+        if job.state == "queued_local" {
+            transaction.commit()?;
+            return Ok(job);
+        }
+        if job.state != "cloud_accept_pending" {
+            return Err(StorageError::InvalidLocalEvent(format!(
+                "cloud job {job_id} cannot activate from {}",
+                job.state
+            )));
+        }
+        let has_intent: bool = transaction.query_row(
+            "SELECT EXISTS (
+               SELECT 1 FROM cloud_accept_intents WHERE job_id = ?1
+             )",
+            [job_id],
+            |row| row.get(0),
+        )?;
+        if !has_intent {
+            return Err(StorageError::InvalidLocalEvent(format!(
+                "cloud job {job_id} has no acceptance intent"
+            )));
+        }
+        transaction.execute(
+            "UPDATE jobs SET state = 'queued_local', updated_unix_ms = ?2
+             WHERE job_id = ?1",
+            params![job_id, observed_unix_ms],
+        )?;
+        append_event_tx(
+            &transaction,
+            &EventId::new().to_string(),
+            job_id,
+            1,
+            "queued_local",
+            None,
+            Some("Job is durable in the local queue"),
+            "{}",
+            observed_unix_ms,
+        )?;
+        transaction.execute(
+            "DELETE FROM cloud_accept_intents WHERE job_id = ?1",
+            [job_id],
+        )?;
+        transaction.commit()?;
+        self.get_job(job_id)?
+            .ok_or_else(|| StorageError::JobNotFound(job_id.to_owned()))
     }
 
     /// Looks up one locally durable job.
@@ -788,7 +1011,10 @@ impl AgentStore {
         let Some(job) = self.get_job(job_id)? else {
             return Err(StorageError::JobNotFound(job_id.to_owned()));
         };
-        if matches!(job.state.as_str(), "queued_local" | "failed_retryable") {
+        if matches!(
+            job.state.as_str(),
+            "cloud_accept_pending" | "queued_local" | "failed_retryable"
+        ) {
             return self.cancel_before_handoff(job_id, observed_unix_ms);
         }
         if !matches!(
@@ -950,6 +1176,16 @@ impl AgentStore {
         let Some(job) = self.get_job(job_id)? else {
             return Err(StorageError::JobNotFound(job_id.to_owned()));
         };
+        if job.state == "cloud_accept_pending" {
+            self.terminalize_prepared_cloud_job(
+                job_id,
+                "cancelled",
+                "cancelled_by_server",
+                "Cancelled by the control plane before cloud acceptance",
+                observed_unix_ms,
+            )?;
+            return Ok(true);
+        }
         if !matches!(job.state.as_str(), "queued_local" | "failed_retryable") {
             return Ok(false);
         }
@@ -983,7 +1219,9 @@ impl AgentStore {
         let job_ids = {
             let mut statement = self.connection.prepare(
                 "SELECT job_id FROM jobs
-                 WHERE state IN ('queued_local', 'failed_retryable')
+                 WHERE state IN (
+                    'cloud_accept_pending', 'queued_local', 'failed_retryable'
+                 )
                    AND expires_unix_ms IS NOT NULL
                    AND expires_unix_ms <= ?1",
             )?;
@@ -991,6 +1229,19 @@ impl AgentStore {
             rows.collect::<Result<Vec<_>, _>>()?
         };
         for job_id in &job_ids {
+            if self
+                .get_job(job_id)?
+                .is_some_and(|job| job.state == "cloud_accept_pending")
+            {
+                self.terminalize_prepared_cloud_job(
+                    job_id,
+                    "expired",
+                    "expired_before_handoff",
+                    "Job expired before cloud acceptance",
+                    now_unix_ms,
+                )?;
+                continue;
+            }
             let sequence: i64 = self.connection.query_row(
                 "SELECT COALESCE(MAX(job_sequence), 0) + 1 FROM job_events WHERE job_id = ?1",
                 [job_id],
@@ -1008,6 +1259,48 @@ impl AgentStore {
             )?;
         }
         Ok(job_ids.len())
+    }
+
+    fn terminalize_prepared_cloud_job(
+        &mut self,
+        job_id: &str,
+        state: &str,
+        reason: &str,
+        message: &str,
+        observed_unix_ms: i64,
+    ) -> Result<(), StorageError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current = query_job(&transaction, job_id)?
+            .ok_or_else(|| StorageError::JobNotFound(job_id.to_owned()))?;
+        if current.state != "cloud_accept_pending" {
+            return Err(StorageError::InvalidLocalEvent(format!(
+                "cloud job {job_id} cannot terminate from {}",
+                current.state
+            )));
+        }
+        transaction.execute(
+            "DELETE FROM cloud_accept_intents WHERE job_id = ?1",
+            [job_id],
+        )?;
+        transaction.execute(
+            "UPDATE jobs SET state = ?2, updated_unix_ms = ?3 WHERE job_id = ?1",
+            params![job_id, state, observed_unix_ms],
+        )?;
+        append_event_tx(
+            &transaction,
+            &EventId::new().to_string(),
+            job_id,
+            1,
+            state,
+            Some(reason),
+            Some(message),
+            "{}",
+            observed_unix_ms,
+        )?;
+        transaction.commit()?;
+        Ok(())
     }
 }
 
@@ -1072,6 +1365,59 @@ fn query_job(connection: &Connection, job_id: &str) -> Result<Option<LocalJob>, 
         .optional()
 }
 
+fn upsert_cloud_accept_intent(
+    connection: &Connection,
+    job: &LocalJob,
+    lease_id: &str,
+    lease_token: &str,
+    lease_expires_unix_ms: i64,
+    prepared_unix_ms: i64,
+) -> Result<(), StorageError> {
+    connection.execute(
+        "INSERT INTO cloud_accept_intents (
+            job_id, lease_id, lease_token, lease_expires_unix_ms,
+            content_sha256, local_sequence, prepared_unix_ms
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT(job_id) DO UPDATE SET
+            lease_id = excluded.lease_id,
+            lease_token = excluded.lease_token,
+            lease_expires_unix_ms = excluded.lease_expires_unix_ms,
+            content_sha256 = excluded.content_sha256,
+            local_sequence = excluded.local_sequence,
+            prepared_unix_ms = excluded.prepared_unix_ms",
+        params![
+            job.job_id,
+            lease_id,
+            lease_token,
+            lease_expires_unix_ms,
+            job.content_sha256,
+            job.printer_sequence,
+            prepared_unix_ms,
+        ],
+    )?;
+    Ok(())
+}
+
+fn row_to_cloud_accept_intent(
+    row: &rusqlite::Row<'_>,
+) -> Result<CloudAcceptIntent, rusqlite::Error> {
+    let local_sequence: i64 = row.get(5)?;
+    Ok(CloudAcceptIntent {
+        job_id: row.get(0)?,
+        lease_id: row.get(1)?,
+        lease_token: row.get(2)?,
+        lease_expires_unix_ms: row.get(3)?,
+        content_sha256: row.get(4)?,
+        local_sequence: u64::try_from(local_sequence).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                5,
+                rusqlite::types::Type::Integer,
+                Box::new(error),
+            )
+        })?,
+    })
+}
+
 fn row_to_job(row: &rusqlite::Row<'_>) -> Result<LocalJob, rusqlite::Error> {
     Ok(LocalJob {
         job_id: row.get(0)?,
@@ -1123,6 +1469,102 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].state, "queued_local");
         assert!(store.integrity_check().unwrap());
+    }
+
+    #[test]
+    fn prepared_cloud_accept_survives_both_accept_crash_windows() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("agent.sqlite");
+        let mut cloud = job("cloud", "p1", 10);
+        cloud.cloud_managed = true;
+        let lease_id = "lease-before-crash";
+        {
+            let mut store = AgentStore::open(&database).unwrap();
+            let prepared = store
+                .prepare_cloud_job(&cloud, lease_id, "secret-token", 30_000)
+                .unwrap();
+            assert_eq!(prepared.state, "cloud_accept_pending");
+            assert!(store.runnable_heads(20).unwrap().is_empty());
+            assert!(store.pending_events(0, 10).unwrap().is_empty());
+        }
+
+        let restarted_before_accept = AgentStore::open(&database).unwrap();
+        let intents = restarted_before_accept.pending_cloud_accepts().unwrap();
+        assert_eq!(intents.len(), 1);
+        assert_eq!(intents[0].lease_id, lease_id);
+        assert_eq!(intents[0].lease_token, "secret-token");
+        assert!(!format!("{:?}", intents[0]).contains("secret-token"));
+        assert!(
+            restarted_before_accept
+                .runnable_heads(20)
+                .unwrap()
+                .is_empty()
+        );
+        drop(restarted_before_accept);
+
+        // Model a crash after the server durably accepted the exact intent but
+        // before the client could activate its local queue.
+        let mut restarted = AgentStore::open(&database).unwrap();
+        assert_eq!(restarted.pending_cloud_accepts().unwrap(), intents);
+        restarted.activate_cloud_job("cloud", 20).unwrap();
+        restarted.activate_cloud_job("cloud", 21).unwrap();
+        assert_eq!(restarted.runnable_heads(30).unwrap().len(), 1);
+        assert_eq!(restarted.pending_events(0, 10).unwrap().len(), 1);
+        assert!(restarted.pending_cloud_accepts().unwrap().is_empty());
+    }
+
+    #[test]
+    fn repeated_cloud_offer_updates_only_lease_intent() {
+        let mut store = AgentStore::in_memory().unwrap();
+        let mut cloud = job("cloud", "p1", 10);
+        cloud.cloud_managed = true;
+        store
+            .prepare_cloud_job(&cloud, "old-lease", "old-token", 30_000)
+            .unwrap();
+        let new_lease = "new-lease";
+        let duplicate = store
+            .prepare_cloud_job(&cloud, new_lease, "new-token", 60_000)
+            .unwrap();
+        assert_eq!(duplicate.printer_sequence, 1);
+        let intents = store.pending_cloud_accepts().unwrap();
+        assert_eq!(intents.len(), 1);
+        assert_eq!(intents[0].lease_id, new_lease);
+        assert_eq!(intents[0].lease_token, "new-token");
+        assert!(store.pending_events(0, 10).unwrap().is_empty());
+        assert!(store.runnable_heads(20).unwrap().is_empty());
+    }
+
+    #[test]
+    fn cancel_and_expiry_terminalize_prepared_cloud_jobs_once() {
+        let mut store = AgentStore::in_memory().unwrap();
+        let mut cancelled = job("cancelled", "p1", 10);
+        cancelled.cloud_managed = true;
+        store
+            .prepare_cloud_job(&cancelled, "cancel-lease", "cancel-token", 30_000)
+            .unwrap();
+        assert!(store.request_cancel("cancelled", 20).unwrap());
+        assert_eq!(
+            store.get_job("cancelled").unwrap().unwrap().state,
+            "cancelled"
+        );
+
+        let mut expired = job("expired", "p2", 11);
+        expired.cloud_managed = true;
+        expired.expires_unix_ms = Some(25);
+        store
+            .prepare_cloud_job(&expired, "expire-lease", "expire-token", 30_000)
+            .unwrap();
+        assert_eq!(store.expire_waiting(26).unwrap(), 1);
+        assert_eq!(store.get_job("expired").unwrap().unwrap().state, "expired");
+        assert!(store.pending_cloud_accepts().unwrap().is_empty());
+        assert!(store.runnable_heads(30).unwrap().is_empty());
+
+        let events = store.pending_events(0, 10).unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].state, "cancelled");
+        assert_eq!(events[0].reason.as_deref(), Some("cancelled_by_server"));
+        assert_eq!(events[1].state, "expired");
+        assert_eq!(events[1].reason.as_deref(), Some("expired_before_handoff"));
     }
 
     #[test]

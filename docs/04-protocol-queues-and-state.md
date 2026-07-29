@@ -260,6 +260,18 @@ If any message is duplicated, stable IDs make processing idempotent. If a lease
 expires before `agent_accepted`, another valid session for the same installation
 may claim it. Only one installation identity may own a printer at a time.
 
+The V1 polling transport implements this as a durable two-phase local handoff.
+During content materialisation and acceptance work, the agent renews the lease
+at most every ten seconds with a five-second renewal-request timeout. It first
+stores a `cloud_accept_pending` job and the exact lease/digest/local-sequence
+accept intent in `SQLite`; this state is not runnable and emits no queue event.
+An ambiguous response or restart retries that exact intent against the server's
+idempotent acceptance record. Only a confirmed response atomically changes the
+job to `queued_local`, emits its first outbox event, and deletes the persisted
+lease capability. A server cancellation or policy expiry terminalises a
+prepared job and deletes the capability without inventing a transient-failure
+cancellation.
+
 ### Agent event outbox
 
 The agent writes events and local state changes in the same SQLite transaction.
@@ -312,4 +324,3 @@ The loopback native API reuses the same domain commands and state events:
 
 When an agent is later enrolled, existing local job history remains local by
 default. Uploading historical metadata requires explicit policy.
-

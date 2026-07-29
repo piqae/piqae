@@ -108,6 +108,37 @@ pub struct ContentStore {
     root: PathBuf,
 }
 
+#[derive(Debug)]
+struct PartialContent {
+    path: PathBuf,
+    published: bool,
+}
+
+impl PartialContent {
+    const fn new(path: PathBuf) -> Self {
+        Self {
+            path,
+            published: false,
+        }
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    const fn published(&mut self) {
+        self.published = true;
+    }
+}
+
+impl Drop for PartialContent {
+    fn drop(&mut self) {
+        if !self.published {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredContent {
     pub sha256: String,
@@ -174,10 +205,11 @@ impl ContentStore {
             }
         }
         let temporary_path = self.root.join(format!(".{}.part", Uuid::new_v4()));
+        let mut partial = PartialContent::new(temporary_path);
         let mut output = tokio::fs::OpenOptions::new()
             .create_new(true)
             .write(true)
-            .open(&temporary_path)
+            .open(partial.path())
             .await?;
         let mut hasher = Sha256::new();
         let mut total_bytes = 0_u64;
@@ -192,7 +224,6 @@ impl ContentStore {
             total_bytes = total_bytes.saturating_add(u64::try_from(count).unwrap_or(u64::MAX));
             if total_bytes > Self::MAX_CONTENT_BYTES {
                 drop(output);
-                let _ = tokio::fs::remove_file(&temporary_path).await;
                 return Err(AgentError::ContentTooLarge {
                     limit: Self::MAX_CONTENT_BYTES,
                 });
@@ -204,30 +235,30 @@ impl ContentStore {
         let actual = format!("{:x}", hasher.finalize());
         if let Some(expected) = expected {
             if actual != expected {
-                let _ = tokio::fs::remove_file(&temporary_path).await;
                 return Err(AgentError::ContentDigestMismatch { expected, actual });
             }
         }
         let final_path = self.root.join(&actual);
 
-        match tokio::fs::rename(&temporary_path, &final_path).await {
-            Ok(()) => Ok(StoredContent {
-                sha256: actual,
-                path: final_path,
-                bytes: total_bytes,
-            }),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                let _ = tokio::fs::remove_file(&temporary_path).await;
+        match tokio::fs::rename(partial.path(), &final_path).await {
+            Ok(()) => {
+                partial.published();
                 Ok(StoredContent {
                     sha256: actual,
                     path: final_path,
                     bytes: total_bytes,
                 })
             }
-            Err(error) => {
-                let _ = tokio::fs::remove_file(&temporary_path).await;
-                Err(error.into())
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let _ = tokio::fs::remove_file(partial.path()).await;
+                partial.published();
+                Ok(StoredContent {
+                    sha256: actual,
+                    path: final_path,
+                    bytes: total_bytes,
+                })
             }
+            Err(error) => Err(error.into()),
         }
     }
 }
@@ -765,6 +796,7 @@ impl Executor for FakeExecutor {
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use std::time::Duration;
     use tokio::io::BufReader;
 
     #[derive(Debug, Clone, Copy)]
@@ -883,6 +915,24 @@ mod tests {
             .await
             .expect_err("mismatch");
         assert!(matches!(error, AgentError::ContentDigestMismatch { .. }));
+    }
+
+    #[tokio::test]
+    async fn cancelled_stream_removes_partial_content() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let store = ContentStore::open(directory.path()).await.expect("open");
+        let (mut writer, reader) = tokio::io::duplex(64);
+        let write = tokio::spawn(async move {
+            writer.write_all(b"partial").await.expect("write");
+            std::future::pending::<()>().await;
+        });
+        let put = tokio::spawn(async move { store.put(reader).await });
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        put.abort();
+        let _ = put.await;
+        write.abort();
+        let mut entries = tokio::fs::read_dir(directory.path()).await.expect("list");
+        assert!(entries.next_entry().await.expect("entry").is_none());
     }
 
     #[tokio::test]

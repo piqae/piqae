@@ -11,7 +11,9 @@ use spool_agent_core::{
     AgentEngine, ContentStore, Executor, ExecutorFailure, FakeExecutor, LocalSubmission,
     NativeAcceptance, NativeJobReference, SystemClock,
 };
-use spool_agent_storage::{AcceptedJob, AgentStore, PendingEvent, QueueCounts, StorageError};
+use spool_agent_storage::{
+    AcceptedJob, AgentStore, CloudAcceptIntent, PendingEvent, QueueCounts, StorageError,
+};
 use spool_domain::{AgentId, ContentKind, EventId, JobEvent, JobFailureReason, JobId, JobState};
 use spool_executor_supervisor::{ExecutorSupervisor, SupervisedExecutor};
 use spool_local_api::{
@@ -22,13 +24,14 @@ use spool_protocol::{
     CURRENT_PROTOCOL_VERSION,
     agent::{
         AgentAcceptJobRequest, AgentCommand, AgentHealth, AgentReleaseLeaseRequest,
-        AgentSyncRequest, AgentSyncResponse, ContentDescriptor, JobOffer, PrinterSnapshot,
-        QueueSnapshot,
+        AgentRenewLeaseRequest, AgentSyncRequest, AgentSyncResponse, ContentDescriptor, JobOffer,
+        PrinterSnapshot, QueueSnapshot,
     },
     executor::NativeJobObservation,
     executor::{DiscoveredPrinter, ExecutorOperation, ExecutorResult},
 };
 use std::{
+    future::Future,
     io::Write as _,
     net::SocketAddr,
     path::{Path, PathBuf},
@@ -44,6 +47,9 @@ use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 use uri_fetch::UriFetcher;
 use url::Url;
+
+const LEASE_RENEWAL_INTERVAL: Duration = Duration::from_secs(10);
+const LEASE_RENEWAL_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum AgentMode {
@@ -566,6 +572,7 @@ async fn run_cloud_sync_loop(
     let started_at = Utc::now();
     let mut failures = 0_u32;
     loop {
+        resume_pending_cloud_accepts(&cloud, &mut store).await;
         let request = match prepare_sync_request(
             &mut store,
             &printer_discovery,
@@ -726,8 +733,64 @@ async fn accept_offer(
     uri_fetcher: &UriFetcher,
     offer: JobOffer,
 ) -> Result<()> {
+    let lease_id = offer.lease_id;
+    let lease_token = offer.lease_token.clone();
     let job_id = offer.job.id;
-    let stored = match materialize_descriptor(
+    let result = maintain_lease(
+        offer.lease_expires_at,
+        LEASE_RENEWAL_INTERVAL,
+        accept_offer_under_lease(cloud, store, content_store, uri_fetcher, offer),
+        || async {
+            tokio::time::timeout(
+                LEASE_RENEWAL_REQUEST_TIMEOUT,
+                cloud.client.renew_lease(
+                    &cloud.identity,
+                    job_id,
+                    &AgentRenewLeaseRequest {
+                        lease_id,
+                        lease_token: lease_token.clone(),
+                    },
+                ),
+            )
+            .await
+            .map_err(|_| anyhow::anyhow!("job lease renewal failed"))?
+            .map(|response| response.lease_expires_at)
+            .map_err(|_| anyhow::anyhow!("job lease renewal failed"))
+        },
+    )
+    .await;
+    if result.is_err() {
+        let has_durable_intent = store
+            .pending_cloud_accepts()?
+            .iter()
+            .any(|intent| intent.job_id == job_id.to_string());
+        if !has_durable_intent {
+            let _ = cloud
+                .client
+                .release_lease(
+                    &cloud.identity,
+                    job_id,
+                    &AgentReleaseLeaseRequest {
+                        lease_id,
+                        lease_token,
+                        reason: "acceptance_failed".into(),
+                    },
+                )
+                .await;
+        }
+    }
+    result
+}
+
+async fn accept_offer_under_lease(
+    cloud: &CloudConfiguration,
+    store: &mut AgentStore,
+    content_store: &ContentStore,
+    uri_fetcher: &UriFetcher,
+    offer: JobOffer,
+) -> Result<()> {
+    let job_id = offer.job.id;
+    let stored = materialize_descriptor(
         cloud,
         content_store,
         uri_fetcher,
@@ -736,63 +799,128 @@ async fn accept_offer(
         &offer.lease_token,
         offer.content,
     )
-    .await
-    {
-        Ok(stored) => stored,
-        Err(error) => {
-            let _ = cloud
-                .client
-                .release_lease(
-                    &cloud.identity,
-                    job_id,
-                    &AgentReleaseLeaseRequest {
-                        lease_id: offer.lease_id,
-                        lease_token: offer.lease_token,
-                        reason: "content_unavailable".into(),
-                    },
-                )
-                .await;
-            return Err(error);
-        }
-    };
+    .await?;
     let logical_printer_id = offer.job.printer_id.to_string();
     let native_printer_id = store
         .native_printer_id(&logical_printer_id)?
         .with_context(|| {
             format!("printer {logical_printer_id} has no durable native queue mapping")
         })?;
-    let local = store.accept_job(&AcceptedJob {
-        job_id: job_id.to_string(),
-        submission_id: format!("sub_{job_id}"),
-        printer_id: logical_printer_id,
-        printer_native_id: native_printer_id,
-        title: offer.job.title,
-        content_sha256: stored.sha256.clone(),
-        content_path: stored.path.to_string_lossy().into_owned(),
-        content_kind: match offer.job.content_kind {
-            ContentKind::Pdf => "pdf",
-            ContentKind::Raw => "raw",
+    let accepted_unix_ms = Utc::now().timestamp_millis();
+    let local = store.prepare_cloud_job(
+        &AcceptedJob {
+            job_id: job_id.to_string(),
+            submission_id: format!("sub_{job_id}"),
+            printer_id: logical_printer_id,
+            printer_native_id: native_printer_id,
+            title: offer.job.title,
+            content_sha256: stored.sha256.clone(),
+            content_path: stored.path.to_string_lossy().into_owned(),
+            content_kind: match offer.job.content_kind {
+                ContentKind::Pdf => "pdf",
+                ContentKind::Raw => "raw",
+            }
+            .into(),
+            options_json: serde_json::to_string(&offer.job.options)?,
+            expires_unix_ms: Some(offer.job.expires_at.timestamp_millis()),
+            accepted_unix_ms,
+            cloud_managed: true,
+        },
+        &offer.lease_id.to_string(),
+        &offer.lease_token,
+        offer.lease_expires_at.timestamp_millis(),
+    )?;
+    confirm_cloud_accept(
+        cloud,
+        store,
+        &CloudAcceptIntent {
+            job_id: job_id.to_string(),
+            lease_id: offer.lease_id.to_string(),
+            lease_token: offer.lease_token,
+            lease_expires_unix_ms: offer.lease_expires_at.timestamp_millis(),
+            content_sha256: stored.sha256,
+            local_sequence: u64::try_from(local.printer_sequence).unwrap_or(u64::MAX),
+        },
+    )
+    .await
+}
+
+async fn resume_pending_cloud_accepts(cloud: &CloudConfiguration, store: &mut AgentStore) {
+    let intents = match store.pending_cloud_accepts() {
+        Ok(intents) => intents,
+        Err(error) => {
+            warn!(%error, "pending cloud accept intents could not be read");
+            return;
         }
-        .into(),
-        options_json: serde_json::to_string(&offer.job.options)?,
-        expires_unix_ms: Some(offer.job.expires_at.timestamp_millis()),
-        accepted_unix_ms: Utc::now().timestamp_millis(),
-        cloud_managed: true,
-    })?;
+    };
+    for intent in intents {
+        let job_id = intent.job_id.clone();
+        let result = tokio::time::timeout(
+            LEASE_RENEWAL_REQUEST_TIMEOUT,
+            confirm_cloud_accept(cloud, store, &intent),
+        )
+        .await;
+        if !matches!(result, Ok(Ok(()))) {
+            warn!(%job_id, "pending cloud acceptance retry deferred");
+        }
+    }
+}
+
+async fn confirm_cloud_accept(
+    cloud: &CloudConfiguration,
+    store: &mut AgentStore,
+    intent: &CloudAcceptIntent,
+) -> Result<()> {
+    let job_id = intent.job_id.parse::<JobId>()?;
     cloud
         .client
         .accept_job(
             &cloud.identity,
             job_id,
             &AgentAcceptJobRequest {
-                lease_id: offer.lease_id,
-                lease_token: offer.lease_token,
-                content_sha256: stored.sha256,
-                local_sequence: u64::try_from(local.printer_sequence).unwrap_or(u64::MAX),
+                lease_id: intent.lease_id.parse()?,
+                lease_token: intent.lease_token.clone(),
+                content_sha256: intent.content_sha256.clone(),
+                local_sequence: intent.local_sequence,
             },
         )
-        .await?;
+        .await
+        .map_err(|_| anyhow::anyhow!("remote cloud acceptance failed"))?;
+    store.activate_cloud_job(&intent.job_id, Utc::now().timestamp_millis())?;
     Ok(())
+}
+
+async fn maintain_lease<T, Work, Renew, Renewal>(
+    initial_expires_at: chrono::DateTime<Utc>,
+    maximum_interval: Duration,
+    work: Work,
+    mut renew: Renew,
+) -> Result<T>
+where
+    Work: Future<Output = Result<T>>,
+    Renew: FnMut() -> Renewal,
+    Renewal: Future<Output = Result<chrono::DateTime<Utc>>>,
+{
+    let mut expires_at = initial_expires_at;
+    tokio::pin!(work);
+    loop {
+        let delay = lease_renewal_delay(expires_at, maximum_interval);
+        tokio::select! {
+            biased;
+            () = tokio::time::sleep(delay) => {
+                expires_at = renew().await?;
+            }
+            result = &mut work => return result,
+        }
+    }
+}
+
+fn lease_renewal_delay(expires_at: chrono::DateTime<Utc>, maximum_interval: Duration) -> Duration {
+    const SAFETY_MARGIN: Duration = Duration::from_secs(5);
+    let remaining = (expires_at - Utc::now()).to_std().unwrap_or(Duration::ZERO);
+    remaining
+        .saturating_sub(SAFETY_MARGIN)
+        .min(maximum_interval)
 }
 
 async fn materialize_descriptor(
@@ -1084,4 +1212,229 @@ fn load_or_create_private_token(path: &Path) -> Result<String> {
     file.write_all(token.as_bytes())?;
     file.sync_all()?;
     Ok(token)
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    #[tokio::test]
+    async fn delayed_content_stream_renews_until_materialized() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let store = ContentStore::open(directory.path()).await.expect("store");
+        let (mut writer, reader) = tokio::io::duplex(64);
+        let source = tokio::spawn(async move {
+            writer.write_all(b"first").await.expect("first");
+            tokio::time::sleep(Duration::from_millis(11)).await;
+            writer.write_all(b"-second").await.expect("second");
+            tokio::time::sleep(Duration::from_millis(11)).await;
+            writer.write_all(b"-third").await.expect("third");
+        });
+        let renewals = Arc::new(AtomicUsize::new(0));
+        let renewal_counter = Arc::clone(&renewals);
+        let content = maintain_lease(
+            Utc::now() + chrono::Duration::seconds(30),
+            Duration::from_millis(10),
+            async { Ok(store.put(reader).await?) },
+            move || {
+                let counter = Arc::clone(&renewal_counter);
+                async move {
+                    counter.fetch_add(1, Ordering::Relaxed);
+                    Ok(Utc::now() + chrono::Duration::seconds(30))
+                }
+            },
+        )
+        .await
+        .expect("materialize");
+        source.await.expect("source");
+        assert_eq!(
+            tokio::fs::read(content.path).await.expect("content"),
+            b"first-second-third"
+        );
+        assert_eq!(renewals.load(Ordering::Relaxed), 2);
+    }
+
+    #[tokio::test]
+    async fn failed_renewal_prevents_acceptance_and_restart_accepts_once() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let database = directory.path().join("agent.sqlite");
+        let job = cloud_job();
+        let mut store = AgentStore::open(&database).expect("store");
+        let error = maintain_lease(
+            Utc::now() + chrono::Duration::seconds(30),
+            Duration::from_millis(10),
+            async {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                store.prepare_cloud_job(
+                    &job,
+                    &uuid::Uuid::new_v4().to_string(),
+                    "first-lease",
+                    Utc::now().timestamp_millis() + 30_000,
+                )?;
+                Ok(())
+            },
+            || async { Err(anyhow::anyhow!("renewal unavailable")) },
+        )
+        .await
+        .expect_err("renewal must fail");
+        assert_eq!(error.to_string(), "renewal unavailable");
+        assert!(store.get_job(&job.job_id).expect("query").is_none());
+        drop(store);
+
+        let mut restarted = AgentStore::open(&database).expect("restart");
+        let renewals = Arc::new(AtomicUsize::new(0));
+        let renewal_counter = Arc::clone(&renewals);
+        maintain_lease(
+            Utc::now() + chrono::Duration::seconds(30),
+            Duration::from_millis(10),
+            async {
+                tokio::time::sleep(Duration::from_millis(15)).await;
+                restarted.prepare_cloud_job(
+                    &job,
+                    &uuid::Uuid::new_v4().to_string(),
+                    "restart-lease",
+                    Utc::now().timestamp_millis() + 30_000,
+                )?;
+                Ok(())
+            },
+            move || {
+                let counter = Arc::clone(&renewal_counter);
+                async move {
+                    counter.fetch_add(1, Ordering::Relaxed);
+                    Ok(Utc::now() + chrono::Duration::seconds(30))
+                }
+            },
+        )
+        .await
+        .expect("accept after restart");
+        assert!(restarted.runnable_heads(10).expect("runnable").is_empty());
+        restarted
+            .activate_cloud_job(&job.job_id, 10)
+            .expect("remote accepted");
+        restarted
+            .activate_cloud_job(&job.job_id, 11)
+            .expect("duplicate response");
+        assert_eq!(renewals.load(Ordering::Relaxed), 1);
+        assert_eq!(restarted.pending_events(0, 10).expect("events").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn ambiguous_server_accept_retries_exact_intent_before_activation() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let address = listener.local_addr().expect("address");
+        let server = tokio::spawn(async move {
+            let mut bodies = Vec::new();
+            for attempt in 0..2 {
+                let (mut stream, _) = listener.accept().await.expect("accept");
+                bodies.push(read_request_body(&mut stream).await);
+                if attempt == 0 {
+                    continue;
+                }
+                let body = br#"{"accepted_at":"2026-01-01T00:00:00Z","state":"agent_accepted"}"#;
+                stream
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .expect("headers");
+                stream.write_all(body).await.expect("body");
+            }
+            bodies
+        });
+
+        let agent_id = AgentId::new();
+        let cloud = CloudConfiguration {
+            client: AgentClient::new(Url::parse(&format!("http://{address}/")).expect("base URL"))
+                .expect("client"),
+            identity: DeviceIdentity::generate(agent_id),
+            agent_id,
+        };
+        let mut store = AgentStore::in_memory().expect("store");
+        let job = cloud_job();
+        let lease_id = uuid::Uuid::new_v4();
+        let local = store
+            .prepare_cloud_job(&job, &lease_id.to_string(), "retry-secret", i64::MAX)
+            .expect("prepare");
+        let intent = CloudAcceptIntent {
+            job_id: job.job_id.clone(),
+            lease_id: lease_id.to_string(),
+            lease_token: "retry-secret".into(),
+            lease_expires_unix_ms: i64::MAX,
+            content_sha256: job.content_sha256.clone(),
+            local_sequence: u64::try_from(local.printer_sequence).expect("sequence"),
+        };
+        confirm_cloud_accept(&cloud, &mut store, &intent)
+            .await
+            .expect_err("first response is ambiguous");
+        assert!(store.runnable_heads(10).expect("runnable").is_empty());
+        assert_eq!(store.pending_cloud_accepts().expect("intents").len(), 1);
+
+        resume_pending_cloud_accepts(&cloud, &mut store).await;
+        let bodies = server.await.expect("server");
+        assert_eq!(bodies.len(), 2);
+        assert_eq!(bodies[0], bodies[1]);
+        assert!(bodies[0].contains("\"lease_token\":\"retry-secret\""));
+        assert_eq!(store.runnable_heads(10).expect("runnable").len(), 1);
+        assert_eq!(store.pending_events(0, 10).expect("events").len(), 1);
+        assert!(store.pending_cloud_accepts().expect("intents").is_empty());
+    }
+
+    async fn read_request_body(stream: &mut tokio::net::TcpStream) -> String {
+        let mut request = Vec::new();
+        let body_start;
+        let content_length;
+        loop {
+            let mut chunk = [0_u8; 1024];
+            let count = stream.read(&mut chunk).await.expect("request");
+            assert!(count > 0);
+            request.extend_from_slice(&chunk[..count]);
+            if let Some(index) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+                body_start = index + 4;
+                let headers = String::from_utf8_lossy(&request[..index]);
+                content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        line.to_ascii_lowercase()
+                            .strip_prefix("content-length:")
+                            .and_then(|value| value.trim().parse::<usize>().ok())
+                    })
+                    .expect("content length");
+                break;
+            }
+        }
+        while request.len() < body_start + content_length {
+            let mut chunk = [0_u8; 1024];
+            let count = stream.read(&mut chunk).await.expect("body");
+            assert!(count > 0);
+            request.extend_from_slice(&chunk[..count]);
+        }
+        String::from_utf8(request[body_start..body_start + content_length].to_vec())
+            .expect("JSON body")
+    }
+
+    fn cloud_job() -> AcceptedJob {
+        AcceptedJob {
+            job_id: JobId::new().to_string(),
+            submission_id: "sub_restart".into(),
+            printer_id: "printer".into(),
+            printer_native_id: "native".into(),
+            title: "Restart-safe receipt".into(),
+            content_sha256: "abc".into(),
+            content_path: "/content/abc".into(),
+            content_kind: "pdf".into(),
+            options_json: "{}".into(),
+            expires_unix_ms: None,
+            accepted_unix_ms: 1,
+            cloud_managed: true,
+        }
+    }
 }
