@@ -21,4 +21,5 @@ test-results/
 *.log
 *.key
 *.pem
+.spool*/
 artifacts/
