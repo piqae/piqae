@@ -9,10 +9,10 @@ publish = false
 
 [dependencies]
 spool-domain.workspace = true
-spool-executor-protocol = { path = "../executor-protocol" }
+spool-executor-protocol = { path = "../executor-protocol", version = "0.1.0" }
 spool-protocol.workspace = true
 
 [dev-dependencies]
-spool-executor-supervisor = { path = "../executor-supervisor" }
+spool-executor-supervisor = { path = "../executor-supervisor", version = "0.1.0" }
 tokio.workspace = true
 uuid.workspace = true

@@ -9,9 +9,9 @@ publish = false
 
 [dependencies]
 async-trait.workspace = true
-spool-agent-core = { path = "../agent-core" }
+spool-agent-core = { path = "../agent-core", version = "0.1.0" }
 spool-domain.workspace = true
-spool-executor-protocol = { path = "../executor-protocol" }
+spool-executor-protocol = { path = "../executor-protocol", version = "0.1.0" }
 spool-protocol.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

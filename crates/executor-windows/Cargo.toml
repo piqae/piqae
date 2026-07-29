@@ -9,7 +9,7 @@ publish = false
 
 [dependencies]
 spool-domain.workspace = true
-spool-executor-protocol = { path = "../executor-protocol" }
+spool-executor-protocol = { path = "../executor-protocol", version = "0.1.0" }
 spool-protocol.workspace = true
 
 [target.'cfg(windows)'.dependencies]

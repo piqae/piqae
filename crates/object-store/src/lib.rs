@@ -1,7 +1,8 @@
 //! Content-addressed object storage used by the hosted and self-hosted control plane.
 
 use apache_object_store::{
-    ObjectStore as ApacheObjectStore, aws::AmazonS3Builder, path::Path as ObjectPath,
+    ObjectStore as ApacheObjectStore, ObjectStoreExt, aws::AmazonS3Builder,
+    path::Path as ObjectPath,
 };
 use async_trait::async_trait;
 use bytes::Bytes;

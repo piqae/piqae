@@ -21,13 +21,13 @@ futures.workspace = true
 hex.workspace = true
 reqwest.workspace = true
 serde_json.workspace = true
-spool-agent-client = { path = "../agent-client" }
-spool-agent-core = { path = "../agent-core" }
-spool-agent-storage = { path = "../agent-storage" }
+spool-agent-client = { path = "../agent-client", version = "0.1.0" }
+spool-agent-core = { path = "../agent-core", version = "0.1.0" }
+spool-agent-storage = { path = "../agent-storage", version = "0.1.0" }
 spool-domain.workspace = true
-spool-executor-supervisor = { path = "../executor-supervisor" }
-spool-local-api = { path = "../local-api" }
-spool-local-ipc = { path = "../local-ipc" }
+spool-executor-supervisor = { path = "../executor-supervisor", version = "0.1.0" }
+spool-local-api = { path = "../local-api", version = "0.1.0" }
+spool-local-ipc = { path = "../local-ipc", version = "0.1.0" }
 spool-protocol.workspace = true
 tokio.workspace = true
 tokio-util = { version = "0.7.19", features = ["io"] }

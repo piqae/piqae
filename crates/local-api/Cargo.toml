@@ -11,7 +11,7 @@ publish = false
 axum.workspace = true
 serde.workspace = true
 spool-domain.workspace = true
-spool-local-ipc = { path = "../local-ipc" }
+spool-local-ipc = { path = "../local-ipc", version = "0.1.0" }
 thiserror.workspace = true
 tokio.workspace = true
 tower-http.workspace = true

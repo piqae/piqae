@@ -54,11 +54,11 @@ url.workspace = true
 uuid.workspace = true
 
 spool-domain.workspace = true
-spool-object-store = { path = "../object-store" }
+spool-object-store = { path = "../object-store", version = "0.1.0" }
 spool-protocol.workspace = true
-spool-auth = { path = "../auth" }
-spool-storage-postgres = { path = "../storage-postgres" }
-spool-webhooks = { path = "../webhooks" }
+spool-auth = { path = "../auth", version = "0.1.0" }
+spool-storage-postgres = { path = "../storage-postgres", version = "0.1.0" }
+spool-webhooks = { path = "../webhooks", version = "0.1.0" }
 
 [dev-dependencies]
 http-body-util = "0.1"
