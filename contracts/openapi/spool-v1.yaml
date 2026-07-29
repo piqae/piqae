@@ -73,6 +73,12 @@ paths:
           $ref: "#/components/responses/Error"
         "409":
           $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "503":
+          $ref: "#/components/responses/Error"
     get:
       summary: List print jobs
       tags: [Jobs]
@@ -87,6 +93,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/JobPage"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
   /v1/jobs/{job_id}:
     parameters:
       - $ref: "#/components/parameters/JobId"
@@ -102,6 +114,10 @@ paths:
               schema:
                 $ref: "#/components/schemas/Job"
         "404":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
           $ref: "#/components/responses/Error"
   /v1/jobs/{job_id}/events:
     parameters:
@@ -119,6 +135,12 @@ paths:
                 type: array
                 items:
                   $ref: "#/components/schemas/JobEvent"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
   /v1/jobs/{job_id}/cancel:
     parameters:
       - $ref: "#/components/parameters/JobId"
@@ -134,6 +156,10 @@ paths:
               schema:
                 $ref: "#/components/schemas/Job"
         "409":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
           $ref: "#/components/responses/Error"
   /v1/printers:
     get:
@@ -160,6 +186,12 @@ paths:
                     type: [string, "null"]
                   has_more:
                     type: boolean
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
   /v1/agents:
     get:
       summary: List agents
@@ -174,6 +206,10 @@ paths:
                 type: array
                 items:
                   $ref: "#/components/schemas/Agent"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
   /v1/agent-enrolments:
     post:
       summary: Create a single-use agent enrolment
@@ -212,6 +248,132 @@ paths:
                   expires_at:
                     type: string
                     format: date-time
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+  /v1/agents/enrol:
+    post:
+      summary: Consume a single-use enrolment and register an agent key
+      tags: [Agents]
+      operationId: enrolAgent
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EnrolRequest"
+      responses:
+        "201":
+          description: Agent enrolled.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EnrolResponse"
+        "400":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+  /v1/uploads:
+    post:
+      summary: Create a content upload
+      tags: [Jobs]
+      operationId: createUpload
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateUpload"
+      responses:
+        "201":
+          description: Pending server-proxy upload.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UploadResponse"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+  /v1/uploads/{upload_id}/content:
+    parameters:
+      - $ref: "#/components/parameters/UploadId"
+    put:
+      summary: Upload content through the Spool server
+      tags: [Jobs]
+      operationId: putUploadContent
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              contentMediaType: application/octet-stream
+              contentEncoding: base64
+          application/pdf:
+            schema:
+              type: string
+              contentMediaType: application/pdf
+              contentEncoding: base64
+      responses:
+        "200":
+          description: Upload verified and completed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Upload"
+        "400":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "413":
+          $ref: "#/components/responses/Error"
+        "503":
+          $ref: "#/components/responses/Error"
+  /v1/uploads/{upload_id}/complete:
+    parameters:
+      - $ref: "#/components/parameters/UploadId"
+    post:
+      summary: Verify and complete a directly stored upload
+      tags: [Jobs]
+      operationId: completeUpload
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [sha256, byte_length]
+              properties:
+                sha256:
+                  $ref: "#/components/schemas/Sha256"
+                byte_length:
+                  type: integer
+                  format: int64
+                  minimum: 1
+                  maximum: 52428800
+      responses:
+        "200":
+          description: Upload verified and completed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Upload"
+        "400":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "503":
+          $ref: "#/components/responses/Error"
   /v1/events/stream:
     get:
       summary: Stream environment events
@@ -229,6 +391,10 @@ paths:
             text/event-stream:
               schema:
                 type: string
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
   /v1/webhooks:
     get:
       summary: List webhook endpoints
@@ -243,6 +409,10 @@ paths:
                 type: array
                 items:
                   $ref: "#/components/schemas/Webhook"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
     post:
       summary: Create a webhook endpoint
       tags: [Webhooks]
@@ -276,12 +446,262 @@ paths:
                     properties:
                       secret:
                         type: string
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+  /v1/webhooks/{webhook_id}:
+    parameters:
+      - $ref: "#/components/parameters/WebhookId"
+    delete:
+      summary: Delete a webhook endpoint
+      tags: [Webhooks]
+      operationId: deleteWebhook
+      responses:
+        "204":
+          description: Webhook deleted.
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+  /v1/webhooks/{webhook_id}/deliveries:
+    parameters:
+      - $ref: "#/components/parameters/WebhookId"
+    get:
+      summary: List webhook delivery attempts
+      tags: [Webhooks]
+      operationId: listWebhookDeliveries
+      responses:
+        "200":
+          description: Most recent delivery records.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/WebhookDelivery"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+  /v1/webhook-deliveries/{delivery_id}/replay:
+    parameters:
+      - $ref: "#/components/parameters/DeliveryId"
+    post:
+      summary: Replay a webhook delivery
+      tags: [Webhooks]
+      operationId: replayWebhookDelivery
+      responses:
+        "202":
+          description: Delivery scheduled for replay.
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+  /v1/agent/sync:
+    post:
+      summary: Synchronize agent health, printers, events, and job offers
+      tags: [Agents]
+      operationId: syncAgent
+      security:
+        - agentId: []
+          agentTimestamp: []
+          agentNonce: []
+          agentBodyDigest: []
+          agentSignature: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AgentSyncRequest"
+      responses:
+        "200":
+          description: Commands and leased job candidates.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentSyncResponse"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+  /v1/agent/jobs/{job_id}/accept:
+    parameters:
+      - $ref: "#/components/parameters/JobId"
+    post:
+      summary: Durably accept a leased job
+      tags: [Agents, Jobs]
+      operationId: acceptAgentJob
+      security:
+        - agentId: []
+          agentTimestamp: []
+          agentNonce: []
+          agentBodyDigest: []
+          agentSignature: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AgentAcceptRequest"
+      responses:
+        "200":
+          description: Job accepted by the local queue.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentAcceptResponse"
+        "401":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+  /v1/agent/jobs/{job_id}/lease:
+    parameters:
+      - $ref: "#/components/parameters/JobId"
+    post:
+      summary: Renew an active job lease
+      tags: [Agents, Jobs]
+      operationId: renewAgentLease
+      security:
+        - agentId: []
+          agentTimestamp: []
+          agentNonce: []
+          agentBodyDigest: []
+          agentSignature: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LeaseCapability"
+      responses:
+        "200":
+          description: Lease renewed.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [lease_expires_at]
+                properties:
+                  lease_expires_at:
+                    type: string
+                    format: date-time
+        "401":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+  /v1/agent/jobs/{job_id}/release:
+    parameters:
+      - $ref: "#/components/parameters/JobId"
+    post:
+      summary: Release an active job lease
+      tags: [Agents, Jobs]
+      operationId: releaseAgentLease
+      security:
+        - agentId: []
+          agentTimestamp: []
+          agentNonce: []
+          agentBodyDigest: []
+          agentSignature: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/LeaseCapability"
+                - type: object
+                  required: [reason]
+                  properties:
+                    reason:
+                      type: string
+                      minLength: 1
+      responses:
+        "204":
+          description: Lease released.
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+  /v1/agent/jobs/{job_id}/content:
+    parameters:
+      - $ref: "#/components/parameters/JobId"
+      - $ref: "#/components/parameters/LeaseIdHeader"
+      - $ref: "#/components/parameters/LeaseTokenHeader"
+    get:
+      summary: Download uploaded job content under an active lease
+      tags: [Agents, Jobs]
+      operationId: downloadAgentJobContent
+      security:
+        - agentId: []
+          agentTimestamp: []
+          agentNonce: []
+          agentBodyDigest: []
+          agentSignature: []
+      responses:
+        "200":
+          description: Original PDF or RAW bytes.
+          headers:
+            Digest:
+              schema:
+                type: string
+          content:
+            application/pdf:
+              schema:
+                type: string
+                contentMediaType: application/pdf
+                contentEncoding: base64
+            application/octet-stream:
+              schema:
+                type: string
+                contentMediaType: application/octet-stream
+                contentEncoding: base64
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "503":
+          $ref: "#/components/responses/Error"
 components:
   securitySchemes:
     bearer:
       type: http
       scheme: bearer
-      bearerFormat: spl_live_…
+      bearerFormat: Spool API key or OIDC JWT
+      description: API keys are scope-limited. OIDC JWTs require issuer, expiry, organization, permissions, and either audience or an exact configured claim/value application binding.
+    agentId:
+      type: apiKey
+      in: header
+      name: x-spool-agent-id
+    agentTimestamp:
+      type: apiKey
+      in: header
+      name: x-spool-timestamp
+    agentNonce:
+      type: apiKey
+      in: header
+      name: x-spool-nonce
+    agentBodyDigest:
+      type: apiKey
+      in: header
+      name: x-spool-body-sha256
+    agentSignature:
+      type: apiKey
+      in: header
+      name: x-spool-signature
   parameters:
     IdempotencyKey:
       name: Idempotency-Key
@@ -298,6 +718,41 @@ components:
       schema:
         type: string
         pattern: ^job_[0-9A-HJKMNP-TV-Z]{26}$
+    UploadId:
+      name: upload_id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: ^upl_[0-9A-HJKMNP-TV-Z]{26}$
+    WebhookId:
+      name: webhook_id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: ^whk_[0-9A-HJKMNP-TV-Z]{26}$
+    DeliveryId:
+      name: delivery_id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: ^whd_[0-9A-HJKMNP-TV-Z]{26}$
+    LeaseIdHeader:
+      name: x-spool-lease-id
+      in: header
+      required: true
+      schema:
+        type: string
+        format: uuid
+    LeaseTokenHeader:
+      name: x-spool-lease-token
+      in: header
+      required: true
+      schema:
+        type: string
+        minLength: 1
     Limit:
       name: limit
       in: query
@@ -328,6 +783,345 @@ components:
           enum: [ok]
         version:
           type: string
+    Sha256:
+      type: string
+      pattern: ^[0-9a-fA-F]{64}$
+    CreateUpload:
+      type: object
+      additionalProperties: false
+      required: [media_type, byte_length, sha256]
+      properties:
+        media_type:
+          type: string
+          enum: [application/pdf, application/octet-stream]
+        byte_length:
+          type: integer
+          format: int64
+          minimum: 1
+          maximum: 52428800
+        sha256:
+          $ref: "#/components/schemas/Sha256"
+    Upload:
+      type: object
+      required:
+        [id, object_key, media_type, expected_sha256, expected_bytes, state, expires_at]
+      properties:
+        id:
+          type: string
+        object_key:
+          type: string
+        media_type:
+          type: string
+          enum: [application/pdf, application/octet-stream]
+        expected_sha256:
+          $ref: "#/components/schemas/Sha256"
+        expected_bytes:
+          type: integer
+          format: int64
+        state:
+          type: string
+          enum: [pending, complete, expired]
+        expires_at:
+          type: string
+          format: date-time
+    UploadResponse:
+      allOf:
+        - $ref: "#/components/schemas/Upload"
+        - type: object
+          required: [upload_url]
+          properties:
+            upload_url:
+              type: [string, "null"]
+    EnrolRequest:
+      type: object
+      additionalProperties: false
+      required:
+        [token, public_key, name, hostname, platform, architecture, installation_mode, agent_version, protocol_version]
+      properties:
+        token:
+          type: string
+          pattern: ^spl_enr_
+        public_key:
+          type: string
+          description: Base64url or standard Base64 Ed25519 public key (32 decoded bytes).
+        name:
+          type: string
+        hostname:
+          type: string
+        platform:
+          type: string
+        architecture:
+          type: string
+        installation_mode:
+          type: string
+          enum: [machine, user, local]
+        agent_version:
+          type: string
+        protocol_version:
+          type: integer
+          enum: [1]
+    EnrolResponse:
+      type: object
+      required: [agent_id, environment, server_time, sync_after_ms]
+      properties:
+        agent_id:
+          type: string
+        environment:
+          type: string
+        server_time:
+          type: string
+          format: date-time
+        sync_after_ms:
+          type: integer
+          format: int64
+          minimum: 0
+    QueueSnapshot:
+      type: object
+      additionalProperties: false
+      required: [queued_jobs, active_jobs, content_bytes, accepts_jobs]
+      properties:
+        queued_jobs:
+          type: integer
+          minimum: 0
+        active_jobs:
+          type: integer
+          minimum: 0
+        content_bytes:
+          type: integer
+          format: int64
+          minimum: 0
+        accepts_jobs:
+          type: boolean
+    AgentHealth:
+      type: object
+      additionalProperties: false
+      required:
+        [started_at, observed_at, sqlite_integrity_ok, executor_crashes, last_error_code]
+      properties:
+        started_at:
+          type: string
+          format: date-time
+        observed_at:
+          type: string
+          format: date-time
+        sqlite_integrity_ok:
+          type: boolean
+        executor_crashes:
+          type: integer
+          format: int64
+          minimum: 0
+        last_error_code:
+          type: [string, "null"]
+    PrinterSnapshot:
+      type: object
+      additionalProperties: false
+      required: [id, native_id, name, state, is_default, capabilities]
+      properties:
+        id:
+          type: string
+        native_id:
+          type: string
+        name:
+          type: string
+        state:
+          $ref: "#/components/schemas/PrinterState"
+        is_default:
+          type: boolean
+        capabilities:
+          type: object
+    AgentSyncRequest:
+      type: object
+      additionalProperties: false
+      required:
+        [agent_id, protocol_version, agent_version, printer_revision, acknowledged_command_cursor, event_cursor, queue, health, printers, events]
+      properties:
+        agent_id:
+          type: string
+        protocol_version:
+          type: integer
+          enum: [1]
+        agent_version:
+          type: string
+        printer_revision:
+          type: integer
+          format: int64
+          minimum: 0
+        acknowledged_command_cursor:
+          type: [string, "null"]
+        event_cursor:
+          type: [string, "null"]
+        queue:
+          $ref: "#/components/schemas/QueueSnapshot"
+        health:
+          $ref: "#/components/schemas/AgentHealth"
+        printers:
+          type: [array, "null"]
+          items:
+            $ref: "#/components/schemas/PrinterSnapshot"
+        events:
+          type: array
+          maxItems: 1000
+          items:
+            $ref: "#/components/schemas/JobEvent"
+    AgentSyncResponse:
+      type: object
+      required:
+        [server_time, acknowledged_event_cursor, command_cursor, commands, candidate_jobs, next_poll_after_ms]
+      properties:
+        server_time:
+          type: string
+          format: date-time
+        acknowledged_event_cursor:
+          type: [string, "null"]
+        command_cursor:
+          type: [string, "null"]
+        commands:
+          type: array
+          items:
+            type: object
+        candidate_jobs:
+          type: array
+          items:
+            $ref: "#/components/schemas/JobOffer"
+        next_poll_after_ms:
+          type: integer
+          format: int64
+          minimum: 0
+    JobOffer:
+      type: object
+      required: [job, lease_id, lease_token, lease_expires_at, content]
+      properties:
+        job:
+          $ref: "#/components/schemas/AgentJob"
+        lease_id:
+          type: string
+          format: uuid
+        lease_token:
+          type: string
+          writeOnly: true
+        lease_expires_at:
+          type: string
+          format: date-time
+        content:
+          $ref: "#/components/schemas/ContentDescriptor"
+    ContentDescriptor:
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [type, url, sha256, bytes]
+          properties:
+            type:
+              const: download
+            url:
+              type: string
+            sha256:
+              $ref: "#/components/schemas/Sha256"
+            bytes:
+              type: integer
+              format: int64
+              minimum: 0
+        - type: object
+          additionalProperties: false
+          required: [type, data, sha256, bytes]
+          properties:
+            type:
+              const: inline_base64
+            data:
+              type: string
+              contentEncoding: base64
+            sha256:
+              oneOf:
+                - $ref: "#/components/schemas/Sha256"
+                - type: "null"
+            bytes:
+              type: [integer, "null"]
+              format: int64
+              minimum: 0
+        - type: object
+          additionalProperties: false
+          required: [type, uri, authentication, sha256, bytes]
+          properties:
+            type:
+              const: uri
+            uri:
+              type: string
+              format: uri
+            authentication:
+              type: "null"
+            sha256:
+              oneOf:
+                - $ref: "#/components/schemas/Sha256"
+                - type: "null"
+            bytes:
+              type: [integer, "null"]
+              format: int64
+              minimum: 0
+    AgentJob:
+      type: object
+      required:
+        [id, workspace_id, environment_id, printer_id, title, source, content_kind, content, options, deliveries, state, created_at, expires_at]
+      properties:
+        id:
+          type: string
+        workspace_id:
+          type: string
+        environment_id:
+          type: string
+        printer_id:
+          type: string
+        title:
+          type: string
+        source:
+          type: [string, "null"]
+        content_kind:
+          type: string
+          enum: [pdf, raw]
+        content:
+          type: object
+        options:
+          $ref: "#/components/schemas/JobOptions"
+        deliveries:
+          type: integer
+        state:
+          $ref: "#/components/schemas/JobState"
+        created_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+    LeaseCapability:
+      type: object
+      additionalProperties: false
+      required: [lease_id, lease_token]
+      properties:
+        lease_id:
+          type: string
+          format: uuid
+        lease_token:
+          type: string
+          writeOnly: true
+    AgentAcceptRequest:
+      allOf:
+        - $ref: "#/components/schemas/LeaseCapability"
+        - type: object
+          required: [content_sha256, local_sequence]
+          properties:
+            content_sha256:
+              $ref: "#/components/schemas/Sha256"
+            local_sequence:
+              type: integer
+              format: int64
+              minimum: 0
+    AgentAcceptResponse:
+      type: object
+      required: [accepted_at, state]
+      properties:
+        accepted_at:
+          type: string
+          format: date-time
+        state:
+          $ref: "#/components/schemas/JobState"
     CreateJob:
       type: object
       additionalProperties: false
@@ -511,12 +1305,15 @@ components:
         name:
           type: string
         state:
-          enum: [online, offline, paused, busy, paper_out, error, unknown]
+          $ref: "#/components/schemas/PrinterState"
         capabilities:
           type: object
         updated_at:
           type: string
           format: date-time
+    PrinterState:
+      type: string
+      enum: [online, offline, paused, busy, paper_out, error, unknown]
     Agent:
       type: object
       required: [id, name, platform, state, version, last_seen_at]
@@ -551,6 +1348,29 @@ components:
           type: boolean
         created_at:
           type: string
+          format: date-time
+    WebhookDelivery:
+      type: object
+      required:
+        [id, event_id, attempt, next_attempt_at, response_status, delivered_at, dead_lettered_at]
+      properties:
+        id:
+          type: string
+        event_id:
+          type: string
+        attempt:
+          type: integer
+          minimum: 0
+        next_attempt_at:
+          type: string
+          format: date-time
+        response_status:
+          type: [integer, "null"]
+        delivered_at:
+          type: [string, "null"]
+          format: date-time
+        dead_lettered_at:
+          type: [string, "null"]
           format: date-time
     ErrorEnvelope:
       type: object

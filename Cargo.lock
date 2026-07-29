@@ -2646,6 +2646,7 @@ dependencies = [
  "sha2",
  "spool-agent-storage",
  "spool-domain",
+ "spool-protocol",
  "tempfile",
  "thiserror",
  "tokio",
