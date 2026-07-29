@@ -796,38 +796,30 @@ impl PostgresStore {
         .bind(limit.clamp(1, 500))
         .fetch_all(&self.pool)
         .await?;
-        rows.into_iter()
-            .map(|row| {
-                let id: String = row.try_get("id")?;
-                let agent_id: String = row.try_get("agent_id")?;
-                let state: String = row.try_get("state")?;
-                Ok(StoredPrinter {
-                    id: id.parse().map_err(|error| {
-                        StorageError::InvalidData(format!("printer id `{id}`: {error}"))
-                    })?,
-                    agent_id: agent_id.parse().map_err(|error| {
-                        StorageError::InvalidData(format!("agent id `{agent_id}`: {error}"))
-                    })?,
-                    name: row.try_get("name")?,
-                    state: serde_json::from_value(serde_json::Value::String(state.clone()))
-                        .map_err(|error| {
-                            StorageError::InvalidData(format!("printer state `{state}`: {error}"))
-                        })?,
-                    capabilities: serde_json::from_value(row.try_get("capabilities")?)?,
-                    capability_revision: u64::try_from(
-                        row.try_get::<i64, _>("capabilities_revision")?,
-                    )
-                    .map_err(|error| {
-                        StorageError::InvalidData(format!(
-                            "capability revision is negative: {error}"
-                        ))
-                    })?,
-                    native_options: serde_json::from_value(row.try_get("native_options")?)?,
-                    profiles: serde_json::from_value(row.try_get("profiles")?)?,
-                    updated_at: row.try_get("updated_at")?,
-                })
-            })
-            .collect()
+        rows.iter().map(printer_from_row).collect()
+    }
+
+    pub async fn get_printer(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        printer_id: PrinterId,
+    ) -> Result<StoredPrinter, StorageError> {
+        let row = sqlx::query(
+            "SELECT id, agent_id, name, state, capabilities, capabilities_revision,
+                    native_options, profiles,
+                    COALESCE(last_seen_at, created_at) AS updated_at
+             FROM printers
+             WHERE id = $1 AND workspace_id = $2 AND environment_id = $3
+               AND removed_at IS NULL",
+        )
+        .bind(printer_id.to_string())
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(StorageError::NotFound)?;
+        printer_from_row(&row)
     }
 
     pub async fn list_stocks(
@@ -886,7 +878,8 @@ impl PostgresStore {
         .bind(&stock.attributes)
         .bind(stock.archived)
         .execute(&self.pool)
-        .await?;
+        .await
+        .map_err(map_create_conflict)?;
         self.get_stock(workspace_id, environment_id, &stock.id)
             .await
     }
@@ -961,18 +954,21 @@ impl PostgresStore {
         environment_id: EnvironmentId,
         target: &StoredTarget,
     ) -> Result<StoredTarget, StorageError> {
+        let mut transaction = self.pool.begin().await?;
         validate_stock_reference(
-            &self.pool,
+            &mut transaction,
             workspace_id,
             environment_id,
             target.stock_id.as_deref(),
         )
         .await?;
-        sqlx::query(
+        let row = sqlx::query(
             "INSERT INTO targets (
                 id, workspace_id, environment_id, name, description, stock_id,
                 enabled, routing_policy
-             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+             RETURNING id, name, description, stock_id, enabled, routing_policy,
+                       created_at, updated_at",
         )
         .bind(&target.id)
         .bind(workspace_id.to_string())
@@ -982,10 +978,12 @@ impl PostgresStore {
         .bind(&target.stock_id)
         .bind(target.enabled)
         .bind(&target.routing_policy)
-        .execute(&self.pool)
-        .await?;
-        self.get_target(workspace_id, environment_id, &target.id)
-            .await
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(map_create_conflict)?;
+        let target = target_from_row(&row)?;
+        transaction.commit().await?;
+        Ok(target)
     }
 
     pub async fn update_target(
@@ -994,17 +992,20 @@ impl PostgresStore {
         environment_id: EnvironmentId,
         target: &StoredTarget,
     ) -> Result<StoredTarget, StorageError> {
+        let mut transaction = self.pool.begin().await?;
         validate_stock_reference(
-            &self.pool,
+            &mut transaction,
             workspace_id,
             environment_id,
             target.stock_id.as_deref(),
         )
         .await?;
-        let result = sqlx::query(
+        let row = sqlx::query(
             "UPDATE targets SET name = $4, description = $5, stock_id = $6,
                     enabled = $7, routing_policy = $8, updated_at = now()
-             WHERE id = $1 AND workspace_id = $2 AND environment_id = $3",
+             WHERE id = $1 AND workspace_id = $2 AND environment_id = $3
+             RETURNING id, name, description, stock_id, enabled, routing_policy,
+                       created_at, updated_at",
         )
         .bind(&target.id)
         .bind(workspace_id.to_string())
@@ -1014,13 +1015,12 @@ impl PostgresStore {
         .bind(&target.stock_id)
         .bind(target.enabled)
         .bind(&target.routing_policy)
-        .execute(&self.pool)
-        .await?;
-        if result.rows_affected() == 0 {
-            return Err(StorageError::NotFound);
-        }
-        self.get_target(workspace_id, environment_id, &target.id)
-            .await
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(StorageError::NotFound)?;
+        let target = target_from_row(&row)?;
+        transaction.commit().await?;
+        Ok(target)
     }
 
     pub async fn list_target_bindings(
@@ -1052,11 +1052,25 @@ impl PostgresStore {
         environment_id: EnvironmentId,
         binding: &StoredTargetBinding,
     ) -> Result<StoredTargetBinding, StorageError> {
-        self.get_target(workspace_id, environment_id, &binding.target_id)
-            .await?;
-        let (agent_id, profiles) =
-            fetch_binding_printer(&self.pool, workspace_id, environment_id, binding.printer_id)
-                .await?;
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query_scalar::<_, String>(
+            "SELECT id FROM targets
+             WHERE id = $1 AND workspace_id = $2 AND environment_id = $3
+             FOR SHARE",
+        )
+        .bind(&binding.target_id)
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(StorageError::NotFound)?;
+        let (agent_id, profiles) = fetch_binding_printer(
+            &mut transaction,
+            workspace_id,
+            environment_id,
+            binding.printer_id,
+        )
+        .await?;
         let profile = profiles
             .iter()
             .find(|profile| {
@@ -1069,11 +1083,13 @@ impl PostgresStore {
                 "target binding profile is not published".into(),
             ));
         }
-        sqlx::query(
+        let row = sqlx::query(
             "INSERT INTO target_bindings (
                 id, workspace_id, environment_id, target_id, printer_id, agent_id,
                 profile_id, profile_revision, role, enabled
-             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+             RETURNING id, target_id, printer_id, agent_id, profile_id, profile_revision,
+                       role, enabled, created_at, updated_at",
         )
         .bind(&binding.id)
         .bind(workspace_id.to_string())
@@ -1087,15 +1103,12 @@ impl PostgresStore {
         })?)
         .bind(&binding.role)
         .bind(binding.enabled)
-        .execute(&self.pool)
-        .await?;
-        self.get_target_binding(
-            workspace_id,
-            environment_id,
-            &binding.target_id,
-            &binding.id,
-        )
+        .fetch_one(&mut *transaction)
         .await
+        .map_err(map_create_conflict)?;
+        let binding = binding_from_row(&row)?;
+        transaction.commit().await?;
+        Ok(binding)
     }
 
     pub async fn get_target_binding(
@@ -2579,6 +2592,32 @@ fn normalize_agent_state(value: &str) -> String {
     .to_owned()
 }
 
+fn printer_from_row(row: &PgRow) -> Result<StoredPrinter, StorageError> {
+    let id: String = row.try_get("id")?;
+    let agent_id: String = row.try_get("agent_id")?;
+    let state: String = row.try_get("state")?;
+    Ok(StoredPrinter {
+        id: id
+            .parse()
+            .map_err(|error| StorageError::InvalidData(format!("printer id `{id}`: {error}")))?,
+        agent_id: agent_id.parse().map_err(|error| {
+            StorageError::InvalidData(format!("agent id `{agent_id}`: {error}"))
+        })?,
+        name: row.try_get("name")?,
+        state: serde_json::from_value(serde_json::Value::String(state.clone())).map_err(
+            |error| StorageError::InvalidData(format!("printer state `{state}`: {error}")),
+        )?,
+        capabilities: serde_json::from_value(row.try_get("capabilities")?)?,
+        capability_revision: u64::try_from(row.try_get::<i64, _>("capabilities_revision")?)
+            .map_err(|error| {
+                StorageError::InvalidData(format!("capability revision is negative: {error}"))
+            })?,
+        native_options: serde_json::from_value(row.try_get("native_options")?)?,
+        profiles: serde_json::from_value(row.try_get("profiles")?)?,
+        updated_at: row.try_get("updated_at")?,
+    })
+}
+
 fn stock_from_row(row: &PgRow) -> Result<StoredStock, StorageError> {
     Ok(StoredStock {
         id: row.try_get("id")?,
@@ -2630,7 +2669,7 @@ fn binding_from_row(row: &PgRow) -> Result<StoredTargetBinding, StorageError> {
 }
 
 async fn validate_stock_reference(
-    pool: &PgPool,
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     workspace_id: WorkspaceId,
     environment_id: EnvironmentId,
     stock_id: Option<&str>,
@@ -2638,37 +2677,48 @@ async fn validate_stock_reference(
     let Some(stock_id) = stock_id else {
         return Ok(());
     };
-    let exists = sqlx::query_scalar::<_, bool>(
-        "SELECT EXISTS(
-            SELECT 1 FROM stocks
-            WHERE id = $1 AND workspace_id = $2 AND environment_id = $3 AND archived = false
-         )",
+    sqlx::query_scalar::<_, bool>(
+        "SELECT archived FROM stocks
+         WHERE id = $1 AND workspace_id = $2 AND environment_id = $3
+         FOR SHARE",
     )
     .bind(stock_id)
     .bind(workspace_id.to_string())
     .bind(environment_id.to_string())
-    .fetch_one(pool)
-    .await?;
-    if !exists {
-        return Err(StorageError::NotFound);
-    }
+    .fetch_optional(&mut **transaction)
+    .await?
+    .filter(|archived| !archived)
+    .ok_or(StorageError::NotFound)?;
     Ok(())
 }
 
+fn map_create_conflict(error: sqlx::Error) -> StorageError {
+    if error
+        .as_database_error()
+        .and_then(sqlx::error::DatabaseError::code)
+        .is_some_and(|code| code == "23505")
+    {
+        StorageError::ConcurrentStateChange
+    } else {
+        StorageError::Database(error)
+    }
+}
+
 async fn fetch_binding_printer(
-    pool: &PgPool,
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     workspace_id: WorkspaceId,
     environment_id: EnvironmentId,
     printer_id: PrinterId,
 ) -> Result<(AgentId, Vec<PrinterProfileSnapshot>), StorageError> {
     let row = sqlx::query(
         "SELECT agent_id, profiles FROM printers
-         WHERE id = $1 AND workspace_id = $2 AND environment_id = $3 AND removed_at IS NULL",
+         WHERE id = $1 AND workspace_id = $2 AND environment_id = $3 AND removed_at IS NULL
+         FOR SHARE",
     )
     .bind(printer_id.to_string())
     .bind(workspace_id.to_string())
     .bind(environment_id.to_string())
-    .fetch_optional(pool)
+    .fetch_optional(&mut **transaction)
     .await?
     .ok_or(StorageError::NotFound)?;
     let agent_id = row.try_get::<String, _>("agent_id")?;

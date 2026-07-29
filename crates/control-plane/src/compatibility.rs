@@ -115,15 +115,18 @@ async fn resolve_compatibility_destination(
             })?;
             let printer = state
                 .repository
-                .list_printers(tenant.workspace_id, tenant.environment_id, None, 500)
-                .await
-                .map_err(|error| AppError::from(error).compatibility())?
-                .into_iter()
-                .find(|printer| printer.id == printer_id)
-                .ok_or_else(|| {
-                    AppError::invalid("InvalidPrinter", "The printer does not exist.")
-                        .compatibility()
-                })?;
+                .get_printer(tenant.workspace_id, tenant.environment_id, printer_id)
+                .await;
+            let printer = match printer {
+                Ok(printer) => printer,
+                Err(RepositoryError::NotFound) => {
+                    return Err(
+                        AppError::invalid("InvalidPrinter", "The printer does not exist.")
+                            .compatibility(),
+                    );
+                }
+                Err(error) => return Err(AppError::from(error).compatibility()),
+            };
             return Ok((printer, None));
         }
         Err(RepositoryError::NotFound) => {}
@@ -140,36 +143,23 @@ async fn resolve_compatibility_destination(
         )
         .await
         .map_err(|error| AppError::from(error).compatibility())?;
-    let mut parts = resource.split(':');
-    let printer_id = parts
-        .next()
-        .and_then(|value| PrinterId::from_str(value).ok())
-        .ok_or_else(|| {
-            AppError::invalid("InvalidPrinter", "The profile target is invalid.").compatibility()
-        })?;
-    let profile_id = parts
-        .next()
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| {
-            AppError::invalid("InvalidPrinter", "The profile target is invalid.").compatibility()
-        })?;
-    let revision = parts
-        .next()
-        .and_then(|value| value.parse::<u64>().ok())
-        .filter(|_| parts.next().is_none())
-        .ok_or_else(|| {
+    let (printer_id, profile_id, revision) =
+        parse_profile_target_resource(&resource).ok_or_else(|| {
             AppError::invalid("InvalidPrinter", "The profile target is invalid.").compatibility()
         })?;
     let printer = state
         .repository
-        .list_printers(tenant.workspace_id, tenant.environment_id, None, 500)
-        .await
-        .map_err(|error| AppError::from(error).compatibility())?
-        .into_iter()
-        .find(|printer| printer.id == printer_id)
-        .ok_or_else(|| {
-            AppError::invalid("InvalidPrinter", "The printer does not exist.").compatibility()
-        })?;
+        .get_printer(tenant.workspace_id, tenant.environment_id, printer_id)
+        .await;
+    let printer = match printer {
+        Ok(printer) => printer,
+        Err(RepositoryError::NotFound) => {
+            return Err(
+                AppError::invalid("InvalidPrinter", "The printer does not exist.").compatibility(),
+            );
+        }
+        Err(error) => return Err(AppError::from(error).compatibility()),
+    };
     let profile = printer
         .profiles
         .iter()
@@ -198,9 +188,10 @@ fn merge_profile_options(
     requested: &JobOptions,
 ) -> Result<JobOptions, AppError> {
     let mut resolved = serde_json::to_value(&profile.options)
-        .map_err(|_| AppError::service_unavailable("profile_options_invalid"))?;
-    let requested = serde_json::to_value(requested)
-        .map_err(|_| AppError::invalid("InvalidRequest", "The print options are invalid."))?;
+        .map_err(|_| AppError::service_unavailable("profile_options_invalid").compatibility())?;
+    let requested = serde_json::to_value(requested).map_err(|_| {
+        AppError::invalid("InvalidRequest", "The print options are invalid.").compatibility()
+    })?;
     let resolved = resolved
         .as_object_mut()
         .ok_or_else(|| AppError::service_unavailable("profile_options_invalid").compatibility())?;
@@ -215,7 +206,7 @@ fn merge_profile_options(
         if !profile.safe_overrides.iter().any(|allowed| allowed == key) {
             return Err(AppError::invalid(
                 "ProfileOverrideNotAllowed",
-                &format!("The selected print profile does not allow `{key}` to be overridden."),
+                format!("The selected print profile does not allow `{key}` to be overridden."),
             )
             .compatibility());
         }
@@ -869,7 +860,10 @@ pub(crate) async fn list_printers(
             .iter()
             .filter(|profile| {
                 profile.published
-                    && profile.status.as_deref().is_none_or(|status| status == "ready")
+                    && profile
+                        .status
+                        .as_deref()
+                        .is_none_or(|status| status == "ready")
             })
             .cloned()
         {
@@ -973,7 +967,10 @@ async fn filtered_computer_printers(
             .iter()
             .filter(|profile| {
                 profile.published
-                    && profile.status.as_deref().is_none_or(|status| status == "ready")
+                    && profile
+                        .status
+                        .as_deref()
+                        .is_none_or(|status| status == "ready")
             })
             .cloned()
         {
@@ -989,8 +986,7 @@ async fn filtered_computer_printers(
                 .await
                 .map_err(|error| AppError::from(error).compatibility())?;
             response.push(
-                compatibility_profile_printer(state, tenant, &printer, profile, profile_id)
-                    .await?,
+                compatibility_profile_printer(state, tenant, &printer, profile, profile_id).await?,
             );
         }
     }
@@ -1027,14 +1023,19 @@ async fn compatibility_printer(
     })
 }
 
-fn profile_target_resource_id(
-    printer_id: PrinterId,
-    profile: &PrinterProfileSnapshot,
-) -> String {
-    format!(
-        "{printer_id}:{}:{}",
-        profile.profile_id, profile.revision
-    )
+fn profile_target_resource_id(printer_id: PrinterId, profile: &PrinterProfileSnapshot) -> String {
+    format!("{printer_id}:{}:{}", profile.profile_id, profile.revision)
+}
+
+fn parse_profile_target_resource(resource: &str) -> Option<(PrinterId, &str, u64)> {
+    let (destination, revision) = resource.rsplit_once(':')?;
+    let revision = revision
+        .parse::<u64>()
+        .ok()
+        .filter(|revision| *revision > 0)?;
+    let (printer_id, profile_id) = destination.split_once(':')?;
+    let printer_id = PrinterId::from_str(printer_id).ok()?;
+    (!profile_id.is_empty()).then_some((printer_id, profile_id, revision))
 }
 
 fn profile_capabilities(
@@ -1049,7 +1050,11 @@ fn profile_capabilities(
             .any(|allowed| allowed == option)
     };
     if let Some(paper) = &profile.options.paper {
-        let dimensions = capabilities.papers.get(paper).copied().unwrap_or([None, None]);
+        let dimensions = capabilities
+            .papers
+            .get(paper)
+            .copied()
+            .unwrap_or([None, None]);
         capabilities.papers = std::collections::BTreeMap::from([(paper.clone(), dimensions)]);
     }
     if let Some(bin) = &profile.options.bin {
@@ -1317,15 +1322,16 @@ mod profile_target_tests {
 
     #[test]
     fn profile_target_merges_only_allowlisted_options() {
-        let resolved = merge_profile_options(
+        let Ok(resolved) = merge_profile_options(
             &profile(),
             &JobOptions {
                 copies: Some(3),
                 pages: Some("1".into()),
                 ..JobOptions::default()
             },
-        )
-        .expect("safe overrides");
+        ) else {
+            panic!("safe overrides must merge");
+        };
         assert_eq!(resolved.paper.as_deref(), Some("A4"));
         assert_eq!(resolved.copies, Some(3));
         assert_eq!(resolved.pages.as_deref(), Some("1"));
@@ -1340,6 +1346,25 @@ mod profile_target_tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn profile_target_resource_preserves_colons_in_profile_id() {
+        let printer_id = PrinterId::new();
+        let resource = format!("{printer_id}:vendor:labels:matte:7");
+        let Some(parsed) = parse_profile_target_resource(&resource) else {
+            panic!("profile target must parse");
+        };
+        assert_eq!(parsed, (printer_id, "vendor:labels:matte", 7));
+    }
+
+    #[test]
+    fn profile_target_resource_rejects_invalid_components() {
+        let printer_id = PrinterId::new();
+        assert!(parse_profile_target_resource(&format!("{printer_id}::2")).is_none());
+        assert!(parse_profile_target_resource(&format!("{printer_id}:profile:0")).is_none());
+        assert!(parse_profile_target_resource("not-a-printer:profile:2").is_none());
+        assert!(parse_profile_target_resource(&format!("{printer_id}:profile:nope")).is_none());
     }
 
     #[test]

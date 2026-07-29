@@ -138,6 +138,12 @@ pub trait Repository: Send + Sync + 'static {
         after: Option<PrinterId>,
         limit: i64,
     ) -> Result<Vec<StoredPrinter>, RepositoryError>;
+    async fn get_printer(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        printer_id: PrinterId,
+    ) -> Result<StoredPrinter, RepositoryError>;
     async fn list_stocks(
         &self,
         workspace_id: WorkspaceId,
@@ -594,6 +600,17 @@ impl Repository for PostgresStore {
         limit: i64,
     ) -> Result<Vec<StoredPrinter>, RepositoryError> {
         Self::list_printers(self, workspace_id, environment_id, after, limit)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn get_printer(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        printer_id: PrinterId,
+    ) -> Result<StoredPrinter, RepositoryError> {
+        Self::get_printer(self, workspace_id, environment_id, printer_id)
             .await
             .map_err(Into::into)
     }
@@ -1614,6 +1631,24 @@ impl Repository for MemoryRepository {
         Ok(printers)
     }
 
+    async fn get_printer(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        printer_id: PrinterId,
+    ) -> Result<StoredPrinter, RepositoryError> {
+        self.state
+            .read()
+            .await
+            .printers
+            .get(&printer_id)
+            .filter(|(workspace, environment, _)| {
+                *workspace == workspace_id && *environment == environment_id
+            })
+            .map(|(_, _, printer)| printer.clone())
+            .ok_or(RepositoryError::NotFound)
+    }
+
     async fn list_stocks(
         &self,
         workspace_id: WorkspaceId,
@@ -1750,7 +1785,16 @@ impl Repository for MemoryRepository {
                 })
                 .ok_or(RepositoryError::NotFound)?;
         }
-        if state.targets.contains_key(&target.id) {
+        if state.targets.contains_key(&target.id)
+            || state
+                .targets
+                .values()
+                .any(|(workspace, environment, existing)| {
+                    *workspace == workspace_id
+                        && *environment == environment_id
+                        && existing.name == target.name
+                })
+        {
             return Err(RepositoryError::ConcurrentStateChange);
         }
         state.targets.insert(
@@ -2731,5 +2775,74 @@ impl Repository for MemoryRepository {
             ))
             .cloned()
             .ok_or(RepositoryError::NotFound)
+    }
+}
+
+#[cfg(test)]
+mod routing_repository_tests {
+    use super::*;
+
+    fn target(id: &str, name: &str) -> StoredTarget {
+        let now = Utc::now();
+        StoredTarget {
+            id: id.into(),
+            name: name.into(),
+            description: None,
+            stock_id: None,
+            enabled: true,
+            routing_policy: "primary_then_standby".into(),
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    #[tokio::test]
+    async fn memory_targets_reject_duplicate_tenant_names() {
+        let repository = MemoryRepository::default();
+        let workspace_id = WorkspaceId::new();
+        let environment_id = EnvironmentId::new();
+        assert!(
+            repository
+                .create_target(
+                    workspace_id,
+                    environment_id,
+                    &target("tgt_first", "Shipping labels"),
+                )
+                .await
+                .is_ok()
+        );
+
+        let error = repository
+            .create_target(
+                workspace_id,
+                environment_id,
+                &target("tgt_second", "Shipping labels"),
+            )
+            .await;
+        assert!(matches!(error, Err(RepositoryError::ConcurrentStateChange)));
+    }
+
+    #[tokio::test]
+    async fn direct_printer_lookup_is_tenant_scoped() {
+        let repository = MemoryRepository::default();
+        let workspace_id = WorkspaceId::new();
+        let environment_id = EnvironmentId::new();
+        let printer_id = PrinterId::new();
+        repository
+            .add_printer(workspace_id, environment_id, printer_id, AgentId::new())
+            .await;
+
+        assert!(matches!(
+            repository
+                .get_printer(workspace_id, environment_id, printer_id)
+                .await,
+            Ok(printer) if printer.id == printer_id
+        ));
+        assert!(matches!(
+            repository
+                .get_printer(WorkspaceId::new(), environment_id, printer_id)
+                .await,
+            Err(RepositoryError::NotFound)
+        ));
     }
 }

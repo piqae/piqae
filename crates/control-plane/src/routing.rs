@@ -263,7 +263,7 @@ pub async fn create_binding(
     let tenant = authenticate_native(&state, &headers, Scope::PrintersWrite).await?;
     if !matches!(request.role.as_str(), "primary" | "standby")
         || request.profile_id.trim().is_empty()
-        || request.profile_id.len() > 120
+        || request.profile_id.chars().count() > 120
         || request.profile_revision == 0
     {
         return Err(AppError::invalid(
@@ -275,11 +275,8 @@ pub async fn create_binding(
         .map_err(|_| AppError::invalid("invalid_target_binding", "The printer ID is not valid."))?;
     let printer = state
         .repository
-        .list_printers(tenant.workspace_id, tenant.environment_id, None, 500)
-        .await?
-        .into_iter()
-        .find(|printer| printer.id == printer_id)
-        .ok_or(RepositoryError::NotFound)?;
+        .get_printer(tenant.workspace_id, tenant.environment_id, printer_id)
+        .await?;
     let profile = printer
         .profiles
         .iter()
@@ -365,10 +362,6 @@ pub async fn target_readiness(
         .repository
         .list_target_bindings(tenant.workspace_id, tenant.environment_id, &target_id)
         .await?;
-    let printers = state
-        .repository
-        .list_printers(tenant.workspace_id, tenant.environment_id, None, 500)
-        .await?;
     let agents = state
         .repository
         .list_agents(tenant.workspace_id, tenant.environment_id)
@@ -386,37 +379,20 @@ pub async fn target_readiness(
             .any(|agent| agent.id == binding.agent_id && agent.state == "connected")
         {
             "node_offline"
-        } else if let Some(printer) = printers.iter().find(|item| item.id == binding.printer_id) {
-            if printer.agent_id != binding.agent_id {
-                reasons.push("binding_agent_changed".into());
-                "destination_missing"
-            } else if let Some(profile) = printer.profiles.iter().find(|profile| {
-                (profile.profile_id.as_str(), profile.revision)
-                    == (binding.profile_id.as_str(), binding.profile_revision)
-            }) {
-                if !profile.published {
-                    "profile_stale"
-                } else if target.stock_id.is_some() && target.stock_id != profile.stock_id {
-                    reasons.push("profile_stock_does_not_match_target".into());
-                    "dependency_missing"
-                } else if let Some(profile_status) = profile.status.as_deref() {
-                    match profile_status {
-                        "ready" => printer_readiness(printer.state),
-                        "driver_mismatch" => "driver_mismatch",
-                        "dependency_missing" => "dependency_missing",
-                        "destination_missing" => "destination_missing",
-                        "interactive_only" => "needs_operator",
-                        _ => "profile_stale",
-                    }
-                } else {
-                    printer_readiness(printer.state)
-                }
-            } else {
-                reasons.push("profile_revision_not_in_current_snapshot".into());
-                "profile_stale"
-            }
         } else {
-            "destination_missing"
+            match state
+                .repository
+                .get_printer(
+                    tenant.workspace_id,
+                    tenant.environment_id,
+                    binding.printer_id,
+                )
+                .await
+            {
+                Ok(printer) => binding_printer_readiness(&target, &binding, &printer, &mut reasons),
+                Err(RepositoryError::NotFound) => "destination_missing",
+                Err(error) => return Err(error.into()),
+            }
         };
         evaluated.push(StoredBindingReadiness {
             binding,
@@ -441,6 +417,40 @@ pub async fn target_readiness(
     }))
 }
 
+fn binding_printer_readiness(
+    target: &StoredTarget,
+    binding: &StoredTargetBinding,
+    printer: &spool_storage_postgres::StoredPrinter,
+    reasons: &mut Vec<String>,
+) -> &'static str {
+    if printer.agent_id != binding.agent_id {
+        reasons.push("binding_agent_changed".into());
+        return "destination_missing";
+    }
+    let Some(profile) = printer.profiles.iter().find(|profile| {
+        (profile.profile_id.as_str(), profile.revision)
+            == (binding.profile_id.as_str(), binding.profile_revision)
+    }) else {
+        reasons.push("profile_revision_not_in_current_snapshot".into());
+        return "profile_stale";
+    };
+    if !profile.published {
+        return "profile_stale";
+    }
+    if target.stock_id.is_some() && target.stock_id != profile.stock_id {
+        reasons.push("profile_stock_does_not_match_target".into());
+        return "dependency_missing";
+    }
+    match profile.status.as_deref() {
+        Some("ready") | None => printer_readiness(printer.state),
+        Some("driver_mismatch") => "driver_mismatch",
+        Some("dependency_missing") => "dependency_missing",
+        Some("destination_missing") => "destination_missing",
+        Some("interactive_only") => "needs_operator",
+        Some(_) => "profile_stale",
+    }
+}
+
 const fn printer_readiness(state: PrinterState) -> &'static str {
     match state {
         PrinterState::Online => "ready",
@@ -452,7 +462,7 @@ const fn printer_readiness(state: PrinterState) -> &'static str {
 
 fn validate_name(value: &str, code: &'static str) -> Result<String, AppError> {
     let value = value.trim();
-    if value.is_empty() || value.len() > 120 {
+    if value.is_empty() || value.chars().count() > 120 {
         return Err(AppError::invalid(
             code,
             "The resource name must contain between 1 and 120 characters.",
@@ -469,7 +479,7 @@ fn clean_optional(
     value
         .map(|value| {
             let value = value.trim();
-            if value.len() > max {
+            if value.chars().count() > max {
                 Err(AppError::invalid(
                     code,
                     "A field exceeds its maximum length.",
@@ -492,4 +502,29 @@ fn validate_routing_policy(value: &str) -> Result<(), AppError> {
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn name_limits_count_unicode_characters_not_bytes() {
+        let valid = "🖨".repeat(120);
+        assert_eq!(
+            validate_name(&valid, "invalid_target").ok().as_deref(),
+            Some(valid.as_str())
+        );
+        assert!(validate_name(&"🖨".repeat(121), "invalid_target").is_err());
+    }
+
+    #[test]
+    fn optional_field_limits_count_unicode_characters_not_bytes() {
+        let valid = "é".repeat(2_000);
+        assert_eq!(
+            clean_optional(Some(valid.clone()), 2_000, "invalid_target").ok(),
+            Some(Some(valid))
+        );
+        assert!(clean_optional(Some("é".repeat(2_001)), 2_000, "invalid_target").is_err());
+    }
 }
