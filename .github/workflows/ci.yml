@@ -76,7 +76,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-      - run: pnpm dlx @redocly/cli@1.34.3 lint contracts/openapi/spool-v1.yaml
+      - run: pnpm --package=@redocly/cli@1.34.3 dlx redocly lint contracts/openapi/spool-v1.yaml
 
   macos-shell:
     name: macOS menu shell

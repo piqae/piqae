@@ -16,8 +16,12 @@ use axum::{
 use chrono::{Duration, Utc};
 use serde::{Deserialize, Serialize};
 use spool_auth::Scope;
-use spool_domain::{ContentKind, ContentSource, Job, JobOptions, JobState, PrinterId};
-use std::{collections::HashMap, str::FromStr};
+use spool_domain::{AgentId, ContentKind, ContentSource, Job, JobOptions, JobState, PrinterId};
+use spool_storage_postgres::{StoredAgent, StoredPrinter};
+use std::{
+    collections::{HashMap, HashSet},
+    str::FromStr,
+};
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -189,6 +193,8 @@ pub(crate) struct CompatibilityListQuery {
     limit: i64,
     #[serde(default)]
     dir: Direction,
+    #[serde(default)]
+    after: Option<i64>,
 }
 
 const fn compatibility_limit() -> i64 {
@@ -201,6 +207,30 @@ enum Direction {
     Asc,
     #[default]
     Desc,
+}
+
+fn paginate_compatibility<T>(
+    items: &mut Vec<T>,
+    query: &CompatibilityListQuery,
+    id: impl Fn(&T) -> i64,
+) -> Result<(), AppError> {
+    if query.after.is_some_and(|after| after <= 0) {
+        return Err(
+            AppError::invalid("InvalidAfter", "The pagination cursor is invalid.").compatibility(),
+        );
+    }
+    items.sort_unstable_by_key(&id);
+    if matches!(query.dir, Direction::Desc) {
+        items.reverse();
+    }
+    if let Some(after) = query.after {
+        items.retain(|item| match query.dir {
+            Direction::Asc => id(item) > after,
+            Direction::Desc => id(item) < after,
+        });
+    }
+    items.truncate(usize::try_from(query.limit.clamp(1, 500)).unwrap_or(500));
+    Ok(())
 }
 
 #[derive(Debug, Serialize)]
@@ -220,25 +250,47 @@ struct CompatibilityPrinterReference {
     id: i64,
 }
 
+async fn compatibility_job(
+    state: &AppState,
+    tenant: crate::authentication::TenantContext,
+    job: Job,
+    id: i64,
+) -> Result<CompatibilityJob, AppError> {
+    let printer_id = state
+        .repository
+        .compatibility_id(
+            tenant.workspace_id,
+            tenant.environment_id,
+            "printer",
+            &job.printer_id.to_string(),
+        )
+        .await
+        .map_err(|error| AppError::from(error).compatibility())?;
+    Ok(CompatibilityJob {
+        id,
+        printer: CompatibilityPrinterReference { id: printer_id },
+        title: job.title,
+        content_type: match job.content_kind {
+            ContentKind::Pdf => "pdf",
+            ContentKind::Raw => "raw",
+        },
+        source: job.source,
+        state: compatibility_state(job.state),
+        create_timestamp: job.created_at.timestamp(),
+    })
+}
+
 pub(crate) async fn list_print_jobs(
     State(state): State<AppState>,
     headers: HeaderMap,
     Query(query): Query<CompatibilityListQuery>,
 ) -> Result<Json<Vec<CompatibilityJob>>, AppError> {
     let tenant = authenticate_compatibility(&state, &headers, Scope::JobsRead).await?;
-    let mut jobs = state
+    let jobs = state
         .repository
-        .list_jobs(
-            tenant.workspace_id,
-            tenant.environment_id,
-            None,
-            query.limit.clamp(1, 500),
-        )
+        .list_jobs(tenant.workspace_id, tenant.environment_id, None, 500)
         .await
         .map_err(|error| AppError::from(error).compatibility())?;
-    if matches!(query.dir, Direction::Asc) {
-        jobs.reverse();
-    }
     let mut response = Vec::with_capacity(jobs.len());
     for job in jobs {
         let id = state
@@ -251,29 +303,9 @@ pub(crate) async fn list_print_jobs(
             )
             .await
             .map_err(|error| AppError::from(error).compatibility())?;
-        let printer_id = state
-            .repository
-            .compatibility_id(
-                tenant.workspace_id,
-                tenant.environment_id,
-                "printer",
-                &job.printer_id.to_string(),
-            )
-            .await
-            .map_err(|error| AppError::from(error).compatibility())?;
-        response.push(CompatibilityJob {
-            id,
-            printer: CompatibilityPrinterReference { id: printer_id },
-            title: job.title,
-            content_type: match job.content_kind {
-                ContentKind::Pdf => "pdf",
-                ContentKind::Raw => "raw",
-            },
-            source: job.source,
-            state: compatibility_state(job.state),
-            create_timestamp: job.created_at.timestamp(),
-        });
+        response.push(compatibility_job(&state, tenant, job, id).await?);
     }
+    paginate_compatibility(&mut response, &query, |job| job.id)?;
     Ok(Json(response))
 }
 
@@ -299,30 +331,207 @@ pub(crate) async fn get_print_jobs(
             )
             .await
             .map_err(|error| AppError::from(error).compatibility())?;
-        let printer_id = state
-            .repository
-            .compatibility_id(
-                tenant.workspace_id,
-                tenant.environment_id,
-                "printer",
-                &job.printer_id.to_string(),
-            )
-            .await
-            .map_err(|error| AppError::from(error).compatibility())?;
-        response.push(CompatibilityJob {
-            id: value,
-            printer: CompatibilityPrinterReference { id: printer_id },
-            title: job.title,
-            content_type: match job.content_kind {
-                ContentKind::Pdf => "pdf",
-                ContentKind::Raw => "raw",
-            },
-            source: job.source,
-            state: compatibility_state(job.state),
-            create_timestamp: job.created_at.timestamp(),
-        });
+        response.push(compatibility_job(&state, tenant, job, value).await?);
     }
     Ok(Json(response))
+}
+
+pub(crate) async fn get_printer_print_jobs(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(printer_set): Path<String>,
+    Query(query): Query<CompatibilityListQuery>,
+) -> Result<Json<Vec<CompatibilityJob>>, AppError> {
+    filtered_print_jobs(&state, &headers, &printer_set, None, query).await
+}
+
+pub(crate) async fn get_printer_print_job_set(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((printer_set, job_set)): Path<(String, String)>,
+    Query(query): Query<CompatibilityListQuery>,
+) -> Result<Json<Vec<CompatibilityJob>>, AppError> {
+    filtered_print_jobs(&state, &headers, &printer_set, Some(&job_set), query).await
+}
+
+async fn filtered_print_jobs(
+    state: &AppState,
+    headers: &HeaderMap,
+    printer_set: &str,
+    job_set: Option<&str>,
+    query: CompatibilityListQuery,
+) -> Result<Json<Vec<CompatibilityJob>>, AppError> {
+    let tenant = authenticate_compatibility(state, headers, Scope::JobsRead).await?;
+    let printers = resolve_printer_set(state, tenant, printer_set).await?;
+    let mut jobs = if let Some(set) = job_set {
+        let mut jobs = Vec::new();
+        for id in parse_integer_set(set)? {
+            let native = state
+                .repository
+                .resolve_compatibility_id(tenant.workspace_id, tenant.environment_id, "job", id)
+                .await
+                .map_err(|error| AppError::from(error).compatibility())?;
+            let job = state
+                .repository
+                .get_job(
+                    tenant.workspace_id,
+                    tenant.environment_id,
+                    parse_job_id(&native).map_err(AppError::compatibility)?,
+                )
+                .await
+                .map_err(|error| AppError::from(error).compatibility())?;
+            jobs.push((id, job));
+        }
+        jobs
+    } else {
+        let mut jobs = Vec::new();
+        for job in state
+            .repository
+            .list_jobs(tenant.workspace_id, tenant.environment_id, None, 500)
+            .await
+            .map_err(|error| AppError::from(error).compatibility())?
+        {
+            let id = state
+                .repository
+                .compatibility_id(
+                    tenant.workspace_id,
+                    tenant.environment_id,
+                    "job",
+                    &job.id.to_string(),
+                )
+                .await
+                .map_err(|error| AppError::from(error).compatibility())?;
+            jobs.push((id, job));
+        }
+        jobs
+    };
+    jobs.retain(|(_, job)| printers.contains(&job.printer_id));
+    let mut response = Vec::with_capacity(jobs.len());
+    for (id, job) in jobs {
+        response.push(compatibility_job(state, tenant, job, id).await?);
+    }
+    paginate_compatibility(&mut response, &query, |job| job.id)?;
+    Ok(Json(response))
+}
+
+pub(crate) async fn cancel_print_jobs(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<i64>>, AppError> {
+    cancel_matching_jobs(&state, &headers, None, None).await
+}
+
+pub(crate) async fn cancel_print_job_set(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(job_set): Path<String>,
+) -> Result<Json<Vec<i64>>, AppError> {
+    cancel_matching_jobs(&state, &headers, None, Some(&job_set)).await
+}
+
+pub(crate) async fn cancel_printer_print_jobs(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(printer_set): Path<String>,
+) -> Result<Json<Vec<i64>>, AppError> {
+    cancel_matching_jobs(&state, &headers, Some(&printer_set), None).await
+}
+
+pub(crate) async fn cancel_printer_print_job_set(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((printer_set, job_set)): Path<(String, String)>,
+) -> Result<Json<Vec<i64>>, AppError> {
+    cancel_matching_jobs(&state, &headers, Some(&printer_set), Some(&job_set)).await
+}
+
+async fn cancel_matching_jobs(
+    state: &AppState,
+    headers: &HeaderMap,
+    printer_set: Option<&str>,
+    job_set: Option<&str>,
+) -> Result<Json<Vec<i64>>, AppError> {
+    let tenant = authenticate_compatibility(state, headers, Scope::JobsWrite).await?;
+    let printers = match printer_set {
+        Some(set) => Some(resolve_printer_set(state, tenant, set).await?),
+        None => None,
+    };
+    let candidates = if let Some(set) = job_set {
+        let mut jobs = Vec::new();
+        for id in parse_integer_set(set)? {
+            let native = state
+                .repository
+                .resolve_compatibility_id(tenant.workspace_id, tenant.environment_id, "job", id)
+                .await
+                .map_err(|error| AppError::from(error).compatibility())?;
+            jobs.push((
+                id,
+                state
+                    .repository
+                    .get_job(
+                        tenant.workspace_id,
+                        tenant.environment_id,
+                        parse_job_id(&native).map_err(AppError::compatibility)?,
+                    )
+                    .await
+                    .map_err(|error| AppError::from(error).compatibility())?,
+            ));
+        }
+        jobs
+    } else {
+        let mut jobs = Vec::new();
+        for job in state
+            .repository
+            .list_jobs(tenant.workspace_id, tenant.environment_id, None, 500)
+            .await
+            .map_err(|error| AppError::from(error).compatibility())?
+        {
+            let id = state
+                .repository
+                .compatibility_id(
+                    tenant.workspace_id,
+                    tenant.environment_id,
+                    "job",
+                    &job.id.to_string(),
+                )
+                .await
+                .map_err(|error| AppError::from(error).compatibility())?;
+            jobs.push((id, job));
+        }
+        jobs
+    };
+    let mut cancelled = Vec::new();
+    for (id, job) in candidates {
+        if printers
+            .as_ref()
+            .is_some_and(|printers| !printers.contains(&job.printer_id))
+            || !matches!(
+                job.state,
+                JobState::Registered | JobState::ContentPending | JobState::WaitingForAgent
+            )
+        {
+            continue;
+        }
+        match state
+            .repository
+            .request_job_cancellation(tenant.workspace_id, tenant.environment_id, job.id)
+            .await
+        {
+            Ok(job) => {
+                state
+                    .publish(tenant, "job.updated", &job)
+                    .await
+                    .map_err(|error| AppError::from(error).compatibility())?;
+                cancelled.push(id);
+            }
+            Err(
+                crate::repository::RepositoryError::ConcurrentStateChange
+                | crate::repository::RepositoryError::InvalidTransition,
+            ) => {}
+            Err(error) => return Err(AppError::from(error).compatibility()),
+        }
+    }
+    Ok(Json(cancelled))
 }
 
 #[derive(Debug, Serialize)]
@@ -420,15 +629,16 @@ struct CompatibilityComputerReference {
 pub(crate) async fn list_computers(
     State(state): State<AppState>,
     headers: HeaderMap,
+    Query(query): Query<CompatibilityListQuery>,
 ) -> Result<Json<Vec<CompatibilityComputer>>, AppError> {
     let tenant = authenticate_compatibility(&state, &headers, Scope::AgentsRead).await?;
-    let mut response = Vec::new();
-    for agent in state
+    let agents = state
         .repository
         .list_agents(tenant.workspace_id, tenant.environment_id)
         .await
-        .map_err(|error| AppError::from(error).compatibility())?
-    {
+        .map_err(|error| AppError::from(error).compatibility())?;
+    let mut response = Vec::new();
+    for agent in agents {
         let id = state
             .repository
             .compatibility_id(
@@ -439,32 +649,70 @@ pub(crate) async fn list_computers(
             )
             .await
             .map_err(|error| AppError::from(error).compatibility())?;
-        response.push(CompatibilityComputer {
-            id,
-            name: agent.name,
-            state: if agent.state == "connected" {
-                "connected"
-            } else {
-                "disconnected"
-            },
-            version: agent.version,
-        });
+        response.push(compatibility_computer(agent, id));
+    }
+    paginate_compatibility(&mut response, &query, |computer| computer.id)?;
+    Ok(Json(response))
+}
+
+pub(crate) async fn get_computers(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(set): Path<String>,
+) -> Result<Json<Vec<CompatibilityComputer>>, AppError> {
+    let tenant = authenticate_compatibility(&state, &headers, Scope::AgentsRead).await?;
+    let agents = state
+        .repository
+        .list_agents(tenant.workspace_id, tenant.environment_id)
+        .await
+        .map_err(|error| AppError::from(error).compatibility())?
+        .into_iter()
+        .map(|agent| (agent.id, agent))
+        .collect::<HashMap<_, _>>();
+    let mut response = Vec::new();
+    for id in parse_integer_set(&set)? {
+        let native = state
+            .repository
+            .resolve_compatibility_id(tenant.workspace_id, tenant.environment_id, "computer", id)
+            .await
+            .map_err(|error| AppError::from(error).compatibility())?;
+        let agent_id = AgentId::from_str(&native).map_err(|_| {
+            AppError::invalid("InvalidComputer", "The computer does not exist.").compatibility()
+        })?;
+        let agent = agents.get(&agent_id).cloned().ok_or_else(|| {
+            AppError::invalid("InvalidComputer", "The computer does not exist.").compatibility()
+        })?;
+        response.push(compatibility_computer(agent, id));
     }
     Ok(Json(response))
+}
+
+fn compatibility_computer(agent: StoredAgent, id: i64) -> CompatibilityComputer {
+    CompatibilityComputer {
+        id,
+        name: agent.name,
+        state: if agent.state == "connected" {
+            "connected"
+        } else {
+            "disconnected"
+        },
+        version: agent.version,
+    }
 }
 
 pub(crate) async fn list_printers(
     State(state): State<AppState>,
     headers: HeaderMap,
+    Query(query): Query<CompatibilityListQuery>,
 ) -> Result<Json<Vec<CompatibilityPrinter>>, AppError> {
     let tenant = authenticate_compatibility(&state, &headers, Scope::PrintersRead).await?;
-    let mut response = Vec::new();
-    for printer in state
+    let printers = state
         .repository
         .list_printers(tenant.workspace_id, tenant.environment_id, None, 500)
         .await
-        .map_err(|error| AppError::from(error).compatibility())?
-    {
+        .map_err(|error| AppError::from(error).compatibility())?;
+    let mut response = Vec::new();
+    for printer in printers {
         let id = state
             .repository
             .compatibility_id(
@@ -475,29 +723,198 @@ pub(crate) async fn list_printers(
             )
             .await
             .map_err(|error| AppError::from(error).compatibility())?;
-        let computer_id = state
+        response.push(compatibility_printer(&state, tenant, printer, id).await?);
+    }
+    paginate_compatibility(&mut response, &query, |printer| printer.id)?;
+    Ok(Json(response))
+}
+
+pub(crate) async fn get_printers(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(set): Path<String>,
+) -> Result<Json<Vec<CompatibilityPrinter>>, AppError> {
+    let tenant = authenticate_compatibility(&state, &headers, Scope::PrintersRead).await?;
+    let available = state
+        .repository
+        .list_printers(tenant.workspace_id, tenant.environment_id, None, 500)
+        .await
+        .map_err(|error| AppError::from(error).compatibility())?
+        .into_iter()
+        .map(|printer| (printer.id, printer))
+        .collect::<HashMap<_, _>>();
+    let mut response = Vec::new();
+    for id in parse_integer_set(&set)? {
+        let native = state
+            .repository
+            .resolve_compatibility_id(tenant.workspace_id, tenant.environment_id, "printer", id)
+            .await
+            .map_err(|error| AppError::from(error).compatibility())?;
+        let printer_id = PrinterId::from_str(&native).map_err(|_| {
+            AppError::invalid("InvalidPrinter", "The printer does not exist.").compatibility()
+        })?;
+        let printer = available.get(&printer_id).cloned().ok_or_else(|| {
+            AppError::invalid("InvalidPrinter", "The printer does not exist.").compatibility()
+        })?;
+        response.push(compatibility_printer(&state, tenant, printer, id).await?);
+    }
+    Ok(Json(response))
+}
+
+pub(crate) async fn get_computer_printers(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(computer_set): Path<String>,
+    Query(query): Query<CompatibilityListQuery>,
+) -> Result<Json<Vec<CompatibilityPrinter>>, AppError> {
+    filtered_computer_printers(&state, &headers, &computer_set, None, query).await
+}
+
+pub(crate) async fn get_computer_printer_set(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((computer_set, printer_set)): Path<(String, String)>,
+    Query(query): Query<CompatibilityListQuery>,
+) -> Result<Json<Vec<CompatibilityPrinter>>, AppError> {
+    filtered_computer_printers(&state, &headers, &computer_set, Some(&printer_set), query).await
+}
+
+async fn filtered_computer_printers(
+    state: &AppState,
+    headers: &HeaderMap,
+    computer_set: &str,
+    printer_set: Option<&str>,
+    query: CompatibilityListQuery,
+) -> Result<Json<Vec<CompatibilityPrinter>>, AppError> {
+    let tenant = authenticate_compatibility(state, headers, Scope::PrintersRead).await?;
+    let computers = resolve_computer_set(state, tenant, computer_set).await?;
+    let selected_printers = match printer_set {
+        Some(set) => Some(resolve_printer_set(state, tenant, set).await?),
+        None => None,
+    };
+    let mut printers = state
+        .repository
+        .list_printers(tenant.workspace_id, tenant.environment_id, None, 500)
+        .await
+        .map_err(|error| AppError::from(error).compatibility())?;
+    printers.retain(|printer| {
+        computers.contains(&printer.agent_id)
+            && selected_printers
+                .as_ref()
+                .is_none_or(|selected| selected.contains(&printer.id))
+    });
+    let mut response = Vec::with_capacity(printers.len());
+    for printer in printers {
+        let id = state
             .repository
             .compatibility_id(
                 tenant.workspace_id,
                 tenant.environment_id,
-                "computer",
-                &printer.agent_id.to_string(),
+                "printer",
+                &printer.id.to_string(),
             )
             .await
             .map_err(|error| AppError::from(error).compatibility())?;
-        response.push(CompatibilityPrinter {
-            id,
-            name: printer.name,
-            computer: CompatibilityComputerReference { id: computer_id },
-            is_default: false,
-            state: match printer.state {
-                spool_domain::PrinterState::Online | spool_domain::PrinterState::Busy => "online",
-                _ => "offline",
-            },
-            capabilities: printer.capabilities,
-        });
+        response.push(compatibility_printer(state, tenant, printer, id).await?);
     }
+    paginate_compatibility(&mut response, &query, |printer| printer.id)?;
     Ok(Json(response))
+}
+
+async fn compatibility_printer(
+    state: &AppState,
+    tenant: crate::authentication::TenantContext,
+    printer: StoredPrinter,
+    id: i64,
+) -> Result<CompatibilityPrinter, AppError> {
+    let computer_id = state
+        .repository
+        .compatibility_id(
+            tenant.workspace_id,
+            tenant.environment_id,
+            "computer",
+            &printer.agent_id.to_string(),
+        )
+        .await
+        .map_err(|error| AppError::from(error).compatibility())?;
+    Ok(CompatibilityPrinter {
+        id,
+        name: printer.name,
+        computer: CompatibilityComputerReference { id: computer_id },
+        is_default: false,
+        state: match printer.state {
+            spool_domain::PrinterState::Online | spool_domain::PrinterState::Busy => "online",
+            _ => "offline",
+        },
+        capabilities: printer.capabilities,
+    })
+}
+
+async fn resolve_computer_set(
+    state: &AppState,
+    tenant: crate::authentication::TenantContext,
+    set: &str,
+) -> Result<HashSet<AgentId>, AppError> {
+    let available = state
+        .repository
+        .list_agents(tenant.workspace_id, tenant.environment_id)
+        .await
+        .map_err(|error| AppError::from(error).compatibility())?
+        .into_iter()
+        .map(|agent| agent.id)
+        .collect::<HashSet<_>>();
+    let mut result = HashSet::new();
+    for id in parse_integer_set(set)? {
+        let native = state
+            .repository
+            .resolve_compatibility_id(tenant.workspace_id, tenant.environment_id, "computer", id)
+            .await
+            .map_err(|error| AppError::from(error).compatibility())?;
+        let agent_id = AgentId::from_str(&native).map_err(|_| {
+            AppError::invalid("InvalidComputer", "The computer does not exist.").compatibility()
+        })?;
+        if !available.contains(&agent_id) {
+            return Err(
+                AppError::invalid("InvalidComputer", "The computer does not exist.")
+                    .compatibility(),
+            );
+        }
+        result.insert(agent_id);
+    }
+    Ok(result)
+}
+
+async fn resolve_printer_set(
+    state: &AppState,
+    tenant: crate::authentication::TenantContext,
+    set: &str,
+) -> Result<HashSet<PrinterId>, AppError> {
+    let available = state
+        .repository
+        .list_printers(tenant.workspace_id, tenant.environment_id, None, 500)
+        .await
+        .map_err(|error| AppError::from(error).compatibility())?
+        .into_iter()
+        .map(|printer| printer.id)
+        .collect::<HashSet<_>>();
+    let mut result = HashSet::new();
+    for id in parse_integer_set(set)? {
+        let native = state
+            .repository
+            .resolve_compatibility_id(tenant.workspace_id, tenant.environment_id, "printer", id)
+            .await
+            .map_err(|error| AppError::from(error).compatibility())?;
+        let printer_id = PrinterId::from_str(&native).map_err(|_| {
+            AppError::invalid("InvalidPrinter", "The printer does not exist.").compatibility()
+        })?;
+        if !available.contains(&printer_id) {
+            return Err(
+                AppError::invalid("InvalidPrinter", "The printer does not exist.").compatibility(),
+            );
+        }
+        result.insert(printer_id);
+    }
+    Ok(result)
 }
 
 fn decode_request(headers: &HeaderMap, body: &[u8]) -> Result<PrintJobRequest, AppError> {
@@ -590,6 +1007,11 @@ fn parse_integer_set(value: &str) -> Result<Vec<i64>, AppError> {
         .map_err(|_| {
             AppError::invalid("InvalidSet", "The resource ID set is invalid.").compatibility()
         })?;
+    if result.is_empty() || result.iter().any(|id| *id <= 0) {
+        return Err(
+            AppError::invalid("InvalidSet", "The resource ID set is invalid.").compatibility(),
+        );
+    }
     result.sort_unstable();
     result.dedup();
     Ok(result)

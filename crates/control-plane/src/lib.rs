@@ -187,24 +187,7 @@ pub fn router(state: AppState) -> Router {
             "/v1/agent/jobs/{job_id}/content",
             get(api::get_agent_content),
         )
-        .route("/whoami", get(compatibility::whoami))
-        .route("/ping", get(compatibility::ping))
-        .route("/noop", get(compatibility::noop))
-        .route(
-            "/printjobs",
-            post(compatibility::create_print_job).get(compatibility::list_print_jobs),
-        )
-        .route(
-            "/printjobs/states",
-            get(compatibility::get_print_job_states),
-        )
-        .route("/printjobs/{set}", get(compatibility::get_print_jobs))
-        .route(
-            "/printjobs/{set}/states",
-            get(compatibility::get_print_job_states),
-        )
-        .route("/computers", get(compatibility::list_computers))
-        .route("/printers", get(compatibility::list_printers))
+        .merge(compatibility_router())
         // A 50 MiB binary payload expands to roughly 66.7 MiB when Base64 is
         // carried in JSON. Direct uploads remain preferred, but compatibility
         // clients must be able to submit the documented maximum.
@@ -212,6 +195,53 @@ pub fn router(state: AppState) -> Router {
         .layer(CompressionLayer::new())
         .layer(middleware::from_fn(request_id::middleware))
         .with_state(state)
+}
+
+fn compatibility_router() -> Router<AppState> {
+    Router::new()
+        .route("/whoami", get(compatibility::whoami))
+        .route("/ping", get(compatibility::ping))
+        .route("/noop", get(compatibility::noop))
+        .route(
+            "/printjobs",
+            post(compatibility::create_print_job)
+                .get(compatibility::list_print_jobs)
+                .delete(compatibility::cancel_print_jobs),
+        )
+        .route(
+            "/printjobs/states",
+            get(compatibility::get_print_job_states),
+        )
+        .route(
+            "/printjobs/{set}",
+            get(compatibility::get_print_jobs).delete(compatibility::cancel_print_job_set),
+        )
+        .route(
+            "/printjobs/{set}/states",
+            get(compatibility::get_print_job_states),
+        )
+        .route("/computers", get(compatibility::list_computers))
+        .route("/computers/{set}", get(compatibility::get_computers))
+        .route(
+            "/computers/{computer_set}/printers",
+            get(compatibility::get_computer_printers),
+        )
+        .route(
+            "/computers/{computer_set}/printers/{printer_set}",
+            get(compatibility::get_computer_printer_set),
+        )
+        .route("/printers", get(compatibility::list_printers))
+        .route("/printers/{set}", get(compatibility::get_printers))
+        .route(
+            "/printers/{printer_set}/printjobs",
+            get(compatibility::get_printer_print_jobs)
+                .delete(compatibility::cancel_printer_print_jobs),
+        )
+        .route(
+            "/printers/{printer_set}/printjobs/{job_set}",
+            get(compatibility::get_printer_print_job_set)
+                .delete(compatibility::cancel_printer_print_job_set),
+        )
 }
 
 #[cfg(test)]
@@ -340,6 +370,43 @@ mod tests {
         request
             .body(body.map_or_else(Body::empty, |value| Body::from(value.to_owned())))
             .expect("valid API request")
+    }
+
+    fn compatibility_request(method: &str, path: &str, body: Option<String>) -> Request<Body> {
+        let credentials = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            "spl_test_integration:",
+        );
+        let mut request = Request::builder()
+            .method(method)
+            .uri(path)
+            .header("authorization", format!("Basic {credentials}"));
+        if body.is_some() {
+            request = request.header("content-type", "application/json");
+        }
+        request
+            .body(body.map_or_else(Body::empty, Body::from))
+            .expect("valid compatibility request")
+    }
+
+    async fn compatibility_json(
+        router: &Router,
+        request: Request<Body>,
+    ) -> (StatusCode, serde_json::Value) {
+        let response = router
+            .clone()
+            .oneshot(request)
+            .await
+            .expect("compatibility response");
+        let status = response.status();
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("compatibility body")
+            .to_bytes();
+        let json = serde_json::from_slice(&body).expect("compatibility JSON");
+        (status, json)
     }
 
     fn signed_request(
@@ -860,6 +927,230 @@ mod tests {
             .to_bytes();
         let id: i64 = serde_json::from_slice(&body).expect("numeric ID");
         assert!(id > 0);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn compatibility_filtered_routes_and_cancellation_are_tenant_scoped() {
+        let application = application().await;
+        let second_printer = PrinterId::new();
+        application
+            .repository
+            .add_printer(
+                application.tenant.workspace_id,
+                application.tenant.environment_id,
+                second_printer,
+                application.agent_id,
+            )
+            .await;
+        let computer_id = application
+            .repository
+            .compatibility_id(
+                application.tenant.workspace_id,
+                application.tenant.environment_id,
+                "computer",
+                &application.agent_id.to_string(),
+            )
+            .await
+            .expect("computer compatibility ID");
+        let printer_id = application
+            .repository
+            .compatibility_id(
+                application.tenant.workspace_id,
+                application.tenant.environment_id,
+                "printer",
+                &application.printer_id.to_string(),
+            )
+            .await
+            .expect("printer compatibility ID");
+        let second_printer_id = application
+            .repository
+            .compatibility_id(
+                application.tenant.workspace_id,
+                application.tenant.environment_id,
+                "printer",
+                &second_printer.to_string(),
+            )
+            .await
+            .expect("second printer compatibility ID");
+
+        let (_, computers) = compatibility_json(
+            &application.router,
+            compatibility_request(
+                "GET",
+                &format!("/computers/{computer_id},{computer_id}"),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(computers.as_array().expect("computers").len(), 1);
+        assert_eq!(computers[0]["id"], computer_id);
+
+        let (_, printers) = compatibility_json(
+            &application.router,
+            compatibility_request(
+                "GET",
+                &format!("/printers/{second_printer_id},{printer_id}"),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(printers.as_array().expect("printers").len(), 2);
+        assert_eq!(
+            printers
+                .as_array()
+                .expect("printers")
+                .iter()
+                .map(|printer| printer["id"].as_i64().expect("printer ID"))
+                .collect::<Vec<_>>(),
+            {
+                let mut expected = vec![printer_id, second_printer_id];
+                expected.sort_unstable();
+                expected
+            }
+        );
+        let (_, paged) = compatibility_json(
+            &application.router,
+            compatibility_request("GET", "/printers?limit=1&dir=asc", None),
+        )
+        .await;
+        assert_eq!(paged.as_array().expect("paged printers").len(), 1);
+        let first_page_id = paged[0]["id"].as_i64().expect("first page printer ID");
+        assert_eq!(first_page_id, printer_id.min(second_printer_id));
+        let (_, next_page) = compatibility_json(
+            &application.router,
+            compatibility_request(
+                "GET",
+                &format!("/printers?limit=1&dir=asc&after={first_page_id}"),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(
+            next_page[0]["id"].as_i64().expect("next page printer ID"),
+            printer_id.max(second_printer_id)
+        );
+        let invalid_after = application
+            .router
+            .clone()
+            .oneshot(compatibility_request("GET", "/printers?after=0", None))
+            .await
+            .expect("invalid after response");
+        assert_eq!(invalid_after.status(), StatusCode::BAD_REQUEST);
+
+        let (_, nested) = compatibility_json(
+            &application.router,
+            compatibility_request("GET", &format!("/computers/{computer_id}/printers"), None),
+        )
+        .await;
+        assert_eq!(nested.as_array().expect("nested printers").len(), 2);
+        let (_, nested_set) = compatibility_json(
+            &application.router,
+            compatibility_request(
+                "GET",
+                &format!("/computers/{computer_id}/printers/{printer_id}"),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(nested_set.as_array().expect("nested printer set").len(), 1);
+
+        let (_, created) = compatibility_json(
+            &application.router,
+            compatibility_request(
+                "POST",
+                "/printjobs",
+                Some(format!(
+                    r#"{{"printerId":{printer_id},"title":"Filtered","contentType":"pdf_base64","content":"JVBERi0="}}"#
+                )),
+            ),
+        )
+        .await;
+        let job_id = created.as_i64().expect("job compatibility ID");
+        let (_, printer_jobs) = compatibility_json(
+            &application.router,
+            compatibility_request("GET", &format!("/printers/{printer_id}/printjobs"), None),
+        )
+        .await;
+        assert_eq!(printer_jobs[0]["id"], job_id);
+        let (_, other_jobs) = compatibility_json(
+            &application.router,
+            compatibility_request(
+                "GET",
+                &format!("/printers/{second_printer_id}/printjobs"),
+                None,
+            ),
+        )
+        .await;
+        assert!(other_jobs.as_array().expect("other jobs").is_empty());
+        let (_, selected_job) = compatibility_json(
+            &application.router,
+            compatibility_request(
+                "GET",
+                &format!("/printers/{printer_id}/printjobs/{job_id}"),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(selected_job[0]["id"], job_id);
+
+        let (cancel_status, cancelled) = compatibility_json(
+            &application.router,
+            compatibility_request(
+                "DELETE",
+                &format!("/printers/{printer_id}/printjobs/{job_id}"),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(cancel_status, StatusCode::OK);
+        assert_eq!(cancelled, serde_json::json!([job_id]));
+        let (_, repeated) = compatibility_json(
+            &application.router,
+            compatibility_request("DELETE", &format!("/printjobs/{job_id}"), None),
+        )
+        .await;
+        assert_eq!(repeated, serde_json::json!([]));
+
+        let foreign_tenant = TenantContext::unrestricted(WorkspaceId::new(), EnvironmentId::new());
+        let foreign_printer = PrinterId::new();
+        application
+            .repository
+            .add_printer(
+                foreign_tenant.workspace_id,
+                foreign_tenant.environment_id,
+                foreign_printer,
+                AgentId::new(),
+            )
+            .await;
+        let foreign_id = application
+            .repository
+            .compatibility_id(
+                foreign_tenant.workspace_id,
+                foreign_tenant.environment_id,
+                "printer",
+                &foreign_printer.to_string(),
+            )
+            .await
+            .expect("foreign printer ID");
+        let foreign = application
+            .router
+            .clone()
+            .oneshot(compatibility_request(
+                "GET",
+                &format!("/printers/{foreign_id}"),
+                None,
+            ))
+            .await
+            .expect("foreign response");
+        assert_eq!(foreign.status(), StatusCode::NOT_FOUND);
+        let invalid = application
+            .router
+            .clone()
+            .oneshot(compatibility_request("GET", "/printers/not-a-set", None))
+            .await
+            .expect("invalid set response");
+        assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

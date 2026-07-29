@@ -29,7 +29,341 @@ tags:
     description: Consume immutable state changes.
   - name: Webhooks
     description: Deliver signed event notifications.
+  - name: PrintNode Compatibility
+    description: PrintNode-shaped migration surface at the API origin root.
 paths:
+  /whoami:
+    get:
+      summary: Inspect the PrintNode-compatible account projection
+      tags: [PrintNode Compatibility]
+      operationId: compatibilityWhoAmI
+      security: [{ compatibilityBasic: [] }]
+      responses:
+        "200":
+          description: Compatibility account details for the authenticated environment.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CompatibilityWhoAmI" }
+        "401": { $ref: "#/components/responses/Error" }
+  /ping:
+    get:
+      summary: Check authenticated PrintNode compatibility access
+      tags: [PrintNode Compatibility]
+      operationId: compatibilityPing
+      security: [{ compatibilityBasic: [] }]
+      responses:
+        "200":
+          description: Authenticated compatibility API is reachable.
+          content:
+            text/plain:
+              schema: { type: string, const: pong }
+        "401": { $ref: "#/components/responses/Error" }
+  /noop:
+    get:
+      summary: Perform an authenticated no-op
+      tags: [PrintNode Compatibility]
+      operationId: compatibilityNoop
+      security: [{ compatibilityBasic: [] }]
+      responses:
+        "204":
+          description: Authentication succeeded; no content is returned.
+        "401": { $ref: "#/components/responses/Error" }
+  /computers:
+    get:
+      summary: List PrintNode-compatible computers
+      tags: [PrintNode Compatibility]
+      operationId: compatibilityListComputers
+      security: [{ compatibilityBasic: [] }]
+      parameters:
+        - $ref: "#/components/parameters/CompatibilityLimit"
+        - $ref: "#/components/parameters/CompatibilityDirection"
+        - $ref: "#/components/parameters/CompatibilityAfter"
+      responses:
+        "200":
+          description: Computers in the authenticated environment.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/CompatibilityComputer" }
+        "401": { $ref: "#/components/responses/Error" }
+  /computers/{computer_set}:
+    parameters:
+      - $ref: "#/components/parameters/ComputerSet"
+    get:
+      summary: Get a set of PrintNode-compatible computers
+      tags: [PrintNode Compatibility]
+      operationId: compatibilityGetComputers
+      security: [{ compatibilityBasic: [] }]
+      responses:
+        "200":
+          description: Sorted, deduplicated computer set.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/CompatibilityComputer" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /computers/{computer_set}/printers:
+    parameters:
+      - $ref: "#/components/parameters/ComputerSet"
+    get:
+      summary: List printers attached to a computer set
+      tags: [PrintNode Compatibility]
+      operationId: compatibilityListComputerPrinters
+      security: [{ compatibilityBasic: [] }]
+      parameters:
+        - $ref: "#/components/parameters/CompatibilityLimit"
+        - $ref: "#/components/parameters/CompatibilityDirection"
+        - $ref: "#/components/parameters/CompatibilityAfter"
+      responses:
+        "200":
+          description: Matching printers.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/CompatibilityPrinter" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /computers/{computer_set}/printers/{printer_set}:
+    parameters:
+      - $ref: "#/components/parameters/ComputerSet"
+      - $ref: "#/components/parameters/PrinterSet"
+    get:
+      summary: Intersect computer and printer sets
+      tags: [PrintNode Compatibility]
+      operationId: compatibilityGetComputerPrinters
+      security: [{ compatibilityBasic: [] }]
+      parameters:
+        - $ref: "#/components/parameters/CompatibilityLimit"
+        - $ref: "#/components/parameters/CompatibilityDirection"
+        - $ref: "#/components/parameters/CompatibilityAfter"
+      responses:
+        "200":
+          description: Matching printers.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/CompatibilityPrinter" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /printers:
+    get:
+      summary: List PrintNode-compatible printers
+      tags: [PrintNode Compatibility]
+      operationId: compatibilityListPrinters
+      security: [{ compatibilityBasic: [] }]
+      parameters:
+        - $ref: "#/components/parameters/CompatibilityLimit"
+        - $ref: "#/components/parameters/CompatibilityDirection"
+        - $ref: "#/components/parameters/CompatibilityAfter"
+      responses:
+        "200":
+          description: Printers in the authenticated environment.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/CompatibilityPrinter" }
+        "401": { $ref: "#/components/responses/Error" }
+  /printers/{printer_set}:
+    parameters:
+      - $ref: "#/components/parameters/PrinterSet"
+    get:
+      summary: Get a set of PrintNode-compatible printers
+      tags: [PrintNode Compatibility]
+      operationId: compatibilityGetPrinters
+      security: [{ compatibilityBasic: [] }]
+      responses:
+        "200":
+          description: Sorted, deduplicated printer set.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/CompatibilityPrinter" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /printjobs:
+    post:
+      summary: Create a PrintNode-compatible print job
+      tags: [PrintNode Compatibility]
+      operationId: compatibilityCreatePrintJob
+      security: [{ compatibilityBasic: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CompatibilityCreatePrintJob"
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: "#/components/schemas/CompatibilityCreatePrintJob"
+      responses:
+        "201":
+          description: Numeric compatibility job ID.
+          content:
+            application/json:
+              schema: { type: integer, minimum: 1 }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+    get:
+      summary: List PrintNode-compatible print jobs
+      tags: [PrintNode Compatibility]
+      operationId: compatibilityListPrintJobs
+      security: [{ compatibilityBasic: [] }]
+      parameters:
+        - $ref: "#/components/parameters/CompatibilityLimit"
+        - $ref: "#/components/parameters/CompatibilityDirection"
+        - $ref: "#/components/parameters/CompatibilityAfter"
+      responses:
+        "200":
+          description: Print jobs in the authenticated environment.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/CompatibilityPrintJob" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+    delete:
+      summary: Cancel all eligible pre-delivery print jobs
+      tags: [PrintNode Compatibility]
+      operationId: compatibilityCancelPrintJobs
+      security: [{ compatibilityBasic: [] }]
+      responses:
+        "200":
+          $ref: "#/components/responses/CompatibilityCancelledIds"
+        "401": { $ref: "#/components/responses/Error" }
+  /printjobs/{job_set}:
+    parameters:
+      - $ref: "#/components/parameters/JobSet"
+    get:
+      summary: Get a set of PrintNode-compatible print jobs
+      tags: [PrintNode Compatibility]
+      operationId: compatibilityGetPrintJobs
+      security: [{ compatibilityBasic: [] }]
+      responses:
+        "200":
+          description: Sorted, deduplicated job set.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/CompatibilityPrintJob" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+    delete:
+      summary: Cancel an eligible set of pre-delivery print jobs
+      tags: [PrintNode Compatibility]
+      operationId: compatibilityCancelPrintJobSet
+      security: [{ compatibilityBasic: [] }]
+      responses:
+        "200":
+          $ref: "#/components/responses/CompatibilityCancelledIds"
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /printjobs/states:
+    get:
+      summary: List PrintNode-compatible job states
+      tags: [PrintNode Compatibility]
+      operationId: compatibilityListPrintJobStates
+      security: [{ compatibilityBasic: [] }]
+      responses:
+        "200":
+          description: States for the newest 500 jobs in the authenticated environment.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/CompatibilityPrintJobState" }
+        "401": { $ref: "#/components/responses/Error" }
+  /printjobs/{job_set}/states:
+    parameters:
+      - $ref: "#/components/parameters/JobSet"
+    get:
+      summary: Get PrintNode-compatible states for a job set
+      tags: [PrintNode Compatibility]
+      operationId: compatibilityGetPrintJobStates
+      security: [{ compatibilityBasic: [] }]
+      responses:
+        "200":
+          description: States for the requested job set.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/CompatibilityPrintJobState" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /printers/{printer_set}/printjobs:
+    parameters:
+      - $ref: "#/components/parameters/PrinterSet"
+    get:
+      summary: List print jobs for a printer set
+      tags: [PrintNode Compatibility]
+      operationId: compatibilityListPrinterPrintJobs
+      security: [{ compatibilityBasic: [] }]
+      parameters:
+        - $ref: "#/components/parameters/CompatibilityLimit"
+        - $ref: "#/components/parameters/CompatibilityDirection"
+        - $ref: "#/components/parameters/CompatibilityAfter"
+      responses:
+        "200":
+          description: Matching print jobs.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/CompatibilityPrintJob" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+    delete:
+      summary: Cancel eligible pre-delivery jobs for a printer set
+      tags: [PrintNode Compatibility]
+      operationId: compatibilityCancelPrinterPrintJobs
+      security: [{ compatibilityBasic: [] }]
+      responses:
+        "200":
+          $ref: "#/components/responses/CompatibilityCancelledIds"
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /printers/{printer_set}/printjobs/{job_set}:
+    parameters:
+      - $ref: "#/components/parameters/PrinterSet"
+      - $ref: "#/components/parameters/JobSet"
+    get:
+      summary: Intersect printer and print-job sets
+      tags: [PrintNode Compatibility]
+      operationId: compatibilityGetPrinterPrintJobs
+      security: [{ compatibilityBasic: [] }]
+      parameters:
+        - $ref: "#/components/parameters/CompatibilityLimit"
+        - $ref: "#/components/parameters/CompatibilityDirection"
+        - $ref: "#/components/parameters/CompatibilityAfter"
+      responses:
+        "200":
+          description: Matching print jobs.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/CompatibilityPrintJob" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+    delete:
+      summary: Cancel the eligible intersection of printer and print-job sets
+      tags: [PrintNode Compatibility]
+      operationId: compatibilityCancelPrinterPrintJobSet
+      security: [{ compatibilityBasic: [] }]
+      responses:
+        "200":
+          $ref: "#/components/responses/CompatibilityCancelledIds"
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
   /v1/health:
     get:
       summary: Check process health
@@ -772,6 +1106,10 @@ components:
       scheme: bearer
       bearerFormat: Spool API key or OIDC JWT
       description: API keys are scope-limited. OIDC JWTs require issuer, expiry, organization, permissions, and either audience or an exact configured claim/value application binding.
+    compatibilityBasic:
+      type: http
+      scheme: basic
+      description: Spool compatibility API key as the username with an empty password.
     agentId:
       type: apiKey
       in: header
@@ -793,6 +1131,40 @@ components:
       in: header
       name: x-spool-signature
   parameters:
+    CompatibilityLimit:
+      name: limit
+      in: query
+      required: false
+      schema: { type: integer, minimum: 1, maximum: 500, default: 100 }
+    CompatibilityDirection:
+      name: dir
+      in: query
+      required: false
+      schema: { type: string, enum: [asc, desc], default: desc }
+    CompatibilityAfter:
+      name: after
+      in: query
+      required: false
+      description: Exclusive positive integer compatibility-ID cursor. Printer and job collections are bounded to the newest 500 hydrated records in V1.
+      schema: { type: integer, minimum: 1 }
+    ComputerSet:
+      name: computer_set
+      in: path
+      required: true
+      description: Comma-separated positive integer compatibility IDs.
+      schema: { type: string, pattern: '^[1-9][0-9]*(,[1-9][0-9]*)*$' }
+    PrinterSet:
+      name: printer_set
+      in: path
+      required: true
+      description: Comma-separated positive integer compatibility IDs.
+      schema: { type: string, pattern: '^[1-9][0-9]*(,[1-9][0-9]*)*$' }
+    JobSet:
+      name: job_set
+      in: path
+      required: true
+      description: Comma-separated positive integer compatibility IDs.
+      schema: { type: string, pattern: '^[1-9][0-9]*(,[1-9][0-9]*)*$' }
     IdempotencyKey:
       name: Idempotency-Key
       in: header
@@ -857,6 +1229,13 @@ components:
       schema:
         type: string
   responses:
+    CompatibilityCancelledIds:
+      description: Numeric IDs successfully cancelled before durable agent acceptance. Unqualified collection deletion examines at most the newest 500 jobs in V1.
+      content:
+        application/json:
+          schema:
+            type: array
+            items: { type: integer, minimum: 1 }
     Error:
       description: Request failed.
       headers:
@@ -867,6 +1246,77 @@ components:
           schema:
             $ref: "#/components/schemas/ErrorEnvelope"
   schemas:
+    CompatibilityWhoAmI:
+      type: object
+      required: [id, email, canCreateSubAccounts, credits, numComputers, totalPrints, versions]
+      properties:
+        id: { type: integer, minimum: 1 }
+        email: { type: string, format: email }
+        canCreateSubAccounts: { type: boolean }
+        credits: { type: integer }
+        numComputers: { type: integer, minimum: 0 }
+        totalPrints: { type: integer, minimum: 0 }
+        versions:
+          type: array
+          items: { type: string }
+    CompatibilityComputer:
+      type: object
+      required: [id, name, state, version]
+      properties:
+        id: { type: integer, minimum: 1 }
+        name: { type: string }
+        state: { type: string, enum: [connected, disconnected] }
+        version: { type: string }
+    CompatibilityPrinter:
+      type: object
+      required: [id, name, computer, default, state, capabilities]
+      properties:
+        id: { type: integer, minimum: 1 }
+        name: { type: string }
+        computer:
+          type: object
+          required: [id]
+          properties:
+            id: { type: integer, minimum: 1 }
+        default: { type: boolean }
+        state: { type: string, enum: [online, offline] }
+        capabilities: { type: object, additionalProperties: true }
+    CompatibilityPrintJob:
+      type: object
+      required: [id, printer, title, contentType, state, createTimestamp]
+      properties:
+        id: { type: integer, minimum: 1 }
+        printer:
+          type: object
+          required: [id]
+          properties:
+            id: { type: integer, minimum: 1 }
+        title: { type: string }
+        contentType: { type: string, enum: [pdf, raw] }
+        source: { type: [string, "null"] }
+        state: { type: string, enum: [new, sent_to_client, done, error, expired] }
+        createTimestamp: { type: integer }
+    CompatibilityPrintJobState:
+      type: object
+      required: [id, state, age]
+      properties:
+        id: { type: integer, minimum: 1 }
+        state: { type: string, enum: [new, sent_to_client, done, error, expired] }
+        age: { type: integer, minimum: 0 }
+    CompatibilityCreatePrintJob:
+      type: object
+      required: [printerId, title, contentType, content]
+      properties:
+        printerId: { type: integer, minimum: 1 }
+        title: { type: string, minLength: 1 }
+        contentType:
+          type: string
+          enum: [pdf_base64, raw_base64, pdf_uri, raw_uri]
+        content: { type: string }
+        source: { type: string }
+        qty: { type: integer, minimum: 1, maximum: 100, default: 1 }
+        expireAfter: { type: integer, minimum: 1, maximum: 1209600 }
+        options: { type: object, additionalProperties: true }
     Health:
       type: object
       required: [status, version]
