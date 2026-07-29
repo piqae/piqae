@@ -80,4 +80,28 @@ final class MacPrintProfileSerializerTests: XCTestCase {
             )
         }
     }
+
+    @MainActor
+    func testProfileAccessoryKeepsEditableFieldsAtUsableSize() {
+        let controller = ProfileAccessoryController(profileName: "A4 colour")
+        let accessory = controller.view
+        accessory.layoutSubtreeIfNeeded()
+
+        let fields = accessory.descendants.compactMap { view -> NSTextField? in
+            guard let field = view as? NSTextField, field.isEditable else { return nil }
+            return field
+        }
+        XCTAssertEqual(fields.count, 2)
+        for field in fields {
+            XCTAssertGreaterThanOrEqual(field.frame.width, 260)
+            XCTAssertGreaterThan(field.frame.height, 20)
+        }
+        XCTAssertEqual(controller.preferredContentSize, NSSize(width: 500, height: 144))
+    }
+}
+
+private extension NSView {
+    var descendants: [NSView] {
+        subviews + subviews.flatMap(\.descendants)
+    }
 }
