@@ -1,0 +1,33 @@
+# Spool
+
+> Apache-2.0 local-first and remote printing infrastructure using installed OS
+> printer drivers, durable edge queues, and an optional self-hosted control
+> plane.
+
+## Start
+
+- [README](README.md)
+- [Contributor guide](CONTRIBUTING.md)
+- [Agent instructions](AGENTS.md)
+- [Development](docs/contributing/development.md)
+- [Testing](docs/contributing/testing.md)
+- [Release checks](docs/contributing/releases.md)
+
+## Architecture
+
+- [Vision and scope](docs/00-vision-and-scope.md)
+- [Architecture and stack](docs/03-architecture-and-stack.md)
+- [Queues and state](docs/04-protocol-queues-and-state.md)
+- [Platform printing](docs/05-platform-printing.md)
+- [Security and operations](docs/07-security-observability-and-operations.md)
+- [Native profiles and routing](docs/16-native-print-profiles-stock-and-routing.md)
+
+## Contracts and operations
+
+- [Native API model](docs/11-native-api-and-data-model.md)
+- [PrintNode migration](docs/api/printnode-migration.md)
+- [Self-hosting](docs/operations/self-hosting.md)
+- [Support matrix](release/support-matrix.yaml)
+
+Physical printing is opt-in and is never performed by ordinary development,
+test, fixture-reset, or release-check commands.

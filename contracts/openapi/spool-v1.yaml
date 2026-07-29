@@ -9,8 +9,8 @@ info:
     otherwise Spool generates `req_<ULID>`. Native `error.request_id` and
     PrintNode-compatible error `uid` exactly match the response header.
   license:
-    name: AGPL-3.0-only
-    identifier: AGPL-3.0-only
+    name: Apache-2.0
+    identifier: Apache-2.0
 servers:
   - url: https://api.example.invalid
     description: Replace with the deployment API origin.

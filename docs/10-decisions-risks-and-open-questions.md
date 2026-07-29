@@ -21,7 +21,7 @@
 | Completion semantics | Honest observer-attributed states | Proposed |
 | Ambiguous handoff | No automatic retry by default | Proposed |
 | Compatibility | Public REST behavior, not proprietary wire protocol | Proposed |
-| Licence | Apache-2.0 agent/protocol/SDK; AGPL-3.0 control plane/UI | Recommended, pending legal review |
+| Licence | Apache-2.0 for all Spool-authored material; separate trademark policy | Accepted |
 | Mobile | Not initial scope | Proposed |
 | Scales | Later module unless internal workload requires it | Proposed |
 
@@ -248,10 +248,9 @@ Complete before Phase 1:
 - Do not use PrintNode binaries, private protocol captures, trademarks, or
   copied documentation/code.
 - Review PDFium and every bundled native dependency licence.
-- Decide contributor licence agreement or Developer Certificate of Origin.
+- Use Developer Certificate of Origin sign-off; no CLA.
 - Publish security disclosure and supported-version policies.
-- Decide Apache-2.0 versus AGPL strategy before accepting outside
-  contributions.
+- Keep package metadata, generated notices, and SBOMs aligned with Apache-2.0.
 
 ## Definition of “almost simpler”
 

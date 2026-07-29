@@ -1,0 +1,22 @@
+[tools]
+rust = "1.88.0"
+node = "22"
+pnpm = "11.4.0"
+
+[tasks.doctor]
+run = "cargo xtask doctor"
+
+[tasks.dev]
+run = "cargo xtask dev"
+
+[tasks.test]
+run = "cargo xtask test changed"
+
+[tasks."test:all"]
+run = "cargo xtask test all"
+
+[tasks."fixture:reset"]
+run = "cargo xtask fixture reset"
+
+[tasks."release:check"]
+run = "cargo xtask release check"

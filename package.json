@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "description": "Open-source local and remote printing infrastructure",
-  "license": "AGPL-3.0-only",
+  "license": "Apache-2.0",
   "packageManager": "pnpm@11.4.0",
   "scripts": {
     "build": "pnpm -r build",

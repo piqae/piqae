@@ -2,6 +2,7 @@
   "name": "@spool/sdk",
   "version": "0.1.0",
   "description": "TypeScript SDK for the Spool printing API",
+  "license": "Apache-2.0",
   "type": "module",
   "sideEffects": false,
   "exports": {

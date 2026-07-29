@@ -76,7 +76,7 @@ implementation code merely because the repository is public.
 - [AWS guidance for cell-based architecture](https://docs.aws.amazon.com/solutions/cell-based-architecture-on-aws/)
 - [Supabase open-source and self-hosted model](https://github.com/supabase/supabase)
 - [Supabase Apache-2.0 licence](https://github.com/supabase/supabase/blob/master/LICENSE)
-- [OSI-approved AGPL-3.0](https://opensource.org/license/agpl-3-0)
+- [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0)
 
 ## MVP stack and reusable components
 

@@ -97,24 +97,21 @@ webhooks, job history, diagnostics, or security controls.
 
 ## Open-source model
 
-### Licence split
+### Licence
 
-Recommended:
+The repository-wide licence decision is:
 
 | Area | Licence | Reason |
 | --- | --- | --- |
-| Agent, protocol, schemas, CLI, SDKs | Apache-2.0 | Maximum adoption and no licence concern for applications embedding SDKs. |
-| Control plane and Svelte UI | AGPL-3.0 | Remains OSI-approved open source and returns public hosted modifications to the community. |
-| Documentation/examples | CC BY 4.0 or Apache-2.0 | Easy reuse with attribution. |
+| All Spool-authored source, schemas, documentation and examples | Apache-2.0 | A single permissive licence maximises adoption and makes embedding, forking, and self-hosting straightforward. |
 
 Do not use BSL, SSPL, Commons Clause, or “source available” while marketing the
 project as open source.
 
-The AGPL choice can reduce adoption by organisations with blanket copyleft
-policies. Apache-2.0 for the entire repository is the alternative if maximum
-adoption is more valuable than hosted-fork protection. Make this decision with
-legal advice before accepting external contributions. Do not repeatedly
-relicense after the community forms.
+Spool Cloud competes on managed availability, signing, upgrades, monitoring,
+backups, and support. Core printing functionality is not withheld from
+self-hosters. Spool names and branding are covered separately by
+`TRADEMARKS.md`.
 
 ### Contribution model
 

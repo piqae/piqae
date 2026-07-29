@@ -3,6 +3,7 @@ resolver = "2"
 members = [
   "bins/*",
   "crates/*",
+  "xtask",
 ]
 
 [workspace.package]
