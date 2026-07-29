@@ -29,8 +29,8 @@ features:
     tier: preview
     reason: new jobs select a ready binding, but already-waiting jobs are not automatically reassigned
   automatic_waiting_job_reassignment:
-    tier: disabled
-    reason: atomic pre-acceptance reassignment and duplicate-prevention evidence are not implemented
+    tier: preview
+    reason: atomic pre-acceptance reassignment is implemented, but PostgreSQL fault injection and fleet duplicate-prevention soak evidence are incomplete
   compose_self_hosting:
     tier: preview
     reason: configuration renders locally but backup, restore, and upgrade drills are operator-owned

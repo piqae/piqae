@@ -20,6 +20,10 @@ required:
     command: python3 -m unittest discover -s release/tools -p 'test_*.py' -v
   - id: deployment_rendering
     command: ./deploy/validate.sh
+  - id: streaming_faults
+    command: cargo test -p spool-object-store --test stream_faults --locked
+  - id: offline_recovery
+    command: cargo test -p spool-agent-storage --test offline_recovery --locked
 manual:
   - id: compatibility
     evidence: PrintNode fixture suite and compatibility endpoint report
