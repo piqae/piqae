@@ -140,8 +140,17 @@ mod platform {
                 title,
                 content_kind: ContentKind::Raw,
                 content_path,
+                native_profile,
                 ..
-            } => submit_raw(&native_printer_id, &title, &content_path),
+            } => {
+                if native_profile.is_some() {
+                    Err(native_profile_backend_unavailable(
+                        "RAW jobs cannot replay a Windows driver profile",
+                    ))
+                } else {
+                    submit_raw(&native_printer_id, &title, &content_path)
+                }
+            }
             ExecutorOperation::Submit {
                 job_id,
                 native_printer_id,
@@ -149,7 +158,16 @@ mod platform {
                 content_kind: ContentKind::Pdf,
                 content_path,
                 options,
-            } => submit_pdf_helper(job_id, &native_printer_id, &content_path, &options),
+                native_profile,
+            } => {
+                if native_profile.is_some() {
+                    Err(native_profile_backend_unavailable(
+                        "Windows native profile replay requires the PDFium/GDI backend; the Sumatra fallback cannot apply DEVMODE profiles",
+                    ))
+                } else {
+                    submit_pdf_helper(job_id, &native_printer_id, &content_path, &options)
+                }
+            }
             ExecutorOperation::Observe {
                 native_printer_id,
                 native_job_id,
@@ -158,6 +176,15 @@ mod platform {
                 native_printer_id,
                 native_job_id,
             } => cancel(&native_printer_id, &native_job_id),
+        }
+    }
+
+    fn native_profile_backend_unavailable(message: &str) -> ExecutorError {
+        ExecutorError {
+            code: "native_profile_backend_unavailable".into(),
+            message: message.into(),
+            retryable: false,
+            handoff_may_have_succeeded: false,
         }
     }
 

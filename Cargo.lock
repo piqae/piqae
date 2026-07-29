@@ -3131,6 +3131,9 @@ dependencies = [
 name = "spool-executor-cups"
 version = "0.1.0"
 dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
  "spool-domain",
  "spool-executor-protocol",
  "spool-executor-supervisor",

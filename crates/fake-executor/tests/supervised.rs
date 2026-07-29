@@ -23,6 +23,7 @@ async fn fake_executor_runs_across_the_framed_process_boundary() {
                 content_kind: ContentKind::Raw,
                 content_path: "/does/not/matter".into(),
                 options: JobOptions::default(),
+                native_profile: None,
             },
         })
         .await
