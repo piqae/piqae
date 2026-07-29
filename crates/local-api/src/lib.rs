@@ -110,7 +110,9 @@ pub fn router(state: LocalApiState) -> Router {
         .route("/v1/local/pause", post(pause))
         .route("/v1/local/resume", post(resume))
         .route("/v1/jobs", post(submit_job))
-        .layer(RequestBodyLimitLayer::new(64 * 1024 * 1024))
+        // Leave enough envelope room for the 50 MiB content limit after
+        // Base64 expansion. URI submissions remain the low-memory path.
+        .layer(RequestBodyLimitLayer::new(72 * 1024 * 1024))
         .with_state(state)
 }
 

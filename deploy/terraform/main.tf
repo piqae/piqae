@@ -107,7 +107,7 @@ resource "google_cloud_run_v2_service" "server" {
     # V1 object transfers are bounded to 50 MiB but are buffered while their
     # digest is verified. Keep per-instance memory use bounded until the object
     # store interface supports end-to-end streaming.
-    max_instance_request_concurrency = 8
+    max_instance_request_concurrency = 4
 
     lifecycle {
       precondition {

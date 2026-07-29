@@ -23,7 +23,8 @@ the verified `permissions` array and unrestricted OIDC access is always
 disabled in this hosted module.
 
 The control plane currently verifies 50 MiB object digests from bounded
-in-memory buffers. Cloud Run concurrency is therefore capped at eight and
+in-memory buffers, and Base64 compatibility requests can briefly hold both
+encoded and decoded forms. Cloud Run concurrency is therefore capped at four and
 instances use 1 GiB of memory. Increase neither limit independently; migrate
 the object-store boundary to streaming before raising transfer concurrency.
 

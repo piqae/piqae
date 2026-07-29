@@ -205,7 +205,10 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/computers", get(compatibility::list_computers))
         .route("/printers", get(compatibility::list_printers))
-        .layer(DefaultBodyLimit::max(52_428_800))
+        // A 50 MiB binary payload expands to roughly 66.7 MiB when Base64 is
+        // carried in JSON. Direct uploads remain preferred, but compatibility
+        // clients must be able to submit the documented maximum.
+        .layer(DefaultBodyLimit::max(72 * 1024 * 1024))
         .layer(CompressionLayer::new())
         .layer(middleware::from_fn(request_id::middleware))
         .with_state(state)
