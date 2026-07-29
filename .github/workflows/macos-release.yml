@@ -1,0 +1,376 @@
+name: macOS release candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Bundle and Cargo version (without a leading v)
+        required: true
+        default: "0.1.0"
+      build_number:
+        description: Monotonic CFBundleVersion
+        required: true
+        default: "1"
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  candidate:
+    name: Universal macOS candidate
+    runs-on: macos-15
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    env:
+      MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+      MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+      MACOS_APPLICATION_IDENTITY: ${{ secrets.MACOS_APPLICATION_IDENTITY }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+      SPARKLE_PRIVATE_KEY_BASE64: ${{ secrets.SPARKLE_PRIVATE_KEY_BASE64 }}
+      SPARKLE_PUBLIC_ED_KEY: ${{ secrets.SPARKLE_PUBLIC_ED_KEY }}
+      SPARKLE_FEED_URL: ${{ secrets.SPARKLE_FEED_URL }}
+      SPARKLE_DOWNLOAD_URL_PREFIX: ${{ secrets.SPARKLE_DOWNLOAD_URL_PREFIX }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.88.0
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: macos-universal-release
+
+      - name: Resolve version and credential gate
+        id: gate
+        shell: bash
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+          REQUESTED_BUILD: ${{ inputs.build_number }}
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            version=${GITHUB_REF_NAME#v}
+            build_number=${GITHUB_RUN_NUMBER}
+            tagged=true
+          else
+            version=$REQUESTED_VERSION
+            build_number=$REQUESTED_BUILD
+            tagged=false
+          fi
+          if [[ ! "$version" =~ ^[0-9]+([.][0-9]+){2}([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Version must be a safe SemVer-like value." >&2
+            exit 2
+          fi
+          if [[ ! "$build_number" =~ ^[1-9][0-9]*$ ]]; then
+            echo "Build number must be a positive integer." >&2
+            exit 2
+          fi
+
+          required=(
+            MACOS_CERTIFICATE_P12_BASE64
+            MACOS_CERTIFICATE_PASSWORD
+            MACOS_APPLICATION_IDENTITY
+            APPLE_ID
+            APPLE_TEAM_ID
+            APPLE_APP_PASSWORD
+            SPARKLE_PRIVATE_KEY_BASE64
+            SPARKLE_PUBLIC_ED_KEY
+            SPARKLE_FEED_URL
+            SPARKLE_DOWNLOAD_URL_PREFIX
+          )
+          present=0
+          for name in "${required[@]}"; do
+            if [[ -n "${!name}" ]]; then
+              present=$((present + 1))
+            fi
+          done
+          if [[ "$present" -ne 0 && "$present" -ne "${#required[@]}" ]]; then
+            echo "macOS release credentials are partially configured; refusing an ambiguous candidate." >&2
+            exit 1
+          fi
+          if [[ "$present" -eq "${#required[@]}" ]]; then
+            release_mode=signed
+          else
+            release_mode=unsigned-preview
+          fi
+          if [[ "$tagged" == true && "$release_mode" != signed ]]; then
+            echo "Tagged macOS candidates require signing, notarisation, and Sparkle credentials." >&2
+            exit 1
+          fi
+
+          {
+            echo "version=$version"
+            echo "build_number=$build_number"
+            echo "release_mode=$release_mode"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Check component versions
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ steps.gate.outputs.version }}
+        run: |
+          metadata=$(cargo metadata --locked --no-deps --format-version 1)
+          agent_version=$(printf '%s' "$metadata" | jq -r '.packages[] | select(.name == "spool-agent") | .version')
+          executor_version=$(printf '%s' "$metadata" | jq -r '.packages[] | select(.name == "spool-executor-cups") | .version')
+          if [[ "$agent_version" != "$RELEASE_VERSION" || "$executor_version" != "$RELEASE_VERSION" ]]; then
+            echo "Bundle version must match spool-agent and spool-executor-cups." >&2
+            exit 1
+          fi
+
+      - name: Test Swift package
+        run: swift test --package-path shells/macos
+
+      - name: Static packaging checks
+        shell: bash
+        run: |
+          bash -n \
+            shells/macos/build-app.sh \
+            packaging/macos/build-user-package.sh \
+            packaging/macos/generate-appcast.sh \
+            packaging/macos/install-user.sh \
+            packaging/macos/sign-app.sh \
+            packaging/macos/uninstall-user.sh \
+            packaging/macos/verify-update-signature.sh
+          plutil -lint \
+            shells/macos/Resources/Info.plist \
+            shells/macos/Resources/Spool.entitlements \
+            packaging/macos/com.c4coffee.spool.agent.plist.in \
+            packaging/macos/com.c4coffee.spool.menu.plist.in
+
+      - name: Build universal Rust node
+        shell: bash
+        run: |
+          for target in aarch64-apple-darwin x86_64-apple-darwin; do
+            cargo build \
+              --locked \
+              --release \
+              --target "$target" \
+              -p spool-agent \
+              -p spool-executor-cups \
+              --bins
+          done
+          fixture="$GITHUB_WORKSPACE/.spool-test-fixtures/native-release"
+          mkdir -p "$fixture/bin"
+          lipo -create \
+            target/aarch64-apple-darwin/release/spool-agent \
+            target/x86_64-apple-darwin/release/spool-agent \
+            -output "$fixture/bin/spool-agent"
+          lipo -create \
+            target/aarch64-apple-darwin/release/spool-executor-cups \
+            target/x86_64-apple-darwin/release/spool-executor-cups \
+            -output "$fixture/bin/spool-executor-cups"
+          lipo -archs "$fixture/bin/spool-agent" | grep -F arm64 | grep -F x86_64
+          lipo -archs "$fixture/bin/spool-executor-cups" | grep -F arm64 | grep -F x86_64
+
+      - name: Import Developer ID certificate
+        if: steps.gate.outputs.release_mode == 'signed'
+        shell: bash
+        run: |
+          fixture="$GITHUB_WORKSPACE/.spool-test-fixtures/native-release"
+          keychain="$fixture/release.keychain-db"
+          certificate="$fixture/developer-id.p12"
+          keychain_password=$(openssl rand -hex 24)
+          echo "::add-mask::$keychain_password"
+          printf '%s' "$MACOS_CERTIFICATE_P12_BASE64" | base64 -D > "$certificate"
+          chmod 0600 "$certificate"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$certificate" \
+            -k "$keychain" \
+            -P "$MACOS_CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign \
+            -T /usr/bin/security
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: \
+            -s \
+            -k "$keychain_password" \
+            "$keychain"
+          security list-keychains -d user -s "$keychain"
+          security find-identity -v -p codesigning "$keychain" |
+            grep -F "$MACOS_APPLICATION_IDENTITY"
+          echo "SPOOL_RELEASE_KEYCHAIN=$keychain" >> "$GITHUB_ENV"
+
+      - name: Build app bundle
+        shell: bash
+        env:
+          RELEASE_MODE: ${{ steps.gate.outputs.release_mode }}
+          RELEASE_VERSION: ${{ steps.gate.outputs.version }}
+          RELEASE_BUILD: ${{ steps.gate.outputs.build_number }}
+        run: |
+          fixture="$GITHUB_WORKSPACE/.spool-test-fixtures/native-release"
+          app="$fixture/Spool.app"
+          if [[ "$RELEASE_MODE" == signed ]]; then
+            SPOOL_APP_BUNDLE="$app" \
+            SPOOL_VERSION="$RELEASE_VERSION" \
+            SPOOL_BUILD_NUMBER="$RELEASE_BUILD" \
+            SPOOL_SWIFT_ARCHS="arm64,x86_64" \
+            SPOOL_CODE_SIGN_IDENTITY="$MACOS_APPLICATION_IDENTITY" \
+            SPOOL_SPARKLE_FEED_URL="$SPARKLE_FEED_URL" \
+            SPOOL_SPARKLE_PUBLIC_ED_KEY="$SPARKLE_PUBLIC_ED_KEY" \
+              shells/macos/build-app.sh
+          else
+            SPOOL_APP_BUNDLE="$app" \
+            SPOOL_VERSION="$RELEASE_VERSION" \
+            SPOOL_BUILD_NUMBER="$RELEASE_BUILD" \
+            SPOOL_SWIFT_ARCHS="arm64,x86_64" \
+              shells/macos/build-app.sh
+          fi
+          lipo -archs "$app/Contents/MacOS/SpoolMenu" | grep -F arm64 | grep -F x86_64
+          lipo -archs "$app/Contents/MacOS/SpoolPrintCoreReplay" | grep -F arm64 | grep -F x86_64
+
+      - name: Verify Developer ID signature
+        if: steps.gate.outputs.release_mode == 'signed'
+        shell: bash
+        run: |
+          fixture="$GITHUB_WORKSPACE/.spool-test-fixtures/native-release"
+          mkdir -p artifacts
+          codesign --verify --deep --strict --verbose=4 "$fixture/Spool.app" \
+            2> artifacts/codesign-evidence.txt
+          codesign -dv --verbose=4 "$fixture/Spool.app" \
+            2>> artifacts/codesign-evidence.txt
+          grep -F "Authority=Developer ID Application:" artifacts/codesign-evidence.txt
+
+      - name: Notarise and staple app
+        if: steps.gate.outputs.release_mode == 'signed'
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ steps.gate.outputs.version }}
+          RELEASE_BUILD: ${{ steps.gate.outputs.build_number }}
+        run: |
+          fixture="$GITHUB_WORKSPACE/.spool-test-fixtures/native-release"
+          submission="$fixture/Spool-${RELEASE_VERSION}-${RELEASE_BUILD}-notary.zip"
+          ditto -c -k --sequesterRsrc --keepParent "$fixture/Spool.app" "$submission"
+          xcrun notarytool submit "$submission" \
+            --apple-id "$APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_PASSWORD" \
+            --wait \
+            --output-format json \
+            > artifacts/notarisation-evidence.json
+          jq -e '.status == "Accepted"' artifacts/notarisation-evidence.json
+          xcrun stapler staple "$fixture/Spool.app"
+          xcrun stapler validate "$fixture/Spool.app" \
+            > artifacts/stapler-evidence.txt
+          spctl --assess --type execute --verbose=4 "$fixture/Spool.app" \
+            2> artifacts/gatekeeper-evidence.txt
+          rm -f -- "$submission"
+
+      - name: Stage SBOM input
+        shell: bash
+        run: |
+          fixture="$GITHUB_WORKSPACE/.spool-test-fixtures/native-release"
+          mkdir -p "$fixture/sbom-input"
+          ditto "$fixture/Spool.app" "$fixture/sbom-input/Spool.app"
+          install -m 0755 "$fixture/bin/spool-agent" "$fixture/sbom-input/spool-agent"
+          install -m 0755 \
+            "$fixture/bin/spool-executor-cups" \
+            "$fixture/sbom-input/spool-executor-cups"
+
+      - name: Generate SPDX SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          path: .spool-test-fixtures/native-release/sbom-input
+          format: spdx-json
+          output-file: artifacts/SBOM.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: Build per-user and update archives
+        shell: bash
+        run: |
+          fixture="$GITHUB_WORKSPACE/.spool-test-fixtures/native-release"
+          packaging/macos/build-user-package.sh \
+            "$fixture/Spool.app" \
+            "$fixture/bin/spool-agent" \
+            "$fixture/bin/spool-executor-cups" \
+            artifacts
+
+      - name: Generate and verify signed Sparkle appcast
+        if: steps.gate.outputs.release_mode == 'signed'
+        shell: bash
+        run: |
+          fixture="$GITHUB_WORKSPACE/.spool-test-fixtures/native-release"
+          private_key="$fixture/sparkle-private-key"
+          appcast_dir="$fixture/appcast"
+          mkdir -p "$appcast_dir"
+          chmod 0700 "$appcast_dir"
+          printf '%s' "$SPARKLE_PRIVATE_KEY_BASE64" | base64 -D > "$private_key"
+          chmod 0600 "$private_key"
+          update_archives=(artifacts/Spool-*-macos-update.zip)
+          if [[ "${#update_archives[@]}" -ne 1 || ! -f "${update_archives[0]}" ]]; then
+            echo "Expected exactly one update archive." >&2
+            exit 1
+          fi
+          cp "${update_archives[0]}" "$appcast_dir/"
+          sparkle_bin="$GITHUB_WORKSPACE/shells/macos/.build/artifacts/sparkle/Sparkle/bin"
+          SPARKLE_BIN_DIR="$sparkle_bin" \
+          SPARKLE_PRIVATE_KEY_FILE="$private_key" \
+          SPOOL_SPARKLE_DOWNLOAD_URL_PREFIX="$SPARKLE_DOWNLOAD_URL_PREFIX" \
+            packaging/macos/generate-appcast.sh \
+              "$appcast_dir" \
+              "$appcast_dir/appcast.xml"
+          SPOOL_SPARKLE_PUBLIC_ED_KEY="$SPARKLE_PUBLIC_ED_KEY" \
+            packaging/macos/verify-update-signature.sh \
+              "$appcast_dir/$(basename "${update_archives[0]}")" \
+              "$appcast_dir/appcast.xml"
+          install -m 0644 "$appcast_dir/appcast.xml" artifacts/appcast.xml
+
+      - name: Write release evidence and checksums
+        shell: bash
+        env:
+          RELEASE_MODE: ${{ steps.gate.outputs.release_mode }}
+          RELEASE_VERSION: ${{ steps.gate.outputs.version }}
+          RELEASE_BUILD: ${{ steps.gate.outputs.build_number }}
+        run: |
+          {
+            echo "version=$RELEASE_VERSION"
+            echo "build=$RELEASE_BUILD"
+            echo "mode=$RELEASE_MODE"
+            echo "architectures=arm64 x86_64"
+            echo "support_claim=release candidate; physical printer and clean-install certification remain separate"
+            if [[ "$RELEASE_MODE" == unsigned-preview ]]; then
+              echo "signature=absent"
+              echo "notarisation=not attempted"
+              echo "sparkle_updates=disabled"
+            else
+              echo "signature=evidence in codesign-evidence.txt"
+              echo "notarisation=evidence in notarisation-evidence.json"
+              echo "sparkle_updates=Ed25519 archive signature verified with public key"
+            fi
+          } > artifacts/RELEASE-EVIDENCE.txt
+          (
+            cd artifacts
+            checksum_file=$(mktemp)
+            find . -maxdepth 1 -type f ! -name SHA256SUMS -print |
+              sort |
+              xargs shasum -a 256 > "$checksum_file"
+            mv "$checksum_file" SHA256SUMS
+          )
+
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: artifacts/*
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: spool-macos-${{ steps.gate.outputs.release_mode }}-${{ steps.gate.outputs.version }}-${{ steps.gate.outputs.build_number }}
+          path: artifacts/
+          if-no-files-found: error
+
+      - name: Remove credential and scratch state
+        if: always()
+        shell: bash
+        run: |
+          if [[ -n "${SPOOL_RELEASE_KEYCHAIN:-}" && -e "$SPOOL_RELEASE_KEYCHAIN" ]]; then
+            security delete-keychain "$SPOOL_RELEASE_KEYCHAIN" || true
+          fi
+          rm -rf -- "$GITHUB_WORKSPACE/.spool-test-fixtures/native-release"

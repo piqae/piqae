@@ -23,8 +23,6 @@
         <key>SPOOL_ALLOW_PRIVATE_URI_SOURCES</key>
         <string>false</string>
     </dict>
-    <key>UserName</key>
-    <string>@SPOOL_USER@</string>
     <key>WorkingDirectory</key>
     <string>@DATA_DIR@</string>
     <key>RunAtLoad</key>
@@ -39,8 +37,8 @@
     <key>ProcessType</key>
     <string>Background</string>
     <key>StandardOutPath</key>
-    <string>/var/log/spool-agent.log</string>
+    <string>@LOG_FILE@</string>
     <key>StandardErrorPath</key>
-    <string>/var/log/spool-agent.log</string>
+    <string>@LOG_FILE@</string>
 </dict>
 </plist>

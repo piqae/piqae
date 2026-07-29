@@ -43,6 +43,7 @@ final class SpoolMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var refreshTask: Task<Void, Never>?
     private var actionTask: Task<Void, Never>?
     private var refreshTimer: Timer?
+    private var updateCoordinator: SpoolUpdateCoordinator?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         do {
@@ -52,6 +53,7 @@ final class SpoolMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         } catch {
             lastError = error.localizedDescription
         }
+        updateCoordinator = SpoolUpdateCoordinator(client: client)
 
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         item.button?.image = symbol(
@@ -152,6 +154,7 @@ final class SpoolMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
                 guard !Task.isCancelled else { return }
                 status = loadedStatus
+                updateCoordinator?.observe(status: loadedStatus)
                 printers = loadedPrinters.sorted {
                     if $0.isDefault != $1.isDefault { return $0.isDefault }
                     return $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
@@ -170,6 +173,7 @@ final class SpoolMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 return
             } catch {
                 status = nil
+                updateCoordinator?.observe(status: nil)
                 printers = []
                 profilesSupported = false
                 queueSupported = false
@@ -424,6 +428,17 @@ final class SpoolMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         dashboard.target = self
         dashboard.isEnabled = dashboardURL() != nil
         dashboard.image = symbol("rectangle.3.group", description: "Dashboard")
+
+        let updates = menu.addItem(
+            withTitle: updateCoordinator?.isEnabled == true
+                ? "Check for Updates…"
+                : "Updates unavailable in this build",
+            action: #selector(checkForUpdates(_:)),
+            keyEquivalent: ""
+        )
+        updates.target = self
+        updates.isEnabled = updateCoordinator?.canCheckForUpdates == true
+        updates.image = symbol("arrow.down.circle", description: "Software updates")
     }
 
     private func diagnosticsItem() -> NSMenuItem {
@@ -504,6 +519,10 @@ final class SpoolMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         actionTask?.cancel()
         actionTask = Task { [weak self] in
             guard let self else { return }
+            updateCoordinator?.beginForegroundOperation()
+            defer {
+                updateCoordinator?.endForegroundOperation()
+            }
             var session: LocalProfileCaptureSession?
             do {
                 let openedSession = try await client.createProfileCaptureSession(
@@ -640,6 +659,10 @@ final class SpoolMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func openDashboard() {
         guard let url = dashboardURL() else { return }
         NSWorkspace.shared.open(url)
+    }
+
+    @objc private func checkForUpdates(_ sender: NSMenuItem) {
+        updateCoordinator?.checkForUpdates(sender)
     }
 
     @objc private func copyDiagnostics() {

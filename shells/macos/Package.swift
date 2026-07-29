@@ -8,6 +8,12 @@ let package = Package(
         .executable(name: "SpoolMenu", targets: ["SpoolMenu"]),
         .executable(name: "SpoolPrintCoreReplay", targets: ["SpoolPrintCoreReplay"]),
     ],
+    dependencies: [
+        .package(
+            url: "https://github.com/sparkle-project/Sparkle",
+            exact: "2.9.2"
+        ),
+    ],
     targets: [
         .target(name: "SpoolMenuCore"),
         .target(name: "SpoolProfileHost", dependencies: ["SpoolMenuCore"]),
@@ -17,7 +23,11 @@ let package = Package(
         ),
         .executableTarget(
             name: "SpoolMenu",
-            dependencies: ["SpoolMenuCore", "SpoolProfileHost"]
+            dependencies: [
+                "SpoolMenuCore",
+                "SpoolProfileHost",
+                .product(name: "Sparkle", package: "Sparkle"),
+            ]
         ),
         .executableTarget(
             name: "SpoolPrintCoreReplay",

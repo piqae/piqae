@@ -24,8 +24,59 @@ shells/macos/build-app.sh
 open shells/macos/build/Spool.app
 ```
 
-The generated app is unsigned and intended for source builds. The shell does
-not attempt signing, notarisation, installation, or login-item registration.
+The default generated app is an unsigned Preview build. Its bundle metadata
+explicitly disables Sparkle, and the menu reports that updates are unavailable.
+It does not bypass Gatekeeper.
+
+`build-app.sh` accepts `SPOOL_VERSION`, `SPOOL_BUILD_NUMBER`, and
+`SPOOL_APP_BUNDLE`. A release build may additionally provide all three of
+`SPOOL_CODE_SIGN_IDENTITY`, `SPOOL_SPARKLE_FEED_URL`, and
+`SPOOL_SPARKLE_PUBLIC_ED_KEY`. The identity must be an available Developer ID
+Application identity and the feed must use HTTPS. Partial update configuration
+fails closed. Release builds embed Sparkle 2.9.2 and sign its nested code before
+signing the app with the hardened runtime.
+
+The dedicated `macos-release.yml` workflow builds arm64/x86_64 binaries, runs
+the Swift suite, creates an SPDX SBOM and checksums, and records provenance.
+With no credentials, a manually dispatched run produces only artifacts whose
+names and evidence say `unsigned-preview`; update checks remain disabled. A tag
+fails unless the complete Developer ID, Apple notarisation, and Sparkle Ed25519
+secret set is present. Credentialed runs verify Developer ID signing, notarise
+and staple the app, generate an appcast, and verify the update archive's
+Ed25519 signature with the public key. The workflow uploads CI artifacts but
+does not publish a GitHub release or deploy the appcast.
+
+## Per-user package
+
+`packaging/macos/build-user-package.sh` combines an app, `spool-agent`, and
+`spool-executor-cups` into a per-user ZIP. Its installer uses:
+
+- `~/Applications/Spool.app`;
+- `~/Library/Application Support/Spool/bin` for the agent and executor;
+- `~/Library/Application Support/Spool` for durable identity, queue, and local
+  API token;
+- `~/Library/LaunchAgents` for separate agent and menu launch agents; and
+- `~/Library/Logs/Spool/agent.log`.
+
+The installer must run as the desktop user without `sudo`. Before replacing a
+loaded node it authenticates to the existing loopback status endpoint and
+refuses the handoff while jobs are queued or active, or when idle state cannot
+be verified. It retains the previous app and preserves data on uninstall.
+Unsigned packages are labelled Preview and do not remove quarantine or apply a
+Gatekeeper workaround.
+
+Sparkle currently replaces only `Spool.app`, including the menu and
+`SpoolPrintCoreReplay`. It does not replace or restart the separately installed
+Rust agent/executor. A full-node update therefore still uses the per-user
+package's idle-checked installer. Do not represent the Sparkle foundation as an
+atomic full-node updater.
+
+Automatic Sparkle checks and silent updates are disabled. A credentialed build
+adds **Check for Updates…**. If installation reaches the relaunch boundary
+while the local API reports queued/active jobs or a profile panel is open, the
+menu postpones replacement and polls the authenticated local status until the
+node is idle. An unavailable agent is not assumed idle.
+
 The **Local driver test…** action requires an exposed logical printer, a named
 print profile, and explicit confirmation. It never falls back to unprofiled
 job submission.
