@@ -131,6 +131,10 @@ public enum PrintCoreReplayer {
                 operation: "setting the last page"
             )
         }
+        // Synchronize the portable PrintCore fields before applying AppKit
+        // paper/orientation overrides; synchronizing afterwards would replace
+        // those requested per-job values with the restored profile values.
+        printInfo.updateFromPMPrintSettings()
         if let paper = options.paper {
             guard !paper.isEmpty, paper.utf8.count <= 256 else {
                 throw PrintCoreReplayError.failure(
@@ -150,7 +154,6 @@ public enum PrintCoreReplayer {
         if let rotation = options.rotate {
             printInfo.orientation = rotation == .degrees90 ? .landscape : .portrait
         }
-        printInfo.updateFromPMPrintSettings()
     }
 
     private static func check(_ status: OSStatus, operation: String) throws {

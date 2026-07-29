@@ -463,7 +463,7 @@ async fn handle_control_request(
             request,
             respond_to,
         } => {
-            let result = begin_profile_capture(engine.store_mut(), &printer_id, request);
+            let result = begin_profile_capture(engine.store_mut(), &printer_id, &request);
             let _ = respond_to.send(result);
         }
         ControlRequest::CommitProfileCapture {
@@ -497,7 +497,7 @@ async fn handle_control_request(
             revision,
             respond_to,
         } => {
-            let result = validate_profile_revision(engine.store(), &profile_id, revision);
+            let result = validate_profile_revision(engine.store_mut(), &profile_id, revision);
             let _ = respond_to.send(result);
         }
         ControlRequest::ConfirmLoadedMedia {
@@ -833,7 +833,7 @@ fn update_profile(
 fn begin_profile_capture(
     store: &mut AgentStore,
     printer_id: &str,
-    request: spool_local_api::ProfileCaptureBeginRequest,
+    request: &spool_local_api::ProfileCaptureBeginRequest,
 ) -> Result<ProfileCaptureAuthorized, ControlFailure> {
     match request.operation {
         ProfileCaptureOperation::Create
@@ -865,13 +865,12 @@ fn begin_profile_capture(
             "printer is not currently installed on this node",
         ));
     }
-    let existing = request
-        .profile_id
-        .as_deref()
-        .map(|profile_id| store.named_profile(printer_id, profile_id))
-        .transpose()
-        .map_err(storage_control_failure)?
-        .flatten();
+    let existing = match (request.profile_id.as_deref(), request.expected_revision) {
+        (Some(profile_id), Some(revision)) => store
+            .named_profile_revision(printer_id, profile_id, revision)
+            .map_err(storage_control_failure)?,
+        _ => None,
+    };
     let native_configuration = if let Some(profile) = &existing {
         store
             .native_profile_blob(&profile.profile_id, profile.revision)
@@ -984,24 +983,44 @@ fn commit_profile_capture(
 }
 
 fn validate_profile_revision(
-    store: &AgentStore,
+    store: &mut AgentStore,
     profile_id: &str,
     revision: u64,
 ) -> Result<ProfileValidationResult, ControlFailure> {
     let validated_unix_ms = Utc::now().timestamp_millis();
-    let blob = store
-        .native_profile_blob(profile_id, revision)
+    let profile = store
+        .profile_revision(profile_id, revision)
         .map_err(storage_control_failure)?
         .ok_or_else(|| control_failure("profile_not_found", "profile revision was not found"))?;
-    let _: NativeProfileKind = parse_stored_enum(&blob.native_kind, "native profile kind")?;
+    let kind: NativeProfileKind = parse_stored_enum(&profile.native_kind, "native profile kind")?;
+    if kind != NativeProfileKind::PortableOptions {
+        let blob = store
+            .native_profile_blob(profile_id, revision)
+            .map_err(storage_control_failure)?
+            .ok_or_else(|| {
+                control_failure("profile_invalid", "native profile payload was not found")
+            })?;
+        let blob_kind: NativeProfileKind =
+            parse_stored_enum(&blob.native_kind, "native profile kind")?;
+        if blob_kind != kind || profile.native_digest.as_deref() != Some(blob.digest.as_str()) {
+            return Err(control_failure(
+                "profile_invalid",
+                "native profile metadata does not match its immutable payload",
+            ));
+        }
+    }
+    let status = parse_stored_enum(&profile.status, "profile status")?;
+    store
+        .record_profile_validation(profile_id, revision, validated_unix_ms)
+        .map_err(storage_control_failure)?;
     Ok(ProfileValidationResult {
         profile_id: profile_id.to_owned(),
         revision,
-        status: ProfileStatus::NeedsTest,
-        code: Some("driver_test_required".into()),
-        message: Some(
-            "The immutable native settings are intact; run a driver test before publishing.".into(),
-        ),
+        status,
+        code: (status == ProfileStatus::NeedsTest).then(|| "driver_test_required".into()),
+        message: (status == ProfileStatus::NeedsTest).then(|| {
+            "The immutable native settings are intact; run a driver test before publishing.".into()
+        }),
         validated_unix_ms,
     })
 }
@@ -1247,21 +1266,24 @@ async fn submit_test_page(
         Some((profile.profile_id.clone(), profile.revision)),
     )
     .await?;
-    let passed_native_handoff = matches!(
-        accepted.state.as_str(),
-        "accepted_by_spooler" | "spooling" | "printing" | "completed_reported"
-    );
     engine
         .store_mut()
         .record_profile_test_result(
             &profile.profile_id,
             profile.revision,
             &accepted.job_id,
-            passed_native_handoff,
+            profile_test_passed(&accepted.state),
             Utc::now().timestamp_millis(),
         )
         .map_err(storage_control_failure)?;
     Ok(accepted)
+}
+
+fn profile_test_passed(state: &str) -> bool {
+    matches!(
+        state,
+        "accepted_by_spooler" | "spooling" | "printing" | "completed_reported"
+    )
 }
 
 fn is_a4(value: &str) -> bool {
@@ -1337,20 +1359,17 @@ fn storage_control_failure(error: StorageError) -> ControlFailure {
         StorageError::ProfileRevisionConflict { .. } => {
             control_failure("profile_revision_conflict", &error.to_string())
         }
-        StorageError::InvalidPrinterProfile(_) => {
+        StorageError::InvalidPrinterProfile(_) | StorageError::NativeBlobTooLarge(_) => {
             control_failure("profile_invalid", &error.to_string())
         }
         StorageError::CaptureSessionNotFound(_) => {
             control_failure("profile_capture_not_found", &error.to_string())
         }
         StorageError::CaptureSessionNotAuthorized(_) => {
-            control_failure("profile_capture_timed_out", &error.to_string())
+            control_failure("profile_capture_not_authorized", &error.to_string())
         }
         StorageError::InvalidCaptureToken => {
             control_failure("profile_capture_token_invalid", &error.to_string())
-        }
-        StorageError::NativeBlobTooLarge(_) => {
-            control_failure("profile_invalid", &error.to_string())
         }
         _ => control_failure("local_storage_failed", &error.to_string()),
     }
@@ -1692,6 +1711,8 @@ async fn accept_offer(
                             "printer_not_present"
                         } else if error.to_string().contains("printer_not_exposed") {
                             "printer_not_exposed"
+                        } else if error.to_string().contains("profile_not_ready") {
+                            "profile_not_ready"
                         } else if error.to_string().contains("unsupported_profile_option")
                             || error.to_string().contains("native option")
                         {
@@ -1726,6 +1747,27 @@ async fn accept_offer_under_lease(
     }
     if !printer.exposed {
         anyhow::bail!("printer_not_exposed: {logical_printer_id}");
+    }
+    if let Some(pin) = &profile_pin {
+        let profile = store
+            .named_profile_revision(&printer.printer_id, &pin.profile_id, pin.profile_revision)?
+            .with_context(|| {
+                format!(
+                    "profile_not_found: {} revision {}",
+                    pin.profile_id, pin.profile_revision
+                )
+            })?;
+        let status: ProfileStatus =
+            serde_json::from_value(serde_json::Value::String(profile.status.clone()))
+                .context("profile status is invalid")?;
+        if !status.permits_jobs() {
+            anyhow::bail!(
+                "profile_not_ready: {} revision {} is {}",
+                pin.profile_id,
+                pin.profile_revision,
+                profile.status
+            );
+        }
     }
     validate_options(&printer, &offer.job.options)
         .map_err(|failure| anyhow::anyhow!("{}: {}", failure.code, failure.message))?;
@@ -1764,25 +1806,6 @@ async fn accept_offer_under_lease(
         offer.lease_expires_at.timestamp_millis(),
     )?;
     if let Some(pin) = profile_pin {
-        let profile = store
-            .named_profile_revision(&printer.printer_id, &pin.profile_id, pin.profile_revision)?
-            .with_context(|| {
-                format!(
-                    "profile_not_found: {} revision {}",
-                    pin.profile_id, pin.profile_revision
-                )
-            })?;
-        let status: ProfileStatus =
-            serde_json::from_value(serde_json::Value::String(profile.status.clone()))
-                .context("profile status is invalid")?;
-        if !status.permits_jobs() {
-            anyhow::bail!(
-                "profile_not_ready: {} revision {} is {}",
-                pin.profile_id,
-                pin.profile_revision,
-                profile.status
-            );
-        }
         store.pin_job_profile(
             &job_id.to_string(),
             pin.target_id.as_deref(),
@@ -2061,28 +2084,7 @@ async fn discover_cloud_printers(
     store: &mut AgentStore,
     discovery: &PrinterDiscovery,
 ) -> Result<Vec<PrinterSnapshot>> {
-    let discovered = match discovery {
-        PrinterDiscovery::Disabled => Vec::new(),
-        PrinterDiscovery::Fake => vec![DiscoveredPrinter {
-            native_id: "fake-printer".into(),
-            name: "Spool deterministic fake printer".into(),
-            is_default: true,
-            state: spool_domain::PrinterState::Online,
-            capabilities: spool_domain::PrinterCapabilities::default(),
-            native_options: std::collections::BTreeMap::new(),
-        }],
-        PrinterDiscovery::Process(executor) => match executor
-            .execute_operation(
-                ExecutorOperation::DiscoverPrinters,
-                Utc::now().timestamp_millis() + 30_000,
-            )
-            .await
-            .map_err(|error| anyhow::anyhow!("{}: {}", error.code, error.message))?
-        {
-            ExecutorResult::Printers { printers } => printers,
-            _ => anyhow::bail!("executor returned the wrong discovery result"),
-        },
-    };
+    let discovered = run_printer_discovery(discovery).await?;
     let present_native_ids = discovered
         .iter()
         .map(|printer| printer.native_id.clone())
@@ -2160,6 +2162,32 @@ async fn discover_cloud_printers(
         .collect::<Result<Vec<Option<PrinterSnapshot>>>>()?;
     store.reconcile_printer_presence(&present_native_ids)?;
     Ok(snapshots.into_iter().flatten().collect())
+}
+
+async fn run_printer_discovery(discovery: &PrinterDiscovery) -> Result<Vec<DiscoveredPrinter>> {
+    let discovered = match discovery {
+        PrinterDiscovery::Disabled => Vec::new(),
+        PrinterDiscovery::Fake => vec![DiscoveredPrinter {
+            native_id: "fake-printer".into(),
+            name: "Spool deterministic fake printer".into(),
+            is_default: true,
+            state: spool_domain::PrinterState::Online,
+            capabilities: spool_domain::PrinterCapabilities::default(),
+            native_options: std::collections::BTreeMap::new(),
+        }],
+        PrinterDiscovery::Process(executor) => match executor
+            .execute_operation(
+                ExecutorOperation::DiscoverPrinters,
+                Utc::now().timestamp_millis() + 30_000,
+            )
+            .await
+            .map_err(|error| anyhow::anyhow!("{}: {}", error.code, error.message))?
+        {
+            ExecutorResult::Printers { printers } => printers,
+            _ => anyhow::bail!("executor returned the wrong discovery result"),
+        },
+    };
+    Ok(discovered)
 }
 
 fn protocol_event(

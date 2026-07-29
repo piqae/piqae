@@ -58,7 +58,7 @@ pub enum LocalOperation {
     ExportSupportBundle { destination: PathBuf },
     Reenrol { confirmation: String },
     BeginProfileCapture(BeginProfileCapture),
-    CommitProfileCapture(CommitProfileCapture),
+    CommitProfileCapture(Box<CommitProfileCapture>),
     CancelProfileCapture(CancelProfileCapture),
     ValidateProfile(ValidateProfile),
     ConfirmLoadedMedia(ConfirmLoadedMedia),
@@ -78,8 +78,8 @@ pub enum LocalResult {
     Printers { printers: Vec<LocalPrinter> },
     Accepted,
     SupportBundle { path: PathBuf },
-    ProfileCaptureAuthorized(ProfileCaptureAuthorized),
-    ProfileCaptured { profile: LocalPrinterProfile },
+    ProfileCaptureAuthorized(Box<ProfileCaptureAuthorized>),
+    ProfileCaptured { profile: Box<LocalPrinterProfile> },
     ProfileValidation(ProfileValidationResult),
 }
 
@@ -200,7 +200,7 @@ impl std::fmt::Debug for ProfileCaptureAuthorized {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NativeProfileSeed {
     pub kind: NativeProfileKind,
     pub schema_version: u16,
@@ -208,6 +208,21 @@ pub struct NativeProfileSeed {
     /// Standard Base64. Kept inside the short-lived authenticated response so
     /// the native profile host can restore the exact prior driver state.
     pub native_blob_base64: String,
+}
+
+impl std::fmt::Debug for NativeProfileSeed {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("NativeProfileSeed")
+            .field("kind", &self.kind)
+            .field("schema_version", &self.schema_version)
+            .field("digest", &self.digest)
+            .field(
+                "native_blob_bytes_estimate",
+                &(self.native_blob_base64.len().saturating_mul(3) / 4),
+            )
+            .finish()
+    }
 }
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
@@ -556,6 +571,19 @@ mod tests {
         assert_ne!(first_digest, second_digest);
         assert_eq!(first_digest, capture_token_digest(&first));
         assert!(!first_digest.contains(&first));
+    }
+
+    #[test]
+    fn native_profile_seed_debug_never_exposes_the_blob() {
+        let seed = NativeProfileSeed {
+            kind: NativeProfileKind::MacosPrintcore,
+            schema_version: 1,
+            digest: "sha256:test".into(),
+            native_blob_base64: "sensitive-native-driver-state".into(),
+        };
+        let debug = format!("{seed:?}");
+        assert!(!debug.contains("sensitive-native-driver-state"));
+        assert!(debug.contains("native_blob_bytes_estimate"));
     }
 
     #[cfg(unix)]

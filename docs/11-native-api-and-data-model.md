@@ -170,6 +170,7 @@ Immutable ordered fact:
 
 - `GET /v1/destinations/{id}/profiles`
 - `POST /v1/destinations/{id}/profile-capture-sessions`
+- `POST /v1/profiles/{id}/profile-capture-sessions` for edit/clone capture
 - `GET /v1/profiles/{id}`
 - `POST /v1/profiles/{id}/validate`
 - `POST /v1/profiles/{id}/test-jobs`

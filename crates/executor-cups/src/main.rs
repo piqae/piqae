@@ -37,11 +37,12 @@ mod platform {
     use std::{
         collections::{BTreeMap, BTreeSet},
         ffi::{CStr, CString, c_char, c_int, c_long},
-        io::Write as _,
+        io::{Read as _, Write as _},
+        os::unix::fs::{MetadataExt as _, PermissionsExt as _},
         path::Path,
         process::{Command, Stdio},
         ptr,
-        time::{Duration, Instant},
+        time::{Duration, Instant, SystemTime, UNIX_EPOCH},
     };
 
     #[repr(C)]
@@ -655,20 +656,22 @@ mod platform {
             if count < 0 {
                 return Err(last_error("cups_discovery_failed", false));
             }
-            let length =
-                usize::try_from(count).map_err(|_| last_error("cups_discovery_failed", false))?;
-            let records = records_or_empty(destinations, length)
-                .ok_or_else(|| last_error("cups_discovery_failed", false))?;
-            let found = records.iter().any(|destination| {
-                !destination.name.is_null()
-                    && !destination.instance.is_null()
-                    && CStr::from_ptr(destination.name).to_bytes() == base.as_bytes()
-                    && CStr::from_ptr(destination.instance).to_bytes() == instance.as_bytes()
-            });
+            let found = usize::try_from(count)
+                .ok()
+                .and_then(|length| records_or_empty(destinations, length))
+                .map(|records| {
+                    records.iter().any(|destination| {
+                        !destination.name.is_null()
+                            && !destination.instance.is_null()
+                            && CStr::from_ptr(destination.name).to_bytes() == base.as_bytes()
+                            && CStr::from_ptr(destination.instance).to_bytes()
+                                == instance.as_bytes()
+                    })
+                });
             if !destinations.is_null() {
                 cups_free_dests(count, destinations);
             }
-            found
+            found.ok_or_else(|| last_error("cups_discovery_failed", false))?
         };
         found.then_some(()).ok_or_else(|| ExecutorError {
             code: "profile_destination_missing".into(),
@@ -679,6 +682,9 @@ mod platform {
     }
 
     const MAX_CUPS_PROFILE_BYTES: usize = 64 * 1024;
+    const MAX_PRINTCORE_PROFILE_BYTES: usize = 1024 * 1024;
+    const MAX_PRINTCORE_RESPONSE_BYTES: usize = 64 * 1024;
+    const PRINTCORE_HELPER_TIMEOUT: Duration = Duration::from_secs(60);
     const MAX_CUPS_PROFILE_OPTIONS: usize = 256;
     const MAX_CUPS_OPTION_NAME_BYTES: usize = 255;
     const MAX_CUPS_OPTION_VALUE_BYTES: usize = 4096;
@@ -765,6 +771,12 @@ mod platform {
             ));
         }
         verify_profile_digest(profile)?;
+        if profile.blob.len() > MAX_PRINTCORE_PROFILE_BYTES {
+            return Err(profile_error(
+                "native_profile_too_large",
+                "macOS PrintCore profile exceeds the one MiB executor limit",
+            ));
+        }
         if profile.driver_fingerprint.native_queue_id != printer {
             return Err(profile_error(
                 "profile_destination_mismatch",
@@ -1076,6 +1088,12 @@ mod platform {
             .into_iter()
             .map(|job| job.native_job_id)
             .collect::<BTreeSet<_>>();
+        let handoff_start = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .ok()
+            .and_then(|duration| i64::try_from(duration.as_secs()).ok())
+            .map(|seconds| seconds.saturating_mul(1_000));
+        let submitting_user = std::env::var("USER").ok();
         let request = serde_json::json!({
             "printer_native_id": printer,
             "pdf_path": content_path,
@@ -1096,40 +1114,8 @@ mod platform {
             )
         })?;
         let helper = printcore_helper_path()?;
-        let mut child = Command::new(&helper)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|error| {
-                profile_error(
-                    "native_profile_backend_unavailable",
-                    format!("could not start {}: {error}", helper.display()),
-                )
-            })?;
-        child
-            .stdin
-            .take()
-            .ok_or_else(|| {
-                profile_error(
-                    "native_profile_backend_unavailable",
-                    "PrintCore helper stdin was unavailable",
-                )
-            })?
-            .write_all(&body)
-            .map_err(|error| {
-                profile_error(
-                    "native_profile_backend_unavailable",
-                    format!("could not send the PrintCore replay request: {error}"),
-                )
-            })?;
-        let output = child.wait_with_output().map_err(|error| ExecutorError {
-            code: "native_profile_backend_failed".into(),
-            message: format!("PrintCore replay process failed: {error}"),
-            retryable: false,
-            handoff_may_have_succeeded: true,
-        })?;
-        if output.stdout.len() > 64 * 1024 {
+        let (status, stdout) = run_printcore_helper(&helper, body)?;
+        if stdout.len() > MAX_PRINTCORE_RESPONSE_BYTES {
             return Err(ExecutorError {
                 code: "native_profile_backend_failed".into(),
                 message: "PrintCore replay response exceeded 64 KiB".into(),
@@ -1138,13 +1124,13 @@ mod platform {
             });
         }
         let response: PrintCoreReplayResponse =
-            serde_json::from_slice(&output.stdout).map_err(|_| ExecutorError {
+            serde_json::from_slice(&stdout).map_err(|_| ExecutorError {
                 code: "native_profile_backend_failed".into(),
                 message: "PrintCore replay returned an invalid response".into(),
                 retryable: false,
                 handoff_may_have_succeeded: true,
             })?;
-        if !response.ok || !output.status.success() {
+        if !response.ok || !status.success() {
             return Err(ExecutorError {
                 code: response
                     .code
@@ -1167,7 +1153,17 @@ mod platform {
         for _ in 0..20 {
             if let Some(job_id) = queue_jobs(printer)?
                 .into_iter()
-                .filter(|job| job.title == title && !before.contains(&job.native_job_id))
+                .filter(|job| {
+                    job.title == title
+                        && !before.contains(&job.native_job_id)
+                        && submitting_user
+                            .as_ref()
+                            .is_none_or(|user| job.user.as_ref() == Some(user))
+                        && handoff_start.is_none_or(|started| {
+                            job.created_unix_ms
+                                .is_some_and(|created| created >= started)
+                        })
+                })
                 .filter_map(|job| {
                     job.native_job_id
                         .parse::<i64>()
@@ -1193,6 +1189,90 @@ mod platform {
         })
     }
 
+    fn run_printcore_helper(
+        helper: &Path,
+        body: Vec<u8>,
+    ) -> Result<(std::process::ExitStatus, Vec<u8>), ExecutorError> {
+        let mut child = Command::new(helper)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|error| {
+                profile_error(
+                    "native_profile_backend_unavailable",
+                    format!("could not start {}: {error}", helper.display()),
+                )
+            })?;
+        let mut stdin = child.stdin.take().ok_or_else(|| {
+            profile_error(
+                "native_profile_backend_unavailable",
+                "PrintCore helper stdin was unavailable",
+            )
+        })?;
+        let mut stdout = child.stdout.take().ok_or_else(|| {
+            profile_error(
+                "native_profile_backend_unavailable",
+                "PrintCore helper stdout was unavailable",
+            )
+        })?;
+        let writer = std::thread::spawn(move || stdin.write_all(&body));
+        let reader = std::thread::spawn(move || {
+            let mut output = Vec::new();
+            stdout
+                .by_ref()
+                .take(u64::try_from(MAX_PRINTCORE_RESPONSE_BYTES + 1).unwrap_or(u64::MAX))
+                .read_to_end(&mut output)
+                .map(|_| output)
+        });
+        let started = Instant::now();
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break status,
+                Ok(None) if started.elapsed() < PRINTCORE_HELPER_TIMEOUT => {
+                    std::thread::sleep(Duration::from_millis(25));
+                }
+                Ok(None) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(ExecutorError {
+                        code: "native_profile_backend_timeout".into(),
+                        message: "PrintCore replay exceeded its 60 second deadline".into(),
+                        retryable: false,
+                        handoff_may_have_succeeded: true,
+                    });
+                }
+                Err(error) => {
+                    return Err(ExecutorError {
+                        code: "native_profile_backend_failed".into(),
+                        message: format!("PrintCore replay process failed: {error}"),
+                        retryable: false,
+                        handoff_may_have_succeeded: true,
+                    });
+                }
+            }
+        };
+        writer
+            .join()
+            .map_err(|_| profile_error("native_profile_backend_failed", "helper writer panicked"))?
+            .map_err(|error| {
+                profile_error(
+                    "native_profile_backend_failed",
+                    format!("could not send PrintCore request: {error}"),
+                )
+            })?;
+        let output = reader
+            .join()
+            .map_err(|_| profile_error("native_profile_backend_failed", "helper reader panicked"))?
+            .map_err(|error| {
+                profile_error(
+                    "native_profile_backend_failed",
+                    format!("could not read PrintCore response: {error}"),
+                )
+            })?;
+        Ok((status, output))
+    }
+
     fn printcore_helper_path() -> Result<std::path::PathBuf, ExecutorError> {
         let configured =
             std::env::var_os("SPOOL_PRINTCORE_REPLAY_PATH").map(std::path::PathBuf::from);
@@ -1200,12 +1280,32 @@ mod platform {
             path.parent()
                 .map(|parent| parent.join("SpoolPrintCoreReplay"))
         });
-        let development = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../shells/macos/.build/release/SpoolPrintCoreReplay");
-        [configured, sibling, Some(development)]
+        #[cfg(debug_assertions)]
+        let development = Some(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../shells/macos/.build/release/SpoolPrintCoreReplay"),
+        );
+        #[cfg(not(debug_assertions))]
+        let development: Option<std::path::PathBuf> = None;
+        let executor_owner = std::env::current_exe()
+            .ok()
+            .and_then(|path| std::fs::metadata(path).ok())
+            .map(|metadata| metadata.uid());
+        [configured, sibling, development]
             .into_iter()
             .flatten()
-            .find(|path| path.is_absolute() && path.is_file())
+            .filter_map(|path| path.canonicalize().ok())
+            .find(|path| {
+                let Ok(metadata) = std::fs::metadata(path) else {
+                    return false;
+                };
+                let mode = metadata.permissions().mode();
+                path.is_absolute()
+                    && metadata.is_file()
+                    && mode & 0o111 != 0
+                    && mode & 0o022 == 0
+                    && (metadata.uid() == 0 || executor_owner == Some(metadata.uid()))
+            })
             .ok_or_else(|| {
                 profile_error(
                     "native_profile_backend_unavailable",

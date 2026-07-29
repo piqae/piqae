@@ -508,9 +508,14 @@ impl<E: Executor, C: Clock> AgentEngine<E, C> {
                     "profile {profile_id} revision {revision} is missing"
                 ))
             })?;
-        let metadata_kind = serde_json::from_value::<NativeProfileKind>(
-            serde_json::Value::String(metadata.native_kind.clone()),
-        )?;
+        let metadata_kind = serde_json::from_value::<NativeProfileKind>(serde_json::Value::String(
+            metadata.native_kind.clone(),
+        ))
+        .map_err(|error| {
+            AgentError::InvalidNativeProfile(format!(
+                "profile {profile_id} revision {revision} has invalid native kind metadata: {error}"
+            ))
+        })?;
         // Legacy/basic profiles are represented entirely by the already
         // pinned JobOptions. They intentionally have no opaque driver blob.
         if metadata_kind == NativeProfileKind::PortableOptions {
@@ -534,11 +539,27 @@ impl<E: Executor, C: Clock> AgentEngine<E, C> {
         }
         let kind = serde_json::from_value::<NativeProfileKind>(serde_json::Value::String(
             native.native_kind,
-        ))?;
+        ))
+        .map_err(|error| {
+            AgentError::InvalidNativeProfile(format!(
+                "profile {profile_id} revision {revision} has invalid native kind metadata: {error}"
+            ))
+        })?;
         let safe_overrides =
-            serde_json::from_str::<Vec<SafeProfileOverride>>(&metadata.safe_overrides_json)?;
-        let driver_fingerprint =
-            serde_json::from_str::<DriverFingerprint>(&metadata.driver_fingerprint_json)?;
+            serde_json::from_str::<Vec<SafeProfileOverride>>(&metadata.safe_overrides_json)
+                .map_err(|error| {
+                    AgentError::InvalidNativeProfile(format!(
+                        "profile {profile_id} revision {revision} has invalid safe override metadata: {error}"
+                    ))
+                })?;
+        let driver_fingerprint = serde_json::from_str::<DriverFingerprint>(
+            &metadata.driver_fingerprint_json,
+        )
+        .map_err(|error| {
+            AgentError::InvalidNativeProfile(format!(
+                "profile {profile_id} revision {revision} has invalid driver metadata: {error}"
+            ))
+        })?;
         Ok(Some(NativeProfilePayload {
             profile_id: profile_id.clone(),
             revision,

@@ -443,6 +443,9 @@ async fn commit_profile_capture(
     headers: HeaderMap,
     Json(capture): Json<NativeProfileCapturePayload>,
 ) -> Response {
+    if !authenticate(&state, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
     let Some(capture_token) = capture_token(&headers) else {
         return (
             StatusCode::UNAUTHORIZED,
@@ -472,8 +475,18 @@ async fn cancel_profile_capture(
     Path(session_id): Path<String>,
     headers: HeaderMap,
 ) -> Response {
-    let Some(capture_token) = capture_token(&headers) else {
+    if !authenticate(&state, &headers) {
         return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let Some(capture_token) = capture_token(&headers) else {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(ControlFailure {
+                code: "capture_token_required".into(),
+                message: "X-Spool-Capture-Token is required".into(),
+            }),
+        )
+            .into_response();
     };
     control_action(state, headers, |respond_to| {
         ControlRequest::CancelProfileCapture {
@@ -649,7 +662,9 @@ fn failure_status(code: &str) -> StatusCode {
         }
         "profile_revision_conflict" => StatusCode::CONFLICT,
         "profile_capture_token_invalid" => StatusCode::UNAUTHORIZED,
-        "profile_capture_timed_out" | "profile_capture_cancelled" => StatusCode::GONE,
+        "profile_capture_timed_out"
+        | "profile_capture_cancelled"
+        | "profile_capture_not_authorized" => StatusCode::GONE,
         _ => StatusCode::UNPROCESSABLE_ENTITY,
     }
 }
@@ -847,6 +862,35 @@ mod tests {
             .expect("response");
         assert_eq!(response.status(), StatusCode::CREATED);
         responder.await.expect("responder");
+    }
+
+    #[tokio::test]
+    async fn capture_token_presence_is_hidden_until_session_authentication() {
+        let (state, mut receive) = test_state();
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/local/profile-capture-sessions/pcs_test/complete")
+                    .header("x-spool-capture-token", "one-time-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{
+                          "name":"A4",
+                          "native_kind":"macos_printcore",
+                          "native_schema_version":1,
+                          "native_digest":"sha256:test",
+                          "native_blob_base64":"b3BhcXVl",
+                          "driver_fingerprint":{},
+                          "summary":{}
+                        }"#,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert!(receive.try_recv().is_err());
     }
 
     #[tokio::test]
