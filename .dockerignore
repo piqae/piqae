@@ -1,0 +1,17 @@
+.git
+.github
+.env
+.env.*
+.pnpm-store
+artifacts
+apps/web/.svelte-kit
+apps/web/.vercel
+apps/web/build-node
+coverage
+node_modules
+playwright-report
+target
+test-results
+*.db
+*.db-shm
+*.db-wal
