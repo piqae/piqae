@@ -1830,6 +1830,11 @@ components:
         rotate:
           type: integer
           enum: [0, 90, 180, 270]
+        native_options:
+          type: object
+          description: Driver-native option selections keyed by the stable driver option name.
+          additionalProperties:
+            type: string
     Job:
       type: object
       required:
@@ -1912,7 +1917,18 @@ components:
           format: date-time
     Printer:
       type: object
-      required: [id, agent_id, name, state, capabilities, updated_at]
+      required:
+        [
+          id,
+          agent_id,
+          name,
+          state,
+          capabilities,
+          capability_revision,
+          native_options,
+          profiles,
+          updated_at,
+        ]
       properties:
         id:
           type: string
@@ -1923,10 +1939,159 @@ components:
         state:
           $ref: "#/components/schemas/PrinterState"
         capabilities:
+          $ref: "#/components/schemas/PrinterCapabilities"
+        capability_revision:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Monotonic revision of the synced driver capability snapshot.
+        native_options:
           type: object
+          description: Complete driver-native option definitions keyed by stable driver option name.
+          additionalProperties:
+            $ref: "#/components/schemas/NativePrinterOption"
+        profiles:
+          type: array
+          description: Named, immutable printer option snapshots synced from the agent.
+          items:
+            $ref: "#/components/schemas/PrinterProfileSnapshot"
         updated_at:
           type: string
           format: date-time
+    PrinterCapabilities:
+      type: object
+      additionalProperties: false
+      required:
+        [
+          bins,
+          collate,
+          color,
+          copies,
+          dpis,
+          duplex,
+          extent,
+          medias,
+          nup,
+          papers,
+          printrate,
+          supports_custom_paper_size,
+        ]
+      properties:
+        bins:
+          type: array
+          items:
+            type: string
+        collate:
+          type: boolean
+        color:
+          type: boolean
+        copies:
+          type: integer
+          minimum: 0
+        dpis:
+          type: array
+          items:
+            type: string
+        duplex:
+          type: boolean
+        extent:
+          type: array
+          items:
+            $ref: "#/components/schemas/PrinterExtent"
+        medias:
+          type: array
+          items:
+            type: string
+        nup:
+          type: array
+          items:
+            type: integer
+            minimum: 0
+        papers:
+          type: object
+          description: Paper dimensions keyed by driver paper name.
+          additionalProperties:
+            $ref: "#/components/schemas/PrinterPaperDimensions"
+        printrate:
+          anyOf:
+            - $ref: "#/components/schemas/PrintRate"
+            - type: "null"
+        supports_custom_paper_size:
+          type: boolean
+    PrinterExtent:
+      type: array
+      description: A two-dimensional driver-reported printer extent.
+      prefixItems:
+        - type: integer
+          minimum: 0
+        - type: integer
+          minimum: 0
+      items: false
+      minItems: 2
+      maxItems: 2
+    PrinterPaperDimensions:
+      type: array
+      description: Optional driver-reported width and height.
+      prefixItems:
+        - type: [integer, "null"]
+          minimum: 0
+        - type: [integer, "null"]
+          minimum: 0
+      items: false
+      minItems: 2
+      maxItems: 2
+    PrintRate:
+      type: object
+      additionalProperties: false
+      required: [unit, rate]
+      properties:
+        unit:
+          type: string
+          enum: [ppm, ipm, lmp, cpm]
+        rate:
+          type: number
+          format: float
+    NativePrinterOption:
+      type: object
+      additionalProperties: false
+      required: [display_name, default_choice, selected_choice, choices]
+      properties:
+        display_name:
+          type: string
+        default_choice:
+          type: [string, "null"]
+        selected_choice:
+          type: [string, "null"]
+        choices:
+          type: array
+          items:
+            $ref: "#/components/schemas/NativePrinterChoice"
+    NativePrinterChoice:
+      type: object
+      additionalProperties: false
+      required: [value, display_name]
+      properties:
+        value:
+          type: string
+        display_name:
+          type: string
+    PrinterProfileSnapshot:
+      type: object
+      additionalProperties: false
+      required: [profile_id, revision, name, is_default, options]
+      properties:
+        profile_id:
+          type: string
+        revision:
+          type: integer
+          format: int64
+          minimum: 0
+        name:
+          type: string
+        is_default:
+          type: boolean
+        options:
+          $ref: "#/components/schemas/JobOptions"
     PrinterState:
       type: string
       enum: [online, offline, paused, busy, paper_out, error, unknown]

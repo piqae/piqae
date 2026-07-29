@@ -96,18 +96,23 @@ export function createLiveApi(
     isDefault: false,
     queueDepth: 0,
     lastSeenAt: printer.updated_at,
+    capabilityRevision: printer.capability_revision,
+    nativeOptions: printer.native_options,
+    profiles: printer.profiles.map((profile) => ({
+      profileId: profile.profile_id,
+      revision: profile.revision,
+      name: profile.name,
+      isDefault: profile.is_default,
+      options: profile.options
+    })),
     capabilities: {
       color: printer.capabilities.color === true,
       duplex: printer.capabilities.duplex === true,
       copies: Number(printer.capabilities.copies ?? 1),
-      papers: Array.isArray(printer.capabilities.papers)
-        ? printer.capabilities.papers.map(String)
-        : [],
-      dpis: Array.isArray(printer.capabilities.dpis)
-        ? printer.capabilities.dpis.map(String)
-        : [],
-      source: String(printer.capabilities.source ?? 'driver'),
-      revision: String(printer.capabilities.revision ?? 'unknown'),
+      papers: Object.keys(printer.capabilities.papers),
+      dpis: printer.capabilities.dpis,
+      source: 'driver',
+      revision: String(printer.capability_revision),
       observedAt: printer.updated_at
     }
   });

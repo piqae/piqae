@@ -96,6 +96,9 @@ export const printers: DashboardPrinter[] = [
     isDefault: true,
     queueDepth: 3,
     lastSeenAt: ago(0),
+    capabilityRevision: 1,
+    nativeOptions: {},
+    profiles: [],
     capabilities
   },
   {
@@ -109,6 +112,9 @@ export const printers: DashboardPrinter[] = [
     isDefault: false,
     queueDepth: 1,
     lastSeenAt: ago(1),
+    capabilityRevision: 1,
+    nativeOptions: {},
+    profiles: [],
     capabilities: { ...capabilities, papers: ['62mm', '29mm'], source: 'windows_driver' }
   },
   {
@@ -122,6 +128,9 @@ export const printers: DashboardPrinter[] = [
     isDefault: true,
     queueDepth: 0,
     lastSeenAt: ago(1),
+    capabilityRevision: 1,
+    nativeOptions: {},
+    profiles: [],
     capabilities: {
       ...capabilities,
       color: true,
@@ -141,6 +150,9 @@ export const printers: DashboardPrinter[] = [
     isDefault: false,
     queueDepth: 2,
     lastSeenAt: ago(7),
+    capabilityRevision: 1,
+    nativeOptions: {},
+    profiles: [],
     capabilities: { ...capabilities, source: 'cups' }
   }
 ];

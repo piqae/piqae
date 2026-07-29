@@ -83,8 +83,59 @@ export interface Printer {
   agent_id: SpoolId;
   name: string;
   state: 'online' | 'offline' | 'paused' | 'busy' | 'paper_out' | 'error' | 'unknown';
-  capabilities: Record<string, unknown>;
+  capabilities: PrinterCapabilities;
+  /** Monotonic revision of the synced driver capability snapshot. */
+  capability_revision: number;
+  /** Driver-native option definitions keyed by the stable driver option name. */
+  native_options: Record<string, NativePrinterOption>;
+  /** Named printer option snapshots synced from the agent. */
+  profiles: PrinterProfileSnapshot[];
   updated_at: string;
+}
+
+export type PrintRateUnit = 'ppm' | 'ipm' | 'lmp' | 'cpm';
+
+export interface PrintRate {
+  unit: PrintRateUnit;
+  rate: number;
+}
+
+export type PrinterExtent = [number, number];
+export type PrinterPaperDimensions = [number | null, number | null];
+
+export interface PrinterCapabilities {
+  bins: string[];
+  collate: boolean;
+  color: boolean;
+  copies: number;
+  dpis: string[];
+  duplex: boolean;
+  extent: PrinterExtent[];
+  medias: string[];
+  nup: number[];
+  papers: Record<string, PrinterPaperDimensions>;
+  printrate: PrintRate | null;
+  supports_custom_paper_size: boolean;
+}
+
+export interface NativePrinterChoice {
+  value: string;
+  display_name: string;
+}
+
+export interface NativePrinterOption {
+  display_name: string;
+  default_choice: string | null;
+  selected_choice: string | null;
+  choices: NativePrinterChoice[];
+}
+
+export interface PrinterProfileSnapshot {
+  profile_id: string;
+  revision: number;
+  name: string;
+  is_default: boolean;
+  options: JobOptions;
 }
 
 export interface JobOptions {

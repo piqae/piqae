@@ -1,4 +1,4 @@
-import type { JobState } from '@spool/sdk';
+import type { JobOptions, JobState, NativePrinterOption } from '@spool/sdk';
 
 export type ResourceState = 'online' | 'offline' | 'degraded' | 'paused' | 'unknown';
 
@@ -32,6 +32,9 @@ export interface DashboardPrinter {
   isDefault: boolean;
   queueDepth: number;
   lastSeenAt: string;
+  capabilityRevision: number;
+  nativeOptions: Record<string, NativePrinterOption>;
+  profiles: DashboardPrinterProfile[];
   capabilities: {
     color: boolean;
     duplex: boolean;
@@ -42,6 +45,14 @@ export interface DashboardPrinter {
     revision: string;
     observedAt: string;
   };
+}
+
+export interface DashboardPrinterProfile {
+  profileId: string;
+  revision: number;
+  name: string;
+  isDefault: boolean;
+  options: JobOptions;
 }
 
 export interface DashboardJob {

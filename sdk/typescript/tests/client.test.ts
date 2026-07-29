@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { SpoolClient } from '../src/index.js';
+import type { Printer } from '../src/index.js';
 
 describe('SpoolClient', () => {
   it('sends auth, idempotency, and JSON for job creation', async () => {
@@ -70,6 +71,64 @@ describe('SpoolClient', () => {
     const url = new URL(String(fetcher.mock.calls[0]?.[0]));
     expect(url.origin + url.pathname).toBe('http://localhost:39100/v1/jobs');
     expect(Object.fromEntries(url.searchParams)).toEqual({ after: 'job_9', limit: '25' });
+  });
+
+  it('returns complete synced printer capability and profile snapshots', async () => {
+    const printer = {
+      id: 'printer_1',
+      agent_id: 'agent_1',
+      name: 'Packing',
+      state: 'online',
+      capabilities: {
+        bins: ['Tray1'],
+        collate: true,
+        color: true,
+        copies: 99,
+        dpis: ['300dpi'],
+        duplex: true,
+        extent: [[2100, 2970]],
+        medias: ['plain'],
+        nup: [1, 2],
+        papers: { A4: [2100, 2970] },
+        printrate: { unit: 'ppm', rate: 20 },
+        supports_custom_paper_size: true
+      },
+      capability_revision: 4,
+      native_options: {
+        InputSlot: {
+          display_name: 'Paper source',
+          default_choice: 'Tray1',
+          selected_choice: 'Tray2',
+          choices: [
+            { value: 'Tray1', display_name: 'Tray 1' },
+            { value: 'Tray2', display_name: 'Tray 2' }
+          ]
+        }
+      },
+      profiles: [
+        {
+          profile_id: 'profile_1',
+          revision: 2,
+          name: 'Packing slips',
+          is_default: true,
+          options: { paper: 'A4', native_options: { InputSlot: 'Tray2' } }
+        }
+      ],
+      updated_at: '2026-07-29T00:00:00Z'
+    } satisfies Printer;
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(JSON.stringify({ data: [printer], next_cursor: null, has_more: false }))
+    );
+    const client = new SpoolClient({ fetch: fetcher });
+
+    const page = await client.printers.list();
+
+    expect(page.data[0]?.capability_revision).toBe(4);
+    expect(page.data[0]?.native_options.InputSlot?.selected_choice).toBe('Tray2');
+    expect(page.data[0]?.profiles[0]).toMatchObject({
+      profile_id: 'profile_1',
+      name: 'Packing slips'
+    });
   });
 
   it('deletes a webhook through the canonical endpoint', async () => {
