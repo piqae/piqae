@@ -18,6 +18,22 @@ Each platform adapter implements:
 Slow driver calls run in bounded blocking workers. A hung network printer or
 driver must not stall heartbeats, other printers, or the local UI.
 
+## Native profiles
+
+An installed queue is a destination, not a complete production setup. Spool
+supports multiple immutable native profiles beneath one destination. Creating
+or editing a profile uses the operating system's native driver interface;
+jobs pin the resulting platform configuration and revision.
+
+Windows captures a complete driver-normalized `DEVMODE`/PrintTicket. macOS
+captures `NSPrintInfo`/PrintCore settings and page format through
+`NSPrintPanel`, with a CUPS/IPP option mirror where available. The normal web
+UI does not reproduce vendor-specific forms.
+
+The full identity, capture, replay, stock, routing, API, storage, UI, and
+testing design is in
+[native print profiles, stock, and routing](16-native-print-profiles-stock-and-routing.md).
+
 ## Windows
 
 ### Discovery
@@ -276,4 +292,3 @@ Evaluate:
 
 Do not select MuPDF or Poppler without deliberate licence review. Do not use
 Adobe Reader automation or a desktop application as the core service backend.
-

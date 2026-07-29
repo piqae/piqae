@@ -19,6 +19,23 @@ With a focused three-person team, a useful internal replacement may take
 polish can extend the programme to 9–15 months. These are planning ranges; the
 PDF/Windows spike is intended to replace guesses with evidence.
 
+## Priority implementation slice: native profiles and stock
+
+The next cross-platform slice is no longer generic option-form expansion. It is
+the native profile model described in
+[native print profiles, stock, and routing](16-native-print-profiles-stock-and-routing.md):
+
+- one installed destination with multiple native profiles;
+- macOS `NSPrintPanel` and Windows `DocumentPropertiesW` capture;
+- immutable native tickets and driver fingerprints;
+- stock/tray readiness and operator holds;
+- stable targets across multiple nodes;
+- virtual printer IDs for PrintNode-compatible callers;
+- a simpler web UI that delegates vendor settings to the native driver.
+
+The current option-only named profiles migrate into this model as unverified
+profiles and require validation before production use.
+
 ## Phase 0: workload and acceptance baseline (1–2 weeks)
 
 Deliver:
@@ -258,4 +275,3 @@ engineering and support cost. Keep it economically sensible by:
 5. Turn the documented PrintNode subset into OpenAPI/JSON fixtures and
    differential tests.
 6. Decide licence and project name before publishing.
-

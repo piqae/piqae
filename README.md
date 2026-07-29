@@ -89,7 +89,8 @@ printers. Production trace export is covered in the
 14. [Superseded Go-first evaluation](docs/13-two-day-mvp-and-stack-decision.md)
 15. [Long-term native architecture and 48-hour production plan](docs/14-long-term-native-architecture-and-48-hour-production.md)
 16. [Linear-aligned visual system](docs/15-linear-aligned-visual-system.md)
-17. [Research sources](docs/references.md)
+17. [Native print profiles, stock, and routing](docs/16-native-print-profiles-stock-and-routing.md)
+18. [Research sources](docs/references.md)
 
 ## Architecture
 

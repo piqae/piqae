@@ -61,6 +61,36 @@ Logical installed service. Important fields:
 - application queue policy;
 - created, last seen, and removed timestamps.
 
+This resource represents an installed operating-system destination. The
+expanded native-profile design adds optional physical-device grouping,
+immutable profiles, stock, and stable routing targets without changing the
+PrintNode-compatible meaning of a printer. See
+[native print profiles, stock, and routing](16-native-print-profiles-stock-and-routing.md).
+
+### Print profile
+
+- stable profile ID and immutable revision;
+- destination and driver fingerprint;
+- platform-native configuration kind and local blob digest;
+- portable summary and required stock/dependencies;
+- safe per-job overrides;
+- readiness, validation, test, publish, and retirement state.
+
+The native blob remains local to the agent by default.
+
+### Stock and loaded media
+
+Stock is a portable business definition for paper, rolls, labels, or cards.
+Loaded-media state associates a stock with one physical device source/tray and
+records whether it was device-reported, scanned, operator-confirmed, assumed,
+or unknown.
+
+### Target and binding
+
+A target is a stable API destination. Each binding selects a node,
+destination, profile revision, and routing priority. One delivery lease selects
+one binding; no fan-out occurs.
+
 ### Job
 
 - ID and workspace;
@@ -135,6 +165,18 @@ Immutable ordered fact:
 - `POST /v1/printers/{id}/test-jobs`
 - `POST /v1/printers/{id}/pause`
 - `POST /v1/printers/{id}/resume`
+
+### Profiles, stocks, and targets
+
+- `GET /v1/destinations/{id}/profiles`
+- `POST /v1/destinations/{id}/profile-capture-sessions`
+- `GET /v1/profiles/{id}`
+- `POST /v1/profiles/{id}/validate`
+- `POST /v1/profiles/{id}/test-jobs`
+- `POST /v1/profiles/{id}/publish`
+- `POST /v1/profiles/{id}/retire`
+- stock CRUD and loaded-media confirmation;
+- target CRUD, bindings, and readiness.
 
 ### Jobs
 
@@ -264,6 +306,15 @@ Suggested PostgreSQL tables:
 - `printer_native_identities`
 - `printer_capability_revisions`
 - `printer_state_events`
+- `physical_devices`
+- `printer_device_bindings`
+- `printer_profiles`
+- `profile_native_metadata`
+- `profile_dependencies`
+- `stocks`
+- `loaded_media`
+- `print_targets`
+- `target_bindings`
 - `jobs`
 - `job_submissions` for each `qty` child/native job;
 - `job_events`

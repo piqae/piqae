@@ -41,7 +41,15 @@ record the actual date and version observed.
 - [Microsoft `PRINTER_INFO_2` states](https://learn.microsoft.com/en-us/windows/win32/printdocs/printer-info-2)
 - [Microsoft `EnumPrinters` blocking behavior](https://learn.microsoft.com/en-us/windows/win32/printdocs/enumprinters)
 - [Microsoft Print Ticket API](https://learn.microsoft.com/en-us/windows/win32/printdocs/print-ticket-api)
+- [Microsoft `DocumentPropertiesW`](https://learn.microsoft.com/en-us/windows/win32/printdocs/documentproperties)
+- [Microsoft reliable `DEVMODE` modification guidance](https://learn.microsoft.com/en-us/troubleshoot/windows/win32/modify-printer-settings-documentproperties)
 - [Microsoft print provider functions](https://learn.microsoft.com/en-us/windows-hardware/drivers/print/functions-defined-by-print-providers)
+- [Apple `NSPrintInfo.printSettings`](https://developer.apple.com/documentation/appkit/nsprintinfo/printsettings)
+- [Apple `NSPrintPanel`](https://developer.apple.com/documentation/appkit/nsprintpanel)
+- [CUPS saved options and printer instances](https://openprinting.github.io/cups/doc/options.html)
+- [CUPS `lpoptions`](https://openprinting.github.io/cups/doc/man-lpoptions.html)
+- [OKI Pro1050 PS Driver User's Guide](https://www.oki.com/jp/printing/download/47309602EE2_Pro1050_PSD_UG_EN_286729.pdf?id=47309602EE)
+- [OKI Pro1050 drivers and utilities](https://www.oki.com/uk/printing/support/drivers-and-utilities/label/46672103/)
 - [PDFium licence](https://pdfium.googlesource.com/pdfium/+/refs/heads/main/LICENSE)
 
 ## Related open-source reference implementation
