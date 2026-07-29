@@ -44,6 +44,7 @@ mod windows_shell {
             profile_id: Option<String>,
             revision: Option<u64>,
             operation: ProfileCaptureOperation,
+            is_default: bool,
         },
         OpenDashboard,
         Refresh,
@@ -274,6 +275,7 @@ mod windows_shell {
                             profile_id: None,
                             revision: None,
                             operation: ProfileCaptureOperation::Create,
+                            is_default: false,
                         },
                         &mut actions,
                     );
@@ -296,6 +298,7 @@ mod windows_shell {
                                     profile_id: Some(profile.profile_id.clone()),
                                     revision: Some(profile.revision),
                                     operation: ProfileCaptureOperation::Edit,
+                                    is_default: profile.is_default,
                                 },
                                 &mut actions,
                             );
@@ -307,6 +310,7 @@ mod windows_shell {
                                     profile_id: Some(profile.profile_id),
                                     revision: Some(profile.revision),
                                     operation: ProfileCaptureOperation::Clone,
+                                    is_default: false,
                                 },
                                 &mut actions,
                             );
@@ -355,12 +359,14 @@ mod windows_shell {
                 profile_id,
                 revision,
                 operation,
+                is_default,
             }) => capture_profile(
                 window,
                 &printer_id,
                 profile_id.as_deref(),
                 revision,
                 operation,
+                is_default,
             ),
             Some(MenuAction::OpenDashboard) => open_dashboard(window),
             Some(MenuAction::Refresh) => show_menu(window),
@@ -377,6 +383,7 @@ mod windows_shell {
         profile_id: Option<&str>,
         revision: Option<u64>,
         operation: ProfileCaptureOperation,
+        is_default: bool,
     ) {
         let result = (|| {
             let state_lock = SHELL_STATE
@@ -400,7 +407,7 @@ mod windows_shell {
                         return Err(error);
                     }
                 };
-            let payload = capture_payload(&session, &captured)?;
+            let payload = capture_payload(&session, &captured, is_default)?;
             match state.client.complete_profile_capture(&session, &payload) {
                 Ok(profile) => Ok(Some(profile)),
                 Err(error) => {

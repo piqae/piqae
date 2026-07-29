@@ -538,6 +538,7 @@ pub fn run_profile_host(
 pub fn capture_payload(
     session: &ProfileCaptureAuthorized,
     capture: &WindowsNativeProfileCapture,
+    is_default: bool,
 ) -> Result<NativeProfileCapturePayload, ShellError> {
     let native_blob = serde_json::to_vec(capture).map_err(ShellError::Json)?;
     let summary = &capture.summary;
@@ -584,7 +585,7 @@ pub fn capture_payload(
     let fingerprint = &capture.fingerprint;
     Ok(NativeProfileCapturePayload {
         name,
-        is_default: false,
+        is_default,
         options: JobOptions::default(),
         native_kind: NativeProfileKind::WindowsDevmode,
         native_schema_version: capture.schema_version,
@@ -773,8 +774,10 @@ mod tests {
             native_configuration: None,
         };
 
-        let payload = capture_payload(&session, &native).unwrap_or_else(|error| panic!("{error}"));
+        let payload =
+            capture_payload(&session, &native, true).unwrap_or_else(|error| panic!("{error}"));
         assert_eq!(payload.name, "OKI C9500 profile");
+        assert!(payload.is_default);
         assert_eq!(payload.native_kind, NativeProfileKind::WindowsDevmode);
         assert_eq!(payload.summary.dimensions_mm, Some([210.0, 297.0]));
         assert_eq!(payload.summary.copies, Some(2));
