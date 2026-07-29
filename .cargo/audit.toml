@@ -1,0 +1,22 @@
+[advisories]
+# sqlx locks its disabled MySQL backend; the rsa crate is absent from every
+# enabled Spool feature graph. The bounded exception is tracked in
+# release/security-exceptions.json and must be removed if it becomes reachable.
+ignore = ["RUSTSEC-2023-0071"]
+informational_warnings = ["unmaintained", "unsound"]
+severity_threshold = "low"
+
+[database]
+url = "https://github.com/RustSec/advisory-db.git"
+fetch = true
+stale = false
+
+[output]
+deny = ["warnings"]
+format = "terminal"
+quiet = false
+show_tree = true
+
+[yanked]
+enabled = true
+update_index = true

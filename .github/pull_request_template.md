@@ -14,7 +14,7 @@ Describe the observable result.
 - [ ] Security and tenant impact reviewed
 - [ ] Telemetry added for new failure modes
 - [ ] Documentation updated
-- [ ] DCO sign-off present
+- [ ] Every commit has a [DCO sign-off](DCO_SIGNOFF.md)
 
 ## Compatibility
 

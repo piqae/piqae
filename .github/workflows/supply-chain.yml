@@ -1,0 +1,94 @@
+name: Supply-chain policy
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: supply-chain-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  policy:
+    name: Release policy and tooling
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Test release evidence tooling
+        run: python3 -m unittest discover -s release/tools -p 'test_*.py' -v
+      - name: Validate bounded security exceptions
+        run: python3 release/tools/check_security_exceptions.py
+      - name: Reject mutable action references
+        run: >-
+          python3 release/tools/check_workflow_pins.py
+          .github/workflows/supply-chain.yml
+          .github/workflows/release-evidence.yml
+
+  rust-dependencies:
+    name: Rust dependency policy
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install pinned Rust toolchain
+        run: |
+          rustup toolchain install 1.88.0 --profile minimal
+          rustup default 1.88.0
+      - name: Install pinned audit tools
+        run: |
+          cargo install cargo-deny --locked --version 0.20.2
+          cargo install cargo-audit --locked --version 0.22.2
+      - name: Enforce dependency source, license, and advisory policy
+        run: cargo deny check --hide-inclusion-graph
+      - name: Enforce RustSec vulnerability policy
+        run: cargo audit
+
+  secrets:
+    name: Repository secret history
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out complete history
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+      - name: Scan with digest-pinned Gitleaks
+        run: >-
+          docker run --rm
+          -v "$GITHUB_WORKSPACE:/repo"
+          -w /repo
+          ghcr.io/gitleaks/gitleaks@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f
+          git --redact=100 --config .gitleaks.toml --log-opts="--all"
+
+  source-sbom:
+    name: Source dependency SBOM
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Generate SPDX JSON
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          path: .
+          format: spdx-json
+          output-file: spool-source.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+      - name: Validate SPDX contract
+        run: python3 release/tools/release_bundle.py validate-sbom spool-source.spdx.json
+      - name: Upload source SBOM
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: spool-source-sbom
+          path: spool-source.spdx.json
+          if-no-files-found: error
+          retention-days: 14

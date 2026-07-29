@@ -1,0 +1,8 @@
+title = "Spool secret-scanning policy"
+
+[extend]
+useDefault = true
+
+# Keep this file deliberately free of broad path or regex allowlists. If a test
+# needs a credential-shaped value, generate it at runtime or add a
+# fingerprint-specific .gitleaksignore entry with a reviewable justification.

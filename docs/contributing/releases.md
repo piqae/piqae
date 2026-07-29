@@ -26,3 +26,8 @@ Before tagging:
 
 The release check never sends a print job. Hardware certification must be
 explicitly scheduled with a named printer and controlled fixture.
+
+Release artifacts additionally pass the fail-closed evidence audit documented
+in [`release/README.md`](../../release/README.md). Local structural provenance
+validation is suitable for tests only; a published release requires
+cryptographic verification against the expected repository identity.

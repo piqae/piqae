@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "exceptions": [
+    {
+      "id": "RUSTSEC-2023-0071",
+      "tool": "cargo-audit",
+      "dependency": "rsa 0.9.10",
+      "scope": "Locked only through sqlx-mysql; not present in cargo tree --workspace --all-features",
+      "owner": "Spool maintainers",
+      "review_by": "2026-10-27",
+      "removal_condition": "Remove immediately if sqlx-mysql or rsa enters any enabled feature graph"
+    }
+  ]
+}
