@@ -44,21 +44,25 @@ final class ProfileAccessoryController: NSViewController, NSPrintPanelAccessoriz
     override func loadView() {
         nameField.placeholderString = "A4 colour, Tray 1"
         nameField.setAccessibilityLabel("Profile name")
+        nameField.lineBreakMode = .byTruncatingTail
         stockField.placeholderString = "Optional stock ID"
         stockField.setAccessibilityLabel("Stock ID")
-
-        let nameRow = labelledRow(label: "Profile name:", control: nameField)
-        let stockRow = labelledRow(label: "Stock:", control: stockField)
-        let overridesLabel = NSTextField(labelWithString: "API overrides:")
-        overridesLabel.alignment = .right
-        overridesLabel.setContentHuggingPriority(.required, for: .horizontal)
+        stockField.lineBreakMode = .byTruncatingTail
         let overrides = NSStackView(views: [copiesCheckbox, pagesCheckbox])
         overrides.orientation = .horizontal
         overrides.spacing = 12
-        let overridesRow = NSStackView(views: [overridesLabel, overrides])
-        overridesRow.orientation = .horizontal
-        overridesRow.alignment = .centerY
-        overridesRow.spacing = 8
+        overrides.setAccessibilityLabel("Safe API overrides")
+
+        let grid = NSGridView(views: [
+            [formLabel("Profile name:"), nameField],
+            [formLabel("Stock:"), stockField],
+            [formLabel("API overrides:"), overrides],
+        ])
+        grid.rowSpacing = 8
+        grid.columnSpacing = 10
+        grid.column(at: 0).xPlacement = .trailing
+        grid.column(at: 1).xPlacement = .fill
+        grid.translatesAutoresizingMaskIntoConstraints = false
 
         let note = NSTextField(
             wrappingLabelWithString:
@@ -66,16 +70,20 @@ final class ProfileAccessoryController: NSViewController, NSPrintPanelAccessoriz
                 + "Spool saves them without printing."
         )
         note.textColor = .secondaryLabelColor
-        note.maximumNumberOfLines = 3
+        note.maximumNumberOfLines = 0
+        note.preferredMaxLayoutWidth = 456
 
-        let stack = NSStackView(views: [nameRow, stockRow, overridesRow, note])
+        let stack = NSStackView(views: [grid, note])
         stack.orientation = .vertical
-        stack.alignment = .leading
+        stack.alignment = .width
         stack.spacing = 10
         stack.edgeInsets = NSEdgeInsets(top: 12, left: 12, bottom: 12, right: 12)
         stack.translatesAutoresizingMaskIntoConstraints = false
 
-        let container = NSView()
+        // NSPrintPanel queries the accessory's initial frame before completing
+        // Auto Layout. Give it a stable intrinsic host size so controls do not
+        // collapse and trigger layout churn while its settings list scrolls.
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 500, height: 144))
         container.addSubview(stack)
         NSLayoutConstraint.activate([
             stack.leadingAnchor.constraint(equalTo: container.leadingAnchor),
@@ -86,6 +94,7 @@ final class ProfileAccessoryController: NSViewController, NSPrintPanelAccessoriz
             stockField.widthAnchor.constraint(greaterThanOrEqualToConstant: 260),
         ])
         view = container
+        preferredContentSize = container.frame.size
     }
 
     func localizedSummaryItems() -> [[NSPrintPanel.AccessorySummaryKey: String]] {
@@ -107,14 +116,10 @@ final class ProfileAccessoryController: NSViewController, NSPrintPanelAccessoriz
         ]
     }
 
-    private func labelledRow(label: String, control: NSView) -> NSStackView {
+    private func formLabel(_ label: String) -> NSTextField {
         let labelView = NSTextField(labelWithString: label)
         labelView.alignment = .right
         labelView.setContentHuggingPriority(.required, for: .horizontal)
-        let row = NSStackView(views: [labelView, control])
-        row.orientation = .horizontal
-        row.alignment = .centerY
-        row.spacing = 8
-        return row
+        return labelView
     }
 }

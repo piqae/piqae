@@ -84,13 +84,23 @@ public final class MacPrintProfileCapturer {
     }
 
     private func resolvePrinter(session: LocalProfileCaptureSession) throws -> NSPrinter {
-        let candidates = [session.nativeID, session.printerName]
-            .compactMap { $0 }
-            .filter { !$0.isEmpty }
-        for candidate in candidates {
-            if let printer = NSPrinter(name: candidate) {
-                return printer
+        if let nativeID = session.nativeID, !nativeID.isEmpty,
+           let printCorePrinter = PMPrinterCreateFromPrinterID(nativeID as CFString)
+        {
+            defer { PMRelease(UnsafeRawPointer(printCorePrinter)) }
+            if let unmanagedName = PMPrinterGetName(printCorePrinter) {
+                let displayName = unmanagedName.takeUnretainedValue() as String
+                if let printer = NSPrinter(name: displayName) {
+                    return printer
+                }
             }
+        }
+
+        // NSPrinter resolves the user-facing display name, while CUPS and the
+        // local agent identify a queue by its native destination ID. They are
+        // commonly different (for example, spaces versus underscores).
+        if let printer = NSPrinter(name: session.printerName) {
+            return printer
         }
         throw MacPrintProfileCaptureError.printerUnavailable(session.printerName)
     }
