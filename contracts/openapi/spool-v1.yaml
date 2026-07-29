@@ -12,6 +12,8 @@ servers:
 security:
   - bearer: []
 tags:
+  - name: API Keys
+    description: Create and revoke environment-scoped developer credentials.
   - name: Jobs
     description: Register and observe durable print jobs.
   - name: Printers
@@ -48,6 +50,76 @@ paths:
               schema:
                 $ref: "#/components/schemas/Health"
         "503":
+          $ref: "#/components/responses/Error"
+  /v1/api-keys:
+    get:
+      summary: List API key metadata for the current environment
+      tags: [API Keys]
+      operationId: listApiKeys
+      responses:
+        "200":
+          description: API key metadata. Secrets and password hashes are never returned.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ApiKey"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+    post:
+      summary: Create an API key
+      description: Requested scopes must be a subset of the authenticated caller's scopes.
+      tags: [API Keys]
+      operationId: createApiKey
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateApiKey"
+      responses:
+        "201":
+          description: API key created. The plaintext secret is returned exactly once.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreatedApiKey"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "503":
+          $ref: "#/components/responses/Error"
+  /v1/api-keys/{key_id}:
+    parameters:
+      - name: key_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    delete:
+      summary: Revoke an API key
+      description: Revocation is idempotent. The key record is retained and never hard-deleted.
+      tags: [API Keys]
+      operationId: revokeApiKey
+      responses:
+        "200":
+          description: Revoked API key metadata.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiKey"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "404":
           $ref: "#/components/responses/Error"
   /v1/jobs:
     post:
@@ -783,6 +855,79 @@ components:
           enum: [ok]
         version:
           type: string
+    ApiKeyScope:
+      type: string
+      enum:
+        - api_keys_read
+        - api_keys_write
+        - agents_read
+        - agents_write
+        - printers_read
+        - printers_write
+        - jobs_read
+        - jobs_write
+        - webhooks_read
+        - webhooks_write
+        - usage_read
+        - audit_read
+    CreateApiKey:
+      type: object
+      additionalProperties: false
+      required: [name, scopes]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 120
+        scopes:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/ApiKeyScope"
+        expires_at:
+          type: [string, "null"]
+          format: date-time
+          description: Optional expiry no more than 365 days in the future.
+    ApiKey:
+      type: object
+      required:
+        [id, name, lookup_prefix, scopes, expires_at, last_used_at, revoked_at, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        lookup_prefix:
+          type: string
+          description: Non-secret prefix suitable for identifying the key.
+        scopes:
+          type: array
+          items:
+            $ref: "#/components/schemas/ApiKeyScope"
+        expires_at:
+          type: [string, "null"]
+          format: date-time
+        last_used_at:
+          type: [string, "null"]
+          format: date-time
+        revoked_at:
+          type: [string, "null"]
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+    CreatedApiKey:
+      allOf:
+        - $ref: "#/components/schemas/ApiKey"
+        - type: object
+          required: [secret]
+          properties:
+            secret:
+              type: string
+              writeOnly: true
+              description: Plaintext API key returned only by the create operation.
     Sha256:
       type: string
       pattern: ^[0-9a-fA-F]{64}$

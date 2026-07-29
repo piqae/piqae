@@ -126,6 +126,14 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/v1/health", get(api::health))
         .route("/v1/ready", get(api::ready))
+        .route(
+            "/v1/api-keys",
+            get(api::list_api_keys).post(api::create_api_key),
+        )
+        .route(
+            "/v1/api-keys/{key_id}",
+            axum::routing::delete(api::revoke_api_key),
+        )
         .route("/v1/agents", get(api::list_agents))
         .route("/v1/printers", get(api::list_printers))
         .route("/v1/agent-enrolments", post(api::create_agent_enrolment))
@@ -220,6 +228,7 @@ mod tests {
     use http_body_util::BodyExt;
     use rand::rngs::OsRng;
     use sha2::{Digest, Sha256};
+    use spool_auth::Scope;
     use spool_domain::{AgentId, EnvironmentId, PrinterId, WorkspaceId};
     use spool_protocol::agent::{
         AgentAcceptJobRequest, AgentHealth, AgentSyncRequest, AgentSyncResponse, QueueSnapshot,
@@ -265,6 +274,36 @@ mod tests {
             signing_key,
             tenant,
         }
+    }
+
+    async fn api_key_application(
+        principals: &[(&str, TenantContext)],
+    ) -> (Router, MemoryRepository) {
+        let repository = MemoryRepository::default();
+        let authenticator = StaticAuthenticator::default();
+        for (token, tenant) in principals {
+            authenticator.insert(token, *tenant).await;
+        }
+        (
+            router(AppState::new(
+                Arc::new(repository.clone()),
+                Arc::new(authenticator),
+            )),
+            repository,
+        )
+    }
+
+    fn api_request(method: &str, path: &str, token: &str, body: Option<&str>) -> Request<Body> {
+        let mut request = Request::builder()
+            .method(method)
+            .uri(path)
+            .header("authorization", format!("Bearer {token}"));
+        if body.is_some() {
+            request = request.header("content-type", "application/json");
+        }
+        request
+            .body(body.map_or_else(Body::empty, |value| Body::from(value.to_owned())))
+            .expect("valid API request")
     }
 
     fn signed_request(
@@ -352,6 +391,151 @@ mod tests {
             .await
             .expect("router response");
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn api_keys_are_one_time_scoped_tenant_isolated_and_revocable() {
+        let workspace = WorkspaceId::new();
+        let first_environment = EnvironmentId::new();
+        let second_environment = EnvironmentId::new();
+        let manager = TenantContext::with_scopes(
+            workspace,
+            first_environment,
+            &[Scope::ApiKeysRead, Scope::ApiKeysWrite, Scope::JobsRead],
+        );
+        let read_only =
+            TenantContext::with_scopes(workspace, first_environment, &[Scope::ApiKeysRead]);
+        let other_tenant = TenantContext::with_scopes(
+            workspace,
+            second_environment,
+            &[Scope::ApiKeysRead, Scope::ApiKeysWrite, Scope::JobsRead],
+        );
+        let (application, _) = api_key_application(&[
+            ("spl_test_manager", manager),
+            ("spl_test_reader", read_only),
+            ("spl_test_other", other_tenant),
+        ])
+        .await;
+
+        let denied = application
+            .clone()
+            .oneshot(api_request(
+                "POST",
+                "/v1/api-keys",
+                "spl_test_reader",
+                Some(r#"{"name":"Denied","scopes":["jobs_read"]}"#),
+            ))
+            .await
+            .expect("read-only response");
+        assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+
+        let overscoped = application
+            .clone()
+            .oneshot(api_request(
+                "POST",
+                "/v1/api-keys",
+                "spl_test_manager",
+                Some(r#"{"name":"Too broad","scopes":["jobs_write"]}"#),
+            ))
+            .await
+            .expect("overscope response");
+        assert_eq!(overscoped.status(), StatusCode::FORBIDDEN);
+
+        let created = application
+            .clone()
+            .oneshot(api_request(
+                "POST",
+                "/v1/api-keys",
+                "spl_test_manager",
+                Some(r#"{"name":"Read jobs","scopes":["jobs_read"]}"#),
+            ))
+            .await
+            .expect("create response");
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let created: serde_json::Value = serde_json::from_slice(
+            &created
+                .into_body()
+                .collect()
+                .await
+                .expect("created body")
+                .to_bytes(),
+        )
+        .expect("created JSON");
+        let key_id = created["id"].as_str().expect("key id");
+        let secret = created["secret"].as_str().expect("one-time secret");
+        assert!(secret.starts_with("spl_test_"));
+        assert!(created.get("secret_hash").is_none());
+
+        let listed = application
+            .clone()
+            .oneshot(api_request("GET", "/v1/api-keys", "spl_test_manager", None))
+            .await
+            .expect("list response");
+        let listed: serde_json::Value = serde_json::from_slice(
+            &listed
+                .into_body()
+                .collect()
+                .await
+                .expect("list body")
+                .to_bytes(),
+        )
+        .expect("list JSON");
+        assert_eq!(listed.as_array().expect("key list").len(), 1);
+        assert!(listed[0].get("secret").is_none());
+        assert!(listed[0].get("secret_hash").is_none());
+
+        let isolated = application
+            .clone()
+            .oneshot(api_request("GET", "/v1/api-keys", "spl_test_other", None))
+            .await
+            .expect("isolated list response");
+        let isolated: serde_json::Value = serde_json::from_slice(
+            &isolated
+                .into_body()
+                .collect()
+                .await
+                .expect("isolated body")
+                .to_bytes(),
+        )
+        .expect("isolated JSON");
+        assert!(isolated.as_array().expect("isolated key list").is_empty());
+
+        let missing = application
+            .clone()
+            .oneshot(api_request(
+                "DELETE",
+                &format!("/v1/api-keys/{key_id}"),
+                "spl_test_other",
+                None,
+            ))
+            .await
+            .expect("cross-tenant revoke response");
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+
+        for _ in 0..2 {
+            let revoked = application
+                .clone()
+                .oneshot(api_request(
+                    "DELETE",
+                    &format!("/v1/api-keys/{key_id}"),
+                    "spl_test_manager",
+                    None,
+                ))
+                .await
+                .expect("revoke response");
+            assert_eq!(revoked.status(), StatusCode::OK);
+            let revoked: serde_json::Value = serde_json::from_slice(
+                &revoked
+                    .into_body()
+                    .collect()
+                    .await
+                    .expect("revoke body")
+                    .to_bytes(),
+            )
+            .expect("revoke JSON");
+            assert!(revoked["revoked_at"].is_string());
+        }
     }
 
     #[tokio::test]

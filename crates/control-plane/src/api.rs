@@ -22,7 +22,7 @@ use chrono::{Duration, Utc};
 use rand::{RngCore, rngs::OsRng};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use spool_auth::Scope;
+use spool_auth::{Environment, Scope, generate_api_key};
 use spool_domain::{
     ContentKind, ContentSource, Job, JobEvent, JobId, JobOptions, JobState, PrinterId,
 };
@@ -33,9 +33,10 @@ use spool_protocol::agent::{
     ContentDescriptor, EnrolRequest, EnrolResponse, JobOffer,
 };
 use spool_storage_postgres::{
-    StoredAgent, StoredPrinter, StoredUpload, StoredWebhook, StoredWebhookDelivery, SyncedPrinter,
+    StoredAgent, StoredApiKey, StoredPrinter, StoredUpload, StoredWebhook, StoredWebhookDelivery,
+    SyncedPrinter,
 };
-use std::{convert::Infallible, str::FromStr};
+use std::{collections::BTreeSet, convert::Infallible, str::FromStr};
 
 #[derive(Debug, Serialize)]
 pub struct HealthResponse {
@@ -53,6 +54,108 @@ pub async fn health() -> Json<HealthResponse> {
 pub async fn ready(State(state): State<AppState>) -> Result<Json<HealthResponse>, AppError> {
     state.repository.ready().await?;
     Ok(health().await)
+}
+
+pub async fn list_api_keys(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<StoredApiKey>>, AppError> {
+    let tenant = authenticate_native(&state, &headers, Scope::ApiKeysRead).await?;
+    Ok(Json(
+        state
+            .repository
+            .list_api_keys(tenant.workspace_id, tenant.environment_id)
+            .await?,
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateApiKeyRequest {
+    name: String,
+    scopes: Vec<Scope>,
+    expires_at: Option<chrono::DateTime<Utc>>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CreatedApiKeyResponse {
+    #[serde(flatten)]
+    key: StoredApiKey,
+    secret: String,
+}
+
+pub async fn create_api_key(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<CreateApiKeyRequest>,
+) -> Result<Response, AppError> {
+    let tenant = authenticate_native(&state, &headers, Scope::ApiKeysWrite).await?;
+    let requested = request.scopes.iter().copied().collect::<BTreeSet<_>>();
+    if request.name.trim().is_empty()
+        || request.name.len() > 120
+        || requested.is_empty()
+        || requested.len() != request.scopes.len()
+        || request
+            .expires_at
+            .is_some_and(|expiry| expiry <= Utc::now() || expiry > Utc::now() + Duration::days(365))
+    {
+        return Err(AppError::invalid(
+            "invalid_api_key",
+            "Name, scopes, or expiry are outside the supported limits.",
+        ));
+    }
+    if requested.iter().any(|scope| !tenant.allows(*scope)) {
+        return Err(AppError::forbidden());
+    }
+    let kind = state
+        .repository
+        .environment_kind(tenant.workspace_id, tenant.environment_id)
+        .await?;
+    let environment = match kind.as_str() {
+        "test" => Environment::Test,
+        "live" => Environment::Live,
+        _ => return Err(AppError::service_unavailable("invalid_environment_kind")),
+    };
+    let generated = generate_api_key(environment)
+        .map_err(|_| AppError::service_unavailable("api_key_generation_failed"))?;
+    let scopes = requested
+        .iter()
+        .map(|scope| scope.as_str().to_owned())
+        .collect::<Vec<_>>();
+    let key = state
+        .repository
+        .create_api_key(
+            tenant.workspace_id,
+            tenant.environment_id,
+            &generated.id.to_string(),
+            request.name.trim(),
+            &generated.lookup_prefix,
+            &generated.password_hash,
+            &scopes,
+            request.expires_at,
+        )
+        .await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(CreatedApiKeyResponse {
+            key,
+            secret: generated.plaintext,
+        }),
+    )
+        .into_response())
+}
+
+pub async fn revoke_api_key(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(key_id): Path<String>,
+) -> Result<Json<StoredApiKey>, AppError> {
+    let tenant = authenticate_native(&state, &headers, Scope::ApiKeysWrite).await?;
+    Ok(Json(
+        state
+            .repository
+            .revoke_api_key(tenant.workspace_id, tenant.environment_id, &key_id)
+            .await?,
+    ))
 }
 
 pub async fn list_agents(
@@ -1169,7 +1272,7 @@ pub(crate) async fn authenticate_native(
         .authenticate_bearer(authorization)
         .await
         .map_err(|_| AppError::unauthorized())?;
-    if !tenant.allows(&required_scope) {
+    if !tenant.allows(required_scope) {
         return Err(AppError::forbidden());
     }
     Ok(tenant)
@@ -1189,7 +1292,7 @@ pub(crate) async fn authenticate_compatibility(
         .authenticate_basic(authorization)
         .await
         .map_err(|_| AppError::compatibility_unauthorized())?;
-    if !tenant.allows(&required_scope) {
+    if !tenant.allows(required_scope) {
         return Err(AppError::forbidden().compatibility());
     }
     Ok(tenant)

@@ -60,6 +60,18 @@ pub struct ApiKeyAuthenticationRecord {
 }
 
 #[derive(Clone, Debug, Serialize)]
+pub struct StoredApiKey {
+    pub id: String,
+    pub name: String,
+    pub lookup_prefix: String,
+    pub scopes: Vec<String>,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub last_used_at: Option<DateTime<Utc>>,
+    pub revoked_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Serialize)]
 pub struct StoredAgent {
     pub id: AgentId,
     pub name: String,
@@ -324,6 +336,91 @@ impl PostgresStore {
             .execute(&self.pool)
             .await?;
         Ok(())
+    }
+
+    pub async fn environment_kind(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+    ) -> Result<String, StorageError> {
+        sqlx::query_scalar("SELECT kind FROM environments WHERE id = $1 AND workspace_id = $2")
+            .bind(environment_id.to_string())
+            .bind(workspace_id.to_string())
+            .fetch_optional(&self.pool)
+            .await?
+            .ok_or(StorageError::NotFound)
+    }
+
+    pub async fn list_api_keys(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+    ) -> Result<Vec<StoredApiKey>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT id, name, lookup_prefix, scopes, expires_at, last_used_at,
+                    revoked_at, created_at
+             FROM api_keys
+             WHERE workspace_id = $1 AND environment_id = $2
+             ORDER BY created_at DESC, id DESC",
+        )
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(stored_api_key_from_row).collect()
+    }
+
+    pub async fn create_api_key(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        id: &str,
+        name: &str,
+        lookup_prefix: &str,
+        secret_hash: &str,
+        scopes: &[String],
+        expires_at: Option<DateTime<Utc>>,
+    ) -> Result<StoredApiKey, StorageError> {
+        let row = sqlx::query(
+            "INSERT INTO api_keys (
+                id, workspace_id, environment_id, name, lookup_prefix,
+                secret_hash, scopes, expires_at
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+             RETURNING id, name, lookup_prefix, scopes, expires_at, last_used_at,
+                       revoked_at, created_at",
+        )
+        .bind(id)
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(name)
+        .bind(lookup_prefix)
+        .bind(secret_hash)
+        .bind(scopes)
+        .bind(expires_at)
+        .fetch_one(&self.pool)
+        .await?;
+        stored_api_key_from_row(&row)
+    }
+
+    pub async fn revoke_api_key(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        id: &str,
+    ) -> Result<StoredApiKey, StorageError> {
+        let row = sqlx::query(
+            "UPDATE api_keys SET revoked_at = COALESCE(revoked_at, now())
+             WHERE id = $1 AND workspace_id = $2 AND environment_id = $3
+             RETURNING id, name, lookup_prefix, scopes, expires_at, last_used_at,
+                       revoked_at, created_at",
+        )
+        .bind(id)
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(StorageError::NotFound)?;
+        stored_api_key_from_row(&row)
     }
 
     pub async fn agent_for_authentication(
@@ -1757,6 +1854,19 @@ async fn find_idempotent_job(
         }
         Some(_) => Err(StorageError::IdempotencyConflict),
     }
+}
+
+fn stored_api_key_from_row(row: &sqlx::postgres::PgRow) -> Result<StoredApiKey, StorageError> {
+    Ok(StoredApiKey {
+        id: row.try_get("id")?,
+        name: row.try_get("name")?,
+        lookup_prefix: row.try_get("lookup_prefix")?,
+        scopes: row.try_get("scopes")?,
+        expires_at: row.try_get("expires_at")?,
+        last_used_at: row.try_get("last_used_at")?,
+        revoked_at: row.try_get("revoked_at")?,
+        created_at: row.try_get("created_at")?,
+    })
 }
 
 async fn insert_event(

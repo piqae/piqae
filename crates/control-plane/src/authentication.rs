@@ -32,34 +32,38 @@ impl Permissions {
         let mut value = 0;
         for name in names {
             value |= match name.as_str() {
-                "agents_read" => 1 << 0,
-                "agents_write" => 1 << 1,
-                "printers_read" => 1 << 2,
-                "printers_write" => 1 << 3,
-                "jobs_read" => 1 << 4,
-                "jobs_write" => 1 << 5,
-                "webhooks_read" => 1 << 6,
-                "webhooks_write" => 1 << 7,
-                "usage_read" => 1 << 8,
-                "audit_read" => 1 << 9,
+                "api_keys_read" => 1 << 0,
+                "api_keys_write" => 1 << 1,
+                "agents_read" => 1 << 2,
+                "agents_write" => 1 << 3,
+                "printers_read" => 1 << 4,
+                "printers_write" => 1 << 5,
+                "jobs_read" => 1 << 6,
+                "jobs_write" => 1 << 7,
+                "webhooks_read" => 1 << 8,
+                "webhooks_write" => 1 << 9,
+                "usage_read" => 1 << 10,
+                "audit_read" => 1 << 11,
                 _ => 0,
             };
         }
         Self(value)
     }
 
-    const fn allows(self, scope: &Scope) -> bool {
+    const fn allows(self, scope: Scope) -> bool {
         let bit = match scope {
-            Scope::AgentsRead => 1 << 0,
-            Scope::AgentsWrite => 1 << 1,
-            Scope::PrintersRead => 1 << 2,
-            Scope::PrintersWrite => 1 << 3,
-            Scope::JobsRead => 1 << 4,
-            Scope::JobsWrite => 1 << 5,
-            Scope::WebhooksRead => 1 << 6,
-            Scope::WebhooksWrite => 1 << 7,
-            Scope::UsageRead => 1 << 8,
-            Scope::AuditRead => 1 << 9,
+            Scope::ApiKeysRead => 1 << 0,
+            Scope::ApiKeysWrite => 1 << 1,
+            Scope::AgentsRead => 1 << 2,
+            Scope::AgentsWrite => 1 << 3,
+            Scope::PrintersRead => 1 << 4,
+            Scope::PrintersWrite => 1 << 5,
+            Scope::JobsRead => 1 << 6,
+            Scope::JobsWrite => 1 << 7,
+            Scope::WebhooksRead => 1 << 8,
+            Scope::WebhooksWrite => 1 << 9,
+            Scope::UsageRead => 1 << 10,
+            Scope::AuditRead => 1 << 11,
         };
         self.0 & bit != 0
     }
@@ -76,8 +80,26 @@ impl TenantContext {
     }
 
     #[must_use]
-    pub const fn allows(self, scope: &Scope) -> bool {
+    pub const fn allows(self, scope: Scope) -> bool {
         self.permissions.allows(scope)
+    }
+
+    #[must_use]
+    pub fn with_scopes(
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        scopes: &[Scope],
+    ) -> Self {
+        Self {
+            workspace_id,
+            environment_id,
+            permissions: Permissions::from_names(
+                &scopes
+                    .iter()
+                    .map(|scope| scope.as_str().to_owned())
+                    .collect::<Vec<_>>(),
+            ),
+        }
     }
 }
 
@@ -466,8 +488,8 @@ mod tests {
             environment_id: EnvironmentId::new(),
             permissions: Permissions::from_names(&["jobs_read".into()]),
         };
-        assert!(tenant.allows(&Scope::JobsRead));
-        assert!(!tenant.allows(&Scope::JobsWrite));
-        assert!(!tenant.allows(&Scope::WebhooksWrite));
+        assert!(tenant.allows(Scope::JobsRead));
+        assert!(!tenant.allows(Scope::JobsWrite));
+        assert!(!tenant.allows(Scope::WebhooksWrite));
     }
 }

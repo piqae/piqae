@@ -12,8 +12,8 @@ use spool_domain::{
 };
 use spool_storage_postgres::{
     AgentAuthenticationRecord, CreateJobResult as PgCreateJobResult, EnrolledAgent, JobLease,
-    PostgresStore, StorageError, StoredAgent, StoredPrinter, StoredTenantEvent, StoredUpload,
-    StoredWebhook, StoredWebhookDelivery, SyncedPrinter, WebhookDeliveryWork,
+    PostgresStore, StorageError, StoredAgent, StoredApiKey, StoredPrinter, StoredTenantEvent,
+    StoredUpload, StoredWebhook, StoredWebhookDelivery, SyncedPrinter, WebhookDeliveryWork,
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -58,6 +58,33 @@ impl From<StorageError> for RepositoryError {
 #[async_trait]
 pub trait Repository: Send + Sync + 'static {
     async fn ready(&self) -> Result<(), RepositoryError>;
+    async fn environment_kind(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+    ) -> Result<String, RepositoryError>;
+    async fn list_api_keys(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+    ) -> Result<Vec<StoredApiKey>, RepositoryError>;
+    async fn create_api_key(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        id: &str,
+        name: &str,
+        lookup_prefix: &str,
+        secret_hash: &str,
+        scopes: &[String],
+        expires_at: Option<DateTime<Utc>>,
+    ) -> Result<StoredApiKey, RepositoryError>;
+    async fn revoke_api_key(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        id: &str,
+    ) -> Result<StoredApiKey, RepositoryError>;
     async fn agent_for_authentication(
         &self,
         agent_id: AgentId,
@@ -306,6 +333,63 @@ pub trait Repository: Send + Sync + 'static {
 impl Repository for PostgresStore {
     async fn ready(&self) -> Result<(), RepositoryError> {
         self.readiness().await.map_err(Into::into)
+    }
+
+    async fn environment_kind(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+    ) -> Result<String, RepositoryError> {
+        Self::environment_kind(self, workspace_id, environment_id)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn list_api_keys(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+    ) -> Result<Vec<StoredApiKey>, RepositoryError> {
+        Self::list_api_keys(self, workspace_id, environment_id)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn create_api_key(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        id: &str,
+        name: &str,
+        lookup_prefix: &str,
+        secret_hash: &str,
+        scopes: &[String],
+        expires_at: Option<DateTime<Utc>>,
+    ) -> Result<StoredApiKey, RepositoryError> {
+        Self::create_api_key(
+            self,
+            workspace_id,
+            environment_id,
+            id,
+            name,
+            lookup_prefix,
+            secret_hash,
+            scopes,
+            expires_at,
+        )
+        .await
+        .map_err(Into::into)
+    }
+
+    async fn revoke_api_key(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        id: &str,
+    ) -> Result<StoredApiKey, RepositoryError> {
+        Self::revoke_api_key(self, workspace_id, environment_id, id)
+            .await
+            .map_err(Into::into)
     }
 
     async fn agent_for_authentication(
@@ -840,6 +924,7 @@ struct MemoryJob {
 
 #[derive(Debug, Default)]
 struct MemoryState {
+    api_keys: HashMap<String, (WorkspaceId, EnvironmentId, StoredApiKey, String)>,
     jobs: HashMap<JobId, MemoryJob>,
     printers: HashMap<PrinterId, (WorkspaceId, EnvironmentId, StoredPrinter)>,
     agents: HashMap<AgentId, (WorkspaceId, EnvironmentId, StoredAgent)>,
@@ -917,6 +1002,95 @@ impl MemoryRepository {
 impl Repository for MemoryRepository {
     async fn ready(&self) -> Result<(), RepositoryError> {
         Ok(())
+    }
+
+    async fn environment_kind(
+        &self,
+        _workspace_id: WorkspaceId,
+        _environment_id: EnvironmentId,
+    ) -> Result<String, RepositoryError> {
+        Ok("test".into())
+    }
+
+    async fn list_api_keys(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+    ) -> Result<Vec<StoredApiKey>, RepositoryError> {
+        let mut keys = self
+            .state
+            .read()
+            .await
+            .api_keys
+            .values()
+            .filter(|(workspace, environment, _, _)| {
+                *workspace == workspace_id && *environment == environment_id
+            })
+            .map(|(_, _, key, _)| key.clone())
+            .collect::<Vec<_>>();
+        keys.sort_by_key(|key| std::cmp::Reverse((key.created_at, key.id.clone())));
+        Ok(keys)
+    }
+
+    async fn create_api_key(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        id: &str,
+        name: &str,
+        lookup_prefix: &str,
+        secret_hash: &str,
+        scopes: &[String],
+        expires_at: Option<DateTime<Utc>>,
+    ) -> Result<StoredApiKey, RepositoryError> {
+        let mut state = self.state.write().await;
+        if state
+            .api_keys
+            .values()
+            .any(|(_, _, key, _)| key.lookup_prefix == lookup_prefix)
+        {
+            return Err(RepositoryError::ConcurrentStateChange);
+        }
+        let key = StoredApiKey {
+            id: id.into(),
+            name: name.into(),
+            lookup_prefix: lookup_prefix.into(),
+            scopes: scopes.to_vec(),
+            expires_at,
+            last_used_at: None,
+            revoked_at: None,
+            created_at: Utc::now(),
+        };
+        state.api_keys.insert(
+            id.into(),
+            (
+                workspace_id,
+                environment_id,
+                key.clone(),
+                secret_hash.into(),
+            ),
+        );
+        Ok(key)
+    }
+
+    async fn revoke_api_key(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        id: &str,
+    ) -> Result<StoredApiKey, RepositoryError> {
+        let mut state = self.state.write().await;
+        let (_, _, key, _) = state
+            .api_keys
+            .get_mut(id)
+            .filter(|(workspace, environment, _, _)| {
+                *workspace == workspace_id && *environment == environment_id
+            })
+            .ok_or(RepositoryError::NotFound)?;
+        if key.revoked_at.is_none() {
+            key.revoked_at = Some(Utc::now());
+        }
+        Ok(key.clone())
     }
 
     async fn agent_for_authentication(

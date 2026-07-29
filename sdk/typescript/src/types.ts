@@ -33,6 +33,42 @@ export interface Health {
   version: string;
 }
 
+export type ApiKeyScope =
+  | 'api_keys_read'
+  | 'api_keys_write'
+  | 'agents_read'
+  | 'agents_write'
+  | 'printers_read'
+  | 'printers_write'
+  | 'jobs_read'
+  | 'jobs_write'
+  | 'webhooks_read'
+  | 'webhooks_write'
+  | 'usage_read'
+  | 'audit_read';
+
+export interface ApiKey {
+  id: string;
+  name: string;
+  lookup_prefix: string;
+  scopes: ApiKeyScope[];
+  expires_at: string | null;
+  last_used_at: string | null;
+  revoked_at: string | null;
+  created_at: string;
+}
+
+export interface CreateApiKey {
+  name: string;
+  scopes: ApiKeyScope[];
+  expires_at?: string | null;
+}
+
+export interface CreatedApiKey extends ApiKey {
+  /** Plaintext secret returned only by the create operation. */
+  secret: string;
+}
+
 export interface Agent {
   id: SpoolId;
   name: string;

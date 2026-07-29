@@ -27,9 +27,11 @@ impl Environment {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Scope {
+    ApiKeysRead,
+    ApiKeysWrite,
     AgentsRead,
     AgentsWrite,
     PrintersRead,
@@ -40,6 +42,26 @@ pub enum Scope {
     WebhooksWrite,
     UsageRead,
     AuditRead,
+}
+
+impl Scope {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ApiKeysRead => "api_keys_read",
+            Self::ApiKeysWrite => "api_keys_write",
+            Self::AgentsRead => "agents_read",
+            Self::AgentsWrite => "agents_write",
+            Self::PrintersRead => "printers_read",
+            Self::PrintersWrite => "printers_write",
+            Self::JobsRead => "jobs_read",
+            Self::JobsWrite => "jobs_write",
+            Self::WebhooksRead => "webhooks_read",
+            Self::WebhooksWrite => "webhooks_write",
+            Self::UsageRead => "usage_read",
+            Self::AuditRead => "audit_read",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

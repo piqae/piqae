@@ -71,4 +71,45 @@ describe('SpoolClient', () => {
     expect(url.origin + url.pathname).toBe('http://localhost:39100/v1/jobs');
     expect(Object.fromEntries(url.searchParams)).toEqual({ after: 'job_9', limit: '25' });
   });
+
+  it('deletes a webhook through the canonical endpoint', async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(null, { status: 204 }));
+    const client = new SpoolClient({
+      apiKey: 'spl_live_secret',
+      fetch: fetcher,
+      baseUrl: 'https://api.spool.test'
+    });
+
+    await client.webhooks.remove('whk_01K');
+
+    const [url, init] = fetcher.mock.calls[0] ?? [];
+    expect(String(url)).toBe('https://api.spool.test/v1/webhooks/whk_01K');
+    expect(init?.method).toBe('DELETE');
+  });
+
+  it('creates and revokes environment-scoped API keys', async () => {
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ id: 'key_1', secret: 'spl_test_x' })))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ id: 'key_1', revoked_at: 'now' })));
+    const client = new SpoolClient({
+      apiKey: 'spl_test_manager',
+      fetch: fetcher,
+      baseUrl: 'https://print.example.test'
+    });
+
+    await client.apiKeys.create({ name: 'CI', scopes: ['jobs_read'] });
+    await client.apiKeys.revoke('key_1');
+
+    const [createUrl, createInit] = fetcher.mock.calls[0] ?? [];
+    expect(String(createUrl)).toBe('https://print.example.test/v1/api-keys');
+    expect(createInit?.method).toBe('POST');
+    expect(JSON.parse(String(createInit?.body))).toEqual({
+      name: 'CI',
+      scopes: ['jobs_read']
+    });
+    const [revokeUrl, revokeInit] = fetcher.mock.calls[1] ?? [];
+    expect(String(revokeUrl)).toBe('https://print.example.test/v1/api-keys/key_1');
+    expect(revokeInit?.method).toBe('DELETE');
+  });
 });

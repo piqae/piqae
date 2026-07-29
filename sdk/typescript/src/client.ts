@@ -1,7 +1,10 @@
 import type {
   Agent,
   AgentEnrolment,
+  ApiKey,
+  CreateApiKey,
   CreateJob,
+  CreatedApiKey,
   ErrorEnvelope,
   Health,
   Job,
@@ -65,6 +68,14 @@ export class SpoolClient {
   health = () => this.request<Health>('GET', '/v1/health');
   ready = () => this.request<Health>('GET', '/v1/ready');
 
+  readonly apiKeys = {
+    list: () => this.request<ApiKey[]>('GET', '/v1/api-keys'),
+    create: (input: CreateApiKey) =>
+      this.request<CreatedApiKey>('POST', '/v1/api-keys', { body: input }),
+    revoke: (id: string) =>
+      this.request<ApiKey>('DELETE', `/v1/api-keys/${encodeURIComponent(id)}`)
+  };
+
   readonly agents = {
     list: () => this.request<Agent[]>('GET', '/v1/agents'),
     createEnrolment: (input: { name: string; expires_in_seconds?: number }) =>
@@ -95,7 +106,9 @@ export class SpoolClient {
   readonly webhooks = {
     list: () => this.request<Webhook[]>('GET', '/v1/webhooks'),
     create: (input: { url: string; events: string[] }) =>
-      this.request<Webhook & { secret: string }>('POST', '/v1/webhooks', { body: input })
+      this.request<Webhook & { secret: string }>('POST', '/v1/webhooks', { body: input }),
+    remove: (id: string) =>
+      this.request<void>('DELETE', `/v1/webhooks/${encodeURIComponent(id)}`)
   };
 
   /**
