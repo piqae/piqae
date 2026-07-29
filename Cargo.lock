@@ -3272,6 +3272,17 @@ dependencies = [
 name = "spool-shell-windows"
 version = "0.1.0"
 dependencies = [
+ "base64",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "spool-domain",
+ "spool-executor-windows",
+ "spool-local-ipc",
+ "thiserror",
+ "url",
+ "uuid",
  "windows-sys 0.59.0",
 ]
 

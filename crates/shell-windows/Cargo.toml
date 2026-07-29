@@ -7,6 +7,19 @@ repository.workspace = true
 rust-version.workspace = true
 publish = false
 
+[dependencies]
+base64.workspace = true
+hex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+spool-domain.workspace = true
+spool-executor-windows = { path = "../executor-windows", version = "0.1.0" }
+spool-local-ipc = { path = "../local-ipc", version = "0.1.0" }
+thiserror.workspace = true
+url.workspace = true
+uuid.workspace = true
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59.0", features = [
   "Win32_Foundation",
