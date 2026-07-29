@@ -830,14 +830,18 @@ impl PostgresStore {
         environment_id: EnvironmentId,
     ) -> Result<PlatformGrantAuthenticationRecord, StorageError> {
         let row = sqlx::query(
-            "SELECT account.secret_hash, grant.scopes
+            "SELECT account.secret_hash, workspace_grant.scopes
              FROM platform_service_accounts account
-             JOIN platform_workspace_grants grant
-               ON grant.service_account_id = account.id
+             JOIN platform_workspace_grants workspace_grant
+               ON workspace_grant.service_account_id = account.id
              WHERE account.id = $1 AND account.revoked_at IS NULL
-               AND grant.workspace_id = $2 AND grant.environment_id = $3
-               AND grant.revoked_at IS NULL
-               AND (grant.expires_at IS NULL OR grant.expires_at > now())",
+               AND workspace_grant.workspace_id = $2
+               AND workspace_grant.environment_id = $3
+               AND workspace_grant.revoked_at IS NULL
+               AND (
+                    workspace_grant.expires_at IS NULL
+                    OR workspace_grant.expires_at > now()
+               )",
         )
         .bind(service_account_id)
         .bind(workspace_id.to_string())
@@ -851,17 +855,43 @@ impl PostgresStore {
         })
     }
 
-    pub async fn mark_platform_service_account_used(
+    pub async fn record_platform_service_account_use(
         &self,
         service_account_id: &str,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        required_scope: &str,
+        scope_granted: bool,
+        request_id: &str,
     ) -> Result<(), StorageError> {
-        sqlx::query(
+        let mut transaction = self.pool.begin().await?;
+        let affected = sqlx::query(
             "UPDATE platform_service_accounts SET last_used_at = now()
              WHERE id = $1 AND revoked_at IS NULL",
         )
         .bind(service_account_id)
-        .execute(&self.pool)
+        .execute(&mut *transaction)
+        .await?
+        .rows_affected();
+        if affected != 1 {
+            return Err(StorageError::NotFound);
+        }
+        insert_platform_audit_event(
+            &mut transaction,
+            workspace_id,
+            Some(environment_id),
+            "platform_service_account",
+            Some(service_account_id),
+            "platform_service_account.authenticated",
+            service_account_id,
+            serde_json::json!({
+                "required_scope": required_scope,
+                "scope_granted": scope_granted
+            }),
+            Some(request_id),
+        )
         .await?;
+        transaction.commit().await?;
         Ok(())
     }
 
@@ -898,6 +928,18 @@ impl PostgresStore {
         .bind(expires_at)
         .execute(&mut *transaction)
         .await?;
+        insert_platform_audit_event(
+            &mut transaction,
+            workspace_id,
+            Some(environment_id),
+            "operator_cli",
+            None,
+            "platform_service_account.created",
+            id,
+            serde_json::json!({"name": name, "scopes": scopes, "expires_at": expires_at}),
+            None,
+        )
+        .await?;
         transaction.commit().await?;
         Ok(())
     }
@@ -910,6 +952,7 @@ impl PostgresStore {
         scopes: &[String],
         expires_at: Option<DateTime<Utc>>,
     ) -> Result<(), StorageError> {
+        let mut transaction = self.pool.begin().await?;
         sqlx::query(
             "INSERT INTO platform_workspace_grants (
                 id, service_account_id, workspace_id, environment_id, scopes, expires_at
@@ -924,8 +967,21 @@ impl PostgresStore {
         .bind(environment_id.to_string())
         .bind(scopes)
         .bind(expires_at)
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await?;
+        insert_platform_audit_event(
+            &mut transaction,
+            workspace_id,
+            Some(environment_id),
+            "operator_cli",
+            None,
+            "platform_service_account.grant_updated",
+            service_account_id,
+            serde_json::json!({"scopes": scopes, "expires_at": expires_at}),
+            None,
+        )
+        .await?;
+        transaction.commit().await?;
         Ok(())
     }
 
@@ -935,6 +991,7 @@ impl PostgresStore {
         workspace_id: WorkspaceId,
         environment_id: EnvironmentId,
     ) -> Result<(), StorageError> {
+        let mut transaction = self.pool.begin().await?;
         let affected = sqlx::query(
             "UPDATE platform_workspace_grants SET revoked_at = COALESCE(revoked_at, now())
              WHERE service_account_id = $1 AND workspace_id = $2 AND environment_id = $3
@@ -943,12 +1000,133 @@ impl PostgresStore {
         .bind(service_account_id)
         .bind(workspace_id.to_string())
         .bind(environment_id.to_string())
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await?
         .rows_affected();
         if affected != 1 {
             return Err(StorageError::NotFound);
         }
+        insert_platform_audit_event(
+            &mut transaction,
+            workspace_id,
+            Some(environment_id),
+            "operator_cli",
+            None,
+            "platform_service_account.grant_revoked",
+            service_account_id,
+            serde_json::json!({}),
+            None,
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    pub async fn rotate_platform_service_account(
+        &self,
+        service_account_id: &str,
+        secret_hash: &str,
+    ) -> Result<(), StorageError> {
+        let mut transaction = self.pool.begin().await?;
+        let grants = platform_grant_tenants(&mut transaction, service_account_id).await?;
+        let affected = sqlx::query(
+            "UPDATE platform_service_accounts
+             SET secret_hash = $2
+             WHERE id = $1 AND revoked_at IS NULL",
+        )
+        .bind(service_account_id)
+        .bind(secret_hash)
+        .execute(&mut *transaction)
+        .await?
+        .rows_affected();
+        if affected != 1 {
+            return Err(StorageError::NotFound);
+        }
+        for (workspace_id, environment_id) in grants {
+            insert_platform_audit_event(
+                &mut transaction,
+                workspace_id,
+                Some(environment_id),
+                "operator_cli",
+                None,
+                "platform_service_account.rotated",
+                service_account_id,
+                serde_json::json!({}),
+                None,
+            )
+            .await?;
+        }
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    pub async fn revoke_platform_service_account(
+        &self,
+        service_account_id: &str,
+    ) -> Result<(), StorageError> {
+        let mut transaction = self.pool.begin().await?;
+        let grants = platform_grant_tenants(&mut transaction, service_account_id).await?;
+        let affected = sqlx::query(
+            "UPDATE platform_service_accounts SET revoked_at = COALESCE(revoked_at, now())
+             WHERE id = $1 AND revoked_at IS NULL",
+        )
+        .bind(service_account_id)
+        .execute(&mut *transaction)
+        .await?
+        .rows_affected();
+        if affected != 1 {
+            return Err(StorageError::NotFound);
+        }
+        for (workspace_id, environment_id) in grants {
+            insert_platform_audit_event(
+                &mut transaction,
+                workspace_id,
+                Some(environment_id),
+                "operator_cli",
+                None,
+                "platform_service_account.revoked",
+                service_account_id,
+                serde_json::json!({}),
+                None,
+            )
+            .await?;
+        }
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    pub async fn delete_platform_service_account(
+        &self,
+        service_account_id: &str,
+    ) -> Result<(), StorageError> {
+        let mut transaction = self.pool.begin().await?;
+        let grants = platform_grant_tenants(&mut transaction, service_account_id).await?;
+        let affected = sqlx::query(
+            "DELETE FROM platform_service_accounts
+             WHERE id = $1 AND revoked_at IS NOT NULL",
+        )
+        .bind(service_account_id)
+        .execute(&mut *transaction)
+        .await?
+        .rows_affected();
+        if affected != 1 {
+            return Err(StorageError::NotFound);
+        }
+        for (workspace_id, environment_id) in grants {
+            insert_platform_audit_event(
+                &mut transaction,
+                workspace_id,
+                Some(environment_id),
+                "operator_cli",
+                None,
+                "platform_service_account.deleted",
+                service_account_id,
+                serde_json::json!({}),
+                None,
+            )
+            .await?;
+        }
+        transaction.commit().await?;
         Ok(())
     }
 
@@ -3695,6 +3873,65 @@ impl PostgresStore {
             .await?;
         Ok(())
     }
+}
+
+async fn platform_grant_tenants(
+    transaction: &mut Transaction<'_, Postgres>,
+    service_account_id: &str,
+) -> Result<Vec<(WorkspaceId, EnvironmentId)>, StorageError> {
+    sqlx::query(
+        "SELECT workspace_id, environment_id
+         FROM platform_workspace_grants
+         WHERE service_account_id = $1",
+    )
+    .bind(service_account_id)
+    .fetch_all(&mut **transaction)
+    .await?
+    .into_iter()
+    .map(|row| {
+        let workspace_id: String = row.try_get("workspace_id")?;
+        let environment_id: String = row.try_get("environment_id")?;
+        Ok((
+            workspace_id.parse().map_err(|error| {
+                StorageError::InvalidData(format!("workspace id `{workspace_id}`: {error}"))
+            })?,
+            environment_id.parse().map_err(|error| {
+                StorageError::InvalidData(format!("environment id `{environment_id}`: {error}"))
+            })?,
+        ))
+    })
+    .collect()
+}
+
+async fn insert_platform_audit_event(
+    transaction: &mut Transaction<'_, Postgres>,
+    workspace_id: WorkspaceId,
+    environment_id: Option<EnvironmentId>,
+    actor_type: &str,
+    actor_id: Option<&str>,
+    action: &str,
+    service_account_id: &str,
+    safe_metadata: serde_json::Value,
+    request_id: Option<&str>,
+) -> Result<(), StorageError> {
+    sqlx::query(
+        "INSERT INTO audit_events (
+            id, workspace_id, environment_id, actor_type, actor_id, action,
+            resource_type, resource_id, safe_metadata, request_id
+         ) VALUES ($1,$2,$3,$4,$5,$6,'platform_service_account',$7,$8,$9)",
+    )
+    .bind(format!("audit_{}", Uuid::now_v7()))
+    .bind(workspace_id.to_string())
+    .bind(environment_id.map(|id| id.to_string()))
+    .bind(actor_type)
+    .bind(actor_id)
+    .bind(action)
+    .bind(service_account_id)
+    .bind(safe_metadata)
+    .bind(request_id)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
 }
 
 async fn find_idempotent_job(

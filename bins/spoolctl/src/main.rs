@@ -3,10 +3,11 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use clap::{Parser, Subcommand, ValueEnum};
 use reqwest::{Client, Method, StatusCode};
 use serde_json::{Value, json};
-use spool_auth::generate_platform_service_account_key;
+use spool_auth::{generate_platform_service_account_key, rotate_platform_service_account_key};
 use spool_domain::{EnvironmentId, WorkspaceId};
 use spool_storage_postgres::PostgresStore;
 use std::{path::PathBuf, str::FromStr};
+use uuid::Uuid;
 
 #[derive(Debug, Parser)]
 #[command(name = "spoolctl", version, about = "Operate a Spool deployment")]
@@ -68,6 +69,21 @@ enum PlatformCommand {
         workspace: String,
         #[arg(long)]
         environment: String,
+    },
+    Rotate {
+        #[arg(long)]
+        service_account: String,
+    },
+    Revoke {
+        #[arg(long)]
+        service_account: String,
+    },
+    Delete {
+        #[arg(long)]
+        service_account: String,
+        /// Must exactly repeat the service-account ID.
+        #[arg(long)]
+        confirm: String,
     },
 }
 
@@ -216,12 +232,7 @@ async fn main() -> Result<()> {
 }
 
 async fn run_platform_command(command: PlatformCommand) -> Result<()> {
-    let database_url = std::env::var("SPOOL_DATABASE_URL")
-        .context("SPOOL_DATABASE_URL is required for platform operator commands")?;
-    let store = PostgresStore::connect(&database_url, 2)
-        .await
-        .context("failed to connect to the Spool database")?;
-    store.migrate().await.context("database migration failed")?;
+    let store = platform_store().await?;
     match command {
         PlatformCommand::Create {
             name,
@@ -280,8 +291,51 @@ async fn run_platform_command(command: PlatformCommand) -> Result<()> {
                 .await
                 .context("failed to revoke platform workspace access")?;
         }
+        PlatformCommand::Rotate { service_account } => {
+            let account_id =
+                Uuid::parse_str(&service_account).context("invalid platform service-account ID")?;
+            let generated = rotate_platform_service_account_key(account_id)
+                .context("failed to rotate platform credential")?;
+            store
+                .rotate_platform_service_account(&service_account, &generated.password_hash)
+                .await
+                .context("failed to rotate platform service account")?;
+            println!("service_account_id={service_account}");
+            println!("credential={}", generated.plaintext);
+            eprintln!(
+                "Store the credential now; the previous credential is invalid and Spool cannot display the new one again."
+            );
+        }
+        PlatformCommand::Revoke { service_account } => {
+            store
+                .revoke_platform_service_account(&service_account)
+                .await
+                .context("failed to revoke platform service account")?;
+        }
+        PlatformCommand::Delete {
+            service_account,
+            confirm,
+        } => {
+            if confirm != service_account {
+                bail!("--confirm must exactly match --service-account");
+            }
+            store
+                .delete_platform_service_account(&service_account)
+                .await
+                .context("failed to delete platform service account")?;
+        }
     }
     Ok(())
+}
+
+async fn platform_store() -> Result<PostgresStore> {
+    let database_url = std::env::var("SPOOL_DATABASE_URL")
+        .context("SPOOL_DATABASE_URL is required for platform operator commands")?;
+    let store = PostgresStore::connect(&database_url, 2)
+        .await
+        .context("failed to connect to the Spool database")?;
+    store.migrate().await.context("database migration failed")?;
+    Ok(store)
 }
 
 fn parse_workspace(value: &str) -> Result<WorkspaceId> {

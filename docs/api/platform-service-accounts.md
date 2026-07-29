@@ -14,6 +14,8 @@ ordinary Spool API keys:
 - the server authenticates the credential before considering selection headers;
 - an ordinary API key cannot use selection headers to cross tenants;
 - revoking one grant does not revoke unrelated customer grants.
+- every successful credential verification writes a tenant-scoped audit event
+  before the request is allowed to proceed.
 
 ## SDK
 
@@ -97,3 +99,32 @@ spoolctl platform revoke-grant \
   --workspace wrk_... \
   --environment env_...
 ```
+
+Rotate a credential without changing its grants:
+
+```console
+spoolctl platform rotate --service-account 019...
+```
+
+The old credential stops working as soon as the transaction commits. The
+replacement is printed once.
+
+Revoke the whole account immediately:
+
+```console
+spoolctl platform revoke --service-account 019...
+```
+
+Deleting an account is intentionally harder than revocation: the account must
+already be revoked, and the command requires repeating its exact ID:
+
+```console
+spoolctl platform delete \
+  --service-account 019... \
+  --confirm 019...
+```
+
+Creation, grant changes, rotation, account revocation, deletion, and verified
+request use write tenant-scoped audit records. Those records contain IDs,
+scopes, outcomes, and request IDs—not credentials or document content. If the
+request audit write fails, platform authentication fails closed.

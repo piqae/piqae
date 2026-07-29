@@ -136,8 +136,15 @@ pub fn generate_platform_service_account_key() -> Result<GeneratedLocalSecret, A
     generate_local_secret("spl_platform_")
 }
 
+pub fn rotate_platform_service_account_key(id: Uuid) -> Result<GeneratedLocalSecret, AuthError> {
+    generate_local_secret_for_id("spl_platform_", id)
+}
+
 fn generate_local_secret(prefix: &str) -> Result<GeneratedLocalSecret, AuthError> {
-    let id = Uuid::now_v7();
+    generate_local_secret_for_id(prefix, Uuid::now_v7())
+}
+
+fn generate_local_secret_for_id(prefix: &str, id: Uuid) -> Result<GeneratedLocalSecret, AuthError> {
     let mut random = [0_u8; 32];
     OsRng.fill_bytes(&mut random);
     let plaintext = format!("{prefix}{id}.{}", URL_SAFE_NO_PAD.encode(random));
@@ -298,5 +305,24 @@ mod tests {
         assert!(verify_platform_service_account_key(&key.plaintext, &key.password_hash).is_ok());
         assert!(local_owner_session_id(&key.plaintext).is_err());
         assert!(api_key_lookup_prefix(&key.plaintext).is_err());
+    }
+
+    #[test]
+    fn platform_key_rotation_preserves_identity_and_replaces_secret() {
+        let original = generate_platform_service_account_key().unwrap();
+        let rotated = rotate_platform_service_account_key(original.id).unwrap();
+        assert_eq!(rotated.id, original.id);
+        assert_ne!(rotated.plaintext, original.plaintext);
+        assert_eq!(
+            platform_service_account_key_id(&rotated.plaintext),
+            Ok(original.id)
+        );
+        assert!(
+            verify_platform_service_account_key(&rotated.plaintext, &rotated.password_hash).is_ok()
+        );
+        assert!(
+            verify_platform_service_account_key(&original.plaintext, &rotated.password_hash)
+                .is_err()
+        );
     }
 }

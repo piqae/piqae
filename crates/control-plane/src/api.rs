@@ -1840,9 +1840,16 @@ pub(crate) async fn authenticate_native(
                 WorkspaceId::from_str(workspace).map_err(|_| AppError::unauthorized())?;
             let environment_id =
                 EnvironmentId::from_str(environment).map_err(|_| AppError::unauthorized())?;
+            let request_id = crate::request_id::current();
             state
                 .authenticator
-                .authenticate_platform_bearer(authorization, workspace_id, environment_id)
+                .authenticate_platform_bearer(
+                    authorization,
+                    workspace_id,
+                    environment_id,
+                    required_scope,
+                    &request_id,
+                )
                 .await
         }
         _ => Err(crate::authentication::AuthenticationError),

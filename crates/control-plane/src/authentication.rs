@@ -125,6 +125,8 @@ pub trait Authenticator: Send + Sync + 'static {
         _authorization: &str,
         _workspace_id: WorkspaceId,
         _environment_id: EnvironmentId,
+        _required_scope: Scope,
+        _request_id: &str,
     ) -> Result<TenantContext, AuthenticationError> {
         Err(AuthenticationError)
     }
@@ -301,6 +303,8 @@ impl Authenticator for PostgresAuthenticator {
         authorization: &str,
         workspace_id: WorkspaceId,
         environment_id: EnvironmentId,
+        required_scope: Scope,
+        request_id: &str,
     ) -> Result<TenantContext, AuthenticationError> {
         let token = authorization
             .strip_prefix("Bearer ")
@@ -320,17 +324,22 @@ impl Authenticator for PostgresAuthenticator {
         .await
         .map_err(|_| AuthenticationError)?
         .map_err(|_| AuthenticationError)?;
-        if let Err(error) = self
-            .store
-            .mark_platform_service_account_used(&id.to_string())
+        let permissions = Permissions::from_names(&record.scopes);
+        self.store
+            .record_platform_service_account_use(
+                &id.to_string(),
+                workspace_id,
+                environment_id,
+                required_scope.as_str(),
+                permissions.allows(required_scope),
+                request_id,
+            )
             .await
-        {
-            tracing::warn!(%error, "failed to record platform service account use");
-        }
+            .map_err(|_| AuthenticationError)?;
         Ok(TenantContext {
             workspace_id,
             environment_id,
-            permissions: Permissions::from_names(&record.scopes),
+            permissions,
         })
     }
 }
@@ -404,9 +413,17 @@ impl Authenticator for CombinedAuthenticator {
         authorization: &str,
         workspace_id: WorkspaceId,
         environment_id: EnvironmentId,
+        required_scope: Scope,
+        request_id: &str,
     ) -> Result<TenantContext, AuthenticationError> {
         self.postgres
-            .authenticate_platform_bearer(authorization, workspace_id, environment_id)
+            .authenticate_platform_bearer(
+                authorization,
+                workspace_id,
+                environment_id,
+                required_scope,
+                request_id,
+            )
             .await
     }
 }

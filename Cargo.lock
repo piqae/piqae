@@ -3102,6 +3102,7 @@ dependencies = [
  "spool-protocol",
  "spool-storage-postgres",
  "spool-webhooks",
+ "sqlx",
  "subtle",
  "thiserror",
  "tokio",
@@ -3298,6 +3299,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "spool-auth",
  "spool-domain",
  "sqlx",
  "thiserror",
@@ -3360,6 +3362,7 @@ dependencies = [
  "spool-domain",
  "spool-storage-postgres",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
