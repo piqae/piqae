@@ -2,15 +2,8 @@
   import { onMount, untrack } from 'svelte';
   import Icon from '$lib/components/Icon.svelte';
   import PageHeader from '$lib/components/PageHeader.svelte';
-  import { copyLimit } from '$lib/printer-capabilities';
 
   type Connection = 'local_only' | 'connected' | 'connecting' | 'offline' | 'degraded';
-  type NativeChoice = { value: string; display_name: string };
-  type NativeOption = {
-    display_name: string;
-    default_choice: string | null;
-    choices: NativeChoice[];
-  };
   type ProfileOptions = {
     copies?: number;
     color?: boolean;
@@ -24,12 +17,50 @@
     fit_to_page?: boolean;
     native_options?: Record<string, string>;
   };
+  type ProfileStatus =
+    | 'draft'
+    | 'capturing'
+    | 'ready'
+    | 'needs_test'
+    | 'stale'
+    | 'driver_mismatch'
+    | 'destination_missing'
+    | 'dependency_missing'
+    | 'interactive_only'
+    | 'invalid'
+    | 'retired';
+  type ProfileSummary = {
+    paper?: string | null;
+    dimensions_mm?: [number, number] | null;
+    source?: string | null;
+    media?: string | null;
+    color?: string | null;
+    duplex?: string | null;
+    resolution?: string | null;
+    copies?: number | null;
+    native?: Record<string, string>;
+    details?: Record<string, unknown>;
+  };
   type Profile = {
     profile_id: string;
     name: string;
     is_default: boolean;
     revision: number;
     options: ProfileOptions;
+    status: ProfileStatus;
+    native_kind?: string | null;
+    driver_fingerprint?: {
+      platform?: string;
+      driver_name?: string;
+      driver_version?: string | null;
+      native_queue_id?: string;
+    };
+    summary?: ProfileSummary;
+    stock_id?: string | null;
+    safe_overrides?: string[];
+    last_validated_unix_ms?: number | null;
+    last_test_job_id?: string | null;
+    published?: boolean;
   };
   type Printer = {
     printer_id: string;
@@ -50,7 +81,7 @@
       nup?: number[];
       collate?: boolean;
     };
-    native_options: Record<string, NativeOption>;
+    native_options: Record<string, unknown>;
     profiles: Profile[];
     queue_counts: { queued?: number; active?: number };
   };
@@ -89,7 +120,28 @@
       name: 'A4 packing slips',
       is_default: true,
       revision: 3,
-      options: { copies: 1, color: false, duplex: 'one-sided', paper: 'A4', fit_to_page: true }
+      options: { copies: 1, color: false, duplex: 'one-sided', paper: 'A4', fit_to_page: true },
+      status: 'ready',
+      native_kind: 'macos_printcore',
+      driver_fingerprint: {
+        platform: 'macos',
+        driver_name: 'HP Color LaserJet MFP M283fdw',
+        driver_version: '3.0',
+        native_queue_id: 'Office_Printer'
+      },
+      summary: {
+        paper: 'A4',
+        source: 'Auto select',
+        media: 'Plain paper',
+        color: 'Monochrome',
+        duplex: 'One-sided',
+        resolution: '600 dpi'
+      },
+      stock_id: 'stock_a4_plain',
+      safe_overrides: ['copies', 'color'],
+      last_validated_unix_ms: Date.now() - 240_000,
+      last_test_job_id: 'job_demo_printed',
+      published: true
     }
   ];
   const demoPrinters: Printer[] = [
@@ -147,19 +199,6 @@
   let notice = $state<string | null>(null);
   let confirmationOpen = $state(false);
   let confirmed = $state(false);
-  let editingProfileId = $state<string | null>(null);
-  let profileName = $state('');
-  let profileDefault = $state(false);
-  let profileCopies = $state(1);
-  let profileColor = $state(false);
-  let profileDuplex = $state<'one-sided' | 'long-edge' | 'short-edge'>('one-sided');
-  let profilePaper = $state('A4');
-  let profileDpi = $state('');
-  let profileBin = $state('');
-  let profileMedia = $state('');
-  let profileNup = $state(1);
-  let profileCollate = $state(false);
-  let nativeSelections = $state<Record<string, string>>({});
 
   const selectedPrinter = $derived(
     printers.find((printer) => printer.printer_id === selectedPrinterId) ?? printers[0] ?? null
@@ -169,41 +208,15 @@
     selectedProfiles.find((profile) => profile.profile_id === selectedProfileId) ?? null
   );
   const selectedProfileA4Compatible = $derived(
-    !selectedProfile?.options.paper || isA4Paper(selectedProfile.options.paper)
+    !(selectedProfile?.summary?.paper ?? selectedProfile?.options.paper) ||
+      isA4Paper(selectedProfile?.summary?.paper ?? selectedProfile?.options.paper ?? '')
   );
   const exposedCount = $derived(printers.filter((printer) => printer.exposed).length);
-  const portableNativeKeys = new Set([
-    'pagesize',
-    'pageregion',
-    'media',
-    'duplex',
-    'sides',
-    'colormodel',
-    'colormode',
-    'printcolormode',
-    'inputslot',
-    'outputbin',
-    'mediasource',
-    'mediatype',
-    'resolution',
-    'printerresolution',
-    'collate',
-    'numberup'
-  ]);
-
-  function isAdvancedNativeOption(key: string): boolean {
-    return !portableNativeKeys.has(key.toLowerCase().replaceAll(/[^a-z0-9]/g, ''));
-  }
 
   function isA4Paper(value: string): boolean {
     return /^(?:(?:iso[_ -])?a4(?:[._-](?:210x297(?:mm)?|fullbleed))?|210x297(?:mm)?)$/i.test(
       value.trim()
     );
-  }
-
-  function defaultPaper(): string {
-    const papers = Object.keys(selectedPrinter?.capabilities.papers ?? {});
-    return papers.find(isA4Paper) ?? papers[0] ?? 'A4';
   }
 
   function displayError(value: unknown, fallback: string): string {
@@ -237,7 +250,15 @@
   }
 
   function normalizeProfile(profile: Profile & { id?: string }): Profile {
-    return { ...profile, profile_id: profile.profile_id ?? profile.id ?? '' };
+    return {
+      ...profile,
+      profile_id: profile.profile_id ?? profile.id ?? '',
+      status: profile.status ?? 'needs_test',
+      options: profile.options ?? {},
+      summary: profile.summary ?? {},
+      safe_overrides: profile.safe_overrides ?? [],
+      published: profile.published ?? false
+    };
   }
 
   function normalizePrinter(printer: Printer): Printer {
@@ -330,99 +351,59 @@
     }
   }
 
-  function resetProfileForm() {
-    editingProfileId = null;
-    profileName = '';
-    profileDefault = false;
-    profileCopies = 1;
-    profileColor = false;
-    profileDuplex = 'one-sided';
-    profilePaper = defaultPaper();
-    profileDpi = selectedPrinter?.capabilities.dpis?.[0] ?? '';
-    profileBin = selectedPrinter?.capabilities.bins?.[0] ?? '';
-    profileMedia = selectedPrinter?.capabilities.medias?.[0] ?? '';
-    profileNup = selectedPrinter?.capabilities.nup?.[0] ?? 1;
-    profileCollate = false;
-    nativeSelections = Object.fromEntries(
-      Object.entries(selectedPrinter?.native_options ?? {})
-        .filter(([key]) => isAdvancedNativeOption(key))
-        .map(([key, option]) => [key, option.default_choice ?? option.choices[0]?.value ?? ''])
-    );
+  function selectPrinter(printer: Printer) {
+    selectedPrinterId = printer.printer_id;
+    selectedProfileId =
+      printer.profiles.find((profile) => profile.is_default)?.profile_id ??
+      printer.profiles[0]?.profile_id ??
+      '';
+    void refreshQueue();
   }
 
-  function editProfile(profile: Profile) {
-    editingProfileId = profile.profile_id;
-    profileName = profile.name;
-    profileDefault = profile.is_default;
-    profileCopies = profile.options.copies ?? 1;
-    profileColor = profile.options.color ?? false;
-    profileDuplex = profile.options.duplex ?? 'one-sided';
-    profilePaper = profile.options.paper ?? defaultPaper();
-    profileDpi = profile.options.dpi ?? selectedPrinter?.capabilities.dpis?.[0] ?? '';
-    profileBin = profile.options.bin ?? selectedPrinter?.capabilities.bins?.[0] ?? '';
-    profileMedia = profile.options.media ?? selectedPrinter?.capabilities.medias?.[0] ?? '';
-    profileNup = profile.options.nup ?? selectedPrinter?.capabilities.nup?.[0] ?? 1;
-    profileCollate = profile.options.collate ?? false;
-    const advancedDefaults = Object.fromEntries(
-      Object.entries(selectedPrinter?.native_options ?? {})
-        .filter(([key]) => isAdvancedNativeOption(key))
-        .map(([key, option]) => [key, option.default_choice ?? option.choices[0]?.value ?? ''])
-    );
-    nativeSelections = {
-      ...advancedDefaults,
-      ...Object.fromEntries(
-        Object.entries(profile.options.native_options ?? {}).filter(([key]) =>
-          isAdvancedNativeOption(key)
-        )
-      )
-    };
+  function profileKind(profile: Profile): string {
+    if (!profile.native_kind || profile.native_kind === 'portable_options') return 'Basic fallback';
+    if (profile.native_kind === 'macos_printcore') return 'macOS native';
+    if (profile.native_kind === 'windows_devmode') return 'Windows native';
+    if (profile.native_kind === 'windows_print_ticket') return 'Windows PrintTicket';
+    if (profile.native_kind === 'cups_instance') return 'CUPS instance';
+    return profile.native_kind.replaceAll('_', ' ');
   }
 
-  function profileOptions(): ProfileOptions {
-    const copies = Number(profileCopies);
-    return {
-      copies: Math.max(
-        1,
-        Math.min(Number.isFinite(copies) ? copies : 1, copyLimit(selectedPrinter?.capabilities.copies))
-      ),
-      color: selectedPrinter?.capabilities.color ? profileColor : false,
-      duplex: selectedPrinter?.capabilities.duplex ? profileDuplex : 'one-sided',
-      paper: profilePaper || undefined,
-      dpi: profileDpi || undefined,
-      bin: profileBin || undefined,
-      media: profileMedia || undefined,
-      nup: profileNup || undefined,
-      collate: selectedPrinter?.capabilities.collate ? profileCollate : undefined,
-      fit_to_page: true,
-      native_options: Object.fromEntries(
-        Object.entries(nativeSelections).filter(([key, value]) => isAdvancedNativeOption(key) && value)
-      )
-    };
+  function profilePaper(profile: Profile | null): string {
+    return profile?.summary?.paper ?? profile?.options.paper ?? 'Driver default';
   }
 
-  async function saveProfile() {
-    if (demo || !selectedPrinter || !profileName.trim()) return;
+  function profileFact(profile: Profile, key: keyof ProfileSummary, fallback: string): string {
+    const value = profile.summary?.[key];
+    return typeof value === 'string' && value ? value : fallback;
+  }
+
+  function validatedLabel(profile: Profile): string {
+    if (!profile.last_validated_unix_ms) return 'Not validated on this node';
+    return `Validated ${new Intl.DateTimeFormat(undefined, {
+      dateStyle: 'medium',
+      timeStyle: 'short'
+    }).format(new Date(profile.last_validated_unix_ms))}`;
+  }
+
+  async function validateProfile(profile: Profile) {
+    if (demo) return;
     actionError = null;
-    pending = 'profile';
-    const current = selectedProfiles.find((profile) => profile.profile_id === editingProfileId);
-    const endpoint = current
-      ? `/api/local/printers/${encodeURIComponent(selectedPrinter.printer_id)}/profiles/${encodeURIComponent(current.profile_id)}`
-      : `/api/local/printers/${encodeURIComponent(selectedPrinter.printer_id)}/profiles`;
+    notice = null;
+    pending = `validate:${profile.profile_id}`;
     try {
-      await jsonRequest(endpoint, {
-        method: current ? 'PUT' : 'POST',
-        body: JSON.stringify({
-          ...(current ? { expected_revision: current.revision } : {}),
-          name: profileName.trim(),
-          is_default: profileDefault,
-          options: profileOptions()
-        })
-      });
-      notice = current ? 'Profile updated.' : 'Profile created.';
-      resetProfileForm();
+      const result = await jsonRequest<{ status: ProfileStatus; message?: string | null }>(
+        `/api/local/profiles/${encodeURIComponent(profile.profile_id)}/validate`,
+        { method: 'POST', body: JSON.stringify({ revision: profile.revision }) }
+      );
+      notice =
+        result.message ??
+        (result.status === 'ready'
+          ? `${profile.name} matches this queue and driver.`
+          : `${profile.name} validation returned ${result.status.replaceAll('_', ' ')}.`);
       await refresh();
     } catch (error) {
-      actionError = error instanceof Error ? error.message : 'Profile could not be saved.';
+      actionError = error instanceof Error ? error.message : 'Profile validation failed.';
     } finally {
       pending = '';
     }
@@ -439,7 +420,6 @@
         { method: 'DELETE' }
       );
       if (selectedProfileId === profile.profile_id) selectedProfileId = '';
-      resetProfileForm();
       await refresh();
       notice = 'Profile deleted.';
     } catch (error) {
@@ -524,7 +504,7 @@
 <PageHeader
   eyebrow="This Mac"
   title="Local node"
-  description="Live driver discovery, durable profiles, and both sides of the operating-system queue."
+  description="Native driver profiles, local queue truth, and real-time delivery from Spool to this Mac."
   {actions}
 />
 
@@ -572,7 +552,7 @@
 </section>
 
 <section class="section-heading">
-  <div><h2>Discovered OS queues</h2><p>Queues and capabilities reported directly by installed macOS drivers.</p></div>
+  <div><h2>Installed destinations</h2><p>Queues reported by macOS. Exposure controls what the API can address.</p></div>
   <span>{printers.length} found</span>
 </section>
 
@@ -583,7 +563,7 @@
       {#each printers as printer (printer.printer_id)}
         <tr class:selected={selectedPrinterId === printer.printer_id}>
           <td>
-            <button class="printer-name" onclick={() => { selectedPrinterId = printer.printer_id; selectedProfileId = printer.profiles.find((profile) => profile.is_default)?.profile_id ?? printer.profiles[0]?.profile_id ?? ''; resetProfileForm(); void refreshQueue(); }}>
+            <button class="printer-name" onclick={() => selectPrinter(printer)}>
               <span class="printer-icon"><Icon name="printers" size={14} /></span>
               <span><strong>{printer.name}</strong><small class="mono">{printer.native_id}</small></span>
             </button>
@@ -602,7 +582,7 @@
               onclick={() => setExposure(printer)}
             ><span></span></button>
           </td>
-          <td><button class="button small" onclick={() => { selectedPrinterId = printer.printer_id; selectedProfileId = printer.profiles.find((profile) => profile.is_default)?.profile_id ?? printer.profiles[0]?.profile_id ?? ''; confirmationOpen = true; confirmed = false; }} disabled={!printer.exposed || !printer.profiles.length}>Send A4 test</button></td>
+          <td><button class="button small" onclick={() => { selectPrinter(printer); confirmationOpen = true; confirmed = false; }} disabled={!printer.exposed || !printer.profiles.length}>Send A4 test</button></td>
         </tr>
       {:else}
         <tr><td colspan="6" class="empty">{loading ? 'Discovering installed queues…' : 'No operating-system printers were discovered.'}</td></tr>
@@ -621,8 +601,8 @@
     <label>Print profile<select bind:value={selectedProfileId}>{#each selectedProfiles as profile}<option value={profile.profile_id}>{profile.name} · r{profile.revision}{profile.options.paper && !isA4Paper(profile.options.paper) ? ' · not A4' : ''}</option>{/each}</select></label>
     <div class="test-summary">
       <span><small>Printer</small><strong>{selectedPrinter.name}</strong></span>
-      <span><small>Paper / media</small><strong>{selectedProfile?.options.paper ?? 'Driver default'} · {selectedProfile?.options.media ?? 'Default media'}</strong></span>
-      <span><small>Output</small><strong>{selectedProfile?.options.color ? 'Color' : 'Mono'} · {selectedProfile?.options.duplex ?? 'one-sided'}</strong></span>
+      <span><small>Paper / media</small><strong>{profilePaper(selectedProfile)} · {selectedProfile ? profileFact(selectedProfile, 'media', 'Driver default') : 'Driver default'}</strong></span>
+      <span><small>Output</small><strong>{selectedProfile ? profileFact(selectedProfile, 'color', 'Driver default') : 'Driver default'} · {selectedProfile ? profileFact(selectedProfile, 'duplex', 'Driver default') : 'Driver default'}</strong></span>
     </div>
     <label class="confirm-check"><input type="checkbox" bind:checked={confirmed} /> I confirm this printer and profile. Physical output will be produced.</label>
     {#if !selectedProfileA4Compatible}<p class="paper-warning">This profile explicitly selects {selectedProfile?.options.paper}. Choose or create an A4 profile.</p>{/if}
@@ -637,55 +617,87 @@
 <div class="management-grid">
   <section>
     <div class="section-heading">
-      <div><h2>Named profiles</h2><p>Versioned settings persisted by the local agent.</p></div>
+      <div><h2>Native print profiles</h2><p>Immutable driver settings captured and replayed by this node.</p></div>
       {#if selectedPrinter}<span>{selectedPrinter.name}</span>{/if}
     </div>
     <div class="panel profiles">
       <div class="profile-list">
         {#each selectedProfiles as profile}
-          <article class:active={editingProfileId === profile.profile_id}>
-            <button onclick={() => editProfile(profile)}>
+          <article class:active={selectedProfileId === profile.profile_id}>
+            <button onclick={() => (selectedProfileId = profile.profile_id)}>
               <strong>{profile.name}</strong>
-              <span>{profile.options.paper ?? 'Driver default'} · {profile.options.color ? 'Color' : 'Mono'} · {profile.options.duplex ?? 'one-sided'}</span>
+              <span>{profileKind(profile)} · r{profile.revision}</span>
             </button>
-            <div><small>r{profile.revision}{profile.is_default ? ' · Default' : ''}</small><button class="icon-button danger" aria-label={`Delete ${profile.name}`} onclick={() => deleteProfile(profile)} disabled={demo || pending === `delete:${profile.profile_id}`}><Icon name="x" size={12} /></button></div>
+            <div>
+              <small class:ready={profile.status === 'ready'}>{profile.status.replaceAll('_', ' ')}</small>
+              <button class="icon-button danger" aria-label={`Delete ${profile.name}`} onclick={() => deleteProfile(profile)} disabled={demo || pending === `delete:${profile.profile_id}`}><Icon name="x" size={12} /></button>
+            </div>
           </article>
         {:else}
-          <p class="empty compact">Select a printer and create its first profile.</p>
+          <p class="empty compact">No profiles yet. Add one from the Spool menu bar app.</p>
         {/each}
       </div>
-      <form onsubmit={(event) => { event.preventDefault(); void saveProfile(); }}>
-        <div class="form-title"><strong>{editingProfileId ? 'Edit profile' : 'New profile'}</strong>{#if editingProfileId}<button type="button" class="button ghost small" onclick={resetProfileForm}>New</button>{/if}</div>
-        <label>Name<input bind:value={profileName} maxlength="80" placeholder="A4 packing slips" required /></label>
-        <div class="form-row">
-          <label>Paper<select bind:value={profilePaper}>{#each Object.keys(selectedPrinter?.capabilities.papers ?? {}) as paper}<option value={paper}>{paper}</option>{/each}{#if !Object.keys(selectedPrinter?.capabilities.papers ?? {}).length}<option value="A4">A4</option>{/if}</select></label>
-          <label>Copies<input type="number" min="1" max={copyLimit(selectedPrinter?.capabilities.copies)} bind:value={profileCopies} /></label>
-        </div>
-        <div class="form-row">
-          <label>Color<select bind:value={profileColor} disabled={!selectedPrinter?.capabilities.color}><option value={false}>Monochrome</option><option value={true}>Color</option></select></label>
-          <label>Duplex<select bind:value={profileDuplex} disabled={!selectedPrinter?.capabilities.duplex}><option value="one-sided">One-sided</option><option value="long-edge">Long edge</option><option value="short-edge">Short edge</option></select></label>
-        </div>
-        {#if selectedPrinter?.capabilities.dpis?.length}
-          <label>Resolution<select bind:value={profileDpi}>{#each selectedPrinter.capabilities.dpis as dpi}<option value={dpi}>{dpi} dpi</option>{/each}</select></label>
-        {/if}
-        {#if selectedPrinter?.capabilities.medias?.length || selectedPrinter?.capabilities.bins?.length}
-          <div class="form-row">
-            {#if selectedPrinter.capabilities.medias?.length}<label>Media type<select bind:value={profileMedia}>{#each selectedPrinter.capabilities.medias as media}<option value={media}>{media}</option>{/each}</select></label>{/if}
-            {#if selectedPrinter.capabilities.bins?.length}<label>Paper source / bin<select bind:value={profileBin}>{#each selectedPrinter.capabilities.bins as bin}<option value={bin}>{bin}</option>{/each}</select></label>{/if}
+      <div class="profile-detail">
+        {#if selectedProfile}
+          <div class="profile-title">
+            <span>
+              <strong>{selectedProfile.name}</strong>
+              <small>{profileKind(selectedProfile)} · revision {selectedProfile.revision}{selectedProfile.is_default ? ' · default' : ''}</small>
+            </span>
+            <span class:ready={selectedProfile.status === 'ready'} class="status-pill">{selectedProfile.status.replaceAll('_', ' ')}</span>
+          </div>
+
+          {#if selectedProfile.native_kind === 'portable_options' || !selectedProfile.native_kind}
+            <div class="fallback-note">
+              <Icon name="warning" size={13} />
+              <span><strong>Basic fallback profile</strong><small>Portable options cannot preserve vendor controls. Recreate this from the menu bar app for exact driver replay.</small></span>
+            </div>
+          {/if}
+
+          <dl class="profile-facts">
+            <div><dt>Paper</dt><dd>{profilePaper(selectedProfile)}</dd></div>
+            <div><dt>Stock</dt><dd>{selectedProfile.stock_id ?? 'Not assigned'}</dd></div>
+            <div><dt>Source</dt><dd>{profileFact(selectedProfile, 'source', 'Driver default')}</dd></div>
+            <div><dt>Media</dt><dd>{profileFact(selectedProfile, 'media', 'Driver default')}</dd></div>
+            <div><dt>Color</dt><dd>{profileFact(selectedProfile, 'color', 'Driver default')}</dd></div>
+            <div><dt>Duplex</dt><dd>{profileFact(selectedProfile, 'duplex', 'Driver default')}</dd></div>
+            <div><dt>Resolution</dt><dd>{profileFact(selectedProfile, 'resolution', 'Driver default')}</dd></div>
+            <div><dt>Published</dt><dd>{selectedProfile.published ? 'Available to API' : 'Local only'}</dd></div>
+          </dl>
+
+          <div class="driver-line">
+            <span><small>Driver</small><strong>{selectedProfile.driver_fingerprint?.driver_name ?? 'Native driver'}</strong></span>
+            <span><small>Version</small><strong>{selectedProfile.driver_fingerprint?.driver_version ?? 'Unknown'}</strong></span>
+          </div>
+
+          <div class="override-block">
+            <small>API-safe overrides</small>
+            <div class="chips">
+              {#each selectedProfile.safe_overrides ?? [] as override}
+                <span>{override.replaceAll('_', ' ')}</span>
+              {:else}
+                <em>Locked to the captured driver settings</em>
+              {/each}
+            </div>
+          </div>
+
+          <div class="profile-actions">
+            <span><small>{validatedLabel(selectedProfile)}</small>{#if selectedProfile.last_test_job_id}<small class="mono">Last test {selectedProfile.last_test_job_id}</small>{/if}</span>
+            <button class="button small" onclick={() => validateProfile(selectedProfile)} disabled={demo || pending === `validate:${selectedProfile.profile_id}`}>{pending === `validate:${selectedProfile.profile_id}` ? 'Validating…' : 'Validate profile'}</button>
+            <button class="button primary small" onclick={runLocalDiagnostic} disabled={demo || pending === 'diagnostic'}>{pending === 'diagnostic' ? 'Queuing…' : 'Print local test'}</button>
+          </div>
+        {:else}
+          <div class="native-setup">
+            <span class="printer-icon"><Icon name="printers" size={16} /></span>
+            <strong>Create profiles in the native app</strong>
+            <p>Open the Spool icon in the macOS menu bar, choose this printer, then Add profile. The real driver panel captures paper, trays, finishing, marks, calibration, and vendor settings as one immutable revision.</p>
           </div>
         {/if}
-        {#if selectedPrinter?.capabilities.nup?.length || selectedPrinter?.capabilities.collate}
-          <div class="form-row">
-            {#if selectedPrinter.capabilities.nup?.length}<label>Pages per sheet<select bind:value={profileNup}>{#each selectedPrinter.capabilities.nup as nup}<option value={nup}>{nup}</option>{/each}</select></label>{/if}
-            {#if selectedPrinter.capabilities.collate}<label class="check"><input type="checkbox" bind:checked={profileCollate} /> Collate copies</label>{/if}
-          </div>
-        {/if}
-        {#each Object.entries(selectedPrinter?.native_options ?? {}).filter(([key]) => isAdvancedNativeOption(key)) as [key, option]}
-          <label>{option.display_name}<select value={nativeSelections[key] ?? option.default_choice ?? ''} onchange={(event) => (nativeSelections = { ...nativeSelections, [key]: event.currentTarget.value })}>{#each option.choices as choice}<option value={choice.value}>{choice.display_name}</option>{/each}</select></label>
-        {/each}
-        <label class="check"><input type="checkbox" bind:checked={profileDefault} /> Default for this printer</label>
-        <button class="button primary" type="submit" disabled={demo || !selectedPrinter || !profileName.trim() || pending === 'profile'}>{pending === 'profile' ? 'Saving…' : editingProfileId ? 'Save revision' : 'Create profile'}</button>
-      </form>
+      </div>
+    </div>
+    <div class="native-guidance">
+      <div><strong>Add, edit, or clone a profile</strong><span>Use the Spool menu bar app. Editing creates a new immutable revision through the printer’s native driver panel.</span></div>
+      <span class="shortcut">Spool menu bar → Printers → {selectedPrinter?.name ?? 'Printer'} → Add profile</span>
     </div>
   </section>
 
@@ -708,8 +720,8 @@
         {:else}<p class="empty compact">No jobs reported by the OS queue.</p>{/each}
       </div>
       <div class="diagnostic">
-        <div><strong>Local-only diagnostic</strong><small>Bypasses the hosted queue and tests only agent → driver → OS handoff.</small></div>
-        <button class="button small" onclick={runLocalDiagnostic} disabled={demo || !selectedProfile || pending === 'diagnostic'}>{pending === 'diagnostic' ? 'Queuing…' : 'Run diagnostic'}</button>
+        <div><strong>Two independent queue views</strong><small>The durable Spool job remains visible beside the macOS/CUPS handoff for accurate failure tracing.</small></div>
+        <button class="button small" onclick={refreshQueue} disabled={demo || !selectedPrinter}>Refresh queue</button>
       </div>
     </div>
   </section>
@@ -756,7 +768,7 @@
   .test-summary span { min-width: 0; display: grid; gap: 2px; padding: 6px; background: var(--surface-raised); border: 1px solid var(--border-subtle); border-radius: 5px; }
   .test-summary small { color: var(--text-tertiary); font-size: 8px; text-transform: uppercase; letter-spacing: .03em; }
   .test-summary strong { overflow: hidden; font-size: 9px; font-weight: 520; text-overflow: ellipsis; white-space: nowrap; }
-  .confirm-check, .check { display: flex; align-items: center; gap: 7px; line-height: 15px; } .confirm-check input, .check input { width: 13px; height: 13px; flex: 0 0 auto; }
+  .confirm-check { display: flex; align-items: center; gap: 7px; line-height: 15px; } .confirm-check input { width: 13px; height: 13px; flex: 0 0 auto; }
   .paper-warning { margin: 0; padding: 7px; color: var(--warning); background: var(--warning-soft); border-radius: 5px; font-size: 9px; }
   .confirmation-actions { display: flex; justify-content: flex-end; gap: 6px; } .audit-note { grid-column: 1 / -1; color: var(--text-tertiary); font-size: 9px; }
   .management-grid { display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(0, .95fr); gap: 12px; }
@@ -766,9 +778,44 @@
   .profile-list article.active { background: var(--surface-selected); } .profile-list article > button:first-child { min-width: 0; display: grid; flex: 1; gap: 3px; padding: 0; text-align: left; background: none; border: 0; cursor: pointer; }
   .profile-list strong { overflow: hidden; font-size: 10px; font-weight: 540; text-overflow: ellipsis; white-space: nowrap; } .profile-list span, .profile-list small { color: var(--text-tertiary); font-size: 9px; }
   .profile-list article > div { display: flex; align-items: center; gap: 5px; }
+  .profile-list small.ready { color: var(--success); }
   .icon-button { width: 24px; height: 24px; display: grid; place-items: center; color: var(--text-tertiary); background: transparent; border: 0; border-radius: 5px; cursor: pointer; } .icon-button:hover { background: var(--surface-hover); } .icon-button.danger:hover { color: var(--danger); }
-  form { display: grid; align-content: start; gap: 10px; padding: 12px; } .form-title { display: flex; align-items: center; justify-content: space-between; min-height: 25px; } .form-title strong { font-size: 11px; }
-  .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .profile-detail { min-width: 0; display: grid; align-content: start; gap: 12px; padding: 13px; }
+  .profile-title { min-width: 0; display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; padding-bottom: 11px; border-bottom: 1px solid var(--border-subtle); }
+  .profile-title > span:first-child { min-width: 0; display: grid; gap: 3px; }
+  .profile-title strong { overflow: hidden; font-size: 12px; font-weight: 560; text-overflow: ellipsis; white-space: nowrap; }
+  .profile-title small { color: var(--text-tertiary); font-size: 9px; }
+  .status-pill { flex: 0 0 auto; padding: 3px 6px; color: var(--warning); background: var(--warning-soft); border-radius: 5px; font-size: 9px; text-transform: capitalize; }
+  .status-pill.ready { color: var(--success); background: var(--success-soft); }
+  .fallback-note { display: flex; align-items: flex-start; gap: 8px; padding: 8px; color: var(--warning); background: var(--warning-soft); border: 1px solid color-mix(in oklch, var(--warning), transparent 78%); border-radius: var(--radius-md); }
+  .fallback-note > span { display: grid; gap: 3px; }
+  .fallback-note strong { font-size: 10px; }
+  .fallback-note small { color: var(--text-secondary); font-size: 9px; line-height: 14px; }
+  .profile-facts { display: grid; grid-template-columns: 1fr 1fr; gap: 0; margin: 0; border: 1px solid var(--border-subtle); border-radius: var(--radius-md); overflow: hidden; }
+  .profile-facts div { min-width: 0; display: grid; grid-template-columns: 76px minmax(0, 1fr); gap: 7px; padding: 7px 8px; border-right: 1px solid var(--border-subtle); border-bottom: 1px solid var(--border-subtle); }
+  .profile-facts div:nth-child(2n) { border-right: 0; }
+  .profile-facts div:nth-last-child(-n + 2) { border-bottom: 0; }
+  .profile-facts dt { color: var(--text-tertiary); font-size: 9px; }
+  .profile-facts dd { overflow: hidden; margin: 0; color: var(--text-primary); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+  .driver-line { display: grid; grid-template-columns: 1fr 90px; gap: 8px; }
+  .driver-line span { min-width: 0; display: grid; gap: 3px; }
+  .driver-line small, .override-block > small { color: var(--text-tertiary); font-size: 8px; font-weight: 550; text-transform: uppercase; letter-spacing: .04em; }
+  .driver-line strong { overflow: hidden; font-size: 9px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+  .override-block { display: grid; gap: 6px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 5px; }
+  .chips span { padding: 3px 6px; color: var(--text-secondary); background: var(--surface-raised); border: 1px solid var(--border-subtle); border-radius: 5px; font-size: 8px; text-transform: capitalize; }
+  .chips em { color: var(--text-tertiary); font-size: 9px; font-style: normal; }
+  .profile-actions { display: flex; align-items: center; gap: 6px; margin-top: auto; padding-top: 2px; }
+  .profile-actions > span { min-width: 0; display: grid; flex: 1; gap: 2px; }
+  .profile-actions small { overflow: hidden; color: var(--text-tertiary); font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
+  .native-setup { min-height: 350px; display: grid; align-content: center; justify-items: center; gap: 8px; padding: 28px; text-align: center; }
+  .native-setup strong { font-size: 11px; }
+  .native-setup p { max-width: 390px; margin: 0; color: var(--text-secondary); font-size: 9px; line-height: 15px; }
+  .native-guidance { min-height: 62px; display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-top: 8px; padding: 9px 11px; background: color-mix(in oklch, var(--surface-raised), transparent 20%); border: 1px solid var(--border-subtle); border-radius: var(--radius-md); }
+  .native-guidance > div { display: grid; gap: 3px; }
+  .native-guidance strong { font-size: 10px; font-weight: 540; }
+  .native-guidance span { color: var(--text-tertiary); font-size: 9px; line-height: 13px; }
+  .native-guidance .shortcut { max-width: 245px; padding: 5px 7px; color: var(--text-secondary); background: var(--surface-base); border: 1px solid var(--border-subtle); border-radius: 5px; font-family: var(--font-mono); }
   .queues { min-height: 414px; display: grid; grid-template-rows: auto auto 1fr; overflow: hidden; }
   .queue-column { min-height: 118px; border-bottom: 1px solid var(--border-subtle); }
   .queue-column h3 { height: 33px; display: flex; align-items: center; justify-content: space-between; margin: 0; padding: 0 11px; color: var(--text-secondary); font-size: 9px; font-weight: 560; text-transform: uppercase; letter-spacing: .04em; border-bottom: 1px solid var(--border-subtle); }
@@ -779,5 +826,5 @@
   .diagnostic { align-self: end; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px; background: color-mix(in oklch, var(--surface-raised), transparent 30%); }
   .diagnostic > div { display: grid; gap: 3px; } .diagnostic strong { font-size: 10px; } .diagnostic small { color: var(--text-tertiary); font-size: 9px; line-height: 14px; }
   @media (max-width: 1050px) { .metrics { grid-template-columns: 1fr 1fr; } .management-grid { grid-template-columns: 1fr; } .confirmation { grid-template-columns: 1fr 1fr; } }
-  @media (max-width: 650px) { .metrics { grid-template-columns: 1fr; } .confirmation { grid-template-columns: 1fr; } .profiles { grid-template-columns: 1fr; } .profile-list { border-right: 0; border-bottom: 1px solid var(--border-subtle); } }
+  @media (max-width: 650px) { .metrics { grid-template-columns: 1fr; } .confirmation { grid-template-columns: 1fr; } .profiles { grid-template-columns: 1fr; } .profile-list { border-right: 0; border-bottom: 1px solid var(--border-subtle); } .profile-facts { grid-template-columns: 1fr; } .profile-facts div { border-right: 0; border-bottom: 1px solid var(--border-subtle) !important; } .profile-facts div:last-child { border-bottom: 0 !important; } .native-guidance { align-items: flex-start; flex-direction: column; } .native-guidance .shortcut { max-width: 100%; } }
 </style>

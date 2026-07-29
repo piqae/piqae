@@ -12,7 +12,7 @@ function notFound(): Response {
   );
 }
 
-function pathFor(method: string, path: string): string | null {
+export function pathFor(method: string, path: string): string | null {
   const segments = path.split('/').filter(Boolean);
   if (segments.some((segment) => segment.length > 512)) return null;
   if (method === 'GET' && segments.length === 1 && ['status', 'printers'].includes(segments[0] ?? '')) {
@@ -22,11 +22,20 @@ function pathFor(method: string, path: string): string | null {
     return `/v1/local/${segments[0]}`;
   }
   if (
+    method === 'POST' &&
+    segments[0] === 'profiles' &&
+    segments[1] &&
+    segments[2] === 'validate' &&
+    segments.length === 3
+  ) {
+    return `/v1/local/profiles/${encodeURIComponent(segments[1])}/validate`;
+  }
+  if (
     segments[0] === 'printers' &&
     segments[1] &&
     segments.length === 3 &&
     ((method === 'GET' && ['queue', 'profiles'].includes(segments[2] ?? '')) ||
-      (method === 'POST' && ['profiles', 'test-page'].includes(segments[2] ?? '')) ||
+      (method === 'POST' && segments[2] === 'test-page') ||
       (method === 'PUT' && segments[2] === 'exposure'))
   ) {
     return `/v1/local/printers/${encodeURIComponent(segments[1])}/${segments[2]}`;
@@ -37,7 +46,7 @@ function pathFor(method: string, path: string): string | null {
     segments[2] === 'profiles' &&
     segments[3] &&
     segments.length === 4 &&
-    ['PUT', 'DELETE'].includes(method)
+    method === 'DELETE'
   ) {
     return `/v1/local/printers/${encodeURIComponent(segments[1])}/profiles/${encodeURIComponent(segments[3])}`;
   }
