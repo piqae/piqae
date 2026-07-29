@@ -1,11 +1,10 @@
-use crate::repository::RepositoryError;
+use crate::{repository::RepositoryError, request_id};
 use axum::{
     Json,
     http::StatusCode,
     response::{IntoResponse, Response},
 };
 use serde::Serialize;
-use ulid::Ulid;
 
 #[derive(Debug)]
 pub struct AppError {
@@ -150,7 +149,7 @@ impl From<serde_json::Error> for AppError {
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
-        let request_id = format!("req_{}", Ulid::new());
+        let request_id = request_id::current();
         if self.compatibility {
             return (
                 self.status,

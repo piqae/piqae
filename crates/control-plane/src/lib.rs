@@ -6,12 +6,14 @@ pub mod compatibility;
 pub mod device_auth;
 pub mod error;
 pub mod repository;
+pub mod request_id;
 pub mod webhook_worker;
 
 use authentication::{Authenticator, TenantContext};
 use axum::{
     Router,
     extract::DefaultBodyLimit,
+    middleware,
     routing::{get, post},
 };
 use repository::Repository;
@@ -20,7 +22,7 @@ use spool_object_store::{MemoryObjectStore, ObjectStore};
 use spool_webhooks::WebhookSecretBox;
 use std::{fmt, sync::Arc};
 use tokio::sync::broadcast;
-use tower_http::{compression::CompressionLayer, trace::TraceLayer};
+use tower_http::compression::CompressionLayer;
 
 #[derive(Clone, Debug)]
 pub struct PublishedEvent {
@@ -205,7 +207,7 @@ pub fn router(state: AppState) -> Router {
         .route("/printers", get(compatibility::list_printers))
         .layer(DefaultBodyLimit::max(52_428_800))
         .layer(CompressionLayer::new())
-        .layer(TraceLayer::new_for_http())
+        .layer(middleware::from_fn(request_id::middleware))
         .with_state(state)
 }
 
@@ -391,6 +393,171 @@ mod tests {
             .await
             .expect("router response");
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn native_and_compatibility_error_ids_match_response_headers() {
+        let application = application().await;
+        let native = application
+            .router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/jobs")
+                    .body(Body::empty())
+                    .expect("native request"),
+            )
+            .await
+            .expect("native response");
+        let native_header = native
+            .headers()
+            .get(request_id::HEADER_NAME)
+            .expect("native request ID")
+            .to_str()
+            .expect("ASCII request ID")
+            .to_owned();
+        let native_body: serde_json::Value = serde_json::from_slice(
+            &native
+                .into_body()
+                .collect()
+                .await
+                .expect("native body")
+                .to_bytes(),
+        )
+        .expect("native JSON");
+        assert_eq!(native_body["error"]["request_id"], native_header);
+
+        let compatibility = application
+            .router
+            .oneshot(
+                Request::builder()
+                    .uri("/whoami")
+                    .body(Body::empty())
+                    .expect("compatibility request"),
+            )
+            .await
+            .expect("compatibility response");
+        let compatibility_header = compatibility
+            .headers()
+            .get(request_id::HEADER_NAME)
+            .expect("compatibility request ID")
+            .to_str()
+            .expect("ASCII request ID")
+            .to_owned();
+        let compatibility_body: serde_json::Value = serde_json::from_slice(
+            &compatibility
+                .into_body()
+                .collect()
+                .await
+                .expect("compatibility body")
+                .to_bytes(),
+        )
+        .expect("compatibility JSON");
+        assert_eq!(compatibility_body["uid"], compatibility_header);
+    }
+
+    #[tokio::test]
+    async fn request_id_acceptance_replacement_and_success_are_consistent() {
+        let application = application().await;
+        let trusted = "client.trace-123:abc";
+        let accepted = application
+            .router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/health")
+                    .header(request_id::HEADER_NAME, trusted)
+                    .body(Body::empty())
+                    .expect("trusted request"),
+            )
+            .await
+            .expect("trusted response");
+        assert_eq!(accepted.status(), StatusCode::OK);
+        assert_eq!(
+            accepted
+                .headers()
+                .get(request_id::HEADER_NAME)
+                .expect("trusted response ID"),
+            trusted
+        );
+
+        let replaced = application
+            .router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/health")
+                    .header(request_id::HEADER_NAME, "bad id!")
+                    .body(Body::empty())
+                    .expect("invalid request ID request"),
+            )
+            .await
+            .expect("invalid request ID response");
+        let replacement = replaced
+            .headers()
+            .get(request_id::HEADER_NAME)
+            .expect("replacement request ID")
+            .to_str()
+            .expect("ASCII replacement");
+        assert!(replacement.starts_with("req_"));
+        assert_ne!(replacement, "bad id!");
+
+        let generated = application
+            .router
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/health")
+                    .body(Body::empty())
+                    .expect("health request"),
+            )
+            .await
+            .expect("health response");
+        assert_eq!(generated.status(), StatusCode::OK);
+        assert!(
+            generated
+                .headers()
+                .get(request_id::HEADER_NAME)
+                .expect("generated success ID")
+                .to_str()
+                .expect("ASCII generated ID")
+                .starts_with("req_")
+        );
+    }
+
+    #[tokio::test]
+    async fn framework_not_found_and_method_errors_have_request_ids() {
+        let application = application().await;
+        for request in [
+            Request::builder()
+                .uri("/does-not-exist")
+                .body(Body::empty())
+                .expect("not found request"),
+            Request::builder()
+                .method("POST")
+                .uri("/v1/health")
+                .body(Body::empty())
+                .expect("method request"),
+        ] {
+            let response = application
+                .router
+                .clone()
+                .oneshot(request)
+                .await
+                .expect("framework response");
+            assert!(matches!(
+                response.status(),
+                StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED
+            ));
+            assert!(
+                response
+                    .headers()
+                    .get(request_id::HEADER_NAME)
+                    .expect("framework request ID")
+                    .to_str()
+                    .expect("ASCII framework ID")
+                    .starts_with("req_")
+            );
+        }
     }
 
     #[tokio::test]

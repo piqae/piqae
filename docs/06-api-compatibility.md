@@ -179,8 +179,9 @@ happy path does.
 
 ## Errors and request IDs
 
-All API requests receive a UUID/ULID request identifier. Compatibility errors
-project the internal error to:
+All API responses carry `X-Request-Id`; compatibility error `uid` is always
+the exact same value. Unsafe or oversized caller identifiers are replaced with
+`req_<ULID>`. Compatibility errors project the internal error to:
 
 ```json
 {
