@@ -45,12 +45,20 @@ jobs:
           version: 11.4.0
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 24
+          node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm check
       - run: pnpm test
-      - run: pnpm build
+      - name: Build the Node web artifact
+        run: pnpm --filter @spool/web build
+      - name: Build the Vercel production artifact
+        run: pnpm --filter @spool/web build:vercel
+      - name: Validate Piqae edge routing
+        run: |
+          node --test deploy/cloudflare/domain-router/router.test.mjs
+          pnpm dlx wrangler@4.115.0 deploy --dry-run \
+            --config deploy/cloudflare/domain-router/wrangler.jsonc
 
   supply-chain:
     name: Supply chain
@@ -75,7 +83,7 @@ jobs:
           version: 11.4.0
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 24
+          node-version: 22
       - run: pnpm --package=@redocly/cli@1.34.3 dlx redocly lint contracts/openapi/spool-v1.yaml
 
   terraform:
