@@ -5,10 +5,10 @@ platforms:
     reason: physical PDF and RAW release gates have not run
   macos_13_plus_aarch64:
     tier: preview
-    reason: packaging and physical printing gates have not run
+    reason: signed/notarised clean-install and physical printing gates have not run
   macos_15_x86_64:
     tier: preview
-    reason: packaging and physical printing gates have not run
+    reason: signed/notarised clean-install and physical printing gates have not run
   ubuntu_22_04_24_04_x86_64:
     tier: preview
     reason: packaging and physical printing gates have not run
