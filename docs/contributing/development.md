@@ -1,5 +1,7 @@
 # Development
 
+**Status:** implemented contributor workflow.
+
 ## Toolchain
 
 Spool uses Rust 1.88, Node.js 22, pnpm 11.4, Swift on macOS, and Docker for the

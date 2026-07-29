@@ -1,5 +1,8 @@
 # Testing
 
+**Status:** implemented automated test workflow; physical certification remains
+human-authorized and platform-specific.
+
 Use the narrowest command that gives meaningful evidence:
 
 ```console

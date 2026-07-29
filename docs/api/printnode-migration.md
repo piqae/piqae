@@ -1,5 +1,8 @@
 # Migrating a PrintNode printing integration
 
+**Status:** substantial V1 compatibility surface implemented; explicitly
+bounded differences below are not exact parity.
+
 Spool V1 implements the PrintNode printing surface at the API origin root. The
 native Spool API remains under `/v1`.
 
@@ -103,3 +106,7 @@ Spool's native API exposes more precise events including `queued_local`,
 
 An unsupported endpoint returns a stable error; it never silently reports
 success.
+
+Use [authentication](authentication.md), [idempotency](idempotency.md), and
+[job status semantics](../printing/jobs-and-statuses.md) when moving from the
+compatibility shape to the native API.

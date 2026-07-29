@@ -17,14 +17,17 @@ token is stored as `local.token` under the configured agent data directory.
 Handlers send commands over a bounded Tokio channel and cannot access SQLite or
 print drivers directly.
 
-Implemented V1 operations are status, printers, pause, resume, and local job
-submission. See `crates/local-api` for the exact route contract.
+Implemented V1 operations include status, printer/profile/queue reads, exposure,
+pause/resume, local job/test submission, native profile capture
+authorization/commit/cancel/validation, and loaded-media confirmation. See
+`crates/local-api` for the exact route contract.
 
 Shell capabilities are intentionally described narrowly:
 
 - Linux Preview shell reads status from loopback HTTP using `local.token`.
-- macOS Preview shell currently displays `Agent status unavailable`; it is not
-  connected to the control API.
+- macOS Preview shell reads authenticated status, printers, queues, and
+  profiles; it can pause/resume, expose printers, run tests, and open native
+  create/edit/clone profile capture.
 - Windows development shell reads authenticated loopback status, lists queues
   and profiles, and opens native create/edit/clone profile capture. It remains
   Disabled for production release.
@@ -40,10 +43,10 @@ macOS and Linux. The target protocol uses length-prefixed JSON, a 64 KiB
 message limit, protocol versioning, and an OS-ACL-protected session challenge.
 The Rust contract and codec foundations live in `crates/local-ipc`.
 
-Target operations also include restart, support-bundle export, and re-enrolment.
-These are roadmap contract entries, not working V1 shell actions. Re-enrolment
-will require an explicit confirmation string. Quitting a tray shell never stops
-or pauses the agent.
+Target operations also include restart, support-bundle export, and local
+re-enrolment. These remain roadmap shell actions even though connected
+one-time enrolment is implemented as an agent bootstrap command. Quitting a
+tray shell never stops or pauses the agent.
 
 ## Release gates
 

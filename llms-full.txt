@@ -1,0 +1,363 @@
+# Spool documentation corpus
+
+Generated from repository-owned documentation on 2026-07-29.
+Third-party documentation text is not reproduced. External products are named
+only where needed to describe Spool integrations.
+
+## Documentation conventions
+
+Spool is an open-source, self-hostable print control plane and local print-node
+agent. Repository-relative Markdown links include the literal `.md` extension
+so they work in source archives, raw Markdown readers, and GitHub. External
+links use full HTTPS URLs. Credentials, signed URLs, native profile blobs, and
+unredacted support data never belong in URLs.
+
+Status terms are evidence claims:
+
+- Implemented: code exists in the repository.
+- Tested: the named automated or physical test actually ran.
+- Preview: evaluation is possible but release gates remain.
+- Supported: a stable published support tier covers the behavior.
+- Disabled: development-only and not a production release claim.
+- Planned: design only.
+
+The release support matrix is authoritative. At generation time, macOS and
+Linux native paths are Preview and Windows is Disabled for production. Native
+archives are unsigned. Source implementation, automated tests, an ad-hoc
+physical test, and stable support certification are different facts.
+
+## Product model
+
+Spool accepts print jobs from a native API or a PrintNode-shaped compatibility
+API, stores durable tenant/job state in PostgreSQL, stores content in an
+S3-compatible object store, and routes work to an enrolled node. The node
+persists accepted work in SQLite, uses an isolated executor, and hands output
+to CUPS or the Windows spooler through installed local drivers.
+
+Durable edges:
+
+    integration
+      -> control plane / PostgreSQL / S3
+      -> enrolled node / SQLite
+      -> executor
+      -> OS spooler
+      -> physical printer
+
+PostgreSQL coordinates tenant state, job idempotency, leases, routing, event
+history, and transactional outboxes. Object storage holds document content.
+The node owns native printer discovery, driver access, local recovery, and
+opaque native profile blobs. Tray/menu applications are disposable clients of
+an authenticated loopback API; they do not own queues or device credentials.
+
+## Deployment journeys
+
+### Local-only
+
+Local-only mode runs the headless agent, durable node queue, executor, and
+loopback API on one computer. The API defaults to 127.0.0.1:39100 and requires
+the generated local.token for operational routes. It is an API, not an embedded
+web page. Local-only mode has no remote submission, multi-node routing, hosted
+identity, or off-device recovery.
+
+### Docker Compose
+
+The evaluation topology runs spool-server, PostgreSQL 16, and MinIO. The
+dashboard is optional. Operators replace every placeholder, keep bootstrap
+keys server-side, pin production images by digest, and back up PostgreSQL and
+objects as one logical set. This topology is not highly available.
+
+### Kubernetes
+
+The production Helm foundation requires external PostgreSQL and S3. It renders
+api, sync, and worker Deployments; a migration job; optional dashboard; HPA;
+PDB; topology spreading; anti-affinity; probes; restricted security contexts;
+NetworkPolicies; service accounts; External Secrets integration; and Ingress
+or Gateway API routing.
+
+The current server binary is combined-role. All three pools still expose HTTP
+and run PostgreSQL-leased background work. The pools provide scaling and
+failure boundaries, not code-level role isolation. Production requires
+database HA/PITR, object retention/replication, immutable images, secrets, TLS,
+WAF/rate limits, monitoring, and rehearsed failover.
+
+### GCP foundation
+
+Terraform defaults to Sydney Cloud Run with external PostgreSQL and S3.
+Optional resources add warm Melbourne compute, a global HTTPS load balancer
+with bounded 5xx outlier detection, regional-HA Cloud SQL with a Melbourne read
+replica, and Sydney/Melbourne dual-region objects. Managed data resources are
+not automatically wired into runtime secrets. Database promotion, credentials,
+cutover, fencing, and reconciliation remain explicit operator actions.
+
+No repository configuration is itself a public Supported Spool SaaS.
+
+## Node journeys
+
+### Pairing
+
+Interactive nodes generate their Ed25519 identity locally and use a ten-minute,
+single-use browser approval. The approval page shows non-secret node metadata
+and requires the eight-character code displayed by the node. The human web
+session is never stored on the node. Headless automation can use a short-lived
+enrolment token through protected input; enrolment secrets do not belong in
+arguments, filenames, URLs, analytics, or logs.
+
+### macOS
+
+The source implements CUPS discovery/submission, local durability,
+authenticated status, a native menu, PrintCore capture, immutable profile
+revisions, and headless PrintCore replay. Add/Edit opens the actual macOS print
+panel and captures settings without printing. The release tier is Preview:
+artifacts are unsigned/not notarised and formal packaging/hardware matrices
+remain.
+
+### Windows
+
+The source implements tray status/printer/profile menus, the driver's genuine
+DocumentPropertiesW property sheet, full public/private DEVMODE capture, and
+PDFium-to-GDI replay foundations. A Windows node talks to its own loopback
+agent, not a Mac's 127.0.0.1. Nodes meet through the control plane. Windows
+remains Disabled for production while signing, service lifecycle, installer,
+physical PDF/RAW, complex-driver, restart, and reliability gates remain.
+
+### Linux
+
+The source implements CUPS discovery, PDF/RAW submission, durable local
+queuing, authenticated loopback control, executor supervision, systemd
+templates, and an optional small status tray. Listed x86-64 distributions and
+Linux ARM64 remain Preview pending packaging/hardware evidence.
+
+### Updates and diagnostics
+
+Node upgrades are operator-managed. Drain work, preserve delivery-uncertain
+evidence, back up state/identity, verify artifacts from a trusted channel,
+replace binaries, verify queues/profiles, and canary print. Checksums are not
+code signing. Fully automated signed native updating is not Supported.
+
+Diagnostics include version, OS/architecture, node/job/printer/profile IDs,
+timestamps, state events, native spooler correlation, redacted logs, and driver
+version. A complete one-click support-bundle export is Planned. Never include
+API/enrolment/local tokens, device keys, database URLs, signed object URLs,
+documents, native blobs, full DEVMODE/PrintCore state, or customer labels.
+Review and encrypt any support archive and set a retention deadline.
+
+## Printing model
+
+### Printers
+
+A logical printer belongs to a node and points at an exact native queue ID.
+Display names are not identifiers. Multiple nodes may expose equivalent
+physical devices as distinct destinations. One physical device may use
+multiple deliberate OS queues, but immutable profiles are preferred when the
+driver reliably restores saved state.
+
+### Native profiles
+
+A profile is a named immutable revision for one exact queue and driver
+fingerprint. It includes safe portable summaries, an opaque node-local native
+blob, stock/dependency metadata, allowed per-job overrides, validation/test
+state, and publication state. Edit restores an exact revision and creates a
+new revision; Clone creates a new identity. Jobs pin an exact revision.
+
+Native blobs are not recreated or edited in the web UI. Driver, queue, port,
+firmware, or device changes may stale a profile. Structural validation is not a
+physical print test.
+
+### Complex drivers
+
+Manufacturer-specific settings such as stock sensing, gap/black mark,
+registration, white toner, feed direction, cutter, tray, and finishing remain
+in the genuine vendor driver UI. Spool saves opaque native state rather than
+cloning every option. Profiles must be qualified on the final node, queue,
+driver, firmware, device, stock, and loading procedure. Only explicitly safe
+fields such as copies/pages should remain per-job overrides.
+
+### Queue layers
+
+The control plane durably registers jobs/content/profile pins and waits for a
+node. The node SQLite queue protects already accepted/downloaded work through
+network interruptions. CUPS or Windows owns the native job after handoff. New
+work waits or expires while a node is offline; accepted local work may continue.
+An ambiguous handoff becomes delivery_uncertain and is never blindly retried.
+
+### Job states
+
+Typical progression:
+
+    registered -> content_pending -> waiting_for_agent -> agent_downloading
+    -> agent_accepted -> queued_local -> preparing -> rendering
+    -> spool_intent -> accepted_by_spooler -> spooling -> printing
+    -> completed_reported
+
+Terminal/intervention states also include cancelled, expired, failed_retryable,
+failed_terminal, and delivery_uncertain. accepted_by_spooler does not mean paper
+exited. completed_reported is the strongest reported completion, not
+independent physical proof.
+
+## API model
+
+Native clients use:
+
+    Authorization: Bearer spl_...
+
+Keys are server-side secrets, one per integration/environment, with minimum
+scopes. Bootstrap credentials are rotated after durable keys exist. Nodes use
+their enrolled identity. Hosted OIDC verifies issuer, JWKS, application
+binding, organization, and permission claims; unrestricted OIDC remains off.
+PrintNode compatibility routes use HTTP Basic with the compatibility key as the
+username and an empty password.
+
+Native job registration is POST /v1/jobs. Clients send an Idempotency-Key of
+8-255 characters. The same key and request returns the recorded job; the same
+key with a different request returns idempotency_conflict. Idempotency prevents
+duplicate registration, not ambiguous physical delivery.
+
+Job content can reference an upload, Base64 data, or a URI. URI content must
+remain available until node download; private/short-lived content should use
+uploads. A successful create is durable registration, not printing.
+
+Webhook endpoint management, encrypted signing secrets, transactional outbox,
+retry history, and replay are implemented. Delivery is at least once. Spool
+signs the exact raw body with HMAC-SHA256 over:
+
+    <decimal timestamp>.<raw body>
+
+Headers are Spool-Timestamp and Spool-Signature: v1=<base64>. Consumers verify
+before parsing/side effects, use constant-time comparison and a timestamp
+tolerance, durably deduplicate event IDs, and return 2xx only after acceptance.
+
+The PrintNode-shaped API implements computers, printers, print jobs, states,
+cancellation, and compatibility authentication/idempotency with documented V1
+bounds. Collections currently hydrate bounded windows in some routes. Scales,
+integrator/child-account headers, and exact undocumented race behavior are not
+claimed as parity.
+
+## Operations
+
+### Configuration
+
+Secrets come from protected files/stores, not Git, images, URLs, logs, or
+support data. Separate staging/production state. Pin immutable artifacts.
+Hosted environments keep unrestricted OIDC and plain HTTP object access off.
+Preserve node data, identity, profiles, and delivery evidence across changes.
+
+### Upgrade
+
+Back up, stage, run compatibility tests, execute migrations, roll server
+replicas behind readiness, observe, then canary nodes. Server comes before
+agents. Migrations remain compatible with the previous server during rolling
+windows. Do not combine driver replacement with a Spool rollout unless profile
+invalidation is planned and tested.
+
+### Backup/restore
+
+Back up PostgreSQL and objects as one logical set with PITR, object versioning,
+separate failure domains, encryption, documented RPO/RTO, and restore drills.
+Restore in isolation with printing/webhooks blocked; verify migrations,
+digests, tenants, events, idempotency, outboxes, and profiles; then canary.
+Preserve node/native queues and reconcile uncertain deliveries.
+
+### High availability
+
+Replicas share PostgreSQL/S3 and coordinate with leases/outboxes. Spread at
+least two replicas across nodes/zones and gate traffic on readiness. Regional
+compute failover cannot make a database writable. Fence writers before
+cross-region database promotion, rotate the connection secret, reconcile lag,
+and rehearse failback. Replication is not a zero-RPO guarantee.
+
+### Monitoring
+
+Monitor API latency/errors/readiness; job depth/oldest age/retries/expiry/
+delivery_uncertain; node heartbeat/printer warnings/profile mismatch/native
+queue; PostgreSQL latency/connections/locks/replication; object integrity; and
+webhook backlog. /v1/health is process liveness. /v1/ready gates PostgreSQL and
+object readiness. Neither proves physical output.
+
+### Incident response
+
+Declare ownership/severity/timeline, preserve evidence, stop expansion, classify
+waiting/failed/uncertain jobs, and rotate exposed credentials. Never bulk retry
+ambiguous output. Reconcile Spool ID, native ID, physical output, and stock.
+Fence database writers before promotion. Share only redacted support data.
+
+## Contributor model
+
+The toolchain uses Rust 1.88, Node 22, pnpm, Swift on macOS, Docker, and
+platform print dependencies. Ordinary tests never physically print. The full
+suite covers formatting, strict Clippy, Rust tests, web tests/checks, and Swift
+tests when available. Physical certification is separately authorized with a
+named printer, stock, expected output, and retained evidence.
+
+Architecture changes preserve durable ownership, crash behavior, tenant scope,
+profile pins, native blob locality, protocol compatibility, and duplicate/
+timeout/restart tests. Material public protocol, security, durability, native
+format, dependency, and support-tier changes use an RFC and normally an ADR.
+RFC acceptance does not change a release support tier; evidence gates do.
+
+## Repository documentation sources
+
+Entry points:
+
+- docs/README.md
+- docs/getting-started/cloud.md
+- docs/getting-started/self-hosted-compose.md
+- docs/getting-started/self-hosted-kubernetes.md
+- docs/getting-started/local-only.md
+- docs/getting-started/development.md
+- docs/nodes/macos.md
+- docs/nodes/windows.md
+- docs/nodes/linux-headless.md
+- docs/nodes/pairing.md
+- docs/nodes/updates.md
+- docs/nodes/diagnostics.md
+- docs/printing/printers.md
+- docs/printing/native-profiles.md
+- docs/printing/complex-drivers.md
+- docs/printing/jobs-and-statuses.md
+- docs/printing/offline-queues.md
+- docs/api/quickstart.md
+- docs/api/authentication.md
+- docs/api/idempotency.md
+- docs/api/webhooks.md
+- docs/api/printnode-migration.md
+- docs/operations/configuration.md
+- docs/operations/upgrades.md
+- docs/operations/backups-and-restore.md
+- docs/operations/high-availability.md
+- docs/operations/monitoring.md
+- docs/operations/incident-response.md
+- docs/contributing/development.md
+- docs/contributing/architecture.md
+- docs/contributing/testing.md
+- docs/contributing/releases.md
+- docs/contributing/rfc-process.md
+
+Authoritative design/reference:
+
+- docs/00-vision-and-scope.md
+- docs/01-printnode-capability-inventory.md
+- docs/02-product-requirements.md
+- docs/03-architecture-and-stack.md
+- docs/04-protocol-queues-and-state.md
+- docs/05-platform-printing.md
+- docs/06-api-compatibility.md
+- docs/07-security-observability-and-operations.md
+- docs/08-testing-and-reliability.md
+- docs/09-roadmap.md
+- docs/10-decisions-risks-and-open-questions.md
+- docs/11-native-api-and-data-model.md
+- docs/12-open-source-saas-and-build-plan.md
+- docs/13-two-day-mvp-and-stack-decision.md
+- docs/14-long-term-native-architecture-and-48-hour-production.md
+- docs/15-linear-aligned-visual-system.md
+- docs/16-native-print-profiles-stock-and-routing.md
+- docs/architecture/adr-0001-rust-postgres-durable-edges.md
+- docs/architecture/adr-0002-portable-hosted-control-plane.md
+- docs/architecture/local-agent-control.md
+- docs/architecture/windows-pdf-helper.md
+- docs/operations/agent-service-installation.md
+- docs/operations/observability.md
+- docs/operations/self-hosting.md
+
+Machine-readable contracts and current release tiers remain authoritative over
+this generated narrative.

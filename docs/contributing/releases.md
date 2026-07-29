@@ -1,5 +1,8 @@
 # Release checks
 
+**Status:** evidence-gated release process; current native tiers remain Preview
+or Disabled rather than stable Supported.
+
 Release support is evidence-gated. Run:
 
 ```console

@@ -50,9 +50,11 @@ rendered file with `plutil -lint`, then install it as
 `/Library/LaunchDaemons/com.c4coffee.spool.agent.plist`, owned by `root:wheel`
 and mode `0644`, and load it with `launchctl bootstrap system`.
 
-The menu-bar shell is a separate user application and currently cannot read
-agent status. It shows a dashboard action only when `SPOOL_DASHBOARD_URL` is an
-explicit HTTP(S) URL. There is no notarised package or signed update channel.
+The menu-bar shell is a separate user application. It reads the authenticated
+loopback API, shows status/printers/profiles, and hosts native profile capture.
+It shows a dashboard action only when `SPOOL_DASHBOARD_URL` is an explicit
+HTTP(S) URL. Source packaging/signing scripts do not constitute a notarised
+release or a Supported signed update channel.
 
 ## Windows development installation
 
