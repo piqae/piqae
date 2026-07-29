@@ -997,7 +997,10 @@ pub async fn agent_sync(
                 tenant.environment_id,
                 request.agent_id,
                 &format!("{}:{}", request.agent_id, request.agent_version),
-                20,
+                // The V1 agent materializes offers serially. Claiming a batch
+                // would let later 30-second leases expire before the agent
+                // reaches them, so offer one durable handoff per sync.
+                1,
             )
             .await?
     } else {
