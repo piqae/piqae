@@ -13,6 +13,7 @@
     { href: '/dashboard', label: 'Overview', icon: 'activity' },
     { href: '/dashboard/jobs', label: 'Jobs', icon: 'jobs' },
     { href: '/dashboard/agents', label: 'Agents', icon: 'agents' },
+    { href: '/dashboard/local', label: 'Local node', icon: 'printers' },
     { href: '/dashboard/printers', label: 'Printers', icon: 'printers' },
     { href: '/dashboard/webhooks', label: 'Webhooks', icon: 'webhooks' },
     { href: '/dashboard/api-keys', label: 'API keys', icon: 'api' }

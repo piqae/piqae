@@ -100,6 +100,8 @@ export interface JobOptions {
   pages?: string;
   paper?: string;
   rotate?: 0 | 90 | 180 | 270;
+  /** Validated driver-native choices captured by a versioned printer profile. */
+  native_options?: Record<string, string>;
 }
 
 export type JobContent =

@@ -29,6 +29,22 @@ adds authentication server-side, forwards `Last-Event-ID`, disables buffering,
 and streams bytes without placing credentials in the URL. The dashboard
 throttles event-driven data invalidation to avoid request storms.
 
+### Local Mac agent
+
+The Local node page can manage a Spool agent running on the same machine as
+the web server. Enable its same-origin proxy with both server-only values:
+
+```sh
+SPOOL_LOCAL_AGENT_URL=http://127.0.0.1:17890
+SPOOL_LOCAL_AGENT_TOKEN_FILE=/absolute/path/to/local.token
+```
+
+The URL is restricted to loopback addresses. SvelteKit reads the token file
+for each upstream request and sends the credential only to the local agent;
+the path, token, and authorization header never enter browser data or browser
+storage. When either setting is absent, local access remains disabled with an
+explicit setup message.
+
 ## Deployment targets
 
 Vercel is the hosted default:

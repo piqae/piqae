@@ -5,5 +5,9 @@ let package = Package(
     name: "SpoolMenu",
     platforms: [.macOS(.v13)],
     products: [.executable(name: "SpoolMenu", targets: ["SpoolMenu"])],
-    targets: [.executableTarget(name: "SpoolMenu")]
+    targets: [
+        .target(name: "SpoolMenuCore"),
+        .executableTarget(name: "SpoolMenu", dependencies: ["SpoolMenuCore"]),
+        .testTarget(name: "SpoolMenuCoreTests", dependencies: ["SpoolMenuCore"]),
+    ]
 )
