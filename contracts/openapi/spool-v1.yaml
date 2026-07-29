@@ -2092,6 +2092,111 @@ components:
           type: boolean
         options:
           $ref: "#/components/schemas/JobOptions"
+        status:
+          type: string
+          enum:
+            [
+              draft,
+              capturing,
+              ready,
+              needs_test,
+              stale,
+              driver_mismatch,
+              destination_missing,
+              dependency_missing,
+              interactive_only,
+              invalid,
+              retired,
+            ]
+        native_kind:
+          type: string
+          enum:
+            [
+              portable_options,
+              cups_options,
+              cups_instance,
+              macos_printcore,
+              windows_devmode,
+              windows_printticket,
+            ]
+        native_digest:
+          type: [string, "null"]
+          description: Digest of the node-local opaque native configuration. The native blob is never returned.
+        driver_fingerprint:
+          anyOf:
+            - $ref: "#/components/schemas/DriverFingerprint"
+            - type: "null"
+        summary:
+          $ref: "#/components/schemas/PrintProfileSummary"
+        stock_id:
+          type: [string, "null"]
+        safe_overrides:
+          type: array
+          items:
+            type: string
+        last_validated_at:
+          type: [string, "null"]
+          format: date-time
+        last_test_job_id:
+          type: [string, "null"]
+        published:
+          type: boolean
+    DriverFingerprint:
+      type: object
+      additionalProperties: false
+      required:
+        [
+          platform,
+          driver_name,
+          driver_version,
+          architecture,
+          native_queue_id,
+          device_fingerprint,
+        ]
+      properties:
+        platform:
+          type: string
+        driver_name:
+          type: string
+        driver_version:
+          type: [string, "null"]
+        architecture:
+          type: [string, "null"]
+        native_queue_id:
+          type: string
+        device_fingerprint:
+          type: [string, "null"]
+    PrintProfileSummary:
+      type: object
+      additionalProperties: false
+      properties:
+        paper:
+          type: [string, "null"]
+        dimensions_mm:
+          type: [array, "null"]
+          prefixItems:
+            - type: number
+            - type: number
+          items: false
+          minItems: 2
+          maxItems: 2
+        source:
+          type: [string, "null"]
+        media:
+          type: [string, "null"]
+        color:
+          type: [string, "null"]
+        duplex:
+          type: [string, "null"]
+        resolution:
+          type: [string, "null"]
+        copies:
+          type: [integer, "null"]
+          minimum: 0
+        native:
+          type: object
+          additionalProperties:
+            type: string
     PrinterState:
       type: string
       enum: [online, offline, paused, busy, paper_out, error, unknown]
