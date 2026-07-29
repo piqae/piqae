@@ -1,20 +1,19 @@
 <script lang="ts">
   import Icon from '$lib/components/Icon.svelte';
   import { docs } from '$lib/docs-content';
-  const featured = docs.filter((doc) => ['quickstart', 'jobs', 'self-host'].includes(doc.slug));
-  const firstPrint = `curl https://api.spool.dev/v1/jobs \\
-  -H "Authorization: Bearer $SPOOL_API_KEY" \\
-  -H "Idempotency-Key: order-481-label" \\
-  -H "Content-Type: application/json" \\
-  -d '{
-    "printer_id": "prt_01K...",
-    "title": "Order 481 label",
-    "content_type": "pdf",
-    "content": {
-      "type": "uri",
-      "uri": "https://example.com/481.pdf"
-    }
-  }'`;
+  const featured = docs.filter((doc) =>
+    ['quickstart', 'platform-accounts', 'integration-models'].includes(doc.slug)
+  );
+  const firstPrint = `const customer = await spool.accounts.getOrCreate('org_01JQ8K8M6Q', {
+  name: 'Northwind Foods'
+});
+
+await customer.printPdf({
+  printerId: 'prt_01K...',
+  title: 'Order 481 label',
+  pdf: await readFile('./label.pdf'),
+  idempotencyKey: 'northwind-order-481-label-v1'
+});`;
 </script>
 
 <svelte:head>
@@ -27,8 +26,8 @@
     <span>Spool documentation</span>
     <h1>Printing infrastructure<br />without the mystery.</h1>
     <p>
-      Build reliable local and remote printing with durable queues, installed drivers, honest
-      state, and a small open-source node.
+      Add reliable local and remote printing to your product with one small SDK, durable queues,
+      installed drivers, and honest live status.
     </p>
     <div>
       <a class="button primary" href="/docs/quickstart">Start printing <Icon name="arrow-right" size={13} /></a>
@@ -37,7 +36,7 @@
   </header>
 
   <section class="code-sample">
-    <div class="code-top"><span>First print</span><code>curl</code></div>
+    <div class="code-top"><span>First customer print</span><code>TypeScript</code></div>
     <pre><code>{firstPrint}</code></pre>
   </section>
 
@@ -45,7 +44,7 @@
     {#each featured as doc}
       <a href={`/docs/${doc.slug}`}>
         <span class="feature-icon">
-          <Icon name={doc.slug === 'quickstart' ? 'bolt' : doc.slug === 'jobs' ? 'jobs' : 'agents'} size={16} />
+          <Icon name={doc.slug === 'quickstart' ? 'bolt' : doc.slug === 'platform-accounts' ? 'agents' : 'api'} size={16} />
         </span>
         <strong>{doc.title}</strong>
         <p>{doc.description}</p>

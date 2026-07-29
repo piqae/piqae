@@ -1,40 +1,58 @@
-# Spool documentation
+# Spool developer documentation
 
-Spool is an open-source, self-hostable print control plane and local print-node
-agent. Start with the journey matching your job:
+Spool Cloud is the default path: add the SDK to a trusted backend, create one
+isolated account per customer, pair their nodes in a browser, and send durable
+print jobs through the same API used by the dashboard.
 
-- [Cloud evaluation](getting-started/cloud.md)
-- [Self-hosted Docker Compose](getting-started/self-hosted-compose.md)
-- [Self-hosted Kubernetes](getting-started/self-hosted-kubernetes.md)
-- [Local-only node](getting-started/local-only.md)
-- [Developer setup](getting-started/development.md)
+## Start here
+
+- [Hosted headless quickstart](api/platform-headless-quickstart.md) — a SaaS,
+  marketplace, fulfilment, or design application serving many customers.
+- [Single-workspace quickstart](api/quickstart.md) — one organisation adding
+  printing to its own backend.
+- [Cloud node setup](getting-started/cloud.md) — install, pair, discover a
+  printer, capture a native profile, and send a test job.
+- [PrintNode migration](api/printnode-migration.md) — switch the tested
+  compatibility subset, then adopt native Spool resources.
+
+## Build an integration
+
+- [Platform accounts](api/platform-service-accounts.md)
+- [Authentication](api/authentication.md)
+- [Uploads and design applications](api/uploads-and-design-apps.md)
+- [Jobs, offline nodes, and delivery truth](printing/jobs-and-statuses.md)
+- [Idempotency](api/idempotency.md)
+- [Signed webhooks](api/webhooks.md)
+- [Printers and native profiles](printing/printers.md)
+- [Complex vendor drivers](printing/complex-drivers.md)
+
+Platform application code can create, retrieve, list, and archive customer
+accounts, then manage their nodes, printers, profiles, targets, uploads, jobs,
+API keys, webhooks, and usage through an account-scoped SDK client. Creating,
+rotating, or revoking the first platform credential remains an operator or
+hosted account-setup action.
+
+## Project
+
+- [Open source and self-hosting](open-source.md)
+- [Contributing](contributing/README.md)
+- [Operations](operations/README.md)
+- [Architecture record](00-vision-and-scope.md)
 
 ## Status language
 
-Every operational page uses these terms literally:
+- **Implemented:** code exists in this repository.
+- **Tested:** the named automated or physical test actually ran.
+- **Preview:** usable for evaluation, but release gates remain.
+- **Supported:** covered by a published stable support tier.
+- **Disabled:** present for development only; not a production release claim.
+- **Planned:** design only.
 
-- **Implemented**: code exists in this repository.
-- **Tested**: the named automated or physical test has actually run.
-- **Preview**: usable for evaluation, but release gates remain.
-- **Supported**: covered by a published stable support tier.
-- **Disabled**: built or documented for development only; not a production
-  release claim.
-- **Planned**: design only.
-
-No native platform is currently a stable Supported release. The authoritative
-release tiers are in
+The authoritative release tiers are
 [`release/support-matrix.yaml`](../release/support-matrix.yaml) and
-[`release/native-bundle-status.md`](../release/native-bundle-status.md).
+[`release/native-bundle-status.md`](../release/native-bundle-status.md). A job
+accepted by an operating-system spooler is not proof that ink reached paper.
 
-## Raw Markdown URL convention
-
-Documentation links use repository-relative paths with the literal `.md`
-extension. This keeps links usable in GitHub, source archives, raw Markdown
-readers, and generated `llms-full.txt`. Do not use documentation-site routes
-such as `/docs/nodes/macos`; write `../nodes/macos.md`. External links use full
-HTTPS URLs. Never place credentials, signed URLs, native profile blobs, or
-unredacted support bundles in a URL.
-
-The numbered documents remain the product and architecture record. Journey
-pages explain how to operate what is currently real and link back to those
-authoritative specifications.
+Repository-relative links retain the literal `.md` extension so the same pages
+work in GitHub, source archives, raw Markdown readers, and generated
+`llms-full.txt`.

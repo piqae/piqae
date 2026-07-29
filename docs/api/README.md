@@ -3,6 +3,7 @@
 - [Quickstart](quickstart.md)
 - [Authentication](authentication.md)
 - [Platform service accounts](platform-service-accounts.md)
+- [Headless SaaS quickstart](platform-headless-quickstart.md)
 - [Idempotency](idempotency.md)
 - [Uploads and design applications](uploads-and-design-apps.md)
 - [Webhooks](webhooks.md)

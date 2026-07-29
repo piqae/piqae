@@ -18,235 +18,328 @@ export interface Doc {
 export const docs: Doc[] = [
   {
     slug: 'quickstart',
-    group: 'Get started',
+    group: 'Hosted',
     title: 'Print in under ten minutes',
-    description: 'Create an API key, add a node, choose a printer, and submit a durable PDF job.',
+    description: 'Install the SDK, connect a customer, and send a durable PDF job from your server.',
     blocks: [
       {
-        heading: '1. Start Spool',
-        body: 'Use Spool Cloud, run the self-hosted Docker Compose stack, or start a node in local-only mode. Cloud and self-hosted nodes need outbound HTTPS access only.'
-      },
-      {
-        code: `# Local-only mode
-spool-agent --mode local
+        heading: 'Install',
+        body: 'Use Spool Cloud unless you have a specific reason to operate the control plane yourself. Platform keys are server credentials and must never be used in a browser, mobile app, or distributed desktop client.',
+        code: `pnpm add @spool/sdk
 
-# Or enrol with a hosted/self-hosted control plane
-spool-agent enrol \\
-  --server https://api.spool.example \\
-  --token spl_enr_...`,
+# Server-only secret
+SPOOL_PLATFORM_KEY=spl_platform_...`,
         language: 'shell'
       },
       {
-        heading: '2. Find a printer',
-        body: 'After enrolment, installed operating-system queues appear automatically. Use the native printer ID rather than the driver display name in application code.',
-        code: `curl https://api.spool.dev/v1/printers \\
-  -H "Authorization: Bearer $SPOOL_API_KEY"`,
-        language: 'shell'
+        heading: 'Connect one customer',
+        code: `import { SpoolPlatform } from '@spool/sdk';
+
+const spool = new SpoolPlatform({
+  platformKey: process.env.SPOOL_PLATFORM_KEY!
+});
+
+const customer = await spool.accounts.getOrCreate('org_01JQ8K8M6Q', {
+  name: 'Northwind Foods',
+  metadata: { plan: 'pro' }
+});`,
+        language: 'typescript'
       },
       {
-        heading: '3. Submit a PDF',
-        code: `curl https://api.spool.dev/v1/jobs \\
-  -H "Authorization: Bearer $SPOOL_API_KEY" \\
-  -H "Idempotency-Key: order-481-label" \\
-  -H "Content-Type: application/json" \\
-  -d '{
-    "printer_id": "prt_01K...",
-    "title": "Order 481 label",
-    "content_type": "pdf",
-    "content": {
-      "type": "uri",
-      "uri": "https://example.com/labels/481.pdf"
-    },
-    "options": {
-      "paper": "4x6",
-      "fit_to_page": true,
-      "copies": 1
-    }
-  }'`,
-        language: 'shell'
+        heading: 'Print one PDF',
+        code: `const printer = (await customer.printers.list()).data[0];
+
+const job = await customer.printPdf({
+  printerId: printer.id,
+  title: 'Order 10428 shipping label',
+  pdf: await readFile('./shipping-label.pdf'),
+  idempotencyKey: 'northwind-order-10428-label-v1',
+  metadata: { order_id: '10428' }
+});`,
+        language: 'typescript'
       },
       {
         callout: {
           tone: 'info',
+          title: 'The SDK defaults customer calls to Live',
+          body: 'Use customer.test during onboarding and automated checks. Pick the environment in trusted server code; never accept a raw Live/Test choice from an untrusted client.'
+        }
+      },
+      {
+        callout: {
+          tone: 'warning',
           title: 'A 201 response means durable registration',
-          body: 'It does not mean the document printed. Follow the job resource, SSE stream, or a signed webhook until the state reaches accepted_by_spooler or a later observation.'
+          body: 'Follow job.updated webhooks until operating-system handoff or a later observation. A printer or driver may be unable to prove that ink reached paper.'
+        }
+      }
+    ]
+  },
+  {
+    slug: 'integration-models',
+    group: 'Hosted',
+    title: 'Choose an integration',
+    description: 'Use a platform account, a workspace API key, or an interactive node flow without mixing their trust boundaries.',
+    blocks: [
+      {
+        heading: 'Headless platform',
+        body: 'Best for SaaS products, fulfilment systems, marketplaces, and design tools serving many customer organisations. Your backend keeps one platform key, maps each authenticated organisation to an immutable external ID, and manages isolated customer accounts through the API or SDK.',
+        bullets: [
+          'Create, retrieve, list, and archive customer accounts.',
+          'Use isolated Test and Live environments for every customer.',
+          'List nodes, printers, profiles, targets, jobs, API keys, and webhooks.',
+          'Send PDFs without implementing upload or digest plumbing.',
+          'Keep all platform and tenant selection decisions on the server.'
+        ]
+      },
+      {
+        heading: 'Single-workspace backend',
+        body: 'Best for one company adding printing to its own application. Create a scoped Live or Test API key in Developers, then use SpoolClient directly.',
+        code: `import { SpoolClient } from '@spool/sdk';
+
+const spool = new SpoolClient({
+  apiKey: process.env.SPOOL_API_KEY!
+});
+
+const printers = await spool.printers.list();
+const jobs = await spool.jobs.list({ limit: 25 });`,
+        language: 'typescript'
+      },
+      {
+        heading: 'Interactive desktop or operator flow',
+        body: 'Best when a person installs a node, chooses native driver settings, or monitors a local queue. Pair the thin tray app in a browser. The node keeps a device credential in Keychain or DPAPI and does not retain the person’s web session.'
+      },
+      {
+        heading: 'Local-only',
+        body: 'Best for a single machine that must print without any control plane. Use the loopback API and local SQLite queue. Platform accounts, workspace members, and hosted webhooks are intentionally absent.'
+      }
+    ]
+  },
+  {
+    slug: 'platform-accounts',
+    group: 'Platform APIs',
+    title: 'Customer accounts',
+    description: 'Give every customer an isolated workspace while keeping integration code compact.',
+    blocks: [
+      {
+        heading: 'Use your immutable external ID',
+        body: 'Use a non-personal identifier from your own database. Never use a mutable slug, email address, display name, printer ID, or value accepted directly from browser input.',
+        code: `const customer = await spool.accounts.getOrCreate(customer.id, {
+  name: customer.displayName,
+  metadata: {
+    billing_tier: customer.plan,
+    home_region: customer.region
+  }
+});`,
+        language: 'typescript'
+      },
+      {
+        heading: 'Test and Live are isolated',
+        code: `// Live is the default.
+await customer.printers.list();
+
+// Test has separate nodes, printers, jobs and webhooks.
+await customer.test.printers.list();`,
+        language: 'typescript'
+      },
+      {
+        heading: 'Manage the lifecycle',
+        code: `const accounts = await spool.accounts.list();
+const sameCustomer = await spool.accounts.retrieve(customer.externalId);
+await spool.accounts.archive(customer.externalId);`,
+        language: 'typescript'
+      },
+      {
+        body: 'Archive blocks new platform access and revokes both environment grants. Already accepted jobs retain their durable lifecycle. Archive is not immediate data deletion.'
+      },
+      {
+        heading: 'Dashboard and API',
+        body: 'Platform operators can view customer accounts and environment health in the hosted dashboard. Application code should use the SDK or API. The browser dashboard uses the signed-in human session; it never receives the platform key.'
+      }
+    ]
+  },
+  {
+    slug: 'common-patterns',
+    group: 'Platform APIs',
+    title: 'Common printing patterns',
+    description: 'Build labels, receipts, documents, and design experiences around printer profiles rather than vendor settings.',
+    blocks: [
+      {
+        heading: 'Shipping and fulfilment labels',
+        body: 'Create one native profile for each stock or finishing setup. Store the profile-backed target ID with your warehouse configuration, then send the order PDF with a stable order/label idempotency key.',
+        code: `await customer.printPdf({
+  targetId: warehouse.targets.shippingLabel4x6,
+  title: \`Order \${order.number} label\`,
+  pdf,
+  idempotencyKey: \`order-\${order.id}-label-v2\`
+});`,
+        language: 'typescript'
+      },
+      {
+        heading: 'Point of sale',
+        body: 'Use a target that can route to an available node and printer. Keep the receipt request short-lived, show current node/printer health before checkout, and provide an explicit reprint action when delivery becomes uncertain.'
+      },
+      {
+        heading: 'Batch documents',
+        body: 'Create one job per independently retryable document. Bound concurrency in your application and use webhooks to drive progress rather than polling every job.'
+      },
+      {
+        heading: 'Design and template applications',
+        body: 'List profiles and stock metadata before rendering. Use the profile’s page dimensions, printable area, orientation, stock identifier, and native validation state to size the canvas. The installed driver remains authoritative for trays, colour, cutters, black-mark sensors, and vendor PostScript options.'
+      },
+      {
+        heading: 'Multiple nodes',
+        body: 'A physical printer exposed by two computers is two node-specific printer resources. Send to a printer for exact placement, or to a target for an explicit routing policy. Spool does not silently reroute a pinned printer job.'
+      }
+    ]
+  },
+  {
+    slug: 'printers-and-profiles',
+    group: 'Platform APIs',
+    title: 'Printers, profiles, and stock',
+    description: 'Discover what is available and expose safe print choices to your application.',
+    blocks: [
+      {
+        heading: 'List available resources',
+        code: `const [nodes, printers, stocks, targets] = await Promise.all([
+  customer.agents.list(),
+  customer.printers.list(),
+  customer.stocks.list(),
+  customer.targets.list()
+]);`,
+        language: 'typescript'
+      },
+      {
+        heading: 'Profiles are native snapshots',
+        body: 'A profile is an immutable capture of operating-system driver settings on one node. The same OS printer can have several profiles—for example A4 colour, A4 duplex, tray 2 letterhead, or an OKI label stock with vendor-specific calibration.'
+      },
+      {
+        heading: 'What the web app should show',
+        bullets: [
+          'Friendly profile and stock name.',
+          'Page dimensions, orientation, colour, duplex, copies policy, and printable area.',
+          'Node and printer online state.',
+          'Native validation and last successful test.',
+          'A stable target ID when routing rather than a specific OS queue is desired.'
+        ]
+      },
+      {
+        callout: {
+          tone: 'info',
+          title: 'Do not recreate complex drivers in your web UI',
+          body: 'Open the operating system’s native printer panel to edit advanced settings. Spool stores and replays the opaque native snapshot and exposes only portable metadata needed by an application.'
         }
       }
     ]
   },
   {
     slug: 'jobs',
-    group: 'Core concepts',
+    group: 'Reliability',
     title: 'Jobs and delivery truth',
-    description: 'Understand durable registration, node acceptance, operating-system handoff, and uncertain delivery.',
+    description: 'Understand offline nodes, durable queues, large documents, retries, and uncertain delivery.',
     blocks: [
       {
-        heading: 'Two durable queues',
-        body: 'The control plane retains responsibility while a node is offline. The node acknowledges a claim only after writing it to its local SQLite queue. This boundary prevents a successful API response from becoming a lost print.'
+        heading: 'When no node is online',
+        body: 'The control plane durably retains the job. An eligible node claims it after reconnecting, writes the claim and document reference into its local SQLite queue, then acknowledges ownership. Expiry and cancellation still apply while offline.'
+      },
+      {
+        heading: 'Large documents',
+        body: 'Upload binary content directly to object storage using the SDK. The SDK computes SHA-256, sends no Spool credential to the signed upload URL, and verifies the upload before job creation. The hosted V1 limit is 50 MiB per document; stream from disk in production when the runtime supports it.'
       },
       {
         heading: 'Idempotency',
-        body: 'Send a unique Idempotency-Key for every logical job. Retrying an identical request returns its original result; reusing the key with a different body returns a conflict.',
-        code: `const job = await spool.jobs.create(
-  {
-    printer_id: 'prt_01K...',
-    title: 'Packing slip',
-    content_type: 'pdf',
-    content: { type: 'uri', uri: documentUrl }
-  },
-  \`order-\${order.id}-packing-slip\`
-);`,
+        body: 'Use one stable key for one logical print. Retrying an identical request returns the original job. Reusing the key with different content returns a conflict.',
+        code: `await customer.printPdf({
+  printerId,
+  title: 'Packing slip',
+  pdf,
+  idempotencyKey: \`order-\${order.id}-packing-slip-v1\`
+});`,
         language: 'typescript'
       },
       {
-        heading: 'The handoff boundary',
+        heading: 'Lifecycle',
         bullets: [
           'registered: the service durably owns the job.',
-          'agent_accepted: a specific machine durably owns a local copy.',
-          'accepted_by_spooler: the OS queue accepted the submission.',
-          'completed_reported: the OS reports completion; physical output may still be unknowable.',
-          'delivery_uncertain: a crash occurred at the handoff boundary and automatic retry could duplicate output.'
+          'agent_accepted: one node durably owns a local copy.',
+          'accepted_by_spooler: the operating-system queue accepted the submission.',
+          'completed_reported: the OS reports completion; physical output may remain unknowable.',
+          'delivery_uncertain: a crash crossed the handoff boundary and automatic retry could duplicate output.'
         ]
       },
       {
         callout: {
           tone: 'warning',
-          title: 'Never automatically retry delivery_uncertain',
-          body: 'An operator must decide whether to mark the original delivered or create a linked reprint that explicitly accepts duplicate risk.'
-        }
-      }
-    ]
-  },
-  {
-    slug: 'api-keys',
-    group: 'Authentication',
-    title: 'API keys',
-    description: 'Use environment-bound, least-privilege credentials without exposing browser sessions or device keys.',
-    blocks: [
-      {
-        heading: 'Authenticate',
-        body: 'Send the secret as a Bearer token. The prefix identifies whether a credential belongs to a test or live environment.',
-        code: `Authorization: Bearer spl_live_...`,
-        language: 'http'
-      },
-      {
-        heading: 'Scopes',
-        bullets: [
-          'jobs:read and jobs:write',
-          'printers:read and printers:write',
-          'agents:read and agents:write',
-          'webhooks:read and webhooks:write',
-          'usage:read and audit:read'
-        ]
-      },
-      {
-        callout: {
-          tone: 'warning',
-          title: 'Secrets are shown once',
-          body: 'Spool stores only a one-way hash. Keep keys in a secret manager, never in browser code, source control, logs, or document metadata.'
+          title: 'Never hide uncertain delivery',
+          body: 'Do not automatically retry delivery_uncertain. Let an operator mark the original delivered or create a linked reprint that explicitly accepts duplicate risk.'
         }
       }
     ]
   },
   {
     slug: 'webhooks',
-    group: 'Events',
-    title: 'Signed webhooks',
-    description: 'Receive durable, at-least-once event delivery with replayable attempts.',
+    group: 'Reliability',
+    title: 'Webhooks and live status',
+    description: 'Receive signed, at-least-once lifecycle events without running a polling loop.',
     blocks: [
       {
-        heading: 'Verify before parsing',
-        body: 'Compute HMAC-SHA256 over the timestamp and exact raw request bytes. Reject stale timestamps and compare signatures in constant time.',
-        code: `const payload = \`\${timestamp}.\${rawBody}\`;
-const expected = createHmac('sha256', secret)
-  .update(payload)
-  .digest('hex');
+        heading: 'Create a webhook',
+        code: `const webhook = await customer.webhooks.create({
+  url: 'https://example.com/webhooks/spool',
+  events: ['job.updated']
+});
 
-if (!timingSafeEqual(Buffer.from(expected), Buffer.from(signature))) {
-  throw new Error('Invalid Spool signature');
-}`,
+// Save webhook.secret now. It is returned once.`,
         language: 'typescript'
       },
       {
-        heading: 'Delivery model',
+        heading: 'Delivery rules',
         bullets: [
-          'Events are delivered at least once; deduplicate by event ID.',
-          'Any 2xx response acknowledges an attempt.',
-          'Failures retry with exponential backoff for up to 24 hours.',
-          'Dead-letter attempts remain visible and can be replayed without changing the event ID.'
+          'Verify the timestamp and HMAC signature over the exact raw request body.',
+          'Deduplicate at-least-once delivery by event ID.',
+          'Return 2xx only after your application durably records the event.',
+          'Treat status changes as monotonic evidence, not proof of physical output.',
+          'Use API reads to reconcile after downtime or an event gap.'
         ]
       }
     ]
   },
   {
-    slug: 'sdk',
-    group: 'Libraries',
-    title: 'TypeScript SDK',
-    description: 'A dependency-free client for Node.js, browsers, serverless functions, and local-only nodes.',
+    slug: 'api-and-sdk',
+    group: 'Reference',
+    title: 'API and SDK',
+    description: 'Use one small TypeScript client or the same versioned HTTP contract from any backend.',
     blocks: [
       {
-        heading: 'Install',
-        code: `pnpm add @spool/sdk`,
-        language: 'shell'
-      },
-      {
-        heading: 'Create a client',
-        code: `import { SpoolClient } from '@spool/sdk';
-
-const spool = new SpoolClient({
-  apiKey: process.env.SPOOL_API_KEY,
-  // Override for self-hosted or local-only Spool.
-  baseUrl: process.env.SPOOL_API_URL
-});`,
+        heading: 'TypeScript',
+        code: `import {
+  SpoolClient,   // one workspace/environment
+  SpoolPlatform, // many customer accounts
+  SpoolError
+} from '@spool/sdk';`,
         language: 'typescript'
       },
       {
-        heading: 'Structured failures',
-        body: 'SpoolError exposes a stable code, HTTP status, request ID, retryable flag, and structured details. Do not branch on the human-readable message.'
-      }
-    ]
-  },
-  {
-    slug: 'self-host',
-    group: 'Deployment',
-    title: 'Self-host Spool',
-    description: 'Run the same control plane using PostgreSQL, S3-compatible storage, and generic OIDC.',
-    blocks: [
-      {
-        heading: 'Required services',
-        bullets: [
-          'spool-server OCI image',
-          'PostgreSQL 16 or later',
-          'S3, R2, MinIO, or filesystem object storage',
-          'Generic OIDC, WorkOS, or one-time local-owner bootstrap',
-          'SvelteKit Node artifact or separately deployed Vercel frontend'
-        ]
+        heading: 'HTTP',
+        body: 'The native API is JSON over HTTPS under /v1. Platform account management uses only the platform bearer. Tenant operations add the exact workspace and environment selected by server-owned application state. Use Idempotency-Key on mutating requests that may be retried.'
       },
       {
-        heading: 'Dashboard authentication',
-        body: 'Hosted WorkOS mode forwards the verified AuthKit session access token only from the SvelteKit server to the control plane OIDC verifier. It is never exposed through a browser token endpoint. Local deployments without OIDC may set a narrowly scoped SPOOL_DASHBOARD_API_KEY as an explicit server-only fallback.'
+        heading: 'Errors',
+        body: 'SpoolError exposes a stable code, HTTP status, request ID, retryable flag, and structured details. Branch on the code, never on the human-readable message. Retry only operations marked retryable and preserve the same idempotency key.'
       },
       {
-        heading: 'Build the self-hosted web artifact',
-        code: `pnpm --filter @spool/web build:self-host
-node apps/web/build-node`,
-        language: 'shell'
-      },
-      {
-        heading: 'Operational baseline',
-        body: 'Run migrations as an explicit job, configure health probes, back up PostgreSQL and signing keys, apply object lifecycle rules, and exercise restoration before production traffic.'
+        heading: 'Initial setup remains deliberate',
+        body: 'Create, rotate, or revoke the first platform credential with the operator CLI or hosted account setup. Routine customer accounts, nodes, printers, jobs, API keys, webhooks, and usage are API/SDK resources.'
       }
     ]
   },
   {
     slug: 'printnode-migration',
-    group: 'Migration',
-    title: 'Move from PrintNode',
-    description: 'Keep your existing printing integration while adopting richer Spool observability incrementally.',
+    group: 'Reference',
+    title: 'Migrate from PrintNode',
+    description: 'Change the API origin for the tested compatibility subset, then adopt native Spool resources incrementally.',
     blocks: [
       {
-        heading: 'Change the origin and credential',
-        body: 'The compatibility hostname implements documented PrintNode printing routes at the root. Keep HTTP Basic authentication and replace only the API origin and key.',
+        heading: 'Compatibility endpoint',
         code: `const printNode = new PrintNode({
   apiKey: process.env.SPOOL_API_KEY,
   baseUrl: 'https://compat.spool.example'
@@ -254,13 +347,79 @@ node apps/web/build-node`,
         language: 'typescript'
       },
       {
-        heading: 'Compatibility scope',
+        heading: 'Scope',
         bullets: [
-          'Computers, printers, print jobs, states, and printing webhooks are V1.',
-          'PDF and RAW URI/base64 modes are supported.',
-          'Scales and integrator child accounts arrive in V1.1.',
-          'Native Spool states provide more truth than the five-state compatibility projection.'
+          'Computers, printers, print jobs, states, and printing webhooks are the V1 compatibility focus.',
+          'PDF and RAW URI/base64 modes are supported only where the checked-in compatibility tests say so.',
+          'Platform customer accounts use the native Spool SDK/API.',
+          'Native states expose more delivery evidence than the compatibility projection.'
         ]
+      }
+    ]
+  },
+  {
+    slug: 'open-source',
+    group: 'Project',
+    title: 'Open source and self-hosting',
+    description: 'Run the complete printing control plane yourself without WorkOS, Stripe, a licence server, or phone-home.',
+    blocks: [
+      {
+        heading: 'Choose a deployment',
+        bullets: [
+          'Docker Compose for development and normal small installations.',
+          'Helm with external PostgreSQL and S3-compatible storage for highly available deployments.',
+          'Local-only node and loopback API when no server is needed.',
+          'The same signed node can connect to Spool Cloud or your HTTPS control plane.'
+        ]
+      },
+      {
+        heading: 'Start with Compose',
+        code: `cd deploy/self-host
+cp .env.example .env
+# Replace every placeholder.
+docker compose --env-file .env up -d`,
+        language: 'shell'
+      },
+      {
+        heading: 'What remains complete',
+        body: 'Self-hosted Spool includes printing, native profiles, durable queues, platform accounts, API keys, webhooks, diagnostics, update policy, local-owner access, and generic OIDC. Hosted convenience—not withheld printing capability—is the commercial product.'
+      },
+      {
+        callout: {
+          tone: 'warning',
+          title: 'Compose is not highly available',
+          body: 'Production operators must back up PostgreSQL and object storage together, pin image digests, run migrations explicitly, monitor queue age, and prove restore and upgrade procedures.'
+        }
+      }
+    ]
+  },
+  {
+    slug: 'contributing',
+    group: 'Project',
+    title: 'Contributing',
+    description: 'Create a virtual first print from a fresh checkout without touching physical hardware.',
+    blocks: [
+      {
+        heading: 'Set up',
+        code: `git clone https://github.com/C4CoffeeCo/spool.git
+cd spool
+cargo xtask doctor
+cargo xtask dev`,
+        language: 'shell'
+      },
+      {
+        heading: 'Work safely',
+        bullets: [
+          'Read AGENTS.md and the nearest scoped instructions before editing.',
+          'Use the virtual node and fake printers unless a named physical test is explicitly authorised.',
+          'Update OpenAPI before public route or schema code.',
+          'Use append-only PostgreSQL migrations with cross-tenant tests.',
+          'Run cargo xtask test changed before a focused DCO-signed commit.'
+        ]
+      },
+      {
+        heading: 'Submit',
+        body: 'Open an issue or RFC for protocol, profile, compatibility, or deployment changes. Keep pull requests small, include failure-path evidence, preserve the distinction between spooler acceptance and physical delivery, and never use customer documents as fixtures.'
       }
     ]
   }
