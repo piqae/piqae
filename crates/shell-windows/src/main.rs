@@ -32,7 +32,7 @@ mod windows_shell {
     };
 
     const TRAY_MESSAGE: u32 = WM_APP + 1;
-    const FIRST_ACTION_ID: u32 = 100;
+    const FIRST_ACTION_ID: i32 = 100;
     const TRAY_ICON_ID: u32 = 1;
 
     static SHELL_STATE: OnceLock<Mutex<ShellState>> = OnceLock::new();
@@ -234,7 +234,9 @@ mod windows_shell {
             DestroyMenu(menu);
         }
         if command >= FIRST_ACTION_ID {
-            execute_action(window, command - FIRST_ACTION_ID);
+            if let Ok(index) = u32::try_from(command - FIRST_ACTION_ID) {
+                execute_action(window, index);
+            }
         }
     }
 
@@ -465,7 +467,7 @@ mod windows_shell {
         action: MenuAction,
         actions: &mut Vec<MenuAction>,
     ) {
-        let Ok(offset) = u32::try_from(actions.len()) else {
+        let Ok(offset) = i32::try_from(actions.len()) else {
             return;
         };
         let id = FIRST_ACTION_ID + offset;
