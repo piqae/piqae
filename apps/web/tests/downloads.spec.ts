@@ -17,14 +17,16 @@ test('downloads remain truthful, responsive, and keyboard reachable', async ({ p
     await page.setViewportSize(viewport);
     await page.goto('/downloads');
 
-    await expect(page.getByRole('heading', { name: 'Connect a printer computer' })).toBeVisible();
-    await expect(page.getByText('Development only')).toBeVisible();
-    await expect(page.getByText('Unsigned Preview build')).toBeVisible();
-    await expect(page.getByRole('link', { name: /^Download / })).toHaveCount(0);
     await expect(
-      page.getByRole('heading', { name: 'Approve the computer in your browser' })
+      page.getByRole('heading', { level: 1, name: /^(Piqae for .* is almost ready|Download Piqae)$/ })
     ).toBeVisible();
-    await expect(page.getByRole('heading', { name: 'Older releases' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Piqae for every printer computer.' })).toBeVisible();
+    await expect(page.getByRole('link', { name: /^Download / })).toHaveCount(0);
+    await expect(page.getByRole('heading', { name: 'Ready to print in minutes.' })).toBeVisible();
+    await expect(page.getByText('Connect your account')).toBeVisible();
+    await expect(
+      page.getByRole('heading', { name: 'Everything technical, when you need it.' })
+    ).toBeVisible();
 
     const dimensions = await page.evaluate(() => ({
       documentWidth: document.documentElement.scrollWidth,
@@ -33,7 +35,7 @@ test('downloads remain truthful, responsive, and keyboard reachable', async ({ p
     expect(dimensions.documentWidth).toBeLessThanOrEqual(dimensions.viewportWidth);
 
     await page.locator('body').focus();
-    await tabTo(page, 'a[href="/pair"]');
-    await expect(page.locator('a[href="/pair"]')).toBeFocused();
+    await tabTo(page, 'a[href="#other-downloads"]');
+    await expect(page.locator('a[href="#other-downloads"]')).toBeFocused();
   }
 });
