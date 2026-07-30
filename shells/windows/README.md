@@ -71,6 +71,11 @@ updates…** action without background checks. `automatic` additionally enables
 WinSparkle's periodic checks. Both modes still require operator confirmation;
 neither silently installs an update.
 
+Changing policy through the installed **Update policy** action restarts only
+the tray, leaving the durable agent and queue running, so the new policy takes
+effect immediately. The action fails closed while a native driver profile
+dialog is open.
+
 Before handing a downloaded installer to Windows, the tray asks the local
 agent for current state. The handoff is allowed only when the node is already
 paused, no job is active, and no native profile dialog is open. Queued jobs stay

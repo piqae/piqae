@@ -6,7 +6,7 @@ on:
       version:
         description: SemVer release version without a leading v
         required: true
-        default: 0.1.0-preview.1
+        default: 0.1.0
       publish:
         description: Promote a fully signed build to the stable Railway release feed
         type: boolean
@@ -42,6 +42,8 @@ jobs:
       WINDOWS_PFX_BASE64: ${{ secrets.WINDOWS_AUTHENTICODE_PFX_BASE64 }}
       WINDOWS_PFX_PASSWORD: ${{ secrets.WINDOWS_AUTHENTICODE_PFX_PASSWORD }}
       WINDOWS_TIMESTAMP_URL: ${{ vars.WINDOWS_RFC3161_TIMESTAMP_URL }}
+      WINDOWS_EXPECTED_CERTIFICATE_SUBJECT: ${{ vars.WINDOWS_EXPECTED_CERTIFICATE_SUBJECT }}
+      WINDOWS_EXPECTED_CERTIFICATE_THUMBPRINT: ${{ vars.WINDOWS_EXPECTED_CERTIFICATE_THUMBPRINT }}
       WINSPARKLE_PRIVATE_KEY_BASE64: ${{ secrets.WINSPARKLE_ED25519_PRIVATE_KEY_BASE64 }}
       WINSPARKLE_PUBLIC_KEY: ${{ vars.WINSPARKLE_ED25519_PUBLIC_KEY }}
       WINDOWS_UPDATE_FEED_URL: https://downloads.piqae.com/releases/stable/appcast-windows.xml
@@ -70,6 +72,8 @@ jobs:
             authenticode_certificate = $env:WINDOWS_PFX_BASE64
             authenticode_password = $env:WINDOWS_PFX_PASSWORD
             timestamp_url = $env:WINDOWS_TIMESTAMP_URL
+            expected_certificate_subject = $env:WINDOWS_EXPECTED_CERTIFICATE_SUBJECT
+            expected_certificate_thumbprint = $env:WINDOWS_EXPECTED_CERTIFICATE_THUMBPRINT
             winsparkle_private_key = $env:WINSPARKLE_PRIVATE_KEY_BASE64
             winsparkle_public_key = $env:WINSPARKLE_PUBLIC_KEY
           }
@@ -86,9 +90,13 @@ jobs:
             if (-not $env:WINDOWS_UPDATE_FEED_URL.StartsWith("https://")) {
               throw "WINDOWS_UPDATE_FEED_URL must use HTTPS."
             }
+            $expectedThumbprint = $env:WINDOWS_EXPECTED_CERTIFICATE_THUMBPRINT -replace "\s", ""
+            if ($expectedThumbprint -notmatch "^[0-9A-Fa-f]{40}$") {
+              throw "WINDOWS_EXPECTED_CERTIFICATE_THUMBPRINT must be a 40-character SHA-1 certificate thumbprint."
+            }
             "signed=true" >> $env:GITHUB_OUTPUT
             "artifact_name=piqae-windows-x86_64-signed" >> $env:GITHUB_OUTPUT
-            "SIGNED RELEASE: Authenticode and WinSparkle Ed25519 gates are configured." |
+            "SIGNED RELEASE: expected Authenticode signer and WinSparkle Ed25519 gates are configured." |
               Out-File -Encoding ascii "SIGNING-STATUS.txt"
           } else {
             $missing = $requirements.GetEnumerator() |
@@ -111,6 +119,31 @@ jobs:
       - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
         with:
           key: windows-release-x86_64
+
+      - name: Check component versions
+        shell: pwsh
+        run: |
+          $metadata = cargo metadata --locked --no-deps --format-version 1 |
+            ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) {
+            throw "Could not read Cargo package metadata."
+          }
+          $expected = "${{ steps.release.outputs.version }}"
+          $components = @(
+            "spool-agent",
+            "spoolctl",
+            "spool-executor-windows",
+            "spool-shell-windows"
+          )
+          foreach ($component in $components) {
+            $package = @($metadata.packages | Where-Object name -eq $component)
+            if ($package.Count -ne 1) {
+              throw "Expected exactly one Cargo package named '$component'."
+            }
+            if ($package[0].version -cne $expected) {
+              throw "Release version '$expected' differs from $component version '$($package[0].version)'."
+            }
+          }
 
       - name: Build Windows binaries
         env:
@@ -202,10 +235,10 @@ jobs:
             if ($LASTEXITCODE -ne 0) {
               throw "Authenticode signing failed for $($binary.Name)."
             }
-            $signature = Get-AuthenticodeSignature -LiteralPath $binary.FullName
-            if ($signature.Status -ne "Valid") {
-              throw "Authenticode verification failed for $($binary.Name): $($signature.Status)"
-            }
+            & "packaging/windows/Assert-AuthenticodeSigner.ps1" `
+              -Path $binary.FullName `
+              -ExpectedSubject $env:WINDOWS_EXPECTED_CERTIFICATE_SUBJECT `
+              -ExpectedThumbprint $env:WINDOWS_EXPECTED_CERTIFICATE_THUMBPRINT
           }
 
       - name: Verify preview binaries are not represented as signed
@@ -260,10 +293,10 @@ jobs:
         shell: pwsh
         run: |
           $installer = "artifacts\release\piqae-windows-x86_64-setup.exe"
-          $signature = Get-AuthenticodeSignature -LiteralPath $installer
-          if ($signature.Status -ne "Valid") {
-            throw "Installer Authenticode verification failed: $($signature.Status)"
-          }
+          & "packaging/windows/Assert-AuthenticodeSigner.ps1" `
+            -Path $installer `
+            -ExpectedSubject $env:WINDOWS_EXPECTED_CERTIFICATE_SUBJECT `
+            -ExpectedThumbprint $env:WINDOWS_EXPECTED_CERTIFICATE_THUMBPRINT
 
       - name: Verify preview installer is unsigned
         if: steps.release.outputs.signed != 'true'

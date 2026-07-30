@@ -1,6 +1,6 @@
-# Piqae Node for Windows — development installer
+# Piqae Node for Windows — preview installer
 
-The Windows package is a **per-user development installation**. It installs the
+The Windows package is a **per-user preview installation**. It installs the
 agent, executor, native driver-profile host, CLI, and notification-area shell
 under `%LOCALAPPDATA%\Programs\Piqae` for new installations, then starts the
 agent and shell at login
@@ -15,6 +15,12 @@ are not claimed by this package.
 
 Run `piqae-windows-x86_64-setup.exe` as the Windows user who will configure the
 printer. Setup opens **Configure Piqae Node** after copying the files.
+
+An upgrade detects the existing `%LOCALAPPDATA%\Spool\config.json`, preserves
+the node identity and durable queue, skips the first-run configuration wizard,
+and starts the existing node after replacement. A fresh interactive install
+opens configuration once. Silent fresh installs intentionally remain
+unconfigured until the operator runs **Configure Piqae Node**.
 
 The configuration wizard supports:
 
@@ -69,6 +75,11 @@ settings and is never substituted for a pinned native profile.
 - Manual update check: tray menu → **Check for updates…** (signed packages only)
 - Uninstall: Windows Settings → Apps → Installed apps → Piqae Node
 
+Changing update policy restarts only the disposable tray process so the new
+policy becomes active immediately. It does not stop the durable agent or its
+local queue, and it refuses to restart the tray while native driver settings
+are open.
+
 To remove state after uninstall, first confirm no jobs or enrolled identity must
 be retained, then manually remove `%LOCALAPPDATA%\Spool`.
 
@@ -99,16 +110,32 @@ installer.
 The dedicated `windows-release.yml` workflow has two explicit modes:
 
 - **Signed release** requires an Authenticode PFX/password, RFC 3161 timestamp
-  URL, WinSparkle Ed25519 private/public key pair, and HTTPS appcast URL. It
-  signs every Piqae Node executable, the Inno-generated uninstaller, and the final
-  installer; verifies Authenticode; signs the final installer bytes with
-  WinSparkle's official companion tool; and generates an appcast.
+  URL, the exact expected certificate subject and SHA-1 certificate
+  thumbprint, a WinSparkle Ed25519 private/public key pair, and an HTTPS appcast
+  URL. It signs every Piqae Node executable, the Inno-generated uninstaller,
+  and the final installer; verifies both Authenticode validity and the expected
+  signer identity; signs the final installer bytes with WinSparkle's official
+  companion tool; and generates an appcast.
 - **Unsigned preview** is produced when all signing credentials are absent. Its
   artifact name includes `unsigned-preview`; its installed update configuration
   contains no feed or public key, and update policy cannot be enabled.
 
 Partially configured signing fails the workflow. The workflow never silently
 downgrades an intended signed release to unsigned.
+
+The non-secret GitHub environment variables are:
+
+- `WINDOWS_RFC3161_TIMESTAMP_URL`
+- `WINDOWS_EXPECTED_CERTIFICATE_SUBJECT`
+- `WINDOWS_EXPECTED_CERTIFICATE_THUMBPRINT`
+- `WINSPARKLE_ED25519_PUBLIC_KEY`
+
+The PFX, PFX password, and WinSparkle private key remain environment secrets.
+The expected subject must equal the certificate's full X.509 subject string;
+the thumbprint is its 40-character SHA-1 certificate identifier. The release
+version must exactly match the Cargo versions of the agent, CLI, Windows
+executor/profile host, and tray. Version metadata cannot promote binaries that
+report a different version.
 
 WinSparkle 0.9.4's binary distribution is verified against SHA-256
 `6037df37fc263bd1650a1c4949681a9d40ffe991d01f35892a406cb5d103c976`.

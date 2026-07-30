@@ -6,10 +6,14 @@ param(
 
 $ErrorActionPreference = "Stop"
 $ConfigurationPath = Join-Path $PSScriptRoot "update-config.json"
+$NodeConfigurationPath = Join-Path (Join-Path $env:LOCALAPPDATA "Spool") "config.json"
 $RegistryPath = "HKCU:\Software\Spool\Updates"
 
 if (-not (Test-Path -LiteralPath $ConfigurationPath)) {
     throw "This Piqae Node installation has no update configuration."
+}
+if (-not (Test-Path -LiteralPath $NodeConfigurationPath)) {
+    throw "Configure Piqae Node before changing its update policy."
 }
 $configuration = Get-Content -Raw -LiteralPath $ConfigurationPath | ConvertFrom-Json
 if (-not $Policy) {
@@ -54,6 +58,36 @@ if ($Policy -ne "disabled") {
     }
 }
 
+$profileHostPath = Join-Path $PSScriptRoot "spool-profile-host-windows.exe"
+foreach ($process in Get-Process -Name "spool-profile-host-windows" -ErrorAction SilentlyContinue) {
+    try {
+        $isInstalledProfileHost = $process.MainModule.FileName -eq $profileHostPath
+    } catch {
+        $isInstalledProfileHost = $false
+    }
+    if ($isInstalledProfileHost) {
+        throw "Close the open printer-driver settings before changing update policy."
+    }
+}
+
 New-Item -Path $RegistryPath -Force | Out-Null
 New-ItemProperty -Path $RegistryPath -Name "Policy" -Value $Policy -PropertyType String -Force | Out-Null
 Write-Host "Piqae Node update policy set to '$Policy' for the current Windows user."
+
+$shellPath = Join-Path $PSScriptRoot "spool-shell-windows.exe"
+foreach ($process in Get-Process -Name "spool-shell-windows" -ErrorAction SilentlyContinue) {
+    try {
+        $isInstalledShell = $process.MainModule.FileName -eq $shellPath
+    } catch {
+        # Never terminate a process whose executable path cannot be verified.
+        $isInstalledShell = $false
+    }
+    if ($isInstalledShell) {
+        Stop-Process -Id $process.Id -Force
+        if (-not $process.WaitForExit(10000)) {
+            throw "The Piqae tray did not stop in time to apply its update policy."
+        }
+    }
+}
+& (Join-Path $PSScriptRoot "Start-Spool.ps1")
+Write-Host "The Piqae tray has restarted and the new update policy is active."

@@ -80,6 +80,30 @@ try {
     Assert-True ($installer.Contains("update-config.json")) "Installer does not stage update configuration."
     Assert-True ($installer.Contains("WinSparkle.dll")) "Installer does not stage WinSparkle when present."
     Assert-True ($installer.Contains("createvalueifdoesntexist")) "Installer would overwrite the user update policy."
+    Assert-True ($installer.Contains("Check: NeedsInitialConfiguration")) "Installer reopens first-run configuration during upgrades."
+    Assert-True ($installer.Contains("Check: HasExistingConfiguration")) "Installer does not restart an already configured node after upgrade."
+
+    $policyScript = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot "Set-SpoolUpdatePolicy.ps1")
+    Assert-True ($policyScript.Contains("spool-shell-windows")) "Update-policy changes do not restart the tray."
+    Assert-True ($policyScript.Contains("spool-profile-host-windows")) "Update-policy changes do not defer for native driver settings."
+    Assert-True ($policyScript.Contains("Start-Spool.ps1")) "Update-policy changes do not relaunch the tray."
+    Assert-True (-not $policyScript.Contains("Stop-Spool.ps1")) "Update-policy changes would stop the durable agent."
+
+    $signerScript = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot "Assert-AuthenticodeSigner.ps1")
+    Assert-True ($signerScript.Contains("SignerCertificate.Subject")) "Authenticode verification does not bind the signer subject."
+    Assert-True ($signerScript.Contains("SignerCertificate.Thumbprint")) "Authenticode verification does not bind the signer thumbprint."
+
+    $releaseWorkflow = Get-Content -Raw -LiteralPath (Join-Path $RepositoryRoot ".github\workflows\windows-release.yml")
+    foreach ($component in @(
+        "spool-agent",
+        "spoolctl",
+        "spool-executor-windows",
+        "spool-shell-windows"
+    )) {
+        Assert-True ($releaseWorkflow.Contains('"' + $component + '"')) "Release version gate omits $component."
+    }
+    Assert-True ($releaseWorkflow.Contains("WINDOWS_EXPECTED_CERTIFICATE_SUBJECT")) "Release workflow does not require the expected signer subject."
+    Assert-True ($releaseWorkflow.Contains("WINDOWS_EXPECTED_CERTIFICATE_THUMBPRINT")) "Release workflow does not require the expected signer thumbprint."
 
     Write-Host "Windows packaging static tests passed."
 } finally {

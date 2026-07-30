@@ -71,7 +71,19 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
 Root: HKCU; Subkey: "Software\Spool\Updates"; ValueType: string; ValueName: "Policy"; ValueData: "disabled"; Flags: createvalueifdoesntexist uninsdeletevalue
 
 [Run]
-Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\Configure-Spool.ps1"""; Description: "Configure and start Piqae Node"; Flags: postinstall nowait skipifsilent
+Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\Configure-Spool.ps1"""; Description: "Configure and start Piqae Node"; Flags: postinstall nowait skipifsilent; Check: NeedsInitialConfiguration
+Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""{app}\Start-Spool.ps1"""; Flags: runhidden waituntilterminated; Check: HasExistingConfiguration
 
 [UninstallRun]
 Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\Stop-Spool.ps1"""; Flags: runhidden; RunOnceId: "StopSpool"
+
+[Code]
+function HasExistingConfiguration(): Boolean;
+begin
+  Result := FileExists(ExpandConstant('{localappdata}\Spool\config.json'));
+end;
+
+function NeedsInitialConfiguration(): Boolean;
+begin
+  Result := not HasExistingConfiguration();
+end;

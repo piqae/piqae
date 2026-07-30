@@ -1,8 +1,10 @@
 # Windows node
 
-**Release tier:** Disabled for production; development-only on Windows 10/11
-x86-64. The Inno Setup package is unsigned and uses a per-user login launcher,
-not a Windows Service.
+**Release tier:** Disabled for production; preview-only on Windows 10/11
+x86-64. The Inno Setup workflow can produce a signed release candidate and uses
+a per-user login launcher, not a Windows Service. A signed candidate remains a
+Preview until its Windows installation, update, rollback, and printer evidence
+gates pass.
 
 **Implemented in source:** printer discovery, authenticated tray status,
 queue/profile menus, native create/edit/clone through the driver's
