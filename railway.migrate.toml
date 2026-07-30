@@ -1,0 +1,10 @@
+# One-shot Railway migration service. It builds the same reviewed control-plane
+# image as the API, runs append-only migrations, and exits without opening a
+# public listener.
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "deploy/docker/Dockerfile.server"
+
+[deploy]
+startCommand = "migrate"
+restartPolicyType = "NEVER"
