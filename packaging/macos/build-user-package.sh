@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ "$#" -ne 4 ]]; then
-  echo "usage: $0 /path/Spool.app /path/spool-agent /path/spool-executor-cups /output/directory" >&2
+  echo "usage: $0 /path/Piqae.app /path/spool-agent /path/spool-executor-cups /output/directory" >&2
   exit 2
 fi
 
@@ -20,7 +20,7 @@ for required in "$app" "$agent" "$executor"; do
   fi
 done
 if [[ "$app" != *.app ]]; then
-  echo "first input must be a Spool.app bundle" >&2
+  echo "first input must be a macOS app bundle" >&2
   exit 2
 fi
 
@@ -37,10 +37,10 @@ suffix=""
 if [[ "$channel" == "unsigned-preview" ]]; then
   suffix="-unsigned-preview"
 fi
-package_name="Spool-${version}-${build}-macos-user${suffix}"
+package_name="Piqae-${version}-${build}-macos-user${suffix}"
 package_dir="$output_root/$package_name"
 package_zip="$output_root/$package_name.zip"
-update_zip="$output_root/Spool-${version}-${build}-macos-update${suffix}.zip"
+update_zip="$output_root/Piqae-${version}-${build}-macos-update${suffix}.zip"
 
 if [[ -e "$package_dir" || -e "$package_zip" || -e "$update_zip" ]]; then
   echo "refusing to overwrite an existing release artifact" >&2
@@ -48,7 +48,7 @@ if [[ -e "$package_dir" || -e "$package_zip" || -e "$update_zip" ]]; then
 fi
 
 mkdir -p "$package_dir/payload"
-ditto "$app" "$package_dir/payload/Spool.app"
+ditto "$app" "$package_dir/payload/Piqae.app"
 install -m 0755 "$agent" "$package_dir/payload/spool-agent"
 install -m 0755 "$executor" "$package_dir/payload/spool-executor-cups"
 install -m 0755 "$script_root/install-user.sh" "$package_dir/install-user.sh"
@@ -65,8 +65,8 @@ ditto "$repository_root/LICENSES" "$package_dir/LICENSES"
 (
   cd "$package_dir"
   shasum -a 256 \
-    "payload/Spool.app/Contents/MacOS/SpoolMenu" \
-    "payload/Spool.app/Contents/MacOS/SpoolPrintCoreReplay" \
+    "payload/Piqae.app/Contents/MacOS/SpoolMenu" \
+    "payload/Piqae.app/Contents/MacOS/SpoolPrintCoreReplay" \
     "payload/spool-agent" \
     "payload/spool-executor-cups" \
     > SHA256SUMS

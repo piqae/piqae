@@ -8,7 +8,7 @@ them to two replaceable origins:
 - `API_ORIGIN`: the Rust control plane used by SDKs and native nodes.
 
 Cloudflare Custom Domains create the required DNS records and certificates.
-There is no Railway or Vercel service per hostname. `api.piqae.com` and
+There is no separate Railway service per hostname. `api.piqae.com` and
 `sync.piqae.com` intentionally share the control-plane origin while retaining
 separate stable contracts for future scaling.
 

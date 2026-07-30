@@ -11,19 +11,22 @@ Cloud Run or Helm without introducing a second application architecture.
 ## Current shape
 
 ```text
-Vercel dashboard
-      |
-      v
+public Railway web service
+             |
+             v
 public Railway API (one replica, SPOOL_SERVICE_ROLE=api)
-      |                         |
-      v                         v
-Railway PostgreSQL       Railway S3-compatible bucket
-      ^
-      |
+             |                         |
+             v                         v
+      Railway PostgreSQL       spool-documents bucket
+             ^
+             |
 private Railway worker (one replica, SPOOL_SERVICE_ROLE=worker)
+
+separate piqae-releases bucket -> web-owned short-lived download redirects
 ```
 
-- Only the API has a public Railway domain.
+- The web and API services have public Railway domains behind the Piqae custom
+  domains.
 - The worker has no public domain. It runs webhook and, when enabled, billing
   outbox work against the same PostgreSQL and object store.
 - Node sync currently uses the public API. A separate `sync` Railway service
@@ -37,6 +40,9 @@ private Railway worker (one replica, SPOOL_SERVICE_ROLE=worker)
   US West region. Its Railway bucket is in Singapore. This is operational but
   adds document latency and transfer distance; measure it and migrate to a
   colocated object store before opening the service broadly.
+- Native installers and update metadata use the separate `piqae-releases`
+  bucket. Never grant the web or a release publisher access to customer print
+  objects merely because both stores expose an S3-compatible API.
 
 Keep the API and worker at one always-running replica. Autosleep is a poor fit
 for a print control plane because node polling and job pickup are
@@ -50,8 +56,9 @@ The root [`railway.toml`](../../railway.toml) selects
 [`deploy/docker/Dockerfile.server`](../../deploy/docker/Dockerfile.server) and
 gates the public service on `/v1/ready`.
 
-The API and worker use the same image and release. Configure their
-service-specific values separately:
+The web service selects `/railway.web.toml` and gates on `/healthz`. The API and
+worker use the same server image and release. Configure their service-specific
+values separately:
 
 | Variable | API | Worker |
 | --- | --- | --- |
@@ -62,6 +69,32 @@ service-specific values separately:
 
 The server still binds an HTTP listener in worker mode, but that listener must
 remain private.
+
+### Staging before production
+
+Railway is the canonical hosted web and control-plane deployment target for
+the private preview. Keep `staging` and `production` as isolated Railway
+environments:
+
+- pull requests run repository CI and may create disposable Railway PR
+  environments;
+- a reviewed merge to `main` deploys the web, API, and worker to `staging`;
+- staging uses its own PostgreSQL instance, object bucket, release
+  configuration, domains, and device identities;
+- staging stays `noindex`, uses local-owner identity while hosted identity is
+  unverified, and keeps billing disabled;
+- production is promoted from the exact commit tested in staging through a
+  manual release action; it must not rebuild from a different source state;
+- production migration, API, worker, and web promotion follow the order below.
+
+Do not connect a PR environment to production PostgreSQL, either production
+bucket, production WorkOS/Stripe/Sentry credentials, or real customer nodes.
+A preview environment is disposable and is not a suitable update-feed origin.
+
+GitHub remains the source and required check surface. Railway supplies build
+and deployment automation after those checks pass. Replacing the GitHub-hosted
+runner with Blacksmith changes where Actions jobs execute; it does not remove
+GitHub or its status checks from the deployment chain.
 
 ## Configuration contract
 
@@ -137,17 +170,11 @@ pass.
 5. Create scoped API keys through the authenticated application; do not retain
    a legacy bootstrap API key as the normal integration credential.
 
-The dashboard normally runs on Vercel with `SPOOL_AUTH_MODE=local` and points
-`PUBLIC_SPOOL_API_URL` at the public Railway API. Browser identity and
-control-plane service credentials stay server-side.
-
-### Railway dashboard fallback
-
-If Vercel artifact publication is unavailable, the same SvelteKit application
-can run as a normal Node service on Railway. Create a separate public service
-from this repository and select `/railway.web.toml` as its config file. That
-file builds [`deploy/docker/Dockerfile.web`](../../deploy/docker/Dockerfile.web)
-and uses `/healthz` for the Railway deployment gate.
+The dashboard runs as a normal Node service on Railway. Its service selects
+`/railway.web.toml`, builds
+[`deploy/docker/Dockerfile.web`](../../deploy/docker/Dockerfile.web), and uses
+`/healthz` for the deployment gate. Browser identity and control-plane service
+credentials stay server-side.
 
 Set:
 
@@ -171,6 +198,30 @@ The web service is stateless and may later scale independently. Its `/healthz`
 route proves only that the SvelteKit process can serve requests; the dashboard
 continues to display control-plane failures rather than hiding them behind its
 own liveness response.
+
+### Native release origin
+
+Configure the web service with dedicated origin credentials for the
+`piqae-releases` bucket:
+
+```text
+PIQAE_RELEASES_S3_ENDPOINT
+PIQAE_RELEASES_S3_ACCESS_KEY_ID
+PIQAE_RELEASES_S3_SECRET_ACCESS_KEY
+PIQAE_RELEASES_S3_BUCKET=piqae-releases
+PIQAE_RELEASES_S3_REGION
+PIQAE_RELEASES_S3_VIRTUAL_HOSTED_STYLE
+```
+
+The public routes map constrained filenames to
+`native/<stable|preview>/<artifact>` and issue short-lived redirects. Missing
+configuration or an absent object returns not found. Release publishers use
+different write-capable credentials. The web path performs reads only; enforce
+read-only scope where Railway supports it and never use the web credential to
+publish or replace an appcast.
+
+See [Native release publishing](native-release-publishing.md). No stable native
+download exists merely because these routes and credentials are configured.
 
 ## Migrations and releases
 

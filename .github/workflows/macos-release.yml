@@ -11,6 +11,11 @@ on:
         description: Monotonic CFBundleVersion
         required: true
         default: "1"
+      publish:
+        description: Promote a fully signed and notarised build to the stable Railway release feed
+        type: boolean
+        required: true
+        default: false
   push:
     tags:
       - "v*"
@@ -22,6 +27,13 @@ jobs:
   candidate:
     name: Universal macOS candidate
     runs-on: macos-15
+    environment: native-signing
+    outputs:
+      artifact_name: ${{ steps.gate.outputs.artifact_name }}
+      build_number: ${{ steps.gate.outputs.build_number }}
+      publish: ${{ steps.gate.outputs.publish }}
+      release_mode: ${{ steps.gate.outputs.release_mode }}
+      version: ${{ steps.gate.outputs.version }}
     permissions:
       contents: read
       id-token: write
@@ -35,8 +47,8 @@ jobs:
       APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
       SPARKLE_PRIVATE_KEY_BASE64: ${{ secrets.SPARKLE_PRIVATE_KEY_BASE64 }}
       SPARKLE_PUBLIC_ED_KEY: ${{ secrets.SPARKLE_PUBLIC_ED_KEY }}
-      SPARKLE_FEED_URL: ${{ secrets.SPARKLE_FEED_URL }}
-      SPARKLE_DOWNLOAD_URL_PREFIX: ${{ secrets.SPARKLE_DOWNLOAD_URL_PREFIX }}
+      SPARKLE_FEED_URL: https://downloads.piqae.com/releases/stable/appcast-macos.xml
+      SPARKLE_DOWNLOAD_URL_PREFIX: https://downloads.piqae.com/releases/stable
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
@@ -55,6 +67,7 @@ jobs:
         env:
           REQUESTED_VERSION: ${{ inputs.version }}
           REQUESTED_BUILD: ${{ inputs.build_number }}
+          REQUESTED_PUBLISH: ${{ inputs.publish }}
         run: |
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             version=${GITHUB_REF_NAME#v}
@@ -83,8 +96,6 @@ jobs:
             APPLE_APP_PASSWORD
             SPARKLE_PRIVATE_KEY_BASE64
             SPARKLE_PUBLIC_ED_KEY
-            SPARKLE_FEED_URL
-            SPARKLE_DOWNLOAD_URL_PREFIX
           )
           present=0
           for name in "${required[@]}"; do
@@ -105,11 +116,22 @@ jobs:
             echo "Tagged macOS candidates require signing, notarisation, and Sparkle credentials." >&2
             exit 1
           fi
+          publish=false
+          if [[ "$tagged" == true || "$REQUESTED_PUBLISH" == true ]]; then
+            publish=true
+          fi
+          if [[ "$publish" == true && "$release_mode" != signed ]]; then
+            echo "Stable publication requires a signed and notarised candidate." >&2
+            exit 1
+          fi
+          artifact_name="piqae-macos-${release_mode}-${version}-${build_number}"
 
           {
             echo "version=$version"
             echo "build_number=$build_number"
             echo "release_mode=$release_mode"
+            echo "publish=$publish"
+            echo "artifact_name=$artifact_name"
           } >> "$GITHUB_OUTPUT"
 
       - name: Check component versions
@@ -207,7 +229,7 @@ jobs:
           RELEASE_BUILD: ${{ steps.gate.outputs.build_number }}
         run: |
           fixture="$GITHUB_WORKSPACE/.spool-test-fixtures/native-release"
-          app="$fixture/Spool.app"
+          app="$fixture/Piqae.app"
           if [[ "$RELEASE_MODE" == signed ]]; then
             SPOOL_APP_BUNDLE="$app" \
             SPOOL_VERSION="$RELEASE_VERSION" \
@@ -233,9 +255,9 @@ jobs:
         run: |
           fixture="$GITHUB_WORKSPACE/.spool-test-fixtures/native-release"
           mkdir -p artifacts
-          codesign --verify --deep --strict --verbose=4 "$fixture/Spool.app" \
+          codesign --verify --deep --strict --verbose=4 "$fixture/Piqae.app" \
             2> artifacts/codesign-evidence.txt
-          codesign -dv --verbose=4 "$fixture/Spool.app" \
+          codesign -dv --verbose=4 "$fixture/Piqae.app" \
             2>> artifacts/codesign-evidence.txt
           grep -F "Authority=Developer ID Application:" artifacts/codesign-evidence.txt
 
@@ -247,8 +269,8 @@ jobs:
           RELEASE_BUILD: ${{ steps.gate.outputs.build_number }}
         run: |
           fixture="$GITHUB_WORKSPACE/.spool-test-fixtures/native-release"
-          submission="$fixture/Spool-${RELEASE_VERSION}-${RELEASE_BUILD}-notary.zip"
-          ditto -c -k --sequesterRsrc --keepParent "$fixture/Spool.app" "$submission"
+          submission="$fixture/Piqae-${RELEASE_VERSION}-${RELEASE_BUILD}-notary.zip"
+          ditto -c -k --sequesterRsrc --keepParent "$fixture/Piqae.app" "$submission"
           xcrun notarytool submit "$submission" \
             --apple-id "$APPLE_ID" \
             --team-id "$APPLE_TEAM_ID" \
@@ -257,10 +279,10 @@ jobs:
             --output-format json \
             > artifacts/notarisation-evidence.json
           jq -e '.status == "Accepted"' artifacts/notarisation-evidence.json
-          xcrun stapler staple "$fixture/Spool.app"
-          xcrun stapler validate "$fixture/Spool.app" \
+          xcrun stapler staple "$fixture/Piqae.app"
+          xcrun stapler validate "$fixture/Piqae.app" \
             > artifacts/stapler-evidence.txt
-          spctl --assess --type execute --verbose=4 "$fixture/Spool.app" \
+          spctl --assess --type execute --verbose=4 "$fixture/Piqae.app" \
             2> artifacts/gatekeeper-evidence.txt
           rm -f -- "$submission"
 
@@ -269,7 +291,7 @@ jobs:
         run: |
           fixture="$GITHUB_WORKSPACE/.spool-test-fixtures/native-release"
           mkdir -p "$fixture/sbom-input"
-          ditto "$fixture/Spool.app" "$fixture/sbom-input/Spool.app"
+          ditto "$fixture/Piqae.app" "$fixture/sbom-input/Piqae.app"
           install -m 0755 "$fixture/bin/spool-agent" "$fixture/sbom-input/spool-agent"
           install -m 0755 \
             "$fixture/bin/spool-executor-cups" \
@@ -289,7 +311,7 @@ jobs:
         run: |
           fixture="$GITHUB_WORKSPACE/.spool-test-fixtures/native-release"
           packaging/macos/build-user-package.sh \
-            "$fixture/Spool.app" \
+            "$fixture/Piqae.app" \
             "$fixture/bin/spool-agent" \
             "$fixture/bin/spool-executor-cups" \
             artifacts
@@ -297,6 +319,9 @@ jobs:
       - name: Generate and verify signed Sparkle appcast
         if: steps.gate.outputs.release_mode == 'signed'
         shell: bash
+        env:
+          RELEASE_VERSION: ${{ steps.gate.outputs.version }}
+          RELEASE_BUILD: ${{ steps.gate.outputs.build_number }}
         run: |
           fixture="$GITHUB_WORKSPACE/.spool-test-fixtures/native-release"
           private_key="$fixture/sparkle-private-key"
@@ -305,12 +330,13 @@ jobs:
           chmod 0700 "$appcast_dir"
           printf '%s' "$SPARKLE_PRIVATE_KEY_BASE64" | base64 -D > "$private_key"
           chmod 0600 "$private_key"
-          update_archives=(artifacts/Spool-*-macos-update.zip)
+          update_archives=(artifacts/Piqae-*-macos-update.zip)
           if [[ "${#update_archives[@]}" -ne 1 || ! -f "${update_archives[0]}" ]]; then
             echo "Expected exactly one update archive." >&2
             exit 1
           fi
-          cp "${update_archives[0]}" "$appcast_dir/"
+          public_update="piqae-macos-${RELEASE_VERSION}-${RELEASE_BUILD}-update.zip"
+          cp "${update_archives[0]}" "$appcast_dir/$public_update"
           sparkle_bin="$GITHUB_WORKSPACE/shells/macos/.build/artifacts/sparkle/Sparkle/bin"
           SPARKLE_BIN_DIR="$sparkle_bin" \
           SPARKLE_PRIVATE_KEY_FILE="$private_key" \
@@ -320,7 +346,7 @@ jobs:
               "$appcast_dir/appcast.xml"
           SPOOL_SPARKLE_PUBLIC_ED_KEY="$SPARKLE_PUBLIC_ED_KEY" \
             packaging/macos/verify-update-signature.sh \
-              "$appcast_dir/$(basename "${update_archives[0]}")" \
+              "$appcast_dir/$public_update" \
               "$appcast_dir/appcast.xml"
           install -m 0644 "$appcast_dir/appcast.xml" artifacts/appcast.xml
 
@@ -362,7 +388,7 @@ jobs:
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: spool-macos-${{ steps.gate.outputs.release_mode }}-${{ steps.gate.outputs.version }}-${{ steps.gate.outputs.build_number }}
+          name: ${{ steps.gate.outputs.artifact_name }}
           path: artifacts/
           if-no-files-found: error
 
@@ -374,3 +400,204 @@ jobs:
             security delete-keychain "$SPOOL_RELEASE_KEYCHAIN" || true
           fi
           rm -rf -- "$GITHUB_WORKSPACE/.spool-test-fixtures/native-release"
+
+  publish:
+    name: Promote signed macOS release
+    needs: candidate
+    if: needs.candidate.outputs.publish == 'true'
+    runs-on: ubuntu-24.04
+    environment: native-release
+    concurrency:
+      group: piqae-native-stable-promotion
+      cancel-in-progress: false
+    env:
+      RELEASE_BUILD: ${{ needs.candidate.outputs.build_number }}
+      RELEASE_VERSION: ${{ needs.candidate.outputs.version }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ${{ needs.candidate.outputs.artifact_name }}
+          path: artifacts
+
+      - name: Stage public macOS artifacts and metadata
+        shell: bash
+        run: |
+          if [[ "${{ needs.candidate.outputs.release_mode }}" != signed ]]; then
+            echo "Stable publication refuses a non-signed candidate." >&2
+            exit 1
+          fi
+          source_user="artifacts/Piqae-${RELEASE_VERSION}-${RELEASE_BUILD}-macos-user.zip"
+          source_update="artifacts/Piqae-${RELEASE_VERSION}-${RELEASE_BUILD}-macos-update.zip"
+          user_name="piqae-macos-${RELEASE_VERSION}-${RELEASE_BUILD}-universal.zip"
+          update_name="piqae-macos-${RELEASE_VERSION}-${RELEASE_BUILD}-update.zip"
+          sbom_name="piqae-macos-${RELEASE_VERSION}-${RELEASE_BUILD}-SBOM.spdx.json"
+          mkdir -p promotion
+          install -m 0644 "$source_user" "promotion/$user_name"
+          install -m 0644 "$source_update" "promotion/$update_name"
+          install -m 0644 artifacts/SBOM.spdx.json "promotion/$sbom_name"
+          install -m 0644 artifacts/appcast.xml promotion/appcast-macos.xml
+          user_sha=$(sha256sum "promotion/$user_name" | awk '{print $1}')
+          published_at=$(git show -s --format=%cI "$GITHUB_SHA")
+          printf '%s  %s\n' "$user_sha" "$user_name" > "promotion/$user_name.sha256"
+          jq -n \
+            --arg version "$RELEASE_VERSION" \
+            --arg file "$user_name" \
+            --arg sha "$user_sha" \
+            --arg now "$published_at" \
+            '{
+              platform: "macos",
+              publishedAt: $now,
+              artifact: {
+                id: "macos-universal",
+                platform: "macos",
+                title: "Piqae for macOS",
+                version: $version,
+                fileName: $file,
+                architectures: ["arm64", "x86_64"],
+                minimumOs: "macOS 13 or newer",
+                status: "preview",
+                statusReason: "Signed and notarised distribution; physical-printer and complete-node update certification remain release gates.",
+                downloadUrl: ("https://downloads.piqae.com/releases/stable/" + $file),
+                releaseUrl: "https://piqae.com/downloads",
+                sha256: $sha,
+                checksumUrl: ("https://downloads.piqae.com/releases/stable/" + $file + ".sha256"),
+                signing: {
+                  status: "verified",
+                  label: "Developer ID signed and Apple notarised"
+                },
+                notes: [
+                  "Universal Apple silicon and Intel menu application.",
+                  "The current Sparkle archive updates the menu application; full node-component rollback remains a separate certification gate."
+                ]
+              }
+            }' > promotion/macos.json
+
+      - name: Upload and verify immutable macOS release
+        shell: bash
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.PIQAE_RELEASES_S3_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.PIQAE_RELEASES_S3_SECRET_ACCESS_KEY }}
+          AWS_EC2_METADATA_DISABLED: "true"
+          PIQAE_RELEASES_S3_ENDPOINT: ${{ secrets.PIQAE_RELEASES_S3_ENDPOINT }}
+          PIQAE_RELEASES_S3_BUCKET: ${{ secrets.PIQAE_RELEASES_S3_BUCKET }}
+          PIQAE_RELEASES_S3_REGION: ${{ secrets.PIQAE_RELEASES_S3_REGION }}
+        run: |
+          prefix="native/releases/$RELEASE_VERSION/macos-${RELEASE_BUILD}-${GITHUB_RUN_ATTEMPT}"
+          user_name="piqae-macos-${RELEASE_VERSION}-${RELEASE_BUILD}-universal.zip"
+          update_name="piqae-macos-${RELEASE_VERSION}-${RELEASE_BUILD}-update.zip"
+          sbom_name="piqae-macos-${RELEASE_VERSION}-${RELEASE_BUILD}-SBOM.spdx.json"
+          packaging/release/publish-s3-object.sh immutable \
+            "promotion/$user_name" "$prefix/$user_name" application/zip
+          packaging/release/publish-s3-object.sh immutable \
+            "promotion/$user_name.sha256" "$prefix/$user_name.sha256" text/plain
+          packaging/release/publish-s3-object.sh immutable \
+            "promotion/$update_name" "$prefix/$update_name" application/zip
+          packaging/release/publish-s3-object.sh immutable \
+            "promotion/$sbom_name" "$prefix/$sbom_name" application/spdx+json
+          packaging/release/publish-s3-object.sh immutable \
+            promotion/appcast-macos.xml "$prefix/appcast-macos.xml" application/xml
+          packaging/release/publish-s3-object.sh immutable \
+            promotion/macos.json "$prefix/macos.json" application/json
+
+      - name: Promote macOS artifacts and signed appcast
+        shell: bash
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.PIQAE_RELEASES_S3_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.PIQAE_RELEASES_S3_SECRET_ACCESS_KEY }}
+          AWS_EC2_METADATA_DISABLED: "true"
+          PIQAE_RELEASES_S3_ENDPOINT: ${{ secrets.PIQAE_RELEASES_S3_ENDPOINT }}
+          PIQAE_RELEASES_S3_BUCKET: ${{ secrets.PIQAE_RELEASES_S3_BUCKET }}
+          PIQAE_RELEASES_S3_REGION: ${{ secrets.PIQAE_RELEASES_S3_REGION }}
+        run: |
+          prefix="native/releases/$RELEASE_VERSION/macos-${RELEASE_BUILD}-${GITHUB_RUN_ATTEMPT}"
+          user_name="piqae-macos-${RELEASE_VERSION}-${RELEASE_BUILD}-universal.zip"
+          update_name="piqae-macos-${RELEASE_VERSION}-${RELEASE_BUILD}-update.zip"
+          sbom_name="piqae-macos-${RELEASE_VERSION}-${RELEASE_BUILD}-SBOM.spdx.json"
+          packaging/release/publish-s3-object.sh promote \
+            "$prefix/$user_name" "native/stable/$user_name" application/zip
+          packaging/release/publish-s3-object.sh promote \
+            "$prefix/$user_name.sha256" "native/stable/$user_name.sha256" text/plain
+          packaging/release/publish-s3-object.sh promote \
+            "$prefix/$user_name" native/stable/piqae-macos-universal.zip application/zip
+          packaging/release/publish-s3-object.sh promote \
+            "$prefix/$update_name" "native/stable/$update_name" application/zip
+          packaging/release/publish-s3-object.sh promote \
+            "$prefix/$update_name" native/stable/piqae-macos-update.zip application/zip
+          packaging/release/publish-s3-object.sh promote \
+            "$prefix/$sbom_name" "native/stable/$sbom_name" application/spdx+json
+          # The appcast is the commit point and is promoted only after every
+          # referenced update archive has been independently verified.
+          packaging/release/publish-s3-object.sh promote \
+            "$prefix/appcast-macos.xml" native/stable/appcast-macos.xml application/xml
+
+      - name: Merge and promote stable release manifest
+        shell: bash
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.PIQAE_RELEASES_S3_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.PIQAE_RELEASES_S3_SECRET_ACCESS_KEY }}
+          AWS_EC2_METADATA_DISABLED: "true"
+          PIQAE_RELEASES_S3_ENDPOINT: ${{ secrets.PIQAE_RELEASES_S3_ENDPOINT }}
+          PIQAE_RELEASES_S3_BUCKET: ${{ secrets.PIQAE_RELEASES_S3_BUCKET }}
+          PIQAE_RELEASES_S3_REGION: ${{ secrets.PIQAE_RELEASES_S3_REGION }}
+        run: |
+          if packaging/release/publish-s3-object.sh fetch \
+            native/stable/manifest.json promotion/current-manifest.json
+          then
+            jq -e \
+              '.schemaVersion == 1
+               and (.artifacts | type == "array")
+               and all(.artifacts[];
+                 .status != "supported"
+                 and .signing.status == "verified"
+                 and (.sha256 | test("^[a-f0-9]{64}$"))
+                 and (.downloadUrl | startswith("https://downloads.piqae.com/releases/stable/")))' \
+              promotion/current-manifest.json >/dev/null
+          else
+            code=$?
+            if [[ "$code" -ne 3 ]]; then
+              exit "$code"
+            fi
+            jq -n '{
+              schemaVersion: 1,
+              channel: "stable",
+              currentVersion: "0.0.0",
+              updatedAt: null,
+              artifacts: [],
+              olderReleases: [],
+              releasesUrl: "https://piqae.com/downloads",
+              repositoryUrl: "https://github.com/C4CoffeeCo/piqae"
+            }' > promotion/current-manifest.json
+          fi
+          jq \
+            --slurpfile platform promotion/macos.json \
+            --arg version "$RELEASE_VERSION" \
+            --arg now "$(jq -r '.publishedAt' promotion/macos.json)" \
+            '.channel = "stable"
+             | .currentVersion = $version
+             | .updatedAt = $now
+             | .artifacts = ([.artifacts[] | select(.id != $platform[0].artifact.id)] + [$platform[0].artifact])' \
+            promotion/current-manifest.json > promotion/manifest.json
+          jq -e \
+            '.schemaVersion == 1
+             and .channel == "stable"
+             and all(.artifacts[];
+               .status != "supported"
+               and .signing.status == "verified"
+               and (.sha256 | test("^[a-f0-9]{64}$"))
+               and (.downloadUrl | startswith("https://downloads.piqae.com/releases/stable/")))' \
+            promotion/manifest.json >/dev/null
+          manifest_sha=$(sha256sum promotion/manifest.json | awk '{print $1}')
+          printf '%s  manifest.json\n' "$manifest_sha" > promotion/manifest.json.sha256
+          immutable_manifest="native/releases/$RELEASE_VERSION/macos-${RELEASE_BUILD}-${GITHUB_RUN_ATTEMPT}/manifest.json"
+          immutable_checksum="$immutable_manifest.sha256"
+          packaging/release/publish-s3-object.sh immutable \
+            promotion/manifest.json "$immutable_manifest" application/json
+          packaging/release/publish-s3-object.sh immutable \
+            promotion/manifest.json.sha256 "$immutable_checksum" text/plain
+          packaging/release/publish-s3-object.sh promote \
+            "$immutable_checksum" native/stable/manifest.json.sha256 text/plain
+          # The shared manifest is the final stable-channel commit point.
+          packaging/release/publish-s3-object.sh promote \
+            "$immutable_manifest" native/stable/manifest.json application/json

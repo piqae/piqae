@@ -52,8 +52,6 @@ jobs:
       - run: pnpm test
       - name: Build the Node web artifact
         run: pnpm --filter @spool/web build
-      - name: Build the Vercel production artifact
-        run: pnpm --filter @spool/web build:vercel
       - name: Validate Piqae edge routing
         run: |
           node --test deploy/cloudflare/domain-router/router.test.mjs

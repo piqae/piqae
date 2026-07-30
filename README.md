@@ -103,7 +103,7 @@ Chromium runtime.
 The Rust control plane uses PostgreSQL leases, durable per-agent commands,
 event/outbox tables, and S3-compatible object storage. Agents use signed HTTPS
 polling; there is no required broker or permanent socket gateway. The SvelteKit
-dashboard targets Vercel or a standard Node container and uses the official
+dashboard runs as a standard Node container on Railway or self-hosted and uses the official
 WorkOS AuthKit integration in hosted mode. The canonical TypeScript SDK and
 `spoolctl` cover the native API.
 

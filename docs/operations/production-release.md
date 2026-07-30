@@ -1,7 +1,7 @@
 # Production release and promotion
 
-**Status:** structural deployment foundations are implemented; Spool Cloud is
-not yet approved for production or a 99.95% availability claim.
+**Status:** Railway private-preview deployment and managed-HA foundations are
+implemented; Piqae Cloud is not yet approved for a 99.95% availability claim.
 
 The release decision is fail-closed. A successful build, Helm render, Terraform
 validation, or virtual print does not approve a production promotion.
@@ -14,20 +14,24 @@ Run repository-only checks during development:
 ./deploy/production-check.sh structural
 ```
 
-Run the release preflight with protected, populated configuration and external
-evidence:
+Run the Railway private-beta release gate with protected, populated
+configuration and external evidence:
 
 ```console
-SPOOL_PRODUCTION_VERCEL_ENV_FILE=/protected/vercel-production.env \
-SPOOL_PRODUCTION_TFVARS_FILE=/protected/production.tfvars \
+SPOOL_PRODUCTION_RAILWAY_ENV_FILE=/protected/railway-production-web.env \
 SPOOL_PRODUCTION_EVIDENCE_DIR=/protected/release-evidence \
-  ./deploy/production-check.sh
+  ./deploy/production-check.sh release
 ```
 
-The command does not deploy, publish, sign, or print. It runs the full release
-check and rejects missing configuration, mutable images, example domains,
-unfinished hosted integrations, absent external evidence, and unsafe rollout
-semantics. It never prints secret values.
+The command does not deploy, publish, sign, or print. It rejects missing
+configuration, example domains, unfinished hosted integrations, absent
+external evidence, and unsafe rollout semantics without printing secret
+values.
+
+The future managed-HA Cloud Run/GCP target uses
+`./deploy/production-check.sh managed-ha` and additionally requires
+`SPOOL_PRODUCTION_TFVARS_FILE` plus regional DR evidence. Those scale-up gates
+do not block the controlled Railway private beta.
 
 ## Current gate classification
 
@@ -46,7 +50,41 @@ semantics. It never prints secret values.
 
 `release/support-matrix.yaml` remains the public source of support claims.
 
-## Required production order
+## Railway private-preview promotion
+
+Railway is the canonical current web, API, and worker host. Promotion is
+staging-first:
+
+1. Build and attest the web and server candidate from one reviewed commit.
+2. Deploy that commit to the isolated Railway `staging` environment.
+3. Run backward-compatible migrations exactly once, then deploy staging API,
+   worker, and web.
+4. Verify `/v1/health`, `/v1/ready`, `/v1/meta`, authenticated dashboard
+   access, object digest fetch, fake-print lifecycle, webhook delivery,
+   reconnect, queue age, and tenant isolation.
+5. Back up the production database and referenced objects and bind them into
+   one restore checkpoint.
+6. Record the staging commit, build/deployment IDs, migration version, checks,
+   approver, and observation window.
+7. Promote that exact commit to production. Do not rebuild an unreviewed tree.
+8. Run the compatible production migration once; keep ordinary replicas from
+   running DDL.
+9. Deploy the API and verify readiness before the worker. Never percentage
+   split worker revisions.
+10. Deploy the web only after the production API contract is healthy.
+11. Keep every previous Railway deployment selectable until the observation
+    window closes.
+
+A failed production application deployment rolls back to the prior Railway
+deployment. Migrations do not roll back automatically. Durably registered jobs
+remain in PostgreSQL, already leased jobs remain in node SQLite, and ambiguous
+native handoffs remain `delivery_uncertain`.
+
+This one-region preview is operational for controlled use, but it is not
+highly available and does not support a 99.95% claim. See
+[Railway low-cost private preview](railway-private-preview.md).
+
+## Required managed-HA production order
 
 1. Build and attest immutable server, migration, web, macOS, and Windows
    candidates from the same reviewed commit.
@@ -96,10 +134,11 @@ connected nodes preserve already leased work in their local SQLite queues.
 
 ## Hosted configuration contract
 
-`deploy/hosted/vercel.env.example` is the Cloud dashboard contract. Spool Cloud
-has exactly Free and Pro plans. The production preflight requires WorkOS,
-Stripe, Sentry, public domains and release metadata, while rejecting blank
-values and non-HTTPS origins.
+[`apps/web/.env.example`](../../apps/web/.env.example) is the dashboard runtime
+contract; protected values live in separate Railway staging and production
+environments. Piqae Cloud has exactly Free and Pro plans. The production
+preflight requires WorkOS, Stripe, Sentry, public domains and release metadata,
+while rejecting blank values and non-HTTPS origins.
 
 ### One-time WorkOS setup
 
@@ -111,8 +150,8 @@ values and non-HTTPS origins.
 3. Set the organisation claim to `org_id` and permissions claim to
    `permissions`; set the exact issuer, JWKS URL, and application binding in
    protected Terraform variables.
-4. Add only the production site callback and logout URLs. Export the AuthKit
-   variables in `deploy/hosted/vercel.env.example` to Vercel Production.
+4. Add only the production site callback and logout URLs. Store the AuthKit
+   variables as protected Railway production web-service variables.
 5. Prove workspace switching, role refresh, removal, and cross-workspace denial
    with two real organisations before enabling public signup.
 
@@ -143,8 +182,9 @@ spool_overage_unit=1000
 ```
 
 Put each Price’s unique lookup key—not its displayed amount—in the matching
-`STRIPE_PRICE_*` Vercel variable. Register the control-plane endpoint
-`https://<api-host>/v1/integrations/stripe/webhook` for these exact events:
+`STRIPE_PRICE_*` Railway production variable. Register the control-plane
+endpoint `https://<api-host>/v1/integrations/stripe/webhook` for these exact
+events:
 
 ```text
 checkout.session.completed
@@ -205,14 +245,16 @@ manager and state backend, not Git or command output.
 
 ## External evidence records
 
-The preflight expects one JSON record for each filename declared in
-`release/production-readiness.json`. A record must identify the gate, say
-`passed`, bind to a full commit, include a timestamp, and point to access-
-controlled evidence. A locally created assertion is not acceptable evidence.
-Signing, physical Windows/OKI tests, regional DR, live WorkOS identity, live
-Stripe test-clock billing, production Sentry redaction/source maps, independent
-security review, and the 30-day production soak remain open until those
-activities really occur.
+The preflight expects one JSON record for each target-specific filename
+declared in `release/production-readiness.json`. A record must identify the
+gate, say `passed`, bind to a full commit, include a timestamp, and point to
+access-controlled evidence. A locally created assertion is not acceptable
+evidence. Signing, physical Windows/OKI tests, live WorkOS identity, live
+Stripe test-clock billing, production Sentry redaction/source maps, and
+independent security review remain open Railway private-beta gates. Regional
+DR is an additional managed-HA gate. The 30-day production soak is a public
+self-serve release gate rather than a prerequisite for controlled private
+beta.
 
 The live WorkOS record must cover workspace creation, invitation, role change,
 workspace switching, removal, and session revocation without cross-workspace

@@ -15,14 +15,14 @@ Build the native menu app:
 
 ```sh
 shells/macos/build-app.sh
-open shells/macos/build/Spool.app
+open shells/macos/build/Piqae.app
 ```
 
 The menu app connects only to the local loopback agent. Add Profile opens the
 real macOS print panel and saves driver settings without printing. Edit restores
 the exact prior PrintCore revision; Clone creates a new profile.
 
-Complex vendor panes are captured as opaque native state. Spool does not
+Complex vendor panes are captured as opaque native state. Piqae does not
 recreate them in the web UI. Test every saved profile on its actual printer and
 stock before publishing it.
 

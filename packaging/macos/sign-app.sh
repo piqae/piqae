@@ -7,7 +7,7 @@ script_root=$(cd "$(dirname "$0")" && pwd)
 entitlements="$script_root/../../shells/macos/Resources/Spool.entitlements"
 
 if [[ -z "$app" || ! -d "$app" || "$app" != *.app ]]; then
-  echo "usage: SPOOL_CODE_SIGN_IDENTITY='Developer ID Application: …' $0 /path/Spool.app" >&2
+  echo "usage: SPOOL_CODE_SIGN_IDENTITY='Developer ID Application: …' $0 /path/Piqae.app" >&2
   exit 2
 fi
 if [[ "$identity" != "Developer ID Application:"* ]]; then

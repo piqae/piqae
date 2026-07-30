@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
-  echo "Spool's per-user package can only be installed on macOS." >&2
+  echo "Piqae's per-user package can only be installed on macOS." >&2
   exit 2
 fi
 if [[ "$EUID" -eq 0 ]]; then
@@ -12,7 +12,7 @@ fi
 
 package_root=$(cd "$(dirname "$0")" && pwd)
 payload="$package_root/payload"
-app_source="$payload/Spool.app"
+app_source="$payload/Piqae.app"
 agent_source="$payload/spool-agent"
 executor_source="$payload/spool-executor-cups"
 agent_template="$payload/com.c4coffee.spool.agent.plist.in"
@@ -27,7 +27,8 @@ done
 
 support_root="$HOME/Library/Application Support/Spool"
 install_root="$support_root/bin"
-app_root="$HOME/Applications/Spool.app"
+app_root="$HOME/Applications/Piqae.app"
+legacy_app_root="$HOME/Applications/Spool.app"
 launch_agents="$HOME/Library/LaunchAgents"
 log_root="$HOME/Library/Logs/Spool"
 agent_plist="$launch_agents/com.c4coffee.spool.agent.plist"
@@ -72,7 +73,7 @@ if [[ "$is_loaded" == true ]]; then
     exit 1
   fi
   if [[ "$queued" -ne 0 || "$active" -ne 0 ]]; then
-    echo "Spool has $queued queued and $active active jobs. Drain them before updating." >&2
+    echo "Piqae has $queued queued and $active active jobs. Drain them before updating." >&2
     exit 1
   fi
 fi
@@ -88,13 +89,19 @@ install -m 0755 "$executor_source" "$install_root/spool-executor-cups"
 
 app_stage=$(mktemp -d "$HOME/Applications/.spool-app.XXXXXX")
 trap 'rm -rf -- "$app_stage"' EXIT
-ditto "$app_source" "$app_stage/Spool.app"
+ditto "$app_source" "$app_stage/Piqae.app"
+installed_app=""
 if [[ -e "$app_root" ]]; then
-  previous_app="$HOME/Applications/Spool.previous.$(date -u +%Y%m%dT%H%M%SZ).app"
-  mv "$app_root" "$previous_app"
+  installed_app="$app_root"
+elif [[ -e "$legacy_app_root" ]]; then
+  installed_app="$legacy_app_root"
+fi
+if [[ -n "$installed_app" ]]; then
+  previous_app="$HOME/Applications/Piqae.previous.$(date -u +%Y%m%dT%H%M%SZ).app"
+  mv "$installed_app" "$previous_app"
   echo "Previous app retained at $previous_app"
 fi
-mv "$app_stage/Spool.app" "$app_root"
+mv "$app_stage/Piqae.app" "$app_root"
 
 render_plist() {
   local source=$1
@@ -126,7 +133,7 @@ if codesign --verify --deep --strict "$app_root" >/dev/null 2>&1 &&
   codesign -dv --verbose=4 "$app_root" 2>&1 |
     grep -F "Authority=Developer ID Application:" >/dev/null
 then
-  echo "Installed a Developer ID-signed Spool app for the current user."
+  echo "Installed a Developer ID-signed Piqae app for the current user."
 else
   echo "Installed an unsigned Preview build. macOS may block it; no Gatekeeper bypass was applied."
 fi

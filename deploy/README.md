@@ -6,9 +6,13 @@ Spool supports two self-hosting shapes:
 - `helm/spool/`: production Kubernetes control plane using external PostgreSQL
   and S3-compatible storage.
 
-The current low-cost hosted launch shape uses one public API service and one
-private worker on Railway, with Railway PostgreSQL and S3-compatible object
-storage. It is an operational private preview, not a production or availability
+The current low-cost hosted launch shape uses public web and API services plus
+one private worker on Railway, with Railway PostgreSQL, a print-document bucket,
+and a separate native-release bucket. Staging and production are isolated
+Railway environments. A reviewed commit deploys to staging before an operator
+promotes that exact commit to production.
+
+This is an operational private preview, not a high-availability or 99.95%
 claim. See
 [`Railway low-cost private preview`](../docs/operations/railway-private-preview.md)
 for the exact configuration, migration, scaling, backup, and release limits.
@@ -57,8 +61,7 @@ cluster/cloud account.
 Run the fail-closed production preflight with:
 
 ```sh
-SPOOL_PRODUCTION_VERCEL_ENV_FILE=/protected/vercel-production.env \
-SPOOL_PRODUCTION_TFVARS_FILE=/protected/production.tfvars \
+SPOOL_PRODUCTION_RAILWAY_ENV_FILE=/protected/railway-production-web.env \
 SPOOL_PRODUCTION_EVIDENCE_DIR=/protected/release-evidence \
   ./deploy/production-check.sh
 ```
@@ -66,9 +69,46 @@ SPOOL_PRODUCTION_EVIDENCE_DIR=/protected/release-evidence \
 The command deliberately fails until code gates, populated configuration, and
 external evidence all exist. `./deploy/production-check.sh structural` checks
 only repository-owned templates and policies and is safe for normal CI. It is
-not production approval.
+not production approval. The protected environment starts from
+[`hosted/railway.env.example`](hosted/railway.env.example) and must never be
+committed.
 
-## Hosted GCP option
+The `railway-production-runtime.json` evidence record contains no secrets. In
+addition to the common gate, status, commit, timestamp, and evidence URL fields,
+it records the exact successful deployment IDs and separation boundaries:
+
+```json
+{
+  "railway": {
+    "project_id": "<project-id>",
+    "environment_id": "<production-environment-id>",
+    "services": {
+      "web": {
+        "deployment_id": "<id>",
+        "status": "SUCCESS",
+        "public_domain": true
+      },
+      "api": {
+        "deployment_id": "<id>",
+        "status": "SUCCESS",
+        "public_domain": true
+      },
+      "worker": {
+        "deployment_id": "<id>",
+        "status": "SUCCESS",
+        "public_domain": false
+      }
+    },
+    "document_bucket": "spool-documents",
+    "release_bucket": "piqae-releases"
+  }
+}
+```
+
+The preflight rejects non-successful services, a public worker, or one bucket
+being reused for documents and releases.
+
+## Optional managed-HA scale-up
 
 `terraform/` continues to default to one Cloud Run region with external
 PostgreSQL/S3. Production flags add a warm Melbourne service, global HTTPS load
@@ -83,3 +123,17 @@ explicit, fenced operator procedure in the production runbook.
 Use separate projects and Terraform states for staging and production. Review
 every plan, provider release, quota, and deletion-protection change before
 apply.
+
+Cloud Run, Cloud SQL, GCS, the global load balancer, and regional DR are not
+required to launch the Railway private beta. When promoting that optional
+managed-HA target, run the stricter profile:
+
+```sh
+SPOOL_PRODUCTION_RAILWAY_ENV_FILE=/protected/railway-production-web.env \
+SPOOL_PRODUCTION_TFVARS_FILE=/protected/production.tfvars \
+SPOOL_PRODUCTION_EVIDENCE_DIR=/protected/release-evidence \
+  ./deploy/production-check.sh managed-ha
+```
+
+That profile additionally requires digest-pinned managed-HA configuration and
+regional disaster-recovery evidence.

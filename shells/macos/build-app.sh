@@ -3,7 +3,7 @@ set -euo pipefail
 
 shell_root=$(cd "$(dirname "$0")" && pwd)
 configuration=${CONFIGURATION:-release}
-bundle=${SPOOL_APP_BUNDLE:-"$shell_root/build/Spool.app"}
+bundle=${SPOOL_APP_BUNDLE:-"$shell_root/build/Piqae.app"}
 version=${SPOOL_VERSION:-0.1.0}
 build_number=${SPOOL_BUILD_NUMBER:-1}
 feed_url=${SPOOL_SPARKLE_FEED_URL:-}
@@ -21,6 +21,21 @@ if [[ -n "$swift_archs" ]]; then
     esac
   done
 fi
+
+swift_build() {
+  if [[ -n "$swift_archs" ]]; then
+    swift build \
+      --package-path "$shell_root" \
+      --configuration "$configuration" \
+      "${swift_arch_args[@]}" \
+      "$@"
+  else
+    swift build \
+      --package-path "$shell_root" \
+      --configuration "$configuration" \
+      "$@"
+  fi
+}
 
 case "$bundle" in
   ""|"/"|"$HOME"|"$shell_root") echo "refusing unsafe app bundle path: $bundle" >&2; exit 2 ;;
@@ -55,23 +70,9 @@ if [[ -n "$feed_url" || -n "$public_key" || -n "$signing_identity" ]]; then
   fi
 fi
 
-swift build \
-  --package-path "$shell_root" \
-  --configuration "$configuration" \
-  "${swift_arch_args[@]}" \
-  --product SpoolMenu
-
-swift build \
-  --package-path "$shell_root" \
-  --configuration "$configuration" \
-  "${swift_arch_args[@]}" \
-  --product SpoolPrintCoreReplay
-
-binary_directory=$(swift build \
-  --package-path "$shell_root" \
-  --configuration "$configuration" \
-  "${swift_arch_args[@]}" \
-  --show-bin-path)
+swift_build --product SpoolMenu
+swift_build --product SpoolPrintCoreReplay
+binary_directory=$(swift_build --show-bin-path)
 
 if [[ -e "$bundle" ]]; then
   rm -rf -- "$bundle"

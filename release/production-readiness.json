@@ -1,16 +1,30 @@
 {
-  "version": 1,
+  "version": 2,
+  "current_target": "railway_private_beta",
   "commercial_plans": ["free", "pro"],
   "hosted_components": {
-    "cloud_run": "required",
-    "cloud_sql": "required",
-    "gcs": "required",
-    "vercel": "required",
+    "railway_web": "required",
+    "railway_api": "required",
+    "railway_worker": "required",
+    "railway_postgres": "required",
+    "railway_document_bucket": "required",
+    "railway_release_bucket": "required",
     "workos": "required",
     "stripe": "required",
     "sentry": "required"
   },
+  "optional_scale_up_components": {
+    "cloud_run": "optional",
+    "cloud_sql": "optional",
+    "gcs": "optional",
+    "kubernetes": "optional"
+  },
   "external_evidence": [
+    {
+      "id": "railway_production_runtime",
+      "status": "open",
+      "required_file": "railway-production-runtime.json"
+    },
     {
       "id": "apple_signing_and_notarisation",
       "status": "open",
@@ -25,11 +39,6 @@
       "id": "windows_oki_physical",
       "status": "open",
       "required_file": "windows-oki-physical.json"
-    },
-    {
-      "id": "regional_dr_rehearsal",
-      "status": "open",
-      "required_file": "regional-dr-rehearsal.json"
     },
     {
       "id": "workos_live_identity",
@@ -50,7 +59,16 @@
       "id": "external_security_review",
       "status": "open",
       "required_file": "external-security-review.json"
-    },
+    }
+  ],
+  "managed_ha_external_evidence": [
+    {
+      "id": "regional_dr_rehearsal",
+      "status": "open",
+      "required_file": "regional-dr-rehearsal.json"
+    }
+  ],
+  "public_release_external_evidence": [
     {
       "id": "production_soak_30_days",
       "status": "open",

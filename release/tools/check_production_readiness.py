@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-"""Fail-closed repository and deployment preflight for Spool Cloud."""
+"""Fail-closed repository and deployment preflight for Piqae Cloud."""
 
 from __future__ import annotations
 
 import argparse
 import json
-import os
 import re
 import sys
 from pathlib import Path
@@ -13,19 +12,29 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 REQUIRED_COMPONENTS = {
-    "cloud_run",
-    "cloud_sql",
-    "gcs",
-    "vercel",
+    "railway_web",
+    "railway_api",
+    "railway_worker",
+    "railway_postgres",
+    "railway_document_bucket",
+    "railway_release_bucket",
     "workos",
     "stripe",
     "sentry",
 }
-REQUIRED_VERCEL_KEYS = {
+OPTIONAL_SCALE_UP_COMPONENTS = {
+    "cloud_run",
+    "cloud_sql",
+    "gcs",
+    "kubernetes",
+}
+REQUIRED_RAILWAY_WEB_KEYS = {
     "SPOOL_AUTH_MODE",
     "PUBLIC_SPOOL_DASHBOARD_MODE",
     "PUBLIC_SPOOL_API_URL",
     "PUBLIC_SITE_URL",
+    "ORIGIN",
+    "SPOOL_COOKIE_SECURE",
     "WORKOS_CLIENT_ID",
     "WORKOS_API_KEY",
     "WORKOS_REDIRECT_URI",
@@ -48,6 +57,12 @@ REQUIRED_VERCEL_KEYS = {
     "SENTRY_PROJECT",
     "SENTRY_RELEASE",
     "SPOOL_RELEASE_MANIFEST_JSON",
+    "PIQAE_RELEASES_S3_ENDPOINT",
+    "PIQAE_RELEASES_S3_ACCESS_KEY_ID",
+    "PIQAE_RELEASES_S3_SECRET_ACCESS_KEY",
+    "PIQAE_RELEASES_S3_BUCKET",
+    "PIQAE_RELEASES_S3_REGION",
+    "PIQAE_RELEASES_S3_VIRTUAL_HOSTED_STYLE",
     "PUBLIC_MARKETING_INDEXABLE",
 }
 SECRET_KEYS = {
@@ -56,6 +71,8 @@ SECRET_KEYS = {
     "STRIPE_SECRET_KEY",
     "PRICING_DRIFT_SHARED_SECRET",
     "SENTRY_AUTH_TOKEN",
+    "PIQAE_RELEASES_S3_ACCESS_KEY_ID",
+    "PIQAE_RELEASES_S3_SECRET_ACCESS_KEY",
 }
 
 
@@ -123,23 +140,39 @@ def structural_errors() -> list[str]:
 
     if contract.get("commercial_plans") != ["free", "pro"]:
         errors.append("commercial plan contract must be exactly Free and Pro")
+    if contract.get("current_target") != "railway_private_beta":
+        errors.append("current hosted target must be railway_private_beta")
     if set(contract.get("hosted_components", {})) != REQUIRED_COMPONENTS:
         errors.append("production contract must require every hosted component")
-    evidence = contract.get("external_evidence")
-    if not isinstance(evidence, list) or not evidence:
-        errors.append("external evidence gates are missing")
-    elif any(item.get("status") != "open" for item in evidence):
-        errors.append("checked-in external evidence declarations must remain open")
+    if any(value != "required" for value in contract.get("hosted_components", {}).values()):
+        errors.append("current hosted components must remain required")
+    if set(contract.get("optional_scale_up_components", {})) != OPTIONAL_SCALE_UP_COMPONENTS:
+        errors.append("production contract must declare every optional scale-up component")
+    if any(
+        value != "optional"
+        for value in contract.get("optional_scale_up_components", {}).values()
+    ):
+        errors.append("scale-up components must remain optional for Railway private beta")
+    for key in (
+        "external_evidence",
+        "managed_ha_external_evidence",
+        "public_release_external_evidence",
+    ):
+        evidence = contract.get(key)
+        if not isinstance(evidence, list) or not evidence:
+            errors.append(f"{key} gates are missing")
+        elif any(item.get("status") != "open" for item in evidence):
+            errors.append("checked-in external evidence declarations must remain open")
 
-    template_path = ROOT / "deploy/hosted/vercel.env.example"
+    template_path = ROOT / "deploy/hosted/railway.env.example"
     try:
         template = parse_env(template_path)
     except (OSError, PreflightError) as error:
         errors.append(str(error))
         template = {}
-    missing_keys = sorted(REQUIRED_VERCEL_KEYS - set(template))
+    missing_keys = sorted(REQUIRED_RAILWAY_WEB_KEYS - set(template))
     if missing_keys:
-        errors.append(f"Vercel template is missing: {', '.join(missing_keys)}")
+        errors.append(f"Railway web template is missing: {', '.join(missing_keys)}")
     if template.get("STRIPE_CHECKOUT_ENABLED") != "false":
         errors.append("example Stripe checkout must fail closed")
     if template.get("PUBLIC_MARKETING_INDEXABLE") != "false":
@@ -147,6 +180,23 @@ def structural_errors() -> list[str]:
     for key in SECRET_KEYS:
         if template.get(key):
             errors.append(f"example must not contain a value for {key}")
+
+    require_text(
+        ROOT / "railway.toml",
+        [
+            'dockerfilePath = "deploy/docker/Dockerfile.server"',
+            'healthcheckPath = "/v1/ready"',
+        ],
+        errors,
+    )
+    require_text(
+        ROOT / "railway.web.toml",
+        [
+            'dockerfilePath = "deploy/docker/Dockerfile.web"',
+            'healthcheckPath = "/healthz"',
+        ],
+        errors,
+    )
 
     terraform_main = require_text(
         ROOT / "deploy/terraform/main.tf",
@@ -227,7 +277,7 @@ def structural_errors() -> list[str]:
         ROOT / ".github/workflows/production-promotion.yml",
         [
             "environment: production",
-            "./deploy/production-check.sh release",
+            "./deploy/production-check.sh managed-ha",
             "./deploy/cloud/promote.sh",
         ],
         errors,
@@ -259,25 +309,36 @@ def require_https(name: str, value: str, errors: list[str]) -> None:
         errors.append(f"{name} must use HTTPS")
 
 
-def release_errors(vercel_env: Path | None, tfvars: Path | None, evidence_dir: Path | None) -> list[str]:
+def release_errors(
+    railway_env: Path | None,
+    evidence_dir: Path | None,
+    *,
+    target: str = "railway",
+    tfvars: Path | None = None,
+) -> list[str]:
     errors = structural_errors()
-    if vercel_env is None or not vercel_env.is_file():
-        errors.append("release preflight requires --vercel-env")
+    if railway_env is None or not railway_env.is_file():
+        errors.append("release preflight requires --railway-env")
         values: dict[str, str] = {}
     else:
         try:
-            values = parse_env(vercel_env)
+            values = parse_env(railway_env)
         except PreflightError as error:
             errors.append(str(error))
             values = {}
 
-    for key in REQUIRED_VERCEL_KEYS:
+    for key in REQUIRED_RAILWAY_WEB_KEYS:
         if not values.get(key):
-            errors.append(f"production Vercel environment is missing {key}")
+            errors.append(f"production Railway web environment is missing {key}")
     if values.get("SPOOL_AUTH_MODE") != "workos":
         errors.append("production SPOOL_AUTH_MODE must be workos")
     if values.get("PUBLIC_SPOOL_DASHBOARD_MODE") != "live":
         errors.append("production dashboard mode must be live")
+    if values.get("SPOOL_COOKIE_SECURE") != "true":
+        errors.append("production cookies must be explicitly secure")
+    expected_redirect = values.get("ORIGIN", "").rstrip("/") + "/auth/callback"
+    if values.get("WORKOS_REDIRECT_URI") != expected_redirect:
+        errors.append("WORKOS_REDIRECT_URI must be the canonical ORIGIN callback")
     if values.get("STRIPE_CHECKOUT_ENABLED") != "true":
         errors.append("production Stripe checkout must be explicitly enabled")
     if values.get("PUBLIC_MARKETING_INDEXABLE") != "true":
@@ -294,39 +355,25 @@ def release_errors(vercel_env: Path | None, tfvars: Path | None, evidence_dir: P
             errors.append(f"{key} must be between 0 and 1")
     if re.search(r"replace|example|latest", values.get("SENTRY_RELEASE", ""), re.IGNORECASE):
         errors.append("SENTRY_RELEASE must identify the immutable promoted release")
-    for key in ("PUBLIC_SPOOL_API_URL", "PUBLIC_SITE_URL", "WORKOS_REDIRECT_URI"):
+    for key in (
+        "PUBLIC_SPOOL_API_URL",
+        "PUBLIC_SITE_URL",
+        "ORIGIN",
+        "WORKOS_REDIRECT_URI",
+        "PIQAE_RELEASES_S3_ENDPOINT",
+    ):
         if values.get(key):
             require_https(key, values[key], errors)
+    if values.get("PIQAE_RELEASES_S3_VIRTUAL_HOSTED_STYLE") != "false":
+        errors.append("Railway release bucket must use path-style S3 addressing")
 
-    if tfvars is None or not tfvars.is_file():
-        errors.append("release preflight requires --tfvars")
-    else:
-        text = tfvars.read_text(encoding="utf-8")
-        for setting in (
-            "environment",
-            "image",
-            "enable_multi_region",
-            "enable_global_load_balancer",
-            "allow_public_cloud_run_invocation",
-            "enable_managed_data_plane",
-            "managed_object_bucket_name",
-            "load_balancer_domains",
-            "stripe_meter_event_name",
-        ):
-            if not re.search(rf"(?m)^\s*{re.escape(setting)}\s*=", text):
-                errors.append(f"production tfvars is missing {setting}")
-        for setting in (
-            "enable_multi_region",
-            "enable_global_load_balancer",
-            "allow_public_cloud_run_invocation",
-            "enable_managed_data_plane",
-        ):
-            if not re.search(rf"(?m)^\s*{setting}\s*=\s*true\s*$", text):
-                errors.append(f"production tfvars must set {setting}=true")
-        if not re.search(r'(?m)^\s*image\s*=\s*"[^"]+@sha256:[0-9a-f]{64}"\s*$', text):
-            errors.append("production tfvars must pin image by digest")
-        if re.search(r"replace|example\.com|000000000000", text, re.IGNORECASE):
-            errors.append("production tfvars still contains an example placeholder")
+    if target == "managed-ha":
+        if tfvars is None or not tfvars.is_file():
+            errors.append("managed-ha preflight requires --tfvars")
+        else:
+            check_managed_ha_tfvars(tfvars, errors)
+    elif target != "railway":
+        errors.append(f"unsupported release target: {target}")
 
     app_sources = "\n".join(
         path.read_text(encoding="utf-8")
@@ -349,8 +396,6 @@ def release_errors(vercel_env: Path | None, tfvars: Path | None, evidence_dir: P
     ):
         errors.append("Sentry web SDK/runtime integration is not implemented")
     control_plane = (ROOT / "crates/control-plane/src/main.rs").read_text(encoding="utf-8")
-    if not re.search(r'"gcs"\s*=>', control_plane):
-        errors.append("native GCS object-store runtime is not implemented")
     if "SPOOL_SERVICE_ROLE" not in control_plane:
         errors.append("api/sync/worker service-role isolation is not implemented")
     if "SPOOL_RUN_MIGRATIONS_ON_STARTUP" not in control_plane or "migrate_only" not in control_plane:
@@ -362,10 +407,13 @@ def release_errors(vercel_env: Path | None, tfvars: Path | None, evidence_dir: P
             errors.append(f"billing meter worker does not consume {key}")
 
     contract = json.loads((ROOT / "release/production-readiness.json").read_text(encoding="utf-8"))
+    evidence_gates = list(contract["external_evidence"])
+    if target == "managed-ha":
+        evidence_gates.extend(contract["managed_ha_external_evidence"])
     if evidence_dir is None or not evidence_dir.is_dir():
         errors.append("release preflight requires --evidence-dir with external records")
     else:
-        for gate in contract["external_evidence"]:
+        for gate in evidence_gates:
             path = evidence_dir / gate["required_file"]
             if not path.is_file():
                 errors.append(f"missing external evidence: {gate['id']}")
@@ -381,26 +429,99 @@ def release_errors(vercel_env: Path | None, tfvars: Path | None, evidence_dir: P
                 errors.append(f"external evidence lacks a full commit: {gate['id']}")
             if not record.get("recorded_at") or not record.get("evidence_url"):
                 errors.append(f"external evidence lacks timestamp/URL: {gate['id']}")
+            if gate["id"] == "railway_production_runtime":
+                check_railway_runtime_record(record, errors)
     return errors
+
+
+def check_railway_runtime_record(record: dict[str, object], errors: list[str]) -> None:
+    railway = record.get("railway")
+    if not isinstance(railway, dict):
+        errors.append("Railway runtime evidence is missing railway details")
+        return
+    for key in ("project_id", "environment_id"):
+        if not railway.get(key):
+            errors.append(f"Railway runtime evidence is missing {key}")
+    services = railway.get("services")
+    if not isinstance(services, dict):
+        errors.append("Railway runtime evidence is missing services")
+    else:
+        for name, should_be_public in (("web", True), ("api", True), ("worker", False)):
+            service = services.get(name)
+            if not isinstance(service, dict):
+                errors.append(f"Railway runtime evidence is missing {name} service")
+                continue
+            if not service.get("deployment_id"):
+                errors.append(f"Railway {name} evidence is missing deployment_id")
+            if service.get("status") != "SUCCESS":
+                errors.append(f"Railway {name} deployment is not SUCCESS")
+            if service.get("public_domain") is not should_be_public:
+                expected = "public" if should_be_public else "private"
+                errors.append(f"Railway {name} service must be {expected}")
+    document_bucket = railway.get("document_bucket")
+    release_bucket = railway.get("release_bucket")
+    if not document_bucket or not release_bucket:
+        errors.append("Railway runtime evidence is missing bucket identities")
+    elif document_bucket == release_bucket:
+        errors.append("Railway release and document buckets must be distinct")
+
+
+def check_managed_ha_tfvars(tfvars: Path, errors: list[str]) -> None:
+    try:
+        text = tfvars.read_text(encoding="utf-8")
+    except OSError as error:
+        errors.append(f"cannot read managed-ha tfvars: {error}")
+        return
+    for setting in (
+        "environment",
+        "image",
+        "enable_multi_region",
+        "enable_global_load_balancer",
+        "allow_public_cloud_run_invocation",
+        "enable_managed_data_plane",
+        "managed_object_bucket_name",
+        "load_balancer_domains",
+        "stripe_meter_event_name",
+    ):
+        if not re.search(rf"(?m)^\s*{re.escape(setting)}\s*=", text):
+            errors.append(f"production tfvars is missing {setting}")
+    for setting in (
+        "enable_multi_region",
+        "enable_global_load_balancer",
+        "allow_public_cloud_run_invocation",
+        "enable_managed_data_plane",
+    ):
+        if not re.search(rf"(?m)^\s*{setting}\s*=\s*true\s*$", text):
+            errors.append(f"production tfvars must set {setting}=true")
+    if not re.search(r'(?m)^\s*image\s*=\s*"[^"]+@sha256:[0-9a-f]{64}"\s*$', text):
+        errors.append("production tfvars must pin image by digest")
+    if re.search(r"replace|example\.com|000000000000", text, re.IGNORECASE):
+        errors.append("production tfvars still contains an example placeholder")
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=("structural", "release"), default="structural")
-    parser.add_argument("--vercel-env", type=Path)
+    parser.add_argument("--target", choices=("railway", "managed-ha"), default="railway")
+    parser.add_argument("--railway-env", type=Path)
     parser.add_argument("--tfvars", type=Path)
     parser.add_argument("--evidence-dir", type=Path)
     args = parser.parse_args()
     errors = (
         structural_errors()
         if args.mode == "structural"
-        else release_errors(args.vercel_env, args.tfvars, args.evidence_dir)
+        else release_errors(
+            args.railway_env,
+            args.evidence_dir,
+            target=args.target,
+            tfvars=args.tfvars,
+        )
     )
     if errors:
         for error in errors:
             print(f"FAIL: {error}", file=sys.stderr)
         return 1
-    print(f"production {args.mode} preflight passed")
+    print(f"production {args.mode} preflight passed for {args.target}")
     return 0
 
 

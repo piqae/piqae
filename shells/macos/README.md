@@ -1,6 +1,6 @@
-# Spool macOS menu shell
+# Piqae macOS menu shell
 
-This is a small AppKit status-menu client for the headless Spool agent. It
+This is a small AppKit status-menu client for the headless Piqae node. It
 contains no print driver, queue, database, device credential, or cloud client.
 Operational actions use the authenticated loopback API and time out quickly
 when the agent is unavailable.
@@ -21,7 +21,7 @@ Build and test:
 ```sh
 swift test --package-path shells/macos
 shells/macos/build-app.sh
-open shells/macos/build/Spool.app
+open shells/macos/build/Piqae.app
 ```
 
 The default generated app is an unsigned Preview build. Its bundle metadata
@@ -51,7 +51,7 @@ does not publish a GitHub release or deploy the appcast.
 `packaging/macos/build-user-package.sh` combines an app, `spool-agent`, and
 `spool-executor-cups` into a per-user ZIP. Its installer uses:
 
-- `~/Applications/Spool.app`;
+- `~/Applications/Piqae.app`;
 - `~/Library/Application Support/Spool/bin` for the agent and executor;
 - `~/Library/Application Support/Spool` for durable identity, queue, and local
   API token;
@@ -65,7 +65,7 @@ be verified. It retains the previous app and preserves data on uninstall.
 Unsigned packages are labelled Preview and do not remove quarantine or apply a
 Gatekeeper workaround.
 
-Sparkle currently replaces only `Spool.app`, including the menu and
+Sparkle currently replaces only `Piqae.app`, including the menu and
 `SpoolPrintCoreReplay`. It does not replace or restart the separately installed
 Rust agent/executor. A full-node update therefore still uses the per-user
 package's idle-checked installer. Do not represent the Sparkle foundation as an
@@ -77,9 +77,9 @@ while the local API reports queued/active jobs or a profile panel is open, the
 menu postpones replacement and polls the authenticated local status until the
 node is idle. An unavailable agent is not assumed idle.
 
-The **Local driver test…** action requires an exposed logical printer, a named
-print profile, and explicit confirmation. It never falls back to unprofiled
-job submission.
+The **Local driver test…** action requires a present local printer, a profile,
+and explicit confirmation. It does not require cloud/API exposure and never
+falls back to unprofiled job submission.
 
 ## Native print profiles
 
@@ -177,4 +177,4 @@ Failures include a stable `code`, a bounded `message`, `retryable`, and
 `handoff_may_have_succeeded`. A failure after `NSPrintOperation.run()` begins is
 marked ambiguous and must not be retried automatically. The process exits zero
 on success and one on failure. The app bundle builder embeds the helper at
-`Spool.app/Contents/MacOS/SpoolPrintCoreReplay`.
+`Piqae.app/Contents/MacOS/SpoolPrintCoreReplay`.

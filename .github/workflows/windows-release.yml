@@ -8,7 +8,7 @@ on:
         required: true
         default: 0.1.0-preview.1
       publish:
-        description: Publish a GitHub release (signed builds only)
+        description: Promote a fully signed build to the stable Railway release feed
         type: boolean
         required: true
         default: false
@@ -27,8 +27,14 @@ jobs:
   package:
     name: Package x86_64 Windows
     runs-on: windows-latest
+    environment: native-signing
+    outputs:
+      artifact_name: ${{ steps.release.outputs.artifact_name }}
+      publish: ${{ steps.release.outputs.publish }}
+      signed: ${{ steps.release.outputs.signed }}
+      version: ${{ steps.release.outputs.version }}
     permissions:
-      contents: write
+      contents: read
       id-token: write
       attestations: write
     env:
@@ -38,7 +44,7 @@ jobs:
       WINDOWS_TIMESTAMP_URL: ${{ vars.WINDOWS_RFC3161_TIMESTAMP_URL }}
       WINSPARKLE_PRIVATE_KEY_BASE64: ${{ secrets.WINSPARKLE_ED25519_PRIVATE_KEY_BASE64 }}
       WINSPARKLE_PUBLIC_KEY: ${{ vars.WINSPARKLE_ED25519_PUBLIC_KEY }}
-      WINDOWS_UPDATE_FEED_URL: ${{ vars.WINDOWS_UPDATE_FEED_URL }}
+      WINDOWS_UPDATE_FEED_URL: https://downloads.piqae.com/releases/stable/appcast-windows.xml
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
@@ -66,12 +72,11 @@ jobs:
             timestamp_url = $env:WINDOWS_TIMESTAMP_URL
             winsparkle_private_key = $env:WINSPARKLE_PRIVATE_KEY_BASE64
             winsparkle_public_key = $env:WINSPARKLE_PUBLIC_KEY
-            update_feed_url = $env:WINDOWS_UPDATE_FEED_URL
           }
           $present = @($requirements.GetEnumerator() | Where-Object { $_.Value }).Count
           if ($present -eq 0) {
             "signed=false" >> $env:GITHUB_OUTPUT
-            "artifact_name=spool-windows-x86_64-unsigned-preview" >> $env:GITHUB_OUTPUT
+            "artifact_name=piqae-windows-x86_64-unsigned-preview" >> $env:GITHUB_OUTPUT
             "UNSIGNED PREVIEW: no Authenticode or update-signing credentials were supplied." |
               Out-File -Encoding ascii "SIGNING-STATUS.txt"
           } elseif ($present -eq $requirements.Count) {
@@ -82,7 +87,7 @@ jobs:
               throw "WINDOWS_UPDATE_FEED_URL must use HTTPS."
             }
             "signed=true" >> $env:GITHUB_OUTPUT
-            "artifact_name=spool-windows-x86_64-signed" >> $env:GITHUB_OUTPUT
+            "artifact_name=piqae-windows-x86_64-signed" >> $env:GITHUB_OUTPUT
             "SIGNED RELEASE: Authenticode and WinSparkle Ed25519 gates are configured." |
               Out-File -Encoding ascii "SIGNING-STATUS.txt"
           } else {
@@ -91,6 +96,12 @@ jobs:
               ForEach-Object Key
             throw "Signing configuration is partial. Missing: $($missing -join ', ')"
           }
+          $signed = $present -eq $requirements.Count
+          $publish = "${{ github.ref_type }}" -eq "tag" -or "${{ inputs.publish }}" -eq "true"
+          if ($publish -and -not $signed) {
+            throw "Stable publication requires Authenticode and WinSparkle signing."
+          }
+          "publish=$($publish.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
 
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
@@ -129,6 +140,20 @@ jobs:
           Copy-Item "LICENSES\*" "$stage\LICENSES" -Recurse
           & "packaging/windows/Fetch-Pdfium.ps1" -DestinationDirectory $stage
 
+      - name: Stage pinned WinSparkle runtime and signing tool
+        if: steps.release.outputs.signed == 'true'
+        id: winsparkle
+        shell: pwsh
+        run: |
+          $tool = Join-Path $env:RUNNER_TEMP "winsparkle-tool.exe"
+          & "packaging/windows/Fetch-WinSparkle.ps1" `
+            -DestinationDirectory "artifacts\stage" `
+            -SigningToolOutputPath $tool
+          if (-not (Test-Path -LiteralPath $tool)) {
+            throw "Pinned WinSparkle signing tool is missing."
+          }
+          "tool=$tool" >> $env:GITHUB_OUTPUT
+
       - name: Write update configuration
         shell: pwsh
         run: |
@@ -142,31 +167,6 @@ jobs:
           } else {
             & "packaging/windows/New-UpdateConfig.ps1" -OutputPath $output
           }
-
-      - name: Fetch pinned WinSparkle signing tool
-        if: steps.release.outputs.signed == 'true'
-        id: winsparkle
-        shell: pwsh
-        run: |
-          $uri = "https://github.com/vslavik/winsparkle/releases/download/v0.9.4/WinSparkle-0.9.4.zip"
-          $expected = "6037df37fc263bd1650a1c4949681a9d40ffe991d01f35892a406cb5d103c976"
-          $archive = Join-Path $env:RUNNER_TEMP "WinSparkle-0.9.4.zip"
-          $directory = Join-Path $env:RUNNER_TEMP "WinSparkle-0.9.4"
-          Invoke-WebRequest -UseBasicParsing -Uri $uri -OutFile $archive
-          $actual = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
-          if ($actual -cne $expected) {
-            throw "WinSparkle archive digest mismatch: expected $expected, received $actual"
-          }
-          Expand-Archive -LiteralPath $archive -DestinationPath $directory
-          $tool = Join-Path $directory "WinSparkle-0.9.4\bin\winsparkle-tool.exe"
-          if (-not (Test-Path -LiteralPath $tool)) {
-            throw "Pinned WinSparkle signing tool is missing."
-          }
-          "tool=$tool" >> $env:GITHUB_OUTPUT
-          Copy-Item `
-            (Join-Path $directory "WinSparkle-0.9.4\COPYING"), `
-            (Join-Path $directory "WinSparkle-0.9.4\COPYING.expat") `
-            "artifacts\stage\LICENSES"
 
       - name: Authenticode-sign staged Spool binaries
         if: steps.release.outputs.signed == 'true'
@@ -259,7 +259,7 @@ jobs:
         if: steps.release.outputs.signed == 'true'
         shell: pwsh
         run: |
-          $installer = "artifacts\release\spool-windows-x86_64-setup.exe"
+          $installer = "artifacts\release\piqae-windows-x86_64-setup.exe"
           $signature = Get-AuthenticodeSignature -LiteralPath $installer
           if ($signature.Status -ne "Valid") {
             throw "Installer Authenticode verification failed: $($signature.Status)"
@@ -269,7 +269,7 @@ jobs:
         if: steps.release.outputs.signed != 'true'
         shell: pwsh
         run: |
-          $installer = "artifacts\release\spool-windows-x86_64-setup.exe"
+          $installer = "artifacts\release\piqae-windows-x86_64-setup.exe"
           $signature = Get-AuthenticodeSignature -LiteralPath $installer
           if ($signature.Status -eq "Valid") {
             throw "Installer is signed but this workflow selected unsigned-preview mode."
@@ -279,7 +279,7 @@ jobs:
         if: steps.release.outputs.signed == 'true'
         shell: pwsh
         run: |
-          $installer = Resolve-Path "artifacts\release\spool-windows-x86_64-setup.exe"
+          $installer = Resolve-Path "artifacts\release\piqae-windows-x86_64-setup.exe"
           $privateKey = Join-Path $env:RUNNER_TEMP "winsparkle-ed25519.key"
           [IO.File]::WriteAllBytes(
             $privateKey,
@@ -303,9 +303,9 @@ jobs:
           }
           $signature = $Matches[1]
           $installerLength = (Get-Item -LiteralPath $installer.Path).Length
-          $tag = "v${{ steps.release.outputs.version }}"
-          $download = "https://github.com/${{ github.repository }}/releases/download/$tag/spool-windows-x86_64-setup.exe"
-          $notes = "https://github.com/${{ github.repository }}/releases/tag/$tag"
+          $publicName = "piqae-windows-${{ steps.release.outputs.version }}-x86_64-setup.exe"
+          $download = "https://downloads.piqae.com/releases/stable/$publicName"
+          $notes = "https://piqae.com/downloads"
           & "packaging/windows/New-WinSparkleAppcast.ps1" `
             -OutputPath "artifacts\release\appcast-windows.xml" `
             -Version "${{ steps.release.outputs.version }}" `
@@ -346,36 +346,6 @@ jobs:
           path: artifacts/release/*
           if-no-files-found: error
 
-      - name: Publish signed GitHub release
-        if: >-
-          steps.release.outputs.signed == 'true' &&
-          (github.ref_type == 'tag' || inputs.publish == true)
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          $tag = if ("${{ github.ref_type }}" -eq "tag") {
-            "${{ github.ref_name }}"
-          } else {
-            "v${{ steps.release.outputs.version }}"
-          }
-          $arguments = @(
-            "release", "create", $tag,
-            "artifacts/release/spool-windows-x86_64-setup.exe",
-            "artifacts/release/appcast-windows.xml",
-            "artifacts/release/SBOM.spdx.json",
-            "artifacts/release/SHA256SUMS",
-            "artifacts/release/SIGNING-STATUS.txt",
-            "--title", "Spool $tag",
-            "--generate-notes"
-          )
-          if ("${{ github.ref_type }}" -eq "tag") {
-            $arguments += "--verify-tag"
-          } else {
-            $arguments += @("--target", "${{ github.sha }}")
-          }
-          & gh @arguments
-
       - name: Remove temporary signing material
         if: always() && steps.release.outputs.signed == 'true'
         shell: pwsh
@@ -385,3 +355,197 @@ jobs:
             (Join-Path $env:RUNNER_TEMP "winsparkle-ed25519.key") `
             -Force `
             -ErrorAction SilentlyContinue
+
+  publish:
+    name: Promote signed Windows release
+    needs: package
+    if: needs.package.outputs.publish == 'true'
+    runs-on: ubuntu-24.04
+    environment: native-release
+    concurrency:
+      group: piqae-native-stable-promotion
+      cancel-in-progress: false
+    env:
+      RELEASE_VERSION: ${{ needs.package.outputs.version }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ${{ needs.package.outputs.artifact_name }}
+          path: artifacts
+
+      - name: Stage public Windows artifacts and metadata
+        shell: bash
+        run: |
+          if [[ "${{ needs.package.outputs.signed }}" != true ]]; then
+            echo "Stable publication refuses a non-signed candidate." >&2
+            exit 1
+          fi
+          installer_name="piqae-windows-${RELEASE_VERSION}-x86_64-setup.exe"
+          sbom_name="piqae-windows-${RELEASE_VERSION}-SBOM.spdx.json"
+          mkdir -p promotion
+          install -m 0644 \
+            artifacts/piqae-windows-x86_64-setup.exe \
+            "promotion/$installer_name"
+          install -m 0644 artifacts/appcast-windows.xml promotion/appcast-windows.xml
+          install -m 0644 artifacts/SBOM.spdx.json "promotion/$sbom_name"
+          installer_sha=$(sha256sum "promotion/$installer_name" | awk '{print $1}')
+          published_at=$(git show -s --format=%cI "$GITHUB_SHA")
+          printf '%s  %s\n' "$installer_sha" "$installer_name" \
+            > "promotion/$installer_name.sha256"
+          jq -n \
+            --arg version "$RELEASE_VERSION" \
+            --arg file "$installer_name" \
+            --arg sha "$installer_sha" \
+            --arg now "$published_at" \
+            '{
+              platform: "windows",
+              publishedAt: $now,
+              artifact: {
+                id: "windows-x86_64",
+                platform: "windows",
+                title: "Piqae for Windows",
+                version: $version,
+                fileName: $file,
+                architectures: ["x86_64"],
+                minimumOs: "Windows 10 or 11, 64-bit",
+                status: "preview",
+                statusReason: "Signed distribution; physical-printer, clean-install, and complete update-rollback certification remain release gates.",
+                downloadUrl: ("https://downloads.piqae.com/releases/stable/" + $file),
+                releaseUrl: "https://piqae.com/downloads",
+                sha256: $sha,
+                checksumUrl: ("https://downloads.piqae.com/releases/stable/" + $file + ".sha256"),
+                signing: {
+                  status: "verified",
+                  label: "Authenticode and WinSparkle Ed25519 verified"
+                },
+                notes: [
+                  "Per-user Windows node and native driver-profile host.",
+                  "The signed WinSparkle feed and native tray integration are included; automatic rollback remains a separate release gate."
+                ]
+              }
+            }' > promotion/windows.json
+
+      - name: Upload and verify immutable Windows release
+        shell: bash
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.PIQAE_RELEASES_S3_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.PIQAE_RELEASES_S3_SECRET_ACCESS_KEY }}
+          AWS_EC2_METADATA_DISABLED: "true"
+          PIQAE_RELEASES_S3_ENDPOINT: ${{ secrets.PIQAE_RELEASES_S3_ENDPOINT }}
+          PIQAE_RELEASES_S3_BUCKET: ${{ secrets.PIQAE_RELEASES_S3_BUCKET }}
+          PIQAE_RELEASES_S3_REGION: ${{ secrets.PIQAE_RELEASES_S3_REGION }}
+        run: |
+          prefix="native/releases/$RELEASE_VERSION/windows-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          installer_name="piqae-windows-${RELEASE_VERSION}-x86_64-setup.exe"
+          sbom_name="piqae-windows-${RELEASE_VERSION}-SBOM.spdx.json"
+          packaging/release/publish-s3-object.sh immutable \
+            "promotion/$installer_name" "$prefix/$installer_name" \
+            application/vnd.microsoft.portable-executable
+          packaging/release/publish-s3-object.sh immutable \
+            "promotion/$installer_name.sha256" "$prefix/$installer_name.sha256" text/plain
+          packaging/release/publish-s3-object.sh immutable \
+            "promotion/$sbom_name" "$prefix/$sbom_name" application/spdx+json
+          packaging/release/publish-s3-object.sh immutable \
+            promotion/appcast-windows.xml "$prefix/appcast-windows.xml" application/xml
+          packaging/release/publish-s3-object.sh immutable \
+            promotion/windows.json "$prefix/windows.json" application/json
+
+      - name: Promote Windows artifacts and signed appcast
+        shell: bash
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.PIQAE_RELEASES_S3_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.PIQAE_RELEASES_S3_SECRET_ACCESS_KEY }}
+          AWS_EC2_METADATA_DISABLED: "true"
+          PIQAE_RELEASES_S3_ENDPOINT: ${{ secrets.PIQAE_RELEASES_S3_ENDPOINT }}
+          PIQAE_RELEASES_S3_BUCKET: ${{ secrets.PIQAE_RELEASES_S3_BUCKET }}
+          PIQAE_RELEASES_S3_REGION: ${{ secrets.PIQAE_RELEASES_S3_REGION }}
+        run: |
+          prefix="native/releases/$RELEASE_VERSION/windows-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          installer_name="piqae-windows-${RELEASE_VERSION}-x86_64-setup.exe"
+          sbom_name="piqae-windows-${RELEASE_VERSION}-SBOM.spdx.json"
+          packaging/release/publish-s3-object.sh promote \
+            "$prefix/$installer_name" "native/stable/$installer_name" \
+            application/vnd.microsoft.portable-executable
+          packaging/release/publish-s3-object.sh promote \
+            "$prefix/$installer_name.sha256" "native/stable/$installer_name.sha256" text/plain
+          packaging/release/publish-s3-object.sh promote \
+            "$prefix/$installer_name" native/stable/piqae-windows-x86_64-setup.exe \
+            application/vnd.microsoft.portable-executable
+          packaging/release/publish-s3-object.sh promote \
+            "$prefix/$sbom_name" "native/stable/$sbom_name" application/spdx+json
+          # The appcast is the commit point and is promoted only after its
+          # Authenticode- and Ed25519-verified installer is available.
+          packaging/release/publish-s3-object.sh promote \
+            "$prefix/appcast-windows.xml" native/stable/appcast-windows.xml application/xml
+
+      - name: Merge and promote stable release manifest
+        shell: bash
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.PIQAE_RELEASES_S3_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.PIQAE_RELEASES_S3_SECRET_ACCESS_KEY }}
+          AWS_EC2_METADATA_DISABLED: "true"
+          PIQAE_RELEASES_S3_ENDPOINT: ${{ secrets.PIQAE_RELEASES_S3_ENDPOINT }}
+          PIQAE_RELEASES_S3_BUCKET: ${{ secrets.PIQAE_RELEASES_S3_BUCKET }}
+          PIQAE_RELEASES_S3_REGION: ${{ secrets.PIQAE_RELEASES_S3_REGION }}
+        run: |
+          if packaging/release/publish-s3-object.sh fetch \
+            native/stable/manifest.json promotion/current-manifest.json
+          then
+            jq -e \
+              '.schemaVersion == 1
+               and (.artifacts | type == "array")
+               and all(.artifacts[];
+                 .status != "supported"
+                 and .signing.status == "verified"
+                 and (.sha256 | test("^[a-f0-9]{64}$"))
+                 and (.downloadUrl | startswith("https://downloads.piqae.com/releases/stable/")))' \
+              promotion/current-manifest.json >/dev/null
+          else
+            code=$?
+            if [[ "$code" -ne 3 ]]; then
+              exit "$code"
+            fi
+            jq -n '{
+              schemaVersion: 1,
+              channel: "stable",
+              currentVersion: "0.0.0",
+              updatedAt: null,
+              artifacts: [],
+              olderReleases: [],
+              releasesUrl: "https://piqae.com/downloads",
+              repositoryUrl: "https://github.com/C4CoffeeCo/piqae"
+            }' > promotion/current-manifest.json
+          fi
+          jq \
+            --slurpfile platform promotion/windows.json \
+            --arg version "$RELEASE_VERSION" \
+            --arg now "$(jq -r '.publishedAt' promotion/windows.json)" \
+            '.channel = "stable"
+             | .currentVersion = $version
+             | .updatedAt = $now
+             | .artifacts = ([.artifacts[] | select(.id != $platform[0].artifact.id)] + [$platform[0].artifact])' \
+            promotion/current-manifest.json > promotion/manifest.json
+          jq -e \
+            '.schemaVersion == 1
+             and .channel == "stable"
+             and all(.artifacts[];
+               .status != "supported"
+               and .signing.status == "verified"
+               and (.sha256 | test("^[a-f0-9]{64}$"))
+               and (.downloadUrl | startswith("https://downloads.piqae.com/releases/stable/")))' \
+            promotion/manifest.json >/dev/null
+          manifest_sha=$(sha256sum promotion/manifest.json | awk '{print $1}')
+          printf '%s  manifest.json\n' "$manifest_sha" > promotion/manifest.json.sha256
+          immutable_manifest="native/releases/$RELEASE_VERSION/windows-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/manifest.json"
+          immutable_checksum="$immutable_manifest.sha256"
+          packaging/release/publish-s3-object.sh immutable \
+            promotion/manifest.json "$immutable_manifest" application/json
+          packaging/release/publish-s3-object.sh immutable \
+            promotion/manifest.json.sha256 "$immutable_checksum" text/plain
+          packaging/release/publish-s3-object.sh promote \
+            "$immutable_checksum" native/stable/manifest.json.sha256 text/plain
+          # The shared manifest is the final stable-channel commit point.
+          packaging/release/publish-s3-object.sh promote \
+            "$immutable_manifest" native/stable/manifest.json application/json
