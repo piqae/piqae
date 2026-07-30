@@ -25,6 +25,22 @@ for required in "$app_source" "$agent_source" "$executor_source" "$agent_templat
   fi
 done
 
+channel=$(/usr/libexec/PlistBuddy -c "Print :SpoolBuildChannel" "$app_source/Contents/Info.plist")
+if [[ "$channel" == "signed-release" ]]; then
+  for signed_component in "$app_source" "$agent_source" "$executor_source"; do
+    if ! codesign --verify --deep --strict "$signed_component" >/dev/null 2>&1 ||
+      ! codesign -dv --verbose=4 "$signed_component" 2>&1 |
+        grep -F "Authority=Developer ID Application:" >/dev/null
+    then
+      echo "Signed package verification failed for $signed_component." >&2
+      exit 1
+    fi
+  done
+elif [[ "$channel" != "unsigned-preview" ]]; then
+  echo "Package has an unknown release channel; refusing installation." >&2
+  exit 1
+fi
+
 support_root="$HOME/Library/Application Support/Spool"
 install_root="$support_root/bin"
 app_root="$HOME/Applications/Piqae.app"

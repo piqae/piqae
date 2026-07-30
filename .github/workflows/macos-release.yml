@@ -159,6 +159,7 @@ jobs:
             packaging/macos/generate-appcast.sh \
             packaging/macos/install-user.sh \
             packaging/macos/sign-app.sh \
+            packaging/macos/sign-components.sh \
             packaging/macos/uninstall-user.sh \
             packaging/macos/verify-update-signature.sh
           plutil -lint \
@@ -249,6 +250,16 @@ jobs:
           lipo -archs "$app/Contents/MacOS/SpoolMenu" | grep -F arm64 | grep -F x86_64
           lipo -archs "$app/Contents/MacOS/SpoolPrintCoreReplay" | grep -F arm64 | grep -F x86_64
 
+      - name: Sign standalone node components
+        if: steps.gate.outputs.release_mode == 'signed'
+        shell: bash
+        run: |
+          fixture="$GITHUB_WORKSPACE/.spool-test-fixtures/native-release"
+          SPOOL_CODE_SIGN_IDENTITY="$MACOS_APPLICATION_IDENTITY" \
+            packaging/macos/sign-components.sh \
+              "$fixture/bin/spool-agent" \
+              "$fixture/bin/spool-executor-cups"
+
       - name: Verify Developer ID signature
         if: steps.gate.outputs.release_mode == 'signed'
         shell: bash
@@ -259,6 +270,15 @@ jobs:
             2> artifacts/codesign-evidence.txt
           codesign -dv --verbose=4 "$fixture/Piqae.app" \
             2>> artifacts/codesign-evidence.txt
+          for component in \
+            "$fixture/bin/spool-agent" \
+            "$fixture/bin/spool-executor-cups"
+          do
+            codesign --verify --strict --verbose=4 "$component" \
+              2>> artifacts/codesign-evidence.txt
+            codesign -dv --verbose=4 "$component" \
+              2>> artifacts/codesign-evidence.txt
+          done
           grep -F "Authority=Developer ID Application:" artifacts/codesign-evidence.txt
 
       - name: Notarise and staple app
@@ -277,8 +297,8 @@ jobs:
             --password "$APPLE_APP_PASSWORD" \
             --wait \
             --output-format json \
-            > artifacts/notarisation-evidence.json
-          jq -e '.status == "Accepted"' artifacts/notarisation-evidence.json
+            > artifacts/app-notarisation-evidence.json
+          jq -e '.status == "Accepted"' artifacts/app-notarisation-evidence.json
           xcrun stapler staple "$fixture/Piqae.app"
           xcrun stapler validate "$fixture/Piqae.app" \
             > artifacts/stapler-evidence.txt
@@ -310,11 +330,40 @@ jobs:
         shell: bash
         run: |
           fixture="$GITHUB_WORKSPACE/.spool-test-fixtures/native-release"
-          packaging/macos/build-user-package.sh \
-            "$fixture/Piqae.app" \
-            "$fixture/bin/spool-agent" \
-            "$fixture/bin/spool-executor-cups" \
-            artifacts
+          SPOOL_CODE_SIGN_IDENTITY="${MACOS_APPLICATION_IDENTITY:-}" \
+            packaging/macos/build-user-package.sh \
+              "$fixture/Piqae.app" \
+              "$fixture/bin/spool-agent" \
+              "$fixture/bin/spool-executor-cups" \
+              artifacts
+
+      - name: Notarise and staple installer disk image
+        if: steps.gate.outputs.release_mode == 'signed'
+        shell: bash
+        run: |
+          installer_images=(artifacts/Piqae-*-macos-installer.dmg)
+          if [[ "${#installer_images[@]}" -ne 1 || ! -f "${installer_images[0]}" ]]; then
+            echo "Expected exactly one installer disk image." >&2
+            exit 1
+          fi
+          installer_image=${installer_images[0]}
+          xcrun notarytool submit "$installer_image" \
+            --apple-id "$APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_PASSWORD" \
+            --wait \
+            --output-format json \
+            > artifacts/installer-notarisation-evidence.json
+          jq -e '.status == "Accepted"' artifacts/installer-notarisation-evidence.json
+          xcrun stapler staple "$installer_image"
+          xcrun stapler validate "$installer_image" \
+            > artifacts/installer-stapler-evidence.txt
+          spctl --assess \
+            --type open \
+            --context context:primary-signature \
+            --verbose=4 \
+            "$installer_image" \
+            2> artifacts/installer-gatekeeper-evidence.txt
 
       - name: Generate and verify signed Sparkle appcast
         if: steps.gate.outputs.release_mode == 'signed'
@@ -374,8 +423,9 @@ jobs:
               echo "notarisation=not attempted"
               echo "sparkle_updates=disabled"
             else
-              echo "signature=evidence in codesign-evidence.txt"
-              echo "notarisation=evidence in notarisation-evidence.json"
+              echo "signature=app, node, and executor evidence in codesign-evidence.txt"
+              echo "notarisation=app and installer evidence in app-notarisation-evidence.json and installer-notarisation-evidence.json"
+              echo "installer=Developer ID signed, Apple notarised, and stapled DMG"
               echo "sparkle_updates=Ed25519 archive signature verified with public key"
             fi
           } > artifacts/RELEASE-EVIDENCE.txt
@@ -435,9 +485,9 @@ jobs:
             echo "Stable publication refuses a non-signed candidate." >&2
             exit 1
           fi
-          source_user="artifacts/Piqae-${RELEASE_VERSION}-${RELEASE_BUILD}-macos-user.zip"
+          source_user="artifacts/Piqae-${RELEASE_VERSION}-${RELEASE_BUILD}-macos-installer.dmg"
           source_update="artifacts/Piqae-${RELEASE_VERSION}-${RELEASE_BUILD}-macos-update.zip"
-          user_name="piqae-macos-${RELEASE_VERSION}-${RELEASE_BUILD}-universal.zip"
+          user_name="piqae-macos-${RELEASE_VERSION}-${RELEASE_BUILD}-universal.dmg"
           update_name="piqae-macos-${RELEASE_VERSION}-${RELEASE_BUILD}-update.zip"
           sbom_name="piqae-macos-${RELEASE_VERSION}-${RELEASE_BUILD}-SBOM.spdx.json"
           mkdir -p promotion
@@ -465,17 +515,18 @@ jobs:
                 architectures: ["arm64", "x86_64"],
                 minimumOs: "macOS 13 or newer",
                 status: "preview",
-                statusReason: "Signed and notarised distribution; physical-printer and complete-node update certification remain release gates.",
+                statusReason: "Signed and notarised installer; physical-printer and atomic complete-node update certification remain release gates.",
                 downloadUrl: ("https://downloads.piqae.com/releases/stable/" + $file),
                 releaseUrl: "https://piqae.com/downloads",
                 sha256: $sha,
                 checksumUrl: ("https://downloads.piqae.com/releases/stable/" + $file + ".sha256"),
                 signing: {
                   status: "verified",
-                  label: "Developer ID signed and Apple notarised"
+                  label: "Developer ID signed, Apple notarised and stapled"
                 },
                 notes: [
-                  "Universal Apple silicon and Intel menu application.",
+                  "Double-click installer for Apple silicon and Intel Macs; no administrator access required.",
+                  "The menu app, local node, and CUPS executor are Developer ID signed.",
                   "The current Sparkle archive updates the menu application; full node-component rollback remains a separate certification gate."
                 ]
               }
@@ -492,11 +543,11 @@ jobs:
           PIQAE_RELEASES_S3_REGION: ${{ secrets.PIQAE_RELEASES_S3_REGION }}
         run: |
           prefix="native/releases/$RELEASE_VERSION/macos-${RELEASE_BUILD}-${GITHUB_RUN_ATTEMPT}"
-          user_name="piqae-macos-${RELEASE_VERSION}-${RELEASE_BUILD}-universal.zip"
+          user_name="piqae-macos-${RELEASE_VERSION}-${RELEASE_BUILD}-universal.dmg"
           update_name="piqae-macos-${RELEASE_VERSION}-${RELEASE_BUILD}-update.zip"
           sbom_name="piqae-macos-${RELEASE_VERSION}-${RELEASE_BUILD}-SBOM.spdx.json"
           packaging/release/publish-s3-object.sh immutable \
-            "promotion/$user_name" "$prefix/$user_name" application/zip
+            "promotion/$user_name" "$prefix/$user_name" application/x-apple-diskimage
           packaging/release/publish-s3-object.sh immutable \
             "promotion/$user_name.sha256" "$prefix/$user_name.sha256" text/plain
           packaging/release/publish-s3-object.sh immutable \
@@ -519,15 +570,15 @@ jobs:
           PIQAE_RELEASES_S3_REGION: ${{ secrets.PIQAE_RELEASES_S3_REGION }}
         run: |
           prefix="native/releases/$RELEASE_VERSION/macos-${RELEASE_BUILD}-${GITHUB_RUN_ATTEMPT}"
-          user_name="piqae-macos-${RELEASE_VERSION}-${RELEASE_BUILD}-universal.zip"
+          user_name="piqae-macos-${RELEASE_VERSION}-${RELEASE_BUILD}-universal.dmg"
           update_name="piqae-macos-${RELEASE_VERSION}-${RELEASE_BUILD}-update.zip"
           sbom_name="piqae-macos-${RELEASE_VERSION}-${RELEASE_BUILD}-SBOM.spdx.json"
           packaging/release/publish-s3-object.sh promote \
-            "$prefix/$user_name" "native/stable/$user_name" application/zip
+            "$prefix/$user_name" "native/stable/$user_name" application/x-apple-diskimage
           packaging/release/publish-s3-object.sh promote \
             "$prefix/$user_name.sha256" "native/stable/$user_name.sha256" text/plain
           packaging/release/publish-s3-object.sh promote \
-            "$prefix/$user_name" native/stable/piqae-macos-universal.zip application/zip
+            "$prefix/$user_name" native/stable/piqae-macos-universal.dmg application/x-apple-diskimage
           packaging/release/publish-s3-object.sh promote \
             "$prefix/$update_name" "native/stable/$update_name" application/zip
           packaging/release/publish-s3-object.sh promote \

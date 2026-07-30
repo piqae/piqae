@@ -41,15 +41,18 @@ the Swift suite, creates an SPDX SBOM and checksums, and records provenance.
 With no credentials, a manually dispatched run produces only artifacts whose
 names and evidence say `unsigned-preview`; update checks remain disabled. A tag
 fails unless the complete Developer ID, Apple notarisation, and Sparkle Ed25519
-secret set is present. Credentialed runs verify Developer ID signing, notarise
-and staple the app, generate an appcast, and verify the update archive's
-Ed25519 signature with the public key. The workflow uploads CI artifacts but
-does not publish a GitHub release or deploy the appcast.
+secret set is present. Credentialed runs Developer ID-sign the app, node,
+executor, and installer; notarise and staple both the app and installer disk
+image; generate an appcast; and verify the update archive's Ed25519 signature
+with the public key. A publication run uploads immutable artifacts to the
+release bucket before promoting the appcast and shared manifest.
 
 ## Per-user package
 
 `packaging/macos/build-user-package.sh` combines an app, `spool-agent`, and
-`spool-executor-cups` into a per-user ZIP. Its installer uses:
+`spool-executor-cups` into a notarised per-user DMG and a diagnostic ZIP. A
+normal user opens the DMG and double-clicks **Install Piqae**; no Terminal or
+administrator access is required. Its installer uses:
 
 - `~/Applications/Piqae.app`;
 - `~/Library/Application Support/Spool/bin` for the agent and executor;
@@ -58,12 +61,13 @@ does not publish a GitHub release or deploy the appcast.
 - `~/Library/LaunchAgents` for separate agent and menu launch agents; and
 - `~/Library/Logs/Spool/agent.log`.
 
-The installer must run as the desktop user without `sudo`. Before replacing a
+The installer runs as the desktop user without `sudo`. Before replacing a
 loaded node it authenticates to the existing loopback status endpoint and
 refuses the handoff while jobs are queued or active, or when idle state cannot
-be verified. It retains the previous app and preserves data on uninstall.
-Unsigned packages are labelled Preview and do not remove quarantine or apply a
-Gatekeeper workaround.
+be verified. Signed packages fail closed unless the app, node, and executor all
+retain valid Developer ID signatures. It retains the previous app and
+preserves data on uninstall. Unsigned packages are labelled Preview and do not
+remove quarantine or apply a Gatekeeper workaround.
 
 Sparkle currently replaces only `Piqae.app`, including the menu and
 `SpoolPrintCoreReplay`. It does not replace or restart the separately installed

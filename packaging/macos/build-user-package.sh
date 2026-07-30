@@ -41,11 +41,18 @@ package_name="Piqae-${version}-${build}-macos-user${suffix}"
 package_dir="$output_root/$package_name"
 package_zip="$output_root/$package_name.zip"
 update_zip="$output_root/Piqae-${version}-${build}-macos-update${suffix}.zip"
+dmg="$output_root/Piqae-${version}-${build}-macos-installer${suffix}.dmg"
+installer_stage="$output_root/.Piqae-${version}-${build}-installer"
 
-if [[ -e "$package_dir" || -e "$package_zip" || -e "$update_zip" ]]; then
+if [[ -e "$package_dir" || -e "$package_zip" || -e "$update_zip" || -e "$dmg" ||
+  -e "$installer_stage" ]]; then
   echo "refusing to overwrite an existing release artifact" >&2
   exit 1
 fi
+cleanup() {
+  rm -rf -- "$package_dir" "$installer_stage"
+}
+trap cleanup EXIT
 
 mkdir -p "$package_dir/payload"
 ditto "$app" "$package_dir/payload/Piqae.app"
@@ -73,7 +80,60 @@ ditto "$repository_root/LICENSES" "$package_dir/LICENSES"
 )
 ditto -c -k --sequesterRsrc --keepParent "$package_dir" "$package_zip"
 ditto -c -k --sequesterRsrc --keepParent "$app" "$update_zip"
-rm -rf -- "$package_dir"
 
-shasum -a 256 "$package_zip" "$update_zip" > "$output_root/SHA256SUMS"
-printf '%s\n%s\n' "$package_zip" "$update_zip"
+mkdir -p "$installer_stage"
+installer_app="$installer_stage/Install Piqae.app"
+apple_script="$installer_stage/installer.applescript"
+cat > "$apple_script" <<'APPLESCRIPT'
+on run
+  set installerPath to POSIX path of (path to resource "install-user.sh" in directory "PiqaePackage")
+  try
+    set installResult to do shell script "/bin/bash " & quoted form of installerPath
+    display dialog "Piqae is installed and running for this macOS user." & return & return & installResult buttons {"Done"} default button "Done" with title "Piqae" with icon note
+  on error errorMessage number errorNumber
+    display alert "Piqae could not be installed" message errorMessage as critical buttons {"OK"} default button "OK"
+    error number errorNumber
+  end try
+end run
+APPLESCRIPT
+osacompile -o "$installer_app" "$apple_script"
+rm -f -- "$apple_script"
+mkdir -p "$installer_app/Contents/Resources/PiqaePackage"
+ditto "$package_dir" "$installer_app/Contents/Resources/PiqaePackage"
+install -m 0644 "$script_root/INSTALL.txt" "$installer_stage/Read Me.txt"
+
+identity=${SPOOL_CODE_SIGN_IDENTITY:-}
+if [[ -n "$identity" ]]; then
+  if [[ "$identity" != "Developer ID Application:"* ]]; then
+    echo "SPOOL_CODE_SIGN_IDENTITY must name a Developer ID Application certificate" >&2
+    exit 2
+  fi
+  codesign \
+    --force \
+    --timestamp \
+    --options runtime \
+    --identifier com.piqae.installer \
+    --sign "$identity" \
+    "$installer_app"
+  codesign --verify --deep --strict --verbose=2 "$installer_app"
+fi
+
+hdiutil create \
+  -quiet \
+  -fs HFS+ \
+  -format UDZO \
+  -imagekey zlib-level=9 \
+  -srcfolder "$installer_stage" \
+  -volname "Install Piqae" \
+  "$dmg"
+if [[ -n "$identity" ]]; then
+  codesign \
+    --force \
+    --timestamp \
+    --sign "$identity" \
+    "$dmg"
+  codesign --verify --strict --verbose=2 "$dmg"
+fi
+
+shasum -a 256 "$package_zip" "$update_zip" "$dmg" > "$output_root/SHA256SUMS"
+printf '%s\n%s\n%s\n' "$package_zip" "$update_zip" "$dmg"
