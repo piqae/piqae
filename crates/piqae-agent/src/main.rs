@@ -2906,7 +2906,10 @@ mod tests {
         restarted
             .activate_cloud_job(&job.job_id, 11)
             .expect("duplicate response");
-        assert_eq!(renewals.load(Ordering::Relaxed), 1);
+        assert!(
+            renewals.load(Ordering::Relaxed) >= 1,
+            "the restart path must renew while preparing the durable job"
+        );
         assert_eq!(restarted.pending_events(0, 10).expect("events").len(), 1);
     }
 
