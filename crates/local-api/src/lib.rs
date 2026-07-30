@@ -87,6 +87,7 @@ pub enum ControlRequest {
     TestPage {
         printer_id: String,
         profile_id: String,
+        confirmed: bool,
         respond_to: oneshot::Sender<Result<LocalJobAccepted, ControlFailure>>,
     },
     Pause {
@@ -167,6 +168,10 @@ pub struct DeleteProfileQuery {
 #[derive(Debug, Clone, Deserialize)]
 pub struct TestPageRequest {
     pub profile_id: String,
+    /// A local driver test may address an installed printer before it is
+    /// exposed to cloud/API jobs, but only after an explicit user action.
+    #[serde(default)]
+    pub confirmed: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -568,6 +573,7 @@ async fn test_page(
         |respond_to| ControlRequest::TestPage {
             printer_id,
             profile_id: request.profile_id,
+            confirmed: request.confirmed,
             respond_to,
         },
         StatusCode::ACCEPTED,
@@ -731,6 +737,7 @@ mod tests {
             last_validated_unix_ms: None,
             last_test_job_id: None,
             published: false,
+            uses_current_printer_defaults: false,
         }
     }
 
@@ -814,6 +821,44 @@ mod tests {
             .expect("response");
         responder.await.expect("responder");
         assert_eq!(response.status(), StatusCode::CREATED);
+    }
+
+    #[tokio::test]
+    async fn local_test_page_dispatches_explicit_confirmation() {
+        let (state, mut receive) = test_state();
+        let responder = tokio::spawn(async move {
+            if let Some(ControlRequest::TestPage {
+                printer_id,
+                profile_id,
+                confirmed,
+                respond_to,
+            }) = receive.recv().await
+            {
+                assert_eq!(printer_id, "ptr_test");
+                assert_eq!(profile_id, "prf_defaults");
+                assert!(confirmed);
+                let _ = respond_to.send(Ok(LocalJobAccepted {
+                    job_id: "job_test".into(),
+                    state: "queued_local".into(),
+                }));
+            }
+        });
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/local/printers/ptr_test/test-page")
+                    .header("authorization", "Bearer secret")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"profile_id":"prf_defaults","confirmed":true}"#,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        responder.await.expect("responder");
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
     }
 
     #[tokio::test]

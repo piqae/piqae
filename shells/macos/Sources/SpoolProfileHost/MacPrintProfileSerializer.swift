@@ -28,7 +28,7 @@ public enum MacPrintProfileCaptureError: Error, LocalizedError, Equatable {
         case .invalidStoredConfiguration:
             "The saved macOS print profile could not be restored."
         case .captureTooLarge:
-            "The printer driver settings exceed Spool’s local capture limit."
+            "The printer driver settings exceed Piqae’s local capture limit."
         }
     }
 }

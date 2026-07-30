@@ -267,3 +267,41 @@ public enum ProfileMenuState: Equatable, Sendable {
         self = profiles.isEmpty ? .empty : .available(profileCount: profiles.count)
     }
 }
+
+public enum PrinterProfileCaptureAvailability: Equatable, Sendable {
+    case available
+    case paused
+    case unavailable
+
+    public init(printerState: String) {
+        switch printerState.lowercased() {
+        case "paused", "stopped", "disabled":
+            self = .paused
+        case "error", "offline", "missing", "unavailable":
+            self = .unavailable
+        default:
+            self = .available
+        }
+    }
+
+    public var canCapture: Bool {
+        self == .available
+    }
+
+    public var recoveryMessage: String? {
+        switch self {
+        case .available:
+            nil
+        case .paused:
+            "Enable this printer in macOS Printer Settings, then refresh Piqae."
+        case .unavailable:
+            "Reconnect or reinstall this printer in macOS Printer Settings, then refresh Piqae."
+        }
+    }
+}
+
+public enum CurrentPrinterDefaultsProfile {
+    public static let name = "Current printer defaults"
+    public static let detail = "Live macOS defaults · not a saved profile"
+    public static let canSubmitPinnedJob = false
+}

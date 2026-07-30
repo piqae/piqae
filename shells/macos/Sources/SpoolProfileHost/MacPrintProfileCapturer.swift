@@ -11,9 +11,11 @@ public final class MacPrintProfileCapturer {
     /// NSPrintOperation. A successful return captures settings only; this path
     /// has no document, graphics context, or spooler submission.
     public func capture(
-        session: LocalProfileCaptureSession
+        session: LocalProfileCaptureSession,
+        markAsDefault: Bool = false
     ) throws -> LocalProfileCaptureCompletion? {
-        let printer = try resolvePrinter(session: session)
+        let destination = try resolvePrinter(session: session)
+        let printer = destination.printer
         let printInfo = (NSPrintInfo.shared.copy() as? NSPrintInfo) ?? NSPrintInfo()
         printInfo.printer = printer
         printInfo.setUpPrintOperationDefaultValues()
@@ -25,7 +27,11 @@ public final class MacPrintProfileCapturer {
             }
         }
 
-        let profileName = suggestedName(session: session)
+        let profileName = suggestedName(
+            session: session,
+            printerDisplayName: printer.name,
+            markAsDefault: markAsDefault
+        )
         let accessory = ProfileAccessoryController(
             profileName: profileName,
             stockID: session.stockID,
@@ -63,12 +69,13 @@ public final class MacPrintProfileCapturer {
             )
         }
 
-        let nativeID = session.nativeID ?? printer.name
+        let nativeID = destination.nativeID
         let nativeConfiguration = try MacPrintProfileSerializer.capture(printInfo: printInfo)
         let nativeBlob = try MacPrintProfileSerializer.nativeBlob(from: nativeConfiguration)
         let uri = deviceURI(nativeID: nativeID)
         return LocalProfileCaptureCompletion(
             name: accessory.profileName,
+            isDefault: markAsDefault,
             nativeDigest: MacPrintProfileSerializer.digest(of: nativeBlob),
             nativeBlob: nativeBlob,
             driverFingerprint: LocalMacDriverFingerprint(
@@ -87,34 +94,37 @@ public final class MacPrintProfileCapturer {
         )
     }
 
-    private func resolvePrinter(session: LocalProfileCaptureSession) throws -> NSPrinter {
-        if let nativeID = session.nativeID, !nativeID.isEmpty,
-           let printCorePrinter = PMPrinterCreateFromPrinterID(nativeID as CFString)
-        {
-            defer { PMRelease(UnsafeRawPointer(printCorePrinter)) }
-            if let unmanagedName = PMPrinterGetName(printCorePrinter) {
-                let displayName = unmanagedName.takeUnretainedValue() as String
-                if let printer = NSPrinter(name: displayName) {
-                    return printer
-                }
-            }
+    private func resolvePrinter(
+        session: LocalProfileCaptureSession
+    ) throws -> (printer: NSPrinter, nativeID: String) {
+        let destinations = try MacPrinterDestinationResolver.current()
+        guard
+            let identity = MacPrinterDestinationResolver.select(
+                nativeID: session.nativeID,
+                printerName: session.printerName,
+                from: destinations
+            ),
+            let printer = NSPrinter(name: identity.displayName)
+        else {
+            throw MacPrintProfileCaptureError.printerUnavailable(session.printerName)
         }
-
-        // NSPrinter resolves the user-facing display name, while CUPS and the
-        // local agent identify a queue by its native destination ID. They are
-        // commonly different (for example, spaces versus underscores).
-        if let printer = NSPrinter(name: session.printerName) {
-            return printer
-        }
-        throw MacPrintProfileCaptureError.printerUnavailable(session.printerName)
+        return (printer, identity.nativeID)
     }
 
-    private func suggestedName(session: LocalProfileCaptureSession) -> String {
+    private func suggestedName(
+        session: LocalProfileCaptureSession,
+        printerDisplayName: String,
+        markAsDefault: Bool
+    ) -> String {
         let base = session.profileName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         switch session.operation {
         case .create:
-            return base.isEmpty ? "\(session.printerName) profile" : base
+            if !base.isEmpty { return base }
+            return markAsDefault ? "Default" : "\(printerDisplayName) profile"
         case .edit:
+            if base == CurrentPrinterDefaultsProfile.name {
+                return "Default"
+            }
             return base
         case .clone:
             return base.isEmpty ? "" : "\(base) copy"

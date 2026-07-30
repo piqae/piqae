@@ -149,6 +149,11 @@ pub struct LocalPrinterProfile {
     pub last_test_job_id: Option<String>,
     #[serde(default)]
     pub published: bool,
+    /// True only when this profile deliberately follows the operating
+    /// system driver's current defaults instead of replaying a saved native
+    /// configuration.
+    #[serde(default)]
+    pub uses_current_printer_defaults: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

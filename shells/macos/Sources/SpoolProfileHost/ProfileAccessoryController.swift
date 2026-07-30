@@ -21,7 +21,7 @@ final class ProfileAccessoryController: NSViewController, NSPrintPanelAccessoriz
     }
 
     override var title: String? {
-        get { "Spool Profile" }
+        get { "Piqae Profile" }
         set {}
     }
 
@@ -101,7 +101,7 @@ final class ProfileAccessoryController: NSViewController, NSPrintPanelAccessoriz
     func localizedSummaryItems() -> [[NSPrintPanel.AccessorySummaryKey: String]] {
         [
             [
-                .itemName: "Spool profile",
+                .itemName: "Piqae profile",
                 .itemDescription: profileName.isEmpty ? "Unnamed" : profileName,
             ],
             [

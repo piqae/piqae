@@ -151,6 +151,9 @@ pub struct StoredNamedProfile {
     pub last_validated_unix_ms: Option<i64>,
     pub last_test_job_id: Option<String>,
     pub published: bool,
+    /// This revision intentionally delegates non-job settings to the
+    /// printer driver's current defaults instead of replaying a snapshot.
+    pub uses_current_printer_defaults: bool,
     pub updated_unix_ms: i64,
 }
 
@@ -379,6 +382,10 @@ impl AgentStore {
             (
                 "published",
                 "INTEGER NOT NULL DEFAULT 0 CHECK (published IN (0, 1))",
+            ),
+            (
+                "uses_current_printer_defaults",
+                "INTEGER NOT NULL DEFAULT 0 CHECK (uses_current_printer_defaults IN (0, 1))",
             ),
         ] {
             ensure_column(&connection, "printer_profiles", name, definition)?;
@@ -684,6 +691,79 @@ impl AgentStore {
             .ok_or_else(|| StorageError::InvalidPrinterProfile("profile insert failed".into()))
     }
 
+    /// Creates the one live driver-default profile for a discovered printer.
+    ///
+    /// This is idempotent. The generated profile is the job default only when
+    /// the printer does not already have an active default profile.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unknown printer or failed transaction.
+    pub fn ensure_current_printer_defaults_profile(
+        &mut self,
+        printer_id: &str,
+        updated_unix_ms: i64,
+    ) -> Result<StoredNamedProfile, StorageError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let printer_exists: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM printers WHERE printer_id = ?1)",
+            [printer_id],
+            |row| row.get(0),
+        )?;
+        if !printer_exists {
+            return Err(StorageError::PrinterNotFound(printer_id.to_owned()));
+        }
+        if let Some(profile) = query_current_printer_defaults_profile(&transaction, printer_id)? {
+            transaction.commit()?;
+            return Ok(profile);
+        }
+
+        let profile_id = format!("prf_{}", PrinterId::new());
+        let options_json = serde_json::to_string(&JobOptions::default())?;
+        let is_default: bool = transaction.query_row(
+            "SELECT NOT EXISTS(
+               SELECT 1
+               FROM printer_profiles p
+               WHERE p.printer_id = ?1
+                 AND p.is_default = 1
+                 AND p.deleted = 0
+                 AND p.revision = (
+                   SELECT MAX(latest.revision)
+                   FROM printer_profiles latest
+                   WHERE latest.profile_id = p.profile_id
+                 )
+             )",
+            [printer_id],
+            |row| row.get(0),
+        )?;
+        transaction.execute(
+            "INSERT INTO printer_profiles(
+               profile_id, printer_id, revision, name, is_default,
+               options_json, status, native_kind, native_blob_id,
+               native_digest, driver_fingerprint_json, summary_json,
+               stock_id, safe_overrides_json, published,
+               uses_current_printer_defaults, deleted, updated_unix_ms
+             ) VALUES (
+               ?1, ?2, 1, 'Current printer defaults', ?3,
+               ?4, 'ready', 'portable_options', NULL,
+               NULL, '{}', '{}', NULL, '[]', 0, 1, 0, ?5
+             )",
+            params![
+                profile_id,
+                printer_id,
+                is_default,
+                options_json,
+                updated_unix_ms
+            ],
+        )?;
+        let profile = query_named_profile(&transaction, printer_id, &profile_id)?
+            .ok_or_else(|| StorageError::InvalidPrinterProfile("profile insert failed".into()))?;
+        transaction.commit()?;
+        Ok(profile)
+    }
+
     /// Appends a named print profile revision using optimistic concurrency.
     ///
     /// # Errors
@@ -786,7 +866,8 @@ impl AgentStore {
                     p.native_blob_id, p.native_digest,
                     p.driver_fingerprint_json, p.summary_json, p.stock_id,
                     p.safe_overrides_json, p.last_validated_unix_ms,
-                    p.last_test_job_id, p.published, p.updated_unix_ms
+                    p.last_test_job_id, p.published,
+                    p.uses_current_printer_defaults, p.updated_unix_ms
              FROM printer_profiles p
              WHERE p.printer_id = ?1
                AND p.revision = (
@@ -842,7 +923,7 @@ impl AgentStore {
                         native_digest, driver_fingerprint_json, summary_json,
                         stock_id, safe_overrides_json,
                         last_validated_unix_ms, last_test_job_id, published,
-                        updated_unix_ms
+                        uses_current_printer_defaults, updated_unix_ms
                  FROM printer_profiles
                  WHERE printer_id = ?1 AND profile_id = ?2 AND revision = ?3
                  LIMIT 1",
@@ -871,7 +952,7 @@ impl AgentStore {
                         native_digest, driver_fingerprint_json, summary_json,
                         stock_id, safe_overrides_json,
                         last_validated_unix_ms, last_test_job_id, published,
-                        updated_unix_ms
+                        uses_current_printer_defaults, updated_unix_ms
                  FROM printer_profiles
                  WHERE profile_id = ?1 AND revision = ?2
                  LIMIT 1",
@@ -952,7 +1033,11 @@ impl AgentStore {
         let changed = self.connection.execute(
             "UPDATE printer_profiles
              SET status = ?4, last_validated_unix_ms = ?5,
-                 last_test_job_id = ?3, published = ?6,
+                 last_test_job_id = ?3,
+                 published = CASE
+                   WHEN uses_current_printer_defaults = 1 THEN 0
+                   ELSE ?6
+                 END,
                  updated_unix_ms = ?5
              WHERE profile_id = ?1 AND revision = ?2 AND deleted = 0",
             params![
@@ -1166,8 +1251,16 @@ impl AgentStore {
         } else {
             (ProfileId::new().to_string(), 1)
         };
+        // Editing a profile changes its immutable settings revision, not its
+        // routing identity. In particular, capturing the generated driver-
+        // default profile must not unexpectedly stop it being the default.
+        let is_default = if authorization.4 == "edit" {
+            current.as_ref().is_some_and(|profile| profile.is_default)
+        } else {
+            capture.is_default
+        };
         let blob_id = spool_domain::NativeProfileBlobId::new().to_string();
-        if capture.is_default {
+        if is_default {
             demote_default_profiles(
                 &transaction,
                 &authorization.1,
@@ -1180,17 +1273,18 @@ impl AgentStore {
                profile_id, printer_id, revision, name, is_default, options_json,
                status, native_kind, native_blob_id, native_digest,
                driver_fingerprint_json, summary_json, stock_id,
-               safe_overrides_json, published, deleted, updated_unix_ms
+               safe_overrides_json, published, uses_current_printer_defaults,
+               deleted, updated_unix_ms
              ) VALUES (
                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
-               ?14, ?15, 0, ?16
+               ?14, ?15, 0, 0, ?16
              )",
             params![
                 profile_id,
                 authorization.1,
                 revision,
                 capture.name.trim(),
-                capture.is_default,
+                is_default,
                 capture.options_json,
                 capture.status,
                 capture.native_kind,
@@ -3008,7 +3102,8 @@ fn named_profile_from_row(row: &rusqlite::Row<'_>) -> Result<StoredNamedProfile,
         last_validated_unix_ms: row.get(14)?,
         last_test_job_id: row.get(15)?,
         published: row.get(16)?,
-        updated_unix_ms: row.get(17)?,
+        uses_current_printer_defaults: row.get(17)?,
+        updated_unix_ms: row.get(18)?,
     })
 }
 
@@ -3017,7 +3112,7 @@ const NAMED_PROFILE_QUERY: &str = "
            options_json, status, native_kind, native_blob_id, native_digest,
            driver_fingerprint_json, summary_json, stock_id,
            safe_overrides_json, last_validated_unix_ms, last_test_job_id,
-           published, updated_unix_ms
+           published, uses_current_printer_defaults, updated_unix_ms
     FROM printer_profiles
     WHERE printer_id = ?1 AND profile_id = ?2
       AND revision = (
@@ -3036,6 +3131,35 @@ fn query_named_profile(
         .query_row(
             NAMED_PROFILE_QUERY,
             params![printer_id, profile_id],
+            named_profile_from_row,
+        )
+        .optional()
+}
+
+fn query_current_printer_defaults_profile(
+    connection: &Connection,
+    printer_id: &str,
+) -> Result<Option<StoredNamedProfile>, rusqlite::Error> {
+    connection
+        .query_row(
+            "SELECT p.profile_id, p.printer_id, p.revision, p.name,
+                    p.is_default, p.options_json, p.status, p.native_kind,
+                    p.native_blob_id, p.native_digest,
+                    p.driver_fingerprint_json, p.summary_json, p.stock_id,
+                    p.safe_overrides_json, p.last_validated_unix_ms,
+                    p.last_test_job_id, p.published,
+                    p.uses_current_printer_defaults, p.updated_unix_ms
+             FROM printer_profiles p
+             WHERE p.printer_id = ?1
+               AND p.revision = (
+                 SELECT MAX(latest.revision) FROM printer_profiles latest
+                 WHERE latest.profile_id = p.profile_id
+               )
+               AND p.deleted = 0
+               AND p.uses_current_printer_defaults = 1
+             ORDER BY p.revision DESC
+             LIMIT 1",
+            [printer_id],
             named_profile_from_row,
         )
         .optional()
@@ -3629,6 +3753,91 @@ mod tests {
     }
 
     #[test]
+    fn discovery_default_profile_is_idempotent_and_restored_after_deletion() {
+        let mut store = AgentStore::in_memory().unwrap();
+        let printer = store
+            .upsert_printer(
+                "native-defaults",
+                "Office",
+                "online",
+                true,
+                &serde_json::to_string(&PrinterCapabilities::default()).unwrap(),
+                10,
+            )
+            .unwrap();
+
+        let first = store
+            .ensure_current_printer_defaults_profile(&printer.printer_id, 10)
+            .unwrap();
+        let unchanged = store
+            .ensure_current_printer_defaults_profile(&printer.printer_id, 20)
+            .unwrap();
+        assert_eq!(unchanged.profile_id, first.profile_id);
+        assert_eq!(first.name, "Current printer defaults");
+        assert!(first.is_default);
+        assert!(!first.published);
+        assert!(first.uses_current_printer_defaults);
+        assert_eq!(first.native_blob_id, None);
+        assert_eq!(
+            serde_json::from_str::<JobOptions>(&first.options_json).unwrap(),
+            JobOptions::default()
+        );
+        assert_eq!(store.named_profiles(&printer.printer_id).unwrap().len(), 1);
+        store
+            .record_profile_test_result(&first.profile_id, first.revision, "job_test", true, 25)
+            .unwrap();
+        assert!(
+            !store
+                .named_profile(&printer.printer_id, &first.profile_id)
+                .unwrap()
+                .unwrap()
+                .published
+        );
+
+        store
+            .delete_named_profile(&printer.printer_id, &first.profile_id, first.revision, 30)
+            .unwrap();
+        let restored = store
+            .ensure_current_printer_defaults_profile(&printer.printer_id, 40)
+            .unwrap();
+        assert_ne!(restored.profile_id, first.profile_id);
+        assert!(restored.uses_current_printer_defaults);
+        assert_eq!(store.named_profiles(&printer.printer_id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn discovery_default_supplements_user_profiles_without_replacing_them() {
+        let mut store = AgentStore::in_memory().unwrap();
+        let printer = store
+            .upsert_printer(
+                "native-user-profile",
+                "Office",
+                "online",
+                true,
+                &serde_json::to_string(&PrinterCapabilities::default()).unwrap(),
+                10,
+            )
+            .unwrap();
+        let user = store
+            .create_named_profile(
+                &printer.printer_id,
+                "Labels",
+                false,
+                &serde_json::to_string(&JobOptions::default()).unwrap(),
+                11,
+            )
+            .unwrap();
+
+        let generated = store
+            .ensure_current_printer_defaults_profile(&printer.printer_id, 20)
+            .unwrap();
+        assert_ne!(generated.profile_id, user.profile_id);
+        assert!(generated.uses_current_printer_defaults);
+        assert!(generated.is_default);
+        assert_eq!(store.named_profiles(&printer.printer_id).unwrap().len(), 2);
+    }
+
+    #[test]
     fn named_profiles_are_multi_profile_versioned_and_tombstoned() {
         let mut store = AgentStore::in_memory().unwrap();
         let printer = store
@@ -3800,6 +4009,54 @@ mod tests {
         assert_eq!(reappeared.printer_id, stale.printer_id);
         assert_eq!(store.present_printers().unwrap().len(), 2);
         assert_eq!(store.present_printer_warning_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn capturing_discovery_default_preserves_default_identity_and_fixes_snapshot() {
+        let mut store = AgentStore::in_memory().unwrap();
+        let printer = store
+            .upsert_printer(
+                "native-live-default",
+                "Office",
+                "online",
+                true,
+                &serde_json::to_string(&PrinterCapabilities::default()).unwrap(),
+                10,
+            )
+            .unwrap();
+        let dynamic = store
+            .ensure_current_printer_defaults_profile(&printer.printer_id, 11)
+            .unwrap();
+        store
+            .create_profile_capture_session(
+                "pcs_default_edit",
+                "token-digest",
+                &printer.printer_id,
+                Some(&dynamic.profile_id),
+                Some(dynamic.revision),
+                "edit",
+                "501",
+                310_000,
+                12,
+            )
+            .unwrap();
+        let captured = store
+            .commit_profile_capture(
+                "pcs_default_edit",
+                "token-digest",
+                "501",
+                &NativeProfileCapture {
+                    is_default: false,
+                    ..native_capture(b"fixed-driver-settings".to_vec())
+                },
+                20,
+            )
+            .unwrap();
+        assert_eq!(captured.profile_id, dynamic.profile_id);
+        assert_eq!(captured.revision, dynamic.revision + 1);
+        assert!(captured.is_default);
+        assert!(!captured.uses_current_printer_defaults);
+        assert!(captured.native_blob_id.is_some());
     }
 
     #[test]

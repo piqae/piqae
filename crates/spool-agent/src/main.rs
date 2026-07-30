@@ -78,7 +78,7 @@ enum ExecutorMode {
 }
 
 #[derive(Debug, Parser)]
-#[command(version, about = "Spool headless print agent")]
+#[command(version, about = "Piqae headless print node")]
 struct Arguments {
     /// Runtime mode. Hosted modes require enrolment before cloud sync begins.
     #[arg(long, env = "SPOOL_AGENT_MODE", default_value = "local")]
@@ -352,7 +352,7 @@ async fn main() -> Result<()> {
         mode = ?arguments.mode,
         database = %database_path.display(),
         bind = %arguments.local_bind,
-        "Spool agent started"
+        "Piqae node started"
     );
     spool_local_api::serve(
         arguments.local_bind,
@@ -418,7 +418,7 @@ async fn enrol_installation(arguments: &Arguments, token: &str) -> Result<()> {
         Ok(enrolled) => enrolled,
         Err(error) => {
             let _ = std::fs::remove_file(&key_path);
-            return Err(error).context("enrol this Spool installation");
+            return Err(error).context("enrol this Piqae installation");
         }
     };
     let config = serde_json::json!({
@@ -574,7 +574,7 @@ fn installation_hostname() -> String {
         .into_iter()
         .find_map(|name| std::env::var(name).ok())
         .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| "Spool node".into())
+        .unwrap_or_else(|| "Piqae node".into())
 }
 
 fn write_new_device_key(path: &Path, secret: &[u8; 32]) -> Result<()> {
@@ -821,6 +821,7 @@ async fn handle_control_request(
         ControlRequest::TestPage {
             printer_id,
             profile_id,
+            confirmed,
             respond_to,
         } => {
             let result = submit_test_page(
@@ -828,6 +829,7 @@ async fn handle_control_request(
                 content_store,
                 &printer_id,
                 &profile_id,
+                confirmed,
                 paused.load(Ordering::Relaxed),
             )
             .await;
@@ -981,6 +983,10 @@ async fn refresh_local_printers(
                 observed_unix_ms,
             )
             .map_err(storage_control_failure)?;
+        engine
+            .store_mut()
+            .ensure_current_printer_defaults_profile(&stored.printer_id, observed_unix_ms)
+            .map_err(storage_control_failure)?;
     }
     engine
         .store_mut()
@@ -1080,6 +1086,7 @@ fn local_profile(
         last_validated_unix_ms: profile.last_validated_unix_ms,
         last_test_job_id: profile.last_test_job_id,
         published: profile.published,
+        uses_current_printer_defaults: profile.uses_current_printer_defaults,
     })
 }
 
@@ -1355,6 +1362,20 @@ fn resolve_exposed_printer(
     store: &AgentStore,
     printer_id: &str,
 ) -> Result<StoredPrinter, ControlFailure> {
+    let printer = resolve_present_printer(store, printer_id)?;
+    if !printer.exposed {
+        return Err(control_failure(
+            "printer_not_exposed",
+            "printer exposure must be explicitly enabled before submission",
+        ));
+    }
+    Ok(printer)
+}
+
+fn resolve_present_printer(
+    store: &AgentStore,
+    printer_id: &str,
+) -> Result<StoredPrinter, ControlFailure> {
     let printer = store
         .printer(printer_id)
         .map_err(storage_control_failure)?
@@ -1365,13 +1386,17 @@ fn resolve_exposed_printer(
             "printer is not present in the latest successful native discovery",
         ));
     }
-    if !printer.exposed {
+    Ok(printer)
+}
+
+fn require_local_driver_test_confirmation(confirmed: bool) -> Result<(), ControlFailure> {
+    if !confirmed {
         return Err(control_failure(
-            "printer_not_exposed",
-            "printer exposure must be explicitly enabled before submission",
+            "local_test_not_confirmed",
+            "confirm the local driver test before submitting it",
         ));
     }
-    Ok(printer)
+    Ok(())
 }
 
 fn validate_options(
@@ -1484,12 +1509,14 @@ async fn submit_test_page(
     content_store: &ContentStore,
     printer_id: &str,
     profile_id: &str,
+    confirmed: bool,
     paused: bool,
 ) -> Result<LocalJobAccepted, ControlFailure> {
     if paused {
         return Err(control_failure("agent_paused", "the agent is paused"));
     }
-    let printer = resolve_exposed_printer(engine.store(), printer_id)?;
+    require_local_driver_test_confirmation(confirmed)?;
+    let printer = resolve_present_printer(engine.store(), printer_id)?;
     let profile = engine
         .store()
         .named_profile(printer_id, profile_id)
@@ -1558,7 +1585,7 @@ async fn submit_test_page(
         LocalCreateJob {
             printer_id: printer_id.to_owned(),
             printer_native_id: Some(printer.native_id),
-            title: "Spool A4 diagnostic".into(),
+            title: "Piqae A4 diagnostic".into(),
             content_kind: ContentKind::Pdf,
             content: LocalContent::Base64 {
                 data: String::new(),
@@ -1603,7 +1630,7 @@ fn is_native_page_size_key(key: &str) -> bool {
 }
 
 fn a4_test_pdf() -> Vec<u8> {
-    let content = b"BT /F1 22 Tf 72 760 Td (Spool A4 diagnostic) Tj /F1 11 Tf 0 -30 Td (Local queue and driver test) Tj 0 -22 Td (No external content was used.) Tj ET";
+    let content = b"BT /F1 22 Tf 72 760 Td (Piqae A4 diagnostic) Tj /F1 11 Tf 0 -30 Td (Local queue and driver test) Tj 0 -22 Td (No external content was used.) Tj ET";
     let objects = [
         b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
         b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
@@ -2451,6 +2478,7 @@ async fn discover_cloud_printers(
                 &native_options,
                 observed_unix_ms,
             )?;
+            store.ensure_current_printer_defaults_profile(&stored.printer_id, observed_unix_ms)?;
             if !store
                 .printer(&stored.printer_id)?
                 .is_some_and(|printer| printer.exposed)
@@ -2460,6 +2488,9 @@ async fn discover_cloud_printers(
             let profiles = store
                 .named_profiles(&stored.printer_id)?
                 .into_iter()
+                // The generated live-default profile is a local convenience,
+                // not an immutable configuration that cloud routing can pin.
+                .filter(|profile| !profile.uses_current_printer_defaults)
                 .map(|profile| {
                     Ok(PrinterProfileSnapshot {
                         profile_id: profile.profile_id,
@@ -2509,7 +2540,7 @@ async fn run_printer_discovery(discovery: &PrinterDiscovery) -> Result<Vec<Disco
         PrinterDiscovery::Disabled => Vec::new(),
         PrinterDiscovery::Fake => vec![DiscoveredPrinter {
             native_id: "fake-printer".into(),
-            name: "Spool deterministic fake printer".into(),
+            name: "Piqae deterministic fake printer".into(),
             is_default: true,
             state: spool_domain::PrinterState::Online,
             capabilities: spool_domain::PrinterCapabilities::default(),
@@ -2904,6 +2935,73 @@ mod tests {
             accepted_unix_ms: 1,
             cloud_managed: true,
         }
+    }
+
+    #[test]
+    fn local_driver_test_can_resolve_present_unexposed_printer_but_jobs_cannot() {
+        let mut store = AgentStore::in_memory().expect("store");
+        let printer = store
+            .upsert_printer(
+                "native-local-test",
+                "Office",
+                "online",
+                true,
+                &serde_json::to_string(&spool_domain::PrinterCapabilities::default())
+                    .expect("capabilities"),
+                10,
+            )
+            .expect("printer");
+
+        assert!(resolve_present_printer(&store, &printer.printer_id).is_ok());
+        assert_eq!(
+            require_local_driver_test_confirmation(false)
+                .expect_err("local test requires confirmation")
+                .code,
+            "local_test_not_confirmed"
+        );
+        assert!(require_local_driver_test_confirmation(true).is_ok());
+        let blocked = resolve_exposed_printer(&store, &printer.printer_id)
+            .expect_err("normal submission must require exposure");
+        assert_eq!(blocked.code, "printer_not_exposed");
+
+        store
+            .set_printer_exposed(&printer.printer_id, true, 20)
+            .expect("expose");
+        assert!(resolve_exposed_printer(&store, &printer.printer_id).is_ok());
+    }
+
+    #[tokio::test]
+    async fn live_driver_default_profile_is_never_advertised_to_cloud() {
+        let mut store = AgentStore::in_memory().expect("store");
+        assert!(
+            discover_cloud_printers(&mut store, &PrinterDiscovery::Fake)
+                .await
+                .expect("discovery")
+                .is_empty()
+        );
+        let printer = store
+            .present_printers()
+            .expect("printers")
+            .into_iter()
+            .next()
+            .expect("fake printer");
+        let profile = store
+            .named_profiles(&printer.printer_id)
+            .expect("profiles")
+            .into_iter()
+            .next()
+            .expect("default profile");
+        assert!(profile.uses_current_printer_defaults);
+        assert!(!profile.published);
+
+        store
+            .set_printer_exposed(&printer.printer_id, true, 20)
+            .expect("expose");
+        let snapshots = discover_cloud_printers(&mut store, &PrinterDiscovery::Fake)
+            .await
+            .expect("discovery");
+        assert_eq!(snapshots.len(), 1);
+        assert!(snapshots[0].profiles.is_empty());
     }
 
     #[test]

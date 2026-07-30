@@ -75,9 +75,9 @@ public enum LocalAPIError: Error, LocalizedError, Equatable {
         case let .invalidConfiguration(message), let .tokenUnavailable(message):
             message
         case .invalidResponse:
-            "The local agent returned an invalid response."
+            "The local node returned an invalid response."
         case .responseTooLarge:
-            "The local agent response exceeded the shell safety limit."
+            "The local node response exceeded the menu safety limit."
         case let .rejected(_, message):
             message
         }
@@ -143,6 +143,7 @@ public struct LocalPrintProfile: Codable, Equatable, Identifiable, Sendable {
     public let status: String?
     public let stockID: String?
     public let lastValidatedUnixMS: Int64?
+    public let usesCurrentPrinterDefaults: Bool?
 
     public var id: String { profileID }
 
@@ -154,6 +155,7 @@ public struct LocalPrintProfile: Codable, Equatable, Identifiable, Sendable {
         case status
         case stockID = "stock_id"
         case lastValidatedUnixMS = "last_validated_unix_ms"
+        case usesCurrentPrinterDefaults = "uses_current_printer_defaults"
     }
 }
 
@@ -209,9 +211,11 @@ private struct ExposureUpdate: Encodable {
 
 private struct TestPageRequest: Encodable {
     let profileID: String
+    let confirmed: Bool
 
     enum CodingKeys: String, CodingKey {
         case profileID = "profile_id"
+        case confirmed
     }
 }
 
@@ -299,7 +303,9 @@ public final class LocalAPIClient: @unchecked Sendable {
         try await request(
             method: "POST",
             path: "/v1/local/printers/\(try pathComponent(printerID))/test-page",
-            body: try encoder.encode(TestPageRequest(profileID: profileID))
+            body: try encoder.encode(
+                TestPageRequest(profileID: profileID, confirmed: true)
+            )
         )
     }
 
@@ -451,7 +457,7 @@ public final class LocalAPIClient: @unchecked Sendable {
             !value.contains("\\")
         else {
             throw LocalAPIError.invalidConfiguration(
-                "The local agent returned an invalid resource identifier."
+                "The local node returned an invalid resource identifier."
             )
         }
         return value
@@ -461,19 +467,19 @@ public final class LocalAPIClient: @unchecked Sendable {
         do {
             let values = try configuration.tokenFile.resourceValues(forKeys: [.fileSizeKey])
             if let size = values.fileSize, size > 1024 {
-                throw LocalAPIError.tokenUnavailable("The local agent token is oversized.")
+                throw LocalAPIError.tokenUnavailable("The local node token is oversized.")
             }
             let value = try String(contentsOf: configuration.tokenFile, encoding: .utf8)
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             guard !value.isEmpty, value.utf8.count <= 1024 else {
-                throw LocalAPIError.tokenUnavailable("The local agent token is empty or oversized.")
+                throw LocalAPIError.tokenUnavailable("The local node token is empty or oversized.")
             }
             return value
         } catch let error as LocalAPIError {
             throw error
         } catch {
             throw LocalAPIError.tokenUnavailable(
-                "Cannot read the local agent token. Check SPOOL_LOCAL_TOKEN_FILE."
+                "Cannot read the local node token. Check SPOOL_LOCAL_TOKEN_FILE."
             )
         }
     }

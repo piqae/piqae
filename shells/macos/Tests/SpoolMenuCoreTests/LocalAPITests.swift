@@ -27,6 +27,33 @@ final class LocalAPITests: XCTestCase {
         )
     }
 
+    func testPausedAndUnavailablePrintersBlockProfileCaptureWithRecovery() {
+        XCTAssertEqual(
+            PrinterProfileCaptureAvailability(printerState: "paused"),
+            .paused
+        )
+        XCTAssertFalse(
+            PrinterProfileCaptureAvailability(printerState: "paused").canCapture
+        )
+        XCTAssertNotNil(
+            PrinterProfileCaptureAvailability(printerState: "paused").recoveryMessage
+        )
+
+        XCTAssertEqual(
+            PrinterProfileCaptureAvailability(printerState: "offline"),
+            .unavailable
+        )
+        XCTAssertTrue(
+            PrinterProfileCaptureAvailability(printerState: "online").canCapture
+        )
+    }
+
+    func testCurrentPrinterDefaultsAreExplicitlyDynamicAndNotPinned() {
+        XCTAssertEqual(CurrentPrinterDefaultsProfile.name, "Current printer defaults")
+        XCTAssertTrue(CurrentPrinterDefaultsProfile.detail.contains("not a saved profile"))
+        XCTAssertFalse(CurrentPrinterDefaultsProfile.canSubmitPinnedJob)
+    }
+
     func testConfigurationUsesExplicitEnvironment() throws {
         let configuration = try LocalAPIConfiguration(
             environment: [
@@ -174,11 +201,12 @@ final class LocalAPITests: XCTestCase {
         StubURLProtocol.handler = { request in
             XCTAssertEqual(request.httpMethod, "POST")
             XCTAssertEqual(request.url?.path, "/v1/local/printers/prn_test/test-page")
-            XCTAssertEqual(
+            let body = try XCTUnwrap(
                 try JSONSerialization.jsonObject(with: try Self.body(of: request))
-                    as? [String: String],
-                ["profile_id": "profile_a4"]
+                    as? [String: Any]
             )
+            XCTAssertEqual(body["profile_id"] as? String, "profile_a4")
+            XCTAssertEqual(body["confirmed"] as? Bool, true)
             return Self.response(
                 for: request,
                 status: 202,
@@ -330,7 +358,7 @@ final class LocalAPITests: XCTestCase {
         } catch let error as LocalAPIError {
             XCTAssertEqual(
                 error,
-                .invalidConfiguration("The local agent returned an invalid resource identifier.")
+                .invalidConfiguration("The local node returned an invalid resource identifier.")
             )
         }
     }

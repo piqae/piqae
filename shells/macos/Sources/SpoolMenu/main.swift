@@ -19,11 +19,18 @@ private final class ProfileActionContext: NSObject {
     let printerID: String
     let profileID: String?
     let revision: UInt64?
+    let markAsDefault: Bool
 
-    init(printerID: String, profileID: String? = nil, revision: UInt64? = nil) {
+    init(
+        printerID: String,
+        profileID: String? = nil,
+        revision: UInt64? = nil,
+        markAsDefault: Bool = false
+    ) {
         self.printerID = printerID
         self.profileID = profileID
         self.revision = revision
+        self.markAsDefault = markAsDefault
     }
 }
 
@@ -58,9 +65,9 @@ final class SpoolMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         item.button?.image = symbol(
             "printer.fill",
-            description: "Spool print agent"
+            description: "Piqae print node"
         )
-        item.button?.toolTip = "Spool"
+        item.button?.toolTip = "Piqae"
         menu.delegate = self
         item.menu = menu
         statusItem = item
@@ -189,16 +196,16 @@ final class SpoolMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let statusTitle: String
         if let status {
             let connection = status.connection.replacingOccurrences(of: "_", with: " ").capitalized
-            statusTitle = status.paused ? "Spool — Paused" : "Spool — \(connection)"
+            statusTitle = status.paused ? "Piqae — Paused" : "Piqae — \(connection)"
         } else if isRefreshing {
-            statusTitle = "Spool — Connecting…"
+            statusTitle = "Piqae — Connecting…"
         } else {
-            statusTitle = "Spool — Agent unavailable"
+            statusTitle = "Piqae — Node unavailable"
         }
         menu.addItem(informational(statusTitle, symbol: statusSymbolName()))
 
         if let status {
-            let workspace = status.workspaceName ?? "Local agent"
+            let workspace = status.workspaceName ?? "Local node"
             menu.addItem(
                 informational(
                     "\(workspace) · \(status.queuedJobs) queued · \(status.activeJobs) active"
@@ -215,7 +222,7 @@ final class SpoolMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(.separator())
         if let status {
             let item = menu.addItem(
-                withTitle: status.paused ? "Resume Agent" : "Pause Agent",
+                withTitle: status.paused ? "Resume Node" : "Pause Node",
                 action: status.paused ? #selector(resumeAgent) : #selector(pauseAgent),
                 keyEquivalent: ""
             )
@@ -240,7 +247,7 @@ final class SpoolMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         menu.addItem(.separator())
         let quit = menu.addItem(
-            withTitle: "Quit Spool Menu",
+            withTitle: "Quit Piqae",
             action: #selector(quitMenu),
             keyEquivalent: "q"
         )
@@ -251,14 +258,14 @@ final class SpoolMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(informational("PRINTERS (\(printers.count))"))
         if printers.isEmpty {
             menu.addItem(
-                informational(status == nil ? "Agent connection required" : "No printers discovered")
+                informational(status == nil ? "Node connection required" : "No printers discovered")
             )
             return
         }
 
         for printer in printers {
             let root = NSMenuItem(
-                title: printer.name + (printer.isDefault ? " — Default" : ""),
+                title: printer.name + (printer.isDefault ? " — macOS default" : ""),
                 action: nil,
                 keyEquivalent: ""
             )
@@ -272,7 +279,9 @@ final class SpoolMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
             if let exposed = printer.exposed {
                 let exposure = NSMenuItem(
-                    title: exposed ? "Exposed to Spool" : "Local only",
+                    title: exposed
+                        ? "Cloud & API access on"
+                        : "Allow cloud & API jobs",
                     action: #selector(toggleExposure(_:)),
                     keyEquivalent: ""
                 )
@@ -280,8 +289,15 @@ final class SpoolMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 exposure.representedObject = printer.printerID
                 exposure.state = exposed ? .on : .off
                 printerMenu.addItem(exposure)
+                printerMenu.addItem(
+                    informational(
+                        exposed
+                            ? "Remote jobs can use this printer’s saved profiles"
+                            : "Off · this printer can only be used on this Mac"
+                    )
+                )
             } else {
-                printerMenu.addItem(informational("Exposure control unavailable"))
+                printerMenu.addItem(informational("Cloud availability requires an updated node"))
             }
 
             printerMenu.addItem(.separator())
@@ -294,13 +310,62 @@ final class SpoolMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func addProfileItems(for printer: LocalPrinter, to printerMenu: NSMenu) {
-        let profiles = profilesForPrinter(printer)
-        printerMenu.addItem(informational("PROFILES (\(profiles.count))"))
+        let allProfiles = profilesForPrinter(printer)
+        let currentDefaults = allProfiles.first {
+            $0.usesCurrentPrinterDefaults == true
+        }
+        let profiles = allProfiles.filter {
+            $0.usesCurrentPrinterDefaults != true
+        }
+        let captureAvailability = PrinterProfileCaptureAvailability(
+            printerState: printer.state
+        )
+        printerMenu.addItem(informational("SAVED PROFILES (\(profiles.count))"))
+
+        let defaultsRoot = NSMenuItem(
+            title: CurrentPrinterDefaultsProfile.name,
+            action: nil,
+            keyEquivalent: ""
+        )
+        defaultsRoot.image = symbol("gearshape", description: "Current macOS printer defaults")
+        let defaultsMenu = NSMenu()
+        defaultsMenu.addItem(informational(CurrentPrinterDefaultsProfile.detail))
+        defaultsMenu.addItem(
+            informational(
+                currentDefaults == nil
+                    ? "Piqae will add this automatically after the next refresh"
+                    : "Follows the driver’s current defaults until you save fixed settings"
+            )
+        )
+        let saveDefaults = defaultsMenu.addItem(
+            withTitle: currentDefaults == nil
+                ? "Save as Default Profile…"
+                : "Save Fixed Native Settings…",
+            action: currentDefaults == nil
+                ? #selector(addProfile(_:))
+                : #selector(editProfile(_:)),
+            keyEquivalent: ""
+        )
+        saveDefaults.target = self
+        saveDefaults.representedObject = ProfileActionContext(
+            printerID: printer.printerID,
+            profileID: currentDefaults?.profileID,
+            revision: currentDefaults?.revision,
+            markAsDefault: true
+        )
+        saveDefaults.image = symbol("square.and.arrow.down", description: "Save printer defaults")
+        saveDefaults.isEnabled =
+            client != nil && status != nil && captureAvailability.canCapture
+        if let recovery = captureAvailability.recoveryMessage {
+            defaultsMenu.addItem(informational(recovery))
+        }
+        defaultsRoot.submenu = defaultsMenu
+        printerMenu.addItem(defaultsRoot)
 
         for profile in profiles {
             let revision = profile.revision.map { " · r\($0)" } ?? ""
             let profileRoot = NSMenuItem(
-                title: profile.name + (profile.isDefault == true ? " — Default" : ""),
+                title: profile.name + (profile.isDefault == true ? " — Job default" : ""),
                 action: nil,
                 keyEquivalent: ""
             )
@@ -326,6 +391,7 @@ final class SpoolMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 revision: profile.revision
             )
             edit.image = symbol("slider.horizontal.3", description: "Edit native settings")
+            edit.isEnabled = captureAvailability.canCapture
 
             let clone = profileMenu.addItem(
                 withTitle: "Clone as New Profile…",
@@ -339,6 +405,7 @@ final class SpoolMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 revision: profile.revision
             )
             clone.image = symbol("plus.square.on.square", description: "Clone profile")
+            clone.isEnabled = captureAvailability.canCapture
             profileRoot.submenu = profileMenu
             printerMenu.addItem(profileRoot)
         }
@@ -347,25 +414,28 @@ final class SpoolMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             printerMenu.addItem(
                 informational(
                     profilesSupported
-                        ? "No saved profiles"
-                        : "Profile listing requires an updated agent"
+                        ? "No immutable profiles saved for jobs"
+                        : "Profile listing requires an updated node"
                 )
             )
         }
 
         let add = printerMenu.addItem(
-            withTitle: "Add Profile…",
+            withTitle: "Add Saved Profile…",
             action: #selector(addProfile(_:)),
             keyEquivalent: ""
         )
         add.target = self
         add.representedObject = ProfileActionContext(printerID: printer.printerID)
-        add.image = symbol("plus", description: "Add print profile")
-        add.isEnabled = client != nil && status != nil
+        add.image = symbol("plus", description: "Add saved print profile")
+        add.isEnabled = client != nil && status != nil && captureAvailability.canCapture
     }
 
     private func addDriverTestItem(for printer: LocalPrinter, to printerMenu: NSMenu) {
         let availableProfiles = profilesForPrinter(printer)
+        let captureAvailability = PrinterProfileCaptureAvailability(
+            printerState: printer.state
+        )
         let test = NSMenuItem(
             title: "Local driver test…",
             action: #selector(confirmDriverTest(_:)),
@@ -374,14 +444,19 @@ final class SpoolMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         test.target = self
         test.representedObject = printer.printerID
         test.image = symbol("doc.text", description: "Local driver test")
-        test.isEnabled = profilesSupported && !availableProfiles.isEmpty && printer.exposed != false
+        test.isEnabled =
+            profilesSupported
+            && !availableProfiles.isEmpty
+            && captureAvailability.canCapture
         printerMenu.addItem(test)
         if !profilesSupported {
-            printerMenu.addItem(informational("Requires an agent with print-profile support"))
+            printerMenu.addItem(informational("Requires a node with print-profile support"))
         } else if availableProfiles.isEmpty {
-            printerMenu.addItem(informational("Add a print profile before testing"))
-        } else if printer.exposed == false {
-            printerMenu.addItem(informational("Expose this printer before testing"))
+            printerMenu.addItem(
+                informational("Save printer defaults as a profile to test")
+            )
+        } else if let recovery = captureAvailability.recoveryMessage {
+            printerMenu.addItem(informational(recovery))
         }
     }
 
@@ -391,7 +466,7 @@ final class SpoolMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if recentJobs.isEmpty {
             menu.addItem(
                 informational(
-                    queueSupported ? "No recent local jobs" : "Recent jobs unavailable from agent"
+                    queueSupported ? "No recent local jobs" : "Recent jobs unavailable from node"
                 )
             )
             return
@@ -452,7 +527,7 @@ final class SpoolMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         )
         copy.target = self
         let log = diagnostics.addItem(
-            withTitle: "Open Agent Log",
+            withTitle: "Open Node Log",
             action: #selector(openAgentLog),
             keyEquivalent: ""
         )
@@ -516,6 +591,15 @@ final class SpoolMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         else {
             return
         }
+        let availability = PrinterProfileCaptureAvailability(printerState: printer.state)
+        guard availability.canCapture else {
+            showAlert(
+                title: "Piqae cannot open this printer",
+                message: availability.recoveryMessage
+                    ?? "Refresh Piqae after restoring this printer in macOS Printer Settings."
+            )
+            return
+        }
         actionTask?.cancel()
         actionTask = Task { [weak self] in
             guard let self else { return }
@@ -538,7 +622,10 @@ final class SpoolMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 }
 
                 let capturer = MacPrintProfileCapturer()
-                guard let completion = try capturer.capture(session: openedSession) else {
+                guard let completion = try capturer.capture(
+                    session: openedSession,
+                    markAsDefault: context.markAsDefault
+                ) else {
                     try? await client.cancelProfileCapture(session: openedSession)
                     return
                 }
@@ -563,7 +650,7 @@ final class SpoolMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     try? await client.cancelProfileCapture(session: session)
                 }
                 showAlert(
-                    title: "Spool could not save the profile",
+                    title: "Piqae could not save the profile",
                     message: error.localizedDescription
                 )
                 refresh()
@@ -583,7 +670,9 @@ final class SpoolMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         let picker = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 300, height: 26))
         for profile in availableProfiles {
-            picker.addItem(withTitle: profile.name + (profile.isDefault == true ? " — Default" : ""))
+            picker.addItem(
+                withTitle: profile.name + (profile.isDefault == true ? " — Job default" : "")
+            )
         }
         if let defaultIndex = availableProfiles.firstIndex(where: { $0.isDefault == true }) {
             picker.selectItem(at: defaultIndex)
@@ -621,13 +710,16 @@ final class SpoolMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             do {
                 try await operation(client)
                 if let successMessage {
-                    showAlert(title: "Spool", message: successMessage, style: .informational)
+                    showAlert(title: "Piqae", message: successMessage, style: .informational)
                 }
                 refresh()
             } catch is CancellationError {
                 return
             } catch {
-                showAlert(title: "Spool could not complete that action", message: error.localizedDescription)
+                showAlert(
+                    title: "Piqae could not complete that action",
+                    message: error.localizedDescription
+                )
                 refresh()
             }
         }
@@ -667,7 +759,7 @@ final class SpoolMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func copyDiagnostics() {
         var lines = [
-            "Spool menu diagnostics",
+            "Piqae menu diagnostics",
             "api=\(configuration?.baseURL.absoluteString ?? "invalid")",
             "token_file=\(configuration?.tokenFile.path ?? "invalid")",
             "connection=\(status?.connection ?? "unavailable")",
@@ -677,7 +769,7 @@ final class SpoolMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             "printers=\(printers.count)",
             "profiles_supported=\(profilesSupported)",
             "queue_supported=\(queueSupported)",
-            "agent_version=\(status?.version ?? "unknown")",
+            "node_version=\(status?.version ?? "unknown")",
         ]
         if let lastError {
             lines.append("last_error=\(lastError)")
@@ -692,7 +784,7 @@ final class SpoolMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func quitMenu() {
-        // The agent is a separate service and deliberately keeps running.
+        // The node is a separate service and deliberately keeps running.
         NSApplication.shared.terminate(nil)
     }
 
@@ -707,10 +799,13 @@ final class SpoolMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func updateStatusIcon() {
         let name = statusSymbolName()
-        statusItem?.button?.image = symbol(name, description: "Spool \(status?.connection ?? "offline")")
+        statusItem?.button?.image = symbol(
+            name,
+            description: "Piqae \(status?.connection ?? "offline")"
+        )
         statusItem?.button?.toolTip = status.map {
-            "Spool · \($0.connection.replacingOccurrences(of: "_", with: " ").capitalized)"
-        } ?? "Spool · Agent unavailable"
+            "Piqae · \($0.connection.replacingOccurrences(of: "_", with: " ").capitalized)"
+        } ?? "Piqae · Node unavailable"
     }
 
     private func statusSymbolName() -> String {
