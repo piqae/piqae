@@ -1,5 +1,5 @@
 {
-  "name": "spool",
+  "name": "piqae",
   "version": "0.1.0",
   "private": true,
   "description": "Open-source local and remote printing infrastructure",
@@ -14,5 +14,13 @@
   },
   "engines": {
     "node": "22.x"
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/C4CoffeeCo/piqae.git"
+  },
+  "bugs": {
+    "url": "https://github.com/C4CoffeeCo/piqae/issues"
+  },
+  "homepage": "https://github.com/C4CoffeeCo/piqae#readme"
 }
