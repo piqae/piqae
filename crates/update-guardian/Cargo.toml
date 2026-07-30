@@ -1,0 +1,25 @@
+[package]
+name = "spool-update-guardian"
+version.workspace = true
+edition.workspace = true
+license = "Apache-2.0"
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+chrono.workspace = true
+ed25519-dalek.workspace = true
+semver = { version = "1.0.26", features = ["serde"] }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+spool-update-metadata = { path = "../update-metadata" }
+thiserror.workspace = true
+
+[dev-dependencies]
+base64.workspace = true
+tempfile = "3.20.0"
+
+[lints]
+workspace = true

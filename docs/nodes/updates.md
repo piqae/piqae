@@ -98,10 +98,19 @@ release records must remain immutable.
   normal feed. A tested downgrade or package-restoration path is separate
   release evidence.
 
-The intended guardian must defer while work is active, retain the previous
-runtime, verify local health and reconnect after replacement, and restore the
-prior runtime on failure. That complete cross-component guardian is not yet
-implemented or certified.
+The shared Rust guardian now implements the platform-neutral safety boundary:
+checksummed durable command/state journaling, signed-metadata and artifact
+validation, paused/idle admission, versioned staging and activation intents,
+bounded health checks, restart reconciliation, and automatic rollback
+coordination. Its platform runtime interface is intentionally incapable of
+choosing an unverified package.
+
+The macOS and Windows packages do not yet activate the full-node guardian
+interface. Sparkle/WinSparkle app replacement and the operator-run package
+installer remain Preview paths. Whole-node automatic activation becomes
+Supported only after each platform wires its signed installer to the guardian
+and passes clean-install, busy-queue, interrupted-activation, restart, health,
+and rollback evidence.
 
 Server protocol N and N-1 compatibility is the target policy. Upgrade servers
 before a broad node rollout. See [native release publishing](../operations/native-release-publishing.md),
