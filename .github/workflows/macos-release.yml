@@ -249,6 +249,19 @@ jobs:
           fi
           lipo -archs "$app/Contents/MacOS/SpoolMenu" | grep -F arm64 | grep -F x86_64
           lipo -archs "$app/Contents/MacOS/SpoolPrintCoreReplay" | grep -F arm64 | grep -F x86_64
+          otool -l "$app/Contents/MacOS/SpoolMenu" |
+            grep -F "@executable_path/../Frameworks"
+          "$app/Contents/MacOS/SpoolMenu" \
+            > "$fixture/menu-launch-smoke.out" \
+            2> "$fixture/menu-launch-smoke.err" &
+          menu_pid=$!
+          sleep 2
+          if ! kill -0 "$menu_pid" 2>/dev/null; then
+            cat "$fixture/menu-launch-smoke.err" >&2
+            exit 1
+          fi
+          kill -TERM "$menu_pid"
+          wait "$menu_pid" || true
 
       - name: Sign standalone node components
         if: steps.gate.outputs.release_mode == 'signed'

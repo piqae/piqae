@@ -85,6 +85,12 @@ install -m 0755 "$binary_directory/SpoolMenu" "$bundle/Contents/MacOS/SpoolMenu"
 install -m 0755 \
   "$binary_directory/SpoolPrintCoreReplay" \
   "$bundle/Contents/MacOS/SpoolPrintCoreReplay"
+menu_rpaths=$(otool -l "$bundle/Contents/MacOS/SpoolMenu")
+if ! grep -F "@executable_path/../Frameworks" <<<"$menu_rpaths" >/dev/null; then
+  install_name_tool \
+    -add_rpath "@executable_path/../Frameworks" \
+    "$bundle/Contents/MacOS/SpoolMenu"
+fi
 if [[ ! -d "$binary_directory/Sparkle.framework" ]]; then
   echo "Sparkle.framework was not produced by SwiftPM" >&2
   exit 1
