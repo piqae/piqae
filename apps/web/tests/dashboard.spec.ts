@@ -2,7 +2,7 @@ import { expect, test } from '@playwright/test';
 
 test('dashboard exposes operational state with semantic navigation', async ({ page }) => {
   await page.goto('/dashboard');
-  await expect(page).toHaveTitle('Overview · Spool');
+  await expect(page).toHaveTitle('Overview · Piqae');
   await expect(page.getByRole('heading', { name: 'Overview' })).toBeVisible();
   await expect(page.getByText('Demo data — no control-plane requests are being made.')).toBeVisible();
   await expect(page.getByRole('navigation', { name: 'Main navigation' })).toBeVisible();

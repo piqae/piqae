@@ -105,19 +105,6 @@
         </a>
       </article>
     {/each}
-
-    <article class="home-plan self-hosted">
-      <div class="home-plan-header">
-        <div class="home-plan-title"><h3>Self-hosted</h3></div>
-        <p>Run the complete Apache-2.0 stack in your own environment.</p>
-      </div>
-      <div class="home-plan-cost">
-        <div><strong>$0</strong></div>
-        <small>software licence</small>
-        <p>Unlimited self-hosted jobs <span>· Your infrastructure</span></p>
-      </div>
-      <a class="home-plan-cta" href="/open-source">Explore self-hosting</a>
-    </article>
   </div>
 {:else}
   <div class="pricing-controls" role="group" aria-label="Billing interval">
@@ -500,8 +487,8 @@
   .pricing-controls.home span { color: #74aaff; }
   .home-pricing-grid {
     display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: 20px;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: clamp(24px, 7vw, 92px);
   }
   .home-pricing-grid article,
   .home-pricing-grid article.featured {

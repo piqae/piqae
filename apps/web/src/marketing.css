@@ -247,28 +247,6 @@
   color: #a8a6b0;
 }
 
-.marketing .m-pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  min-height: 28px;
-  padding: 0 10px;
-  border: 1px solid var(--m-border);
-  border-radius: 999px;
-  background: rgb(255 255 255 / 0.56);
-  color: var(--m-muted);
-  font-size: 12px;
-  font-weight: 600;
-}
-
-.marketing .m-pill::before {
-  width: 6px;
-  height: 6px;
-  background: var(--m-green);
-  border-radius: 50%;
-  content: '';
-}
-
 .marketing .m-list {
   display: grid;
   gap: 10px;

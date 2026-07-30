@@ -1,9 +1,9 @@
 import { expect, test } from '@playwright/test';
 
 const publicRoutes = [
-  ['/', 'Reliable printing, built into your product.'],
+  ['/', 'Printing infrastructure, ready for your product.'],
   ['/how-it-works', 'From your app to the right printer—without the guesswork.'],
-  ['/pricing', 'Start free. Scale without surprises.'],
+  ['/pricing', 'Pricing for every print path, starting at $0.'],
   ['/about', 'Built where every label matters.'],
   ['/compare', 'Find the printing platform that fits how you build.'],
   ['/compare/printnode', 'Two remote print APIs, with different control boundaries.'],
@@ -30,13 +30,20 @@ test('homepage and mobile navigation expose the primary conversion paths', async
   page
 }, testInfo) => {
   await page.goto('/');
-  await expect(page.getByText('Application', { exact: true })).toBeVisible();
-  await expect(page.getByText('Accepted ≠ printed', { exact: true })).toBeVisible();
-  await expect(page.getByRole('link', { name: 'Compare Spool and PrintNode' })).toBeVisible();
-  await expect(page.getByRole('heading', { name: 'Your product. Now with printing built in.' })).toBeVisible();
   await expect(
     page.getByRole('img', {
-      name: 'Interactive three-dimensional globe illustrating print jobs travelling through Spool to local printers'
+      name: /Piqae dashboard showing printer-computer health/
+    })
+  ).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Compare Piqae and PrintNode' })).toBeVisible();
+  await expect(
+    page.getByRole('heading', {
+      name: 'Add full-service printing. Keep building your product.'
+    })
+  ).toBeVisible();
+  await expect(
+    page.getByRole('img', {
+      name: 'Interactive three-dimensional globe illustrating print jobs travelling through Piqae to local printers'
     })
   ).toBeVisible();
   await expect(page.getByText('Network preview', { exact: true })).toBeVisible();
@@ -85,16 +92,9 @@ test('cost calculator updates locally and exposes its evidence', async ({ page }
 
 test('pricing exposes only the locked Free and Pro catalog', async ({ page }) => {
   await page.goto('/pricing');
-  await expect(
-    page.locator('h3:visible, .plan-name > strong:visible').filter({ hasText: /^Free$/ })
-  ).toBeVisible();
-  await expect(
-    page.locator('h3:visible, .plan-name > strong:visible').filter({ hasText: /^Pro$/ })
-  ).toBeVisible();
-  const allowanceValues =
-    (page.viewportSize()?.width ?? 1_000) <= 700
-      ? page.locator('.mobile-plans:visible dd')
-      : page.locator('.plan-table-wrap:visible strong');
+  await expect(page.getByRole('heading', { name: 'Piqae Free', exact: true })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Piqae Pro', exact: true })).toBeVisible();
+  const allowanceValues = page.locator('.plan-grid dd');
   await expect(allowanceValues.filter({ hasText: /^100(?:\s|$)/ }).first()).toBeVisible();
   await expect(allowanceValues.filter({ hasText: /^25,000(?:\s|$)/ }).first()).toBeVisible();
   await expect(page.getByText('Launch', { exact: true })).toHaveCount(0);

@@ -41,13 +41,14 @@
     gap: 6px;
     min-height: 20px;
     color: var(--text-secondary);
-    font-size: 12px;
+    font-size: 11px;
+    font-weight: 480;
     white-space: nowrap;
   }
 
   .dot {
-    width: 6px;
-    height: 6px;
+    width: 5px;
+    height: 5px;
     border-radius: 50%;
     background: var(--text-tertiary);
     box-shadow: 0 0 0 2px color-mix(in oklch, var(--text-tertiary), transparent 86%);

@@ -57,6 +57,7 @@
 
   onMount(() => {
     interactive = true;
+    theme = document.documentElement.dataset.theme === 'light' ? 'light' : 'dark';
     if (mode !== 'live') return;
     const source = new EventSource('/api/events');
     let refreshTimer: ReturnType<typeof setTimeout> | undefined;
@@ -101,29 +102,27 @@
 <div class="shell">
   <aside id="primary-sidebar" class:open={sidebarOpen}>
     <div class="workspace">
-      <a class="brand" href="/dashboard" onclick={closeSidebar} aria-label="Piqae overview">
-        <span class="logo"><Icon name="printers" size={14} strokeWidth={2} /></span>
-        <span>Piqae</span>
-      </a>
-      <button
+      <a
         class="workspace-switch"
-        aria-label="Current workspace"
-        disabled
+        href="/dashboard"
+        onclick={closeSidebar}
+        aria-label="Piqae overview"
         title={meta.auth.workspaceSwitching
-          ? 'Workspace switching is available in the account menu'
+          ? 'Piqae workspace'
           : 'This deployment has one workspace'}
       >
-        <span class="avatar">SP</span>
+        <span class="logo"><Icon name="printers" size={14} strokeWidth={1.9} /></span>
         <span class="workspace-name">
           <strong>Piqae</strong>
-          <small>{meta.deployment.replace('_', ' ')}</small>
+          <small>Printing workspace</small>
         </span>
-        <Icon name="chevron-down" size={13} />
-      </button>
+        <span class="deployment">{meta.deployment.replace('_', ' ')}</span>
+      </a>
     </div>
 
     <nav aria-label="Main navigation">
       <div class="nav-group">
+        <span class="nav-label">Workspace</span>
         {#each nav as item}
           <a
             href={item.href}
@@ -154,6 +153,7 @@
 
     <div class="sidebar-footer">
       <div class="service">
+        <span class="service-dot" aria-hidden="true"></span>
         <div>
           <strong>{meta.deployment.replace('_', ' ')}</strong>
           <small>v{meta.version}</small>
@@ -215,41 +215,29 @@
   }
 
   .workspace {
-    padding: 13px 10px 7px;
-  }
-
-  .brand {
-    height: 30px;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 0 6px;
-    font-size: 14px;
-    font-weight: 580;
-    letter-spacing: -0.02em;
+    padding: 9px 8px 7px;
   }
 
   .logo {
-    width: 23px;
-    height: 23px;
+    width: 26px;
+    height: 26px;
     display: inline-grid;
     flex: 0 0 auto;
     place-items: center;
     color: white;
     background: var(--accent);
-    border-radius: 6px;
+    border-radius: 7px;
     box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.12);
   }
 
   .workspace-switch {
     width: 100%;
-    min-height: 41px;
+    min-height: 42px;
     display: grid;
-    grid-template-columns: 26px minmax(0, 1fr) 14px;
+    grid-template-columns: 26px minmax(0, 1fr) auto;
     align-items: center;
     gap: 8px;
-    margin-top: 8px;
-    padding: 4px 6px;
+    padding: 4px 7px;
     color: var(--text-secondary);
     text-align: left;
     background: transparent;
@@ -263,19 +251,6 @@
     background: var(--surface-hover);
   }
 
-  .avatar {
-    width: 25px;
-    height: 25px;
-    display: grid;
-    place-items: center;
-    color: var(--text-primary);
-    background: var(--surface-raised);
-    border: 1px solid var(--border-default);
-    border-radius: 6px;
-    font-size: 9px;
-    font-weight: 600;
-  }
-
   .workspace-name {
     display: grid;
     min-width: 0;
@@ -285,15 +260,28 @@
   .workspace-name strong {
     overflow: hidden;
     color: var(--text-primary);
-    font-size: 12px;
-    font-weight: 500;
+    font-family: var(--font-display);
+    font-size: 13px;
+    font-weight: 560;
+    letter-spacing: -0.018em;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
 
   .workspace-name small {
     color: var(--text-tertiary);
-    font-size: 10px;
+    font-size: 9px;
+  }
+
+  .deployment {
+    padding: 2px 5px;
+    color: var(--text-tertiary);
+    background: var(--surface-raised);
+    border: 1px solid var(--border-subtle);
+    border-radius: 4px;
+    font-size: 8px;
+    line-height: 13px;
+    text-transform: capitalize;
   }
 
   nav {
@@ -305,7 +293,7 @@
 
   .nav-group {
     display: grid;
-    gap: 2px;
+    gap: 1px;
   }
 
   .nav-group.utility {
@@ -313,7 +301,7 @@
   }
 
   nav a {
-    height: 29px;
+    height: 30px;
     display: flex;
     align-items: center;
     gap: 9px;
@@ -321,7 +309,7 @@
     color: var(--text-tertiary);
     border-radius: var(--radius-md);
     font-size: 12px;
-    font-weight: 450;
+    font-weight: 470;
     transition:
       color 90ms ease,
       background-color 90ms ease;
@@ -335,6 +323,7 @@
   nav a.active {
     color: var(--text-primary);
     background: var(--surface-selected);
+    box-shadow: inset 0 0 0 1px var(--border-subtle);
   }
 
   nav a :global(svg) {
@@ -343,6 +332,18 @@
 
   nav a.active :global(svg) {
     color: var(--text-secondary);
+  }
+
+  .nav-label {
+    height: 25px;
+    display: flex;
+    align-items: end;
+    padding: 0 8px 5px;
+    color: var(--text-tertiary);
+    font-size: 9px;
+    font-weight: 520;
+    letter-spacing: 0.035em;
+    text-transform: uppercase;
   }
 
   .sidebar-footer {
@@ -358,8 +359,17 @@
     min-width: 0;
     flex: 1;
     display: flex;
-    align-items: flex-start;
+    align-items: center;
     gap: 7px;
+  }
+
+  .service-dot {
+    width: 6px;
+    height: 6px;
+    flex: 0 0 auto;
+    background: var(--success);
+    border-radius: 50%;
+    box-shadow: 0 0 0 2px var(--success-soft);
   }
 
   .service div {

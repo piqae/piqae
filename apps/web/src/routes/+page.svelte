@@ -1,5 +1,4 @@
 <script lang="ts">
-  import FlowDiagram from '$lib/components/marketing/FlowDiagram.svelte';
   import GlobalPrintNetwork from '$lib/components/marketing/GlobalPrintNetwork.svelte';
   import MarketingShell from '$lib/components/marketing/MarketingShell.svelte';
   import PricingCards from '$lib/components/marketing/PricingCards.svelte';
@@ -11,8 +10,8 @@
 </script>
 
 <Seo
-  title="Piqae — Open printing infrastructure"
-  description="Build reliable PDF and RAW printing into any product with a simple API, a lightweight local agent, and your choice of Piqae Cloud or self-hosting."
+  title="Piqae — Cloud printing infrastructure for developers"
+  description="Add reliable network printing to your product with one straightforward API, Piqae Cloud, and a lightweight local agent that keeps the full capability of every printer."
   path="/"
   structuredData={[
     {
@@ -36,31 +35,37 @@
 <MarketingShell announcement="Native agent releases are still preview-gated — see current availability">
   <section class="hero">
     <div class="m-container">
-      <span class="m-pill">Open source · Cloud or self-hosted</span>
-      <h1 class="m-display">Reliable printing, built into your product.</h1>
+      <h1 class="m-display">Printing infrastructure, ready for your product.</h1>
       <p class="m-lede">
-        Connect your application to printers anywhere with one API and a lightweight local agent.
-        Use Piqae as a complete service, run it yourself, or make it the headless print layer
-        behind your own product.
+        Add network printing without building the network. Piqae gives your application one
+        straightforward API, a managed cloud, and a lightweight agent beside every printer.
       </p>
       <div class="m-actions">
-        <a class="m-button primary" href="/start?plan=free&source=home-hero">Start building free</a>
-        <a class="m-button" href="/how-it-works">See how it works <span>→</span></a>
+        <a class="m-button primary" href="/start?plan=free&source=home-hero">Start free</a>
+        <a class="m-button" href="/docs/quickstart">Read the quickstart <span>→</span></a>
       </div>
-      <p class="hero-proof">PDF + RAW · Native local agent · Installed drivers stay in control</p>
+      <p class="hero-proof">One API · Managed cloud · Full native-driver capability</p>
     </div>
   </section>
 
   <section class="product-stage m-container">
-    <div class="m-dark-panel">
-      <FlowDiagram />
+    <div class="dashboard-showcase">
+      <div class="dashboard-capture">
+        <img
+          src="/images/piqae-dashboard-overview.png"
+          width="1440"
+          height="900"
+          alt="Piqae dashboard showing printer-computer health, available printers, onboarding progress, attention items, and recent print jobs"
+          fetchpriority="high"
+        />
+      </div>
     </div>
     <div class="truth-note">
-      <span>Clear status at every handoff</span>
+      <span>One place to run every print workflow</span>
       <p>
-        See when a job is queued, on its way, or accepted by the local print system. Because
-        software cannot always confirm what happened on paper, Piqae keeps that final boundary
-        clear too.
+        See printers, agents, queues, and jobs across every customer and location. Piqae keeps
+        each handoff clear, including the boundary between operating-system acceptance and the
+        physical result.
       </p>
     </div>
   </section>
@@ -69,24 +74,24 @@
     <div class="m-container">
       <span class="m-eyebrow">How it works</span>
       <div class="section-heading">
-        <h2 class="m-heading">From your app to the right printer, in three steps.</h2>
+        <h2 class="m-heading">Build once. Print wherever the work happens.</h2>
         <a href="/how-it-works">Explore the print path <span>→</span></a>
       </div>
       <div class="steps">
         <article>
           <span>01</span>
-          <h3>Send the job</h3>
-          <p>Your application sends PDF or RAW content to one straightforward API.</p>
+          <h3>Connect one API</h3>
+          <p>Send PDF or RAW jobs from the product and workflow your team already owns.</p>
         </article>
         <article>
           <span>02</span>
-          <h3>Reach the right site</h3>
-          <p>Piqae routes it to the enrolled agent beside the selected printer, with recovery built in.</p>
+          <h3>Add each print location</h3>
+          <p>A small native agent securely connects the printers at every site to Piqae Cloud.</p>
         </article>
         <article>
           <span>03</span>
-          <h3>Print with local capability</h3>
-          <p>The operating system applies the installed driver and reports the handoff back to your app.</p>
+          <h3>Use the full printer</h3>
+          <p>Local operating-system drivers preserve media, tray, finishing, and vendor options.</p>
         </article>
       </div>
     </div>
@@ -101,18 +106,19 @@
       </div>
       <div class="m-container global-content">
         <div class="global-copy">
-          <span class="m-eyebrow">Printing without borders</span>
-          <h2 class="m-heading">Global reach.<br />Local precision.</h2>
+          <span class="m-eyebrow">Piqae Cloud</span>
+          <h2 class="m-heading">Hosted to scale.<br />Local where it counts.</h2>
           <p class="m-lede">
-            Send work across the world, then print with the full capability of the computer and
-            driver beside each printer. One reliable path from your product to every site.
+            Run printing across customers and locations without operating the control plane
+            yourself. Piqae keeps work durable from the cloud to the agent, then hands it to the
+            real driver beside the printer.
           </p>
           <div class="global-points">
-            <span><i></i> Durable from cloud to edge</span>
-            <span><i></i> Native driver capability</span>
-            <span><i></i> Clear status at every handoff</span>
+            <span><i></i> Managed cloud control plane</span>
+            <span><i></i> Durable cloud and local queues</span>
+            <span><i></i> Native capability at every site</span>
           </div>
-          <a href="/how-it-works">See the print path <span>→</span></a>
+          <a href="/how-it-works">See how Piqae Cloud works <span>→</span></a>
         </div>
       </div>
     </div>
@@ -121,17 +127,17 @@
   <section class="headless-section m-section">
     <div class="m-container headless-grid">
       <div class="headless-copy">
-        <span class="m-eyebrow">Headless printing</span>
-        <h2 class="m-heading">Your product. Now with printing built in.</h2>
+        <span class="m-eyebrow">Built for developers</span>
+        <h2 class="m-heading">Add full-service printing. Keep building your product.</h2>
         <p class="m-lede">
-          Keep your interface, your customer relationships, and your workflow. Piqae provides the
-          print infrastructure behind the scenes, from customer onboarding to local handoff.
+          Piqae is the headless print layer behind your own experience. Keep your interface,
+          customer relationships, and product logic while we handle the path to every printer.
         </p>
         <ul class="m-list">
-          <li>Offer printing under your own brand and inside your own app</li>
-          <li>Separate customer workspaces, agents, printers, and usage</li>
-          <li>Use one API for PDF, RAW, printer discovery, and status</li>
-          <li>Start managed, self-host later, or run the stack yourself from day one</li>
+          <li>A straightforward API for jobs, printers, status, and customer workspaces</li>
+          <li>PDF and RAW printing without sending credentials into the browser</li>
+          <li>Idempotency, queueing, retries, and agent connectivity already handled</li>
+          <li>Your brand and workflow stay in front; Piqae stays behind the scenes</li>
         </ul>
         <div class="m-actions">
           <a class="m-button primary" href="/docs">Explore the API</a>
@@ -145,7 +151,7 @@
           <small>200 OK</small>
         </div>
         <pre><code><span class="code-muted">// Printing stays inside your workflow</span>
-<span class="code-violet">const</span> job = <span class="code-violet">await</span> spool.printJobs.create(&#123;
+<span class="code-violet">const</span> job = <span class="code-violet">await</span> piqae.printJobs.create(&#123;
   printer: customer.defaultPrinter,
   content: &#123;
     type: <span class="code-green">'pdf'</span>,
@@ -164,13 +170,14 @@
   <section class="decisions-section m-section">
     <div class="m-container decisions-grid">
       <div>
-        <span class="m-eyebrow">Clear operational insight</span>
-        <h2 class="m-heading">Know what happened, fast.</h2>
+        <span class="m-eyebrow">Less infrastructure to operate</span>
+        <h2 class="m-heading">Run the workflow, not the printing plumbing.</h2>
         <p class="m-lede">
-          Follow each job from your application to the local print system. Piqae turns queue,
-          agent, and driver events into a timeline your team can understand and act on.
+          Piqae Cloud handles accounts, queues, agent connectivity, and status in one service.
+          Your team gets the visibility to resolve problems without owning another distributed
+          system.
         </p>
-        <a class="m-button dark" href="/how-it-works#status">Explore job status</a>
+        <a class="m-button dark" href="/pricing">See Piqae Cloud pricing</a>
       </div>
       <div class="status-board" aria-label="Example print job status timeline">
         <div class="status-board-top">
@@ -193,28 +200,32 @@
     </div>
   </section>
 
-  <section class="m-section">
+  <section class="advantages-section m-section">
     <div class="m-container">
-      <span class="m-eyebrow">Freedom to choose</span>
-      <h2 class="m-heading">One platform. Three ways to run it.</h2>
-      <div class="deployment-grid">
-        <article class="m-card">
-          <span class="mode">Fastest start</span>
-          <h3>Piqae Cloud</h3>
-          <p>We operate the service, queues, and updates so your team can focus on the product.</p>
-          <a href="/pricing">See Cloud pricing →</a>
+      <div class="advantages-intro">
+        <span class="m-eyebrow">Why Piqae</span>
+        <h2 class="m-heading">A shorter path from an idea to printed output.</h2>
+      </div>
+      <div class="advantages-grid">
+        <article>
+          <span>01</span>
+          <h3>Developer-forward from day one</h3>
+          <p>Clear resources, useful SDK patterns, webhooks, and a dashboard that speaks the same language as the API.</p>
         </article>
-        <article class="m-card">
-          <span class="mode">Maximum control</span>
-          <h3>Self-hosted</h3>
-          <p>Run the complete Apache-2.0 stack in your environment, with no software licence fee.</p>
-          <a href="/open-source">Explore self-hosting →</a>
+        <article>
+          <span>02</span>
+          <h3>Dependable from cloud to edge</h3>
+          <p>Durable queues and explicit recovery keep work moving through brief network and site interruptions.</p>
         </article>
-        <article class="m-card">
-          <span class="mode">Entirely local</span>
-          <h3>Local-only</h3>
-          <p>Keep the workflow on a trusted network when cloud coordination is not needed.</p>
-          <a href="/docs/local-mode">Read local-mode docs →</a>
+        <article>
+          <span>03</span>
+          <h3>Real drivers. Real print capability.</h3>
+          <p>Use the installed operating-system driver for specialist media, trays, finishing, and production hardware.</p>
+        </article>
+        <article>
+          <span>04</span>
+          <h3>Cloud economics that stay clear</h3>
+          <p>Start free, move to straightforward usage allowances, and compare the cost against your current print volume.</p>
         </article>
       </div>
     </div>
@@ -223,11 +234,11 @@
   <section class="switch-section">
     <div class="m-container switch-grid">
       <div>
-        <span class="m-eyebrow">A more open path</span>
-        <h2 class="m-heading">Considering a move from PrintNode?</h2>
+        <span class="m-eyebrow">Switch with confidence</span>
+        <h2 class="m-heading">A developer-first alternative to PrintNode.</h2>
         <p class="m-lede">
-          See how deployment, pricing, source access, and printer control compare. Then plan a
-          measured rollout around the endpoints and printers you already use.
+          Compare the API model, printer capability, and documented pricing against the way you
+          print today. Then move one customer or location at a time with a clear rollback path.
         </p>
         <div class="m-actions">
           <a class="m-button primary" href="/compare/printnode">Compare Piqae and PrintNode</a>
@@ -250,9 +261,9 @@
   <section class="pricing-section">
     <div class="m-container">
       <div class="pricing-intro">
-        <span class="m-eyebrow">Pricing</span>
-        <h2 class="m-heading">One plan for every print workflow.</h2>
-        <p>Start free, move to Pro when you need more volume, or run Piqae yourself.</p>
+        <span class="m-eyebrow">Piqae Cloud pricing</span>
+        <h2 class="m-heading">Start small. Pay for the printing you use.</h2>
+        <p>No control plane to operate and no long contract. Start free, then move to Pro as your print volume grows.</p>
       </div>
       <PricingCards homepage plans={data.pricing.plans} />
       <p class="pricing-foot">
@@ -262,44 +273,20 @@
     </div>
   </section>
 
-  <section class="origin m-section">
-    <div class="m-container origin-grid">
-      <div class="photo-frame" role="img" aria-label="Reserved for cleared C4 Coffee workflow photography">
-        <span>C4</span>
-        <div>
-          <strong>Real workflow photography</strong>
-          <small>CMS media slot · rights clearance required</small>
-        </div>
-      </div>
-      <div class="origin-copy">
-        <span class="m-eyebrow">Why we built it</span>
-        <h2 class="m-heading">Built where every label matters.</h2>
+  <section class="open-source-section">
+    <div class="m-container open-source-grid">
+      <span class="m-eyebrow">Open source when you need it</span>
+      <div>
+        <h2>Piqae Cloud is the easy path. The platform is still yours to inspect and run.</h2>
         <p>
-          Piqae began at C4 Coffee, where coffee bags, shipping labels, and daily production all
-          depend on software reaching the right printer at the right moment.
+          The complete printing stack is available under Apache-2.0 for teams with specific
+          infrastructure, residency, or local-only requirements.
         </p>
-        <p>
-          That practical beginning still shapes the product: lightweight software, resilient
-          workflows, clear status, and the freedom to choose how it runs.
-        </p>
-        <a class="m-button" href="/about">Read the C4 story <span>→</span></a>
       </div>
+      <a href="/open-source">Explore open source <span>→</span></a>
     </div>
   </section>
 
-  <section class="final-cta">
-    <div class="m-container m-dark-panel">
-      <div>
-        <span>Start with one workflow</span>
-        <h2>Bring reliable printing into your product.</h2>
-        <p>Connect the API, enroll a local agent, and keep every deployment option open.</p>
-      </div>
-      <div class="m-actions">
-        <a class="m-button primary" href="/start?plan=free&source=home-final">Start building free</a>
-        <a class="m-button" href="/docs/quickstart">Read the quickstart</a>
-      </div>
-    </div>
-  </section>
 </MarketingShell>
 
 <style>
@@ -336,7 +323,46 @@
     font-weight: 570;
     letter-spacing: 0.01em;
   }
-  .product-stage { padding-bottom: clamp(70px, 10vw, 130px); }
+  .product-stage {
+    position: relative;
+    padding-bottom: clamp(70px, 10vw, 130px);
+  }
+  .dashboard-showcase {
+    position: relative;
+    padding: clamp(8px, 1.4vw, 16px);
+    border: 1px solid rgb(23 22 27 / .12);
+    border-radius: 24px;
+    background: linear-gradient(145deg, #fdfdfc, #dedee1);
+    box-shadow:
+      0 42px 110px rgb(20 22 30 / .19),
+      0 8px 30px rgb(20 22 30 / .08);
+  }
+  .dashboard-showcase::before {
+    position: absolute;
+    z-index: -1;
+    inset: 10% 8% -8%;
+    border-radius: 50%;
+    background: rgb(0 106 255 / .16);
+    filter: blur(70px);
+    content: '';
+  }
+  .dashboard-capture {
+    position: relative;
+    aspect-ratio: 1440 / 900;
+    overflow: hidden;
+    border: 1px solid rgb(255 255 255 / .1);
+    border-radius: 16px;
+    background: #08090c;
+    box-shadow: 0 2px 8px rgb(0 0 0 / .22);
+  }
+  .dashboard-capture img {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: auto;
+    display: block;
+  }
   .truth-note {
     max-width: 770px;
     display: grid;
@@ -628,11 +654,44 @@
     color: var(--m-muted);
     font-size: 10px;
   }
-  .deployment-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-top: 45px; }
-  .deployment-grid .m-card { min-height: 265px; display: flex; flex-direction: column; }
-  .deployment-grid h3 { margin-top: 60px; font-size: 22px; }
-  .deployment-grid a { margin-top: auto; padding-top: 20px; }
-  .mode { color: var(--m-violet-dark); font-size: 11px; font-weight: 700; text-transform: uppercase; }
+  .advantages-section {
+    background: white;
+  }
+  .advantages-intro {
+    max-width: 830px;
+    margin-bottom: clamp(48px, 7vw, 80px);
+  }
+  .advantages-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    border-top: 1px solid var(--m-border);
+  }
+  .advantages-grid article {
+    min-height: 330px;
+    display: flex;
+    flex-direction: column;
+    padding: 28px 28px 8px 0;
+  }
+  .advantages-grid article + article {
+    padding-left: 28px;
+    border-left: 1px solid var(--m-border);
+  }
+  .advantages-grid article > span {
+    color: var(--m-violet-dark);
+    font: 600 11px var(--font-mono);
+  }
+  .advantages-grid h3 {
+    margin: auto 0 16px;
+    font-size: clamp(21px, 2.15vw, 29px);
+    font-weight: 560;
+    letter-spacing: -.035em;
+    line-height: 1.08;
+  }
+  .advantages-grid p {
+    min-height: 112px;
+    margin: 0;
+    color: var(--m-muted);
+  }
   .switch-section { padding: clamp(72px, 10vw, 130px) 0; background: #ded9ce; }
   .switch-grid { display: grid; grid-template-columns: 1.15fr .85fr; align-items: center; gap: clamp(40px, 8vw, 110px); }
   .migration-card {
@@ -702,44 +761,57 @@
     color: #858585;
     font-size: 11px;
   }
-  .origin { background: #eeece6; }
-  .origin-grid { display: grid; grid-template-columns: 1fr 1fr; align-items: center; gap: clamp(42px, 8vw, 110px); }
-  .photo-frame {
-    min-height: 540px;
-    display: flex;
-    flex-direction: column;
-    justify-content: space-between;
-    padding: 32px;
-    border-radius: 22px;
-    background:
-      linear-gradient(160deg, rgb(25 23 20 / .05), rgb(25 23 20 / .78)),
-      repeating-linear-gradient(45deg, #c7bba5, #c7bba5 14px, #bcaf98 14px, #bcaf98 28px);
-    color: white;
-    box-shadow: inset 0 0 0 1px rgb(23 22 27 / .08);
+  .open-source-section {
+    padding: clamp(62px, 8vw, 100px) 0;
+    background: #d9eaff;
   }
-  .photo-frame > span { font-size: 80px; font-weight: 750; letter-spacing: -.08em; }
-  .photo-frame div { display: grid; }
-  .photo-frame small { color: rgb(255 255 255 / .68); }
-  .origin-copy p { color: var(--m-muted); font-size: 17px; }
-  .origin-copy .m-button { margin-top: 18px; }
-  .final-cta { padding: 80px 0; }
-  .final-cta .m-dark-panel {
-    display: flex;
-    align-items: end;
-    justify-content: space-between;
-    gap: 40px;
-    padding: clamp(35px, 6vw, 72px);
+  .open-source-grid {
+    display: grid;
+    grid-template-columns: .7fr 1.7fr auto;
+    align-items: start;
+    gap: clamp(28px, 5vw, 70px);
   }
-  .final-cta span { color: #898792; font-size: 12px; }
-  .final-cta h2 { max-width: 640px; margin: 10px 0; font-size: clamp(34px, 5vw, 61px); letter-spacing: -.055em; }
-  .final-cta p { max-width: 600px; margin: 0; }
-  .final-cta .m-actions { flex: none; }
-  .final-cta .m-button:not(.primary) { border-color: var(--m-border-light); background: transparent; color: white; }
+  .open-source-grid .m-eyebrow {
+    color: #42607f;
+  }
+  .open-source-grid h2 {
+    max-width: 660px;
+    margin: 0;
+    font-family: var(--m-font-editorial);
+    font-size: clamp(30px, 3.6vw, 48px);
+    font-weight: 400;
+    letter-spacing: -.035em;
+    line-height: 1.02;
+  }
+  .open-source-grid p {
+    max-width: 620px;
+    margin: 22px 0 0;
+    color: #4b5e72;
+    font-size: 16px;
+  }
+  .open-source-grid > a {
+    display: inline-flex;
+    gap: 9px;
+    padding-top: 5px;
+    color: var(--m-violet-dark);
+    font-weight: 680;
+    white-space: nowrap;
+  }
   @media (max-width: 900px) {
     .headless-grid,
     .decisions-grid,
     .switch-grid,
-    .origin-grid { grid-template-columns: 1fr; }
+    .open-source-grid { grid-template-columns: 1fr; }
+    .advantages-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .advantages-grid article:nth-child(3) {
+      padding-left: 0;
+      border-left: 0;
+      border-top: 1px solid var(--m-border);
+    }
+    .advantages-grid article:nth-child(4) {
+      border-top: 1px solid var(--m-border);
+    }
+    .open-source-grid > a { padding-top: 0; }
     .global-frame,
     .global-content { min-height: 1050px; }
     .global-frame::after {
@@ -755,16 +827,27 @@
     }
     .global-copy .m-lede { max-width: 640px; }
     .api-stage { transform: none; }
-    .final-cta .m-dark-panel { align-items: flex-start; flex-direction: column; }
   }
   @media (max-width: 680px) {
     .truth-note { grid-template-columns: 1fr; gap: 5px; }
     .section-heading { align-items: flex-start; flex-direction: column; }
-    .steps, .deployment-grid { grid-template-columns: 1fr; }
+    .steps,
+    .advantages-grid { grid-template-columns: 1fr; }
     .steps { gap: 30px; }
+    .advantages-grid article,
+    .advantages-grid article + article,
+    .advantages-grid article:nth-child(3) {
+      min-height: 0;
+      padding: 34px 0;
+      border-top: 1px solid var(--m-border);
+      border-left: 0;
+    }
+    .advantages-grid h3 { margin: 54px 0 14px; }
+    .advantages-grid p { min-height: 0; }
     .api-stage pre { min-height: 285px; font-size: 11px; }
     .api-result { align-items: start; grid-template-columns: 1fr; gap: 4px; padding-block: 12px; }
-    .photo-frame { min-height: 420px; }
+    .dashboard-showcase { padding: 5px; border-radius: 14px; }
+    .dashboard-capture { border-radius: 10px; }
     .global-copy { padding: 48px 0 0; }
     .global-copy .m-heading { font-size: clamp(44px, 13vw, 62px); }
   }

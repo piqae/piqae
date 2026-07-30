@@ -27,12 +27,12 @@
 
 <style>
   header {
-    min-height: 67px;
+    min-height: 72px;
     display: flex;
     align-items: flex-start;
     justify-content: space-between;
     gap: 24px;
-    padding: 4px 0 17px;
+    padding: 5px 0 16px;
     border-bottom: 1px solid var(--border-subtle);
   }
 
@@ -47,10 +47,11 @@
 
   h1 {
     margin: 0;
-    font-size: 19px;
+    font-family: var(--font-display);
+    font-size: 18px;
     line-height: 26px;
-    font-weight: 580;
-    letter-spacing: -0.025em;
+    font-weight: 570;
+    letter-spacing: -0.027em;
   }
 
   p {

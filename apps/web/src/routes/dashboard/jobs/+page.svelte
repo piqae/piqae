@@ -4,6 +4,12 @@
   import PageHeader from '$lib/components/PageHeader.svelte';
   import RelativeTime from '$lib/components/RelativeTime.svelte';
   import Status from '$lib/components/Status.svelte';
+  import {
+    DataPanel,
+    SearchField,
+    SegmentedControl,
+    Toolbar
+  } from '$lib/components/ui';
   let { data } = $props();
   const jobs = $derived(data.jobs);
   const printers = $derived(data.printers);
@@ -11,6 +17,12 @@
 
   let query = $state('');
   let filterState = $state('all');
+  const jobFilters = [
+    { value: 'all', label: 'All' },
+    { value: 'active', label: 'Active' },
+    { value: 'failed', label: 'Failed' },
+    { value: 'delivery_uncertain', label: 'Uncertain' }
+  ];
 
   const visibleJobs = $derived(
     jobs.filter((job) => {
@@ -43,24 +55,13 @@
 
 {#if data.dataError}<DataError error={data.dataError} />{/if}
 
-<div class="toolbar">
-  <label class="search">
-    <span class="sr-only">Search jobs</span>
-    <Icon name="search" size={13} />
-    <input bind:value={query} placeholder="Search jobs…" />
-  </label>
-  <div class="filters" aria-label="Filter jobs by state">
-    {#each ['all', 'active', 'failed', 'delivery_uncertain'] as option}
-      <button class:active={filterState === option} onclick={() => (filterState = option)}>
-        {option === 'delivery_uncertain' ? 'Uncertain' : option}
-      </button>
-    {/each}
-  </div>
-  <span class="result-count numeric">{visibleJobs.length} jobs</span>
-</div>
+<Toolbar meta={`${visibleJobs.length} jobs`}>
+  <SearchField bind:value={query} label="Search jobs" placeholder="Search jobs…" />
+  <SegmentedControl bind:value={filterState} label="Filter jobs by state" options={jobFilters} />
+</Toolbar>
 
-<div class="panel table-panel">
-  <table>
+<DataPanel minWidth="950px">
+  <table class="ui-data-table">
     <thead>
       <tr>
         <th>Job</th>
@@ -107,120 +108,11 @@
       {/each}
     </tbody>
   </table>
-</div>
+</DataPanel>
 
 <style>
-  .toolbar {
-    min-height: 53px;
-    display: flex;
-    align-items: center;
-    gap: 10px;
-  }
-
-  .search {
-    width: 220px;
-    height: 29px;
-    display: flex;
-    align-items: center;
-    gap: 7px;
-    padding: 0 8px;
-    color: var(--text-tertiary);
-    background: var(--surface);
-    border: 1px solid var(--border-subtle);
-    border-radius: var(--radius-md);
-  }
-
-  .search:focus-within {
-    border-color: var(--accent);
-    box-shadow: 0 0 0 2px var(--accent-soft);
-  }
-
-  .search input {
-    min-width: 0;
-    width: 100%;
-    color: var(--text-primary);
-    background: transparent;
-    border: 0;
-    outline: 0;
-    font-size: 11px;
-  }
-
-  .search input::placeholder {
-    color: var(--text-tertiary);
-  }
-
-  .filters {
-    display: flex;
-    align-items: center;
-    padding: 2px;
-    background: var(--surface);
-    border: 1px solid var(--border-subtle);
-    border-radius: var(--radius-md);
-  }
-
-  .filters button {
-    height: 23px;
-    padding: 0 8px;
-    color: var(--text-tertiary);
-    text-transform: capitalize;
-    background: transparent;
-    border: 0;
-    border-radius: var(--radius-sm);
-    font-size: 10px;
-    cursor: pointer;
-  }
-
-  .filters button:hover {
-    color: var(--text-secondary);
-  }
-
-  .filters button.active {
-    color: var(--text-primary);
-    background: var(--surface-raised);
-    box-shadow: inset 0 0 0 1px var(--border-default);
-  }
-
-  .result-count {
-    margin-left: auto;
-    color: var(--text-tertiary);
-    font-size: 10px;
-  }
-
-  .table-panel {
-    overflow-x: auto;
-  }
-
-  table {
-    width: 100%;
-    min-width: 950px;
-    border-collapse: collapse;
-    font-size: 11px;
-  }
-
-  th {
-    height: 31px;
-    padding: 0 12px;
-    color: var(--text-tertiary);
-    font-size: 9px;
-    font-weight: 500;
-    text-align: left;
-    text-transform: uppercase;
-    letter-spacing: 0.035em;
-    border-bottom: 1px solid var(--border-subtle);
-  }
-
-  td {
+  .ui-data-table td {
     height: 51px;
-    padding: 0 12px;
-    border-bottom: 1px solid var(--border-subtle);
-  }
-
-  tbody tr:last-child td {
-    border-bottom: 0;
-  }
-
-  tbody tr:hover {
-    background: color-mix(in oklch, var(--surface-hover), transparent 35%);
   }
 
   .job {
@@ -283,18 +175,4 @@
     background: var(--surface-hover);
   }
 
-  @media (max-width: 720px) {
-    .toolbar {
-      flex-wrap: wrap;
-      padding: 11px 0;
-    }
-
-    .search {
-      width: 100%;
-    }
-
-    .result-count {
-      display: none;
-    }
-  }
 </style>

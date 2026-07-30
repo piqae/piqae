@@ -1,36 +1,36 @@
 <script lang="ts">
   const workflows = [
     {
-      label: 'Build it into your product',
-      body: 'Add complete printing to your own application with a headless API, customer workspaces, and a local agent that stays out of the way.',
+      label: 'Build printing into your app',
+      body: 'Give customers complete network printing inside your own product with one headless API and a local agent that stays out of the way.',
       href: '/docs/quickstart',
       visual: 'embedded',
       stageLabel: 'Inside your product'
     },
     {
-      label: 'Ship every order',
+      label: 'Print every order',
       body: 'Send shipping labels and packing slips from your order workflow to the right station, across one site or hundreds.',
       href: '/how-it-works',
       visual: 'shipping',
       stageLabel: 'Fulfilment'
     },
     {
-      label: 'Keep production moving',
-      body: 'Print product labels, batch documents, and operational work with the paper sizes, trays, and driver options each site already uses.',
+      label: 'Power production printing',
+      body: 'Print product labels, batch documents, and operational work with the media, trays, finishing, and driver options each site already uses.',
       href: '/how-it-works',
       visual: 'production',
       stageLabel: 'Production'
     },
     {
-      label: 'Turn service into action',
-      body: 'Route receipts, tickets, and work documents to the people who need them without asking them to watch another dashboard.',
+      label: 'Automate service printing',
+      body: 'Route receipts, tickets, and work documents to the people who need them without adding another manual step.',
       href: '/how-it-works',
       visual: 'service',
       stageLabel: 'Service'
     },
     {
-      label: 'Connect every location',
-      body: 'Give teams one dependable print layer across stores, warehouses, offices, and customer sites while local drivers keep the final say.',
+      label: 'Run every customer location',
+      body: 'Give your product one dependable print layer across stores, warehouses, offices, and customer sites while local drivers keep the final say.',
       href: '/how-it-works',
       visual: 'locations',
       stageLabel: 'Multi-site operations'
@@ -46,8 +46,8 @@
     <div class="sidebar-shell">
       <div class="sidebar">
         <header>
-          <span class="m-eyebrow">Where Piqae fits</span>
-          <h2 id="workflow-explorer-title">See every print workflow click into place.</h2>
+          <span class="m-eyebrow">One platform, every workflow</span>
+          <h2 id="workflow-explorer-title">See your whole print operation click into place.</h2>
         </header>
 
         <div class="workflow-accordion">
@@ -83,7 +83,50 @@
       role="img"
       aria-label={`${selected.stageLabel} printing with Piqae`}
     >
-      <span class="stage-label"><i></i>{selected.stageLabel}</span>
+      {#if selected.visual === 'embedded' || selected.visual === 'locations'}
+        <picture class="stage-media dashboard-media" aria-hidden="true">
+          <img
+            src="/images/piqae-dashboard-overview.png"
+            width="1440"
+            height="900"
+            loading="lazy"
+            alt=""
+          />
+        </picture>
+      {:else if selected.visual === 'shipping'}
+        <picture class="stage-media" aria-hidden="true">
+          <source srcset="/images/piqae-fulfilment.avif" type="image/avif" />
+          <img
+            src="/images/piqae-fulfilment.jpg"
+            width="1448"
+            height="1086"
+            loading="lazy"
+            alt=""
+          />
+        </picture>
+      {:else if selected.visual === 'production'}
+        <picture class="stage-media" aria-hidden="true">
+          <source srcset="/images/piqae-industrial-print.avif" type="image/avif" />
+          <img
+            src="/images/piqae-industrial-print.jpg"
+            width="1448"
+            height="1086"
+            loading="lazy"
+            alt=""
+          />
+        </picture>
+      {:else}
+        <picture class="stage-media" aria-hidden="true">
+          <source srcset="/images/piqae-label-production.avif" type="image/avif" />
+          <img
+            src="/images/piqae-label-production.jpg"
+            width="1448"
+            height="1086"
+            loading="lazy"
+            alt=""
+          />
+        </picture>
+      {/if}
 
       {#if selected.visual === 'embedded'}
         <div class="product-window">
@@ -109,7 +152,6 @@
         </div>
       {:else if selected.visual === 'shipping'}
         <div class="warehouse-scene">
-          <div class="warehouse-rack"><i></i><i></i><i></i><i></i><i></i><i></i></div>
           <div class="shipping-sheet">
             <small>PIQAE PRIORITY</small>
             <div class="barcode"></div>
@@ -121,13 +163,11 @@
         </div>
       {:else if selected.visual === 'production'}
         <div class="production-scene">
-          <div class="coffee-bag bag-one"><span>C4</span></div>
-          <div class="coffee-bag bag-two"><span>C4</span></div>
           <div class="product-label">
-            <small>C4 COFFEE CO.</small>
-            <strong>ETHIOPIA</strong>
-            <span>Washed · Filter</span>
-            <i>250 G</i>
+            <small>NATIVE PRINT PROFILE</small>
+            <strong>Packaging line 03</strong>
+            <span>102 × 152 mm · Cutter enabled</span>
+            <i>Driver ready</i>
           </div>
           <div class="driver-chip"><i></i> Local media profile applied</div>
         </div>
@@ -278,56 +318,58 @@
     isolation: isolate;
     transition: background-color 220ms ease;
   }
-  .workflow-stage::before,
+  .workflow-stage::before {
+    position: absolute;
+    z-index: 1;
+    inset: 0;
+    background:
+      linear-gradient(180deg, rgb(8 13 20 / .06), rgb(8 13 20 / .32)),
+      linear-gradient(90deg, rgb(0 55 135 / .08), transparent 58%);
+    content: '';
+    pointer-events: none;
+  }
   .workflow-stage::after {
     position: absolute;
-    z-index: -1;
-    border-radius: 999px;
+    z-index: 1;
+    inset: 0;
+    background-image: radial-gradient(rgb(255 255 255 / .18) .65px, transparent .65px);
+    background-size: 4px 4px;
     content: '';
-    filter: blur(2px);
-    opacity: .5;
+    opacity: .16;
+    pointer-events: none;
   }
-  .workflow-stage::before {
-    width: 520px;
-    height: 520px;
-    top: -190px;
-    right: -170px;
-    background: rgb(255 255 255 / .52);
+  .workflow-stage > :not(.stage-media) {
+    position: relative;
+    z-index: 2;
   }
-  .workflow-stage::after {
-    width: 390px;
-    height: 390px;
-    bottom: -160px;
-    left: -130px;
-    background: rgb(255 255 255 / .28);
+  .stage-media {
+    position: absolute;
+    z-index: 0;
+    inset: 0;
+    display: block;
+  }
+  .stage-media img {
+    width: 100%;
+    height: 100%;
+    display: block;
+    object-fit: cover;
+    transform: scale(1.015);
+  }
+  .dashboard-media img {
+    filter: saturate(.72) contrast(.86) brightness(.72);
+    object-position: 38% center;
+    transform: scale(1.18);
   }
   .workflow-stage.embedded { background: #9bc8ff; }
-  .workflow-stage.shipping { background: #f7bd91; }
-  .workflow-stage.production { background: #e6d09c; }
-  .workflow-stage.service { background: #abe0c7; }
-  .workflow-stage.locations { background: #c7c8ff; }
-  .stage-label {
-    position: absolute;
-    top: 36px;
-    left: 38px;
-    display: flex;
-    align-items: center;
-    gap: 9px;
-    padding: 8px 12px;
-    border: 1px solid rgb(0 0 0 / .12);
-    border-radius: 999px;
-    background: rgb(255 255 255 / .42);
-    font: 600 10px/1 var(--font-mono);
-    letter-spacing: .08em;
-    text-transform: uppercase;
+  .workflow-stage.embedded::before {
+    background:
+      linear-gradient(135deg, rgb(104 173 255 / .7), rgb(130 189 255 / .32)),
+      rgb(0 106 255 / .18);
   }
-  .stage-label i {
-    width: 7px;
-    height: 7px;
-    border-radius: 50%;
-    background: #006aff;
-    box-shadow: 0 0 0 4px rgb(0 106 255 / .12);
-  }
+  .workflow-stage.shipping { background: #af815f; }
+  .workflow-stage.production { background: #746f65; }
+  .workflow-stage.service { background: #7fae9c; }
+  .workflow-stage.locations { background: #7d88c2; }
   .product-window,
   .service-board,
   .locations-panel {
@@ -337,7 +379,9 @@
   .product-window {
     width: min(78%, 580px);
     overflow: hidden;
+    border: 1px solid rgb(255 255 255 / .58);
     border-radius: 22px;
+    box-shadow: 0 45px 100px rgb(23 31 43 / .38);
     transform: rotate(-1.5deg);
   }
   .window-bar {
@@ -471,21 +515,6 @@
     width: 100%;
     height: 100%;
   }
-  .warehouse-rack {
-    position: absolute;
-    inset: 15% -4% 10% 13%;
-    display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    gap: 18px;
-    padding: 25px;
-    border: 12px solid #744d34;
-    background: #a6704e;
-    transform: perspective(800px) rotateY(-10deg);
-  }
-  .warehouse-rack i {
-    background: linear-gradient(145deg, #d6b078 50%, #b98651 50%);
-    box-shadow: inset 0 0 0 8px rgb(255 255 255 / .16);
-  }
   .shipping-sheet {
     position: absolute;
     top: 26%;
@@ -535,46 +564,39 @@
       linear-gradient(90deg, transparent 0 65%, rgb(255 255 255 / .18) 65%),
       linear-gradient(0deg, rgb(82 55 24 / .16), transparent 35%);
   }
-  .coffee-bag {
-    position: absolute;
-    bottom: 7%;
-    width: 39%;
-    height: 69%;
-    display: grid;
-    place-items: center;
-    background: linear-gradient(90deg, #d8c08a, #f1e1b7 48%, #c7a76a);
-    clip-path: polygon(8% 5%, 92% 5%, 100% 100%, 0 100%);
-    filter: drop-shadow(0 30px 30px rgb(74 52 23 / .24));
-  }
-  .coffee-bag span {
-    color: rgb(78 53 26 / .35);
-    font-size: 72px;
-    font-weight: 750;
-    letter-spacing: -.1em;
-  }
-  .bag-one { left: 8%; transform: rotate(-7deg); }
-  .bag-two { right: 7%; transform: rotate(8deg); }
   .product-label {
     position: absolute;
     z-index: 2;
-    top: 34%;
-    left: 29%;
-    width: 42%;
-    min-height: 285px;
+    right: 8%;
+    bottom: 12%;
+    width: min(55%, 420px);
+    min-height: 235px;
     display: flex;
     flex-direction: column;
-    align-items: center;
-    padding: 34px 25px;
-    border: 2px solid #111;
+    align-items: flex-start;
+    padding: 30px;
+    border: 1px solid rgb(255 255 255 / .62);
+    border-radius: 16px;
     background: #fff;
-    box-shadow: 0 30px 70px rgb(56 40 21 / .2);
-    text-align: center;
-    transform: rotate(-1deg);
+    box-shadow: 0 30px 70px rgb(28 34 42 / .28);
+    text-align: left;
+    transform: rotate(1deg);
   }
   .product-label small { font: 9px var(--font-mono); letter-spacing: .15em; }
-  .product-label strong { margin-top: auto; font-size: 40px; letter-spacing: -.06em; }
+  .product-label strong { max-width: 290px; margin-top: auto; font-size: 32px; letter-spacing: -.055em; line-height: 1; }
   .product-label span { margin-top: 8px; font-size: 12px; }
-  .product-label i { margin-top: auto; font: 10px var(--font-mono); }
+  .product-label i {
+    margin-top: 24px;
+    padding: 6px 9px;
+    border-radius: 99px;
+    background: #e6f7ef;
+    color: #087448;
+    font: 10px var(--font-mono);
+  }
+  .production-scene .driver-chip {
+    top: 10%;
+    bottom: auto;
+  }
   .service-board {
     position: absolute;
     top: 21%;
@@ -744,10 +766,6 @@
     .workflow-stage {
       min-height: 590px;
     }
-    .stage-label {
-      top: 22px;
-      left: 22px;
-    }
     .product-window {
       width: 90%;
     }
@@ -783,16 +801,12 @@
       right: 5%;
       bottom: 8%;
     }
-    .coffee-bag {
-      height: 62%;
-    }
-    .coffee-bag span {
-      font-size: 46px;
-    }
     .product-label {
-      top: 32%;
-      left: 21%;
-      width: 58%;
+      top: auto;
+      right: 5%;
+      bottom: 8%;
+      left: auto;
+      width: 72%;
       min-height: 230px;
       padding: 25px 18px;
     }

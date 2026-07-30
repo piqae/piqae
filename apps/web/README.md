@@ -1,8 +1,9 @@
-# Spool web
+# Piqae web
 
-SvelteKit dashboard and documentation application. The visual system uses
-original components and warm OKLCH tokens inspired by the calm density of
-modern developer tools. It has no runtime font, analytics, or image dependency.
+SvelteKit dashboard and documentation application. The dashboard uses the
+native Svelte [Piqae UI](src/lib/components/ui/README.md) system: neutral OKLCH
+tokens, compact controls, restrained blue brand/focus colour, and semantic
+operational states. It has no runtime font or image dependency.
 
 ## Development
 
@@ -45,9 +46,38 @@ likely platform but never change the server-owned release status. The Add Node
 journey leads with short-lived browser pairing; manual enrolment tokens remain
 an explicit fallback in the node dialog.
 
-### Local Mac agent
+Railway hosts the private release origin in the dedicated `piqae-releases`
+bucket. Configure the web service with the `PIQAE_RELEASES_S3_*` values from
+`.env.example`; the runtime performs reads only. Keep these credentials
+distinct from both release publishing credentials and the `spool-documents`
+print-object credentials, and enforce read-only scope when the provider
+supports it.
+The constrained route maps:
 
-The Local node page can manage a Spool agent running on the same machine as
+```text
+/releases/stable/<artifact> -> native/stable/<artifact>
+/releases/preview/<artifact> -> native/preview/<artifact>
+```
+
+and returns a short-lived signed redirect. Missing configuration, an invalid
+filename, or an absent object returns not found. The stable update feed URLs
+are:
+
+```text
+https://downloads.piqae.com/releases/stable/appcast-macos.xml
+https://downloads.piqae.com/releases/stable/appcast-windows.xml
+```
+
+Those paths being routable does not mean a release exists. Do not set an
+artifact to `supported` or publish a stable appcast until native signature,
+checksum, SBOM, provenance, installation, upgrade, and rollback evidence has
+passed and [`release/support-matrix.yaml`](../../release/support-matrix.yaml)
+agrees. See
+[`docs/operations/native-release-publishing.md`](../../docs/operations/native-release-publishing.md).
+
+### Local Mac node
+
+The Local node page can manage a Piqae node running on the same machine as
 the web server. Enable its same-origin proxy with both server-only values:
 
 ```sh
@@ -61,28 +91,21 @@ the path, token, and authorization header never enter browser data or browser
 storage. When either setting is absent, local access remains disabled with an
 explicit setup message.
 
-## Deployment targets
+## Deployment target
 
-Vercel is the hosted default:
-
-```sh
-pnpm --filter @spool/web build:vercel
-```
-
-The adapter is pinned to the Vercel Node.js 22 runtime so builds are
-deterministic even when contributors use newer Node versions.
-
-Self-hosting produces a normal Node server:
+The hosted and self-hosted dashboard use the same normal Node server:
 
 ```sh
 pnpm --filter @spool/web build:self-host
 PORT=3000 node apps/web/build-node
 ```
 
-Set `SPOOL_DEPLOYMENT_TARGET=node` in generic container builds. Authentication
-providers terminate behind same-origin `/auth/*` routes; WorkOS secrets, OIDC
-secrets, local-owner sessions, and short-lived API tokens never enter Svelte
-components.
+Piqae Cloud runs this image on Railway through
+[`deploy/docker/Dockerfile.web`](../../deploy/docker/Dockerfile.web). The
+production and staging services select `/railway.web.toml`; both use `/healthz`
+as their deployment gate. Authentication providers terminate behind
+same-origin `/auth/*` routes; WorkOS secrets, OIDC secrets, local-owner
+sessions, and short-lived API tokens never enter Svelte components.
 
 ## Authentication modes
 

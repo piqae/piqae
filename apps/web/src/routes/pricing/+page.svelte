@@ -1,6 +1,6 @@
 <script lang="ts">
   import MarketingShell from '$lib/components/marketing/MarketingShell.svelte';
-  import PricingCards from '$lib/components/marketing/PricingCards.svelte';
+  import PricingPagePlans from '$lib/components/marketing/PricingPagePlans.svelte';
   import Seo from '$lib/components/marketing/Seo.svelte';
   import { formatUsd } from '$lib/marketing/plans';
   import type { CloudPricingCatalog } from '$lib/marketing/types';
@@ -70,55 +70,48 @@
   structuredData={pricingStructuredData}
 />
 
-<MarketingShell announcement="Pricing is preview-only until the infrastructure margin and release gates pass">
-  <section class="m-page-hero">
-    <div class="m-container centered">
+<MarketingShell>
+  <section class="pricing-hero">
+    <div class="print-texture" aria-hidden="true">
+      <span class="label label-one"></span>
+      <span class="label label-two"></span>
+      <span class="label label-three"></span>
+      <span class="feed feed-one"></span>
+      <span class="feed feed-two"></span>
+    </div>
+    <div class="m-container hero-copy">
       <span class="m-eyebrow">Pricing</span>
-      <h1 class="m-title">Start free. Scale without surprises.</h1>
+      <h1>Pricing for every print path, starting at $0.</h1>
       <p class="m-lede">
-        Choose managed Piqae Cloud or run the open-source stack yourself. Cloud plans include
-        unlimited workspace members and count each job only when the local print system accepts it.
+        Start with Piqae Cloud, move to Pro when printing becomes business-critical, or run the
+        complete open-source stack yourself.
       </p>
     </div>
   </section>
 
-  <section class="m-container">
-    <PricingCards plans={data.pricing.plans} />
-    <p class="pricing-disclaimer">
-      Prices are USD excluding tax and come from server catalog {data.pricing.version}. Checkout
-      must match the same amount in Stripe before it can open. Sales remain disabled until launch
-      gates pass.
-    </p>
-  </section>
-
-  <section class="m-section">
+  <section class="plans-stage">
     <div class="m-container">
-      <div class="self-hosted m-dark-panel">
-        <div>
-          <span>Apache-2.0</span>
-          <h2>Self-hosted is $0.</h2>
-          <p>
-            Run the control plane, database, object storage, and agents in your environment.
-            Unlimited self-hosted jobs; your team owns the infrastructure and operations.
-          </p>
-        </div>
-        <ul>
-          <li>Complete open-source stack</li>
-          <li>Community support</li>
-          <li>Cloud job charges do not apply</li>
-          <li>Paid enterprise assistance available</li>
-        </ul>
-        <a class="m-button primary" href="/open-source">Explore self-hosting</a>
-      </div>
+      <PricingPagePlans plans={data.pricing.plans} />
     </div>
+    <p class="pricing-disclaimer">
+      Prices are USD excluding tax. Final charges are confirmed at checkout. Cloud sales remain in
+      preview until the infrastructure margin and release gates pass. Catalog {data.pricing.version}.
+    </p>
   </section>
 
   <section class="definitions m-section">
     <div class="m-container">
-      <span class="m-eyebrow">What counts</span>
-      <h2 class="m-heading">Only accepted jobs count.</h2>
+      <div class="section-intro">
+        <span class="m-eyebrow">Straightforward usage</span>
+        <h2 class="m-heading">Pay for printing, not failed attempts.</h2>
+        <p>
+          Piqae counts a Cloud job only after the operating system accepts it. Test jobs,
+          cancellations, and failures before that point do not consume paid usage.
+        </p>
+      </div>
       <div class="m-grid-3">
         <article class="m-card">
+          <span class="definition-number">01</span>
           <h3>Accepted job</h3>
           <p>
             Counted once after a live-environment agent reports that the OS spooler accepted the
@@ -126,6 +119,7 @@
           </p>
         </article>
         <article class="m-card">
+          <span class="definition-number">02</span>
           <h3>Node allowance</h3>
           <p>
             A node is one enrolled computer running Piqae. Workspace members and printers do not
@@ -133,6 +127,7 @@
           </p>
         </article>
         <article class="m-card">
+          <span class="definition-number">03</span>
           <h3>Retention</h3>
           <p>
             Job metadata and document content have separate private-beta policy targets. Automated
@@ -145,7 +140,13 @@
 
   <section class="m-section">
     <div class="m-container">
-      <span class="m-eyebrow">Overages and limits</span>
+      <div class="table-intro">
+        <div>
+          <span class="m-eyebrow">Compare Cloud plans</span>
+          <h2 class="m-heading">The details, side by side.</h2>
+        </div>
+        <p>Human dashboard users and virtual test jobs are unlimited on every Cloud plan.</p>
+      </div>
       <div class="m-table-wrap">
         <table class="m-table">
           <thead>
@@ -177,6 +178,7 @@
   <section class="faq m-section">
     <div class="m-narrow">
       <span class="m-eyebrow">Questions</span>
+      <h2 class="m-heading">Good to know.</h2>
       <details>
         <summary>Does spooler acceptance mean the page printed?</summary>
         <p>No. It means the operating system accepted the handoff. Hardware may still fail, jam, or report an ambiguous result.</p>
@@ -206,29 +208,127 @@
 </MarketingShell>
 
 <style>
-  .centered { display: grid; justify-items: center; text-align: center; }
-  .centered .m-lede { margin-inline: auto; }
-  .pricing-disclaimer { margin: 22px 0 0; color: var(--m-faint); text-align: center; font-size: 11px; }
-  .self-hosted {
-    display: grid;
-    grid-template-columns: 1.3fr 1fr auto;
-    align-items: center;
-    gap: 55px;
-    padding: clamp(30px, 5vw, 58px);
+  .pricing-hero {
+    position: relative;
+    min-height: 650px;
+    overflow: hidden;
+    background:
+      radial-gradient(circle at 20% 40%, rgb(0 106 255 / .3), transparent 32%),
+      radial-gradient(circle at 82% 18%, rgb(70 154 255 / .22), transparent 26%),
+      linear-gradient(135deg, #101216 0%, #07121f 52%, #111 100%);
+    color: white;
   }
-  .self-hosted span { color: #71adff; font-size: 11px; font-weight: 700; text-transform: uppercase; }
-  .self-hosted h2 { margin: 10px 0; font-size: 42px; letter-spacing: -.05em; }
-  .self-hosted p { max-width: 570px; margin: 0; }
-  .self-hosted ul { display: grid; gap: 8px; padding: 0; margin: 0; color: #aaa8b1; list-style: none; font-size: 12px; }
-  .self-hosted li::before { margin-right: 8px; color: var(--m-green); content: '✓'; }
+  .pricing-hero::after {
+    position: absolute;
+    inset: 0;
+    background:
+      linear-gradient(180deg, transparent 55%, rgb(0 0 0 / .42)),
+      repeating-radial-gradient(circle at 20% 30%, rgb(255 255 255 / .025) 0 1px, transparent 1px 4px);
+    content: '';
+    mix-blend-mode: screen;
+    pointer-events: none;
+  }
+  .hero-copy {
+    position: relative;
+    z-index: 2;
+    display: grid;
+    justify-items: center;
+    padding-top: clamp(76px, 9vw, 120px);
+    text-align: center;
+  }
+  .hero-copy .m-eyebrow { color: white; font: 620 12px/1 var(--font-mono); letter-spacing: .08em; text-transform: uppercase; }
+  .hero-copy h1 {
+    max-width: 980px;
+    margin: 20px 0 0;
+    color: white;
+    font-family: var(--m-font-editorial);
+    font-size: clamp(52px, 7vw, 92px);
+    font-weight: 400;
+    letter-spacing: -.055em;
+    line-height: .94;
+    text-wrap: balance;
+  }
+  .hero-copy .m-lede {
+    max-width: 680px;
+    margin-top: 28px;
+    color: rgb(255 255 255 / .76);
+    font-size: 17px;
+  }
+  .print-texture { position: absolute; inset: 0; overflow: hidden; filter: blur(.15px); }
+  .label,
+  .feed {
+    position: absolute;
+    display: block;
+    border: 1px solid rgb(255 255 255 / .12);
+    background:
+      repeating-linear-gradient(180deg, transparent 0 15px, rgb(255 255 255 / .07) 15px 16px),
+      rgb(255 255 255 / .035);
+    box-shadow: 0 30px 70px rgb(0 0 0 / .32);
+    transform: rotate(var(--rotation));
+  }
+  .label { width: 190px; height: 250px; border-radius: 12px; }
+  .label::before {
+    position: absolute;
+    top: 28px;
+    left: 28px;
+    width: 72px;
+    height: 72px;
+    border: 14px solid rgb(255 255 255 / .09);
+    content: '';
+  }
+  .label-one { --rotation: -18deg; top: 85px; left: -40px; }
+  .label-two { --rotation: 16deg; top: -90px; right: 8%; opacity: .7; }
+  .label-three { --rotation: 8deg; right: -50px; bottom: -70px; }
+  .feed { width: 65px; height: 520px; border-radius: 6px; }
+  .feed-one { --rotation: 38deg; top: -180px; left: 27%; opacity: .45; }
+  .feed-two { --rotation: -42deg; right: 26%; bottom: -260px; opacity: .35; }
+  .plans-stage {
+    position: relative;
+    z-index: 3;
+    margin-top: -175px;
+    padding-bottom: clamp(82px, 10vw, 130px);
+  }
+  .pricing-disclaimer {
+    width: min(900px, calc(100% - 48px));
+    margin: 24px auto 0;
+    color: var(--m-faint);
+    text-align: center;
+    font-size: 10px;
+  }
   .definitions { background: #eeece6; }
-  .definitions .m-heading { margin-bottom: 40px; }
+  .section-intro { max-width: 820px; margin-bottom: 54px; }
+  .section-intro > p { max-width: 680px; margin: 24px 0 0; color: var(--m-muted); font-size: 17px; }
+  .definitions .m-card { min-height: 310px; display: flex; flex-direction: column; border-radius: 12px; background: #f8f8f6; }
+  .definitions .m-card h3 { margin-top: auto; font-size: 23px; }
+  .definitions .m-card p { font-size: 14px; }
+  .definition-number { color: var(--m-violet-dark); font: 11px var(--font-mono); }
+  .table-intro {
+    display: flex;
+    align-items: end;
+    justify-content: space-between;
+    gap: 40px;
+    margin-bottom: 50px;
+  }
+  .table-intro > p { max-width: 360px; margin: 0 0 5px; color: var(--m-muted); }
+  .m-table-wrap { border-radius: 13px; background: white; }
   .faq { background: #eeece6; }
+  .faq .m-heading { margin-bottom: 42px; }
   details { border-top: 1px solid var(--m-border); }
   details:last-child { border-bottom: 1px solid var(--m-border); }
-  summary { padding: 22px 0; color: var(--m-ink); font-weight: 620; cursor: pointer; }
+  summary { padding: 25px 0; color: var(--m-ink); font-size: 17px; font-weight: 620; cursor: pointer; }
   details p { margin: -5px 0 24px; color: var(--m-muted); }
   @media (max-width: 900px) {
-    .self-hosted { grid-template-columns: 1fr; gap: 28px; }
+    .pricing-hero { min-height: 610px; }
+    .plans-stage { margin-top: -150px; }
+    .table-intro { display: grid; }
+  }
+  @media (max-width: 680px) {
+    .pricing-hero { min-height: 580px; }
+    .hero-copy { padding-top: 70px; }
+    .hero-copy h1 { font-size: 50px; }
+    .hero-copy .m-lede { font-size: 15px; }
+    .plans-stage { margin-top: -120px; }
+    .label { opacity: .45; }
+    .definitions .m-card { min-height: 245px; }
   }
 </style>

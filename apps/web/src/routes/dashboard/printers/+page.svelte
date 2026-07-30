@@ -4,6 +4,7 @@
   import PageHeader from '$lib/components/PageHeader.svelte';
   import RelativeTime from '$lib/components/RelativeTime.svelte';
   import Status from '$lib/components/Status.svelte';
+  import { DataPanel, SearchField, Toolbar } from '$lib/components/ui';
   let { data } = $props();
   const agents = $derived(data.agents);
   const printers = $derived(data.printers);
@@ -37,23 +38,19 @@
 
 {#if data.dataError}<DataError error={data.dataError} />{/if}
 
-<div class="toolbar">
-  <label class="search">
-    <Icon name="search" size={13} />
-    <input bind:value={query} aria-label="Search printers" placeholder="Search printers…" />
-  </label>
-  <select bind:value={filterState} aria-label="Filter printer state">
+<Toolbar meta={`${visible.length} printers`}>
+  <SearchField bind:value={query} label="Search printers" placeholder="Search printers…" />
+  <select class="ui-select" bind:value={filterState} aria-label="Filter printer state">
     <option value="all">All states</option>
     <option value="online">Online</option>
     <option value="degraded">Degraded</option>
     <option value="offline">Offline</option>
     <option value="paused">Paused</option>
   </select>
-  <span class="count numeric">{visible.length} printers</span>
-</div>
+</Toolbar>
 
-<div class="panel table-panel">
-  <table>
+<DataPanel minWidth="900px">
+  <table class="ui-data-table">
     <thead>
       <tr>
         <th>Printer</th>
@@ -112,95 +109,11 @@
       {/each}
     </tbody>
   </table>
-</div>
+</DataPanel>
 
 <style>
-  .toolbar {
-    min-height: 53px;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-  }
-
-  .search {
-    width: 220px;
-    height: 29px;
-    display: flex;
-    align-items: center;
-    gap: 7px;
-    padding: 0 8px;
-    color: var(--text-tertiary);
-    background: var(--surface);
-    border: 1px solid var(--border-subtle);
-    border-radius: var(--radius-md);
-  }
-
-  .search:focus-within {
-    border-color: var(--accent);
-    box-shadow: 0 0 0 2px var(--accent-soft);
-  }
-
-  input {
-    min-width: 0;
-    width: 100%;
-    color: var(--text-primary);
-    background: transparent;
-    border: 0;
-    outline: 0;
-    font-size: 11px;
-  }
-
-  select {
-    height: 29px;
-    padding: 0 25px 0 8px;
-    color: var(--text-secondary);
-    background: var(--surface);
-    border: 1px solid var(--border-subtle);
-    border-radius: var(--radius-md);
-    font-size: 10px;
-  }
-
-  .count {
-    margin-left: auto;
-    color: var(--text-tertiary);
-    font-size: 10px;
-  }
-
-  .table-panel {
-    overflow-x: auto;
-  }
-
-  table {
-    width: 100%;
-    min-width: 900px;
-    border-collapse: collapse;
-    font-size: 11px;
-  }
-
-  th {
-    height: 31px;
-    padding: 0 12px;
-    color: var(--text-tertiary);
-    font-size: 9px;
-    font-weight: 500;
-    text-align: left;
-    text-transform: uppercase;
-    letter-spacing: 0.035em;
-    border-bottom: 1px solid var(--border-subtle);
-  }
-
-  td {
+  .ui-data-table td {
     height: 54px;
-    padding: 0 12px;
-    border-bottom: 1px solid var(--border-subtle);
-  }
-
-  tbody tr:last-child td {
-    border-bottom: 0;
-  }
-
-  tbody tr:hover {
-    background: color-mix(in oklch, var(--surface-hover), transparent 35%);
   }
 
   .printer {
@@ -284,18 +197,4 @@
     background: var(--surface-hover);
   }
 
-  @media (max-width: 620px) {
-    .toolbar {
-      flex-wrap: wrap;
-      padding: 10px 0;
-    }
-
-    .search {
-      width: 100%;
-    }
-
-    .count {
-      display: none;
-    }
-  }
 </style>

@@ -9,18 +9,18 @@ describe('workflow explorer', () => {
     render(WorkflowExplorer);
 
     expect(
-      screen.getByRole('heading', { name: 'See every print workflow click into place.' })
+      screen.getByRole('heading', { name: 'See your whole print operation click into place.' })
     ).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Build it into your product' })).toHaveAttribute(
+    expect(screen.getByRole('button', { name: 'Build printing into your app' })).toHaveAttribute(
       'aria-expanded',
       'true'
     );
     expect(screen.getByRole('img', { name: 'Inside your product printing with Piqae' }))
       .toBeInTheDocument();
 
-    await fireEvent.click(screen.getByRole('button', { name: 'Ship every order' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Print every order' }));
 
-    expect(screen.getByRole('button', { name: 'Ship every order' })).toHaveAttribute(
+    expect(screen.getByRole('button', { name: 'Print every order' })).toHaveAttribute(
       'aria-expanded',
       'true'
     );

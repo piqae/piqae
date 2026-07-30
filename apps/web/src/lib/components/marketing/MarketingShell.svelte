@@ -73,7 +73,7 @@
     <div class="footer-lead m-container">
       <div>
         <a class="brand footer-brand" href="/"><Logo /></a>
-        <p>Reliable printing, built into your product.</p>
+        <p>Cloud printing infrastructure, built for developers.</p>
       </div>
       <a class="m-button primary" href="/start?plan=free&source=footer">Start free <span>→</span></a>
     </div>
