@@ -1,8 +1,9 @@
-# Spool for Windows — development installer
+# Piqae Node for Windows — development installer
 
 The Windows package is a **per-user development installation**. It installs the
 agent, executor, native driver-profile host, CLI, and notification-area shell
-under `%LOCALAPPDATA%\Programs\Spool`, then starts the agent and shell at login
+under `%LOCALAPPDATA%\Programs\Piqae` for new installations, then starts the
+agent and shell at login
 through the current user's `Run` registry key.
 
 It does not register `spool-agent.exe` with the Service Control Manager. The
@@ -12,15 +13,15 @@ are not claimed by this package.
 
 ## Install and connect
 
-Run `spool-windows-x86_64-setup.exe` as the Windows user who will configure the
-printer. Setup opens **Configure Spool** after copying the files.
+Run `piqae-windows-x86_64-setup.exe` as the Windows user who will configure the
+printer. Setup opens **Configure Piqae Node** after copying the files.
 
 The configuration wizard supports:
 
 - **Local mode**, which discovers and prints to drivers installed for that user
   without connecting to a control plane.
 - **Connected mode**, which consumes a short-lived one-time enrolment token
-  against an HTTPS Spool control-plane URL. The private Ed25519 device key is
+  against an HTTPS Piqae control-plane URL. The private Ed25519 device key is
   generated on the Windows computer and is never sent to the server.
 
 Configuration and durable queue data live in `%LOCALAPPDATA%\Spool`. The wizard
@@ -34,7 +35,7 @@ must listen on a LAN-reachable interface, have firewall access, and preferably
 use HTTPS with a certificate trusted by Windows. `127.0.0.1` and `localhost`
 always refer to the Windows computer itself. For a short trusted-LAN development
 test the wizard can explicitly permit HTTP after showing a transport warning.
-The optional dashboard URL only controls the tray's **Open Spool** action; it
+The optional dashboard URL only controls the tray's **Open Piqae** action; it
 does not connect or enrol the Windows agent.
 
 ## Native driver profiles
@@ -47,7 +48,7 @@ finishing controls.
 
 PDF jobs pinned to a native profile use the packaged PDFium renderer and a GDI
 printer device context created from that exact immutable DEVMODE. Before every
-handoff Spool checks the queue/driver fingerprint, asks the installed driver to
+handoff Piqae checks the queue/driver fingerprint, asks the installed driver to
 revalidate and normalize the captured bytes, and applies only the profile's
 explicitly allowed per-job public overrides. Opaque vendor bytes remain under
 the driver’s control.
@@ -59,13 +60,14 @@ settings and is never substituted for a pinned native profile.
 
 ## Operations
 
-- Reconfigure: Start menu → **Spool → Configure Spool**
-- Start: Start menu → **Spool → Start Spool**
-- Stop: Start menu → **Spool → Stop Spool**
+- Reconfigure: Start menu → **Piqae → Configure Piqae Node**
+- Start: Start menu → **Piqae → Start Piqae Node**
+- Stop: Start menu → **Piqae → Stop Piqae Node**
 - Local API: `http://127.0.0.1:39100`
 - Logs: `%LOCALAPPDATA%\Spool\logs`
-- Update policy: Start menu → **Spool → Update policy**
-- Uninstall: Windows Settings → Apps → Installed apps → Spool
+- Update policy: Start menu → **Piqae → Update policy**
+- Manual update check: tray menu → **Check for updates…** (signed packages only)
+- Uninstall: Windows Settings → Apps → Installed apps → Piqae Node
 
 To remove state after uninstall, first confirm no jobs or enrolled identity must
 be retained, then manually remove `%LOCALAPPDATA%\Spool`.
@@ -74,12 +76,12 @@ be retained, then manually remove `%LOCALAPPDATA%\Spool`.
 
 GitHub Actions builds the binaries with the MSVC Rust target and compiles
 `Spool.iss` with Inno Setup. Run the **Release** workflow manually for a
-versioned dry-run artifact, or download the `spool-windows-installer` artifact
+versioned dry-run artifact, or download the `piqae-windows-installer` artifact
 from a CI run. With GitHub CLI authenticated on a development computer:
 
 ```console
 gh run list --workflow CI
-gh run download RUN_ID --name spool-windows-installer --dir ~/Downloads/Spool-Windows
+gh run download RUN_ID --name piqae-windows-installer --dir ~/Downloads/Piqae-Windows
 ```
 
 The artifact contains the installer and its SHA-256 sidecar. Release archives
@@ -98,7 +100,7 @@ The dedicated `windows-release.yml` workflow has two explicit modes:
 
 - **Signed release** requires an Authenticode PFX/password, RFC 3161 timestamp
   URL, WinSparkle Ed25519 private/public key pair, and HTTPS appcast URL. It
-  signs every Spool executable, the Inno-generated uninstaller, and the final
+  signs every Piqae Node executable, the Inno-generated uninstaller, and the final
   installer; verifies Authenticode; signs the final installer bytes with
   WinSparkle's official companion tool; and generates an appcast.
 - **Unsigned preview** is produced when all signing credentials are absent. Its
@@ -108,20 +110,27 @@ The dedicated `windows-release.yml` workflow has two explicit modes:
 Partially configured signing fails the workflow. The workflow never silently
 downgrades an intended signed release to unsigned.
 
-WinSparkle 0.9.4's binary distribution is fetched only for its release signing
-tool and is verified against SHA-256
+WinSparkle 0.9.4's binary distribution is verified against SHA-256
 `6037df37fc263bd1650a1c4949681a9d40ffe991d01f35892a406cb5d103c976`.
-The runtime DLL is not installed yet because the Rust tray has not implemented
-the WinSparkle C API lifecycle. The per-user registry policy and environment
-configuration are integration hooks, not a claim that automatic updates
-currently execute.
+The x64 runtime inside it is independently pinned to SHA-256
+`9b43b1c16ee39fb9a91b5bd75138767898779510e0836be2919250607cdbe8ab`.
+Signed packages install that DLL and the Rust tray implements the WinSparkle C
+API lifecycle. Unsigned packages omit it.
+
+`notify` enables manual checks and `automatic` enables periodic checks. Both
+show WinSparkle's native user confirmation. Installer handoff is denied unless
+the node is already paused, has no active job, and is not editing a native
+profile. This protects the spooler boundary but is not automatic rollback or a
+complete shared update guardian; those remain separate release gates.
 
 Every workflow artifact includes SHA-256 checksums and an SPDX SBOM. GitHub
-build provenance is requested for both preview and signed artifacts. A GitHub
-release is published only for a signed build; absence of signing credentials
-always leaves a downloadable workflow artifact and never creates a release.
+build provenance is requested for both preview and signed artifacts. Unsigned
+previews remain workflow artifacts and can never enter the stable release
+bucket.
 
-`WINDOWS_UPDATE_FEED_URL` must identify an operator-controlled stable HTTPS
-location. Publishing a GitHub release attaches the generated appcast as release
-evidence, but does not deploy or replace the appcast at that stable URL. Feed
-deployment and rollback remain an explicit release-operations step.
+Signed publication is isolated behind the protected `native-release` GitHub
+environment. The workflow uploads immutable versioned objects to the dedicated
+Railway S3-compatible release bucket, verifies their recorded size and SHA-256,
+and only then promotes the installer and signed appcast under
+`https://downloads.piqae.com/releases/stable/`. The appcast is promoted after
+its referenced installer, and the shared release manifest is promoted last.

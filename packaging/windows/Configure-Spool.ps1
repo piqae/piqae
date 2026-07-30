@@ -20,8 +20,8 @@ function Read-Mode {
     Write-Host ""
     Write-Host "Choose how this Windows node runs:"
     Write-Host "  1. Local only (no server)"
-    Write-Host "  2. Hosted Spool control plane"
-    Write-Host "  3. Self-hosted Spool control plane"
+    Write-Host "  2. Hosted Piqae control plane"
+    Write-Host "  3. Self-hosted Piqae control plane"
     $answer = Read-Host "Mode [1]"
     switch ($answer) {
         "2" { return "hosted" }
@@ -122,9 +122,9 @@ Move-Item -Force -LiteralPath $temporaryConfig -Destination $ConfigPath
 Protect-UserFile $ConfigPath
 
 Write-Host ""
-Write-Host "Spool configuration saved to $ConfigPath"
+Write-Host "Piqae Node configuration saved to $ConfigPath"
 if (-not $DoNotStart) {
     & (Join-Path $InstallDirectory "Stop-Spool.ps1")
     & (Join-Path $InstallDirectory "Start-Spool.ps1")
-    Write-Host "Spool is running. The local API is http://127.0.0.1:39100"
+    Write-Host "Piqae Node is running. The local API is http://127.0.0.1:39100"
 }

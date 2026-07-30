@@ -3,6 +3,8 @@
 //! The shell deliberately talks only to the authenticated loopback API. It
 //! never opens the agent database or receives hosted credentials.
 
+pub mod updater;
+
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::{Serialize, de::DeserializeOwned};
 use sha2::{Digest as _, Sha256};

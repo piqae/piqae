@@ -1,4 +1,4 @@
-# Spool Windows shell
+# Piqae Node Windows shell
 
 The Windows V1 shell is a Win32 notification-area process, separate from the
 Windows Service or user-mode agent. Its only stable dependency is the local IPC
@@ -13,7 +13,7 @@ printing code.
 `SPOOL_LOCAL_API_URL` defaults to `http://127.0.0.1:39100` and rejects
 non-loopback origins. `SPOOL_LOCAL_TOKEN_FILE` can point at the agent's
 `local.token`; otherwise the shell uses `SPOOL_DATA_DIR/local.token`, then
-`%ProgramData%\Spool\local.token`. `SPOOL_DASHBOARD_URL` controls the Open Spool
+`%ProgramData%\Spool\local.token`. `SPOOL_DASHBOARD_URL` controls the Open Piqae
 action.
 
 ## Native profile host
@@ -53,22 +53,32 @@ revision; editing restores the exact prior revision and creates another.
 
 ## Update integration boundary
 
-Windows release packaging can install a WinSparkle-compatible `update-config.json`
-and exports these values to the tray process:
+Signed Windows release packaging includes a hash-pinned WinSparkle 0.9.4 x64
+runtime and an `update-config.json`. The launcher exports this complete trust
+tuple to the tray process:
 
 - `SPOOL_UPDATE_POLICY`
 - `SPOOL_UPDATE_FEED_URL`
 - `SPOOL_UPDATE_ED25519_PUBLIC_KEY`
+- `SPOOL_UPDATE_RUNTIME_VERSION`
+- `SPOOL_UPDATE_RUNTIME_SHA256`
 
-The current Rust tray does **not** load `WinSparkle.dll` or call its C API.
-Consequently, storing `notify` or `automatic` policy is only a forward-compatible
-per-user policy hook; it does not perform a network check or install an update.
-Unsigned preview packages contain no feed or public key and force the effective
-policy to `disabled`.
+The Rust tray loads the DLL only by absolute path from its own installation
+directory after verifying its SHA-256 digest. It resolves the required C API,
+sets the HTTPS appcast and Ed25519 public key, and initializes WinSparkle only
+when the full tuple is valid. `notify` enables the tray's manual **Check for
+updates…** action without background checks. `automatic` additionally enables
+WinSparkle's periodic checks. Both modes still require operator confirmation;
+neither silently installs an update.
 
-Before enabling runtime checks, the shell must dynamically load a pinned
-WinSparkle runtime, call `win_sparkle_set_appcast_url()` and
-`win_sparkle_set_eddsa_public_key()`, honor the current-user policy, expose a
-manual **Check for updates** action, and cover initialization/shutdown with
-Windows integration tests. It must never initialize WinSparkle without both an
-HTTPS feed and an Ed25519 public key.
+Before handing a downloaded installer to Windows, the tray asks the local
+agent for current state. The handoff is allowed only when the node is already
+paused, no job is active, and no native profile dialog is open. Queued jobs stay
+in the durable agent database. This is a fail-closed release boundary, not the
+planned shared update guardian or automatic rollback implementation.
+
+Unsigned preview packages contain no feed, key, or WinSparkle DLL and force the
+effective policy to `disabled`. Missing, modified, incomplete, non-HTTPS, or
+unsupported updater configuration leaves printing available but does not
+initialize WinSparkle. Normal shell shutdown calls `win_sparkle_cleanup()`
+before unloading the runtime.

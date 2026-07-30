@@ -34,18 +34,19 @@ try {
     Assert-True (-not $preview.feed_url) "Preview must not contain a feed URL."
     Assert-True (-not $preview.ed25519_public_key) "Preview must not contain an update key."
     Assert-True (-not $preview.shell_integration_available) "Preview must not claim shell integration."
+    Assert-True (-not $preview.runtime_sha256) "Preview must not pin an updater runtime."
 
-    $signedPath = Join-Path $TemporaryDirectory "signed.json"
-    $publicKey = ("A" * 43) + "="
-    & (Join-Path $PSScriptRoot "New-UpdateConfig.ps1") `
-        -OutputPath $signedPath `
-        -SignedRelease `
-        -FeedUrl "https://updates.example.test/windows.xml" `
-        -Ed25519PublicKey $publicKey
-    $signed = Get-Content -Raw -LiteralPath $signedPath | ConvertFrom-Json
-    Assert-True $signed.release_signed "Signed configuration must record release signing."
-    Assert-True (-not $signed.shell_integration_available) "Packaging must not claim tray updater integration."
-    Assert-True (-not $signed.automatic_checks_supported) "Automatic checks must remain unavailable."
+    $rejectedMissingRuntime = $false
+    try {
+        & (Join-Path $PSScriptRoot "New-UpdateConfig.ps1") `
+            -OutputPath (Join-Path $TemporaryDirectory "signed.json") `
+            -SignedRelease `
+            -FeedUrl "https://updates.example.test/windows.xml" `
+            -Ed25519PublicKey (("A" * 43) + "=")
+    } catch {
+        $rejectedMissingRuntime = $true
+    }
+    Assert-True $rejectedMissingRuntime "Signed update configuration accepted a missing runtime."
 
     $rejectedUnsignedFeed = $false
     try {
@@ -62,7 +63,7 @@ try {
     & (Join-Path $PSScriptRoot "New-WinSparkleAppcast.ps1") `
         -OutputPath $appcastPath `
         -Version "1.2.3-preview.1" `
-        -DownloadUrl "https://downloads.example.test/spool-setup.exe" `
+        -DownloadUrl "https://downloads.example.test/piqae-node-setup.exe" `
         -Length 12345 `
         -Ed25519Signature $signature `
         -PublishedAt ([datetime]"2026-01-01T00:00:00Z") `
@@ -77,6 +78,7 @@ try {
 
     $installer = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot "Spool.iss")
     Assert-True ($installer.Contains("update-config.json")) "Installer does not stage update configuration."
+    Assert-True ($installer.Contains("WinSparkle.dll")) "Installer does not stage WinSparkle when present."
     Assert-True ($installer.Contains("createvalueifdoesntexist")) "Installer would overwrite the user update policy."
 
     Write-Host "Windows packaging static tests passed."

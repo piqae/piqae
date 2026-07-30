@@ -6,7 +6,7 @@ $InstallDirectory = $PSScriptRoot
 $StateDirectory = Join-Path $env:LOCALAPPDATA "Spool"
 $ConfigPath = Join-Path $StateDirectory "config.json"
 if (-not (Test-Path -LiteralPath $ConfigPath)) {
-    throw "Spool is not configured. Run Configure Spool from the Start menu."
+    throw "Piqae Node is not configured. Run Configure Piqae Node from the Start menu."
 }
 $config = Get-Content -Raw -LiteralPath $ConfigPath | ConvertFrom-Json
 
@@ -45,6 +45,8 @@ $env:SPOOL_DASHBOARD_URL = $null
 $env:SPOOL_UPDATE_POLICY = "disabled"
 $env:SPOOL_UPDATE_FEED_URL = $null
 $env:SPOOL_UPDATE_ED25519_PUBLIC_KEY = $null
+$env:SPOOL_UPDATE_RUNTIME_VERSION = $null
+$env:SPOOL_UPDATE_RUNTIME_SHA256 = $null
 
 if ($config.control_plane_url) {
     $env:SPOOL_CONTROL_PLANE_URL = $config.control_plane_url
@@ -64,10 +66,15 @@ if (Test-Path -LiteralPath $updateConfigPath) {
         $updateConfig.release_signed -and
         $updateConfig.automatic_checks_supported -and
         $updateConfig.feed_url -and
-        $updateConfig.ed25519_public_key) {
+        $updateConfig.ed25519_public_key -and
+        $updateConfig.runtime_version -and
+        $updateConfig.runtime_sha256 -and
+        (Test-Path -LiteralPath (Join-Path $InstallDirectory "WinSparkle.dll"))) {
         $env:SPOOL_UPDATE_POLICY = $updatePolicy
         $env:SPOOL_UPDATE_FEED_URL = $updateConfig.feed_url
         $env:SPOOL_UPDATE_ED25519_PUBLIC_KEY = $updateConfig.ed25519_public_key
+        $env:SPOOL_UPDATE_RUNTIME_VERSION = $updateConfig.runtime_version
+        $env:SPOOL_UPDATE_RUNTIME_SHA256 = $updateConfig.runtime_sha256
     }
 }
 

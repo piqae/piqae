@@ -45,10 +45,10 @@ try {
     $writer.WriteAttributeString("version", "2.0")
     $writer.WriteAttributeString("xmlns", "sparkle", $null, $SparkleNamespace)
     $writer.WriteStartElement("channel")
-    $writer.WriteElementString("title", "Spool for Windows")
-    $writer.WriteElementString("description", "Signed Spool Windows releases")
+    $writer.WriteElementString("title", "Piqae Node for Windows")
+    $writer.WriteElementString("description", "Signed Piqae Node releases for Windows")
     $writer.WriteStartElement("item")
-    $writer.WriteElementString("title", "Spool $Version")
+    $writer.WriteElementString("title", "Piqae Node $Version")
     $writer.WriteElementString("pubDate", $PublishedAt.ToUniversalTime().ToString("r"))
     if ($ReleaseNotesUrl) {
         $writer.WriteElementString("sparkle", "releaseNotesLink", $SparkleNamespace, $ReleaseNotesUrl.AbsoluteUri)

@@ -5,11 +5,16 @@ mod windows_shell {
     use spool_domain::ProfileCaptureOperation;
     use spool_shell_windows::{
         LocalAgentClient, LocalApiConfiguration, ShellError, capture_payload, run_profile_host,
+        updater::{UpdateConfiguration, WindowsUpdater},
     };
     use std::{
+        cell::RefCell,
         mem::size_of,
         path::PathBuf,
-        sync::{Arc, Mutex, OnceLock},
+        sync::{
+            Arc, Mutex, OnceLock,
+            atomic::{AtomicBool, AtomicIsize, Ordering},
+        },
     };
     use windows_sys::Win32::{
         Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM},
@@ -23,10 +28,10 @@ mod windows_shell {
                 AppendMenuW, CW_USEDEFAULT, CreatePopupMenu, CreateWindowExW, DefWindowProcW,
                 DestroyMenu, DestroyWindow, DispatchMessageW, GetCursorPos, GetMessageW,
                 IDI_APPLICATION, LoadIconW, MB_ICONERROR, MB_ICONINFORMATION, MB_OK, MF_DISABLED,
-                MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING, MSG, MessageBoxW, PostQuitMessage,
-                RegisterClassW, SW_SHOWNORMAL, SetForegroundWindow, TPM_NONOTIFY, TPM_RETURNCMD,
-                TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WM_APP, WM_CONTEXTMENU,
-                WM_DESTROY, WM_LBUTTONUP, WM_RBUTTONUP, WNDCLASSW, WS_OVERLAPPED,
+                MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING, MSG, MessageBoxW, PostMessageW,
+                PostQuitMessage, RegisterClassW, SW_SHOWNORMAL, SetForegroundWindow, TPM_NONOTIFY,
+                TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WM_APP, WM_CLOSE,
+                WM_CONTEXTMENU, WM_DESTROY, WM_LBUTTONUP, WM_RBUTTONUP, WNDCLASSW, WS_OVERLAPPED,
             },
         },
     };
@@ -36,6 +41,12 @@ mod windows_shell {
     const TRAY_ICON_ID: u32 = 1;
 
     static SHELL_STATE: OnceLock<Mutex<ShellState>> = OnceLock::new();
+    static UPDATE_CLIENT: OnceLock<Arc<LocalAgentClient>> = OnceLock::new();
+    static UPDATE_WINDOW: AtomicIsize = AtomicIsize::new(0);
+    static PROFILE_CAPTURE_ACTIVE: AtomicBool = AtomicBool::new(false);
+    thread_local! {
+        static UPDATER: RefCell<Option<WindowsUpdater>> = const { RefCell::new(None) };
+    }
 
     #[derive(Clone, Debug)]
     enum MenuAction {
@@ -47,8 +58,16 @@ mod windows_shell {
             is_default: bool,
         },
         OpenDashboard,
+        CheckForUpdates,
         Refresh,
         Exit,
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum UpdateAvailability {
+        Disabled,
+        Available,
+        Unavailable,
     }
 
     #[derive(Debug)]
@@ -60,6 +79,7 @@ mod windows_shell {
         snapshot: Option<ShellSnapshot>,
         refresh_error: Option<String>,
         refresh_in_progress: bool,
+        updates: UpdateAvailability,
     }
 
     #[derive(Clone, Debug)]
@@ -82,6 +102,7 @@ mod windows_shell {
                 snapshot: None,
                 refresh_error: None,
                 refresh_in_progress: false,
+                updates: UpdateAvailability::Disabled,
             }))
             .map_err(|_| "Windows shell state was already initialized".to_owned())?;
 
@@ -121,6 +142,7 @@ mod windows_shell {
                 return Err("CreateWindowExW failed".into());
             }
             add_icon(window)?;
+            initialize_updater(window);
             schedule_refresh();
             let mut message: MSG = std::mem::zeroed();
             while GetMessageW(&mut message, std::ptr::null_mut(), 0, 0) > 0 {
@@ -138,10 +160,10 @@ mod windows_shell {
             return Ok(PathBuf::from(path));
         }
         let executable = std::env::current_exe()
-            .map_err(|error| format!("Cannot find Spool installation directory: {error}"))?;
+            .map_err(|error| format!("Cannot find the Piqae installation directory: {error}"))?;
         let directory = executable
             .parent()
-            .ok_or_else(|| "Cannot find Spool installation directory".to_owned())?;
+            .ok_or_else(|| "Cannot find the Piqae installation directory".to_owned())?;
         Ok(directory.join("spool-profile-host-windows.exe"))
     }
 
@@ -166,7 +188,7 @@ mod windows_shell {
             data.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
             data.uCallbackMessage = TRAY_MESSAGE;
             data.hIcon = LoadIconW(std::ptr::null_mut(), IDI_APPLICATION);
-            let tip = wide("Spool print node");
+            let tip = wide("Piqae Node");
             for (target, source) in data.szTip.iter_mut().zip(tip) {
                 *target = source;
             }
@@ -201,6 +223,8 @@ mod windows_shell {
             }
         }
         if message == WM_DESTROY {
+            UPDATER.with(|updater| drop(updater.borrow_mut().take()));
+            UPDATE_WINDOW.store(0, Ordering::Release);
             if let Ok(data) = notification_data(window) {
                 // SAFETY: Removing the icon uses the same live window and icon
                 // ID supplied to NIM_ADD.
@@ -268,7 +292,7 @@ mod windows_shell {
                 append_disabled(
                     menu,
                     &format!(
-                        "Spool — {workspace} · {}",
+                        "Piqae — {workspace} · {}",
                         connection_label(status.connection)
                     ),
                 );
@@ -337,7 +361,7 @@ mod windows_shell {
                 }
             }
             None => {
-                append_disabled(menu, "Spool — Connecting…");
+                append_disabled(menu, "Piqae — Connecting…");
                 if let Some(error) = state.refresh_error.as_deref() {
                     append_disabled(menu, error);
                 } else {
@@ -347,10 +371,26 @@ mod windows_shell {
         }
         drop(state);
         append_separator(menu);
-        append_action(menu, "Open Spool", MenuAction::OpenDashboard, &mut actions);
+        append_action(menu, "Open Piqae", MenuAction::OpenDashboard, &mut actions);
+        match SHELL_STATE
+            .get()
+            .and_then(|state| state.lock().ok())
+            .map(|state| state.updates)
+        {
+            Some(UpdateAvailability::Available) => append_action(
+                menu,
+                "Check for updates…",
+                MenuAction::CheckForUpdates,
+                &mut actions,
+            ),
+            Some(UpdateAvailability::Unavailable) => {
+                append_disabled(menu, "Updates unavailable");
+            }
+            _ => {}
+        }
         append_action(menu, "Refresh", MenuAction::Refresh, &mut actions);
         append_separator(menu);
-        append_action(menu, "Quit Spool", MenuAction::Exit, &mut actions);
+        append_action(menu, "Quit Piqae Node", MenuAction::Exit, &mut actions);
         actions
     }
 
@@ -375,6 +415,13 @@ mod windows_shell {
                 is_default,
             ),
             Some(MenuAction::OpenDashboard) => open_dashboard(window),
+            Some(MenuAction::CheckForUpdates) => {
+                UPDATER.with(|updater| {
+                    if let Some(updater) = updater.borrow().as_ref() {
+                        updater.check_with_ui();
+                    }
+                });
+            }
             Some(MenuAction::Refresh) => schedule_refresh(),
             Some(MenuAction::Exit) => unsafe {
                 DestroyWindow(window);
@@ -391,6 +438,7 @@ mod windows_shell {
         operation: ProfileCaptureOperation,
         is_default: bool,
     ) {
+        PROFILE_CAPTURE_ACTIVE.store(true, Ordering::Release);
         let result = (|| {
             let state_lock = SHELL_STATE
                 .get()
@@ -423,6 +471,7 @@ mod windows_shell {
                 }
             }
         })();
+        PROFILE_CAPTURE_ACTIVE.store(false, Ordering::Release);
 
         match result {
             Ok(Some(profile)) => message(
@@ -437,12 +486,92 @@ mod windows_shell {
             Ok(None) => {}
             Err(error) => message(
                 window,
-                "Spool could not save the profile",
+                "Piqae could not save the profile",
                 &compact_error(&error),
                 MB_ICONERROR,
             ),
         }
         schedule_refresh();
+    }
+
+    fn initialize_updater(window: HWND) {
+        let requested = std::env::var("SPOOL_UPDATE_POLICY")
+            .is_ok_and(|policy| matches!(policy.trim(), "notify" | "automatic"));
+        let configuration = match UpdateConfiguration::from_environment() {
+            Ok(Some(configuration)) => configuration,
+            Ok(None) => return,
+            Err(_) => {
+                set_update_availability(UpdateAvailability::Unavailable);
+                return;
+            }
+        };
+        let executable = match std::env::current_exe() {
+            Ok(executable) => executable,
+            Err(_) => {
+                set_update_availability(UpdateAvailability::Unavailable);
+                return;
+            }
+        };
+        let client = SHELL_STATE
+            .get()
+            .and_then(|state| state.lock().ok())
+            .map(|state| Arc::clone(&state.client));
+        let Some(client) = client else {
+            set_update_availability(UpdateAvailability::Unavailable);
+            return;
+        };
+        if UPDATE_CLIENT.set(client).is_err() {
+            set_update_availability(UpdateAvailability::Unavailable);
+            return;
+        }
+        UPDATE_WINDOW.store(window as isize, Ordering::Release);
+        match WindowsUpdater::initialize(
+            &configuration,
+            &executable,
+            updater_can_shutdown,
+            updater_shutdown_requested,
+        ) {
+            Ok(updater) => {
+                UPDATER.with(|slot| {
+                    *slot.borrow_mut() = Some(updater);
+                });
+                set_update_availability(UpdateAvailability::Available);
+            }
+            Err(_) if requested => set_update_availability(UpdateAvailability::Unavailable),
+            Err(_) => {}
+        }
+    }
+
+    fn set_update_availability(availability: UpdateAvailability) {
+        if let Some(state) = SHELL_STATE.get() {
+            if let Ok(mut state) = state.lock() {
+                state.updates = availability;
+            }
+        }
+    }
+
+    unsafe extern "C" fn updater_can_shutdown() -> i32 {
+        if PROFILE_CAPTURE_ACTIVE.load(Ordering::Acquire) {
+            return 0;
+        }
+        let Some(client) = UPDATE_CLIENT.get() else {
+            return 0;
+        };
+        match client.status() {
+            Ok(status) if status.paused && status.active_jobs == 0 => 1,
+            _ => 0,
+        }
+    }
+
+    unsafe extern "C" fn updater_shutdown_requested() {
+        let window = UPDATE_WINDOW.load(Ordering::Acquire) as HWND;
+        if !window.is_null() {
+            // SAFETY: The handle belongs to this process. Posting WM_CLOSE is
+            // asynchronous and lets the UI thread perform normal cleanup.
+            unsafe {
+                PostMessageW(window, WM_CLOSE, 0, 0);
+            }
+        }
     }
 
     fn schedule_refresh() {
@@ -583,7 +712,7 @@ mod windows_shell {
 #[cfg(windows)]
 fn main() {
     if let Err(error) = windows_shell::run() {
-        eprintln!("Spool Windows shell failed: {error}");
+        eprintln!("Piqae Node for Windows failed: {error}");
         std::process::exit(1);
     }
 }
