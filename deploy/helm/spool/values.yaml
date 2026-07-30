@@ -11,7 +11,7 @@ imagePullSecrets: []
 config:
   environment: production
   authMode: oidc
-  oidcIssuer: https://api.workos.com/
+  oidcIssuer: https://api.workos.com/user_management/client_replace-me
   oidcJwksUrl: ""
   oidcAudience: ""
   oidcBindingClaim: client_id

@@ -114,7 +114,7 @@ variable "auth_mode" {
 variable "oidc_issuer" {
   type        = string
   description = "Exact trusted OIDC issuer, including its trailing slash when the issuer publishes one."
-  default     = "https://api.workos.com/"
+  default     = "https://api.workos.com/user_management/client_replace-me"
 }
 
 variable "oidc_jwks_url" {

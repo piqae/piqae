@@ -54,7 +54,7 @@ The production Rust API uses:
 ```text
 SPOOL_AUTH_MODE=oidc
 SPOOL_IDENTITY_PROVIDER=workos
-SPOOL_OIDC_ISSUER=https://api.workos.com/
+SPOOL_OIDC_ISSUER=https://api.workos.com/user_management/<production-client-id>
 SPOOL_OIDC_JWKS_URL=https://api.workos.com/sso/jwks/<production-client-id>
 SPOOL_OIDC_CLIENT_ID=<production-client-id>
 SPOOL_OIDC_ORGANIZATION_CLAIM=org_id

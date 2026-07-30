@@ -72,7 +72,7 @@ fn verify_workos_signature_at(
         .ok_or_else(AppError::unauthorized)?;
     let mut timestamp = None;
     let mut signatures = Vec::new();
-    for component in value.split(',') {
+    for component in value.split(',').map(str::trim) {
         if let Some(value) = component.strip_prefix("t=") {
             timestamp = value.parse::<i64>().ok();
         } else if let Some(value) = component.strip_prefix("v1=")
@@ -235,7 +235,7 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(
             "workos-signature",
-            HeaderValue::from_str(&format!("t={timestamp},v1={signature}"))
+            HeaderValue::from_str(&format!("t={timestamp}, v1={signature}"))
                 .expect("valid test header"),
         );
         assert!(verify_workos_signature_at(&headers, body, secret, timestamp).is_ok());
