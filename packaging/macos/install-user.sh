@@ -52,6 +52,18 @@ menu_plist="$launch_agents/com.c4coffee.spool.menu.plist"
 agent_label="com.c4coffee.spool.agent"
 menu_label="com.c4coffee.spool.menu"
 domain="gui/$UID"
+local_port=39100
+
+launch_agent_pid() {
+  launchctl print "$domain/$agent_label" 2>/dev/null |
+    awk '$1 == "pid" && $2 == "=" && $3 ~ /^[0-9]+$/ { print $3; exit }'
+}
+
+listener_pid() {
+  { /usr/sbin/lsof -nP -t -iTCP:"$local_port" -sTCP:LISTEN 2>/dev/null || true; } |
+    sort -n |
+    head -n 1
+}
 
 is_loaded=false
 if launchctl print "$domain/$agent_label" >/dev/null 2>&1; then
@@ -59,6 +71,12 @@ if launchctl print "$domain/$agent_label" >/dev/null 2>&1; then
 fi
 
 if [[ "$is_loaded" == true ]]; then
+  managed_pid=$(launch_agent_pid)
+  bound_pid=$(listener_pid)
+  if [[ -z "$managed_pid" || -z "$bound_pid" || "$managed_pid" != "$bound_pid" ]]; then
+    echo "The Piqae local port is not owned by the installed LaunchAgent. Stop any development node before installing." >&2
+    exit 1
+  fi
   token_file="$support_root/local.token"
   if [[ ! -r "$token_file" ]]; then
     echo "The running agent's local token is unavailable; refusing an unverified handoff." >&2
@@ -92,12 +110,28 @@ if [[ "$is_loaded" == true ]]; then
     echo "Piqae has $queued queued and $active active jobs. Drain them before updating." >&2
     exit 1
   fi
+elif [[ -n "$(listener_pid)" ]]; then
+  echo "The Piqae local port is already in use. Stop the other local node before installing." >&2
+  exit 1
 fi
 
 if [[ "$is_loaded" == true ]]; then
   launchctl bootout "$domain/$agent_label"
 fi
 launchctl bootout "$domain/$menu_label" >/dev/null 2>&1 || true
+/usr/bin/osascript \
+  -e 'tell application id "com.c4coffee.spool.menu" to quit' \
+  >/dev/null 2>&1 || true
+for _ in {1..20}; do
+  if ! pgrep -x SpoolMenu >/dev/null 2>&1; then
+    break
+  fi
+  sleep 0.25
+done
+if pgrep -x SpoolMenu >/dev/null 2>&1; then
+  echo "Piqae Menu did not quit; no files were replaced." >&2
+  exit 1
+fi
 
 mkdir -p "$install_root" "$HOME/Applications" "$launch_agents" "$log_root"
 install -m 0755 "$agent_source" "$install_root/spool-agent"
@@ -144,6 +178,32 @@ launchctl enable "$domain/$agent_label"
 launchctl kickstart "$domain/$agent_label"
 launchctl bootstrap "$domain" "$menu_plist"
 launchctl enable "$domain/$menu_label"
+
+healthy=false
+for _ in {1..40}; do
+  installed_pid=$(listener_pid)
+  if [[ -n "$installed_pid" ]]; then
+    installed_command=$(ps -p "$installed_pid" -o command= 2>/dev/null || true)
+    if [[ "$installed_command" == "$install_root/spool-agent"* ]] &&
+      curl \
+        --fail \
+        --silent \
+        --show-error \
+        --max-time 2 \
+        --config <(printf 'header = "Authorization: Bearer %s"\n' "$(tr -d '\r\n' < "$support_root/local.token")") \
+        "http://127.0.0.1:$local_port/v1/local/status" \
+        >/dev/null
+    then
+      healthy=true
+      break
+    fi
+  fi
+  sleep 0.25
+done
+if [[ "$healthy" != true ]]; then
+  echo "The installed Piqae node did not become healthy within 10 seconds." >&2
+  exit 1
+fi
 
 if codesign --verify --deep --strict "$app_root" >/dev/null 2>&1 &&
   codesign -dv --verbose=4 "$app_root" 2>&1 |
