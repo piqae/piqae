@@ -41,6 +41,14 @@ test('maps documentation and downloads onto existing web routes', () => {
     kind: 'redirect',
     destination: 'https://piqae.com/downloads'
   });
+  assert.deepEqual(
+    routeRequest('https://downloads.piqae.com/releases/stable/appcast-macos.xml'),
+    {
+      kind: 'proxy',
+      origin: 'web',
+      pathname: '/releases/stable/appcast-macos.xml'
+    }
+  );
 });
 
 test('keeps API and node sync on the control-plane origin', () => {

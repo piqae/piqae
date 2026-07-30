@@ -39,6 +39,9 @@ export function routeRequest(input) {
   }
 
   if (host === 'downloads.piqae.com') {
+    if (url.pathname.startsWith('/releases/')) {
+      return proxy('web', url.pathname);
+    }
     const path =
       url.pathname === '/'
         ? '/downloads'
