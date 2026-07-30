@@ -33,6 +33,12 @@ and permission claim. Hosted configurations keep unrestricted OIDC disabled.
 The dashboard's server session forwards verified access tokens; it must not
 fall back to exposing a bootstrap key.
 
+Piqae Cloud additionally projects signed WorkOS organization, user, and
+membership events. A projected inactive member or user is denied after JWT
+verification, so removal does not rely only on the access token's expiry. See
+[WorkOS production authentication](../operations/workos-production-auth.md)
+for the exact claims, event subscriptions, and live acceptance matrix.
+
 ## Self-hosted local owner
 
 Set `SPOOL_IDENTITY_PROVIDER=local_owner` on the control plane and
