@@ -22,7 +22,7 @@ reported completion, not independent physical proof. `delivery_uncertain`
 means retrying could duplicate output; an operator must reconcile the printer,
 native queue, and stock before deciding.
 
-Store and search by Spool job ID. Native spooler IDs are node-local correlation
+Store and search by Piqae job ID. Native spooler IDs are node-local correlation
 data and may be reused. State transitions and audit events are append-oriented;
 do not rewrite history to make a retry look like the original attempt.
 

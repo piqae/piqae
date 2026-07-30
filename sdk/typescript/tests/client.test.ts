@@ -1,8 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
-import { SpoolClient } from '../src/index.js';
+import { PiqaeClient } from '../src/index.js';
 import type { Printer } from '../src/index.js';
 
-describe('SpoolClient', () => {
+describe('PiqaeClient', () => {
+  it('defaults hosted clients to the canonical Piqae API origin', () => {
+    expect(new PiqaeClient().baseUrl).toBe('https://api.piqae.com');
+  });
+
   it('sends auth, idempotency, and JSON for job creation', async () => {
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
       new Response(
@@ -14,8 +18,8 @@ describe('SpoolClient', () => {
         { status: 201, headers: { 'content-type': 'application/json' } }
       )
     );
-    const client = new SpoolClient({
-      apiKey: 'spl_test_secret',
+    const client = new PiqaeClient({
+      apiKey: 'piq_test_secret',
       baseUrl: 'https://print.example.test/',
       fetch: fetcher
     });
@@ -33,7 +37,7 @@ describe('SpoolClient', () => {
     const [url, init] = fetcher.mock.calls[0] ?? [];
     expect(String(url)).toBe('https://print.example.test/v1/jobs');
     expect(init?.method).toBe('POST');
-    expect(new Headers(init?.headers).get('authorization')).toBe('Bearer spl_test_secret');
+    expect(new Headers(init?.headers).get('authorization')).toBe('Bearer piq_test_secret');
     expect(new Headers(init?.headers).get('idempotency-key')).toBe('order-42');
   });
 
@@ -51,10 +55,10 @@ describe('SpoolClient', () => {
         { status: 409, headers: { 'content-type': 'application/problem+json' } }
       )
     );
-    const client = new SpoolClient({ fetch: fetcher });
+    const client = new PiqaeClient({ fetch: fetcher });
 
     await expect(client.jobs.cancel('job_1')).rejects.toMatchObject({
-      name: 'SpoolError',
+      name: 'PiqaeError',
       code: 'printer_unavailable',
       retryable: true
     });
@@ -64,7 +68,7 @@ describe('SpoolClient', () => {
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
       new Response(JSON.stringify({ data: [], nextCursor: null }), { status: 200 })
     );
-    const client = new SpoolClient({ fetch: fetcher, baseUrl: 'http://localhost:39100' });
+    const client = new PiqaeClient({ fetch: fetcher, baseUrl: 'http://localhost:39100' });
 
     await client.jobs.list({ after: 'job_9', limit: 25 });
 
@@ -119,7 +123,7 @@ describe('SpoolClient', () => {
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
       new Response(JSON.stringify({ data: [printer], next_cursor: null, has_more: false }))
     );
-    const client = new SpoolClient({ fetch: fetcher });
+    const client = new PiqaeClient({ fetch: fetcher });
 
     const page = await client.printers.list();
 
@@ -131,28 +135,44 @@ describe('SpoolClient', () => {
     });
   });
 
-  it('deletes a webhook through the canonical endpoint', async () => {
-    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(null, { status: 204 }));
-    const client = new SpoolClient({
-      apiKey: 'spl_live_secret',
+  it('manages webhook endpoints, delivery history, and replay', async () => {
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(Response.json([]))
+      .mockResolvedValueOnce(new Response(null, { status: 202 }))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }));
+    const client = new PiqaeClient({
+      apiKey: 'piq_live_secret',
       fetch: fetcher,
-      baseUrl: 'https://api.spool.test'
+      baseUrl: 'https://api.piqae.test'
     });
 
+    await client.webhooks.deliveries('whk_01K');
+    await client.webhooks.replay('whd_01K');
     await client.webhooks.remove('whk_01K');
 
-    const [url, init] = fetcher.mock.calls[0] ?? [];
-    expect(String(url)).toBe('https://api.spool.test/v1/webhooks/whk_01K');
+    const [deliveryUrl, deliveryInit] = fetcher.mock.calls[0] ?? [];
+    expect(String(deliveryUrl)).toBe(
+      'https://api.piqae.test/v1/webhooks/whk_01K/deliveries'
+    );
+    expect(deliveryInit?.method).toBe('GET');
+    const [replayUrl, replayInit] = fetcher.mock.calls[1] ?? [];
+    expect(String(replayUrl)).toBe(
+      'https://api.piqae.test/v1/webhook-deliveries/whd_01K/replay'
+    );
+    expect(replayInit?.method).toBe('POST');
+    const [url, init] = fetcher.mock.calls[2] ?? [];
+    expect(String(url)).toBe('https://api.piqae.test/v1/webhooks/whk_01K');
     expect(init?.method).toBe('DELETE');
   });
 
   it('creates and revokes environment-scoped API keys', async () => {
     const fetcher = vi
       .fn<typeof fetch>()
-      .mockResolvedValueOnce(new Response(JSON.stringify({ id: 'key_1', secret: 'spl_test_x' })))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ id: 'key_1', secret: 'piq_test_x' })))
       .mockResolvedValueOnce(new Response(JSON.stringify({ id: 'key_1', revoked_at: 'now' })));
-    const client = new SpoolClient({
-      apiKey: 'spl_test_manager',
+    const client = new PiqaeClient({
+      apiKey: 'piq_test_manager',
       fetch: fetcher,
       baseUrl: 'https://print.example.test'
     });
@@ -203,8 +223,8 @@ describe('SpoolClient', () => {
         })
       )
       .mockResolvedValueOnce(Response.json(usage));
-    const client = new SpoolClient({
-      apiKey: 'spl_live_usage',
+    const client = new PiqaeClient({
+      apiKey: 'piq_live_usage',
       fetch: fetcher,
       baseUrl: 'https://print.example.test'
     });
@@ -230,8 +250,8 @@ describe('SpoolClient', () => {
       .mockResolvedValueOnce(
         new Response(JSON.stringify({ id: 'dva_1', state: 'approved', expires_at: 'later' }))
       );
-    const client = new SpoolClient({
-      apiKey: 'spl_live_manager',
+    const client = new PiqaeClient({
+      apiKey: 'piq_live_manager',
       fetch: fetcher,
       baseUrl: 'https://print.example.test'
     });
@@ -252,12 +272,12 @@ describe('SpoolClient', () => {
     const fetcher = vi
       .fn<typeof fetch>()
       .mockResolvedValueOnce(
-        Response.json({ credential: 'spl_owner_once', workspace: {}, member: {} })
+        Response.json({ credential: 'piq_owner_once', workspace: {}, member: {} })
       )
       .mockResolvedValueOnce(
-        Response.json({ token: 'spl_session_once', expires_at: '2030-01-01T00:00:00Z' })
+        Response.json({ token: 'piq_session_once', expires_at: '2030-01-01T00:00:00Z' })
       );
-    const client = new SpoolClient({
+    const client = new PiqaeClient({
       fetch: fetcher,
       baseUrl: 'https://print.example.test'
     });
@@ -266,16 +286,16 @@ describe('SpoolClient', () => {
       { workspace_name: 'Warehouse', email: 'owner@example.com' },
       'bootstrap-secret'
     );
-    await client.identity.exchange('spl_owner_once');
+    await client.identity.exchange('piq_owner_once');
 
     const [bootstrapUrl, bootstrapInit] = fetcher.mock.calls[0] ?? [];
     expect(String(bootstrapUrl)).not.toContain('bootstrap-secret');
-    expect(new Headers(bootstrapInit?.headers).get('x-spool-bootstrap-token')).toBe(
+    expect(new Headers(bootstrapInit?.headers).get('x-piqae-bootstrap-token')).toBe(
       'bootstrap-secret'
     );
     const [exchangeUrl, exchangeInit] = fetcher.mock.calls[1] ?? [];
-    expect(String(exchangeUrl)).not.toContain('spl_owner_once');
-    expect(JSON.parse(String(exchangeInit?.body))).toEqual({ credential: 'spl_owner_once' });
+    expect(String(exchangeUrl)).not.toContain('piq_owner_once');
+    expect(JSON.parse(String(exchangeInit?.body))).toEqual({ credential: 'piq_owner_once' });
   });
 
   it('exposes typed stocks, target bindings, and readiness', async () => {
@@ -304,8 +324,8 @@ describe('SpoolClient', () => {
           bindings: []
         })
       );
-    const client = new SpoolClient({
-      apiKey: 'spl_live_design_app',
+    const client = new PiqaeClient({
+      apiKey: 'piq_live_design_app',
       fetch: fetcher,
       baseUrl: 'https://print.example.test'
     });
@@ -344,8 +364,8 @@ describe('SpoolClient', () => {
       .fn<typeof fetch>()
       .mockResolvedValueOnce(Response.json(created, { status: 201 }))
       .mockResolvedValueOnce(Response.json(completed));
-    const client = new SpoolClient({
-      apiKey: 'spl_live_upload',
+    const client = new PiqaeClient({
+      apiKey: 'piq_live_upload',
       fetch: fetcher,
       baseUrl: 'https://print.example.test'
     });
@@ -363,15 +383,15 @@ describe('SpoolClient', () => {
     expect(String(uploadUrl)).toBe('https://print.example.test/v1/uploads/upl_01/content');
     expect(uploadInit?.body).toBeInstanceOf(Blob);
     expect(new Headers(uploadInit?.headers).get('authorization')).toBe(
-      'Bearer spl_live_upload'
+      'Bearer piq_live_upload'
     );
     expect(result.state).toBe('complete');
   });
 
-  it('never forwards a Spool API key to an absolute signed upload URL', async () => {
+  it('never forwards a Piqae API key to an absolute signed upload URL', async () => {
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(null, { status: 200 }));
-    const client = new SpoolClient({
-      apiKey: 'spl_live_must_not_leak',
+    const client = new PiqaeClient({
+      apiKey: 'piq_live_must_not_leak',
       fetch: fetcher,
       baseUrl: 'https://print.example.test'
     });
@@ -402,28 +422,28 @@ describe('SpoolClient', () => {
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
       Response.json({ data: [], next_cursor: null, has_more: false })
     );
-    const client = new SpoolClient({
-      apiKey: 'spl_live_tenant',
+    const client = new PiqaeClient({
+      apiKey: 'piq_live_tenant',
       fetch: fetcher,
       headers: {
-        'X-Spool-Workspace-Id': 'wrk_must_not_escape',
-        'x-spool-environment-id': 'env_must_not_escape'
+        'X-Piqae-Workspace-Id': 'wrk_must_not_escape',
+        'x-piqae-environment-id': 'env_must_not_escape'
       }
     });
 
     await client.printers.list();
 
     const headers = new Headers(fetcher.mock.calls[0]?.[1]?.headers);
-    expect(headers.get('x-spool-workspace-id')).toBeNull();
-    expect(headers.get('x-spool-environment-id')).toBeNull();
-    expect(headers.get('authorization')).toBe('Bearer spl_live_tenant');
+    expect(headers.get('x-piqae-workspace-id')).toBeNull();
+    expect(headers.get('x-piqae-environment-id')).toBeNull();
+    expect(headers.get('authorization')).toBe('Bearer piq_live_tenant');
   });
 
   it('rejects tenant credentials combined with a platform context', () => {
     expect(
       () =>
-        new SpoolClient({
-          apiKey: 'spl_live_tenant',
+        new PiqaeClient({
+          apiKey: 'piq_live_tenant',
           platformContext: {
             workspaceId: 'wrk_other',
             environmentId: 'env_other'
@@ -432,28 +452,35 @@ describe('SpoolClient', () => {
     ).toThrow('platformContext requires a distinct platformKey');
   });
 
+  it('fails clearly when server-side code opens SSE without an EventSource implementation', () => {
+    const client = new PiqaeClient();
+    expect(() => client.events()).toThrow(
+      'PiqaeClient.events requires a browser EventSource or the eventSource constructor option'
+    );
+  });
+
   it('adds an explicit grant context only for a platform credential', async () => {
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
       Response.json({ data: [], next_cursor: null, has_more: false })
     );
-    const client = new SpoolClient({
-      platformKey: 'spl_platform_service_account',
+    const client = new PiqaeClient({
+      platformKey: 'piq_platform_service_account',
       platformContext: {
         workspaceId: 'wrk_customer_01',
         environmentId: 'env_customer_live'
       },
       fetch: fetcher,
       headers: {
-        'x-spool-workspace-id': 'wrk_cannot_override',
-        'x-spool-environment-id': 'env_cannot_override'
+        'x-piqae-workspace-id': 'wrk_cannot_override',
+        'x-piqae-environment-id': 'env_cannot_override'
       }
     });
 
     await client.jobs.list();
 
     const headers = new Headers(fetcher.mock.calls[0]?.[1]?.headers);
-    expect(headers.get('authorization')).toBe('Bearer spl_platform_service_account');
-    expect(headers.get('x-spool-workspace-id')).toBe('wrk_customer_01');
-    expect(headers.get('x-spool-environment-id')).toBe('env_customer_live');
+    expect(headers.get('authorization')).toBe('Bearer piq_platform_service_account');
+    expect(headers.get('x-piqae-workspace-id')).toBe('wrk_customer_01');
+    expect(headers.get('x-piqae-environment-id')).toBe('env_customer_live');
   });
 });

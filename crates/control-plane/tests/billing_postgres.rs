@@ -13,18 +13,18 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use chrono::Utc;
 use hmac::{Hmac, Mac};
 use http_body_util::BodyExt;
-use sha2::{Digest, Sha256};
-use spool_control_plane::{
+use piqae_control_plane::{
     AppState, BillingCapabilities, DeploymentCapabilities,
     authentication::{StaticAuthenticator, TenantContext},
     repository::Repository,
     router,
 };
-use spool_domain::{
+use piqae_domain::{
     AgentId, EnvironmentId, EventId, JobEvent, JobId, JobState, PrinterId, WorkspaceId,
 };
-use spool_object_store::MemoryObjectStore;
-use spool_storage_postgres::PostgresStore;
+use piqae_object_store::MemoryObjectStore;
+use piqae_storage_postgres::PostgresStore;
+use sha2::{Digest, Sha256};
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use std::{env, sync::Arc};
 use tower::ServiceExt;
@@ -208,11 +208,11 @@ fn stripe_request(secret: &str, payload: &serde_json::Value) -> Request<Body> {
 
 #[tokio::test]
 async fn cloud_billing_is_tenant_scoped_idempotent_and_stripe_projected() {
-    let Some(database_url) = env::var("SPOOL_TEST_DATABASE_URL").ok() else {
-        eprintln!("skipped: set SPOOL_TEST_DATABASE_URL to run PostgreSQL billing evidence");
+    let Some(database_url) = env::var("PIQAE_TEST_DATABASE_URL").ok() else {
+        eprintln!("skipped: set PIQAE_TEST_DATABASE_URL to run PostgreSQL billing evidence");
         return;
     };
-    let schema = format!("spool_billing_{}", ulid::Ulid::new()).to_ascii_lowercase();
+    let schema = format!("piqae_billing_{}", ulid::Ulid::new()).to_ascii_lowercase();
     let admin = PgPoolOptions::new()
         .max_connections(1)
         .connect(&database_url)
@@ -650,7 +650,7 @@ async fn cloud_billing_is_tenant_scoped_idempotent_and_stripe_projected() {
         .await;
     assert!(matches!(
         over_limit,
-        Err(spool_storage_postgres::StorageError::NodeQuotaExceeded)
+        Err(piqae_storage_postgres::StorageError::NodeQuotaExceeded)
     ));
 
     let replay_key = [11_u8; 32];
@@ -712,7 +712,7 @@ async fn cloud_billing_is_tenant_scoped_idempotent_and_stripe_projected() {
         .await;
     assert!(matches!(
         browser_over_limit,
-        Err(spool_storage_postgres::StorageError::NodeQuotaExceeded)
+        Err(piqae_storage_postgres::StorageError::NodeQuotaExceeded)
     ));
 
     sqlx::query(

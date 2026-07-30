@@ -3,11 +3,11 @@ set -euo pipefail
 
 archive=${1:-}
 appcast=${2:-}
-public_key=${SPOOL_SPARKLE_PUBLIC_ED_KEY:-}
+public_key=${PIQAE_SPARKLE_PUBLIC_ED_KEY:-}
 script_root=$(cd "$(dirname "$0")" && pwd)
 
 if [[ ! -f "$archive" || ! -f "$appcast" || -z "$public_key" ]]; then
-  echo "usage: SPOOL_SPARKLE_PUBLIC_ED_KEY=… $0 /archive.zip /appcast.xml" >&2
+  echo "usage: PIQAE_SPARKLE_PUBLIC_ED_KEY=… $0 /archive.zip /appcast.xml" >&2
   exit 2
 fi
 

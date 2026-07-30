@@ -67,14 +67,14 @@ export async function findStripeCustomer(
   workspaceId: string
 ): Promise<Stripe.Customer | null> {
   if (!/^[A-Za-z0-9_.:-]{1,160}$/.test(workspaceId)) {
-    throw new Error('The Spool workspace ID cannot be used for billing lookup.');
+    throw new Error('The Piqae workspace ID cannot be used for billing lookup.');
   }
   const result = await stripe.customers.search({
     query: `metadata['workspace_id']:'${workspaceId}'`,
     limit: 2
   });
   if (result.data.length > 1) {
-    throw new Error('Multiple Stripe customers map to the same Spool workspace.');
+    throw new Error('Multiple Stripe customers map to the same Piqae workspace.');
   }
   return result.data[0] ?? null;
 }
@@ -135,6 +135,8 @@ export function stripeOveragePriceMatchesCatalog(
       ? catalogPlan.annualIncludedAcceptedJobs
       : catalogPlan.includedAcceptedJobs;
   if (expectedIncludedJobs === null) return false;
+  const metadata = (key: string) =>
+    price.metadata[`piqae_${key}`] ?? price.metadata[`spool_${key}`];
   return (
     price.active &&
     price.type === 'recurring' &&
@@ -146,10 +148,10 @@ export function stripeOveragePriceMatchesCatalog(
     price.recurring.usage_type === 'metered' &&
     typeof price.recurring.meter === 'string' &&
     price.recurring.meter.length > 0 &&
-    price.metadata.spool_plan === plan &&
-    price.metadata.spool_metric === 'accepted_live_jobs_overage' &&
-    price.metadata.spool_included_jobs === String(expectedIncludedJobs) &&
-    price.metadata.spool_overage_unit === String(catalogPlan.jobOverageUnit)
+    metadata('plan') === plan &&
+    metadata('metric') === 'accepted_live_jobs_overage' &&
+    metadata('included_jobs') === String(expectedIncludedJobs) &&
+    metadata('overage_unit') === String(catalogPlan.jobOverageUnit)
   );
 }
 
@@ -172,6 +174,9 @@ export function checkoutIdempotencyKey(
       })
     )
     .digest('hex');
+  // This namespace is part of Stripe's deduplication identity. Keep it stable
+  // across the visible product rename so cross-version retries cannot create a
+  // second Checkout Session.
   return `spool-checkout-${digest}`;
 }
 
@@ -181,7 +186,7 @@ export function stripeCustomerIdempotencyKey(workspaceId: string): string {
 
 export function parseBillingSummary(value: unknown): BillingSummary {
   if (!isRecord(value) || !isRecord(value.usage)) {
-    throw new Error('Spool billing summary response was invalid.');
+    throw new Error('Piqae billing summary response was invalid.');
   }
   const entitlement = isRecord(value.entitlement) ? value.entitlement : null;
   const plan = value.plan === 'free' || value.plan === 'pro' ? value.plan : null;
@@ -194,7 +199,7 @@ export function parseBillingSummary(value: unknown): BillingSummary {
     value.billing_interval !== 'monthly' &&
     value.billing_interval !== 'annual'
   ) {
-    throw new Error('Spool billing summary response was invalid.');
+    throw new Error('Piqae billing summary response was invalid.');
   }
   const statuses = ['active', 'trialing', 'past_due', 'unpaid', 'paused', 'cancelled'];
   const subscriptionStatus = statuses.includes(String(value.subscription_status))
@@ -213,7 +218,7 @@ export function parseBillingSummary(value: unknown): BillingSummary {
     !Number.isInteger(value.overage_live_jobs) ||
     requiredUsage.some((item) => item === undefined)
   ) {
-    throw new Error('Spool billing summary response was invalid.');
+    throw new Error('Piqae billing summary response was invalid.');
   }
   const mappedEntitlement = entitlement
     ? {
@@ -240,7 +245,7 @@ export function parseBillingSummary(value: unknown): BillingSummary {
 }
 
 export function parseUsageSummary(value: unknown): UsageSummary {
-  if (!isRecord(value)) throw new Error('Spool usage response was invalid.');
+  if (!isRecord(value)) throw new Error('Piqae usage response was invalid.');
   return {
     periodStart: stringValue(value.period_start),
     periodEnd: stringValue(value.period_end),
@@ -255,7 +260,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function integer(value: unknown): number {
   if (!Number.isInteger(value) || (value as number) < 0) {
-    throw new Error('Spool billing summary response was invalid.');
+    throw new Error('Piqae billing summary response was invalid.');
   }
   return value as number;
 }
@@ -266,7 +271,7 @@ function nullableInteger(value: unknown): number | null {
 
 function stringValue(value: unknown): string {
   if (typeof value !== 'string' || value === '') {
-    throw new Error('Spool billing summary response was invalid.');
+    throw new Error('Piqae billing summary response was invalid.');
   }
   return value;
 }

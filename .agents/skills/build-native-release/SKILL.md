@@ -1,12 +1,12 @@
 ---
 name: build-native-release
-description: Build Spool macOS and Windows release candidates with checksums, SBOMs, signatures, notarisation evidence, and update metadata. Use for native release packaging or updater work.
+description: Build Piqae macOS and Windows release candidates with checksums, SBOMs, signatures, notarisation evidence, and update metadata. Use for native release packaging or updater work.
 ---
 
 # Build a native release
 
 1. Read `AGENTS.md`, `docs/contributing/releases.md`, and platform guidance.
-2. Build in a new ignored `.spool-test-fixtures/native-release` directory.
+2. Build in a new ignored `.piqae-test-fixtures/native-release` directory.
 3. Run platform tests before packaging and verify matching tray, node,
    executor, profile host, guardian, licence, and SBOM versions.
 4. Generate checksums and canonical update metadata before signing.

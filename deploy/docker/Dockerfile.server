@@ -9,15 +9,15 @@ COPY migrations migrations
 # Published server images include OTLP capability; runtime export remains off
 # unless standard OTEL configuration enables it. Local Compose builds override
 # this argument with an empty value by default for the lightweight build.
-ARG SPOOL_SERVER_FEATURES="otlp"
-RUN if [ -n "${SPOOL_SERVER_FEATURES}" ]; then \
-      cargo build --locked --release --bin spool-server --features "${SPOOL_SERVER_FEATURES}"; \
+ARG PIQAE_SERVER_FEATURES="otlp"
+RUN if [ -n "${PIQAE_SERVER_FEATURES}" ]; then \
+      cargo build --locked --release --bin piqae-server --features "${PIQAE_SERVER_FEATURES}"; \
     else \
-      cargo build --locked --release --bin spool-server; \
+      cargo build --locked --release --bin piqae-server; \
     fi
 
 FROM gcr.io/distroless/cc-debian12:nonroot
-COPY --from=builder /source/target/release/spool-server /usr/local/bin/spool-server
+COPY --from=builder /source/target/release/piqae-server /usr/local/bin/piqae-server
 USER nonroot:nonroot
 EXPOSE 8080
-ENTRYPOINT ["/usr/local/bin/spool-server"]
+ENTRYPOINT ["/usr/local/bin/piqae-server"]

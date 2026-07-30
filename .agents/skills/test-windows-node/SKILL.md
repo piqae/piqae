@@ -1,13 +1,13 @@
 ---
 name: test-windows-node
-description: Build and validate the Spool Windows tray, DPAPI identity, PDFium replay, native driver profiles, installer, and WinSparkle integration. Use for Windows node or packaging changes.
+description: Build and validate the Piqae Windows tray, DPAPI identity, PDFium replay, native driver profiles, installer, and WinSparkle integration. Use for Windows node or packaging changes.
 ---
 
 # Test the Windows node
 
 1. Read `AGENTS.md`, `crates/executor-windows/AGENTS.md`, and Windows packaging
    guidance.
-2. Use `.spool-test-fixtures/windows-node` or an equivalent isolated Windows
+2. Use `.piqae-test-fixtures/windows-node` or an equivalent isolated Windows
    path owned by the checkout.
 3. Run Windows-target Rust checks and installer validation without installing
    into another user's profile.

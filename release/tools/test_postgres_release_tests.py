@@ -22,7 +22,7 @@ class PostgresReleaseEvidenceTest(unittest.TestCase):
 
     def test_missing_database_url_fails_closed(self) -> None:
         with self.assertRaisesRegex(
-            evidence.PostgresEvidenceError, "requires SPOOL_TEST_DATABASE_URL"
+            evidence.PostgresEvidenceError, "requires PIQAE_TEST_DATABASE_URL"
         ):
             evidence.require_database_url({})
 
@@ -31,7 +31,7 @@ class PostgresReleaseEvidenceTest(unittest.TestCase):
             evidence.PostgresEvidenceError, "PostgreSQL connection URL"
         ):
             evidence.require_database_url(
-                {"SPOOL_TEST_DATABASE_URL": "https://example.invalid/database"}
+                {"PIQAE_TEST_DATABASE_URL": "https://example.invalid/database"}
             )
 
     def test_skipped_test_is_not_release_evidence(self) -> None:
@@ -42,7 +42,7 @@ class PostgresReleaseEvidenceTest(unittest.TestCase):
                 0,
                 (
                     "running 1 test\n"
-                    "skipped: set SPOOL_TEST_DATABASE_URL\n"
+                    "skipped: set PIQAE_TEST_DATABASE_URL\n"
                     f"test {gate.expected_test} ... ok\n"
                     "test result: ok. 1 passed; 0 failed\n"
                 ),

@@ -1,4 +1,4 @@
-import { SpoolClient, SpoolError } from './client.js';
+import { PiqaeClient, PiqaeError } from './client.js';
 import type {
   CreateJob,
   ErrorEnvelope,
@@ -8,7 +8,7 @@ import type {
   UpsertPlatformAccount
 } from './types.js';
 
-export interface SpoolPlatformOptions {
+export interface PiqaePlatformOptions {
   platformKey: string;
   baseUrl?: string;
   fetch?: typeof globalThis.fetch;
@@ -33,7 +33,7 @@ interface AccountClientOptions {
   headers: Record<string, string>;
 }
 
-export class SpoolAccountEnvironment extends SpoolClient {
+export class PiqaeAccountEnvironment extends PiqaeClient {
   async printPdf(input: PrintPdfInput): Promise<Job> {
     const { body, bytes } = await pdfContent(input.pdf);
     const sha256 = await sha256Hex(bytes);
@@ -61,10 +61,10 @@ export class SpoolAccountEnvironment extends SpoolClient {
   }
 }
 
-export class SpoolAccount extends SpoolAccountEnvironment {
+export class PiqaeAccount extends PiqaeAccountEnvironment {
   readonly account: PlatformAccount;
-  readonly test: SpoolAccountEnvironment;
-  readonly live: SpoolAccountEnvironment;
+  readonly test: PiqaeAccountEnvironment;
+  readonly live: PiqaeAccountEnvironment;
 
   constructor(account: PlatformAccount, options: AccountClientOptions) {
     super({
@@ -79,7 +79,7 @@ export class SpoolAccount extends SpoolAccountEnvironment {
     });
     this.account = account;
     this.live = this;
-    this.test = new SpoolAccountEnvironment({
+    this.test = new PiqaeAccountEnvironment({
       platformKey: options.platformKey,
       platformContext: {
         workspaceId: account.id,
@@ -124,17 +124,17 @@ export class SpoolAccount extends SpoolAccountEnvironment {
   }
 }
 
-export class SpoolPlatform {
+export class PiqaePlatform {
   readonly baseUrl: string;
   private readonly platformKey: string;
   private readonly fetcher: typeof globalThis.fetch;
   private readonly defaultHeaders: Record<string, string>;
 
-  constructor(options: SpoolPlatformOptions) {
-    if (!options.platformKey.startsWith('spl_platform_')) {
-      throw new TypeError('SpoolPlatform requires a spl_platform_ service-account key');
+  constructor(options: PiqaePlatformOptions) {
+    if (!options.platformKey.startsWith('piq_platform_')) {
+      throw new TypeError('PiqaePlatform requires a piq_platform_ service-account key');
     }
-    this.baseUrl = (options.baseUrl ?? 'https://api.spool.dev').replace(/\/+$/, '');
+    this.baseUrl = (options.baseUrl ?? 'https://api.piqae.com').replace(/\/+$/, '');
     this.platformKey = options.platformKey;
     this.fetcher = options.fetch ?? globalThis.fetch;
     this.defaultHeaders = withoutTenantSelection(options.headers ?? {});
@@ -169,8 +169,8 @@ export class SpoolPlatform {
       )
   };
 
-  private account(account: PlatformAccount): SpoolAccount {
-    return new SpoolAccount(account, {
+  private account(account: PlatformAccount): PiqaeAccount {
+    return new PiqaeAccount(account, {
       platformKey: this.platformKey,
       baseUrl: this.baseUrl,
       fetch: this.fetcher,
@@ -195,11 +195,11 @@ export class SpoolPlatform {
       } catch {
         // Preserve one stable error shape for proxy or edge responses.
       }
-      throw new SpoolError(
+      throw new PiqaeError(
         response.status,
         responseBody?.error ?? {
           code: 'unexpected_response',
-          message: response.statusText || 'Spool platform request failed',
+          message: response.statusText || 'Piqae platform request failed',
           retryable: response.status >= 500
         }
       );
@@ -233,8 +233,8 @@ async function sha256Hex(content: ArrayBuffer): Promise<string> {
 }
 
 const TENANT_SELECTION_HEADERS = new Set([
-  'x-spool-workspace-id',
-  'x-spool-environment-id'
+  'x-piqae-workspace-id',
+  'x-piqae-environment-id'
 ]);
 
 function withoutTenantSelection(headers: Record<string, string>): Record<string, string> {

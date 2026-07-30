@@ -1,17 +1,17 @@
-//! Durable local responsibility boundary for the Spool agent.
+//! Durable local responsibility boundary for the Piqae agent.
 //!
 //! A job is accepted only by [`AgentStore::accept_job`] which atomically
 //! records the inbox receipt, job, per-printer FIFO sequence, initial event,
 //! content reference, and outbound acknowledgement.
 
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
-use serde::{Deserialize, Serialize};
-use sha2::{Digest as _, Sha256};
-use spool_domain::{
+use piqae_domain::{
     DriverFingerprint, EventId, JobOptions, NativePrinterOption, NativeProfileKind,
     PRINTER_PROFILE_SCHEMA_VERSION, PrinterCapabilities, PrinterCapabilityProfile, PrinterId,
     ProfileDependency, ProfileId, ProfileStatus, ProfileSummary, SafeProfileOverride,
 };
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 use std::collections::BTreeMap;
 use std::path::Path;
 use thiserror::Error;
@@ -1259,7 +1259,7 @@ impl AgentStore {
         } else {
             capture.is_default
         };
-        let blob_id = spool_domain::NativeProfileBlobId::new().to_string();
+        let blob_id = piqae_domain::NativeProfileBlobId::new().to_string();
         if is_default {
             demote_default_profiles(
                 &transaction,

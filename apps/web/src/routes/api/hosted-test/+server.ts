@@ -1,6 +1,6 @@
 import type { RequestHandler } from './$types';
-import type { JobOptions } from '@spool/sdk';
-import { SpoolError } from '@spool/sdk';
+import type { JobOptions } from '@piqae/sdk';
+import { PiqaeError } from '@piqae/sdk';
 import { dashboardMode, dashboardSdk } from '$lib/server/dashboard-data';
 import {
   createA4TestPdf,
@@ -83,7 +83,7 @@ export const POST: RequestHandler = async (event) => {
       {
         printer_id: printerId,
         title: 'Piqae A4 end-to-end test',
-        source: 'spool-dashboard',
+        source: 'piqae-dashboard',
         content_type: 'pdf',
         content: { type: 'base64', data: createA4TestPdf() },
         options: profile.options,
@@ -103,7 +103,7 @@ export const POST: RequestHandler = async (event) => {
     );
   } catch (error) {
     if (error instanceof LocalAgentConfigurationError) return localAgentError(error);
-    if (error instanceof SpoolError) {
+    if (error instanceof PiqaeError) {
       return Response.json(
         {
           code: error.code,

@@ -18,7 +18,7 @@ export const load: PageServerLoad = async (event) => {
   preventSecretCaching(event);
   const { cookies, url } = event;
   let attribution: MarketingAttribution | null = null;
-  const stored = cookies.get('spool_attribution');
+  const stored = cookies.get('piqae_attribution');
   if (stored) {
     try {
       attribution = JSON.parse(Buffer.from(stored, 'base64url').toString('utf8')) as MarketingAttribution;
@@ -56,7 +56,7 @@ export const load: PageServerLoad = async (event) => {
     const headers = {
       accept: 'application/json',
       authorization: `Bearer ${bearerToken}`,
-      'x-spool-dashboard': '1'
+      'x-piqae-dashboard': '1'
     };
     const [summaryResponse, usageResponse] = await Promise.all([
       event.fetch(`${baseUrl.replace(/\/$/, '')}/v1/billing/summary`, { headers }),
@@ -64,7 +64,7 @@ export const load: PageServerLoad = async (event) => {
     ]);
     if (!summaryResponse.ok || !usageResponse.ok) {
       throw new Error(
-        `Spool billing request failed with HTTP ${summaryResponse.status}/${usageResponse.status}.`
+        `Piqae billing request failed with HTTP ${summaryResponse.status}/${usageResponse.status}.`
       );
     }
     return {

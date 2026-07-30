@@ -69,7 +69,7 @@ export const POST: RequestHandler = async (event) => {
   const overagePrice = overagePrices.data[0];
   if (!price || !overagePrice) error(503, 'The selected Stripe prices are unavailable');
   if (!stripePriceMatchesCatalog(price, plan as PlanSlug, interval as BillingInterval)) {
-    error(409, 'The selected Stripe price does not match the Spool pricing catalog');
+    error(409, 'The selected Stripe price does not match the Piqae pricing catalog');
   }
   if (
     !stripeOveragePriceMatchesCatalog(
@@ -78,7 +78,7 @@ export const POST: RequestHandler = async (event) => {
       interval as BillingInterval
     )
   ) {
-    error(409, 'The selected Stripe overage price does not match the Spool pricing catalog');
+    error(409, 'The selected Stripe overage price does not match the Piqae pricing catalog');
   }
 
   const { baseUrl, bearerToken } = dashboardConnection(event);
@@ -88,16 +88,16 @@ export const POST: RequestHandler = async (event) => {
       headers: {
         accept: 'application/json',
         authorization: `Bearer ${bearerToken}`,
-        'x-spool-dashboard': '1'
+        'x-piqae-dashboard': '1'
       }
     }
   );
   if (!workspaceResponse.ok) {
-    error(409, 'The current Spool workspace could not be verified');
+    error(409, 'The current Piqae workspace could not be verified');
   }
   const workspace = (await workspaceResponse.json()) as { id?: unknown };
   if (typeof workspace.id !== 'string' || workspace.id === '') {
-    error(409, 'The current Spool workspace identity is invalid');
+    error(409, 'The current Piqae workspace identity is invalid');
   }
   const workspaceId = workspace.id;
   const existingCustomer = await findStripeCustomer(stripe, workspaceId);

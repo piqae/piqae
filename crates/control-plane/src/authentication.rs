@@ -1,14 +1,14 @@
 use async_trait::async_trait;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header, jwk::JwkSet};
-use serde::Deserialize;
-use sha2::{Digest, Sha256};
-use spool_auth::{
+use piqae_auth::{
     Scope, api_key_lookup_prefix, local_owner_session_id, platform_service_account_key_id,
     verify_api_key, verify_local_owner_session, verify_platform_service_account_key,
 };
-use spool_domain::{EnvironmentId, WorkspaceId};
-use spool_storage_postgres::{PostgresStore, WorkOsMembershipAccess};
+use piqae_domain::{EnvironmentId, WorkspaceId};
+use piqae_storage_postgres::{PostgresStore, WorkOsMembershipAccess};
+use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
     sync::Arc,
@@ -474,13 +474,17 @@ impl Authenticator for CombinedAuthenticator {
             .strip_prefix("Bearer ")
             .filter(|value| !value.is_empty())
             .ok_or(AuthenticationError)?;
-        if token.starts_with("spl_platform_") {
+        if token.starts_with("piq_platform_") || token.starts_with("spl_platform_") {
             return self
                 .postgres
                 .authenticate_platform_manager(authorization)
                 .await;
         }
-        if token.starts_with("spl_test_") || token.starts_with("spl_live_") {
+        if token.starts_with("piq_test_")
+            || token.starts_with("piq_live_")
+            || token.starts_with("spl_test_")
+            || token.starts_with("spl_live_")
+        {
             return Err(AuthenticationError);
         }
         let human = if let Some(local_session) = &self.local_session

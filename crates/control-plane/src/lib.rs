@@ -1,4 +1,4 @@
-//! Authoritative Spool HTTP control plane.
+//! Authoritative Piqae HTTP control plane.
 
 pub mod api;
 pub mod authentication;
@@ -24,10 +24,10 @@ use axum::{
     middleware,
     routing::{get, post},
 };
+use piqae_object_store::{MemoryObjectStore, ObjectStore};
+use piqae_webhooks::WebhookSecretBox;
 use repository::Repository;
 use serde::Serialize;
-use spool_object_store::{MemoryObjectStore, ObjectStore};
-use spool_webhooks::WebhookSecretBox;
 use std::{fmt, sync::Arc};
 use tokio::sync::broadcast;
 use tower_http::compression::CompressionLayer;
@@ -467,19 +467,19 @@ mod tests {
     use chrono::Utc;
     use ed25519_dalek::{Signer, SigningKey};
     use http_body_util::BodyExt;
-    use rand::rngs::OsRng;
-    use sha2::{Digest, Sha256};
-    use spool_auth::Scope;
-    use spool_domain::{
+    use piqae_auth::Scope;
+    use piqae_domain::{
         AgentId, DriverFingerprint, EnvironmentId, JobId, JobOptions, JobState,
         NativePrinterChoice, NativePrinterOption, NativeProfileKind, PrinterCapabilities,
         PrinterId, PrinterState, ProfileStatus, ProfileSummary, SafeProfileOverride, WorkspaceId,
     };
-    use spool_object_store::{ObjectStoreError, StoredObject};
-    use spool_protocol::agent::{
+    use piqae_object_store::{ObjectStoreError, StoredObject};
+    use piqae_protocol::agent::{
         AgentAcceptJobRequest, AgentCommand, AgentHealth, AgentSyncRequest, AgentSyncResponse,
         PrinterProfileSnapshot, PrinterSnapshot, QueueSnapshot,
     };
+    use rand::rngs::OsRng;
+    use sha2::{Digest, Sha256};
     use std::{collections::BTreeMap, str::FromStr};
     use tower::ServiceExt;
 
@@ -513,7 +513,7 @@ mod tests {
         async fn put_stream(
             &self,
             _key: &str,
-            _content: spool_object_store::ObjectByteStream,
+            _content: piqae_object_store::ObjectByteStream,
             _expected_sha256: &str,
             _expected_bytes: u64,
         ) -> Result<StoredObject, ObjectStoreError> {
@@ -523,7 +523,7 @@ mod tests {
         async fn get_stream(
             &self,
             _key: &str,
-        ) -> Result<spool_object_store::ObjectByteStream, ObjectStoreError> {
+        ) -> Result<piqae_object_store::ObjectByteStream, ObjectStoreError> {
             Err(ObjectStoreError::S3("unavailable".into()))
         }
 
@@ -554,10 +554,10 @@ mod tests {
         repository
             .set_agent_public_key(agent_id, signing_key.verifying_key().to_bytes().to_vec())
             .await;
-        authenticator.insert("spl_test_integration", tenant).await;
+        authenticator.insert("piq_test_integration", tenant).await;
         authenticator
             .insert(
-                "spl_test_other",
+                "piq_test_other",
                 TenantContext::unrestricted(WorkspaceId::new(), EnvironmentId::new()),
             )
             .await;
@@ -607,7 +607,7 @@ mod tests {
     fn compatibility_request(method: &str, path: &str, body: Option<String>) -> Request<Body> {
         let credentials = base64::Engine::encode(
             &base64::engine::general_purpose::STANDARD,
-            "spl_test_integration:",
+            "piq_test_integration:",
         );
         let mut request = Request::builder()
             .method(method)
@@ -656,12 +656,12 @@ mod tests {
             .method(method)
             .uri(path)
             .header("content-type", "application/json")
-            .header("x-spool-agent-id", application.agent_id.to_string())
-            .header("x-spool-timestamp", timestamp.to_string())
-            .header("x-spool-nonce", nonce.to_string())
-            .header("x-spool-body-sha256", digest)
+            .header("x-piqae-agent-id", application.agent_id.to_string())
+            .header("x-piqae-timestamp", timestamp.to_string())
+            .header("x-piqae-nonce", nonce.to_string())
+            .header("x-piqae-body-sha256", digest)
             .header(
-                "x-spool-signature",
+                "x-piqae-signature",
                 STANDARD_NO_PAD.encode(signature.to_bytes()),
             )
             .body(Body::from(body))
@@ -794,7 +794,7 @@ mod tests {
                 is_default: true,
                 options: JobOptions {
                     paper: Some("A4".into()),
-                    duplex: Some(spool_domain::Duplex::LongEdge),
+                    duplex: Some(piqae_domain::Duplex::LongEdge),
                     native_options: selected_native_options,
                     ..JobOptions::default()
                 },
@@ -815,9 +815,9 @@ mod tests {
         }
     }
 
-    fn stored_profiled_printer(printer_id: PrinterId) -> spool_storage_postgres::SyncedPrinter {
+    fn stored_profiled_printer(printer_id: PrinterId) -> piqae_storage_postgres::SyncedPrinter {
         let printer = profiled_printer_snapshot(printer_id);
-        spool_storage_postgres::SyncedPrinter {
+        piqae_storage_postgres::SyncedPrinter {
             id: printer.id,
             native_id: printer.native_id,
             name: printer.name,
@@ -829,7 +829,7 @@ mod tests {
             profiles: printer
                 .profiles
                 .into_iter()
-                .map(|profile| spool_storage_postgres::PrinterProfileSnapshot {
+                .map(|profile| piqae_storage_postgres::PrinterProfileSnapshot {
                     profile_id: profile.profile_id,
                     revision: profile.revision,
                     name: profile.name,
@@ -897,7 +897,7 @@ mod tests {
             .oneshot(api_request(
                 "GET",
                 "/v1/printers",
-                "spl_test_integration",
+                "piq_test_integration",
                 None,
             ))
             .await
@@ -1031,7 +1031,7 @@ mod tests {
             .oneshot(api_request(
                 "POST",
                 "/v1/stocks",
-                "spl_test_integration",
+                "piq_test_integration",
                 Some(r#"{"name":"Shipping A4","sku":"A4-SHIP","attributes":{"width_mm":210}}"#),
             ))
             .await
@@ -1054,7 +1054,7 @@ mod tests {
             .oneshot(api_request(
                 "POST",
                 "/v1/targets",
-                "spl_test_integration",
+                "piq_test_integration",
                 Some(r#"{"name":"Shipping labels"}"#),
             ))
             .await
@@ -1077,7 +1077,7 @@ mod tests {
             .oneshot(api_request(
                 "POST",
                 &format!("/v1/targets/{target_id}/bindings"),
-                "spl_test_integration",
+                "piq_test_integration",
                 Some(&format!(
                     r#"{{"printer_id":"{printer_id}","profile_id":"profile_shipping","profile_revision":4,"role":"primary"}}"#
                 )),
@@ -1092,7 +1092,7 @@ mod tests {
             .oneshot(api_request(
                 "GET",
                 &format!("/v1/targets/{target_id}/readiness"),
-                "spl_test_integration",
+                "piq_test_integration",
                 None,
             ))
             .await
@@ -1120,7 +1120,7 @@ mod tests {
             .oneshot(api_request(
                 "POST",
                 "/v1/jobs",
-                "spl_test_integration",
+                "piq_test_integration",
                 Some(&format!(
                     r#"{{"target_id":"{target_id}","title":"Routed shipping label","content_type":"pdf","content":{{"type":"base64","data":"JVBERi0="}}}}"#
                 )),
@@ -1154,14 +1154,14 @@ mod tests {
         assert_eq!(
             routed_job
                 .metadata
-                .get("spool.target_id")
+                .get("piqae.target_id")
                 .map(String::as_str),
             Some(target_id)
         );
         assert_eq!(
             routed_job
                 .metadata
-                .get("spool.profile_revision")
+                .get("piqae.profile_revision")
                 .map(String::as_str),
             Some("4")
         );
@@ -1228,7 +1228,7 @@ mod tests {
             .oneshot(api_request(
                 "GET",
                 &format!("/v1/targets/{target_id}/readiness"),
-                "spl_test_other",
+                "piq_test_other",
                 None,
             ))
             .await
@@ -1241,7 +1241,7 @@ mod tests {
             .oneshot(api_request(
                 "POST",
                 &format!("/v1/targets/{target_id}/bindings"),
-                "spl_test_integration",
+                "piq_test_integration",
                 Some(&format!(
                     r#"{{"printer_id":"{printer_id}","profile_id":"profile_shipping","profile_revision":99,"role":"standby"}}"#
                 )),
@@ -1279,7 +1279,7 @@ mod tests {
             .oneshot(api_request(
                 "POST",
                 &format!("/v1/targets/{target_id}/bindings"),
-                "spl_test_integration",
+                "piq_test_integration",
                 Some(&format!(
                     r#"{{"printer_id":"{standby_printer}","profile_id":"profile_shipping","profile_revision":4,"role":"standby"}}"#
                 )),
@@ -1303,7 +1303,7 @@ mod tests {
             .oneshot(api_request(
                 "POST",
                 "/v1/jobs",
-                "spl_test_integration",
+                "piq_test_integration",
                 Some(&format!(
                     r#"{{"target_id":"{target_id}","title":"Standby shipping label","content_type":"pdf","content":{{"type":"base64","data":"JVBERi0="}}}}"#
                 )),
@@ -1337,7 +1337,7 @@ mod tests {
         assert_eq!(
             stored_standby_job
                 .metadata
-                .get("spool.target_id")
+                .get("piqae.target_id")
                 .map(String::as_str),
             Some(target_id)
         );
@@ -1349,7 +1349,7 @@ mod tests {
         let request = Request::builder()
             .method("POST")
             .uri("/v1/jobs")
-            .header("authorization", "Bearer spl_test_integration")
+            .header("authorization", "Bearer piq_test_integration")
             .header("content-type", "application/json")
             .header("idempotency-key", "order-481")
             .body(Body::from(format!(
@@ -1384,7 +1384,7 @@ mod tests {
             .await
             .expect("stored jobs");
         assert_eq!(stored.len(), 1);
-        assert_eq!(stored[0].state, spool_domain::JobState::WaitingForAgent);
+        assert_eq!(stored[0].state, piqae_domain::JobState::WaitingForAgent);
     }
 
     #[tokio::test]
@@ -1411,9 +1411,9 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/v1/jobs")
-                    .header("authorization", "Bearer spl_test_integration")
-                    .header("x-spool-workspace-id", WorkspaceId::new().to_string())
-                    .header("x-spool-environment-id", EnvironmentId::new().to_string())
+                    .header("authorization", "Bearer piq_test_integration")
+                    .header("x-piqae-workspace-id", WorkspaceId::new().to_string())
+                    .header("x-piqae-environment-id", EnvironmentId::new().to_string())
                     .body(Body::empty())
                     .expect("valid request"),
             )
@@ -1606,9 +1606,9 @@ mod tests {
             &[Scope::ApiKeysRead, Scope::ApiKeysWrite, Scope::JobsRead],
         );
         let (application, _) = api_key_application(&[
-            ("spl_test_manager", manager),
-            ("spl_test_reader", read_only),
-            ("spl_test_other", other_tenant),
+            ("piq_test_manager", manager),
+            ("piq_test_reader", read_only),
+            ("piq_test_other", other_tenant),
         ])
         .await;
 
@@ -1617,7 +1617,7 @@ mod tests {
             .oneshot(api_request(
                 "POST",
                 "/v1/api-keys",
-                "spl_test_reader",
+                "piq_test_reader",
                 Some(r#"{"name":"Denied","scopes":["jobs_read"]}"#),
             ))
             .await
@@ -1629,7 +1629,7 @@ mod tests {
             .oneshot(api_request(
                 "POST",
                 "/v1/api-keys",
-                "spl_test_manager",
+                "piq_test_manager",
                 Some(r#"{"name":"Too broad","scopes":["jobs_write"]}"#),
             ))
             .await
@@ -1641,7 +1641,7 @@ mod tests {
             .oneshot(api_request(
                 "POST",
                 "/v1/api-keys",
-                "spl_test_manager",
+                "piq_test_manager",
                 Some(r#"{"name":"Read jobs","scopes":["jobs_read"]}"#),
             ))
             .await
@@ -1658,12 +1658,12 @@ mod tests {
         .expect("created JSON");
         let key_id = created["id"].as_str().expect("key id");
         let secret = created["secret"].as_str().expect("one-time secret");
-        assert!(secret.starts_with("spl_test_"));
+        assert!(secret.starts_with("piq_test_"));
         assert!(created.get("secret_hash").is_none());
 
         let listed = application
             .clone()
-            .oneshot(api_request("GET", "/v1/api-keys", "spl_test_manager", None))
+            .oneshot(api_request("GET", "/v1/api-keys", "piq_test_manager", None))
             .await
             .expect("list response");
         let listed: serde_json::Value = serde_json::from_slice(
@@ -1681,7 +1681,7 @@ mod tests {
 
         let isolated = application
             .clone()
-            .oneshot(api_request("GET", "/v1/api-keys", "spl_test_other", None))
+            .oneshot(api_request("GET", "/v1/api-keys", "piq_test_other", None))
             .await
             .expect("isolated list response");
         let isolated: serde_json::Value = serde_json::from_slice(
@@ -1700,7 +1700,7 @@ mod tests {
             .oneshot(api_request(
                 "DELETE",
                 &format!("/v1/api-keys/{key_id}"),
-                "spl_test_other",
+                "piq_test_other",
                 None,
             ))
             .await
@@ -1713,7 +1713,7 @@ mod tests {
                 .oneshot(api_request(
                     "DELETE",
                     &format!("/v1/api-keys/{key_id}"),
-                    "spl_test_manager",
+                    "piq_test_manager",
                     None,
                 ))
                 .await
@@ -1747,7 +1747,7 @@ mod tests {
             .expect("compatibility printer ID");
         let credentials = base64::Engine::encode(
             &base64::engine::general_purpose::STANDARD,
-            "spl_test_integration:",
+            "piq_test_integration:",
         );
         let response = application
             .router
@@ -2010,7 +2010,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/v1/jobs")
-                    .header("authorization", "Bearer spl_test_integration")
+                    .header("authorization", "Bearer piq_test_integration")
                     .header("content-type", "application/json")
                     .body(Body::from(format!(
                         r#"{{"printer_id":"{}","title":"Cancel me","content_type":"pdf","content":{{"type":"base64","data":"cHJpbnQ="}}}}"#,
@@ -2062,7 +2062,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri(format!("/v1/jobs/{job_id}/cancel"))
-                    .header("authorization", "Bearer spl_test_integration")
+                    .header("authorization", "Bearer piq_test_integration")
                     .body(Body::empty())
                     .expect("valid request"),
             )
@@ -2188,7 +2188,7 @@ mod tests {
         let create = Request::builder()
             .method("POST")
             .uri("/v1/jobs")
-            .header("authorization", "Bearer spl_test_integration")
+            .header("authorization", "Bearer piq_test_integration")
             .header("content-type", "application/json")
             .body(Body::from(format!(
                 r#"{{"printer_id":"{}","title":"Agent lease","content_type":"pdf","content":{{"type":"base64","data":"cHJpbnQ="}}}}"#,
@@ -2254,7 +2254,7 @@ mod tests {
             lease_id: offer.lease_id,
             lease_token: offer.lease_token.clone(),
             content_sha256: match &offer.content {
-                spool_protocol::agent::ContentDescriptor::Download { sha256, .. } => sha256.clone(),
+                piqae_protocol::agent::ContentDescriptor::Download { sha256, .. } => sha256.clone(),
                 _ => panic!("expected materialized download content"),
             },
             local_sequence: 1,
@@ -2327,6 +2327,6 @@ mod tests {
             )
             .await
             .expect("accepted job");
-        assert_eq!(stored.state, spool_domain::JobState::AgentAccepted);
+        assert_eq!(stored.state, piqae_domain::JobState::AgentAccepted);
     }
 }

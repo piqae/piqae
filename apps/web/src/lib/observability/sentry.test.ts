@@ -110,7 +110,7 @@ describe('Sentry privacy boundary', () => {
 
 describe('Sentry source-map release configuration', () => {
   it('leaves source maps disabled when upload credentials are absent', () => {
-    expect(resolveSentryBuildConfiguration({ SENTRY_RELEASE: 'spool@abc123' })).toEqual({
+    expect(resolveSentryBuildConfiguration({ SENTRY_RELEASE: 'piqae@abc123' })).toEqual({
       uploadSourceMaps: false
     });
   });
@@ -119,7 +119,7 @@ describe('Sentry source-map release configuration', () => {
     expect(() =>
       resolveSentryBuildConfiguration({
         SENTRY_AUTH_TOKEN: 'secret-token',
-        SENTRY_ORG: 'spool',
+        SENTRY_ORG: 'piqae',
         SENTRY_PROJECT: 'web'
       })
     ).toThrow('missing SENTRY_RELEASE');
@@ -129,16 +129,16 @@ describe('Sentry source-map release configuration', () => {
     expect(
       resolveSentryBuildConfiguration({
         SENTRY_AUTH_TOKEN: 'secret-token',
-        SENTRY_ORG: 'spool',
+        SENTRY_ORG: 'piqae',
         SENTRY_PROJECT: 'web',
-        SENTRY_RELEASE: 'spool-web@abc123'
+        SENTRY_RELEASE: 'piqae-web@abc123'
       })
     ).toEqual({
       uploadSourceMaps: true,
       authToken: 'secret-token',
-      organization: 'spool',
+      organization: 'piqae',
       project: 'web',
-      release: 'spool-web@abc123'
+      release: 'piqae-web@abc123'
     });
   });
 });

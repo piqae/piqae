@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { env as publicEnv } from '$env/dynamic/public';
   import type { Snippet } from 'svelte';
   import AnalyticsConsent from './AnalyticsConsent.svelte';
   import Logo from './Logo.svelte';
@@ -13,8 +14,8 @@
 
   let open = $state(false);
   const year = new Date().getFullYear();
-  const contactHref = import.meta.env.PUBLIC_SALES_EMAIL
-    ? `mailto:${import.meta.env.PUBLIC_SALES_EMAIL}`
+  const contactHref = publicEnv.PUBLIC_SALES_EMAIL
+    ? `mailto:${publicEnv.PUBLIC_SALES_EMAIL}`
     : '/start?plan=pro&interval=annual&source=footer-contact';
 
   const nav = [

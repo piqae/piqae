@@ -2,10 +2,10 @@ use crate::{AppState, repository::RepositoryError};
 use async_trait::async_trait;
 use chrono::{Duration as ChronoDuration, Utc};
 use futures::{StreamExt, stream};
+use piqae_storage_postgres::WebhookDeliveryWork;
+use piqae_webhooks::{retry_delay, signature};
 use rand::Rng;
 use reqwest::{Client, redirect::Policy};
-use spool_storage_postgres::WebhookDeliveryWork;
-use spool_webhooks::{retry_delay, signature};
 use std::{
     fmt::Debug,
     net::{IpAddr, SocketAddr},
@@ -141,11 +141,11 @@ impl DeliveryTransport for HttpDeliveryTransport {
         Ok(client
             .post(url)
             .header("content-type", "application/json")
-            .header("user-agent", "Spool-Webhook/1.0")
-            .header("spool-event-id", &delivery.event_id)
-            .header("spool-timestamp", timestamp)
-            .header("spool-signature", format!("v1={signed}"))
-            .header("spool-attempt", delivery.attempt + 1)
+            .header("user-agent", "Piqae-Webhook/1.0")
+            .header("piqae-event-id", &delivery.event_id)
+            .header("piqae-timestamp", timestamp)
+            .header("piqae-signature", format!("v1={signed}"))
+            .header("piqae-attempt", delivery.attempt + 1)
             .body(body)
             .send()
             .await?
@@ -237,8 +237,8 @@ mod tests {
         authentication::{StaticAuthenticator, TenantContext},
         repository::{MemoryRepository, Repository},
     };
-    use spool_domain::{EnvironmentId, WorkspaceId};
-    use spool_storage_postgres::{WEBHOOK_CLAIM_TTL_SECONDS, WEBHOOK_MAX_CLAIM_BATCH};
+    use piqae_domain::{EnvironmentId, WorkspaceId};
+    use piqae_storage_postgres::{WEBHOOK_CLAIM_TTL_SECONDS, WEBHOOK_MAX_CLAIM_BATCH};
     use std::{
         collections::HashMap,
         sync::{

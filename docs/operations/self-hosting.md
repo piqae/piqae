@@ -1,6 +1,6 @@
-# Self-hosting Spool
+# Self-hosting Piqae
 
-The supported initial self-host topology is one or more `spool-server`
+The supported initial self-host topology is one or more `piqae-server`
 containers, PostgreSQL 16 or newer, and an S3-compatible object store.
 
 ## Start
@@ -18,14 +18,14 @@ optional dashboard, configure the `WORKOS_*` values and run:
 docker compose --env-file .env --profile dashboard up -d
 ```
 
-For WorkOS, change the control-plane `SPOOL_AUTH_MODE` to `hybrid`, configure
+For WorkOS, change the control-plane `PIQAE_AUTH_MODE` to `hybrid`, configure
 the exact issuer and application JWKS URL, and bind the token with
-`SPOOL_OIDC_CLIENT_ID`. The SvelteKit server forwards the verified WorkOS
+`PIQAE_OIDC_CLIENT_ID`. The SvelteKit server forwards the verified WorkOS
 access token directly to the control plane; it never exposes that token to
-browser JavaScript or falls back to the bootstrap key. Add the Spool
+browser JavaScript or falls back to the bootstrap key. Add the Piqae
 permissions used by each role to the WorkOS `permissions` claim. A private
 self-host can instead make the explicit
-`SPOOL_OIDC_ALLOW_UNRESTRICTED=true` choice, but hosted deployments must leave
+`PIQAE_OIDC_ALLOW_UNRESTRICTED=true` choice, but hosted deployments must leave
 that disabled. Dashboard readers normally need `agents_read`,
 `printers_read`, `jobs_read`, `webhooks_read`, and `api_keys_read`; grant write
 permissions only to roles that expose the matching mutation.

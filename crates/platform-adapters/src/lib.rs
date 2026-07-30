@@ -5,7 +5,7 @@
 //! submission.
 
 use async_trait::async_trait;
-use spool_protocol::executor::{
+use piqae_protocol::executor::{
     DiscoveredPrinter, ExecutorError, ExecutorOperation, ExecutorResult, NativeJobObservation,
     NativeJobState,
 };
@@ -161,7 +161,7 @@ fn not_found(native_id: &str) -> ExecutorError {
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use spool_domain::{PrinterCapabilities, PrinterState};
+    use piqae_domain::{PrinterCapabilities, PrinterState};
 
     #[tokio::test]
     async fn unsupported_adapter_fails_closed() {

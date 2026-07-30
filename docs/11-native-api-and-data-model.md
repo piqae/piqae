@@ -416,7 +416,7 @@ them.
 
 ## SaaS usage ledger
 
-Spool Cloud has one published billable event:
+Piqae Cloud has one published billable event:
 
 - `print_job_accepted`, recorded when a Live job first reaches
   `accepted_by_spooler`.

@@ -1,4 +1,4 @@
-//! Stable domain types and state transitions shared by every Spool component.
+//! Stable domain types and state transitions shared by every Piqae component.
 
 mod id;
 mod job;

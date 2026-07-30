@@ -1,27 +1,27 @@
 locals {
   secondary_enabled = var.enable_multi_region
   runtime_env = {
-    SPOOL_ENVIRONMENT               = var.environment
-    SPOOL_DEPLOYMENT                = "cloud"
-    SPOOL_RUN_MIGRATIONS_ON_STARTUP = "false"
-    SPOOL_IDENTITY_PROVIDER         = "workos"
-    SPOOL_BILLING_ENABLED           = "true"
+    PIQAE_ENVIRONMENT               = var.environment
+    PIQAE_DEPLOYMENT                = "cloud"
+    PIQAE_RUN_MIGRATIONS_ON_STARTUP = "false"
+    PIQAE_IDENTITY_PROVIDER         = "workos"
+    PIQAE_BILLING_ENABLED           = "true"
     STRIPE_METER_EVENT_NAME         = var.stripe_meter_event_name
-    SPOOL_BIND                      = "0.0.0.0:8080"
-    SPOOL_AUTH_MODE                 = var.auth_mode
-    SPOOL_OIDC_ISSUER               = var.oidc_issuer
-    SPOOL_OIDC_JWKS_URL             = var.oidc_jwks_url
-    SPOOL_OIDC_AUDIENCE             = var.oidc_audience
-    SPOOL_OIDC_BINDING_CLAIM        = var.oidc_binding_claim
-    SPOOL_OIDC_BINDING_VALUE        = var.oidc_binding_value
-    SPOOL_OIDC_ORGANIZATION_CLAIM   = var.oidc_organization_claim
-    SPOOL_OIDC_PERMISSIONS_CLAIM    = var.oidc_permissions_claim
-    SPOOL_OIDC_ALLOW_UNRESTRICTED   = "false"
-    SPOOL_OBJECT_STORE              = var.enable_managed_data_plane ? "gcs" : "s3"
-    SPOOL_GCS_BUCKET                = var.enable_managed_data_plane ? google_storage_bucket.objects[0].name : ""
-    SPOOL_S3_ENDPOINT               = var.object_store_endpoint
-    SPOOL_S3_BUCKET                 = var.object_store_bucket
-    SPOOL_S3_REGION                 = "auto"
+    PIQAE_BIND                      = "0.0.0.0:8080"
+    PIQAE_AUTH_MODE                 = var.auth_mode
+    PIQAE_OIDC_ISSUER               = var.oidc_issuer
+    PIQAE_OIDC_JWKS_URL             = var.oidc_jwks_url
+    PIQAE_OIDC_AUDIENCE             = var.oidc_audience
+    PIQAE_OIDC_BINDING_CLAIM        = var.oidc_binding_claim
+    PIQAE_OIDC_BINDING_VALUE        = var.oidc_binding_value
+    PIQAE_OIDC_ORGANIZATION_CLAIM   = var.oidc_organization_claim
+    PIQAE_OIDC_PERMISSIONS_CLAIM    = var.oidc_permissions_claim
+    PIQAE_OIDC_ALLOW_UNRESTRICTED   = "false"
+    PIQAE_OBJECT_STORE              = var.enable_managed_data_plane ? "gcs" : "s3"
+    PIQAE_GCS_BUCKET                = var.enable_managed_data_plane ? google_storage_bucket.objects[0].name : ""
+    PIQAE_S3_ENDPOINT               = var.object_store_endpoint
+    PIQAE_S3_BUCKET                 = var.object_store_bucket
+    PIQAE_S3_REGION                 = "auto"
   }
 }
 
@@ -101,16 +101,16 @@ resource "google_cloud_run_v2_service" "server_secondary" {
         }
       }
       env {
-        name  = "SPOOL_SERVICE_ROLE"
+        name  = "PIQAE_SERVICE_ROLE"
         value = each.key
       }
 
       dynamic "env" {
         for_each = {
-          SPOOL_DATABASE_URL         = google_secret_manager_secret.database_url.secret_id
-          SPOOL_S3_ACCESS_KEY_ID     = google_secret_manager_secret.object_access_key.secret_id
-          SPOOL_S3_SECRET_ACCESS_KEY = google_secret_manager_secret.object_secret_key.secret_id
-          SPOOL_WEBHOOK_MASTER_KEY   = google_secret_manager_secret.webhook_master_key.secret_id
+          PIQAE_DATABASE_URL         = google_secret_manager_secret.database_url.secret_id
+          PIQAE_S3_ACCESS_KEY_ID     = google_secret_manager_secret.object_access_key.secret_id
+          PIQAE_S3_SECRET_ACCESS_KEY = google_secret_manager_secret.object_secret_key.secret_id
+          PIQAE_WEBHOOK_MASTER_KEY   = google_secret_manager_secret.webhook_master_key.secret_id
           STRIPE_SECRET_KEY          = google_secret_manager_secret.stripe_secret_key.secret_id
           STRIPE_WEBHOOK_SECRET      = google_secret_manager_secret.stripe_webhook_secret.secret_id
         }
@@ -247,11 +247,11 @@ resource "google_compute_url_map" "global" {
 
   host_rule {
     hosts        = ["*"]
-    path_matcher = "spool-routes"
+    path_matcher = "piqae-routes"
   }
 
   path_matcher {
-    name            = "spool-routes"
+    name            = "piqae-routes"
     default_service = google_compute_backend_service.global[0].id
     path_rule {
       paths = [
@@ -338,15 +338,15 @@ resource "random_password" "database" {
   special = false
 }
 
-resource "google_sql_database" "spool" {
+resource "google_sql_database" "piqae" {
   count    = var.enable_managed_data_plane ? 1 : 0
-  name     = "spool"
+  name     = "piqae"
   instance = google_sql_database_instance.primary[0].name
 }
 
-resource "google_sql_user" "spool" {
+resource "google_sql_user" "piqae" {
   count    = var.enable_managed_data_plane ? 1 : 0
-  name     = "spool"
+  name     = "piqae"
   instance = google_sql_database_instance.primary[0].name
   password = random_password.database[0].result
 }

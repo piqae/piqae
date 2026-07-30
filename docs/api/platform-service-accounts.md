@@ -5,17 +5,17 @@
 routes and SDK facade have complete tenant, revocation, audit, and redaction
 release evidence.
 
-Platform accounts give a trusted SaaS backend one server-side Spool credential
+Platform accounts give a trusted SaaS backend one server-side Piqae credential
 while keeping every customer in a separate workspace. The intended integration
 should feel like this:
 
 ```ts
 import { readFile } from 'node:fs/promises';
-import { SpoolPlatform } from '@spool/sdk';
+import { PiqaePlatform } from '@piqae/sdk';
 
-const platformKey = process.env.SPOOL_PLATFORM_KEY;
-if (!platformKey) throw new Error('SPOOL_PLATFORM_KEY is required');
-const platform = new SpoolPlatform({ platformKey });
+const platformKey = process.env.PIQAE_PLATFORM_KEY;
+if (!platformKey) throw new Error('PIQAE_PLATFORM_KEY is required');
+const platform = new PiqaePlatform({ platformKey });
 
 // Stable in your system: do not use a display name or browser-supplied ID.
 const account = await platform.accounts.getOrCreate('org_01JQ8K8M6Q', {
@@ -37,18 +37,18 @@ const job = await account.printPdf({
 });
 
 const webhook = await account.webhooks.create({
-  url: 'https://example.com/webhooks/spool',
+  url: 'https://example.com/webhooks/piqae',
   events: ['job.updated']
 });
-// Store webhook.secret now; Spool returns it only once.
+// Store webhook.secret now; Piqae returns it only once.
 ```
 
-`SpoolPlatform` and the account facade are implemented in the repository SDK.
+`PiqaePlatform` and the account facade are implemented in the repository SDK.
 For lower-level or existing integrations, construct an account-scoped tenant
 client directly:
 
 ```ts
-const spool = new SpoolClient({
+const piqae = new PiqaeClient({
   platformKey,
   platformContext: {
     workspaceId: account.id,
@@ -62,7 +62,7 @@ const spool = new SpoolClient({
 Headless account management uses only:
 
 ```text
-Authorization: Bearer spl_platform_...
+Authorization: Bearer piq_platform_...
 ```
 
 It must not send tenant-selection headers. Account-scoped printing uses the
@@ -70,8 +70,8 @@ same verified bearer plus the workspace and environment IDs returned by the
 account response:
 
 ```text
-X-Spool-Workspace-Id: wsp_...
-X-Spool-Environment-Id: env_...
+X-Piqae-Workspace-Id: wsp_...
+X-Piqae-Environment-Id: env_...
 ```
 
 The SDK owns those headers. Do not let callers add or override them. Resolve an
@@ -79,7 +79,7 @@ account from your authenticated server-side organisation mapping, then create
 the account-scoped client. A printer, job, target, profile, or browser parameter
 is never a trusted source of tenant identity.
 
-An ordinary `spl_test_...` or `spl_live_...` API key cannot select a workspace.
+An ordinary `piq_test_...` or `piq_live_...` API key cannot select a workspace.
 Adding platform-selection headers to an ordinary key fails authentication.
 The hosted customer dashboard may call the same management routes from its
 trusted SvelteKit server using an authorised human owner session. That session
@@ -102,7 +102,7 @@ directly from a browser.
 `PUT /v1/platform/accounts/{external_id}` is the get-or-create operation. The
 first successful call creates:
 
-- one isolated Spool workspace;
+- one isolated Piqae workspace;
 - one Test environment;
 - one Live environment; and
 - exact grants for the calling platform identity.
@@ -111,8 +111,8 @@ The HTTP equivalent is deliberately small:
 
 ```console
 curl --request PUT \
-  "https://api.spool.dev/v1/platform/accounts/org_01JQ8K8M6Q" \
-  --header "Authorization: Bearer $SPOOL_PLATFORM_KEY" \
+  "https://api.piqae.com/v1/platform/accounts/org_01JQ8K8M6Q" \
+  --header "Authorization: Bearer $PIQAE_PLATFORM_KEY" \
   --header "Content-Type: application/json" \
   --data '{"name":"Northwind Foods","metadata":{"plan":"pro"}}'
 ```
@@ -156,8 +156,8 @@ Prefer uploads over Base64 for PDFs:
 5. create the job with `content.type = "upload"`.
 
 The current upload contract accepts up to 50 MiB and verifies both length and
-digest. Never forward the Spool bearer to an absolute, time-limited object-store
-URL; send only the returned `upload_headers`. The SDK handles relative Spool
+digest. Never forward the Piqae bearer to an absolute, time-limited object-store
+URL; send only the returned `upload_headers`. The SDK handles relative Piqae
 proxy URLs with authentication.
 
 Choose either a concrete `printer_id` or a logical `target_id`, never both.
@@ -221,14 +221,14 @@ The platform key is a high-impact server credential:
 - rotate immediately after suspected exposure; and
 - apply least-privilege grants.
 
-Spool Cloud and self-hosted Spool use the same account and tenant request
-contract. Self-hosting does not require WorkOS or a Spool Cloud account. Point
+Piqae Cloud and self-hosted Piqae use the same account and tenant request
+contract. Self-hosting does not require WorkOS or a Piqae Cloud account. Point
 the client at the self-hosted HTTPS `baseUrl`, provision the platform identity
 with the local operator CLI, and retain the same external IDs.
 
 ## What remains operator-only
 
-These remain database-backed `spoolctl` operations rather than public platform
+These remain database-backed `piqaectl` operations rather than public platform
 APIs:
 
 - create the platform service-account credential;
@@ -241,9 +241,9 @@ For a self-hosted deployment, create the first identity against an existing
 owner workspace and one of its environments:
 
 ```console
-export SPOOL_DATABASE_URL='postgres://...'
+export PIQAE_DATABASE_URL='postgres://...'
 
-cargo run -p spoolctl -- platform create \
+cargo run -p piqaectl -- platform create \
   --name fulfilment-production \
   --workspace wsp_... \
   --environment env_... \
@@ -259,14 +259,14 @@ Live environments.
 Rotate or immediately revoke the identity by its non-secret ID:
 
 ```console
-cargo run -p spoolctl -- platform rotate \
+cargo run -p piqaectl -- platform rotate \
   --service-account 019...
 
-cargo run -p spoolctl -- platform revoke \
+cargo run -p piqaectl -- platform revoke \
   --service-account 019...
 ```
 
-The credential is printed once at creation or rotation. Spool stores only its
+The credential is printed once at creation or rotation. Piqae stores only its
 Argon2 verifier.
 
 The complete authorization feature remains Disabled until the checked-in

@@ -20,24 +20,24 @@ use axum::{
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{Duration, Utc};
 use futures::StreamExt;
-use rand::{RngCore, rngs::OsRng};
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
-use spool_auth::{Environment, Scope, generate_api_key};
-use spool_domain::{
+use piqae_auth::{Environment, Scope, generate_api_key};
+use piqae_domain::{
     AgentId, ContentKind, ContentSource, EnvironmentId, Job, JobEvent, JobId, JobOptions, JobState,
     PrinterId, PrinterState, WorkspaceId,
 };
-use spool_object_store::{ObjectByteStream, ObjectStoreError, digest_hex};
-use spool_protocol::agent::{
+use piqae_object_store::{ObjectByteStream, ObjectStoreError, digest_hex};
+use piqae_protocol::agent::{
     AgentAcceptJobRequest, AgentAcceptJobResponse, AgentReleaseLeaseRequest,
     AgentRenewLeaseRequest, AgentRenewLeaseResponse, AgentSyncRequest, AgentSyncResponse,
     ContentDescriptor, EnrolRequest, EnrolResponse, JobOffer,
 };
-use spool_storage_postgres::{
+use piqae_storage_postgres::{
     StoredAgent, StoredApiKey, StoredPrinter, StoredTargetBinding, StoredUpload, StoredWebhook,
     StoredWebhookDelivery, SyncedPrinter,
 };
+use rand::{RngCore, rngs::OsRng};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
     convert::Infallible,
@@ -258,7 +258,7 @@ pub async fn pause_node(
         &state,
         &headers,
         node_id,
-        spool_protocol::agent::AgentCommand::Pause,
+        piqae_protocol::agent::AgentCommand::Pause,
     )
     .await
 }
@@ -272,7 +272,7 @@ pub async fn resume_node(
         &state,
         &headers,
         node_id,
-        spool_protocol::agent::AgentCommand::Resume,
+        piqae_protocol::agent::AgentCommand::Resume,
     )
     .await
 }
@@ -300,7 +300,7 @@ pub async fn request_node_diagnostics(
             tenant.workspace_id,
             tenant.environment_id,
             node_id,
-            &spool_protocol::agent::AgentCommand::CollectDiagnostics {
+            &piqae_protocol::agent::AgentCommand::CollectDiagnostics {
                 request_id: request_id.clone(),
             },
         )
@@ -326,7 +326,7 @@ async fn enqueue_node_command(
     state: &AppState,
     headers: &HeaderMap,
     node_id: AgentId,
-    command: spool_protocol::agent::AgentCommand,
+    command: piqae_protocol::agent::AgentCommand,
 ) -> Result<StatusCode, AppError> {
     let tenant = authenticate_native(state, headers, Scope::AgentsWrite).await?;
     state
@@ -425,7 +425,7 @@ pub async fn create_agent_enrolment(
     }
     let mut secret = [0_u8; 24];
     OsRng.fill_bytes(&mut secret);
-    let token = format!("spl_enr_{}", URL_SAFE_NO_PAD.encode(secret));
+    let token = format!("piq_enr_{}", URL_SAFE_NO_PAD.encode(secret));
     let secret_hash = format!("{:x}", Sha256::digest(token.as_bytes()));
     let id = format!("enr_{}", ulid::Ulid::new());
     let expires_at = Utc::now() + Duration::seconds(request.expires_in_seconds);
@@ -1118,16 +1118,16 @@ async fn resolve_target_destination(
             continue;
         };
         let mut metadata = BTreeMap::from([
-            ("spool.target_id".into(), target.id.clone()),
-            ("spool.binding_id".into(), binding.id.clone()),
-            ("spool.profile_id".into(), profile.profile_id.clone()),
+            ("piqae.target_id".into(), target.id.clone()),
+            ("piqae.binding_id".into(), binding.id.clone()),
+            ("piqae.profile_id".into(), profile.profile_id.clone()),
             (
-                "spool.profile_revision".into(),
+                "piqae.profile_revision".into(),
                 profile.revision.to_string(),
             ),
         ]);
         if let Some(stock_id) = target.stock_id.as_ref().or(profile.stock_id.as_ref()) {
-            metadata.insert("spool.stock_id".into(), stock_id.clone());
+            metadata.insert("piqae.stock_id".into(), stock_id.clone());
         }
         let destination = ResolvedJobDestination {
             printer_id: printer.id,
@@ -1164,7 +1164,11 @@ async fn recover_waiting_target_jobs(
         .list_reroutable_target_jobs(tenant.workspace_id, tenant.environment_id, 100)
         .await?;
     for job in jobs {
-        let Some(target_id) = job.metadata.get("spool.target_id") else {
+        let Some(target_id) = job
+            .metadata
+            .get("piqae.target_id")
+            .or_else(|| job.metadata.get("spool.target_id"))
+        else {
             continue;
         };
         let Ok(destination) = resolve_target_destination(state, tenant, target_id, false).await
@@ -1455,7 +1459,7 @@ pub async fn agent_sync(
                 profiles: printer
                     .profiles
                     .iter()
-                    .map(|profile| spool_storage_postgres::PrinterProfileSnapshot {
+                    .map(|profile| piqae_storage_postgres::PrinterProfileSnapshot {
                         profile_id: profile.profile_id.clone(),
                         revision: profile.revision,
                         name: profile.name.clone(),
@@ -1763,12 +1767,14 @@ pub async fn get_agent_content(
     let path = format!("/v1/agent/jobs/{job_id}/content");
     let identity = authenticate_agent(&state, &headers, "GET", &path, &[]).await?;
     let lease_id = headers
-        .get("x-spool-lease-id")
+        .get("x-piqae-lease-id")
+        .or_else(|| headers.get("x-spool-lease-id"))
         .and_then(|value| value.to_str().ok())
         .and_then(|value| uuid::Uuid::parse_str(value).ok())
         .ok_or_else(|| AppError::device_unauthorized("missing_agent_lease"))?;
     let lease_token = headers
-        .get("x-spool-lease-token")
+        .get("x-piqae-lease-token")
+        .or_else(|| headers.get("x-spool-lease-token"))
         .and_then(|value| value.to_str().ok())
         .filter(|value| !value.is_empty())
         .ok_or_else(|| AppError::device_unauthorized("missing_agent_lease"))?;
@@ -1881,12 +1887,10 @@ pub(crate) async fn authenticate_native(
         .get("authorization")
         .and_then(|value| value.to_str().ok())
         .ok_or_else(AppError::unauthorized)?;
-    let platform_workspace = headers
-        .get("x-spool-workspace-id")
-        .and_then(|value| value.to_str().ok());
-    let platform_environment = headers
-        .get("x-spool-environment-id")
-        .and_then(|value| value.to_str().ok());
+    let platform_workspace =
+        optional_product_header(headers, "x-piqae-workspace-id", "x-spool-workspace-id")?;
+    let platform_environment =
+        optional_product_header(headers, "x-piqae-environment-id", "x-spool-environment-id")?;
     let tenant = match (platform_workspace, platform_environment) {
         (None, None) => state.authenticator.authenticate_bearer(authorization).await,
         (Some(workspace), Some(environment)) => {
@@ -1913,6 +1917,27 @@ pub(crate) async fn authenticate_native(
         return Err(AppError::forbidden());
     }
     Ok(tenant)
+}
+
+fn optional_header<'a>(headers: &'a HeaderMap, name: &str) -> Result<Option<&'a str>, AppError> {
+    headers
+        .get(name)
+        .map(|value| value.to_str().map_err(|_| AppError::unauthorized()))
+        .transpose()
+}
+
+fn optional_product_header<'a>(
+    headers: &'a HeaderMap,
+    name: &str,
+    legacy_name: &str,
+) -> Result<Option<&'a str>, AppError> {
+    let canonical = optional_header(headers, name)?;
+    let legacy = optional_header(headers, legacy_name)?;
+    match (canonical, legacy) {
+        (Some(canonical), Some(legacy)) if canonical != legacy => Err(AppError::unauthorized()),
+        (Some(value), _) | (_, Some(value)) => Ok(Some(value)),
+        (None, None) => Ok(None),
+    }
 }
 
 pub(crate) async fn authenticate_compatibility(

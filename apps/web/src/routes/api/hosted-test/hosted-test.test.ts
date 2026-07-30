@@ -22,13 +22,13 @@ import { POST } from './+server';
 
 function event(body: Record<string, unknown>) {
   return {
-    request: new Request('https://spool.test/api/hosted-test', {
+    request: new Request('https://piqae.test/api/hosted-test', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(body)
     }),
     fetch: vi.fn(),
-    url: new URL('https://spool.test/api/hosted-test'),
+    url: new URL('https://piqae.test/api/hosted-test'),
     locals: {}
   } as never;
 }
@@ -144,13 +144,13 @@ describe('hosted A4 test', () => {
 
   it('returns 400 for malformed JSON', async () => {
     const malformedEvent = {
-      request: new Request('https://spool.test/api/hosted-test', {
+      request: new Request('https://piqae.test/api/hosted-test', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: '{'
       }),
       fetch: vi.fn(),
-      url: new URL('https://spool.test/api/hosted-test'),
+      url: new URL('https://piqae.test/api/hosted-test'),
       locals: {}
     } as never;
 

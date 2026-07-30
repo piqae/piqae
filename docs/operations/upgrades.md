@@ -20,7 +20,7 @@ rolling window. Never roll back application binaries across a destructive
 schema change without a tested recovery plan.
 
 Preserve node data directories, device keys, profiles, and delivery evidence.
-Do not reinstall drivers during the same change window as Spool unless the
+Do not reinstall drivers during the same change window as Piqae unless the
 profile invalidation is intentional and tested.
 
 Keep prior immutable images/binaries until the observation period ends. See

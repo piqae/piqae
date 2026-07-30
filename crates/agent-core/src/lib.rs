@@ -1,18 +1,18 @@
-//! Headless Spool agent orchestration.
+//! Headless Piqae agent orchestration.
 //!
 //! This crate contains no operating-system APIs. It enforces durable local
 //! acceptance, per-printer ordering, and the non-transactional spooler
 //! handoff policy around a replaceable [`Executor`].
 
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
-use spool_agent_storage::{AcceptedJob, AgentStore, LocalJob, StorageError};
-use spool_domain::{
+use piqae_agent_storage::{AcceptedJob, AgentStore, LocalJob, StorageError};
+use piqae_domain::{
     DriverFingerprint, EventId, JobOptions, JobState, NativeProfileKind, SafeProfileOverride,
     validate_transition,
 };
-use spool_protocol::executor::{NativeJobObservation, NativeJobState, NativeProfilePayload};
+use piqae_protocol::executor::{NativeJobObservation, NativeJobState, NativeProfilePayload};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{
     collections::VecDeque,
     path::{Path, PathBuf},
@@ -435,7 +435,7 @@ impl<E: Executor, C: Clock> AgentEngine<E, C> {
 
     async fn reconcile_item(
         &mut self,
-        item: spool_agent_storage::ReconciliationItem,
+        item: piqae_agent_storage::ReconciliationItem,
         now: i64,
     ) -> Result<(), AgentError> {
         let Some(native_job_id) = item.job.native_job_id.clone() else {
@@ -574,7 +574,7 @@ impl<E: Executor, C: Clock> AgentEngine<E, C> {
 
     async fn reconcile_cancellation(
         &mut self,
-        item: spool_agent_storage::ReconciliationItem,
+        item: piqae_agent_storage::ReconciliationItem,
         reference: NativeJobReference,
         native_job_id: &str,
         now: i64,
@@ -629,7 +629,7 @@ impl<E: Executor, C: Clock> AgentEngine<E, C> {
 
     fn apply_native_observation(
         &mut self,
-        item: &spool_agent_storage::ReconciliationItem,
+        item: &piqae_agent_storage::ReconciliationItem,
         native_job_id: &str,
         observation: &NativeJobObservation,
         now: i64,
@@ -976,13 +976,13 @@ mod tests {
             )
             .expect("capture session");
         let first_blob = br#"{"options":{"media":"iso_a4_210x297mm"}}"#.to_vec();
-        let first = spool_agent_storage::NativeProfileCapture {
+        let first = piqae_agent_storage::NativeProfileCapture {
             name: "A4".into(),
             is_default: true,
             options_json: "{}".into(),
             status: "ready".into(),
             native_kind: "cups_options".into(),
-            native_schema_version: spool_domain::NATIVE_PROFILE_SCHEMA_VERSION,
+            native_schema_version: piqae_domain::NATIVE_PROFILE_SCHEMA_VERSION,
             native_digest: format!("sha256:{:x}", Sha256::digest(&first_blob)),
             native_blob: first_blob.clone(),
             driver_fingerprint_json: serde_json::to_string(&DriverFingerprint {
@@ -1117,7 +1117,7 @@ mod tests {
     #[tokio::test]
     async fn verified_content_is_atomically_published() {
         let directory = tempfile::tempdir().expect("tempdir");
-        let content = b"hello spool";
+        let content = b"hello piqae";
         let digest = format!("{:x}", Sha256::digest(content));
         let store = ContentStore::open(directory.path()).await.expect("open");
         let path = store

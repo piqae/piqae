@@ -1,4 +1,4 @@
-# Spool
+# Piqae
 
 > Apache-2.0 local-first and remote printing infrastructure using installed OS
 > printer drivers, durable edge queues, and an optional self-hosted control

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Create and audit deterministic Spool release evidence bundles."""
+"""Create and audit deterministic Piqae release evidence bundles."""
 
 from __future__ import annotations
 

@@ -2086,6 +2086,413 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
+name = "piqae-agent"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "base64",
+ "chrono",
+ "clap",
+ "futures",
+ "hex",
+ "piqae-agent-client",
+ "piqae-agent-core",
+ "piqae-agent-storage",
+ "piqae-domain",
+ "piqae-executor-supervisor",
+ "piqae-local-api",
+ "piqae-local-ipc",
+ "piqae-protocol",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "uuid",
+]
+
+[[package]]
+name = "piqae-agent-client"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "chrono",
+ "ed25519-dalek",
+ "piqae-domain",
+ "piqae-protocol",
+ "rand 0.8.7",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+ "tokio",
+ "url",
+ "uuid",
+]
+
+[[package]]
+name = "piqae-agent-core"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "piqae-agent-storage",
+ "piqae-domain",
+ "piqae-protocol",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "piqae-agent-storage"
+version = "0.1.0"
+dependencies = [
+ "piqae-domain",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
+name = "piqae-auth"
+version = "0.1.0"
+dependencies = [
+ "argon2",
+ "base64",
+ "rand 0.8.7",
+ "serde",
+ "thiserror",
+ "uuid",
+]
+
+[[package]]
+name = "piqae-control-plane"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "async-trait",
+ "axum",
+ "base64",
+ "bytes",
+ "chrono",
+ "ed25519-dalek",
+ "futures",
+ "hex",
+ "hmac",
+ "http",
+ "http-body-util",
+ "jsonwebtoken",
+ "opentelemetry",
+ "opentelemetry-http",
+ "opentelemetry-otlp",
+ "opentelemetry_sdk",
+ "piqae-auth",
+ "piqae-domain",
+ "piqae-object-store",
+ "piqae-protocol",
+ "piqae-storage-postgres",
+ "piqae-webhooks",
+ "rand 0.8.7",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "serde_urlencoded",
+ "sha2",
+ "sqlx",
+ "subtle",
+ "thiserror",
+ "tokio",
+ "tower",
+ "tower-http",
+ "tracing",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
+ "ulid",
+ "url",
+ "uuid",
+]
+
+[[package]]
+name = "piqae-domain"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "ulid",
+ "uuid",
+]
+
+[[package]]
+name = "piqae-executor-cups"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "piqae-domain",
+ "piqae-executor-protocol",
+ "piqae-executor-supervisor",
+ "piqae-protocol",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "piqae-executor-protocol"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "piqae-protocol",
+ "proptest",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "piqae-executor-supervisor"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "piqae-agent-core",
+ "piqae-domain",
+ "piqae-executor-protocol",
+ "piqae-protocol",
+ "thiserror",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "piqae-executor-windows"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "hex",
+ "piqae-domain",
+ "piqae-executor-protocol",
+ "piqae-protocol",
+ "serde",
+ "serde_json",
+ "sha2",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "piqae-fake-executor"
+version = "0.1.0"
+dependencies = [
+ "piqae-domain",
+ "piqae-executor-protocol",
+ "piqae-executor-supervisor",
+ "piqae-protocol",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "piqae-local-api"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "piqae-domain",
+ "piqae-local-ipc",
+ "serde",
+ "thiserror",
+ "tokio",
+ "tower",
+ "tower-http",
+]
+
+[[package]]
+name = "piqae-local-ipc"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "piqae-domain",
+ "rand 0.8.7",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "piqae-object-store"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "futures",
+ "object_store",
+ "sha2",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "piqae-platform-adapters"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "piqae-domain",
+ "piqae-protocol",
+ "tokio",
+]
+
+[[package]]
+name = "piqae-protocol"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "piqae-domain",
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
+name = "piqae-shell-linux"
+version = "0.1.0"
+dependencies = [
+ "ksni",
+]
+
+[[package]]
+name = "piqae-shell-windows"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "hex",
+ "piqae-domain",
+ "piqae-executor-windows",
+ "piqae-local-ipc",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+ "url",
+ "uuid",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "piqae-storage-postgres"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "chrono",
+ "piqae-auth",
+ "piqae-domain",
+ "rand 0.8.7",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sqlx",
+ "thiserror",
+ "tokio",
+ "ulid",
+ "uuid",
+]
+
+[[package]]
+name = "piqae-update-guardian"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "chrono",
+ "ed25519-dalek",
+ "piqae-update-metadata",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
+name = "piqae-update-metadata"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "chrono",
+ "ed25519-dalek",
+ "hex",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+]
+
+[[package]]
+name = "piqae-usage"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "thiserror",
+ "time",
+ "uuid",
+]
+
+[[package]]
+name = "piqae-webhooks"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "chacha20poly1305",
+ "hmac",
+ "rand 0.8.7",
+ "serde",
+ "sha2",
+ "subtle",
+ "thiserror",
+ "time",
+ "uuid",
+]
+
+[[package]]
+name = "piqaectl"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "clap",
+ "piqae-auth",
+ "piqae-domain",
+ "piqae-storage-postgres",
+ "reqwest 0.12.28",
+ "serde_json",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "pkcs1"
 version = "0.7.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2973,413 +3380,6 @@ checksum = "d91ed6c858b01f942cd56b37a94b3e0a1798290327d1236e4d9cf4eaca44d29d"
 dependencies = [
  "base64ct",
  "der",
-]
-
-[[package]]
-name = "spool-agent"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "base64",
- "chrono",
- "clap",
- "futures",
- "hex",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "spool-agent-client",
- "spool-agent-core",
- "spool-agent-storage",
- "spool-domain",
- "spool-executor-supervisor",
- "spool-local-api",
- "spool-local-ipc",
- "spool-protocol",
- "tempfile",
- "thiserror",
- "tokio",
- "tokio-util",
- "tracing",
- "tracing-subscriber",
- "url",
- "uuid",
-]
-
-[[package]]
-name = "spool-agent-client"
-version = "0.1.0"
-dependencies = [
- "base64",
- "chrono",
- "ed25519-dalek",
- "rand 0.8.7",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "sha2",
- "spool-domain",
- "spool-protocol",
- "thiserror",
- "tokio",
- "url",
- "uuid",
-]
-
-[[package]]
-name = "spool-agent-core"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "serde",
- "serde_json",
- "sha2",
- "spool-agent-storage",
- "spool-domain",
- "spool-protocol",
- "tempfile",
- "thiserror",
- "tokio",
- "uuid",
-]
-
-[[package]]
-name = "spool-agent-storage"
-version = "0.1.0"
-dependencies = [
- "rusqlite",
- "serde",
- "serde_json",
- "sha2",
- "spool-domain",
- "tempfile",
- "thiserror",
-]
-
-[[package]]
-name = "spool-auth"
-version = "0.1.0"
-dependencies = [
- "argon2",
- "base64",
- "rand 0.8.7",
- "serde",
- "thiserror",
- "uuid",
-]
-
-[[package]]
-name = "spool-control-plane"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-stream",
- "async-trait",
- "axum",
- "base64",
- "bytes",
- "chrono",
- "ed25519-dalek",
- "futures",
- "hex",
- "hmac",
- "http",
- "http-body-util",
- "jsonwebtoken",
- "opentelemetry",
- "opentelemetry-http",
- "opentelemetry-otlp",
- "opentelemetry_sdk",
- "rand 0.8.7",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "serde_urlencoded",
- "sha2",
- "spool-auth",
- "spool-domain",
- "spool-object-store",
- "spool-protocol",
- "spool-storage-postgres",
- "spool-webhooks",
- "sqlx",
- "subtle",
- "thiserror",
- "tokio",
- "tower",
- "tower-http",
- "tracing",
- "tracing-opentelemetry",
- "tracing-subscriber",
- "ulid",
- "url",
- "uuid",
-]
-
-[[package]]
-name = "spool-domain"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "serde",
- "serde_json",
- "thiserror",
- "ulid",
- "uuid",
-]
-
-[[package]]
-name = "spool-executor-cups"
-version = "0.1.0"
-dependencies = [
- "base64",
- "serde",
- "serde_json",
- "sha2",
- "spool-domain",
- "spool-executor-protocol",
- "spool-executor-supervisor",
- "spool-protocol",
- "tokio",
- "uuid",
-]
-
-[[package]]
-name = "spool-executor-protocol"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "proptest",
- "serde",
- "serde_json",
- "spool-protocol",
- "thiserror",
- "tokio",
- "uuid",
-]
-
-[[package]]
-name = "spool-executor-supervisor"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "spool-agent-core",
- "spool-domain",
- "spool-executor-protocol",
- "spool-protocol",
- "thiserror",
- "tokio",
- "uuid",
-]
-
-[[package]]
-name = "spool-executor-windows"
-version = "0.1.0"
-dependencies = [
- "base64",
- "hex",
- "serde",
- "serde_json",
- "sha2",
- "spool-domain",
- "spool-executor-protocol",
- "spool-protocol",
- "windows-sys 0.59.0",
-]
-
-[[package]]
-name = "spool-fake-executor"
-version = "0.1.0"
-dependencies = [
- "spool-domain",
- "spool-executor-protocol",
- "spool-executor-supervisor",
- "spool-protocol",
- "tokio",
- "uuid",
-]
-
-[[package]]
-name = "spool-local-api"
-version = "0.1.0"
-dependencies = [
- "axum",
- "serde",
- "spool-domain",
- "spool-local-ipc",
- "thiserror",
- "tokio",
- "tower",
- "tower-http",
-]
-
-[[package]]
-name = "spool-local-ipc"
-version = "0.1.0"
-dependencies = [
- "base64",
- "rand 0.8.7",
- "serde",
- "serde_json",
- "sha2",
- "spool-domain",
- "tempfile",
- "thiserror",
- "tokio",
- "uuid",
-]
-
-[[package]]
-name = "spool-object-store"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "bytes",
- "futures",
- "object_store",
- "sha2",
- "thiserror",
- "tokio",
- "tokio-util",
-]
-
-[[package]]
-name = "spool-platform-adapters"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "spool-domain",
- "spool-protocol",
- "tokio",
-]
-
-[[package]]
-name = "spool-protocol"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "serde",
- "serde_json",
- "spool-domain",
- "uuid",
-]
-
-[[package]]
-name = "spool-shell-linux"
-version = "0.1.0"
-dependencies = [
- "ksni",
-]
-
-[[package]]
-name = "spool-shell-windows"
-version = "0.1.0"
-dependencies = [
- "base64",
- "hex",
- "serde",
- "serde_json",
- "sha2",
- "spool-domain",
- "spool-executor-windows",
- "spool-local-ipc",
- "thiserror",
- "url",
- "uuid",
- "windows-sys 0.59.0",
-]
-
-[[package]]
-name = "spool-storage-postgres"
-version = "0.1.0"
-dependencies = [
- "base64",
- "chrono",
- "rand 0.8.7",
- "serde",
- "serde_json",
- "sha2",
- "spool-auth",
- "spool-domain",
- "sqlx",
- "thiserror",
- "tokio",
- "ulid",
- "uuid",
-]
-
-[[package]]
-name = "spool-update-guardian"
-version = "0.1.0"
-dependencies = [
- "base64",
- "chrono",
- "ed25519-dalek",
- "semver",
- "serde",
- "serde_json",
- "sha2",
- "spool-update-metadata",
- "tempfile",
- "thiserror",
-]
-
-[[package]]
-name = "spool-update-metadata"
-version = "0.1.0"
-dependencies = [
- "base64",
- "chrono",
- "ed25519-dalek",
- "hex",
- "semver",
- "serde",
- "serde_json",
- "sha2",
- "thiserror",
-]
-
-[[package]]
-name = "spool-usage"
-version = "0.1.0"
-dependencies = [
- "serde",
- "thiserror",
- "time",
- "uuid",
-]
-
-[[package]]
-name = "spool-webhooks"
-version = "0.1.0"
-dependencies = [
- "base64",
- "chacha20poly1305",
- "hmac",
- "rand 0.8.7",
- "serde",
- "sha2",
- "subtle",
- "thiserror",
- "time",
- "uuid",
-]
-
-[[package]]
-name = "spoolctl"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "base64",
- "clap",
- "reqwest 0.12.28",
- "serde_json",
- "spool-auth",
- "spool-domain",
- "spool-storage-postgres",
- "tokio",
- "uuid",
 ]
 
 [[package]]

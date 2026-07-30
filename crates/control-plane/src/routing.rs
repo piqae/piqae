@@ -8,13 +8,13 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use chrono::{DateTime, TimeDelta, Utc};
-use serde::Deserialize;
-use spool_auth::Scope;
-use spool_domain::{PrinterId, PrinterState};
-use spool_storage_postgres::{
+use piqae_auth::Scope;
+use piqae_domain::{PrinterId, PrinterState};
+use piqae_storage_postgres::{
     StoredAgent, StoredBindingReadiness, StoredStock, StoredTarget, StoredTargetBinding,
     StoredTargetReadiness,
 };
+use serde::Deserialize;
 use std::str::FromStr;
 
 #[derive(Debug, Deserialize)]
@@ -432,7 +432,7 @@ fn agent_is_connected_at(agent: &StoredAgent, now: DateTime<Utc>) -> bool {
 fn binding_printer_readiness(
     target: &StoredTarget,
     binding: &StoredTargetBinding,
-    printer: &spool_storage_postgres::StoredPrinter,
+    printer: &piqae_storage_postgres::StoredPrinter,
     reasons: &mut Vec<String>,
 ) -> &'static str {
     if printer.agent_id != binding.agent_id {
@@ -544,7 +544,7 @@ mod tests {
     fn connected_nodes_are_fenced_when_heartbeats_go_stale() {
         let now = Utc::now();
         let mut agent = StoredAgent {
-            id: spool_domain::AgentId::new(),
+            id: piqae_domain::AgentId::new(),
             name: "Node".into(),
             platform: "macos".into(),
             state: "connected".into(),

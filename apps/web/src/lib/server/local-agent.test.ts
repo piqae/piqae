@@ -21,7 +21,7 @@ describe('local agent server adapter', () => {
   });
 
   it('requires the URL and token file as an explicit pair', async () => {
-    environment.SPOOL_LOCAL_AGENT_URL = 'http://127.0.0.1:17890';
+    environment.PIQAE_LOCAL_AGENT_URL = 'http://127.0.0.1:17890';
 
     await expect(localAgentRequest(vi.fn(), '/v1/local/status')).rejects.toThrow(
       LocalAgentConfigurationError
@@ -30,8 +30,8 @@ describe('local agent server adapter', () => {
   });
 
   it('rejects non-loopback agent URLs before reading credentials', async () => {
-    environment.SPOOL_LOCAL_AGENT_URL = 'https://agent.example.com';
-    environment.SPOOL_LOCAL_AGENT_TOKEN_FILE = '/tmp/local.token';
+    environment.PIQAE_LOCAL_AGENT_URL = 'https://agent.example.com';
+    environment.PIQAE_LOCAL_AGENT_TOKEN_FILE = '/tmp/local.token';
 
     await expect(localAgentRequest(vi.fn(), '/v1/local/status')).rejects.toThrow(
       /loopback URL/
@@ -45,16 +45,16 @@ describe('local agent server adapter', () => {
     '/v1/local/status\\..\\..\\steal',
     '/v1/local/status\u0000'
   ])('rejects path escape %s before reading credentials', async (path) => {
-    environment.SPOOL_LOCAL_AGENT_URL = 'http://127.0.0.1:17890';
-    environment.SPOOL_LOCAL_AGENT_TOKEN_FILE = '/tmp/local.token';
+    environment.PIQAE_LOCAL_AGENT_URL = 'http://127.0.0.1:17890';
+    environment.PIQAE_LOCAL_AGENT_TOKEN_FILE = '/tmp/local.token';
 
     await expect(localAgentRequest(vi.fn(), path)).rejects.toThrow(/absolute pathnames/);
     expect(readFile).not.toHaveBeenCalled();
   });
 
   it('reads the token server-side and forwards it only in the upstream header', async () => {
-    environment.SPOOL_LOCAL_AGENT_URL = 'http://localhost:17890';
-    environment.SPOOL_LOCAL_AGENT_TOKEN_FILE = '/var/run/spool/local.token';
+    environment.PIQAE_LOCAL_AGENT_URL = 'http://localhost:17890';
+    environment.PIQAE_LOCAL_AGENT_TOKEN_FILE = '/var/run/piqae/local.token';
     readFile.mockResolvedValue('session-secret\n');
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
       Response.json({ version: '0.1.0', connection: 'connected' })
@@ -65,7 +65,7 @@ describe('local agent server adapter', () => {
     const headers = new Headers(init?.headers);
 
     expect(String(url)).toBe('http://localhost:17890/v1/local/status');
-    expect(readFile).toHaveBeenCalledWith('/var/run/spool/local.token', 'utf8');
+    expect(readFile).toHaveBeenCalledWith('/var/run/piqae/local.token', 'utf8');
     expect(headers.get('authorization')).toBe('Bearer session-secret');
     expect(await response.text()).not.toContain('session-secret');
   });

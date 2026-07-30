@@ -9,10 +9,10 @@
 
 use chrono::{DateTime, Utc};
 use ed25519_dalek::VerifyingKey;
+use piqae_update_metadata::{MetadataRole, SignedMetadata, UpdateTarget, VerificationError};
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
-use spool_update_metadata::{MetadataRole, SignedMetadata, UpdateTarget, VerificationError};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};

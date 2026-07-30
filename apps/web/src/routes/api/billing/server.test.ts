@@ -16,7 +16,7 @@ import { POST as checkout } from './checkout/+server';
 import { POST as portal } from './portal/+server';
 
 function event(path: string, role: string) {
-  const url = new URL(`https://cloud.spool.test${path}`);
+  const url = new URL(`https://cloud.piqae.test${path}`);
   return {
     url,
     request: new Request(url, {
@@ -44,7 +44,7 @@ describe('hosted billing route authorization', () => {
     getUser.mockReset();
     getUser.mockResolvedValue({
       id: 'user_123',
-      email: 'developer@spool.test'
+      email: 'developer@piqae.test'
     });
   });
 

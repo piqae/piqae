@@ -3,30 +3,30 @@
 **Status:** substantial V1 compatibility surface implemented; explicitly
 bounded differences below are not exact parity.
 
-Spool V1 implements the PrintNode printing surface at the API origin root. The
-native Spool API remains under `/v1`.
+Piqae V1 implements the PrintNode printing surface at the API origin root. The
+native Piqae API remains under `/v1`.
 
 ## Minimal migration
 
-1. Create a live Spool API key.
+1. Create a live Piqae API key.
 2. Enrol an agent on each machine that currently runs the PrintNode client.
-3. Confirm the same installed OS queues appear in Spool.
-4. Change the integration's API base URL to the Spool origin.
-5. Replace the PrintNode API key with the Spool compatibility key.
+3. Confirm the same installed OS queues appear in Piqae.
+4. Change the integration's API base URL to the Piqae origin.
+5. Replace the PrintNode API key with the Piqae compatibility key.
 6. Run a PDF and RAW canary through each printer class.
 
 Compatibility authentication keeps the PrintNode convention: use the key as
 the HTTP Basic username and an empty password.
 
 ```sh
-curl --user "$SPOOL_API_KEY:" "$SPOOL_API_ORIGIN/whoami"
+curl --user "$PIQAE_API_KEY:" "$PIQAE_API_ORIGIN/whoami"
 ```
 
 ## Create a compatible print job
 
 ```sh
 curl --request POST \
-  --user "$SPOOL_API_KEY:" \
+  --user "$PIQAE_API_KEY:" \
   --header "Content-Type: application/json" \
   --header "X-Idempotency-Key: order-10428-label" \
   --data '{
@@ -42,15 +42,15 @@ curl --request POST \
       "fit_to_page": true
     }
   }' \
-  "$SPOOL_API_ORIGIN/printjobs"
+  "$PIQAE_API_ORIGIN/printjobs"
 ```
 
-The response is a numeric compatibility job ID. Spool also retains its native
+The response is a numeric compatibility job ID. Piqae also retains its native
 typed ID internally.
 
 ## V1 compatibility matrix
 
-| PrintNode-shaped route | Spool V1 | Notes |
+| PrintNode-shaped route | Piqae V1 | Notes |
 | --- | --- | --- |
 | `GET /computers` and `/computers/{set}` | Implemented | Comma-separated positive integer mappings are tenant scoped, sorted, and deduplicated. |
 | `GET /printers` and `/printers/{set}` | Implemented, bounded | `limit`, `dir=asc|desc`, and exclusive `after={id}` use stable compatibility IDs inside the newest 500-printer hydration window. Set-qualified reads are exact inside that window. |
@@ -61,7 +61,7 @@ typed ID internally.
 | `DELETE /printers/{set}/printjobs[/{set}]` | Implemented, bounded | Applies the same pre-delivery boundary after printer filtering. Unqualified job selection examines the newest 500 jobs. |
 | `GET /printjobs[/\{set\}]/states` | Implemented | Projects native lifecycle states onto the stable compatibility states. |
 
-Set routes retain Spool's documented integer-set behavior: invalid members
+Set routes retain Piqae's documented integer-set behavior: invalid members
 return a compatibility `400`, IDs are sorted and deduplicated, and a mapping
 from another tenant is indistinguishable from a missing mapping. Collection
 routes use stable compatibility-ID ordering, support exclusive `after={id}`,
@@ -76,10 +76,10 @@ repository. Likewise, unqualified `DELETE /printjobs` and
 outside the newest 500-job window.
 
 PrintNode documents that cancellation responses contain only jobs cancelled
-before client delivery. Spool follows that boundary and returns a JSON array of
+before client delivery. Piqae follows that boundary and returns a JSON array of
 cancelled numeric IDs with `200`. Exact undocumented PrintNode behavior for
 mixed missing, already-delivered, and racing sets has not been verified against
-the hosted service; Spool returns missing requested mappings as `404`, omits
+the hosted service; Piqae returns missing requested mappings as `404`, omits
 ineligible/racing jobs, and never reports them as cancelled.
 
 ## Status semantics
@@ -89,7 +89,7 @@ and `expired`. As with PrintNode, `done` means the local client successfully
 handed the document to the operating-system print queue. It does not prove
 that paper physically exited the printer.
 
-Spool's native API exposes more precise events including `queued_local`,
+Piqae's native API exposes more precise events including `queued_local`,
 `spool_intent`, `accepted_by_spooler`, `blocked`, and
 `delivery_uncertain`.
 

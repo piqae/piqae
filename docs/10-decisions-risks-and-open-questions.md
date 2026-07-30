@@ -21,7 +21,7 @@
 | Completion semantics | Honest observer-attributed states | Proposed |
 | Ambiguous handoff | No automatic retry by default | Proposed |
 | Compatibility | Public REST behavior, not proprietary wire protocol | Proposed |
-| Licence | Apache-2.0 for all Spool-authored material; separate trademark policy | Accepted |
+| Licence | Apache-2.0 for all Piqae-authored material; separate trademark policy | Accepted |
 | Mobile | Not initial scope | Proposed |
 | Scales | Later module unless internal workload requires it | Proposed |
 

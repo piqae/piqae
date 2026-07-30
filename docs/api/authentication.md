@@ -6,7 +6,7 @@ OIDC/hybrid authentication, and tenant isolation implemented.
 Native API clients send:
 
 ```text
-Authorization: Bearer spl_...
+Authorization: Bearer piq_...
 ```
 
 Keep keys in a server-side secret manager. Never embed them in browser
@@ -14,9 +14,9 @@ JavaScript, native print content, URLs, logs, or support bundles. Create one key
 per integration/environment with the minimum scopes and revoke without deleting
 the audit record.
 
-Ordinary API keys can never select another workspace or environment. Spool
+Ordinary API keys can never select another workspace or environment. Piqae
 derives their tenant from the verified key and ignores or rejects
-`X-Spool-Workspace-Id` and `X-Spool-Environment-Id` as tenant-escalation
+`X-Piqae-Workspace-Id` and `X-Piqae-Environment-Id` as tenant-escalation
 attempts.
 
 Multi-workspace SaaS backends use a separate platform service-account
@@ -41,32 +41,32 @@ for the exact claims, event subscriptions, and live acceptance matrix.
 
 ## Self-hosted local owner
 
-Set `SPOOL_IDENTITY_PROVIDER=local_owner` on the control plane and
-`SPOOL_AUTH_MODE=local` on the SvelteKit dashboard. Configure a high-entropy
-`SPOOL_LOCAL_OWNER_BOOTSTRAP_TOKEN`, then create the first owner once:
+Set `PIQAE_IDENTITY_PROVIDER=local_owner` on the control plane and
+`PIQAE_AUTH_MODE=local` on the SvelteKit dashboard. Configure a high-entropy
+`PIQAE_LOCAL_OWNER_BOOTSTRAP_TOKEN`, then create the first owner once:
 
 ```console
 curl --fail-with-body \
   -H 'Content-Type: application/json' \
-  -H 'X-Spool-Bootstrap-Token: replace-with-your-bootstrap-token' \
+  -H 'X-Piqae-Bootstrap-Token: replace-with-your-bootstrap-token' \
   -d '{"workspace_name":"My workspace","email":"owner@example.com"}' \
   http://127.0.0.1:8080/v1/identity/local/bootstrap
 ```
 
-The response contains one `spl_owner_...` credential. Store it in a password
-manager: Spool stores only its Argon2id hash and cannot show it again. Remove
-`SPOOL_LOCAL_OWNER_BOOTSTRAP_TOKEN` and restart the control plane after this
+The response contains one `piq_owner_...` credential. Store it in a password
+manager: Piqae stores only its Argon2id hash and cannot show it again. Remove
+`PIQAE_LOCAL_OWNER_BOOTSTRAP_TOKEN` and restart the control plane after this
 request. A deployment-wide advisory lock and database constraint reject a
 second bootstrap.
 
 Enter that owner credential at `/login`. SvelteKit exchanges it server-side
-for a short-lived `spl_session_...` token and stores that token in an
+for a short-lived `piq_session_...` token and stores that token in an
 `HttpOnly`, `SameSite=Strict` cookie. The browser never receives either secret
 in page data or JavaScript. The session-inspection endpoint rotates sessions
 when less than one hour remains, and logout revokes the server-side record
 before deleting the cookie. Configure the lifetime with
-`SPOOL_LOCAL_OWNER_SESSION_SECONDS` (bounded to 15 minutes–24 hours; 12 hours
-by default). Set `SPOOL_COOKIE_SECURE=true` when TLS is terminated in front of
+`PIQAE_LOCAL_OWNER_SESSION_SECONDS` (bounded to 15 minutes–24 hours; 12 hours
+by default). Set `PIQAE_COOKIE_SECURE=true` when TLS is terminated in front of
 an internally HTTP SvelteKit process.
 
 The tenant endpoints `GET /v1/identity/me`, `GET /v1/workspaces/current`, and

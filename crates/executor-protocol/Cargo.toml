@@ -1,5 +1,5 @@
 [package]
-name = "spool-executor-protocol"
+name = "piqae-executor-protocol"
 version.workspace = true
 edition.workspace = true
 license = "Apache-2.0"
@@ -11,7 +11,7 @@ publish = false
 bytes.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-spool-protocol.workspace = true
+piqae-protocol.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 

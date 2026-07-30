@@ -4,7 +4,7 @@
   import Seo from '$lib/components/marketing/Seo.svelte';
   import {
     estimatePrintNode,
-    estimateSpool
+    estimatePiqae
   } from '$lib/marketing/calculator';
   import { formatUsd } from '$lib/marketing/plans';
   import { safeExternalHttpUrl } from '$lib/marketing/urls';
@@ -28,10 +28,10 @@
   let interval = $state<BillingInterval>(params.get('interval') === 'annual' ? 'annual' : 'monthly');
 
   let input = $derived({ jobs, agents, tenants, growthPercent, interval });
-  let spool = $derived(estimateSpool(input, data.spoolPricing));
+  let piqae = $derived(estimatePiqae(input, data.piqaePricing));
   let printNode = $derived(estimatePrintNode(input, data.printNodeSnapshot));
   let difference = $derived(
-    spool.available ? printNode.monthlyCents - spool.monthlyCents : 0
+    piqae.available ? printNode.monthlyCents - piqae.monthlyCents : 0
   );
   let percent = $derived(
     printNode.monthlyCents > 0 ? Math.round((difference / printNode.monthlyCents) * 100) : 0
@@ -118,10 +118,10 @@
             <strong>Numeric comparison needs review.</strong>
             <p>The PrintNode price snapshot passed its 90-day review date, so results are hidden until a reviewer verifies the source.</p>
           </div>
-        {:else if !spool.available}
+        {:else if !piqae.available}
           <div class="expired">
             <strong>Your fleet is outside the public Pro allowance.</strong>
-            <p>{spool.note}</p>
+            <p>{piqae.note}</p>
             <a class="m-button" href="/pricing">Review the public plans</a>
           </div>
         {:else}
@@ -134,9 +134,9 @@
           </div>
           <div class="result-cards">
             <article>
-              <div><span>Piqae</span><small>{spool.plan}</small></div>
-              <strong>{formatUsd(spool.monthlyCents)}<i>/mo</i></strong>
-              <p>{formatUsd(spool.annualCents)} estimated annually</p>
+              <div><span>Piqae</span><small>{piqae.plan}</small></div>
+              <strong>{formatUsd(piqae.monthlyCents)}<i>/mo</i></strong>
+              <p>{formatUsd(piqae.annualCents)} estimated annually</p>
             </article>
             <article>
               <div><span>PrintNode</span><small>{printNode.plan}</small></div>
@@ -145,7 +145,7 @@
             </article>
           </div>
           <div class="assumptions">
-            <p>{spool.note}</p>
+            <p>{piqae.note}</p>
             <p>{printNode.note}</p>
             <p>Expected growth is applied to job volume before selecting a plan. Taxes, negotiated terms, migration work, and support costs are excluded.</p>
           </div>
@@ -171,7 +171,7 @@
         {/if}, observed
         {data.printNodeSnapshot.observedAt} and due for review
         {data.printNodeSnapshot.reviewDueAt}. Piqae values come from server catalog
-        {data.spoolPricing.version}.
+        {data.piqaePricing.version}.
       </p>
       <p>
         This calculator does not promise savings. It does not model discounts, taxes, foreign

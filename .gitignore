@@ -28,6 +28,11 @@ test-results/
 *.key
 *.pem
 .spool*/
+.piqae*/
 artifacts/
 .artifacts/
 .vercel/
+apps/web/static/fonts/**/*.woff
+apps/web/static/fonts/**/*.woff2
+apps/web/static/fonts/**/*.otf
+apps/web/static/fonts/**/*.ttf

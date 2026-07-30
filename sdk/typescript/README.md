@@ -1,6 +1,6 @@
-# @spool/sdk
+# @piqae/sdk
 
-Typed, dependency-free TypeScript client for Spool's native API. It works in
+Typed, dependency-free TypeScript client for Piqae's native API. It works in
 Node.js, browsers, serverless runtimes, and against a local-only agent.
 
 ## SaaS platforms
@@ -10,13 +10,13 @@ customer:
 
 ```ts
 import { readFile } from 'node:fs/promises';
-import { SpoolPlatform } from '@spool/sdk';
+import { PiqaePlatform } from '@piqae/sdk';
 
-const spool = new SpoolPlatform({
-  platformKey: process.env.SPOOL_PLATFORM_KEY!
+const piqae = new PiqaePlatform({
+  platformKey: process.env.PIQAE_PLATFORM_KEY!
 });
 
-const customer = await spool.accounts.getOrCreate('org_01JQ8K8M6Q', {
+const customer = await piqae.accounts.getOrCreate('org_01JQ8K8M6Q', {
   name: 'Northwind Foods'
 });
 
@@ -34,18 +34,18 @@ automated checks. The account client exposes the normal `nodes`, `printers`,
 `stocks`, `targets`, `uploads`, `jobs`, `apiKeys`, and `webhooks` resources.
 
 Create, retrieve, list, or archive customer accounts through
-`spool.accounts`. Creating, rotating, and revoking the first platform key
+`piqae.accounts`. Creating, rotating, and revoking the first platform key
 remains an operator or hosted account-setup action. Never expose it to browser,
 mobile, desktop, or node code.
 
 ## One workspace
 
 ```ts
-import { SpoolClient } from '@spool/sdk';
+import { PiqaeClient } from '@piqae/sdk';
 
-const spool = new SpoolClient({ apiKey: process.env.SPOOL_API_KEY });
+const piqae = new PiqaeClient({ apiKey: process.env.PIQAE_API_KEY });
 
-const job = await spool.jobs.create(
+const job = await piqae.jobs.create(
   {
     printer_id: 'prt_01K...',
     title: 'Order 481 label',
@@ -64,8 +64,8 @@ spooler. Read the effective subscription period and its immutable usage ledger
 without duplicating billing rules in your application:
 
 ```ts
-const billing = await spool.billing.summary();
-const july = await spool.usage.retrieve('2026-07');
+const billing = await piqae.billing.summary();
+const july = await piqae.usage.retrieve('2026-07');
 
 console.log(billing.plan, billing.usage.accepted_live_jobs);
 console.log(july.period_start, july.period_end);
@@ -79,7 +79,7 @@ binary body without Base64:
 
 ```ts
 const file = new Blob([pdfBytes], { type: 'application/pdf' });
-const upload = await spool.uploads.createAndPut(
+const upload = await piqae.uploads.createAndPut(
   {
     media_type: 'application/pdf',
     byte_length: file.size,
@@ -88,7 +88,7 @@ const upload = await spool.uploads.createAndPut(
   file
 );
 
-await spool.jobs.create(
+await piqae.jobs.create(
   {
     target_id: 'tgt_01K...',
     title: 'Order 481 label',
@@ -107,11 +107,11 @@ Lower-level trusted integrations can also construct an explicit account grant
 context:
 
 ```ts
-const customerSpool = new SpoolClient({
-  platformKey: process.env.SPOOL_PLATFORM_KEY,
+const customerPiqae = new PiqaeClient({
+  platformKey: process.env.PIQAE_PLATFORM_KEY,
   platformContext: {
-    workspaceId: customer.spoolWorkspaceId,
-    environmentId: customer.spoolEnvironmentId
+    workspaceId: customer.piqaeWorkspaceId,
+    environmentId: customer.piqaeEnvironmentId
   }
 });
 ```

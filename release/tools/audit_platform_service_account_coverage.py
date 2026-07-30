@@ -106,7 +106,7 @@ def validate_coverage(
                 not isinstance(command, str)
                 or not command.startswith("cargo test ")
                 or "\n" in command
-                or "SPOOL_ALLOW_PHYSICAL_TESTS" in command
+                or "PIQAE_ALLOW_PHYSICAL_TESTS" in command
             ):
                 raise PolicyError(f"{identifier}: unsafe test command")
         if any(not isinstance(item, str) or not item.strip() for item in missing):

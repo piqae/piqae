@@ -18,7 +18,7 @@ Reaching an earlier state never implies a later one.
 ## Storage layout
 
 Native release artifacts use the dedicated Railway bucket `piqae-releases`.
-Customer print documents use `spool-documents`; credentials and retention
+Customer print documents use `piqae-documents`; credentials and retention
 policies must not be shared between the two.
 
 ```text

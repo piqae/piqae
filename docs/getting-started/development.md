@@ -10,8 +10,8 @@ CUPS builds need CUPS development headers.
 cargo test --workspace --all-targets
 corepack enable
 pnpm install --frozen-lockfile
-pnpm --filter @spool/web test
-pnpm --filter @spool/web check
+pnpm --filter @piqae/web test
+pnpm --filter @piqae/web check
 ```
 
 Run the local agent and dashboard in separate terminals. Use disposable data

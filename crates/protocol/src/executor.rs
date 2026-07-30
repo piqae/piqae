@@ -1,8 +1,8 @@
-use serde::{Deserialize, Serialize};
-use spool_domain::{
+use piqae_domain::{
     ContentKind, DriverFingerprint, JobId, JobOptions, NativePrinterOption, NativeProfileKind,
     PrinterCapabilities, PrinterState, SafeProfileOverride,
 };
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use uuid::Uuid;
 

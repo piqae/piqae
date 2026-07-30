@@ -24,22 +24,22 @@ export const docs: Doc[] = [
     blocks: [
       {
         heading: 'Install',
-        body: 'Use Spool Cloud unless you have a specific reason to operate the control plane yourself. Platform keys are server credentials and must never be used in a browser, mobile app, or distributed desktop client.',
-        code: `pnpm add @spool/sdk
+        body: 'Use Piqae Cloud unless you have a specific reason to operate the control plane yourself. Platform keys are server credentials and must never be used in a browser, mobile app, or distributed desktop client.',
+        code: `pnpm add @piqae/sdk
 
 # Server-only secret
-SPOOL_PLATFORM_KEY=spl_platform_...`,
+PIQAE_PLATFORM_KEY=piq_platform_...`,
         language: 'shell'
       },
       {
         heading: 'Connect one customer',
-        code: `import { SpoolPlatform } from '@spool/sdk';
+        code: `import { PiqaePlatform } from '@piqae/sdk';
 
-const spool = new SpoolPlatform({
-  platformKey: process.env.SPOOL_PLATFORM_KEY!
+const piqae = new PiqaePlatform({
+  platformKey: process.env.PIQAE_PLATFORM_KEY!
 });
 
-const customer = await spool.accounts.getOrCreate('org_01JQ8K8M6Q', {
+const customer = await piqae.accounts.getOrCreate('org_01JQ8K8M6Q', {
   name: 'Northwind Foods',
   metadata: { plan: 'pro' }
 });`,
@@ -93,15 +93,15 @@ const job = await customer.printPdf({
       },
       {
         heading: 'Single-workspace backend',
-        body: 'Best for one company adding printing to its own application. Create a scoped Live or Test API key in Developers, then use SpoolClient directly.',
-        code: `import { SpoolClient } from '@spool/sdk';
+        body: 'Best for one company adding printing to its own application. Create a scoped Live or Test API key in Developers, then use PiqaeClient directly.',
+        code: `import { PiqaeClient } from '@piqae/sdk';
 
-const spool = new SpoolClient({
-  apiKey: process.env.SPOOL_API_KEY!
+const piqae = new PiqaeClient({
+  apiKey: process.env.PIQAE_API_KEY!
 });
 
-const printers = await spool.printers.list();
-const jobs = await spool.jobs.list({ limit: 25 });`,
+const printers = await piqae.printers.list();
+const jobs = await piqae.jobs.list({ limit: 25 });`,
         language: 'typescript'
       },
       {
@@ -123,7 +123,7 @@ const jobs = await spool.jobs.list({ limit: 25 });`,
       {
         heading: 'Use your immutable external ID',
         body: 'Use a non-personal identifier from your own database. Never use a mutable slug, email address, display name, printer ID, or value accepted directly from browser input.',
-        code: `const customer = await spool.accounts.getOrCreate(customer.id, {
+        code: `const customer = await piqae.accounts.getOrCreate(customer.id, {
   name: customer.displayName,
   metadata: {
     billing_tier: customer.plan,
@@ -143,9 +143,9 @@ await customer.test.printers.list();`,
       },
       {
         heading: 'Manage the lifecycle',
-        code: `const accounts = await spool.accounts.list();
-const sameCustomer = await spool.accounts.retrieve(customer.externalId);
-await spool.accounts.archive(customer.externalId);`,
+        code: `const accounts = await piqae.accounts.list();
+const sameCustomer = await piqae.accounts.retrieve(customer.externalId);
+await piqae.accounts.archive(customer.externalId);`,
         language: 'typescript'
       },
       {
@@ -188,7 +188,7 @@ await spool.accounts.archive(customer.externalId);`,
       },
       {
         heading: 'Multiple nodes',
-        body: 'A physical printer exposed by two computers is two node-specific printer resources. Send to a printer for exact placement, or to a target for an explicit routing policy. Spool does not silently reroute a pinned printer job.'
+        body: 'A physical printer exposed by two computers is two node-specific printer resources. Send to a printer for exact placement, or to a target for an explicit routing policy. Piqae does not silently reroute a pinned printer job.'
       }
     ]
   },
@@ -226,7 +226,7 @@ await spool.accounts.archive(customer.externalId);`,
         callout: {
           tone: 'info',
           title: 'Do not recreate complex drivers in your web UI',
-          body: 'Open the operating system’s native printer panel to edit advanced settings. Spool stores and replays the opaque native snapshot and exposes only portable metadata needed by an application.'
+          body: 'Open the operating system’s native printer panel to edit advanced settings. Piqae stores and replays the opaque native snapshot and exposes only portable metadata needed by an application.'
         }
       }
     ]
@@ -243,7 +243,7 @@ await spool.accounts.archive(customer.externalId);`,
       },
       {
         heading: 'Large documents',
-        body: 'Upload binary content directly to object storage using the SDK. The SDK computes SHA-256, sends no Spool credential to the signed upload URL, and verifies the upload before job creation. The hosted V1 limit is 50 MiB per document; stream from disk in production when the runtime supports it.'
+        body: 'Upload binary content directly to object storage using the SDK. The SDK computes SHA-256, sends no Piqae credential to the signed upload URL, and verifies the upload before job creation. The hosted V1 limit is 50 MiB per document; stream from disk in production when the runtime supports it.'
       },
       {
         heading: 'Idempotency',
@@ -284,7 +284,7 @@ await spool.accounts.archive(customer.externalId);`,
       {
         heading: 'Create a webhook',
         code: `const webhook = await customer.webhooks.create({
-  url: 'https://example.com/webhooks/spool',
+  url: 'https://example.com/webhooks/piqae',
   events: ['job.updated']
 });
 
@@ -312,10 +312,10 @@ await spool.accounts.archive(customer.externalId);`,
       {
         heading: 'TypeScript',
         code: `import {
-  SpoolClient,   // one workspace/environment
-  SpoolPlatform, // many customer accounts
-  SpoolError
-} from '@spool/sdk';`,
+  PiqaeClient,   // one workspace/environment
+  PiqaePlatform, // many customer accounts
+  PiqaeError
+} from '@piqae/sdk';`,
         language: 'typescript'
       },
       {
@@ -324,7 +324,7 @@ await spool.accounts.archive(customer.externalId);`,
       },
       {
         heading: 'Errors',
-        body: 'SpoolError exposes a stable code, HTTP status, request ID, retryable flag, and structured details. Branch on the code, never on the human-readable message. Retry only operations marked retryable and preserve the same idempotency key.'
+        body: 'PiqaeError exposes a stable code, HTTP status, request ID, retryable flag, and structured details. Branch on the code, never on the human-readable message. Retry only operations marked retryable and preserve the same idempotency key.'
       },
       {
         heading: 'Initial setup remains deliberate',
@@ -336,13 +336,13 @@ await spool.accounts.archive(customer.externalId);`,
     slug: 'printnode-migration',
     group: 'Reference',
     title: 'Migrate from PrintNode',
-    description: 'Change the API origin for the tested compatibility subset, then adopt native Spool resources incrementally.',
+    description: 'Change the API origin for the tested compatibility subset, then adopt native Piqae resources incrementally.',
     blocks: [
       {
         heading: 'Compatibility endpoint',
         code: `const printNode = new PrintNode({
-  apiKey: process.env.SPOOL_API_KEY,
-  baseUrl: 'https://compat.spool.example'
+  apiKey: process.env.PIQAE_API_KEY,
+  baseUrl: 'https://compat.piqae.example'
 });`,
         language: 'typescript'
       },
@@ -351,7 +351,7 @@ await spool.accounts.archive(customer.externalId);`,
         bullets: [
           'Computers, printers, print jobs, states, and printing webhooks are the V1 compatibility focus.',
           'PDF and RAW URI/base64 modes are supported only where the checked-in compatibility tests say so.',
-          'Platform customer accounts use the native Spool SDK/API.',
+          'Platform customer accounts use the native Piqae SDK/API.',
           'Native states expose more delivery evidence than the compatibility projection.'
         ]
       }
@@ -369,7 +369,7 @@ await spool.accounts.archive(customer.externalId);`,
           'Docker Compose for development and normal small installations.',
           'Helm with external PostgreSQL and S3-compatible storage for highly available deployments.',
           'Local-only node and loopback API when no server is needed.',
-          'The same signed node can connect to Spool Cloud or your HTTPS control plane.'
+          'The same signed node can connect to Piqae Cloud or your HTTPS control plane.'
         ]
       },
       {
@@ -382,7 +382,7 @@ docker compose --env-file .env up -d`,
       },
       {
         heading: 'What remains complete',
-        body: 'Self-hosted Spool includes printing, native profiles, durable queues, platform accounts, API keys, webhooks, diagnostics, update policy, local-owner access, and generic OIDC. Hosted convenience—not withheld printing capability—is the commercial product.'
+        body: 'Self-hosted Piqae includes printing, native profiles, durable queues, platform accounts, API keys, webhooks, diagnostics, update policy, local-owner access, and generic OIDC. Hosted convenience—not withheld printing capability—is the commercial product.'
       },
       {
         callout: {
@@ -402,7 +402,7 @@ docker compose --env-file .env up -d`,
       {
         heading: 'Set up',
         code: `git clone https://github.com/C4CoffeeCo/piqae.git
-cd spool
+cd piqae
 cargo xtask doctor
 cargo xtask dev`,
         language: 'shell'

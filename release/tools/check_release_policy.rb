@@ -111,7 +111,7 @@ module ReleasePolicy
       failures << "#{path}: invalid automated gate" unless valid_gate?(gate, "command")
       identifiers << gate["id"] if gate.is_a?(Hash)
       command = gate["command"].to_s
-      if command.include?("SPOOL_ALLOW_PHYSICAL_TESTS") || command.match?(/\bprint(?:er)?\s+test\b/i)
+      if command.include?("PIQAE_ALLOW_PHYSICAL_TESTS") || command.match?(/\bprint(?:er)?\s+test\b/i)
         failures << "#{path}: automated gate #{gate["id"]} may invoke physical printing"
       end
     end

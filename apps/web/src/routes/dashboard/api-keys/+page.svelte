@@ -125,8 +125,8 @@
     <h2>Send your first print job</h2>
     <p>Use the test environment until your integration is ready for physical printers.</p>
   </div>
-  <pre><code><span>curl</span> https://api.spool.dev/v1/jobs \
-  -H <em>"Authorization: Bearer $SPOOL_API_KEY"</em> \
+  <pre><code><span>curl</span> https://api.piqae.com/v1/jobs \
+  -H <em>"Authorization: Bearer $PIQAE_API_KEY"</em> \
   -H <em>"Idempotency-Key: order-481"</em> \
   -H <em>"Content-Type: application/json"</em> \
   -d @job.json</code></pre>

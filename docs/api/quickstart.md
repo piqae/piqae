@@ -7,15 +7,15 @@ Set a server-side API origin/key and list printers:
 
 ```sh
 curl --fail-with-body \
-  --header "Authorization: Bearer $SPOOL_API_KEY" \
-  "$SPOOL_API_ORIGIN/v1/printers?limit=25"
+  --header "Authorization: Bearer $PIQAE_API_KEY" \
+  "$PIQAE_API_ORIGIN/v1/printers?limit=25"
 ```
 
 Register a PDF job with a stable idempotency key:
 
 ```sh
 curl --fail-with-body --request POST \
-  --header "Authorization: Bearer $SPOOL_API_KEY" \
+  --header "Authorization: Bearer $PIQAE_API_KEY" \
   --header "Content-Type: application/json" \
   --header "Idempotency-Key: order-10428-label-v1" \
   --data '{
@@ -27,7 +27,7 @@ curl --fail-with-body --request POST \
     "expire_after_seconds": 600,
     "metadata": {"order_id":"10428"}
   }' \
-  "$SPOOL_API_ORIGIN/v1/jobs"
+  "$PIQAE_API_ORIGIN/v1/jobs"
 ```
 
 Then fetch `/v1/jobs/{job_id}` and `/v1/jobs/{job_id}/events`. A successful
@@ -40,4 +40,4 @@ See [uploads and design applications](uploads-and-design-apps.md) for binary
 uploads, stock geometry, immutable profile summaries, and target readiness.
 
 The machine-readable contract is
-[`contracts/openapi/spool-v1.yaml`](../../contracts/openapi/spool-v1.yaml).
+[`contracts/openapi/piqae-v1.yaml`](../../contracts/openapi/piqae-v1.yaml).

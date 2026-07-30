@@ -2,8 +2,8 @@
 
 #[cfg(windows)]
 mod windows_shell {
-    use spool_domain::ProfileCaptureOperation;
-    use spool_shell_windows::{
+    use piqae_domain::ProfileCaptureOperation;
+    use piqae_shell_windows::{
         LocalAgentClient, LocalApiConfiguration, ShellError, capture_payload, run_profile_host,
         updater::{UpdateConfiguration, WindowsUpdater},
     };
@@ -84,8 +84,8 @@ mod windows_shell {
 
     #[derive(Clone, Debug)]
     struct ShellSnapshot {
-        status: spool_local_ipc::LocalStatus,
-        printers: Vec<spool_local_ipc::LocalPrinter>,
+        status: piqae_local_ipc::LocalStatus,
+        printers: Vec<piqae_local_ipc::LocalPrinter>,
     }
 
     pub fn run() -> Result<(), String> {
@@ -114,7 +114,7 @@ mod windows_shell {
             if instance.is_null() {
                 return Err("GetModuleHandleW failed".into());
             }
-            let class_name = wide("SpoolShellWindow");
+            let class_name = wide("PiqaeShellWindow");
             let class = WNDCLASSW {
                 lpfnWndProc: Some(window_proc),
                 hInstance: instance,
@@ -155,7 +155,7 @@ mod windows_shell {
 
     fn profile_host_path() -> Result<PathBuf, String> {
         if let Some(path) =
-            std::env::var_os("SPOOL_PROFILE_HOST_PATH").filter(|path| !path.is_empty())
+            std::env::var_os("PIQAE_PROFILE_HOST_PATH").filter(|path| !path.is_empty())
         {
             return Ok(PathBuf::from(path));
         }
@@ -164,11 +164,11 @@ mod windows_shell {
         let directory = executable
             .parent()
             .ok_or_else(|| "Cannot find the Piqae installation directory".to_owned())?;
-        Ok(directory.join("spool-profile-host-windows.exe"))
+        Ok(directory.join("piqae-profile-host-windows.exe"))
     }
 
     fn dashboard_url() -> String {
-        let configured = std::env::var("SPOOL_DASHBOARD_URL").unwrap_or_default();
+        let configured = std::env::var("PIQAE_DASHBOARD_URL").unwrap_or_default();
         let configured = configured.trim();
         if !configured.contains(['\r', '\n'])
             && (configured.starts_with("https://") || configured.starts_with("http://"))
@@ -495,7 +495,7 @@ mod windows_shell {
     }
 
     fn initialize_updater(window: HWND) {
-        let requested = std::env::var("SPOOL_UPDATE_POLICY")
+        let requested = std::env::var("PIQAE_UPDATE_POLICY")
             .is_ok_and(|policy| matches!(policy.trim(), "notify" | "automatic"));
         let configuration = match UpdateConfiguration::from_environment() {
             Ok(Some(configuration)) => configuration,
@@ -691,8 +691,8 @@ mod windows_shell {
         compact
     }
 
-    fn connection_label(connection: spool_local_ipc::ConnectionState) -> &'static str {
-        use spool_local_ipc::ConnectionState::{
+    fn connection_label(connection: piqae_local_ipc::ConnectionState) -> &'static str {
+        use piqae_local_ipc::ConnectionState::{
             Connected, Connecting, Degraded, LocalOnly, Offline,
         };
         match connection {
@@ -719,5 +719,5 @@ fn main() {
 
 #[cfg(not(windows))]
 fn main() {
-    eprintln!("spool-shell-windows is only available on Windows");
+    eprintln!("piqae-shell-windows is only available on Windows");
 }

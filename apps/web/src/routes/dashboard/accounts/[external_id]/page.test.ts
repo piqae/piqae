@@ -32,7 +32,7 @@ describe('customer account detail', () => {
     expect(screen.getByRole('heading', { name: 'North Star Coffee' })).toBeInTheDocument();
     expect(screen.getByText(/trusted backend/)).toBeInTheDocument();
     expect(screen.getByText(/never needed in browser code/)).toBeInTheDocument();
-    expect(screen.queryByText(/spl_(live|test)_/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/(?:piq|spl)_(live|test)_/)).not.toBeInTheDocument();
 
     const environmentDetails = screen
       .getByText('Environment IDs')

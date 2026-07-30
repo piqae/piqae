@@ -10,7 +10,7 @@
   },
   "vars": {
     "WEB_ORIGIN": "https://piqae-web-production.up.railway.app",
-    "API_ORIGIN": "https://spool-production-097e.up.railway.app"
+    "API_ORIGIN": "https://piqae-production-097e.up.railway.app"
   },
   "routes": [
     {

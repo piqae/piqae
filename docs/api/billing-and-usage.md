@@ -1,6 +1,6 @@
 # Cloud billing and usage
 
-Spool Cloud has one Free plan and one Pro plan. The control plane owns the
+Piqae Cloud has one Free plan and one Pro plan. The control plane owns the
 entitlement and usage projection; marketing content and Stripe Price objects
 must match this contract before Checkout is enabled.
 
@@ -32,8 +32,8 @@ enforces one acceptance unit per job. These do not add another unit:
 ## Read current usage
 
 ```console
-curl https://api.spool.example/v1/billing/summary \
-  -H "Authorization: Bearer $SPOOL_API_KEY"
+curl https://api.piqae.example/v1/billing/summary \
+  -H "Authorization: Bearer $PIQAE_API_KEY"
 ```
 
 Use `GET /v1/usage?month=YYYY-MM` for a tenant-scoped UTC calendar month. The
@@ -44,8 +44,8 @@ jobs may be accepted.
 The TypeScript SDK exposes the same server projection:
 
 ```ts
-const billing = await spool.billing.summary();
-const july = await spool.usage.retrieve('2026-07');
+const billing = await piqae.billing.summary();
+const july = await piqae.usage.retrieve('2026-07');
 ```
 
 ## Quotas and payment state
@@ -57,7 +57,7 @@ const july = await spool.usage.retrieve('2026-07');
 - A past-due Pro subscription receives the configured grace period. After the
   grace period, new Cloud jobs are rejected while already durable jobs
   continue.
-- Test and self-hosted printing are not blocked by Spool Cloud billing.
+- Test and self-hosted printing are not blocked by Piqae Cloud billing.
 
 Always use an idempotency key when creating jobs. A retry of an existing
 idempotent request remains readable even when the workspace later reaches a
@@ -66,18 +66,18 @@ quota.
 ## WorkOS and Stripe responsibilities
 
 WorkOS authenticates people and supplies the hosted organisation claim. The
-control plane maps that claim to a Spool workspace; a WorkOS organisation ID
-must never be treated as a Spool workspace ID without that verified mapping.
+control plane maps that claim to a Piqae workspace; a WorkOS organisation ID
+must never be treated as a Piqae workspace ID without that verified mapping.
 
 Stripe supplies Checkout, Customer Portal, subscription state, and metered
-invoice calculation. Signed Stripe webhooks update the Spool billing
-projection idempotently. The immutable Spool usage ledger remains authoritative
+invoice calculation. Signed Stripe webhooks update the Piqae billing
+projection idempotently. The immutable Piqae usage ledger remains authoritative
 for printing and is exported to Stripe with stable event identifiers. Checkout
 fails closed when the workspace already has a non-terminal subscription, so
 plan changes and payment recovery go through Customer Portal rather than
 creating duplicate subscriptions.
 
-Spool snapshots the ending period on renewal and its worker submits durable
+Piqae snapshots the ending period on renewal and its worker submits durable
 overage exports every minute. Production Stripe configuration must keep
 usage-based subscription-cycle invoices in draft for a 72-hour finalization
 grace period; the private-beta gate proves the export appears on a test-clock

@@ -7,7 +7,7 @@ Pre-acceptance routing concurrency and acceptance/lease fences have disposable
 PostgreSQL evidence. Production regional failover and the release soak gates in
 this document are not yet proven.
 
-Spool has two different reliability responsibilities:
+Piqae has two different reliability responsibilities:
 
 1. keep the control plane available;
 2. never lose or blindly duplicate a job that it has durably accepted.
@@ -69,7 +69,7 @@ node, printer, profile revision, and stock metadata. If every node is offline
 but the target has a valid configured binding, the API durably registers the
 job as `waiting_for_agent` instead of rejecting or discarding it.
 
-On a later node sync, Spool examines a bounded oldest-first batch of waiting
+On a later node sync, Piqae examines a bounded oldest-first batch of waiting
 target jobs. Reassignment uses a PostgreSQL row lock and a final conditional
 update requiring the correct tenant, a waiting/retryable state, no unexpired
 lease, and no durable acceptance. The target, binding, immutable profile
@@ -126,7 +126,7 @@ native job disappears or cannot be observed by the uncertainty deadline, the
 result is `delivery_uncertain`.
 
 `completed_reported` means the operating-system spooler reported completion.
-It does not prove that ink reached stock. Spool must not relabel this state as
+It does not prove that ink reached stock. Piqae must not relabel this state as
 “physically printed” unless future hardware supplies stronger evidence.
 
 Cancellation before spooler handoff can be definitive. Cancellation after

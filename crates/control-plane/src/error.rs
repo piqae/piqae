@@ -200,8 +200,8 @@ impl From<RepositoryError> for AppError {
     }
 }
 
-impl From<spool_storage_postgres::StorageError> for AppError {
-    fn from(error: spool_storage_postgres::StorageError) -> Self {
+impl From<piqae_storage_postgres::StorageError> for AppError {
+    fn from(error: piqae_storage_postgres::StorageError) -> Self {
         RepositoryError::from(error).into()
     }
 }

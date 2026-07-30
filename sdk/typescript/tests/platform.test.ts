@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { SpoolPlatform } from '../src/index.js';
+import { PiqaePlatform } from '../src/index.js';
 import type { PlatformAccount, Upload } from '../src/index.js';
 
 const account: PlatformAccount = {
@@ -17,19 +17,29 @@ const account: PlatformAccount = {
 };
 
 function platform(fetcher: typeof fetch) {
-  return new SpoolPlatform({
-    platformKey: 'spl_platform_service_account',
+  return new PiqaePlatform({
+    platformKey: 'piq_platform_service_account',
     baseUrl: 'https://print.example.test/',
     fetch: fetcher,
     headers: {
       'x-sdk-version': 'test',
-      'x-spool-workspace-id': 'must_be_stripped',
-      'x-spool-environment-id': 'must_be_stripped'
+      'x-piqae-workspace-id': 'must_be_stripped',
+      'x-piqae-environment-id': 'must_be_stripped'
     }
   });
 }
 
-describe('SpoolPlatform', () => {
+describe('PiqaePlatform', () => {
+  it('rejects keys outside the Piqae platform namespace', () => {
+    expect(
+      () =>
+        new PiqaePlatform({
+          platformKey: 'other_platform_existing',
+          fetch: vi.fn<typeof fetch>()
+        })
+    ).toThrow('piq_platform_');
+  });
+
   it('gets or creates an account and defaults its resources to Live', async () => {
     const fetcher = vi
       .fn<typeof fetch>()
@@ -55,16 +65,18 @@ describe('SpoolPlatform', () => {
     });
     const accountHeaders = new Headers(accountInit?.headers);
     expect(accountHeaders.get('authorization')).toBe(
-      'Bearer spl_platform_service_account'
+      'Bearer piq_platform_service_account'
     );
-    expect(accountHeaders.get('x-spool-workspace-id')).toBeNull();
-    expect(accountHeaders.get('x-spool-environment-id')).toBeNull();
+    expect(accountHeaders.get('x-piqae-workspace-id')).toBeNull();
+    expect(accountHeaders.get('x-piqae-environment-id')).toBeNull();
+    expect(accountHeaders.get('x-piqae-workspace-id')).toBeNull();
+    expect(accountHeaders.get('x-piqae-environment-id')).toBeNull();
 
     const [printerUrl, printerInit] = fetcher.mock.calls[1] ?? [];
     expect(String(printerUrl)).toBe('https://print.example.test/v1/printers');
     const printerHeaders = new Headers(printerInit?.headers);
-    expect(printerHeaders.get('x-spool-workspace-id')).toBe('wrk_customer_01');
-    expect(printerHeaders.get('x-spool-environment-id')).toBe('env_customer_live');
+    expect(printerHeaders.get('x-piqae-workspace-id')).toBe('wrk_customer_01');
+    expect(printerHeaders.get('x-piqae-environment-id')).toBe('env_customer_live');
     expect(scoped.live).toBe(scoped);
     expect(scoped.externalId).toBe('customer:42');
     expect(scoped.jobs).toBeDefined();
@@ -87,11 +99,11 @@ describe('SpoolPlatform', () => {
     await scoped.live.nodes.list();
 
     const testHeaders = new Headers(fetcher.mock.calls[1]?.[1]?.headers);
-    expect(testHeaders.get('x-spool-workspace-id')).toBe('wrk_customer_01');
-    expect(testHeaders.get('x-spool-environment-id')).toBe('env_customer_test');
+    expect(testHeaders.get('x-piqae-workspace-id')).toBe('wrk_customer_01');
+    expect(testHeaders.get('x-piqae-environment-id')).toBe('env_customer_test');
     const liveHeaders = new Headers(fetcher.mock.calls[2]?.[1]?.headers);
-    expect(liveHeaders.get('x-spool-workspace-id')).toBe('wrk_customer_01');
-    expect(liveHeaders.get('x-spool-environment-id')).toBe('env_customer_live');
+    expect(liveHeaders.get('x-piqae-workspace-id')).toBe('wrk_customer_01');
+    expect(liveHeaders.get('x-piqae-environment-id')).toBe('env_customer_live');
   });
 
   it('lists scoped account clients and archives by external ID', async () => {
@@ -99,10 +111,10 @@ describe('SpoolPlatform', () => {
       .fn<typeof fetch>()
       .mockResolvedValueOnce(Response.json([account]))
       .mockResolvedValueOnce(new Response(null, { status: 204 }));
-    const spool = platform(fetcher);
+    const piqae = platform(fetcher);
 
-    const accounts = await spool.accounts.list();
-    await spool.accounts.archive('customer:42');
+    const accounts = await piqae.accounts.list();
+    await piqae.accounts.archive('customer:42');
 
     expect(accounts[0]?.id).toBe('wrk_customer_01');
     expect(String(fetcher.mock.calls[0]?.[0])).toBe(
@@ -141,8 +153,10 @@ describe('SpoolPlatform', () => {
 
     const headers = new Headers(fetcher.mock.calls[1]?.[1]?.headers);
     expect(headers.get('authorization')).toBeNull();
-    expect(headers.get('x-spool-workspace-id')).toBeNull();
-    expect(headers.get('x-spool-environment-id')).toBeNull();
+    expect(headers.get('x-piqae-workspace-id')).toBeNull();
+    expect(headers.get('x-piqae-environment-id')).toBeNull();
+    expect(headers.get('x-piqae-workspace-id')).toBeNull();
+    expect(headers.get('x-piqae-environment-id')).toBeNull();
     expect(headers.get('x-upload-token')).toBe('opaque');
   });
 

@@ -2,14 +2,14 @@
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-chart="${root}/deploy/helm/spool"
+chart="${root}/deploy/helm/piqae"
 values="${chart}/values-ci.yaml"
 production_values="${chart}/values-production.example.yaml"
 chart_arg="${chart}"
 values_arg="${values}"
 production_values_arg="${production_values}"
 if ! command -v helm >/dev/null 2>&1; then
-  chart_arg="deploy/helm/spool"
+  chart_arg="deploy/helm/piqae"
   values_arg="${chart_arg}/values-ci.yaml"
   production_values_arg="${chart_arg}/values-production.example.yaml"
 fi
@@ -28,8 +28,8 @@ run_helm() {
 run_helm lint "${chart_arg}" --values "${values_arg}" --strict
 rendered="$(mktemp)"
 trap 'rm -f "${rendered}"' EXIT
-run_helm template spool "${chart_arg}" \
-  --namespace spool-system \
+run_helm template piqae "${chart_arg}" \
+  --namespace piqae-system \
   --values "${values_arg}" >"${rendered}"
 
 ruby -e '
@@ -46,8 +46,8 @@ ruby -e '
 
 production_rendered="$(mktemp)"
 trap 'rm -f "${rendered}" "${production_rendered}"' EXIT
-run_helm template spool "${chart_arg}" \
-  --namespace spool-system \
+run_helm template piqae "${chart_arg}" \
+  --namespace piqae-system \
   --values "${production_values_arg}" >"${production_rendered}"
 
 ruby -e '

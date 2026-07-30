@@ -4,7 +4,7 @@ use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitEx
 const DEFAULT_FILTER: &str = "info";
 
 #[cfg(feature = "otlp")]
-const SERVICE_NAME: &str = "spool-control-plane";
+const SERVICE_NAME: &str = "piqae-control-plane";
 
 #[derive(Debug)]
 #[must_use = "the guard flushes pending trace spans when it is shut down or dropped"]
@@ -86,7 +86,7 @@ fn init_with_otlp(filter: EnvFilter) -> Result<ObservabilityGuard> {
         .context("configure OTLP trace exporter")?;
     let service_name = nonempty_env("OTEL_SERVICE_NAME").unwrap_or_else(|| SERVICE_NAME.into());
     let deployment_environment =
-        nonempty_env("SPOOL_ENVIRONMENT").unwrap_or_else(|| "development".into());
+        nonempty_env("PIQAE_ENVIRONMENT").unwrap_or_else(|| "development".into());
     let resource = Resource::builder()
         .with_service_name(service_name)
         .with_attributes([

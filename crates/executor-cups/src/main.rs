@@ -1,5 +1,5 @@
-use spool_executor_protocol::{read_frame, write_frame};
-use spool_protocol::executor::{ExecutorRequest, ExecutorResponse};
+use piqae_executor_protocol::{read_frame, write_frame};
+use piqae_protocol::executor::{ExecutorRequest, ExecutorResponse};
 
 fn main() {
     if let Err(error) = run() {
@@ -24,16 +24,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(unix)]
 mod platform {
     use base64::{Engine as _, engine::general_purpose::STANDARD};
-    use serde::{Deserialize, Deserializer, de};
-    use sha2::{Digest, Sha256};
-    use spool_domain::{
+    use piqae_domain::{
         Duplex, JobOptions, NativePrinterChoice, NativePrinterOption, NativeProfileKind,
         PrinterCapabilities, PrinterState, Rotation, SafeProfileOverride,
     };
-    use spool_protocol::executor::{
+    use piqae_protocol::executor::{
         DiscoveredPrinter, ExecutorError, ExecutorOperation, ExecutorResult, NativeJobObservation,
         NativeJobState, NativeProfilePayload, NativeQueueJob,
     };
+    use serde::{Deserialize, Deserializer, de};
+    use sha2::{Digest, Sha256};
     use std::{
         collections::{BTreeMap, BTreeSet},
         ffi::{CStr, CString, c_char, c_int, c_long},
@@ -143,7 +143,7 @@ mod platform {
                 &native_printer_id,
                 &title,
                 &content_path,
-                content_kind == spool_domain::ContentKind::Raw,
+                content_kind == piqae_domain::ContentKind::Raw,
                 &options,
                 native_profile.as_ref(),
             ),
@@ -760,13 +760,13 @@ mod platform {
                 "this native profile kind is not supported by the CUPS executor",
             ));
         }
-        if profile.schema_version != spool_domain::NATIVE_PROFILE_SCHEMA_VERSION {
+        if profile.schema_version != piqae_domain::NATIVE_PROFILE_SCHEMA_VERSION {
             return Err(profile_error(
                 "native_profile_schema_unsupported",
                 format!(
                     "unsupported native profile schema {}; expected {}",
                     profile.schema_version,
-                    spool_domain::NATIVE_PROFILE_SCHEMA_VERSION
+                    piqae_domain::NATIVE_PROFILE_SCHEMA_VERSION
                 ),
             ));
         }
@@ -1060,13 +1060,13 @@ mod platform {
                 "RAW jobs cannot use a macOS PrintCore profile",
             ));
         }
-        if profile.schema_version != spool_domain::NATIVE_PROFILE_SCHEMA_VERSION {
+        if profile.schema_version != piqae_domain::NATIVE_PROFILE_SCHEMA_VERSION {
             return Err(profile_error(
                 "native_profile_schema_unsupported",
                 format!(
                     "unsupported native profile schema {}; expected {}",
                     profile.schema_version,
-                    spool_domain::NATIVE_PROFILE_SCHEMA_VERSION
+                    piqae_domain::NATIVE_PROFILE_SCHEMA_VERSION
                 ),
             ));
         }
@@ -1275,15 +1275,15 @@ mod platform {
 
     fn printcore_helper_path() -> Result<std::path::PathBuf, ExecutorError> {
         let configured =
-            std::env::var_os("SPOOL_PRINTCORE_REPLAY_PATH").map(std::path::PathBuf::from);
+            std::env::var_os("PIQAE_PRINTCORE_REPLAY_PATH").map(std::path::PathBuf::from);
         let sibling = std::env::current_exe().ok().and_then(|path| {
             path.parent()
-                .map(|parent| parent.join("SpoolPrintCoreReplay"))
+                .map(|parent| parent.join("PiqaePrintCoreReplay"))
         });
         #[cfg(debug_assertions)]
         let development = Some(
             Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../shells/macos/.build/release/SpoolPrintCoreReplay"),
+                .join("../../shells/macos/.build/release/PiqaePrintCoreReplay"),
         );
         #[cfg(not(debug_assertions))]
         let development: Option<std::path::PathBuf> = None;
@@ -1309,12 +1309,12 @@ mod platform {
             .ok_or_else(|| {
                 profile_error(
                     "native_profile_backend_unavailable",
-                    "SpoolPrintCoreReplay is not installed; set SPOOL_PRINTCORE_REPLAY_PATH",
+                    "PiqaePrintCoreReplay is not installed; set PIQAE_PRINTCORE_REPLAY_PATH",
                 )
             })
     }
 
-    fn cups_job_options(raw: bool, options: &spool_domain::JobOptions) -> Vec<(String, String)> {
+    fn cups_job_options(raw: bool, options: &piqae_domain::JobOptions) -> Vec<(String, String)> {
         if raw {
             return vec![("raw".into(), "true".into())];
         }
@@ -1488,7 +1488,7 @@ mod platform {
 
         #[test]
         fn pdf_options_map_to_standard_ipp_names() {
-            let options = spool_domain::JobOptions {
+            let options = piqae_domain::JobOptions {
                 bin: Some("tray-1".into()),
                 collate: Some(true),
                 color: Some(false),
@@ -1527,7 +1527,7 @@ mod platform {
 
         #[test]
         fn raw_jobs_ignore_rendering_options() {
-            let options = spool_domain::JobOptions {
+            let options = piqae_domain::JobOptions {
                 copies: Some(99),
                 paper: Some("A4".into()),
                 duplex: Some(Duplex::LongEdge),
@@ -1554,11 +1554,11 @@ mod platform {
                 profile_id: "profile-a4".into(),
                 revision: 7,
                 kind,
-                schema_version: spool_domain::NATIVE_PROFILE_SCHEMA_VERSION,
+                schema_version: piqae_domain::NATIVE_PROFILE_SCHEMA_VERSION,
                 digest: format!("sha256:{:x}", Sha256::digest(&blob)),
                 blob,
                 safe_overrides,
-                driver_fingerprint: spool_domain::DriverFingerprint {
+                driver_fingerprint: piqae_domain::DriverFingerprint {
                     platform: "macos".into(),
                     driver_name: "Fixture".into(),
                     native_queue_id: "HP".into(),
@@ -1740,7 +1740,7 @@ mod platform {
 
 #[cfg(not(unix))]
 mod platform {
-    use spool_protocol::executor::{ExecutorError, ExecutorOperation, ExecutorResult};
+    use piqae_protocol::executor::{ExecutorError, ExecutorOperation, ExecutorResult};
 
     pub fn execute(_operation: ExecutorOperation) -> Result<ExecutorResult, ExecutorError> {
         Err(ExecutorError {

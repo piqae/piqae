@@ -1,6 +1,7 @@
 import { env as privateEnv } from '$env/dynamic/private';
 import { GetObjectCommand, HeadObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import { productEnvironmentValue } from './product-env';
 import {
   parseReleaseManifest,
   type ReleaseManifest
@@ -26,11 +27,21 @@ const assetLookupTimeoutMilliseconds = 2_000;
 export function releaseOriginConfig(
   environment: Record<string, string | undefined> = privateEnv
 ): ReleaseOriginConfig | null {
-  const endpoint = safeHttpsUrl(environment.PIQAE_RELEASES_S3_ENDPOINT);
-  const accessKeyId = present(environment.PIQAE_RELEASES_S3_ACCESS_KEY_ID);
-  const secretAccessKey = present(environment.PIQAE_RELEASES_S3_SECRET_ACCESS_KEY);
-  const bucket = safeBucket(environment.PIQAE_RELEASES_S3_BUCKET);
-  const region = safeRegion(environment.PIQAE_RELEASES_S3_REGION);
+  const endpoint = safeHttpsUrl(
+    productEnvironmentValue(environment, 'PIQAE_RELEASES_S3_ENDPOINT')
+  );
+  const accessKeyId = present(
+    productEnvironmentValue(environment, 'PIQAE_RELEASES_S3_ACCESS_KEY_ID')
+  );
+  const secretAccessKey = present(
+    productEnvironmentValue(environment, 'PIQAE_RELEASES_S3_SECRET_ACCESS_KEY')
+  );
+  const bucket = safeBucket(
+    productEnvironmentValue(environment, 'PIQAE_RELEASES_S3_BUCKET')
+  );
+  const region = safeRegion(
+    productEnvironmentValue(environment, 'PIQAE_RELEASES_S3_REGION')
+  );
   if (!endpoint || !accessKeyId || !secretAccessKey || !bucket || !region) return null;
   return {
     endpoint,
@@ -38,7 +49,9 @@ export function releaseOriginConfig(
     secretAccessKey,
     bucket,
     region,
-    forcePathStyle: environment.PIQAE_RELEASES_S3_VIRTUAL_HOSTED_STYLE !== 'true'
+    forcePathStyle:
+      productEnvironmentValue(environment, 'PIQAE_RELEASES_S3_VIRTUAL_HOSTED_STYLE') !==
+      'true'
   };
 }
 

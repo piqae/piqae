@@ -1,12 +1,12 @@
-# Spool documentation corpus
+# Piqae documentation corpus
 
 Generated from repository-owned documentation on 2026-07-29.
 Third-party documentation text is not reproduced. External products are named
-only where needed to describe Spool integrations.
+only where needed to describe Piqae integrations.
 
 ## Documentation conventions
 
-Spool is an open-source, self-hostable print control plane and local print-node
+Piqae is an open-source, self-hostable print control plane and local print-node
 agent. Repository-relative Markdown links include the literal `.md` extension
 so they work in source archives, raw Markdown readers, and GitHub. External
 links use full HTTPS URLs. Credentials, signed URLs, native profile blobs, and
@@ -28,7 +28,7 @@ physical test, and stable support certification are different facts.
 
 ## Product model
 
-Spool accepts print jobs from a native API or a PrintNode-shaped compatibility
+Piqae accepts print jobs from a native API or a PrintNode-shaped compatibility
 API, stores durable tenant/job state in PostgreSQL, stores content in an
 S3-compatible object store, and routes work to an enrolled node. The node
 persists accepted work in SQLite, uses an isolated executor, and hands output
@@ -61,7 +61,7 @@ identity, or off-device recovery.
 
 ### Docker Compose
 
-The evaluation topology runs spool-server, PostgreSQL 16, and MinIO. The
+The evaluation topology runs piqae-server, PostgreSQL 16, and MinIO. The
 dashboard is optional. Operators replace every placeholder, keep bootstrap
 keys server-side, pin production images by digest, and back up PostgreSQL and
 objects as one logical set. This topology is not highly available.
@@ -89,7 +89,7 @@ replica, and Sydney/Melbourne dual-region objects. Managed data resources are
 not automatically wired into runtime secrets. Database promotion, credentials,
 cutover, fencing, and reconciliation remain explicit operator actions.
 
-No repository configuration is itself a public Supported Spool SaaS.
+No repository configuration is itself a public Supported Piqae SaaS.
 
 ## Node journeys
 
@@ -167,7 +167,7 @@ physical print test.
 
 Manufacturer-specific settings such as stock sensing, gap/black mark,
 registration, white toner, feed direction, cutter, tray, and finishing remain
-in the genuine vendor driver UI. Spool saves opaque native state rather than
+in the genuine vendor driver UI. Piqae saves opaque native state rather than
 cloning every option. Profiles must be qualified on the final node, queue,
 driver, firmware, device, stock, and loading procedure. Only explicitly safe
 fields such as copies/pages should remain per-job overrides.
@@ -198,7 +198,7 @@ independent physical proof.
 
 Native clients use:
 
-    Authorization: Bearer spl_...
+    Authorization: Bearer piq_...
 
 Keys are server-side secrets, one per integration/environment, with minimum
 scopes. Bootstrap credentials are rotated after durable keys exist. Nodes use
@@ -217,12 +217,12 @@ remain available until node download; private/short-lived content should use
 uploads. A successful create is durable registration, not printing.
 
 Webhook endpoint management, encrypted signing secrets, transactional outbox,
-retry history, and replay are implemented. Delivery is at least once. Spool
+retry history, and replay are implemented. Delivery is at least once. Piqae
 signs the exact raw body with HMAC-SHA256 over:
 
     <decimal timestamp>.<raw body>
 
-Headers are Spool-Timestamp and Spool-Signature: v1=<base64>. Consumers verify
+Headers are Piqae-Timestamp and Piqae-Signature: v1=<base64>. Consumers verify
 before parsing/side effects, use constant-time comparison and a timestamp
 tolerance, durably deduplicate event IDs, and return 2xx only after acceptance.
 
@@ -246,7 +246,7 @@ Preserve node data, identity, profiles, and delivery evidence across changes.
 Back up, stage, run compatibility tests, execute migrations, roll server
 replicas behind readiness, observe, then canary nodes. Server comes before
 agents. Migrations remain compatible with the previous server during rolling
-windows. Do not combine driver replacement with a Spool rollout unless profile
+windows. Do not combine driver replacement with a Piqae rollout unless profile
 invalidation is planned and tested.
 
 ### Backup/restore
@@ -267,7 +267,7 @@ and rehearse failback. Replication is not a zero-RPO guarantee.
 
 ### Job lifecycle reliability
 
-Spool treats PostgreSQL/object storage and node SQLite/content files as two
+Piqae treats PostgreSQL/object storage and node SQLite/content files as two
 separate durable boundaries. Node pickup uses short leases; local acceptance
 is replayable and idempotent; a native `spool_intent` is persisted before
 CUPS/Winspool handoff. Failures proven to occur before handoff may retry.
@@ -290,7 +290,7 @@ object readiness. Neither proves physical output.
 
 Declare ownership/severity/timeline, preserve evidence, stop expansion, classify
 waiting/failed/uncertain jobs, and rotate exposed credentials. Never bulk retry
-ambiguous output. Reconcile Spool ID, native ID, physical output, and stock.
+ambiguous output. Reconcile Piqae ID, native ID, physical output, and stock.
 Fence database writers before promotion. Share only redacted support data.
 
 ## Contributor model

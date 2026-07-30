@@ -2,11 +2,11 @@
 import PackageDescription
 
 let package = Package(
-    name: "SpoolMenu",
+    name: "PiqaeMenu",
     platforms: [.macOS(.v13)],
     products: [
-        .executable(name: "SpoolMenu", targets: ["SpoolMenu"]),
-        .executable(name: "SpoolPrintCoreReplay", targets: ["SpoolPrintCoreReplay"]),
+        .executable(name: "PiqaeMenu", targets: ["PiqaeMenu"]),
+        .executable(name: "PiqaePrintCoreReplay", targets: ["PiqaePrintCoreReplay"]),
     ],
     dependencies: [
         .package(
@@ -15,32 +15,32 @@ let package = Package(
         ),
     ],
     targets: [
-        .target(name: "SpoolMenuCore"),
-        .target(name: "SpoolProfileHost", dependencies: ["SpoolMenuCore"]),
+        .target(name: "PiqaeMenuCore"),
+        .target(name: "PiqaeProfileHost", dependencies: ["PiqaeMenuCore"]),
         .target(
-            name: "SpoolPrintCoreReplayCore",
-            dependencies: ["SpoolMenuCore", "SpoolProfileHost"]
+            name: "PiqaePrintCoreReplayCore",
+            dependencies: ["PiqaeMenuCore", "PiqaeProfileHost"]
         ),
         .executableTarget(
-            name: "SpoolMenu",
+            name: "PiqaeMenu",
             dependencies: [
-                "SpoolMenuCore",
-                "SpoolProfileHost",
+                "PiqaeMenuCore",
+                "PiqaeProfileHost",
                 .product(name: "Sparkle", package: "Sparkle"),
             ]
         ),
         .executableTarget(
-            name: "SpoolPrintCoreReplay",
-            dependencies: ["SpoolPrintCoreReplayCore"]
+            name: "PiqaePrintCoreReplay",
+            dependencies: ["PiqaePrintCoreReplayCore"]
         ),
-        .testTarget(name: "SpoolMenuCoreTests", dependencies: ["SpoolMenuCore"]),
+        .testTarget(name: "PiqaeMenuCoreTests", dependencies: ["PiqaeMenuCore"]),
         .testTarget(
-            name: "SpoolProfileHostTests",
-            dependencies: ["SpoolMenuCore", "SpoolProfileHost"]
+            name: "PiqaeProfileHostTests",
+            dependencies: ["PiqaeMenuCore", "PiqaeProfileHost"]
         ),
         .testTarget(
-            name: "SpoolPrintCoreReplayCoreTests",
-            dependencies: ["SpoolMenuCore", "SpoolProfileHost", "SpoolPrintCoreReplayCore"]
+            name: "PiqaePrintCoreReplayCoreTests",
+            dependencies: ["PiqaeMenuCore", "PiqaeProfileHost", "PiqaePrintCoreReplayCore"]
         ),
     ]
 )

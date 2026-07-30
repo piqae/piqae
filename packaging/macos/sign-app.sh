@@ -2,16 +2,16 @@
 set -euo pipefail
 
 app=${1:-}
-identity=${SPOOL_CODE_SIGN_IDENTITY:-}
+identity=${PIQAE_CODE_SIGN_IDENTITY:-}
 script_root=$(cd "$(dirname "$0")" && pwd)
-entitlements="$script_root/../../shells/macos/Resources/Spool.entitlements"
+entitlements="$script_root/../../shells/macos/Resources/Piqae.entitlements"
 
 if [[ -z "$app" || ! -d "$app" || "$app" != *.app ]]; then
-  echo "usage: SPOOL_CODE_SIGN_IDENTITY='Developer ID Application: …' $0 /path/Piqae.app" >&2
+  echo "usage: PIQAE_CODE_SIGN_IDENTITY='Developer ID Application: …' $0 /path/Piqae.app" >&2
   exit 2
 fi
 if [[ "$identity" != "Developer ID Application:"* ]]; then
-  echo "SPOOL_CODE_SIGN_IDENTITY must name a Developer ID Application certificate" >&2
+  echo "PIQAE_CODE_SIGN_IDENTITY must name a Developer ID Application certificate" >&2
   exit 2
 fi
 if ! security find-identity -v -p codesigning | grep -F -- "$identity" >/dev/null; then
@@ -51,7 +51,7 @@ codesign \
   --timestamp \
   --options runtime \
   --sign "$identity" \
-  "$app/Contents/MacOS/SpoolPrintCoreReplay"
+  "$app/Contents/MacOS/PiqaePrintCoreReplay"
 codesign \
   --force \
   --timestamp \

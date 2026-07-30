@@ -12,7 +12,7 @@
 
 ## Printing safety
 
-Do not bulk retry ambiguous jobs. Reconcile Spool ID, native spooler ID,
+Do not bulk retry ambiguous jobs. Reconcile Piqae ID, native spooler ID,
 physical output, and stock. For labels, check the next serial/order before
 releasing work. Disable a bad profile/target rather than editing history.
 

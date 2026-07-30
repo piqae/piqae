@@ -1,13 +1,13 @@
 ---
 name: test-fake-print
-description: Exercise Spool job registration, offline queueing, leasing, status propagation, and idempotency with deterministic virtual nodes and printers. Use for printing-flow tests that must not reach physical hardware.
+description: Exercise Piqae job registration, offline queueing, leasing, status propagation, and idempotency with deterministic virtual nodes and printers. Use for printing-flow tests that must not reach physical hardware.
 ---
 
 # Test fake printing
 
 1. Read `AGENTS.md` and printing safety rules.
-2. Create `.spool-test-fixtures/fake-print` as the state directory.
-3. Run `cargo test -p spool-control-plane -p spool-agent -p spool-fake-executor`.
+2. Create `.piqae-test-fixtures/fake-print` as the state directory.
+3. Run `cargo test -p piqae-control-plane -p piqae-agent -p piqae-fake-executor`.
 4. Start `cargo xtask dev` without `--real-printers`.
 5. Submit the repository fixture to the virtual printer twice with one
    idempotency key; expect one job and one spooler-acceptance usage event.

@@ -16,8 +16,8 @@ describe('same-origin event proxy', () => {
   beforeEach(() => {
     for (const key of Object.keys(publicEnvironment)) delete publicEnvironment[key];
     for (const key of Object.keys(privateEnvironment)) delete privateEnvironment[key];
-    publicEnvironment.PUBLIC_SPOOL_DASHBOARD_MODE = 'live';
-    publicEnvironment.PUBLIC_SPOOL_API_URL = 'https://api.spool.test';
+    publicEnvironment.PUBLIC_PIQAE_DASHBOARD_MODE = 'live';
+    publicEnvironment.PUBLIC_PIQAE_API_URL = 'https://api.piqae.test';
   });
 
   it('forwards session auth and SSE cursors server-side without exposing the token', async () => {
@@ -29,8 +29,8 @@ describe('same-origin event proxy', () => {
     );
     const response = await GET({
       fetch: fetcher,
-      url: new URL('https://dashboard.spool.test/api/events'),
-      request: new Request('https://dashboard.spool.test/api/events', {
+      url: new URL('https://dashboard.piqae.test/api/events'),
+      request: new Request('https://dashboard.piqae.test/api/events', {
         headers: { 'last-event-id': 'evt_1' }
       }),
       locals: {
@@ -41,7 +41,7 @@ describe('same-origin event proxy', () => {
 
     const [url, init] = fetcher.mock.calls[0] ?? [];
     const upstreamHeaders = new Headers(init?.headers);
-    expect(String(url)).toBe('https://api.spool.test/v1/events/stream');
+    expect(String(url)).toBe('https://api.piqae.test/v1/events/stream');
     expect(upstreamHeaders.get('authorization')).toBe(`Bearer ${accessToken}`);
     expect(upstreamHeaders.get('last-event-id')).toBe('evt_1');
     expect(response.headers.get('content-type')).toBe('text/event-stream');

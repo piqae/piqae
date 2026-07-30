@@ -1,5 +1,6 @@
 <script lang="ts">
   import { afterNavigate } from '$app/navigation';
+  import { env as publicEnv } from '$env/dynamic/public';
   import {
     captureMarketingEvent,
     initializeMarketingAnalytics,
@@ -10,13 +11,13 @@
   type Choice = 'granted' | 'denied' | null;
   let choice = $state<Choice>(null);
   let initialized = false;
-  const storageKey = 'spool_analytics_consent_v1';
+  const storageKey = 'piqae_analytics_consent_v1';
 
   async function start() {
-    if (initialized || !import.meta.env.PUBLIC_POSTHOG_KEY) return;
+    if (initialized || !publicEnv.PUBLIC_POSTHOG_KEY) return;
     await initializeMarketingAnalytics(
-      import.meta.env.PUBLIC_POSTHOG_KEY,
-      import.meta.env.PUBLIC_POSTHOG_HOST || 'https://eu.i.posthog.com'
+      publicEnv.PUBLIC_POSTHOG_KEY,
+      publicEnv.PUBLIC_POSTHOG_HOST || 'https://eu.i.posthog.com'
     );
     initialized = true;
     capturePage();
@@ -80,7 +81,7 @@
   afterNavigate(() => capturePage());
 </script>
 
-{#if choice === null && import.meta.env.PUBLIC_POSTHOG_KEY}
+{#if choice === null && publicEnv.PUBLIC_POSTHOG_KEY}
   <aside class="consent" aria-label="Analytics preference">
     <div>
       <strong>Help improve Piqae</strong>

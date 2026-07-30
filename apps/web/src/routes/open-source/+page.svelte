@@ -43,10 +43,10 @@
           menu and tray applications remain disposable interfaces over a narrow local contract.
         </p>
       </div>
-      <pre aria-label="Repository architecture"><code>spool/
+      <pre aria-label="Repository architecture"><code>piqae/
 ├── control-plane
 ├── agent-core
-├── spool-agent
+├── piqae-agent
 ├── protocol
 ├── storage-postgres
 ├── web

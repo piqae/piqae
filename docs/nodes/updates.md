@@ -36,7 +36,7 @@ profile editor is busy. Download and installation still require operator
 confirmation.
 
 Sparkle currently replaces only `Piqae.app`, including the menu shell and
-`SpoolPrintCoreReplay`. It does not replace or restart the separately installed
+`PiqaePrintCoreReplay`. It does not replace or restart the separately installed
 Rust agent and CUPS executor. Silent installation remains disabled. Updating
 every node component still requires the idle-checked per-user package
 installer.

@@ -1,18 +1,18 @@
-//! Authenticated outbound HTTPS transport for Spool agents.
+//! Authenticated outbound HTTPS transport for Piqae agents.
 
 use base64::{Engine as _, engine::general_purpose::STANDARD_NO_PAD};
 use chrono::Utc;
 use ed25519_dalek::{Signer, SigningKey};
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
-use serde::Serialize;
-use sha2::{Digest, Sha256};
-use spool_domain::{AgentId, JobId};
-use spool_protocol::agent::{
+use piqae_domain::{AgentId, JobId};
+use piqae_protocol::agent::{
     AgentAcceptJobRequest, AgentAcceptJobResponse, AgentReleaseLeaseRequest,
     AgentRenewLeaseRequest, AgentRenewLeaseResponse, AgentSyncRequest, AgentSyncResponse,
     CreateDeviceAuthorizationRequest, CreatedDeviceAuthorization, DeviceAuthorizationExchange,
     DeviceAuthorizationStatus, EnrolRequest, EnrolResponse,
 };
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+use serde::Serialize;
+use sha2::{Digest, Sha256};
 use std::time::Duration;
 use thiserror::Error;
 use url::Url;
@@ -100,17 +100,17 @@ impl DeviceIdentity {
         );
         let signature = self.signing_key.sign(canonical.as_bytes());
         let mut headers = HeaderMap::new();
-        insert_header(&mut headers, "x-spool-agent-id", &self.agent_id.to_string())?;
+        insert_header(&mut headers, "x-piqae-agent-id", &self.agent_id.to_string())?;
         insert_header(
             &mut headers,
-            "x-spool-timestamp",
+            "x-piqae-timestamp",
             &timestamp_unix_ms.to_string(),
         )?;
-        insert_header(&mut headers, "x-spool-nonce", &nonce.to_string())?;
-        insert_header(&mut headers, "x-spool-body-sha256", &digest)?;
+        insert_header(&mut headers, "x-piqae-nonce", &nonce.to_string())?;
+        insert_header(&mut headers, "x-piqae-body-sha256", &digest)?;
         insert_header(
             &mut headers,
-            "x-spool-signature",
+            "x-piqae-signature",
             &STANDARD_NO_PAD.encode(signature.to_bytes()),
         )?;
         Ok(headers)
@@ -142,7 +142,7 @@ impl AgentClient {
         let client = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(40))
-            .user_agent(concat!("spool-agent/", env!("CARGO_PKG_VERSION")))
+            .user_agent(concat!("piqae-agent/", env!("CARGO_PKG_VERSION")))
             .build()?;
         Ok(Self { base_url, client })
     }
@@ -302,8 +302,8 @@ impl AgentClient {
             Utc::now().timestamp_millis(),
             Uuid::new_v4(),
         )?;
-        insert_header(&mut headers, "x-spool-lease-id", &lease_id.to_string())?;
-        insert_header(&mut headers, "x-spool-lease-token", lease_token)?;
+        insert_header(&mut headers, "x-piqae-lease-id", &lease_id.to_string())?;
+        insert_header(&mut headers, "x-piqae-lease-token", lease_token)?;
         let response = self
             .client
             .get(self.base_url.join(&path)?)
@@ -409,9 +409,9 @@ mod tests {
             .signed_headers("POST", "/v1/agent/sync", b"{}", 123, nonce)
             .expect("headers");
         let digest = format!("{:x}", Sha256::digest(b"{}"));
-        assert_eq!(headers["x-spool-body-sha256"], digest);
+        assert_eq!(headers["x-piqae-body-sha256"], digest);
         let signature_bytes = STANDARD_NO_PAD
-            .decode(headers["x-spool-signature"].as_bytes())
+            .decode(headers["x-piqae-signature"].as_bytes())
             .expect("base64");
         let signature = Signature::from_slice(&signature_bytes).expect("signature");
         let key = VerifyingKey::from_bytes(&identity.signing_key.verifying_key().to_bytes())
@@ -469,23 +469,23 @@ mod tests {
         let headers = parse_http_headers(&request);
 
         assert!(request.starts_with(&format!("GET /v1/agent/jobs/{job_id}/content HTTP/1.1\r\n")));
-        assert_eq!(headers["x-spool-agent-id"], agent_id.to_string());
-        assert_eq!(headers["x-spool-lease-id"], lease_id.to_string());
-        assert_eq!(headers["x-spool-lease-token"], lease_token);
+        assert_eq!(headers["x-piqae-agent-id"], agent_id.to_string());
+        assert_eq!(headers["x-piqae-lease-id"], lease_id.to_string());
+        assert_eq!(headers["x-piqae-lease-token"], lease_token);
         assert_eq!(
-            headers["x-spool-body-sha256"],
+            headers["x-piqae-body-sha256"],
             format!("{:x}", Sha256::digest([]))
         );
         assert!(!format!("{error:?}").contains(lease_token));
 
-        let nonce = Uuid::parse_str(&headers["x-spool-nonce"]).expect("nonce");
+        let nonce = Uuid::parse_str(&headers["x-piqae-nonce"]).expect("nonce");
         let canonical = format!(
             "GET\n/v1/agent/jobs/{job_id}/content\n{}\n{}\n{}",
-            headers["x-spool-timestamp"], nonce, headers["x-spool-body-sha256"]
+            headers["x-piqae-timestamp"], nonce, headers["x-piqae-body-sha256"]
         );
         let signature = Signature::from_slice(
             &STANDARD_NO_PAD
-                .decode(&headers["x-spool-signature"])
+                .decode(&headers["x-piqae-signature"])
                 .expect("signature encoding"),
         )
         .expect("signature");

@@ -26,7 +26,7 @@ function price(overrides: Partial<Stripe.Price> = {}): Stripe.Price {
     billing_scheme: 'per_unit',
     currency: 'usd',
     metadata: {},
-    product: 'prod_spool',
+    product: 'prod_piqae',
     recurring: {
       interval: 'month',
       interval_count: 1,
@@ -66,10 +66,10 @@ describe('hosted billing contract', () => {
 
   it('enables checkout only when base and metered overage prices are configured', () => {
     privateEnvironment.STRIPE_CHECKOUT_ENABLED = 'true';
-    privateEnvironment.STRIPE_PRICE_PRO_MONTHLY = 'spool_pro_monthly';
+    privateEnvironment.STRIPE_PRICE_PRO_MONTHLY = 'piqae_pro_monthly';
 
     expect(checkoutAllowed('pro', 'monthly')).toBe(false);
-    privateEnvironment.STRIPE_PRICE_PRO_OVERAGE_MONTHLY = 'spool_pro_overage_monthly';
+    privateEnvironment.STRIPE_PRICE_PRO_OVERAGE_MONTHLY = 'piqae_pro_overage_monthly';
     expect(checkoutAllowed('pro', 'monthly')).toBe(true);
   });
 
@@ -100,10 +100,10 @@ describe('hosted billing contract', () => {
       id: 'price_overage',
       unit_amount: 25,
       metadata: {
-        spool_plan: 'pro',
-        spool_metric: 'accepted_live_jobs_overage',
-        spool_included_jobs: '25000',
-        spool_overage_unit: '1000'
+        piqae_plan: 'pro',
+        piqae_metric: 'accepted_live_jobs_overage',
+        piqae_included_jobs: '25000',
+        piqae_overage_unit: '1000'
       },
       recurring: {
         interval: 'month',
@@ -117,7 +117,22 @@ describe('hosted billing contract', () => {
     expect(stripeOveragePriceMatchesCatalog(overage, 'pro', 'monthly')).toBe(true);
     expect(
       stripeOveragePriceMatchesCatalog(
-        { ...overage, metadata: { ...overage.metadata, spool_overage_unit: '1' } },
+        {
+          ...overage,
+          metadata: {
+            spool_plan: 'pro',
+            spool_metric: 'accepted_live_jobs_overage',
+            spool_included_jobs: '25000',
+            spool_overage_unit: '1000'
+          }
+        },
+        'pro',
+        'monthly'
+      )
+    ).toBe(true);
+    expect(
+      stripeOveragePriceMatchesCatalog(
+        { ...overage, metadata: { ...overage.metadata, piqae_overage_unit: '1' } },
         'pro',
         'monthly'
       )
@@ -129,10 +144,10 @@ describe('hosted billing contract', () => {
       id: 'price_overage_annual',
       unit_amount: 25,
       metadata: {
-        spool_plan: 'pro',
-        spool_metric: 'accepted_live_jobs_overage',
-        spool_included_jobs: '300000',
-        spool_overage_unit: '1000'
+        piqae_plan: 'pro',
+        piqae_metric: 'accepted_live_jobs_overage',
+        piqae_included_jobs: '300000',
+        piqae_overage_unit: '1000'
       },
       recurring: {
         interval: 'year',
@@ -148,7 +163,7 @@ describe('hosted billing contract', () => {
       stripeOveragePriceMatchesCatalog(
         {
           ...annualOverage,
-          metadata: { ...annualOverage.metadata, spool_included_jobs: '25000' }
+          metadata: { ...annualOverage.metadata, piqae_included_jobs: '25000' }
         },
         'pro',
         'annual'
@@ -183,9 +198,10 @@ describe('hosted billing contract', () => {
         2_100_000
       )
     ).not.toBe(first);
+    expect(first).toMatch(/^spool-checkout-/);
   });
 
-  it('uses one stable Stripe customer creation key per Spool workspace', () => {
+  it('uses one stable Stripe customer creation key per Piqae workspace', () => {
     expect(stripeCustomerIdempotencyKey('workspace_123')).toBe(
       stripeCustomerIdempotencyKey('workspace_123')
     );
@@ -193,6 +209,7 @@ describe('hosted billing contract', () => {
       stripeCustomerIdempotencyKey('workspace_456')
     );
     expect(stripeCustomerIdempotencyKey('workspace_123')).not.toContain('workspace_123');
+    expect(stripeCustomerIdempotencyKey('workspace_123')).toMatch(/^spool-customer-/);
   });
 
   it('prevents duplicate Checkout for every non-terminal Stripe subscription', () => {

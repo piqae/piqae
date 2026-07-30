@@ -4,7 +4,7 @@
 
 ## Toolchain
 
-Spool uses Rust 1.88, Node.js 22, pnpm 11.4, Swift on macOS, and Docker for the
+Piqae uses Rust 1.88, Node.js 22, pnpm 11.4, Swift on macOS, and Docker for the
 self-hosted stack. `mise.toml` is the canonical cross-language tool declaration.
 
 ```console
@@ -27,12 +27,12 @@ cargo xtask fixture reset
 ```
 
 `dev` defaults to the deterministic demo dashboard. `dev agent` starts the
-local agent with the fake executor and stores disposable state in `.spool-dev`.
+local agent with the fake executor and stores disposable state in `.piqae-dev`.
 Run the two commands in separate terminals when working across the web and
 agent boundary.
 
 The local agent API binds to `127.0.0.1:39100`. Its token is generated under
-`.spool-dev`; do not commit or paste it into logs.
+`.piqae-dev`; do not commit or paste it into logs.
 
 ## Repository shape
 
@@ -50,5 +50,5 @@ durable job state into a tray application.
 ## Safe local operation
 
 No contributor command prints to physical hardware by default. Do not set
-`SPOOL_ALLOW_PHYSICAL_TESTS=1` unless a human has named the printer, stock, and
+`PIQAE_ALLOW_PHYSICAL_TESTS=1` unless a human has named the printer, stock, and
 expected output for that run. Never make physical tests part of ordinary CI.

@@ -5,10 +5,10 @@
 
 use bytes::Bytes;
 use futures::stream;
-use sha2::{Digest, Sha256};
-use spool_object_store::{
+use piqae_object_store::{
     FileObjectStore, ObjectByteStream, ObjectStore, ObjectStoreError, digest_hex,
 };
+use sha2::{Digest, Sha256};
 use std::{
     path::PathBuf,
     time::{SystemTime, UNIX_EPOCH},
@@ -20,7 +20,7 @@ fn temporary_root(label: &str) -> PathBuf {
         .expect("test clock after epoch")
         .as_nanos();
     std::env::temp_dir().join(format!(
-        "spool-object-fault-{label}-{}-{unique}",
+        "piqae-object-fault-{label}-{}-{unique}",
         std::process::id()
     ))
 }

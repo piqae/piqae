@@ -6,20 +6,20 @@
 pub mod updater;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use serde::{Serialize, de::DeserializeOwned};
-use sha2::{Digest as _, Sha256};
-use spool_domain::{
+use piqae_domain::{
     DriverFingerprint, JobOptions, NativeProfileKind, ProfileCaptureOperation, ProfileDependency,
     ProfileSummary, SafeProfileOverride,
 };
-use spool_executor_windows::native_profile::{
+use piqae_executor_windows::native_profile::{
     ProfileHostOperation, ProfileHostRequest, ProfileHostResponse, ProfileHostResult,
     WINDOWS_PROFILE_HOST_PROTOCOL_VERSION, WindowsNativeProfileCapture,
 };
-use spool_local_ipc::{
+use piqae_local_ipc::{
     LocalPrinter, LocalPrinterProfile, LocalStatus, NativeProfileCapturePayload,
     ProfileCaptureAuthorized,
 };
+use serde::{Serialize, de::DeserializeOwned};
+use sha2::{Digest as _, Sha256};
 use std::{
     collections::BTreeMap,
     ffi::OsString,
@@ -63,12 +63,12 @@ impl LocalApiConfiguration {
     ) -> Result<Self, ShellError> {
         let environment = environment.into_iter().collect::<BTreeMap<_, _>>();
         let base_url = environment
-            .get(&OsString::from("SPOOL_LOCAL_API_URL"))
+            .get(&OsString::from("PIQAE_LOCAL_API_URL"))
             .and_then(|value| value.to_str())
             .filter(|value| !value.is_empty())
             .unwrap_or(DEFAULT_LOCAL_API_URL);
         let parsed = url::Url::parse(base_url)
-            .map_err(|_| ShellError::Configuration("SPOOL_LOCAL_API_URL is invalid".into()))?;
+            .map_err(|_| ShellError::Configuration("PIQAE_LOCAL_API_URL is invalid".into()))?;
         let host = parsed.host_str().map(str::to_ascii_lowercase);
         let address = match host.as_deref() {
             Some("127.0.0.1" | "localhost") => {
@@ -79,7 +79,7 @@ impl LocalApiConfiguration {
             }
             _ => {
                 return Err(ShellError::Configuration(
-                    "SPOOL_LOCAL_API_URL must be an HTTP loopback origin".into(),
+                    "PIQAE_LOCAL_API_URL must be an HTTP loopback origin".into(),
                 ));
             }
         };
@@ -91,17 +91,17 @@ impl LocalApiConfiguration {
             || !matches!(parsed.path(), "" | "/")
         {
             return Err(ShellError::Configuration(
-                "SPOOL_LOCAL_API_URL must be an HTTP loopback origin".into(),
+                "PIQAE_LOCAL_API_URL must be an HTTP loopback origin".into(),
             ));
         }
 
         let token_file = environment
-            .get(&OsString::from("SPOOL_LOCAL_TOKEN_FILE"))
+            .get(&OsString::from("PIQAE_LOCAL_TOKEN_FILE"))
             .filter(|value| !value.is_empty())
             .map(PathBuf::from)
             .or_else(|| {
                 environment
-                    .get(&OsString::from("SPOOL_DATA_DIR"))
+                    .get(&OsString::from("PIQAE_DATA_DIR"))
                     .filter(|value| !value.is_empty())
                     .map(PathBuf::from)
                     .map(|directory| directory.join("local.token"))
@@ -111,8 +111,8 @@ impl LocalApiConfiguration {
                     .get(&OsString::from("ProgramData"))
                     .filter(|value| !value.is_empty())
                     .map_or_else(
-                        || PathBuf::from(".spool"),
-                        |directory| PathBuf::from(directory).join("Spool"),
+                        || PathBuf::from(".piqae"),
+                        |directory| PathBuf::from(directory).join("Piqae"),
                     )
                     .join("local.token")
             });
@@ -278,7 +278,7 @@ impl LocalAgentClient {
                 .map_err(ShellError::Io)?;
         }
         if let Some(capture_token) = capture_token {
-            write!(stream, "X-Spool-Capture-Token: {capture_token}\r\n").map_err(ShellError::Io)?;
+            write!(stream, "X-Piqae-Capture-Token: {capture_token}\r\n").map_err(ShellError::Io)?;
         }
         stream.write_all(b"\r\n").map_err(ShellError::Io)?;
         stream.write_all(body).map_err(ShellError::Io)?;
@@ -455,7 +455,7 @@ pub fn run_profile_host(
     };
     let encoded = serde_json::to_vec(&request).map_err(ShellError::Json)?;
     let mut child = Command::new(executable)
-        .env("SPOOL_PROFILE_CAPTURE_TOKEN", &session.capture_token)
+        .env("PIQAE_PROFILE_CAPTURE_TOKEN", &session.capture_token)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -620,7 +620,7 @@ pub fn capture_payload(
 }
 
 fn decode_native_seed(
-    seed: &spool_local_ipc::NativeProfileSeed,
+    seed: &piqae_local_ipc::NativeProfileSeed,
 ) -> Result<WindowsNativeProfileCapture, ShellError> {
     if seed.kind != NativeProfileKind::WindowsDevmode {
         return Err(ShellError::Protocol(format!(
@@ -703,7 +703,7 @@ pub enum ShellError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use spool_domain::{DriverFingerprint, ProfileCaptureOperation};
+    use piqae_domain::{DriverFingerprint, ProfileCaptureOperation};
     use std::net::TcpListener;
 
     #[test]
@@ -716,7 +716,7 @@ mod tests {
             "http://localhost:39100/path",
         ] {
             let result = LocalApiConfiguration::from_values([(
-                OsString::from("SPOOL_LOCAL_API_URL"),
+                OsString::from("PIQAE_LOCAL_API_URL"),
                 OsString::from(url),
             )]);
             assert!(result.is_err(), "{url} should be rejected");
@@ -732,7 +732,7 @@ mod tests {
         .unwrap_or_else(|error| panic!("{error}"));
         assert_eq!(
             configuration.token_file,
-            PathBuf::from(r"C:\ProgramData").join("Spool/local.token")
+            PathBuf::from(r"C:\ProgramData").join("Piqae/local.token")
         );
     }
 
@@ -746,7 +746,7 @@ mod tests {
         bytes[82..84].copy_from_slice(&2100_i16.to_le_bytes());
         bytes[86..88].copy_from_slice(&2_i16.to_le_bytes());
         let native = WindowsNativeProfileCapture::new(
-            spool_executor_windows::native_profile::WindowsDriverFingerprint {
+            piqae_executor_windows::native_profile::WindowsDriverFingerprint {
                 platform: "windows".into(),
                 driver_name: "OKI PostScript".into(),
                 driver_version: "1.2.3".into(),
@@ -811,7 +811,7 @@ mod tests {
             stock_id: None,
             safe_overrides: Vec::new(),
             expected_revision: None,
-            native_configuration: Some(spool_local_ipc::NativeProfileSeed {
+            native_configuration: Some(piqae_local_ipc::NativeProfileSeed {
                 kind: NativeProfileKind::MacosPrintcore,
                 schema_version: 1,
                 digest: "sha256:bad".into(),
@@ -836,7 +836,7 @@ mod tests {
         let address = listener
             .local_addr()
             .unwrap_or_else(|error| panic!("{error}"));
-        let token_file = std::env::temp_dir().join(format!("spool-shell-token-{}", Uuid::new_v4()));
+        let token_file = std::env::temp_dir().join(format!("piqae-shell-token-{}", Uuid::new_v4()));
         fs::write(&token_file, "local-secret\n").unwrap_or_else(|error| panic!("{error}"));
         let server = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap_or_else(|error| panic!("{error}"));
@@ -878,7 +878,7 @@ mod tests {
         assert_eq!(status.agent_id.as_deref(), Some("agt_1"));
         assert_eq!(
             status.connection,
-            spool_local_ipc::ConnectionState::Connected
+            piqae_local_ipc::ConnectionState::Connected
         );
         server.join().unwrap_or_else(|error| panic!("{error:?}"));
         fs::remove_file(token_file).unwrap_or_else(|error| panic!("{error}"));

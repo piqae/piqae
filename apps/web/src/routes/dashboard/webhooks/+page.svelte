@@ -77,7 +77,7 @@
   <Icon name="bolt" size={14} />
   <p>
     Piqae signs the exact request body using HMAC-SHA256. Always verify
-    <code>Spool-Signature</code> before processing an event.
+    <code>Piqae-Signature</code> before processing an event.
   </p>
   <a href="/docs/webhooks">Read guide <Icon name="arrow-right" size={11} /></a>
 </section>
@@ -197,7 +197,7 @@
     <div class="dialog-body">
       <label class="field">
         <span>Endpoint URL</span>
-        <input name="url" type="url" required placeholder="https://example.com/spool/events" />
+        <input name="url" type="url" required placeholder="https://example.com/piqae/events" />
       </label>
       <fieldset>
         <legend>Event families</legend>

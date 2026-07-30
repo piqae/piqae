@@ -27,7 +27,7 @@ export function redactSentryText(value: string): string {
 export function sanitizeSentryUrl(value: string): string {
   try {
     const absolute = /^[a-z][a-z\d+.-]*:\/\//i.test(value);
-    const parsed = new URL(value, 'https://spool.invalid');
+    const parsed = new URL(value, 'https://piqae.invalid');
     const safePath = parsed.pathname
       .replace(UUID, ':id')
       .replace(LONG_IDENTIFIER, ':id')

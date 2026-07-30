@@ -1,5 +1,5 @@
 [package]
-name = "spool-fake-executor"
+name = "piqae-fake-executor"
 version.workspace = true
 edition.workspace = true
 license = "Apache-2.0"
@@ -8,13 +8,13 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
-spool-domain.workspace = true
-spool-executor-protocol = { path = "../executor-protocol", version = "0.1.0" }
-spool-protocol.workspace = true
+piqae-domain.workspace = true
+piqae-executor-protocol = { path = "../executor-protocol", version = "0.1.0" }
+piqae-protocol.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
-spool-executor-supervisor = { path = "../executor-supervisor", version = "0.1.0" }
+piqae-executor-supervisor = { path = "../executor-supervisor", version = "0.1.0" }
 tokio.workspace = true
 
 [lints]

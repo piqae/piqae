@@ -6,22 +6,22 @@ use axum::{
 };
 use chrono::Utc;
 use http_body_util::BodyExt;
-use spool_auth::{
+use piqae_auth::{
     Environment, Scope, generate_api_key, generate_local_owner_credential,
     generate_local_owner_session, generate_platform_service_account_key,
 };
-use spool_control_plane::{
+use piqae_control_plane::{
     AppState,
     authentication::{CombinedAuthenticator, LocalSessionAuthenticator, PostgresAuthenticator},
     repository::Repository,
     router,
 };
-use spool_domain::{
+use piqae_domain::{
     AgentId, ContentKind, ContentSource, EnvironmentId, Job, JobId, JobOptions, JobState,
     PrinterId, WorkspaceId,
 };
-use spool_object_store::MemoryObjectStore;
-use spool_storage_postgres::PostgresStore;
+use piqae_object_store::MemoryObjectStore;
+use piqae_storage_postgres::PostgresStore;
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use std::{collections::BTreeMap, env, sync::Arc};
 use tower::ServiceExt;
@@ -153,13 +153,13 @@ async fn insert_durable_job(
 
 #[tokio::test]
 async fn postgres_http_platform_accounts_are_owned_idempotent_and_archive_safely() {
-    let Some(database_url) = env::var("SPOOL_TEST_DATABASE_URL").ok() else {
+    let Some(database_url) = env::var("PIQAE_TEST_DATABASE_URL").ok() else {
         eprintln!(
-            "skipped: set SPOOL_TEST_DATABASE_URL to run PostgreSQL platform account HTTP evidence"
+            "skipped: set PIQAE_TEST_DATABASE_URL to run PostgreSQL platform account HTTP evidence"
         );
         return;
     };
-    let schema = format!("spool_platform_http_{}", ulid::Ulid::new()).to_ascii_lowercase();
+    let schema = format!("piqae_platform_http_{}", ulid::Ulid::new()).to_ascii_lowercase();
     let admin = PgPoolOptions::new()
         .max_connections(1)
         .connect(&database_url)
@@ -346,8 +346,8 @@ async fn postgres_http_platform_accounts_are_owned_idempotent_and_archive_safely
             Request::builder()
                 .uri("/v1/platform/accounts")
                 .header("authorization", format!("Bearer {}", platform_a.plaintext))
-                .header("x-spool-workspace-id", owner_a.to_string())
-                .header("x-spool-environment-id", owner_a_environment.to_string())
+                .header("x-piqae-workspace-id", owner_a.to_string())
+                .header("x-piqae-environment-id", owner_a_environment.to_string())
                 .body(Body::empty())
                 .expect("tenant-selected manager request"),
         )
@@ -441,8 +441,8 @@ async fn postgres_http_platform_accounts_are_owned_idempotent_and_archive_safely
         Request::builder()
             .uri("/v1/jobs")
             .header("authorization", format!("Bearer {bearer}"))
-            .header("x-spool-workspace-id", customer_workspace.to_string())
-            .header("x-spool-environment-id", customer_live.to_string())
+            .header("x-piqae-workspace-id", customer_workspace.to_string())
+            .header("x-piqae-environment-id", customer_live.to_string())
             .body(Body::empty())
             .expect("tenant request")
     };

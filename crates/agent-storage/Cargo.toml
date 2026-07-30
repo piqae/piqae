@@ -1,5 +1,5 @@
 [package]
-name = "spool-agent-storage"
+name = "piqae-agent-storage"
 version.workspace = true
 edition.workspace = true
 license = "Apache-2.0"
@@ -12,7 +12,7 @@ rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-spool-domain.workspace = true
+piqae-domain.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]

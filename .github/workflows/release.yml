@@ -1,4 +1,4 @@
-name: Cross-platform preview bundles and containers
+name: Piqae preview bundles and containers
 
 on:
   push:
@@ -23,39 +23,39 @@ jobs:
         include:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            artifact: spool-windows-x86_64
+            artifact: piqae-windows-x86_64
             extension: .exe
-            extra_packages: -p spool-executor-windows -p spool-shell-windows
-            executor_binary: spool-executor-windows
-            shell_binary: spool-shell-windows
+            extra_packages: -p piqae-executor-windows -p piqae-shell-windows
+            executor_binary: piqae-executor-windows
+            shell_binary: piqae-shell-windows
           - os: macos-15
             target: aarch64-apple-darwin
-            artifact: spool-macos-aarch64
+            artifact: piqae-macos-aarch64
             extension: ""
-            extra_packages: -p spool-executor-cups
-            executor_binary: spool-executor-cups
+            extra_packages: -p piqae-executor-cups
+            executor_binary: piqae-executor-cups
             shell_binary: ""
           - os: macos-15-intel
             target: x86_64-apple-darwin
-            artifact: spool-macos-x86_64
+            artifact: piqae-macos-x86_64
             extension: ""
-            extra_packages: -p spool-executor-cups
-            executor_binary: spool-executor-cups
+            extra_packages: -p piqae-executor-cups
+            executor_binary: piqae-executor-cups
             shell_binary: ""
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            artifact: spool-linux-x86_64
+            artifact: piqae-linux-x86_64
             extension: ""
-            extra_packages: -p spool-executor-cups -p spool-shell-linux
-            executor_binary: spool-executor-cups
-            shell_binary: spool-shell-linux
+            extra_packages: -p piqae-executor-cups -p piqae-shell-linux
+            executor_binary: piqae-executor-cups
+            shell_binary: piqae-shell-linux
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
-            artifact: spool-linux-aarch64
+            artifact: piqae-linux-aarch64
             extension: ""
-            extra_packages: -p spool-executor-cups -p spool-shell-linux
-            executor_binary: spool-executor-cups
-            shell_binary: spool-shell-linux
+            extra_packages: -p piqae-executor-cups -p piqae-shell-linux
+            executor_binary: piqae-executor-cups
+            shell_binary: piqae-shell-linux
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read
@@ -78,7 +78,7 @@ jobs:
         shell: bash
         env:
           RUSTFLAGS: ${{ runner.os == 'Windows' && '-C target-feature=+crt-static' || '' }}
-        run: cargo build --locked --release --target "${{ matrix.target }}" -p spool-agent -p spoolctl ${{ matrix.extra_packages }} --bins
+        run: cargo build --locked --release --target "${{ matrix.target }}" -p piqae-agent -p piqaectl ${{ matrix.extra_packages }} --bins
       - name: Build macOS menu shell
         if: runner.os == 'macOS'
         shell: bash
@@ -87,17 +87,17 @@ jobs:
         shell: bash
         run: |
           mkdir -p "artifacts/${{ matrix.artifact }}/docs" "artifacts/${{ matrix.artifact }}/service"
-          cp "target/${{ matrix.target }}/release/spool-agent${{ matrix.extension }}" "artifacts/${{ matrix.artifact }}/"
-          cp "target/${{ matrix.target }}/release/spoolctl${{ matrix.extension }}" "artifacts/${{ matrix.artifact }}/"
+          cp "target/${{ matrix.target }}/release/piqae-agent${{ matrix.extension }}" "artifacts/${{ matrix.artifact }}/"
+          cp "target/${{ matrix.target }}/release/piqaectl${{ matrix.extension }}" "artifacts/${{ matrix.artifact }}/"
           cp "target/${{ matrix.target }}/release/${{ matrix.executor_binary }}${{ matrix.extension }}" "artifacts/${{ matrix.artifact }}/"
           if [ -n "${{ matrix.shell_binary }}" ]; then
             cp "target/${{ matrix.target }}/release/${{ matrix.shell_binary }}${{ matrix.extension }}" "artifacts/${{ matrix.artifact }}/"
           fi
           if [ "${{ runner.os }}" = "Windows" ]; then
-            cp "target/${{ matrix.target }}/release/spool-profile-host-windows.exe" "artifacts/${{ matrix.artifact }}/"
+            cp "target/${{ matrix.target }}/release/piqae-profile-host-windows.exe" "artifacts/${{ matrix.artifact }}/"
           fi
           if [ "${{ runner.os }}" = "macOS" ]; then
-            cp "shells/macos/.build/release/SpoolMenu" "artifacts/${{ matrix.artifact }}/"
+            cp "shells/macos/.build/release/PiqaeMenu" "artifacts/${{ matrix.artifact }}/"
           fi
           cp README.md LICENSE "artifacts/${{ matrix.artifact }}/"
           cp -R LICENSES "artifacts/${{ matrix.artifact }}/"
@@ -127,7 +127,7 @@ jobs:
           $source = (Resolve-Path "artifacts/${{ matrix.artifact }}").Path
           $output = (Resolve-Path "artifacts").Path
           $compiler = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
-          & $compiler "/DSourceDir=$source" "/DOutputDir=$output" "/DAppVersion=$env:PACKAGE_VERSION" "packaging/windows/Spool.iss"
+          & $compiler "/DSourceDir=$source" "/DOutputDir=$output" "/DAppVersion=$env:PACKAGE_VERSION" "packaging/windows/Piqae.iss"
           if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed with exit code $LASTEXITCODE" }
       - name: Generate native SPDX SBOM
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
@@ -183,6 +183,8 @@ jobs:
             dockerfile: deploy/docker/Dockerfile.server
           - name: web
             dockerfile: deploy/docker/Dockerfile.web
+          - name: migrate
+            dockerfile: deploy/docker/Dockerfile.migrate
     permissions:
       contents: read
       packages: write
@@ -200,7 +202,7 @@ jobs:
       - uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
         id: metadata
         with:
-          images: ghcr.io/${{ github.repository }}/${{ matrix.name }}
+          images: ghcr.io/c4coffeeco/piqae/${{ matrix.name }}
           tags: |
             type=ref,event=tag
             type=sha
@@ -215,6 +217,6 @@ jobs:
       - uses: actions/attest-build-provenance@96b4a1ef7235a096b17240c259729fdd70c83d45 # v2
         if: startsWith(github.ref, 'refs/tags/')
         with:
-          subject-name: ghcr.io/${{ github.repository }}/${{ matrix.name }}
+          subject-name: ghcr.io/c4coffeeco/piqae/${{ matrix.name }}
           subject-digest: ${{ steps.build.outputs.digest }}
           push-to-registry: true

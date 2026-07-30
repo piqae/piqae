@@ -1,4 +1,4 @@
-import type { JobOptions, JobState, NativePrinterOption } from '@spool/sdk';
+import type { JobOptions, JobState, NativePrinterOption } from '@piqae/sdk';
 
 export type ResourceState = 'online' | 'offline' | 'degraded' | 'paused' | 'unknown';
 

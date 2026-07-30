@@ -21,11 +21,19 @@ pub enum Environment {
 impl Environment {
     fn key_prefix(self) -> &'static str {
         match self {
-            Self::Test => "spl_test_",
-            Self::Live => "spl_live_",
+            Self::Test => "piq_test_",
+            Self::Live => "piq_live_",
         }
     }
 }
+
+const API_KEY_PREFIXES: [&str; 4] = ["piq_test_", "piq_live_", "spl_test_", "spl_live_"];
+const OWNER_PREFIX: &str = "piq_owner_";
+const LEGACY_OWNER_PREFIX: &str = "spl_owner_";
+const SESSION_PREFIX: &str = "piq_session_";
+const LEGACY_SESSION_PREFIX: &str = "spl_session_";
+const PLATFORM_PREFIX: &str = "piq_platform_";
+const LEGACY_PLATFORM_PREFIX: &str = "spl_platform_";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -125,19 +133,19 @@ pub fn generate_api_key(environment: Environment) -> Result<GeneratedApiKey, Aut
 }
 
 pub fn generate_local_owner_credential() -> Result<GeneratedLocalSecret, AuthError> {
-    generate_local_secret("spl_owner_")
+    generate_local_secret(OWNER_PREFIX)
 }
 
 pub fn generate_local_owner_session() -> Result<GeneratedLocalSecret, AuthError> {
-    generate_local_secret("spl_session_")
+    generate_local_secret(SESSION_PREFIX)
 }
 
 pub fn generate_platform_service_account_key() -> Result<GeneratedLocalSecret, AuthError> {
-    generate_local_secret("spl_platform_")
+    generate_local_secret(PLATFORM_PREFIX)
 }
 
 pub fn rotate_platform_service_account_key(id: Uuid) -> Result<GeneratedLocalSecret, AuthError> {
-    generate_local_secret_for_id("spl_platform_", id)
+    generate_local_secret_for_id(PLATFORM_PREFIX, id)
 }
 
 fn generate_local_secret(prefix: &str) -> Result<GeneratedLocalSecret, AuthError> {
@@ -161,15 +169,23 @@ fn generate_local_secret_for_id(prefix: &str, id: Uuid) -> Result<GeneratedLocal
 }
 
 pub fn local_owner_credential_id(plaintext: &str) -> Result<Uuid, AuthError> {
-    local_secret_id(plaintext, "spl_owner_")
+    local_secret_id_with_legacy(plaintext, OWNER_PREFIX, LEGACY_OWNER_PREFIX)
 }
 
 pub fn local_owner_session_id(plaintext: &str) -> Result<Uuid, AuthError> {
-    local_secret_id(plaintext, "spl_session_")
+    local_secret_id_with_legacy(plaintext, SESSION_PREFIX, LEGACY_SESSION_PREFIX)
 }
 
 pub fn platform_service_account_key_id(plaintext: &str) -> Result<Uuid, AuthError> {
-    local_secret_id(plaintext, "spl_platform_")
+    local_secret_id_with_legacy(plaintext, PLATFORM_PREFIX, LEGACY_PLATFORM_PREFIX)
+}
+
+fn local_secret_id_with_legacy(
+    plaintext: &str,
+    prefix: &str,
+    legacy_prefix: &str,
+) -> Result<Uuid, AuthError> {
+    local_secret_id(plaintext, prefix).or_else(|_| local_secret_id(plaintext, legacy_prefix))
 }
 
 fn local_secret_id(plaintext: &str, prefix: &str) -> Result<Uuid, AuthError> {
@@ -209,7 +225,10 @@ fn verify_local_secret(plaintext: &str, encoded_hash: &str) -> Result<(), AuthEr
 }
 
 pub fn verify_api_key(plaintext: &str, encoded_hash: &str) -> Result<(), AuthError> {
-    if !(plaintext.starts_with("spl_test_") || plaintext.starts_with("spl_live_")) {
+    if !API_KEY_PREFIXES
+        .iter()
+        .any(|prefix| plaintext.starts_with(prefix))
+    {
         return Err(AuthError::InvalidKey);
     }
     let parsed = PasswordHash::new(encoded_hash).map_err(|_| AuthError::InvalidKey)?;
@@ -219,7 +238,9 @@ pub fn verify_api_key(plaintext: &str, encoded_hash: &str) -> Result<(), AuthErr
 }
 
 pub fn api_key_lookup_prefix(plaintext: &str) -> Result<String, AuthError> {
-    if !(plaintext.starts_with("spl_test_") || plaintext.starts_with("spl_live_"))
+    if !API_KEY_PREFIXES
+        .iter()
+        .any(|prefix| plaintext.starts_with(prefix))
         || plaintext.len() < 17
     {
         return Err(AuthError::InvalidKey);
@@ -241,9 +262,9 @@ mod tests {
     #[test]
     fn keys_are_environment_scoped_and_verifiable() {
         let key = generate_api_key(Environment::Live).unwrap();
-        assert!(key.plaintext.starts_with("spl_live_"));
+        assert!(key.plaintext.starts_with("piq_live_"));
         assert!(verify_api_key(&key.plaintext, &key.password_hash).is_ok());
-        assert!(verify_api_key("spl_live_wrong", &key.password_hash).is_err());
+        assert!(verify_api_key("piq_live_wrong", &key.password_hash).is_err());
     }
 
     #[test]
@@ -272,7 +293,7 @@ mod tests {
     #[test]
     fn local_owner_credentials_are_opaque_argon2_secrets() {
         let credential = generate_local_owner_credential().unwrap();
-        assert!(credential.plaintext.starts_with("spl_owner_"));
+        assert!(credential.plaintext.starts_with("piq_owner_"));
         assert_eq!(
             local_owner_credential_id(&credential.plaintext),
             Ok(credential.id)
@@ -282,7 +303,7 @@ mod tests {
         );
         assert!(
             verify_local_owner_credential(
-                &format!("spl_owner_{}.wrong", credential.id),
+                &format!("piq_owner_{}.wrong", credential.id),
                 &credential.password_hash
             )
             .is_err()
@@ -300,11 +321,30 @@ mod tests {
     #[test]
     fn platform_keys_are_distinct_opaque_credentials() {
         let key = generate_platform_service_account_key().unwrap();
-        assert!(key.plaintext.starts_with("spl_platform_"));
+        assert!(key.plaintext.starts_with("piq_platform_"));
         assert_eq!(platform_service_account_key_id(&key.plaintext), Ok(key.id));
         assert!(verify_platform_service_account_key(&key.plaintext, &key.password_hash).is_ok());
         assert!(local_owner_session_id(&key.plaintext).is_err());
         assert!(api_key_lookup_prefix(&key.plaintext).is_err());
+    }
+
+    #[test]
+    fn legacy_credentials_remain_parseable_during_the_piqae_cutover() {
+        let id = Uuid::now_v7();
+        let secret = "A".repeat(43);
+        assert_eq!(
+            local_owner_credential_id(&format!("spl_owner_{id}.{secret}")),
+            Ok(id)
+        );
+        assert_eq!(
+            local_owner_session_id(&format!("spl_session_{id}.{secret}")),
+            Ok(id)
+        );
+        assert_eq!(
+            platform_service_account_key_id(&format!("spl_platform_{id}.{secret}")),
+            Ok(id)
+        );
+        assert!(api_key_lookup_prefix(&format!("spl_live_{secret}")).is_ok());
     }
 
     #[test]

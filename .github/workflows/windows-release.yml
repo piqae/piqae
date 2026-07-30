@@ -130,10 +130,10 @@ jobs:
           }
           $expected = "${{ steps.release.outputs.version }}"
           $components = @(
-            "spool-agent",
-            "spoolctl",
-            "spool-executor-windows",
-            "spool-shell-windows"
+            "piqae-agent",
+            "piqaectl",
+            "piqae-executor-windows",
+            "piqae-shell-windows"
           )
           foreach ($component in $components) {
             $package = @($metadata.packages | Where-Object name -eq $component)
@@ -150,10 +150,10 @@ jobs:
           RUSTFLAGS: -C target-feature=+crt-static
         run: >-
           cargo build --locked --release --target ${{ env.TARGET }} --bins
-          -p spool-agent
-          -p spoolctl
-          -p spool-executor-windows
-          -p spool-shell-windows
+          -p piqae-agent
+          -p piqaectl
+          -p piqae-executor-windows
+          -p piqae-shell-windows
 
       - name: Stage release files
         shell: pwsh
@@ -162,11 +162,11 @@ jobs:
           $stage = "artifacts\stage"
           New-Item -ItemType Directory -Force "$stage\service", "$stage\LICENSES" | Out-Null
           Copy-Item `
-            "$source\spool-agent.exe", `
-            "$source\spoolctl.exe", `
-            "$source\spool-executor-windows.exe", `
-            "$source\spool-profile-host-windows.exe", `
-            "$source\spool-shell-windows.exe" `
+            "$source\piqae-agent.exe", `
+            "$source\piqaectl.exe", `
+            "$source\piqae-executor-windows.exe", `
+            "$source\piqae-profile-host-windows.exe", `
+            "$source\piqae-shell-windows.exe" `
             $stage
           Copy-Item "packaging\windows\*" "$stage\service" -Recurse
           Copy-Item "LICENSE", "NOTICE", "README.md", "SIGNING-STATUS.txt" $stage
@@ -201,12 +201,12 @@ jobs:
             & "packaging/windows/New-UpdateConfig.ps1" -OutputPath $output
           }
 
-      - name: Authenticode-sign staged Spool binaries
+      - name: Authenticode-sign staged Piqae binaries
         if: steps.release.outputs.signed == 'true'
         id: authenticode
         shell: pwsh
         run: |
-          $certificate = Join-Path $env:RUNNER_TEMP "spool-authenticode.pfx"
+          $certificate = Join-Path $env:RUNNER_TEMP "piqae-authenticode.pfx"
           [IO.File]::WriteAllBytes(
             $certificate,
             [Convert]::FromBase64String($env:WINDOWS_PFX_BASE64)
@@ -223,7 +223,7 @@ jobs:
           }
           "certificate=$certificate" >> $env:GITHUB_OUTPUT
           "signtool=$signTool" >> $env:GITHUB_OUTPUT
-          $binaries = Get-ChildItem "artifacts\stage\spool-*.exe"
+          $binaries = Get-ChildItem "artifacts\stage\piqae-*.exe"
           foreach ($binary in $binaries) {
             & $signTool sign `
               /fd SHA256 `
@@ -245,7 +245,7 @@ jobs:
         if: steps.release.outputs.signed != 'true'
         shell: pwsh
         run: |
-          foreach ($binary in Get-ChildItem "artifacts\stage\spool-*.exe") {
+          foreach ($binary in Get-ChildItem "artifacts\stage\piqae-*.exe") {
             $signature = Get-AuthenticodeSignature -LiteralPath $binary.FullName
             if ($signature.Status -eq "Valid") {
               throw "$($binary.Name) is signed but this workflow selected unsigned-preview mode."
@@ -268,7 +268,7 @@ jobs:
             "/DOutputDir=$($output.FullName)"
             "/DAppVersion=${{ steps.release.outputs.version }}"
             "/DUpdateConfigFile=$updateConfig"
-            "packaging\windows\Spool.iss"
+            "packaging\windows\Piqae.iss"
           )
           if ("${{ steps.release.outputs.signed }}" -eq "true") {
             $signCommand = (
@@ -279,8 +279,8 @@ jobs:
               $env:WINDOWS_PFX_PASSWORD
             )
             $arguments = @(
-              "/Sspoolsign=$signCommand",
-              "/DInnoSignToolName=spoolsign"
+              "/Spiqaesign=$signCommand",
+              "/DInnoSignToolName=piqaesign"
             ) + $arguments
           }
           & $compiler @arguments
@@ -396,7 +396,7 @@ jobs:
         shell: pwsh
         run: |
           Remove-Item `
-            (Join-Path $env:RUNNER_TEMP "spool-authenticode.pfx"), `
+            (Join-Path $env:RUNNER_TEMP "piqae-authenticode.pfx"), `
             (Join-Path $env:RUNNER_TEMP "winsparkle-ed25519.key") `
             -Force `
             -ErrorAction SilentlyContinue
@@ -407,6 +407,8 @@ jobs:
     if: needs.package.outputs.publish == 'true'
     runs-on: ubuntu-24.04
     environment: native-release
+    permissions:
+      contents: write
     concurrency:
       group: piqae-native-stable-promotion
       cancel-in-progress: false
@@ -471,6 +473,26 @@ jobs:
                 ]
               }
             }' > promotion/windows.json
+
+      - name: Attach signed Windows assets to the draft GitHub release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REPOSITORY" != "piqae/piqae" ]]; then
+            echo "GitHub release publishing is enabled only in piqae/piqae." >&2
+            exit 1
+          fi
+          tag="v${RELEASE_VERSION}"
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            gh release create "$tag" --draft --verify-tag \
+              --title "Piqae $tag" \
+              --notes "Preview candidate. Review checksums, provenance, signatures, notarisation evidence, and the support matrix before publishing."
+          fi
+          gh release upload "$tag" \
+            promotion/piqae-windows-* \
+            promotion/appcast-windows.xml
 
       - name: Upload and verify immutable Windows release
         shell: bash

@@ -6,7 +6,7 @@
 .agents/
 .artifacts/
 .cargo/
-.spool*/
+.piqae*/
 .vercel/
 artifacts/
 bins/

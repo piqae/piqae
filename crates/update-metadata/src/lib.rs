@@ -1,4 +1,4 @@
-//! Verification for Spool's signed, staged update metadata.
+//! Verification for Piqae's signed, staged update metadata.
 //!
 //! Root trust is supplied by the package or administrator. This crate performs
 //! no network or installation operations and therefore remains independently
@@ -176,7 +176,7 @@ mod tests {
             targets: vec![UpdateTarget {
                 platform: "windows".into(),
                 architecture: "x86_64".into(),
-                url: "https://updates.example.invalid/spool.msi".into(),
+                url: "https://updates.example.invalid/piqae.msi".into(),
                 sha256: "a".repeat(64),
                 length: 42,
             }],

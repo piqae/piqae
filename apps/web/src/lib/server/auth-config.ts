@@ -1,4 +1,5 @@
 import { env } from '$env/dynamic/private';
+import { productEnvironmentValue } from './product-env';
 
 export type ServerAuthMode = 'workos' | 'local' | 'demo';
 
@@ -11,16 +12,19 @@ const requiredWorkOs = [
 
 export const workosConfigured = requiredWorkOs.every((value) => Boolean(value));
 
+const configuredAuthMode = productEnvironmentValue(env, 'PIQAE_AUTH_MODE');
 export const authMode: ServerAuthMode =
-  env.SPOOL_AUTH_MODE === 'workos' || env.SPOOL_AUTH_MODE === 'local' || env.SPOOL_AUTH_MODE === 'demo'
-    ? env.SPOOL_AUTH_MODE
+  configuredAuthMode === 'workos' ||
+  configuredAuthMode === 'local' ||
+  configuredAuthMode === 'demo'
+    ? configuredAuthMode
     : workosConfigured
       ? 'workos'
       : 'local';
 
 if (authMode === 'workos' && !workosConfigured) {
   throw new Error(
-    'SPOOL_AUTH_MODE=workos requires WORKOS_CLIENT_ID, WORKOS_API_KEY, ' +
+    'PIQAE_AUTH_MODE=workos requires WORKOS_CLIENT_ID, WORKOS_API_KEY, ' +
       'WORKOS_REDIRECT_URI, and WORKOS_COOKIE_PASSWORD'
   );
 }

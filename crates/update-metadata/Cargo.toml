@@ -1,5 +1,5 @@
 [package]
-name = "spool-update-metadata"
+name = "piqae-update-metadata"
 version.workspace = true
 edition.workspace = true
 license = "Apache-2.0"

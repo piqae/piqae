@@ -1,4 +1,5 @@
 import { env } from '$env/dynamic/private';
+import { productEnvironmentValue } from './product-env';
 import { readFile } from 'node:fs/promises';
 
 export interface LocalAgentStatus {
@@ -29,17 +30,17 @@ export class LocalAgentConfigurationError extends Error {
 }
 
 function configuredBaseUrl(): URL {
-  const rawUrl = env.SPOOL_LOCAL_AGENT_URL?.trim();
-  const tokenFile = env.SPOOL_LOCAL_AGENT_TOKEN_FILE?.trim();
+  const rawUrl = productEnvironmentValue(env, 'PIQAE_LOCAL_AGENT_URL')?.trim();
+  const tokenFile = productEnvironmentValue(env, 'PIQAE_LOCAL_AGENT_TOKEN_FILE')?.trim();
 
   if (!rawUrl && !tokenFile) {
     throw new LocalAgentConfigurationError(
-      'Local agent access is disabled. Set SPOOL_LOCAL_AGENT_URL and SPOOL_LOCAL_AGENT_TOKEN_FILE on the web server.'
+      'Local agent access is disabled. Set PIQAE_LOCAL_AGENT_URL and PIQAE_LOCAL_AGENT_TOKEN_FILE on the web server.'
     );
   }
   if (!rawUrl || !tokenFile) {
     throw new LocalAgentConfigurationError(
-      'Local agent access requires both SPOOL_LOCAL_AGENT_URL and SPOOL_LOCAL_AGENT_TOKEN_FILE.'
+      'Local agent access requires both PIQAE_LOCAL_AGENT_URL and PIQAE_LOCAL_AGENT_TOKEN_FILE.'
     );
   }
 
@@ -47,7 +48,7 @@ function configuredBaseUrl(): URL {
   try {
     url = new URL(rawUrl);
   } catch {
-    throw new LocalAgentConfigurationError('SPOOL_LOCAL_AGENT_URL is not a valid URL.');
+    throw new LocalAgentConfigurationError('PIQAE_LOCAL_AGENT_URL is not a valid URL.');
   }
   const hostname = url.hostname.replace(/^\[|\]$/g, '').toLowerCase();
   if (
@@ -59,20 +60,20 @@ function configuredBaseUrl(): URL {
     url.hash
   ) {
     throw new LocalAgentConfigurationError(
-      'SPOOL_LOCAL_AGENT_URL must be an HTTP(S) loopback URL without credentials, query, or fragment.'
+      'PIQAE_LOCAL_AGENT_URL must be an HTTP(S) loopback URL without credentials, query, or fragment.'
     );
   }
   if (url.pathname !== '/' && url.pathname !== '') {
-    throw new LocalAgentConfigurationError('SPOOL_LOCAL_AGENT_URL must not include a path.');
+    throw new LocalAgentConfigurationError('PIQAE_LOCAL_AGENT_URL must not include a path.');
   }
   return url;
 }
 
 async function localToken(): Promise<string> {
-  const tokenFile = env.SPOOL_LOCAL_AGENT_TOKEN_FILE?.trim();
+  const tokenFile = productEnvironmentValue(env, 'PIQAE_LOCAL_AGENT_TOKEN_FILE')?.trim();
   if (!tokenFile) {
     throw new LocalAgentConfigurationError(
-      'Local agent access requires SPOOL_LOCAL_AGENT_TOKEN_FILE.'
+      'Local agent access requires PIQAE_LOCAL_AGENT_TOKEN_FILE.'
     );
   }
   let token: string;

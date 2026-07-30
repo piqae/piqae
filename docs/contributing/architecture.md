@@ -1,6 +1,6 @@
 # Contributing to the architecture
 
-Spool keeps durable edges explicit:
+Piqae keeps durable edges explicit:
 
 ```text
 integration → control plane/PostgreSQL/S3 → agent SQLite → executor → OS spooler

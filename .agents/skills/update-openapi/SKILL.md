@@ -1,12 +1,12 @@
 ---
 name: update-openapi
-description: Update the Spool native and PrintNode-compatible OpenAPI contract, regenerate SDK types, and prove additive compatibility. Use for any public route, request, response, error, or status change.
+description: Update the Piqae native and PrintNode-compatible OpenAPI contract, regenerate SDK types, and prove additive compatibility. Use for any public route, request, response, error, or status change.
 ---
 
 # Update OpenAPI
 
 1. Read `AGENTS.md` and the compatibility rules.
-2. Edit `contracts/openapi/spool-v1.yaml` before implementation types.
+2. Edit `contracts/openapi/piqae-v1.yaml` before implementation types.
 3. Run the repository OpenAPI validation and TypeScript generation commands.
 4. Run SDK tests and PrintNode migration contract tests.
 5. Confirm V1 changes are additive and deprecated `/v1/agents` aliases remain

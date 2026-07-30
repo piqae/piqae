@@ -7,7 +7,7 @@ param(
 $ErrorActionPreference = "Stop"
 $PdfiumUri = "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium/7961/pdfium-win-x64.tgz"
 $ExpectedSha256 = "88276459349b291c41f10422dad0210f007c04d919c8fa56472b6b7c6406adf4"
-$TemporaryDirectory = Join-Path ([IO.Path]::GetTempPath()) ("spool-pdfium-" + [guid]::NewGuid().ToString("N"))
+$TemporaryDirectory = Join-Path ([IO.Path]::GetTempPath()) ("piqae-pdfium-" + [guid]::NewGuid().ToString("N"))
 $ArchivePath = Join-Path $TemporaryDirectory "pdfium-win-x64.tgz"
 $ExtractedPath = Join-Path $TemporaryDirectory "extracted"
 

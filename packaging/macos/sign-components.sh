@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-identity=${SPOOL_CODE_SIGN_IDENTITY:-}
+identity=${PIQAE_CODE_SIGN_IDENTITY:-}
 
 if [[ "$#" -eq 0 ]]; then
-  echo "usage: SPOOL_CODE_SIGN_IDENTITY='Developer ID Application: …' $0 /path/to/binary [...]" >&2
+  echo "usage: PIQAE_CODE_SIGN_IDENTITY='Developer ID Application: …' $0 /path/to/binary [...]" >&2
   exit 2
 fi
 if [[ "$identity" != "Developer ID Application:"* ]]; then
-  echo "SPOOL_CODE_SIGN_IDENTITY must name a Developer ID Application certificate" >&2
+  echo "PIQAE_CODE_SIGN_IDENTITY must name a Developer ID Application certificate" >&2
   exit 2
 fi
 if ! security find-identity -v -p codesigning | grep -F -- "$identity" >/dev/null; then

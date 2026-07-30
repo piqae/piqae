@@ -1,0 +1,2 @@
+d /var/lib/piqae 0700 piqae piqae -
+d /etc/piqae 0750 root piqae -

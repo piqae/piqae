@@ -8,18 +8,18 @@ use axum::{
     routing::{get, post},
 };
 use chrono::{Duration, Utc};
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
-use spool_auth::{
+use piqae_auth::{
     GeneratedLocalSecret, generate_local_owner_credential, generate_local_owner_session,
     local_owner_credential_id, local_owner_session_id, verify_local_owner_credential,
     verify_local_owner_session,
 };
-use spool_domain::{EnvironmentId, WorkspaceId};
-use spool_storage_postgres::{
+use piqae_domain::{EnvironmentId, WorkspaceId};
+use piqae_storage_postgres::{
     BootstrappedLocalOwner, LocalOwnerAuthenticationRecord, PostgresStore, StorageError,
     StoredWorkspace, StoredWorkspaceMember,
 };
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use uuid::Uuid;
 
@@ -302,7 +302,8 @@ fn authorize_bootstrap(identity: &LocalIdentityState, headers: &HeaderMap) -> Re
         .bootstrap_token_digest
         .ok_or_else(|| AppError::service_unavailable("local_owner_bootstrap_disabled"))?;
     let supplied = headers
-        .get("x-spool-bootstrap-token")
+        .get("x-piqae-bootstrap-token")
+        .or_else(|| headers.get("x-spool-bootstrap-token"))
         .and_then(|value| value.to_str().ok())
         .filter(|value| value.len() <= 512)
         .ok_or_else(AppError::unauthorized)?;

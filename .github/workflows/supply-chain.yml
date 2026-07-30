@@ -81,15 +81,15 @@ jobs:
         with:
           path: .
           format: spdx-json
-          output-file: spool-source.spdx.json
+          output-file: piqae-source.spdx.json
           upload-artifact: false
           upload-release-assets: false
       - name: Validate SPDX contract
-        run: python3 release/tools/release_bundle.py validate-sbom spool-source.spdx.json
+        run: python3 release/tools/release_bundle.py validate-sbom piqae-source.spdx.json
       - name: Upload source SBOM
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: spool-source-sbom
-          path: spool-source.spdx.json
+          name: piqae-source-sbom
+          path: piqae-source.spdx.json
           if-no-files-found: error
           retention-days: 14

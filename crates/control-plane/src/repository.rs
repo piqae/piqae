@@ -6,12 +6,12 @@
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use spool_domain::{
+use piqae_domain::{
     AgentId, EnvironmentId, EventId, Job, JobEvent, JobFailureReason, JobId, JobState,
     PrinterCapabilities, PrinterId, PrinterState, WorkspaceId, validate_transition,
 };
-use spool_protocol::agent::AgentCommand;
-use spool_storage_postgres::{
+use piqae_protocol::agent::AgentCommand;
+use piqae_storage_postgres::{
     AgentAuthenticationRecord, CreateJobResult as PgCreateJobResult, EnrolledAgent, JobLease,
     NewDeviceAuthorization, NodeUpdatePolicy, NodeUpdateState, PostgresStore, StorageError,
     StoredAgent, StoredAgentCommandBatch, StoredApiKey, StoredBillingSummary,
@@ -3268,10 +3268,14 @@ impl Repository for MemoryRepository {
             .targets
             .get(target_id)
             .and_then(|(_, _, target)| target.stock_id.clone());
-        let intended_stock = state
-            .jobs
-            .get(&job_id)
-            .and_then(|record| record.job.metadata.get("spool.stock_id").cloned());
+        let intended_stock = state.jobs.get(&job_id).and_then(|record| {
+            record
+                .job
+                .metadata
+                .get("piqae.stock_id")
+                .or_else(|| record.job.metadata.get("spool.stock_id"))
+                .cloned()
+        });
         if target_stock.is_some() && target_stock != intended_stock {
             return Ok(None);
         }
@@ -3307,10 +3311,16 @@ impl Repository for MemoryRepository {
                 || record
                     .job
                     .metadata
-                    .get("spool.target_id")
+                    .get("piqae.target_id")
+                    .or_else(|| record.job.metadata.get("spool.target_id"))
                     .map(String::as_str)
                     != Some(target_id)
-                || record.job.metadata.get("spool.stock_id") != intended_stock.as_ref()
+                || record
+                    .job
+                    .metadata
+                    .get("piqae.stock_id")
+                    .or_else(|| record.job.metadata.get("spool.stock_id"))
+                    != intended_stock.as_ref()
                 || (record.agent_id == binding.agent_id
                     && record.job.printer_id == binding.printer_id)
             {
@@ -3319,21 +3329,38 @@ impl Repository for MemoryRepository {
             let from_binding_id = record
                 .job
                 .metadata
-                .get("spool.binding_id")
+                .get("piqae.binding_id")
+                .or_else(|| record.job.metadata.get("spool.binding_id"))
                 .cloned()
                 .unwrap_or_default();
+            for suffix in [
+                "target_id",
+                "binding_id",
+                "profile_id",
+                "profile_revision",
+                "stock_id",
+            ] {
+                let legacy_key = format!("spool.{suffix}");
+                if let Some(value) = record.job.metadata.remove(&legacy_key) {
+                    record
+                        .job
+                        .metadata
+                        .entry(format!("piqae.{suffix}"))
+                        .or_insert(value);
+                }
+            }
             record.agent_id = binding.agent_id;
             record.job.printer_id = binding.printer_id;
             record
                 .job
                 .metadata
-                .insert("spool.binding_id".into(), binding.id.clone());
+                .insert("piqae.binding_id".into(), binding.id.clone());
             record
                 .job
                 .metadata
-                .insert("spool.profile_id".into(), binding.profile_id.clone());
+                .insert("piqae.profile_id".into(), binding.profile_id.clone());
             record.job.metadata.insert(
-                "spool.profile_revision".into(),
+                "piqae.profile_revision".into(),
                 binding.profile_revision.to_string(),
             );
             (record.job.clone(), from_binding_id)
@@ -3363,7 +3390,8 @@ impl Repository for MemoryRepository {
                         JobState::WaitingForAgent | JobState::FailedRetryable
                     )
                     && record.job.expires_at > Utc::now()
-                    && record.job.metadata.contains_key("spool.target_id")
+                    && (record.job.metadata.contains_key("piqae.target_id")
+                        || record.job.metadata.contains_key("spool.target_id"))
                     && !state.job_acceptances.contains_key(&record.job.id)
                     && state
                         .leases
@@ -3838,8 +3866,8 @@ impl Repository for MemoryRepository {
 #[allow(clippy::expect_used, clippy::too_many_lines)]
 mod routing_repository_tests {
     use super::*;
-    use spool_domain::JobOptions;
-    use spool_storage_postgres::PrinterProfileSnapshot;
+    use piqae_domain::JobOptions;
+    use piqae_storage_postgres::PrinterProfileSnapshot;
 
     struct RecoveryFixture {
         repository: MemoryRepository,
@@ -3955,8 +3983,8 @@ mod routing_repository_tests {
             printer_id: primary_printer,
             title: "Recovery fixture".into(),
             source: None,
-            content_kind: spool_domain::ContentKind::Pdf,
-            content: spool_domain::ContentSource::Base64 {
+            content_kind: piqae_domain::ContentKind::Pdf,
+            content: piqae_domain::ContentSource::Base64 {
                 data: "JVBERi0=".into(),
             },
             options: JobOptions::default(),
@@ -4071,6 +4099,11 @@ mod routing_repository_tests {
             .await
             .expect("rerouted job");
         assert_eq!(rerouted.printer_id, fixture.standby_printer);
+        assert_eq!(
+            rerouted.metadata.get("piqae.target_id").map(String::as_str),
+            Some("tgt_recovery")
+        );
+        assert!(!rerouted.metadata.contains_key("spool.target_id"));
         let state = fixture.repository.state.read().await;
         assert_eq!(state.routing_attempts.len(), 1);
         assert_eq!(

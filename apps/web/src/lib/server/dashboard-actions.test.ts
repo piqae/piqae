@@ -25,12 +25,12 @@ function actionEvent(fields: Record<string, string | string[]> = {}, params = {}
   return {
     fetch: fetcher,
     setHeaders,
-    request: new Request('https://dashboard.spool.test/dashboard', {
+    request: new Request('https://dashboard.piqae.test/dashboard', {
       method: 'POST',
       headers: { 'content-type': 'application/x-www-form-urlencoded' },
       body: body.toString()
     }),
-    url: new URL('https://dashboard.spool.test/dashboard'),
+    url: new URL('https://dashboard.piqae.test/dashboard'),
     locals: {
       authMode: 'workos',
       auth: { accessToken }
@@ -55,15 +55,15 @@ describe('dashboard mutation actions', () => {
     setHeaders.mockReset();
     for (const key of Object.keys(publicEnvironment)) delete publicEnvironment[key];
     for (const key of Object.keys(privateEnvironment)) delete privateEnvironment[key];
-    publicEnvironment.PUBLIC_SPOOL_API_URL = 'https://api.spool.test';
-    publicEnvironment.PUBLIC_SPOOL_DASHBOARD_MODE = 'live';
+    publicEnvironment.PUBLIC_PIQAE_API_URL = 'https://api.piqae.test';
+    publicEnvironment.PUBLIC_PIQAE_DASHBOARD_MODE = 'live';
   });
 
   it('creates an enrolment with hosted auth kept out of the one-time result', async () => {
     fetcher.mockResolvedValueOnce(
       Response.json({
         id: 'enr_01',
-        token: 'spool_enrol_once',
+        token: 'piqae_enrol_once',
         expires_at: '2026-07-29T12:10:00.000Z'
       })
     );
@@ -73,14 +73,14 @@ describe('dashboard mutation actions', () => {
     );
 
     expect(requestDetails()).toEqual({
-      url: 'https://api.spool.test/v1/agent-enrolments',
+      url: 'https://api.piqae.test/v1/agent-enrolments',
       method: 'POST',
       authorization: `Bearer ${accessToken}`,
       body: { name: 'Warehouse agent', expires_in_seconds: 600 }
     });
     expect(result).toMatchObject({
       mutation: 'createEnrolment',
-      enrolment: { token: 'spool_enrol_once' }
+      enrolment: { token: 'piqae_enrol_once' }
     });
     expect(setHeaders).toHaveBeenCalledWith({ 'cache-control': 'no-store, private' });
     expect(JSON.stringify(result)).not.toContain(accessToken);
@@ -91,7 +91,7 @@ describe('dashboard mutation actions', () => {
       .mockResolvedValueOnce(
         Response.json({
           id: 'whk_01',
-          url: 'https://example.test/spool',
+          url: 'https://example.test/piqae',
           events: ['job.*'],
           secret: 'whsec_once'
         })
@@ -99,20 +99,20 @@ describe('dashboard mutation actions', () => {
       .mockResolvedValueOnce(new Response(null, { status: 204 }));
 
     const created = await webhookActions.createWebhook!(
-      actionEvent({ url: 'https://example.test/spool', events: ['job.*'] }) as never
+      actionEvent({ url: 'https://example.test/piqae', events: ['job.*'] }) as never
     );
     const deleted = await webhookActions.deleteWebhook!(
       actionEvent({ webhook_id: 'whk_01' }) as never
     );
 
     expect(requestDetails(0)).toMatchObject({
-      url: 'https://api.spool.test/v1/webhooks',
+      url: 'https://api.piqae.test/v1/webhooks',
       method: 'POST',
       authorization: `Bearer ${accessToken}`,
-      body: { url: 'https://example.test/spool', events: ['job.*'] }
+      body: { url: 'https://example.test/piqae', events: ['job.*'] }
     });
     expect(requestDetails(1)).toMatchObject({
-      url: 'https://api.spool.test/v1/webhooks/whk_01',
+      url: 'https://api.piqae.test/v1/webhooks/whk_01',
       method: 'DELETE',
       authorization: `Bearer ${accessToken}`
     });
@@ -128,20 +128,20 @@ describe('dashboard mutation actions', () => {
         Response.json({
           id: 'key_01',
           name: 'Order service',
-          lookup_prefix: 'spl_live_abcd',
+          lookup_prefix: 'piq_live_abcd',
           scopes: ['jobs_read', 'jobs_write'],
           expires_at: null,
           last_used_at: null,
           revoked_at: null,
           created_at: '2026-07-29T12:00:00.000Z',
-          secret: 'spl_live_once'
+          secret: 'piq_live_once'
         })
       )
       .mockResolvedValueOnce(
         Response.json({
           id: 'key_01',
           name: 'Order service',
-          lookup_prefix: 'spl_live_abcd',
+          lookup_prefix: 'piq_live_abcd',
           scopes: ['jobs_read', 'jobs_write'],
           expires_at: null,
           last_used_at: null,
@@ -161,7 +161,7 @@ describe('dashboard mutation actions', () => {
     );
 
     expect(requestDetails(0)).toMatchObject({
-      url: 'https://api.spool.test/v1/api-keys',
+      url: 'https://api.piqae.test/v1/api-keys',
       method: 'POST',
       authorization: `Bearer ${accessToken}`,
       body: {
@@ -171,10 +171,10 @@ describe('dashboard mutation actions', () => {
       }
     });
     expect(requestDetails(1)).toMatchObject({
-      url: 'https://api.spool.test/v1/api-keys/key_01',
+      url: 'https://api.piqae.test/v1/api-keys/key_01',
       method: 'DELETE'
     });
-    expect(created).toMatchObject({ apiKey: { secret: 'spl_live_once' } });
+    expect(created).toMatchObject({ apiKey: { secret: 'piq_live_once' } });
     expect(setHeaders).toHaveBeenCalledWith({ 'cache-control': 'no-store, private' });
     expect(revoked).toEqual({ mutation: 'revokeApiKey', revokedApiKeyId: 'key_01' });
     expect(JSON.stringify([created, revoked])).not.toContain(accessToken);
@@ -197,7 +197,7 @@ describe('dashboard mutation actions', () => {
     const result = await jobActions.cancel!(actionEvent({}, { id: 'job_01' }) as never);
 
     expect(requestDetails()).toMatchObject({
-      url: 'https://api.spool.test/v1/jobs/job_01/cancel',
+      url: 'https://api.piqae.test/v1/jobs/job_01/cancel',
       method: 'POST',
       authorization: `Bearer ${accessToken}`
     });
@@ -210,7 +210,7 @@ describe('dashboard mutation actions', () => {
   });
 
   it('keeps demo actions deterministic and non-mutating', async () => {
-    publicEnvironment.PUBLIC_SPOOL_DASHBOARD_MODE = 'demo';
+    publicEnvironment.PUBLIC_PIQAE_DASHBOARD_MODE = 'demo';
 
     const results = await Promise.all([
       agentActions.createEnrolment!(actionEvent({ name: 'Demo agent' }) as never),
@@ -237,7 +237,7 @@ describe('dashboard mutation actions', () => {
     fetcher.mockResolvedValueOnce(
       Response.json({
         id: 'enr_02',
-        token: 'spool_enrol_private',
+        token: 'piqae_enrol_private',
         expires_at: '2026-07-29T12:10:00.000Z'
       })
     );

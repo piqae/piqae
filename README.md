@@ -1,6 +1,6 @@
-# Spool
+# Piqae
 
-Spool is open-source, low-resource local and remote printing infrastructure. It
+Piqae is open-source, low-resource local and remote printing infrastructure. It
 uses installed operating-system printers and drivers, keeps a durable queue at
 both the service and device edges, and never equates a spooler handoff with
 proof that paper physically printed.
@@ -37,23 +37,23 @@ pnpm test
 Run the dashboard with visibly labelled deterministic data:
 
 ```sh
-SPOOL_AUTH_MODE=demo PUBLIC_SPOOL_DASHBOARD_MODE=demo \
-  pnpm --filter @spool/web dev
+PIQAE_AUTH_MODE=demo PUBLIC_PIQAE_DASHBOARD_MODE=demo \
+  pnpm --filter @piqae/web dev
 ```
 
 Run the local agent against the disposable test executor:
 
 ```sh
-cargo build -p spool-agent -p spool-fake-executor
-cargo run -p spool-agent -- \
+cargo build -p piqae-agent -p piqae-fake-executor
+cargo run -p piqae-agent -- \
   --mode local \
-  --data-dir .spool-dev \
+  --data-dir .piqae-dev \
   --executor process \
-  --executor-path target/debug/spool-fake-executor
+  --executor-path target/debug/piqae-fake-executor
 ```
 
 The operational API binds only to loopback. Its randomly generated bearer token
-is stored as mode `0600` in `.spool-dev/local.token`. Use
+is stored as mode `0600` in `.piqae-dev/local.token`. Use
 `GET /v1/local/printers`, `POST /v1/jobs`, and `GET /v1/local/status` to exercise
 the local durable print path.
 
@@ -67,9 +67,21 @@ docker compose --env-file deploy/self-host/.env \
 
 See [self-hosting](docs/operations/self-hosting.md), the
 [PrintNode migration guide](docs/api/printnode-migration.md), and the
-[OpenAPI contract](contracts/openapi/spool-v1.yaml) before connecting real
+[OpenAPI contract](contracts/openapi/piqae-v1.yaml) before connecting real
 printers. Production trace export is covered in the
 [observability guide](docs/operations/observability.md).
+
+## Packages
+
+- TypeScript: `npm install @piqae/sdk`
+- Containers: `ghcr.io/c4coffeeco/piqae/server`, `ghcr.io/c4coffeeco/piqae/migrate`, and
+  `ghcr.io/c4coffeeco/piqae/web`
+- Native candidates: draft releases in
+  [GitHub Releases](https://github.com/C4CoffeeCo/piqae/releases)
+
+Publishing remains fail-closed until the repository has moved to
+`piqae/piqae` and the npm trusted publisher has been configured. See the
+[package publishing guide](docs/operations/package-publishing.md).
 
 ## Documentation
 
@@ -94,10 +106,10 @@ printers. Production trace export is covered in the
 
 ## Architecture
 
-Spool uses one Rust agent core with small platform-specific executor processes,
+Piqae uses one Rust agent core with small platform-specific executor processes,
 not three unrelated desktop applications. The service owns identity, SQLite,
 queueing, networking, printing, and recovery. Tray/menu applications are thin
-native shells and never own job state. Spool does not ship Electron or a bundled
+native shells and never own job state. Piqae does not ship Electron or a bundled
 Chromium runtime.
 
 The Rust control plane uses PostgreSQL leases, durable per-agent commands,
@@ -105,7 +117,7 @@ event/outbox tables, and S3-compatible object storage. Agents use signed HTTPS
 polling; there is no required broker or permanent socket gateway. The SvelteKit
 dashboard runs as a standard Node container on Railway or self-hosted and uses the official
 WorkOS AuthKit integration in hosted mode. The canonical TypeScript SDK and
-`spoolctl` cover the native API.
+`piqaectl` cover the native API.
 
 The hosted and loopback web interfaces use an intentionally close Linear-like
 visual language: calm warm-neutral surfaces, dense alignment, restrained

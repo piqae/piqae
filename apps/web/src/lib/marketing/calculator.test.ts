@@ -1,11 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { estimatePrintNode, estimateSpool } from './calculator';
+import { estimatePrintNode, estimatePiqae } from './calculator';
 import { cloudPricingCatalog } from '$lib/server/pricing';
 
 describe('marketing cost calculator', () => {
-  it('selects the free Spool plan for a small workflow', () => {
+  it('selects the free Piqae plan for a small workflow', () => {
     expect(
-      estimateSpool(
+      estimatePiqae(
         { jobs: 100, agents: 1, tenants: 0, growthPercent: 0, interval: 'monthly' },
         cloudPricingCatalog
       )
@@ -14,7 +14,7 @@ describe('marketing cost calculator', () => {
 
   it('uses the locked annual Pro price', () => {
     expect(
-      estimateSpool(
+      estimatePiqae(
         {
           jobs: 25_000,
           agents: 25,
@@ -27,9 +27,9 @@ describe('marketing cost calculator', () => {
     ).toMatchObject({ plan: 'Pro', annualCents: 9_000, monthlyCents: 750 });
   });
 
-  it('adds paid job overages to the annual Spool total', () => {
+  it('adds paid job overages to the annual Piqae total', () => {
     expect(
-      estimateSpool(
+      estimatePiqae(
         {
           jobs: 27_000,
           agents: 8,
@@ -44,7 +44,7 @@ describe('marketing cost calculator', () => {
 
   it('does not invent a public price above the Pro node allowance', () => {
     expect(
-      estimateSpool(
+      estimatePiqae(
         {
           jobs: 25_000,
           agents: 26,

@@ -3,7 +3,7 @@
 **Status:** implemented evaluation topology; production operations remain
 Preview.
 
-Compose runs `spool-server`, PostgreSQL 16, and MinIO. The dashboard is an
+Compose runs `piqae-server`, PostgreSQL 16, and MinIO. The dashboard is an
 optional profile.
 
 ```sh

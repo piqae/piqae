@@ -8,14 +8,14 @@ local queue, authenticated loopback API, process-supervised executor, and a
 small optional status tray where desktop infrastructure exists.
 
 Install CUPS and the distribution's CUPS development/runtime libraries. The
-provided systemd templates run a dedicated `spool` user with hardened service
+provided systemd templates run a dedicated `piqae` user with hardened service
 settings:
 
 ```sh
-sudo install -m 0755 spool-agent spool-executor-cups /usr/libexec/spool/
-sudo install -m 0644 packaging/linux/spool-agent.service /etc/systemd/system/
+sudo install -m 0755 piqae-agent piqae-executor-cups /usr/libexec/piqae/
+sudo install -m 0644 packaging/linux/piqae-agent.service /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable --now spool-agent
+sudo systemctl enable --now piqae-agent
 ```
 
 Render environment and state paths for the target host first; the templates are

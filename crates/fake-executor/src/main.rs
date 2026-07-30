@@ -1,6 +1,6 @@
-use spool_domain::{PrinterCapabilities, PrinterState};
-use spool_executor_protocol::{read_frame, write_frame};
-use spool_protocol::executor::{
+use piqae_domain::{PrinterCapabilities, PrinterState};
+use piqae_executor_protocol::{read_frame, write_frame};
+use piqae_protocol::executor::{
     DiscoveredPrinter, ExecutorError, ExecutorOperation, ExecutorRequest, ExecutorResponse,
     ExecutorResult, NativeJobObservation, NativeJobState,
 };
@@ -92,7 +92,7 @@ fn fake_observation(native_job_id: &str) -> NativeJobObservation {
 fn fake_printer() -> DiscoveredPrinter {
     DiscoveredPrinter {
         native_id: "fake-printer".into(),
-        name: "Spool deterministic fake printer".into(),
+        name: "Piqae deterministic fake printer".into(),
         is_default: true,
         state: PrinterState::Online,
         capabilities: PrinterCapabilities::default(),

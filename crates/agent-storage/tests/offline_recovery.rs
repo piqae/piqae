@@ -3,7 +3,7 @@
     reason = "fault-test setup and assertions must fail immediately with local context"
 )]
 
-use spool_agent_storage::{AcceptedJob, AgentStore};
+use piqae_agent_storage::{AcceptedJob, AgentStore};
 
 fn cloud_job() -> AcceptedJob {
     AcceptedJob {

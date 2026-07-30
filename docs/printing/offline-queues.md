@@ -3,7 +3,7 @@
 **Status:** durable control-plane registration, agent-local SQLite queue, and
 native spooler handoff are implemented.
 
-Spool has three different layers:
+Piqae has three different layers:
 
 1. **Control plane:** durable job identity, content reference, target/profile
    pin, expiry, audit events, and delivery state.

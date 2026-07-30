@@ -1,0 +1,22 @@
+[package]
+name = "piqaectl"
+version.workspace = true
+edition.workspace = true
+license = "Apache-2.0"
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+base64.workspace = true
+clap.workspace = true
+reqwest.workspace = true
+serde_json.workspace = true
+piqae-auth = { path = "../../crates/auth", version = "0.1.0" }
+piqae-domain = { path = "../../crates/domain", version = "0.1.0" }
+piqae-storage-postgres = { path = "../../crates/storage-postgres", version = "0.1.0" }
+tokio.workspace = true
+uuid.workspace = true
+
+[lints]
+workspace = true

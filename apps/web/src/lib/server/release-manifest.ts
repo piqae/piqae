@@ -1,4 +1,5 @@
 import { env as privateEnv } from '$env/dynamic/private';
+import { productEnvironmentValue } from './product-env';
 
 export type ReleasePlatform = 'windows' | 'macos' | 'linux';
 export type ReleaseStatus = 'supported' | 'preview' | 'development' | 'unavailable';
@@ -133,16 +134,16 @@ const builtInManifest: ReleaseManifest = {
 export function loadReleaseManifest(
   environment: Record<string, string | undefined> = privateEnv
 ): ReleaseManifest {
-  const raw = environment.SPOOL_RELEASE_MANIFEST_JSON;
+  const raw = productEnvironmentValue(environment, 'PIQAE_RELEASE_MANIFEST_JSON');
   if (raw === undefined || raw.trim() === '') return structuredClone(builtInManifest);
   if (new TextEncoder().encode(raw).byteLength > maximumManifestBytes) {
-    throw new Error('SPOOL_RELEASE_MANIFEST_JSON exceeds 128 KiB');
+    throw new Error('PIQAE_RELEASE_MANIFEST_JSON exceeds 128 KiB');
   }
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
   } catch {
-    throw new Error('SPOOL_RELEASE_MANIFEST_JSON is not valid JSON');
+    throw new Error('PIQAE_RELEASE_MANIFEST_JSON is not valid JSON');
   }
   return parseReleaseManifest(parsed);
 }

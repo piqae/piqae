@@ -18,7 +18,7 @@ class ProductionReadinessTests(unittest.TestCase):
     def test_env_parser_rejects_duplicate_keys(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "production.env"
-            path.write_text("SPOOL_AUTH_MODE=workos\nSPOOL_AUTH_MODE=demo\n", encoding="utf-8")
+            path.write_text("PIQAE_AUTH_MODE=workos\nPIQAE_AUTH_MODE=demo\n", encoding="utf-8")
             with self.assertRaisesRegex(readiness.PreflightError, "duplicate key"):
                 readiness.parse_env(path)
 
@@ -81,7 +81,7 @@ class ProductionReadinessTests(unittest.TestCase):
                         "public_domain": False,
                     },
                 },
-                "document_bucket": "spool-documents",
+                "document_bucket": "piqae-documents",
                 "release_bucket": "piqae-releases",
             }
         }
@@ -89,7 +89,7 @@ class ProductionReadinessTests(unittest.TestCase):
         readiness.check_railway_runtime_record(record, errors)
         self.assertEqual(errors, [])
 
-        record["railway"]["release_bucket"] = "spool-documents"
+        record["railway"]["release_bucket"] = "piqae-documents"
         readiness.check_railway_runtime_record(record, errors)
         self.assertIn("Railway release and document buckets must be distinct", errors)
 

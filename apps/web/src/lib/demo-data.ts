@@ -379,7 +379,7 @@ export const jobEvents: DashboardJobEvent[] = [
     sequence: 2,
     type: 'agent.accepted',
     state: 'agent_accepted',
-    observer: 'spool_agent',
+    observer: 'piqae_agent',
     authority: 'agent',
     reasonCode: null,
     message: 'Packing desk accepted the job into its durable queue',
@@ -420,7 +420,7 @@ export const jobEvents: DashboardJobEvent[] = [
 export const webhooks: DashboardWebhook[] = [
   {
     id: 'whk_01K0A',
-    url: 'https://orders.c4coffee.co.nz/hooks/spool',
+    url: 'https://orders.c4coffee.co.nz/hooks/piqae',
     description: 'Order status updates',
     events: ['job.*'],
     enabled: true,
@@ -444,7 +444,7 @@ export const apiKeys: DashboardApiKey[] = [
   {
     id: 'key_01K0A',
     name: 'Production orders',
-    prefix: 'spl_live_9F4E',
+    prefix: 'piq_live_9F4E',
     environment: 'live',
     scopes: ['jobs:read', 'jobs:write', 'printers:read'],
     lastUsedAt: ago(0),
@@ -453,7 +453,7 @@ export const apiKeys: DashboardApiKey[] = [
   {
     id: 'key_01K0B',
     name: 'Local development',
-    prefix: 'spl_test_2A81',
+    prefix: 'piq_test_2A81',
     environment: 'test',
     scopes: ['jobs:read', 'jobs:write', 'printers:read'],
     lastUsedAt: ago(412),

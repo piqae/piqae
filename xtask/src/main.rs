@@ -53,7 +53,7 @@ fn execute(arguments: &[String]) -> TaskResult {
 fn print_help() {
     println!(
         "\
-Spool contributor tasks
+Piqae contributor tasks
 
 Usage:
   cargo xtask doctor
@@ -74,7 +74,7 @@ fn repository_root() -> TaskResult<PathBuf> {
         .map_err(|error| TaskError(format!("cannot run git: {error}")))?;
     if !output.status.success() {
         return Err(TaskError(
-            "run xtask from inside the Spool repository".into(),
+            "run xtask from inside the Piqae repository".into(),
         ));
     }
     let root = String::from_utf8(output.stdout)
@@ -83,7 +83,7 @@ fn repository_root() -> TaskResult<PathBuf> {
 }
 
 fn doctor(root: &Path) -> TaskResult {
-    println!("Spool development environment");
+    println!("Piqae development environment");
     let mut missing = Vec::new();
     for (tool, arguments) in [
         ("git", &["--version"][..]),
@@ -103,7 +103,7 @@ fn doctor(root: &Path) -> TaskResult {
         Ok(version) => println!("  ok      docker   {version}"),
         Err(_) => println!("  optional docker   not installed; required only for self-hosting"),
     }
-    if env::var("SPOOL_ALLOW_PHYSICAL_TESTS").as_deref() == Ok("1") {
+    if env::var("PIQAE_ALLOW_PHYSICAL_TESTS").as_deref() == Ok("1") {
         println!("  warning physical-printer opt-in is enabled in this shell");
     } else {
         println!("  safe    physical-printer tests are disabled");
@@ -140,15 +140,15 @@ fn tool_output(root: &Path, program: &str, arguments: &[&str]) -> TaskResult<Str
 fn dev(root: &Path, target: &str) -> TaskResult {
     match target {
         "web" => {
-            let mut process = command(root, "pnpm", ["--filter", "@spool/web", "dev"]);
+            let mut process = command(root, "pnpm", ["--filter", "@piqae/web", "dev"]);
             process
-                .env("SPOOL_AUTH_MODE", "demo")
-                .env("PUBLIC_SPOOL_DASHBOARD_MODE", "demo");
+                .env("PIQAE_AUTH_MODE", "demo")
+                .env("PUBLIC_PIQAE_DASHBOARD_MODE", "demo");
             run(process)
         }
         "agent" => {
-            let data_directory = env::var_os("SPOOL_STATE_DIR")
-                .map_or_else(|| root.join(".spool-dev"), PathBuf::from);
+            let data_directory = env::var_os("PIQAE_STATE_DIR")
+                .map_or_else(|| root.join(".piqae-dev"), PathBuf::from);
             fs::create_dir_all(&data_directory).map_err(|error| {
                 TaskError(format!(
                     "cannot create {}: {error}",
@@ -158,13 +158,13 @@ fn dev(root: &Path, target: &str) -> TaskResult {
             run(command(
                 root,
                 "cargo",
-                ["build", "-p", "spool-fake-executor"],
+                ["build", "-p", "piqae-fake-executor"],
             ))?;
             let executor = root
                 .join("target")
                 .join("debug")
-                .join(format!("spool-fake-executor{}", env::consts::EXE_SUFFIX));
-            let mut process = command(root, "cargo", ["run", "-p", "spool-agent", "--"]);
+                .join(format!("piqae-fake-executor{}", env::consts::EXE_SUFFIX));
+            let mut process = command(root, "cargo", ["run", "-p", "piqae-agent", "--"]);
             process.args([
                 "--mode",
                 "local",
@@ -359,7 +359,7 @@ fn test_macos(root: &Path) -> TaskResult {
 }
 
 fn fixture_reset(root: &Path) -> TaskResult {
-    for name in [".spool-dev", ".spool-test-fixtures"] {
+    for name in [".piqae-dev", ".piqae-test-fixtures"] {
         let target = root.join(name);
         if target.exists() {
             fs::remove_dir_all(&target).map_err(|error| {
@@ -383,13 +383,13 @@ fn release_check(root: &Path) -> TaskResult {
     if env::var_os("PAYLOAD_SECRET").is_none() {
         build.env(
             "PAYLOAD_SECRET",
-            "spool-release-build-only-secret-not-for-runtime",
+            "piqae-release-build-only-secret-not-for-runtime",
         );
     }
     if env::var_os("DATABASE_URL").is_none() {
         build.env(
             "DATABASE_URL",
-            "postgresql://spool_cms_build@127.0.0.1:1/spool_cms_build",
+            "postgresql://piqae_cms_build@127.0.0.1:1/piqae_cms_build",
         );
     }
     run(build)?;
@@ -550,7 +550,7 @@ mod tests {
 
     #[test]
     fn disposable_fixture_names_are_repository_local() {
-        for name in [".spool-dev", ".spool-test-fixtures"] {
+        for name in [".piqae-dev", ".piqae-test-fixtures"] {
             let path = Path::new(name);
             assert!(path.is_relative());
             assert_eq!(path.components().count(), 1);

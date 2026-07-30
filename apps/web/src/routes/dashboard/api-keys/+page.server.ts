@@ -1,5 +1,5 @@
 import { fail } from '@sveltejs/kit';
-import type { ApiKeyScope } from '@spool/sdk';
+import type { ApiKeyScope } from '@piqae/sdk';
 import type { Actions, PageServerLoad } from './$types';
 import {
   dashboardMode,

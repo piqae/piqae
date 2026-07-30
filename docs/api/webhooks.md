@@ -4,11 +4,11 @@
 outbox, retry worker, delivery history, and replay implemented.
 
 Create endpoints through `/v1/webhooks`. The signing secret is returned once;
-store it immediately. Spool sends:
+store it immediately. Piqae sends:
 
 ```text
-Spool-Timestamp: 1750000000
-Spool-Signature: v1=<base64-hmac-sha256>
+Piqae-Timestamp: 1750000000
+Piqae-Signature: v1=<base64-hmac-sha256>
 ```
 
 Verify HMAC-SHA256 over:

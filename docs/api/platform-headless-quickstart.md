@@ -4,10 +4,10 @@
 facade remain Disabled as a production support claim until release evidence
 passes.
 
-1. Create one server-only platform credential with `spoolctl`.
-2. Store it as `SPOOL_PLATFORM_KEY` in your secret manager.
+1. Create one server-only platform credential with `piqaectl`.
+2. Store it as `PIQAE_PLATFORM_KEY` in your secret manager.
 3. Resolve your authenticated customer to one immutable external ID.
-4. Get or create its Spool account.
+4. Get or create its Piqae account.
 5. Select Test or Live from trusted server-side policy.
 6. Use the returned workspace/environment IDs for printer, upload, job, and
    webhook calls.
@@ -16,10 +16,10 @@ Hosted-first SDK:
 
 ```ts
 import { readFile } from 'node:fs/promises';
-import { SpoolPlatform } from '@spool/sdk';
+import { PiqaePlatform } from '@piqae/sdk';
 
-const platform = new SpoolPlatform({
-  platformKey: process.env.SPOOL_PLATFORM_KEY!
+const platform = new PiqaePlatform({
+  platformKey: process.env.PIQAE_PLATFORM_KEY!
 });
 
 const account = await platform.accounts.getOrCreate(customer.id, {
@@ -41,8 +41,8 @@ Live by default.
 Lower-level account-scoped client:
 
 ```ts
-const spool = new SpoolClient({
-  platformKey: process.env.SPOOL_PLATFORM_KEY!,
+const piqae = new PiqaeClient({
+  platformKey: process.env.PIQAE_PLATFORM_KEY!,
   platformContext: {
     workspaceId: account.id,
     environmentId: account.environments.live.id

@@ -1,9 +1,9 @@
 locals {
-  name          = "spool-${var.environment}"
+  name          = "piqae-${var.environment}"
   min_instances = var.environment == "production" ? 3 : 0
   max_instances = var.environment == "production" ? 10 : 2
   database_url = var.enable_managed_data_plane ? format(
-    "postgresql://spool:%s@localhost/spool?host=%s",
+    "postgresql://piqae:%s@localhost/piqae?host=%s",
     urlencode(random_password.database[0].result),
     urlencode("/cloudsql/${google_sql_database_instance.primary[0].connection_name}")
   ) : var.database_url_secret
@@ -26,7 +26,7 @@ resource "google_project_service" "secret_manager" {
 
 resource "google_service_account" "server" {
   account_id   = local.name
-  display_name = "Spool ${var.environment} control plane"
+  display_name = "Piqae ${var.environment} control plane"
 }
 
 resource "google_secret_manager_secret" "database_url" {
@@ -185,27 +185,27 @@ resource "google_cloud_run_v2_service" "server" {
       }
 
       env {
-        name  = "SPOOL_ENVIRONMENT"
+        name  = "PIQAE_ENVIRONMENT"
         value = var.environment
       }
       env {
-        name  = "SPOOL_DEPLOYMENT"
+        name  = "PIQAE_DEPLOYMENT"
         value = "cloud"
       }
       env {
-        name  = "SPOOL_SERVICE_ROLE"
+        name  = "PIQAE_SERVICE_ROLE"
         value = each.key
       }
       env {
-        name  = "SPOOL_RUN_MIGRATIONS_ON_STARTUP"
+        name  = "PIQAE_RUN_MIGRATIONS_ON_STARTUP"
         value = "false"
       }
       env {
-        name  = "SPOOL_IDENTITY_PROVIDER"
+        name  = "PIQAE_IDENTITY_PROVIDER"
         value = "workos"
       }
       env {
-        name  = "SPOOL_BILLING_ENABLED"
+        name  = "PIQAE_BILLING_ENABLED"
         value = "true"
       }
       env {
@@ -213,67 +213,67 @@ resource "google_cloud_run_v2_service" "server" {
         value = var.stripe_meter_event_name
       }
       env {
-        name  = "SPOOL_BIND"
+        name  = "PIQAE_BIND"
         value = "0.0.0.0:8080"
       }
       env {
-        name  = "SPOOL_AUTH_MODE"
+        name  = "PIQAE_AUTH_MODE"
         value = var.auth_mode
       }
       env {
-        name  = "SPOOL_OIDC_ISSUER"
+        name  = "PIQAE_OIDC_ISSUER"
         value = var.oidc_issuer
       }
       env {
-        name  = "SPOOL_OIDC_JWKS_URL"
+        name  = "PIQAE_OIDC_JWKS_URL"
         value = var.oidc_jwks_url
       }
       env {
-        name  = "SPOOL_OIDC_AUDIENCE"
+        name  = "PIQAE_OIDC_AUDIENCE"
         value = var.oidc_audience
       }
       env {
-        name  = "SPOOL_OIDC_BINDING_CLAIM"
+        name  = "PIQAE_OIDC_BINDING_CLAIM"
         value = var.oidc_binding_claim
       }
       env {
-        name  = "SPOOL_OIDC_BINDING_VALUE"
+        name  = "PIQAE_OIDC_BINDING_VALUE"
         value = var.oidc_binding_value
       }
       env {
-        name  = "SPOOL_OIDC_ORGANIZATION_CLAIM"
+        name  = "PIQAE_OIDC_ORGANIZATION_CLAIM"
         value = var.oidc_organization_claim
       }
       env {
-        name  = "SPOOL_OIDC_PERMISSIONS_CLAIM"
+        name  = "PIQAE_OIDC_PERMISSIONS_CLAIM"
         value = var.oidc_permissions_claim
       }
       env {
-        name  = "SPOOL_OIDC_ALLOW_UNRESTRICTED"
+        name  = "PIQAE_OIDC_ALLOW_UNRESTRICTED"
         value = "false"
       }
       env {
-        name  = "SPOOL_OBJECT_STORE"
+        name  = "PIQAE_OBJECT_STORE"
         value = var.enable_managed_data_plane ? "gcs" : "s3"
       }
       env {
-        name  = "SPOOL_GCS_BUCKET"
+        name  = "PIQAE_GCS_BUCKET"
         value = var.enable_managed_data_plane ? google_storage_bucket.objects[0].name : ""
       }
       env {
-        name  = "SPOOL_S3_ENDPOINT"
+        name  = "PIQAE_S3_ENDPOINT"
         value = var.object_store_endpoint
       }
       env {
-        name  = "SPOOL_S3_BUCKET"
+        name  = "PIQAE_S3_BUCKET"
         value = var.object_store_bucket
       }
       env {
-        name  = "SPOOL_S3_REGION"
+        name  = "PIQAE_S3_REGION"
         value = "auto"
       }
       env {
-        name = "SPOOL_DATABASE_URL"
+        name = "PIQAE_DATABASE_URL"
         value_source {
           secret_key_ref {
             secret  = google_secret_manager_secret.database_url.secret_id
@@ -282,7 +282,7 @@ resource "google_cloud_run_v2_service" "server" {
         }
       }
       env {
-        name = "SPOOL_S3_ACCESS_KEY_ID"
+        name = "PIQAE_S3_ACCESS_KEY_ID"
         value_source {
           secret_key_ref {
             secret  = google_secret_manager_secret.object_access_key.secret_id
@@ -291,7 +291,7 @@ resource "google_cloud_run_v2_service" "server" {
         }
       }
       env {
-        name = "SPOOL_S3_SECRET_ACCESS_KEY"
+        name = "PIQAE_S3_SECRET_ACCESS_KEY"
         value_source {
           secret_key_ref {
             secret  = google_secret_manager_secret.object_secret_key.secret_id
@@ -300,7 +300,7 @@ resource "google_cloud_run_v2_service" "server" {
         }
       }
       env {
-        name = "SPOOL_WEBHOOK_MASTER_KEY"
+        name = "PIQAE_WEBHOOK_MASTER_KEY"
         value_source {
           secret_key_ref {
             secret  = google_secret_manager_secret.webhook_master_key.secret_id

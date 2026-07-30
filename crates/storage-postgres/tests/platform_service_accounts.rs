@@ -1,12 +1,12 @@
 #![allow(clippy::expect_used)]
 
 use chrono::{Duration, Utc};
-use spool_auth::{
+use piqae_auth::{
     generate_platform_service_account_key, rotate_platform_service_account_key,
     verify_platform_service_account_key,
 };
-use spool_domain::{EnvironmentId, WorkspaceId};
-use spool_storage_postgres::{PostgresStore, StorageError};
+use piqae_domain::{EnvironmentId, WorkspaceId};
+use piqae_storage_postgres::{PostgresStore, StorageError};
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use std::env;
 use uuid::Uuid;
@@ -66,14 +66,14 @@ fn assert_not_found(result: &Result<impl Sized, StorageError>) {
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
 async fn postgres_platform_grants_are_exact_scoped_and_revocable() {
-    let Some(database_url) = env::var("SPOOL_TEST_DATABASE_URL").ok() else {
+    let Some(database_url) = env::var("PIQAE_TEST_DATABASE_URL").ok() else {
         eprintln!(
-            "skipped: set SPOOL_TEST_DATABASE_URL to run PostgreSQL platform service-account evidence"
+            "skipped: set PIQAE_TEST_DATABASE_URL to run PostgreSQL platform service-account evidence"
         );
         return;
     };
 
-    let schema = format!("spool_platform_test_{}", ulid::Ulid::new()).to_ascii_lowercase();
+    let schema = format!("piqae_platform_test_{}", ulid::Ulid::new()).to_ascii_lowercase();
     let admin = PgPoolOptions::new()
         .max_connections(1)
         .connect(&database_url)
@@ -158,7 +158,7 @@ async fn postgres_platform_grants_are_exact_scoped_and_revocable() {
     );
 
     let ordinary_key_id = Uuid::now_v7().to_string();
-    let ordinary_lookup_prefix = format!("spl_live_{}", &ordinary_key_id[..8]);
+    let ordinary_lookup_prefix = format!("piq_live_{}", &ordinary_key_id[..8]);
     store
         .create_api_key(
             granted_workspace,

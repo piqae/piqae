@@ -7,9 +7,9 @@ Local-only mode keeps jobs, content, printer discovery, and queue state on one
 computer. It does not turn the loopback API root into a web application.
 
 ```sh
-SPOOL_AGENT_MODE=local \
-SPOOL_DATA_DIR="$PWD/.spool" \
-cargo run -p spool-agent
+PIQAE_AGENT_MODE=local \
+PIQAE_DATA_DIR="$PWD/.piqae" \
+cargo run -p piqae-agent
 ```
 
 The authenticated API binds to `127.0.0.1:39100` by default and creates

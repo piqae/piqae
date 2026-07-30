@@ -1,0 +1,41 @@
+{{- if .Values.migration.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "piqae.fullname" . }}-migrate-{{ .Release.Revision }}
+  labels:
+    {{- include "piqae.labels" . | nindent 4 }}
+    app.kubernetes.io/component: migration
+  annotations:
+    # On first install the ExternalSecret is a normal release resource, so the
+    # hook runs after it can reconcile. The server also embeds idempotent SQLx
+    # migrations. Upgrades run this hook before any Deployment is changed.
+    helm.sh/hook: post-install,pre-upgrade
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: {{ .Values.migration.backoffLimit }}
+  activeDeadlineSeconds: {{ .Values.migration.activeDeadlineSeconds }}
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        {{- include "piqae.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: migration
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ include "piqae.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      securityContext: {{ toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: migrate
+          image: {{ include "piqae.image" (dict "image" .Values.migration.image) }}
+          imagePullPolicy: {{ .Values.migration.image.pullPolicy }}
+          securityContext: {{ toYaml .Values.securityContext | nindent 12 }}
+          env:
+            - name: DATABASE_URL
+              valueFrom: { secretKeyRef: { name: {{ include "piqae.secretName" . }}, key: {{ .Values.secrets.keys.databaseUrl }} } }
+          resources: {{ toYaml .Values.migration.resources | nindent 12 }}
+          volumeMounts: [{ name: tmp, mountPath: /tmp }]
+      volumes: [{ name: tmp, emptyDir: { sizeLimit: 32Mi } }]
+{{- end }}

@@ -1,6 +1,6 @@
 # Hosted infrastructure
 
-This module deploys the Spool control plane to Cloud Run in Sydney. By default,
+This module deploys the Piqae control plane to Cloud Run in Sydney. By default,
 PostgreSQL and S3 remain separately managed services and their credentials are
 passed to Secret Manager.
 
@@ -58,7 +58,7 @@ private connectivity, promoting the replica, and updating
 PostgreSQL/S3 path remains the safe default.
 
 For a global load balancer, `allow_public_cloud_run_invocation=true` grants the
-transport-level Cloud Run invoker role to `allUsers`; Spool's OIDC/API-key
+transport-level Cloud Run invoker role to `allUsers`; Piqae's OIDC/API-key
 authentication still protects every application route. Enforce Cloud Armor,
 rate limits, and organization policy outside this small module.
 

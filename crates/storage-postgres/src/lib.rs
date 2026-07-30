@@ -7,14 +7,14 @@
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, Utc};
-use rand::{RngCore, rngs::OsRng};
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
-use spool_domain::{
+use piqae_domain::{
     AgentId, EnvironmentId, EventId, Job, JobEvent, JobId, JobOptions, JobState,
     NativePrinterOption, PrinterCapabilities, PrinterId, PrinterState, WorkspaceId,
     validate_transition,
 };
+use rand::{RngCore, rngs::OsRng};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use sqlx::{
     PgPool, Postgres, Row, Transaction,
     postgres::{PgPoolOptions, PgRow},
@@ -1005,7 +1005,7 @@ impl PostgresStore {
         display_name: Option<&str>,
     ) -> Result<BootstrappedLocalOwner, StorageError> {
         let mut transaction = self.pool.begin().await?;
-        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('spool-local-owner', 1))")
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('piqae-local-owner', 1))")
             .execute(&mut *transaction)
             .await?;
         let already_configured: bool =
@@ -2045,7 +2045,7 @@ impl PostgresStore {
                     greatest(metered.accepted_jobs - metered.included_jobs, 0)
                     + metered.overage_unit - 1
                 ) / metered.overage_unit,
-                'spool-overage-' || metered.workspace_id || '-' ||
+                'piqae-overage-' || metered.workspace_id || '-' ||
                     extract(epoch FROM metered.period_start)::bigint::text,
                 'pending'
             FROM metered
@@ -4457,7 +4457,13 @@ impl PostgresStore {
         }
 
         let mut job = job_from_row(row.try_get("payload")?, &state)?;
-        if job.metadata.get("spool.target_id").map(String::as_str) != Some(target_id) {
+        if job
+            .metadata
+            .get("piqae.target_id")
+            .or_else(|| job.metadata.get("spool.target_id"))
+            .map(String::as_str)
+            != Some(target_id)
+        {
             transaction.commit().await?;
             return Ok(None);
         }
@@ -4508,7 +4514,11 @@ impl PostgresStore {
         .await?
         .ok_or(StorageError::ConcurrentStateChange)?;
         let stock_id: Option<String> = destination.try_get("stock_id")?;
-        let intended_stock = job.metadata.get("spool.stock_id").cloned();
+        let intended_stock = job
+            .metadata
+            .get("piqae.stock_id")
+            .or_else(|| job.metadata.get("spool.stock_id"))
+            .cloned();
         if stock_id.is_some() && intended_stock.as_ref() != stock_id.as_ref() {
             transaction.commit().await?;
             return Ok(None);
@@ -4539,14 +4549,32 @@ impl PostgresStore {
         .fetch_one(&mut *transaction)
         .await?;
 
-        let from_binding_id = job.metadata.get("spool.binding_id").cloned();
+        let from_binding_id = job
+            .metadata
+            .get("piqae.binding_id")
+            .or_else(|| job.metadata.get("spool.binding_id"))
+            .cloned();
+        for suffix in [
+            "target_id",
+            "binding_id",
+            "profile_id",
+            "profile_revision",
+            "stock_id",
+        ] {
+            let legacy_key = format!("spool.{suffix}");
+            if let Some(value) = job.metadata.remove(&legacy_key) {
+                job.metadata
+                    .entry(format!("piqae.{suffix}"))
+                    .or_insert(value);
+            }
+        }
         job.printer_id = binding.printer_id;
         job.metadata
-            .insert("spool.binding_id".into(), binding.id.clone());
+            .insert("piqae.binding_id".into(), binding.id.clone());
         job.metadata
-            .insert("spool.profile_id".into(), binding.profile_id.clone());
+            .insert("piqae.profile_id".into(), binding.profile_id.clone());
         job.metadata.insert(
-            "spool.profile_revision".into(),
+            "piqae.profile_revision".into(),
             binding.profile_revision.to_string(),
         );
         let updated = sqlx::query(
@@ -4641,7 +4669,10 @@ impl PostgresStore {
              WHERE job.workspace_id = $1 AND job.environment_id = $2
                AND job.state IN ('waiting_for_agent', 'failed_retryable')
                AND job.expires_at > now()
-               AND job.payload->'metadata'->>'spool.target_id' IS NOT NULL
+               AND COALESCE(
+                   job.payload->'metadata'->>'piqae.target_id',
+                   job.payload->'metadata'->>'spool.target_id'
+               ) IS NOT NULL
                AND (job.lease_until IS NULL OR job.lease_until <= now())
                AND NOT EXISTS (
                    SELECT 1 FROM job_acceptances AS acceptance
@@ -5299,7 +5330,7 @@ impl PostgresStore {
         let current_state: String = row.try_get("state")?;
         let mut job = job_from_row(row.try_get("payload")?, &current_state)?;
         let expected_sha256 = match &job.content {
-            spool_domain::ContentSource::Upload { upload_id } => Some(
+            piqae_domain::ContentSource::Upload { upload_id } => Some(
                 sqlx::query_scalar::<_, String>(
                     "SELECT expected_sha256 FROM uploads
                          WHERE id = $1 AND workspace_id = $2 AND environment_id = $3
@@ -5312,13 +5343,13 @@ impl PostgresStore {
                 .await?
                 .ok_or(StorageError::NotFound)?,
             ),
-            spool_domain::ContentSource::Base64 { data } => {
+            piqae_domain::ContentSource::Base64 { data } => {
                 let decoded = base64::engine::general_purpose::STANDARD
                     .decode(data)
                     .map_err(|error| StorageError::InvalidData(error.to_string()))?;
                 Some(format!("{:x}", Sha256::digest(decoded)))
             }
-            spool_domain::ContentSource::Uri { .. } => None,
+            piqae_domain::ContentSource::Uri { .. } => None,
         };
         if expected_sha256.as_deref().is_some_and(|expected| {
             !content_sha256.is_some_and(|actual| actual.eq_ignore_ascii_case(expected))
@@ -5796,7 +5827,7 @@ async fn materialize_usage_export(
             "invalid Stripe usage export period".into(),
         ));
     }
-    let identifier = format!("spool-overage-{workspace_id}-{}", period_start.timestamp());
+    let identifier = format!("piqae-overage-{workspace_id}-{}", period_start.timestamp());
     sqlx::query(
         "WITH billed_workspaces AS (
             SELECT $1::text AS workspace_id

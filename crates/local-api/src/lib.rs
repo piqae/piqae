@@ -10,12 +10,12 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post, put},
 };
-use serde::{Deserialize, Serialize};
-use spool_local_ipc::{
+use piqae_local_ipc::{
     ConfirmLoadedMedia, LocalPrinter, LocalPrinterProfile, LocalPrinterQueue, LocalStatus,
     NativeProfileCapturePayload, ProfileCaptureAuthorized, ProfileValidationResult,
     SessionAuthenticator,
 };
+use serde::{Deserialize, Serialize};
 use std::{net::SocketAddr, sync::Arc};
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
@@ -114,10 +114,10 @@ pub struct LocalCreateJob {
     #[serde(default)]
     pub printer_native_id: Option<String>,
     pub title: String,
-    pub content_kind: spool_domain::ContentKind,
+    pub content_kind: piqae_domain::ContentKind,
     pub content: LocalContent,
     #[serde(default)]
-    pub options: spool_domain::JobOptions,
+    pub options: piqae_domain::JobOptions,
     pub expires_unix_ms: Option<i64>,
 }
 
@@ -146,7 +146,7 @@ pub struct ProfileCreate {
     #[serde(default)]
     pub is_default: bool,
     #[serde(default)]
-    pub options: spool_domain::JobOptions,
+    pub options: piqae_domain::JobOptions,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -157,7 +157,7 @@ pub struct ProfileUpdate {
     #[serde(default)]
     pub is_default: bool,
     #[serde(default)]
-    pub options: spool_domain::JobOptions,
+    pub options: piqae_domain::JobOptions,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -177,7 +177,7 @@ pub struct TestPageRequest {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProfileCaptureBeginRequest {
-    pub operation: spool_domain::ProfileCaptureOperation,
+    pub operation: piqae_domain::ProfileCaptureOperation,
     pub profile_id: Option<String>,
     pub expected_revision: Option<u64>,
 }
@@ -192,7 +192,7 @@ pub struct ValidateProfileRequest {
 #[serde(deny_unknown_fields)]
 pub struct ConfirmLoadedMediaRequest {
     pub stock_id: Option<String>,
-    pub confidence: spool_domain::LoadedMediaConfidence,
+    pub confidence: piqae_domain::LoadedMediaConfidence,
     pub confirmed_by: Option<String>,
 }
 
@@ -456,7 +456,7 @@ async fn commit_profile_capture(
             StatusCode::UNAUTHORIZED,
             Json(ControlFailure {
                 code: "capture_token_required".into(),
-                message: "X-Spool-Capture-Token is required".into(),
+                message: "X-Piqae-Capture-Token is required".into(),
             }),
         )
             .into_response();
@@ -488,7 +488,7 @@ async fn cancel_profile_capture(
             StatusCode::UNAUTHORIZED,
             Json(ControlFailure {
                 code: "capture_token_required".into(),
-                message: "X-Spool-Capture-Token is required".into(),
+                message: "X-Piqae-Capture-Token is required".into(),
             }),
         )
             .into_response();
@@ -690,7 +690,8 @@ fn authenticate(state: &LocalApiState, headers: &HeaderMap) -> bool {
 
 fn capture_token(headers: &HeaderMap) -> Option<String> {
     headers
-        .get("x-spool-capture-token")
+        .get("x-piqae-capture-token")
+        .or_else(|| headers.get("x-spool-capture-token"))
         .and_then(|value| value.to_str().ok())
         .filter(|value| !value.is_empty() && value.len() <= 512)
         .map(str::to_owned)
@@ -725,12 +726,12 @@ mod tests {
             revision: 1,
             name,
             is_default: true,
-            options: spool_domain::JobOptions::default(),
-            status: spool_domain::ProfileStatus::NeedsTest,
-            native_kind: Some(spool_domain::NativeProfileKind::PortableOptions),
+            options: piqae_domain::JobOptions::default(),
+            status: piqae_domain::ProfileStatus::NeedsTest,
+            native_kind: Some(piqae_domain::NativeProfileKind::PortableOptions),
             native_digest: None,
-            driver_fingerprint: spool_domain::DriverFingerprint::default(),
-            summary: spool_domain::ProfileSummary::default(),
+            driver_fingerprint: piqae_domain::DriverFingerprint::default(),
+            summary: piqae_domain::ProfileSummary::default(),
             stock_id: None,
             dependencies: Vec::new(),
             safe_overrides: Vec::new(),
@@ -765,7 +766,7 @@ mod tests {
                     agent_id: Some("agt_test".into()),
                     workspace_name: Some("Test".into()),
                     version: "0.1.0".into(),
-                    connection: spool_local_ipc::ConnectionState::Connected,
+                    connection: piqae_local_ipc::ConnectionState::Connected,
                     queued_jobs: 0,
                     active_jobs: 0,
                     printer_warnings: 0,
@@ -877,7 +878,7 @@ mod tests {
                 assert_eq!(capture.name, "A4 colour");
                 assert_eq!(
                     capture.native_kind,
-                    spool_domain::NativeProfileKind::MacosPrintcore
+                    piqae_domain::NativeProfileKind::MacosPrintcore
                 );
                 let _ = respond_to.send(Ok(profile("prf_native", capture.name.clone())));
             }
@@ -888,7 +889,7 @@ mod tests {
                     .method("POST")
                     .uri("/v1/local/profile-capture-sessions/pcs_test/complete")
                     .header("authorization", "Bearer secret")
-                    .header("x-spool-capture-token", "one-time-token")
+                    .header("x-piqae-capture-token", "one-time-token")
                     .header("content-type", "application/json")
                     .body(Body::from(
                         r#"{
@@ -917,7 +918,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/v1/local/profile-capture-sessions/pcs_test/complete")
-                    .header("x-spool-capture-token", "one-time-token")
+                    .header("x-piqae-capture-token", "one-time-token")
                     .header("content-type", "application/json")
                     .body(Body::from(
                         r#"{

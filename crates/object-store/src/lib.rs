@@ -111,7 +111,7 @@ mod gcs_configuration_tests {
     #[test]
     fn gcs_builder_accepts_application_default_credentials() {
         let store = GcsObjectStore::new_gcs(GcsConfiguration {
-            bucket: "spool-test-bucket".into(),
+            bucket: "piqae-test-bucket".into(),
             service_account_path: None,
         });
         assert!(store.is_ok());
@@ -387,7 +387,7 @@ impl ObjectStore for FileObjectStore {
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
-        let temporary = path.with_extension("spool-part");
+        let temporary = path.with_extension("piqae-part");
         tokio::fs::write(&temporary, &content).await?;
         tokio::fs::rename(&temporary, &path).await?;
         Ok(StoredObject {
@@ -419,7 +419,7 @@ impl ObjectStore for FileObjectStore {
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
-        let temporary = path.with_extension(format!("{}.spool-part", ulid_fragment()));
+        let temporary = path.with_extension(format!("{}.piqae-part", ulid_fragment()));
         let mut output = tokio::fs::OpenOptions::new()
             .create_new(true)
             .write(true)
@@ -600,7 +600,7 @@ mod tests {
 
     #[tokio::test]
     async fn keys_cannot_escape_filesystem_root() {
-        let root = std::env::temp_dir().join(format!("spool-object-store-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("piqae-object-store-{}", std::process::id()));
         let store = FileObjectStore::new(root).await.unwrap();
         assert!(matches!(
             store.put("../outside", Bytes::new(), None).await,

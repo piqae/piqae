@@ -1,4 +1,4 @@
-import { SpoolClient } from '@spool/sdk';
+import { PiqaeClient } from '@piqae/sdk';
 import type {
   DashboardAccount,
   DashboardAgent,
@@ -95,11 +95,11 @@ export function createLiveApi(
   baseUrl: string,
   apiKey?: string
 ): DashboardApi {
-  const client = new SpoolClient({
+  const client = new PiqaeClient({
     baseUrl,
     fetch: fetcher,
     ...(apiKey ? { apiKey } : {}),
-    headers: { 'x-spool-dashboard': '1' }
+    headers: { 'x-piqae-dashboard': '1' }
   });
 
   const toAgent = (agent: Awaited<ReturnType<typeof client.agents.list>>[number]): DashboardAgent => ({
@@ -205,7 +205,7 @@ export function createLiveApi(
     fetcher(`${baseUrl.replace(/\/$/, '')}${path}`, {
       headers: {
         accept: 'application/json',
-        'x-spool-dashboard': '1',
+        'x-piqae-dashboard': '1',
         ...(apiKey ? { authorization: `Bearer ${apiKey}` } : {})
       }
     });
@@ -216,7 +216,7 @@ export function createLiveApi(
         headers: { accept: 'application/json' }
       });
       if (!response.ok) {
-        throw new Error(`Spool metadata request failed with HTTP ${response.status}.`);
+        throw new Error(`Piqae metadata request failed with HTTP ${response.status}.`);
       }
       return parseDashboardMeta(await response.json());
     },
@@ -304,7 +304,7 @@ export function createLiveApi(
             id: apiKey.id,
             name: apiKey.name,
             prefix: apiKey.lookup_prefix,
-            environment: apiKey.lookup_prefix.startsWith('spl_test_') ? 'test' : 'live',
+            environment: apiKey.lookup_prefix.startsWith('piq_test_') ? 'test' : 'live',
             scopes: apiKey.scopes.map((scope) => scope.replace(/_([^_]*)$/, ':$1')),
             lastUsedAt: apiKey.last_used_at,
             createdAt: apiKey.created_at
@@ -313,11 +313,11 @@ export function createLiveApi(
     accounts: async () => {
       const response = await platformRequest('/v1/platform/accounts');
       if (!response.ok) {
-        throw new Error(`Spool customer account request failed with HTTP ${response.status}.`);
+        throw new Error(`Piqae customer account request failed with HTTP ${response.status}.`);
       }
       const value: unknown = await response.json();
       if (!Array.isArray(value)) {
-        throw new Error('Spool customer account response was not a list.');
+        throw new Error('Piqae customer account response was not a list.');
       }
       return page(value.map(parseDashboardAccount));
     },
@@ -327,7 +327,7 @@ export function createLiveApi(
       );
       if (response.status === 404) return null;
       if (!response.ok) {
-        throw new Error(`Spool customer account request failed with HTTP ${response.status}.`);
+        throw new Error(`Piqae customer account request failed with HTTP ${response.status}.`);
       }
       return parseDashboardAccount(await response.json());
     }
@@ -366,7 +366,7 @@ export function parseDashboardMeta(value: unknown): DashboardMeta {
 }
 
 export function parseDashboardAccount(value: unknown): DashboardAccount {
-  if (!isRecord(value)) throw new Error('Spool customer account response was invalid.');
+  if (!isRecord(value)) throw new Error('Piqae customer account response was invalid.');
   const environments = isRecord(value.environments) ? value.environments : {};
   const testEnvironment = isRecord(environments.test) ? environments.test : {};
   const liveEnvironment = isRecord(environments.live) ? environments.live : {};
@@ -384,7 +384,7 @@ export function parseDashboardAccount(value: unknown): DashboardAccount {
     liveEnvironment.id
   ];
   if (!status || requiredStrings.some((item) => typeof item !== 'string' || item === '')) {
-    throw new Error('Spool customer account response was invalid.');
+    throw new Error('Piqae customer account response was invalid.');
   }
   const safeMetadata = Object.fromEntries(
     Object.entries(metadata).filter(

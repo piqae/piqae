@@ -3,7 +3,7 @@ param()
 
 $ErrorActionPreference = "Stop"
 $RepositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
-$TemporaryDirectory = Join-Path ([IO.Path]::GetTempPath()) ("spool-windows-tests-" + [guid]::NewGuid().ToString("N"))
+$TemporaryDirectory = Join-Path ([IO.Path]::GetTempPath()) ("piqae-windows-tests-" + [guid]::NewGuid().ToString("N"))
 
 function Assert-True([bool]$Condition, [string]$Message) {
     if (-not $Condition) {
@@ -76,18 +76,30 @@ try {
     Assert-True ($enclosure.GetAttribute("edSignature", $namespace.LookupNamespace("sparkle")) -eq $signature) "Appcast signature differs."
     Assert-True ($enclosure.GetAttribute("version", $namespace.LookupNamespace("sparkle")) -eq "1.2.3-preview.1") "Appcast version differs."
 
-    $installer = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot "Spool.iss")
+    $installer = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot "Piqae.iss")
     Assert-True ($installer.Contains("update-config.json")) "Installer does not stage update configuration."
     Assert-True ($installer.Contains("WinSparkle.dll")) "Installer does not stage WinSparkle when present."
     Assert-True ($installer.Contains("createvalueifdoesntexist")) "Installer would overwrite the user update policy."
     Assert-True ($installer.Contains("Check: NeedsInitialConfiguration")) "Installer reopens first-run configuration during upgrades."
     Assert-True ($installer.Contains("Check: HasExistingConfiguration")) "Installer does not restart an already configured node after upgrade."
+    Assert-True ($installer.Contains("{localappdata}\Spool\config.json")) "Installer moved the shipped durable state path during the Piqae rename."
+    Assert-True ($installer.Contains("ValueName: ""Spool""; Flags: deletevalue")) "Installer leaves the legacy startup registration active."
 
-    $policyScript = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot "Set-SpoolUpdatePolicy.ps1")
-    Assert-True ($policyScript.Contains("spool-shell-windows")) "Update-policy changes do not restart the tray."
-    Assert-True ($policyScript.Contains("spool-profile-host-windows")) "Update-policy changes do not defer for native driver settings."
-    Assert-True ($policyScript.Contains("Start-Spool.ps1")) "Update-policy changes do not relaunch the tray."
-    Assert-True (-not $policyScript.Contains("Stop-Spool.ps1")) "Update-policy changes would stop the durable agent."
+    $startScript = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot "Start-Piqae.ps1")
+    Assert-True ($startScript.Contains('Join-Path $env:LOCALAPPDATA "Spool"')) "Start script moved the shipped durable state path."
+    Assert-True ($startScript.Contains("piqae-executor-windows.exe")) "Start script does not replace the executor path from an existing configuration."
+    Assert-True ($startScript.Contains("piqae-profile-host-windows.exe")) "Start script does not replace the profile-host path from an existing configuration."
+
+    $stopScript = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot "Stop-Piqae.ps1")
+    Assert-True ($stopScript.Contains("piqae-agent")) "Stop script does not stop the renamed node."
+    Assert-True ($stopScript.Contains("spool-agent")) "Stop script cannot safely hand off an existing pre-rename node."
+    Assert-True ($stopScript.Contains("MainModule.FileName")) "Stop script does not bind termination to the installed executable path."
+
+    $policyScript = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot "Set-PiqaeUpdatePolicy.ps1")
+    Assert-True ($policyScript.Contains("piqae-shell-windows")) "Update-policy changes do not restart the tray."
+    Assert-True ($policyScript.Contains("piqae-profile-host-windows")) "Update-policy changes do not defer for native driver settings."
+    Assert-True ($policyScript.Contains("Start-Piqae.ps1")) "Update-policy changes do not relaunch the tray."
+    Assert-True (-not $policyScript.Contains("Stop-Piqae.ps1")) "Update-policy changes would stop the durable agent."
 
     $signerScript = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot "Assert-AuthenticodeSigner.ps1")
     Assert-True ($signerScript.Contains("SignerCertificate.Subject")) "Authenticode verification does not bind the signer subject."
@@ -95,10 +107,10 @@ try {
 
     $releaseWorkflow = Get-Content -Raw -LiteralPath (Join-Path $RepositoryRoot ".github\workflows\windows-release.yml")
     foreach ($component in @(
-        "spool-agent",
-        "spoolctl",
-        "spool-executor-windows",
-        "spool-shell-windows"
+        "piqae-agent",
+        "piqaectl",
+        "piqae-executor-windows",
+        "piqae-shell-windows"
     )) {
         Assert-True ($releaseWorkflow.Contains('"' + $component + '"')) "Release version gate omits $component."
     }

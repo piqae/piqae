@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.c4coffee.spool.agent</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>@INSTALL_ROOT@/piqae-agent</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PIQAE_AGENT_MODE</key>
+        <string>local</string>
+        <key>PIQAE_DATA_DIR</key>
+        <string>@DATA_DIR@</string>
+        <key>PIQAE_LOCAL_BIND</key>
+        <string>127.0.0.1:39100</string>
+        <key>PIQAE_EXECUTOR</key>
+        <string>process</string>
+        <key>PIQAE_EXECUTOR_PATH</key>
+        <string>@INSTALL_ROOT@/piqae-executor-cups</string>
+        <key>PIQAE_ALLOW_PRIVATE_URI_SOURCES</key>
+        <string>false</string>
+    </dict>
+    <key>WorkingDirectory</key>
+    <string>@DATA_DIR@</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <key>ThrottleInterval</key>
+    <integer>5</integer>
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>StandardOutPath</key>
+    <string>@LOG_FILE@</string>
+    <key>StandardErrorPath</key>
+    <string>@LOG_FILE@</string>
+</dict>
+</plist>

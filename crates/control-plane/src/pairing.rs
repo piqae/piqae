@@ -12,11 +12,11 @@ use base64::{
     engine::general_purpose::{STANDARD_NO_PAD, URL_SAFE_NO_PAD},
 };
 use chrono::{Duration, Utc};
+use piqae_auth::Scope;
+use piqae_storage_postgres::NewDeviceAuthorization;
 use rand::{RngCore, rngs::OsRng};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use spool_auth::Scope;
-use spool_storage_postgres::NewDeviceAuthorization;
 
 const DEVICE_AUTHORIZATION_LIFETIME_SECONDS: i64 = 600;
 const USER_CODE_ALPHABET: &[u8] = b"23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
@@ -69,9 +69,9 @@ pub struct DecideDeviceAuthorizationRequest {
 
 #[derive(Debug, Serialize)]
 pub struct DeviceAuthorizationExchange {
-    pub node_id: spool_domain::AgentId,
-    pub workspace_id: spool_domain::WorkspaceId,
-    pub environment_id: spool_domain::EnvironmentId,
+    pub node_id: piqae_domain::AgentId,
+    pub workspace_id: piqae_domain::WorkspaceId,
+    pub environment_id: piqae_domain::EnvironmentId,
     pub server_time: chrono::DateTime<Utc>,
     pub sync_after_ms: u64,
 }
@@ -95,7 +95,7 @@ pub async fn create(
     }
     let mut secret = [0_u8; 32];
     OsRng.fill_bytes(&mut secret);
-    let device_code = format!("spl_dev_{}", URL_SAFE_NO_PAD.encode(secret));
+    let device_code = format!("piq_dev_{}", URL_SAFE_NO_PAD.encode(secret));
     let user_code = generate_user_code();
     let id = format!("dva_{}", ulid::Ulid::new());
     let expires_at = Utc::now() + Duration::seconds(DEVICE_AUTHORIZATION_LIFETIME_SECONDS);

@@ -285,7 +285,7 @@ counts, and opens the page, but never owns the agent or queue.
 
 ## Licence
 
-All Spool-authored source, schemas, documentation, and examples use
+All Piqae-authored source, schemas, documentation, and examples use
 Apache-2.0. The managed service competes on operations and support rather than
 withholding core functionality. Trademark rights remain separate. See
 [12-open-source-saas-and-build-plan.md](12-open-source-saas-and-build-plan.md)

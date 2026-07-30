@@ -1,0 +1,20 @@
+{{- if .Values.podDisruptionBudget.enabled }}
+{{- $root := . -}}
+{{- range $name, $component := .Values.components }}
+{{- if and $component.enabled (gt (int $component.replicas) 1) }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "piqae.fullname" $root }}-{{ $name }}
+  labels:
+    {{- include "piqae.labels" $root | nindent 4 }}
+spec:
+  minAvailable: {{ $root.Values.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "piqae.selectorLabels" $root | nindent 6 }}
+      app.kubernetes.io/component: {{ $name }}
+{{- end }}
+{{- end }}
+{{- end }}

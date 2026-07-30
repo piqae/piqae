@@ -1,13 +1,13 @@
-# Spool marketing CMS
+# Piqae marketing CMS
 
 This is a private Payload application for marketing copy, comparison evidence,
 displayed prices, and cleared media. It must use a database or schema and role
-that cannot modify the Spool control-plane tables.
+that cannot modify the Piqae control-plane tables.
 
 ```console
 cp .env.example .env
-pnpm --filter @spool/cms generate:types
-pnpm --filter @spool/cms dev
+pnpm --filter @piqae/cms generate:types
+pnpm --filter @piqae/cms dev
 ```
 
 The first user becomes an administrator. Later anonymous user creation is

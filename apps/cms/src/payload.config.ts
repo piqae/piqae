@@ -35,7 +35,7 @@ export default buildConfig({
   admin: {
     user: Users.slug,
     importMap: { baseDir: path.resolve(dirname) },
-    meta: { titleSuffix: ' · Spool CMS' },
+    meta: { titleSuffix: ' · Piqae CMS' },
   },
   collections: [
     Users,

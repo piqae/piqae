@@ -1,6 +1,6 @@
 # Control-plane observability
 
-`spool-server` emits structured JSON tracing to standard output by default.
+`piqae-server` emits structured JSON tracing to standard output by default.
 Set `RUST_LOG` to tune its filter. Every HTTP response includes a bounded
 `x-request-id`; the same value is attached to the request span, completion
 event, and safe API error envelope.
@@ -10,13 +10,13 @@ event, and safe API error envelope.
 OTLP export is compile-time optional and runtime opt-in:
 
 ```sh
-cargo build --locked --release -p spool-control-plane --features otlp
+cargo build --locked --release -p piqae-control-plane --features otlp
 OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=https://collector.example.com/v1/traces \
-  target/release/spool-server
+  target/release/piqae-server
 ```
 
 Cargo's default feature set and local Compose source builds are lightweight and
-exclude OpenTelemetry. Set `SPOOL_SERVER_FEATURES=otlp` for a local Compose
+exclude OpenTelemetry. Set `PIQAE_SERVER_FEATURES=otlp` for a local Compose
 build. The server Dockerfile defaults to `otlp`, so official prebuilt server
 images include the capability; runtime export still remains off until an
 endpoint or exporter selector is configured.
@@ -44,7 +44,7 @@ bundles.
 
 Trace resources always include `service.name`, `service.version`, and
 `deployment.environment.name`. `OTEL_SERVICE_NAME` overrides the service-name
-default, and `SPOOL_ENVIRONMENT` supplies the deployment environment. The
+default, and `PIQAE_ENVIRONMENT` supplies the deployment environment. The
 OpenTelemetry SDK also reads `OTEL_RESOURCE_ATTRIBUTES`.
 
 ## Correlation and data boundaries

@@ -20,7 +20,7 @@ driver must not stall heartbeats, other printers, or the local UI.
 
 ## Native profiles
 
-An installed queue is a destination, not a complete production setup. Spool
+An installed queue is a destination, not a complete production setup. Piqae
 supports multiple immutable native profiles beneath one destination. Creating
 or editing a profile uses the operating system's native driver interface;
 jobs pin the resulting platform configuration and revision.

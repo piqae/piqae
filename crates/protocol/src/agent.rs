@@ -1,10 +1,10 @@
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
-use spool_domain::{
+use piqae_domain::{
     AgentId, DriverFingerprint, EventId, Job, JobEvent, NativePrinterOption, NativeProfileKind,
     PrinterCapabilities, PrinterId, PrinterState, ProfileStatus, ProfileSummary,
     SafeProfileOverride, UriAuthentication,
 };
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use uuid::Uuid;
 
@@ -70,8 +70,8 @@ pub struct DeviceAuthorizationStatus {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct DeviceAuthorizationExchange {
     pub node_id: AgentId,
-    pub workspace_id: spool_domain::WorkspaceId,
-    pub environment_id: spool_domain::EnvironmentId,
+    pub workspace_id: piqae_domain::WorkspaceId,
+    pub environment_id: piqae_domain::EnvironmentId,
     pub server_time: DateTime<Utc>,
     pub sync_after_ms: u64,
 }
@@ -142,7 +142,7 @@ pub struct AgentAcceptJobRequest {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct AgentAcceptJobResponse {
     pub accepted_at: DateTime<Utc>,
-    pub state: spool_domain::JobState,
+    pub state: piqae_domain::JobState,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -168,7 +168,7 @@ pub struct AgentReleaseLeaseRequest {
 pub enum AgentCommand {
     RefreshPrinters,
     CancelJob {
-        job_id: spool_domain::JobId,
+        job_id: piqae_domain::JobId,
     },
     Pause,
     Resume,
@@ -223,7 +223,7 @@ pub struct PrinterProfileSnapshot {
     pub revision: u64,
     pub name: String,
     pub is_default: bool,
-    pub options: spool_domain::JobOptions,
+    pub options: piqae_domain::JobOptions,
     #[serde(default)]
     pub status: ProfileStatus,
     #[serde(default)]

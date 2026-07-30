@@ -18,8 +18,8 @@ Run the Railway private-beta release gate with protected, populated
 configuration and external evidence:
 
 ```console
-SPOOL_PRODUCTION_RAILWAY_ENV_FILE=/protected/railway-production-web.env \
-SPOOL_PRODUCTION_EVIDENCE_DIR=/protected/release-evidence \
+PIQAE_PRODUCTION_RAILWAY_ENV_FILE=/protected/railway-production-web.env \
+PIQAE_PRODUCTION_EVIDENCE_DIR=/protected/release-evidence \
   ./deploy/production-check.sh release
 ```
 
@@ -30,7 +30,7 @@ values.
 
 The future managed-HA Cloud Run/GCP target uses
 `./deploy/production-check.sh managed-ha` and additionally requires
-`SPOOL_PRODUCTION_TFVARS_FILE` plus regional DR evidence. Those scale-up gates
+`PIQAE_PRODUCTION_TFVARS_FILE` plus regional DR evidence. Those scale-up gates
 do not block the controlled Railway private beta.
 
 ## Current gate classification
@@ -144,7 +144,7 @@ while rejecting blank values and non-HTTPS origins.
 
 1. Create separate WorkOS applications for Preview and Production.
 2. Configure each production role (`owner`, `admin`, `developer`, `operator`,
-   `viewer`, and `billing`) and grant the API permission names Spool expects,
+   `viewer`, and `billing`) and grant the API permission names Piqae expects,
    including `usage_read` for billing pages. Keep server-side permission checks
    authoritative.
 3. Set the organisation claim to `org_id` and permissions claim to
@@ -168,17 +168,17 @@ Create one Pro product with four recurring Prices:
 
 The two metered Prices use the same Billing Meter event name configured as
 `stripe_meter_event_name` in Terraform. Its customer key is
-`stripe_customer_id`, value key is `value`, and aggregation is `sum`. Spool
+`stripe_customer_id`, value key is `value`, and aggregation is `sum`. Piqae
 submits integer 1,000-job overage blocks—not raw print counts—after closing a
 subscription period. The worker checks every 60 seconds, claims exports
 durably, and retries transport failures without changing the Stripe event
 identifier. Apply this Price metadata:
 
 ```text
-spool_plan=pro
-spool_metric=accepted_live_jobs_overage
-spool_included_jobs=25000       # monthly; use 300000 for annual
-spool_overage_unit=1000
+piqae_plan=pro
+piqae_metric=accepted_live_jobs_overage
+piqae_included_jobs=25000       # monthly; use 300000 for annual
+piqae_overage_unit=1000
 ```
 
 Put each Price’s unique lookup key—not its displayed amount—in the matching
@@ -202,7 +202,7 @@ In Stripe **Invoice settings**, add a 72-hour invoice-finalization grace-period
 rule for subscription-cycle invoices with a metered Price. Stripe includes
 late-reported usage only while the invoice remains draft, so this rule is a
 billing correctness requirement rather than an optional buffer. Alert when the
-oldest pending or failed Spool usage export is 15 minutes old and block
+oldest pending or failed Piqae usage export is 15 minutes old and block
 promotion unless a test-clock renewal proves that:
 
 1. the ending subscription period is snapshotted once;
@@ -221,7 +221,7 @@ wrong-interval, wrong-meter, or wrong-metadata Price fails with HTTP 409.
 1. Create production Sentry project(s) for server and browser events. The
    runtime DSNs may be the same, but both `SENTRY_DSN` and
    `PUBLIC_SENTRY_DSN` must be configured for complete coverage.
-2. Keep `sendDefaultPii` disabled. Spool additionally removes users, request
+2. Keep `sendDefaultPii` disabled. Piqae additionally removes users, request
    bodies, headers, cookies, query strings, console/UI breadcrumbs, local
    variables, and known credential fields from errors and transactions.
 3. Give the build a least-privilege `SENTRY_AUTH_TOKEN`, organisation, project,

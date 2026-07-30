@@ -140,10 +140,10 @@ jobs:
           RELEASE_VERSION: ${{ steps.gate.outputs.version }}
         run: |
           metadata=$(cargo metadata --locked --no-deps --format-version 1)
-          agent_version=$(printf '%s' "$metadata" | jq -r '.packages[] | select(.name == "spool-agent") | .version')
-          executor_version=$(printf '%s' "$metadata" | jq -r '.packages[] | select(.name == "spool-executor-cups") | .version')
+          agent_version=$(printf '%s' "$metadata" | jq -r '.packages[] | select(.name == "piqae-agent") | .version')
+          executor_version=$(printf '%s' "$metadata" | jq -r '.packages[] | select(.name == "piqae-executor-cups") | .version')
           if [[ "$agent_version" != "$RELEASE_VERSION" || "$executor_version" != "$RELEASE_VERSION" ]]; then
-            echo "Bundle version must match spool-agent and spool-executor-cups." >&2
+            echo "Bundle version must match piqae-agent and piqae-executor-cups." >&2
             exit 1
           fi
 
@@ -164,9 +164,9 @@ jobs:
             packaging/macos/verify-update-signature.sh
           plutil -lint \
             shells/macos/Resources/Info.plist \
-            shells/macos/Resources/Spool.entitlements \
-            packaging/macos/com.c4coffee.spool.agent.plist.in \
-            packaging/macos/com.c4coffee.spool.menu.plist.in
+            shells/macos/Resources/Piqae.entitlements \
+            packaging/macos/com.piqae.agent.plist.in \
+            packaging/macos/com.piqae.menu.plist.in
 
       - name: Build universal Rust node
         shell: bash
@@ -176,28 +176,28 @@ jobs:
               --locked \
               --release \
               --target "$target" \
-              -p spool-agent \
-              -p spool-executor-cups \
+              -p piqae-agent \
+              -p piqae-executor-cups \
               --bins
           done
-          fixture="$GITHUB_WORKSPACE/.spool-test-fixtures/native-release"
+          fixture="$GITHUB_WORKSPACE/.piqae-test-fixtures/native-release"
           mkdir -p "$fixture/bin"
           lipo -create \
-            target/aarch64-apple-darwin/release/spool-agent \
-            target/x86_64-apple-darwin/release/spool-agent \
-            -output "$fixture/bin/spool-agent"
+            target/aarch64-apple-darwin/release/piqae-agent \
+            target/x86_64-apple-darwin/release/piqae-agent \
+            -output "$fixture/bin/piqae-agent"
           lipo -create \
-            target/aarch64-apple-darwin/release/spool-executor-cups \
-            target/x86_64-apple-darwin/release/spool-executor-cups \
-            -output "$fixture/bin/spool-executor-cups"
-          lipo -archs "$fixture/bin/spool-agent" | grep -F arm64 | grep -F x86_64
-          lipo -archs "$fixture/bin/spool-executor-cups" | grep -F arm64 | grep -F x86_64
+            target/aarch64-apple-darwin/release/piqae-executor-cups \
+            target/x86_64-apple-darwin/release/piqae-executor-cups \
+            -output "$fixture/bin/piqae-executor-cups"
+          lipo -archs "$fixture/bin/piqae-agent" | grep -F arm64 | grep -F x86_64
+          lipo -archs "$fixture/bin/piqae-executor-cups" | grep -F arm64 | grep -F x86_64
 
       - name: Import Developer ID certificate
         if: steps.gate.outputs.release_mode == 'signed'
         shell: bash
         run: |
-          fixture="$GITHUB_WORKSPACE/.spool-test-fixtures/native-release"
+          fixture="$GITHUB_WORKSPACE/.piqae-test-fixtures/native-release"
           keychain="$fixture/release.keychain-db"
           certificate="$fixture/developer-id.p12"
           keychain_password=$(openssl rand -hex 24)
@@ -220,7 +220,7 @@ jobs:
           security list-keychains -d user -s "$keychain"
           security find-identity -v -p codesigning "$keychain" |
             grep -F "$MACOS_APPLICATION_IDENTITY"
-          echo "SPOOL_RELEASE_KEYCHAIN=$keychain" >> "$GITHUB_ENV"
+          echo "PIQAE_RELEASE_KEYCHAIN=$keychain" >> "$GITHUB_ENV"
 
       - name: Build app bundle
         shell: bash
@@ -229,29 +229,29 @@ jobs:
           RELEASE_VERSION: ${{ steps.gate.outputs.version }}
           RELEASE_BUILD: ${{ steps.gate.outputs.build_number }}
         run: |
-          fixture="$GITHUB_WORKSPACE/.spool-test-fixtures/native-release"
+          fixture="$GITHUB_WORKSPACE/.piqae-test-fixtures/native-release"
           app="$fixture/Piqae.app"
           if [[ "$RELEASE_MODE" == signed ]]; then
-            SPOOL_APP_BUNDLE="$app" \
-            SPOOL_VERSION="$RELEASE_VERSION" \
-            SPOOL_BUILD_NUMBER="$RELEASE_BUILD" \
-            SPOOL_SWIFT_ARCHS="arm64,x86_64" \
-            SPOOL_CODE_SIGN_IDENTITY="$MACOS_APPLICATION_IDENTITY" \
-            SPOOL_SPARKLE_FEED_URL="$SPARKLE_FEED_URL" \
-            SPOOL_SPARKLE_PUBLIC_ED_KEY="$SPARKLE_PUBLIC_ED_KEY" \
+            PIQAE_APP_BUNDLE="$app" \
+            PIQAE_VERSION="$RELEASE_VERSION" \
+            PIQAE_BUILD_NUMBER="$RELEASE_BUILD" \
+            PIQAE_SWIFT_ARCHS="arm64,x86_64" \
+            PIQAE_CODE_SIGN_IDENTITY="$MACOS_APPLICATION_IDENTITY" \
+            PIQAE_SPARKLE_FEED_URL="$SPARKLE_FEED_URL" \
+            PIQAE_SPARKLE_PUBLIC_ED_KEY="$SPARKLE_PUBLIC_ED_KEY" \
               shells/macos/build-app.sh
           else
-            SPOOL_APP_BUNDLE="$app" \
-            SPOOL_VERSION="$RELEASE_VERSION" \
-            SPOOL_BUILD_NUMBER="$RELEASE_BUILD" \
-            SPOOL_SWIFT_ARCHS="arm64,x86_64" \
+            PIQAE_APP_BUNDLE="$app" \
+            PIQAE_VERSION="$RELEASE_VERSION" \
+            PIQAE_BUILD_NUMBER="$RELEASE_BUILD" \
+            PIQAE_SWIFT_ARCHS="arm64,x86_64" \
               shells/macos/build-app.sh
           fi
-          lipo -archs "$app/Contents/MacOS/SpoolMenu" | grep -F arm64 | grep -F x86_64
-          lipo -archs "$app/Contents/MacOS/SpoolPrintCoreReplay" | grep -F arm64 | grep -F x86_64
-          otool -l "$app/Contents/MacOS/SpoolMenu" |
+          lipo -archs "$app/Contents/MacOS/PiqaeMenu" | grep -F arm64 | grep -F x86_64
+          lipo -archs "$app/Contents/MacOS/PiqaePrintCoreReplay" | grep -F arm64 | grep -F x86_64
+          otool -l "$app/Contents/MacOS/PiqaeMenu" |
             grep -F "@executable_path/../Frameworks"
-          "$app/Contents/MacOS/SpoolMenu" \
+          "$app/Contents/MacOS/PiqaeMenu" \
             > "$fixture/menu-launch-smoke.out" \
             2> "$fixture/menu-launch-smoke.err" &
           menu_pid=$!
@@ -267,25 +267,25 @@ jobs:
         if: steps.gate.outputs.release_mode == 'signed'
         shell: bash
         run: |
-          fixture="$GITHUB_WORKSPACE/.spool-test-fixtures/native-release"
-          SPOOL_CODE_SIGN_IDENTITY="$MACOS_APPLICATION_IDENTITY" \
+          fixture="$GITHUB_WORKSPACE/.piqae-test-fixtures/native-release"
+          PIQAE_CODE_SIGN_IDENTITY="$MACOS_APPLICATION_IDENTITY" \
             packaging/macos/sign-components.sh \
-              "$fixture/bin/spool-agent" \
-              "$fixture/bin/spool-executor-cups"
+              "$fixture/bin/piqae-agent" \
+              "$fixture/bin/piqae-executor-cups"
 
       - name: Verify Developer ID signature
         if: steps.gate.outputs.release_mode == 'signed'
         shell: bash
         run: |
-          fixture="$GITHUB_WORKSPACE/.spool-test-fixtures/native-release"
+          fixture="$GITHUB_WORKSPACE/.piqae-test-fixtures/native-release"
           mkdir -p artifacts
           codesign --verify --deep --strict --verbose=4 "$fixture/Piqae.app" \
             2> artifacts/codesign-evidence.txt
           codesign -dv --verbose=4 "$fixture/Piqae.app" \
             2>> artifacts/codesign-evidence.txt
           for component in \
-            "$fixture/bin/spool-agent" \
-            "$fixture/bin/spool-executor-cups"
+            "$fixture/bin/piqae-agent" \
+            "$fixture/bin/piqae-executor-cups"
           do
             codesign --verify --strict --verbose=4 "$component" \
               2>> artifacts/codesign-evidence.txt
@@ -301,7 +301,7 @@ jobs:
           RELEASE_VERSION: ${{ steps.gate.outputs.version }}
           RELEASE_BUILD: ${{ steps.gate.outputs.build_number }}
         run: |
-          fixture="$GITHUB_WORKSPACE/.spool-test-fixtures/native-release"
+          fixture="$GITHUB_WORKSPACE/.piqae-test-fixtures/native-release"
           submission="$fixture/Piqae-${RELEASE_VERSION}-${RELEASE_BUILD}-notary.zip"
           ditto -c -k --sequesterRsrc --keepParent "$fixture/Piqae.app" "$submission"
           xcrun notarytool submit "$submission" \
@@ -322,18 +322,18 @@ jobs:
       - name: Stage SBOM input
         shell: bash
         run: |
-          fixture="$GITHUB_WORKSPACE/.spool-test-fixtures/native-release"
+          fixture="$GITHUB_WORKSPACE/.piqae-test-fixtures/native-release"
           mkdir -p "$fixture/sbom-input"
           ditto "$fixture/Piqae.app" "$fixture/sbom-input/Piqae.app"
-          install -m 0755 "$fixture/bin/spool-agent" "$fixture/sbom-input/spool-agent"
+          install -m 0755 "$fixture/bin/piqae-agent" "$fixture/sbom-input/piqae-agent"
           install -m 0755 \
-            "$fixture/bin/spool-executor-cups" \
-            "$fixture/sbom-input/spool-executor-cups"
+            "$fixture/bin/piqae-executor-cups" \
+            "$fixture/sbom-input/piqae-executor-cups"
 
       - name: Generate SPDX SBOM
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
         with:
-          path: .spool-test-fixtures/native-release/sbom-input
+          path: .piqae-test-fixtures/native-release/sbom-input
           format: spdx-json
           output-file: artifacts/SBOM.spdx.json
           upload-artifact: false
@@ -342,12 +342,12 @@ jobs:
       - name: Build per-user and update archives
         shell: bash
         run: |
-          fixture="$GITHUB_WORKSPACE/.spool-test-fixtures/native-release"
-          SPOOL_CODE_SIGN_IDENTITY="${MACOS_APPLICATION_IDENTITY:-}" \
+          fixture="$GITHUB_WORKSPACE/.piqae-test-fixtures/native-release"
+          PIQAE_CODE_SIGN_IDENTITY="${MACOS_APPLICATION_IDENTITY:-}" \
             packaging/macos/build-user-package.sh \
               "$fixture/Piqae.app" \
-              "$fixture/bin/spool-agent" \
-              "$fixture/bin/spool-executor-cups" \
+              "$fixture/bin/piqae-agent" \
+              "$fixture/bin/piqae-executor-cups" \
               artifacts
 
       - name: Notarise and staple installer disk image
@@ -385,7 +385,7 @@ jobs:
           RELEASE_VERSION: ${{ steps.gate.outputs.version }}
           RELEASE_BUILD: ${{ steps.gate.outputs.build_number }}
         run: |
-          fixture="$GITHUB_WORKSPACE/.spool-test-fixtures/native-release"
+          fixture="$GITHUB_WORKSPACE/.piqae-test-fixtures/native-release"
           private_key="$fixture/sparkle-private-key"
           appcast_dir="$fixture/appcast"
           mkdir -p "$appcast_dir"
@@ -402,11 +402,11 @@ jobs:
           sparkle_bin="$GITHUB_WORKSPACE/shells/macos/.build/artifacts/sparkle/Sparkle/bin"
           SPARKLE_BIN_DIR="$sparkle_bin" \
           SPARKLE_PRIVATE_KEY_FILE="$private_key" \
-          SPOOL_SPARKLE_DOWNLOAD_URL_PREFIX="$SPARKLE_DOWNLOAD_URL_PREFIX" \
+          PIQAE_SPARKLE_DOWNLOAD_URL_PREFIX="$SPARKLE_DOWNLOAD_URL_PREFIX" \
             packaging/macos/generate-appcast.sh \
               "$appcast_dir" \
               "$appcast_dir/appcast.xml"
-          SPOOL_SPARKLE_PUBLIC_ED_KEY="$SPARKLE_PUBLIC_ED_KEY" \
+          PIQAE_SPARKLE_PUBLIC_ED_KEY="$SPARKLE_PUBLIC_ED_KEY" \
             packaging/macos/verify-update-signature.sh \
               "$appcast_dir/$public_update" \
               "$appcast_dir/appcast.xml"
@@ -466,10 +466,10 @@ jobs:
         if: always()
         shell: bash
         run: |
-          if [[ -n "${SPOOL_RELEASE_KEYCHAIN:-}" && -e "$SPOOL_RELEASE_KEYCHAIN" ]]; then
-            security delete-keychain "$SPOOL_RELEASE_KEYCHAIN" || true
+          if [[ -n "${PIQAE_RELEASE_KEYCHAIN:-}" && -e "$PIQAE_RELEASE_KEYCHAIN" ]]; then
+            security delete-keychain "$PIQAE_RELEASE_KEYCHAIN" || true
           fi
-          rm -rf -- "$GITHUB_WORKSPACE/.spool-test-fixtures/native-release"
+          rm -rf -- "$GITHUB_WORKSPACE/.piqae-test-fixtures/native-release"
 
   publish:
     name: Promote signed macOS release
@@ -477,6 +477,8 @@ jobs:
     if: needs.candidate.outputs.publish == 'true'
     runs-on: ubuntu-24.04
     environment: native-release
+    permissions:
+      contents: write
     concurrency:
       group: piqae-native-stable-promotion
       cancel-in-progress: false
@@ -544,6 +546,26 @@ jobs:
                 ]
               }
             }' > promotion/macos.json
+
+      - name: Attach signed macOS assets to the draft GitHub release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REPOSITORY" != "piqae/piqae" ]]; then
+            echo "GitHub release publishing is enabled only in piqae/piqae." >&2
+            exit 1
+          fi
+          tag="v${RELEASE_VERSION}"
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            gh release create "$tag" --draft --verify-tag \
+              --title "Piqae $tag" \
+              --notes "Preview candidate. Review checksums, provenance, signatures, notarisation evidence, and the support matrix before publishing."
+          fi
+          gh release upload "$tag" \
+            promotion/piqae-macos-* \
+            promotion/appcast-macos.xml
 
       - name: Upload and verify immutable macOS release
         shell: bash

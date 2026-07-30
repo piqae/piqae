@@ -4,12 +4,12 @@ use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
-use spool_auth::generate_platform_service_account_key;
-use spool_control_plane::{
+use piqae_auth::generate_platform_service_account_key;
+use piqae_control_plane::{
     AppState, authentication::PostgresAuthenticator, repository::MemoryRepository, router,
 };
-use spool_domain::{EnvironmentId, WorkspaceId};
-use spool_storage_postgres::PostgresStore;
+use piqae_domain::{EnvironmentId, WorkspaceId};
+use piqae_storage_postgres::PostgresStore;
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use std::{env, sync::Arc};
 use tower::ServiceExt;
@@ -64,8 +64,8 @@ fn platform_request(
     Request::builder()
         .uri("/v1/jobs")
         .header("authorization", format!("Bearer {credential}"))
-        .header("x-spool-workspace-id", workspace_id.to_string())
-        .header("x-spool-environment-id", environment_id.to_string())
+        .header("x-piqae-workspace-id", workspace_id.to_string())
+        .header("x-piqae-environment-id", environment_id.to_string())
         .header("x-request-id", request_id)
         .body(Body::empty())
         .expect("valid platform request")
@@ -74,12 +74,12 @@ fn platform_request(
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
 async fn postgres_platform_http_auth_is_tenant_scoped_audited_and_revocable() {
-    let Some(database_url) = env::var("SPOOL_TEST_DATABASE_URL").ok() else {
-        eprintln!("skipped: set SPOOL_TEST_DATABASE_URL to run PostgreSQL platform HTTP evidence");
+    let Some(database_url) = env::var("PIQAE_TEST_DATABASE_URL").ok() else {
+        eprintln!("skipped: set PIQAE_TEST_DATABASE_URL to run PostgreSQL platform HTTP evidence");
         return;
     };
 
-    let schema = format!("spool_platform_http_{}", ulid::Ulid::new()).to_ascii_lowercase();
+    let schema = format!("piqae_platform_http_{}", ulid::Ulid::new()).to_ascii_lowercase();
     let admin = PgPoolOptions::new()
         .max_connections(1)
         .connect(&database_url)

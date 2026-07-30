@@ -13,7 +13,7 @@ import { dashboardMeta, dashboardSource } from './dashboard-data';
 const fetcher = vi.fn<typeof fetch>();
 const baseEvent = {
   fetch: fetcher,
-  url: new URL('https://dashboard.spool.test/dashboard')
+  url: new URL('https://dashboard.piqae.test/dashboard')
 };
 const oidcAccessToken = 'eyJhbGciOiJSUzI1NiJ9.verified-session-token.signature';
 
@@ -22,7 +22,7 @@ describe('dashboard data source selection', () => {
     fetcher.mockReset();
     for (const key of Object.keys(publicEnvironment)) delete publicEnvironment[key];
     for (const key of Object.keys(privateEnvironment)) delete privateEnvironment[key];
-    publicEnvironment.PUBLIC_SPOOL_API_URL = 'https://api.spool.test';
+    publicEnvironment.PUBLIC_PIQAE_API_URL = 'https://api.piqae.test';
   });
 
   it('forwards a verified hosted session token only in the server-side request', async () => {
@@ -40,7 +40,7 @@ describe('dashboard data source selection', () => {
     await source.api.jobs();
 
     const [url, init] = fetcher.mock.calls[0] ?? [];
-    expect(String(url)).toBe('https://api.spool.test/v1/jobs?limit=100');
+    expect(String(url)).toBe('https://api.piqae.test/v1/jobs?limit=100');
     expect(new Headers(init?.headers).get('authorization')).toBe(`Bearer ${oidcAccessToken}`);
     expect(JSON.stringify({ mode: source.mode })).not.toContain(oidcAccessToken);
   });
@@ -78,12 +78,12 @@ describe('dashboard data source selection', () => {
       platform: { accounts: true }
     });
     const [url, init] = fetcher.mock.calls[0] ?? [];
-    expect(String(url)).toBe('https://api.spool.test/v1/meta');
+    expect(String(url)).toBe('https://api.piqae.test/v1/meta');
     expect(new Headers(init?.headers).has('authorization')).toBe(false);
   });
 
   it('never falls back to a global service key for hosted users', () => {
-    privateEnvironment.SPOOL_DASHBOARD_API_KEY = 'spl_live_must_not_be_used';
+    privateEnvironment.PIQAE_DASHBOARD_API_KEY = 'piq_live_must_not_be_used';
     expect(() =>
       dashboardSource({
         ...baseEvent,
@@ -116,7 +116,7 @@ describe('dashboard data source selection', () => {
   });
 
   it('allows an explicit server-only service key in local/self-host mode', async () => {
-    privateEnvironment.SPOOL_DASHBOARD_API_KEY = 'spl_live_local_service_key';
+    privateEnvironment.PIQAE_DASHBOARD_API_KEY = 'piq_live_local_service_key';
     fetcher.mockResolvedValueOnce(
       new Response(JSON.stringify({ data: [], has_more: false }), { status: 200 })
     );
@@ -129,13 +129,13 @@ describe('dashboard data source selection', () => {
 
     const [, init] = fetcher.mock.calls[0] ?? [];
     expect(new Headers(init?.headers).get('authorization')).toBe(
-      'Bearer spl_live_local_service_key'
+      'Bearer piq_live_local_service_key'
     );
-    expect(JSON.stringify({ mode: source.mode })).not.toContain('spl_live_local_service_key');
+    expect(JSON.stringify({ mode: source.mode })).not.toContain('piq_live_local_service_key');
   });
 
   it('prefers the HttpOnly local-owner session over the legacy service key', async () => {
-    privateEnvironment.SPOOL_DASHBOARD_API_KEY = 'spl_live_legacy_service_key';
+    privateEnvironment.PIQAE_DASHBOARD_API_KEY = 'piq_live_legacy_service_key';
     fetcher.mockResolvedValueOnce(
       new Response(JSON.stringify({ data: [], has_more: false }), { status: 200 })
     );
@@ -143,7 +143,7 @@ describe('dashboard data source selection', () => {
       ...baseEvent,
       locals: {
         authMode: 'local',
-        localSessionToken: 'spl_session_server_only'
+        localSessionToken: 'piq_session_server_only'
       } as never
     });
 
@@ -151,7 +151,7 @@ describe('dashboard data source selection', () => {
 
     const [, init] = fetcher.mock.calls[0] ?? [];
     expect(new Headers(init?.headers).get('authorization')).toBe(
-      'Bearer spl_session_server_only'
+      'Bearer piq_session_server_only'
     );
   });
 
@@ -161,7 +161,7 @@ describe('dashboard data source selection', () => {
         {
           id: 'key_active',
           name: 'Orders',
-          lookup_prefix: 'spl_live_abcd',
+          lookup_prefix: 'piq_live_abcd',
           scopes: ['jobs_read', 'jobs_write'],
           expires_at: null,
           last_used_at: null,
@@ -171,7 +171,7 @@ describe('dashboard data source selection', () => {
         {
           id: 'key_revoked',
           name: 'Old orders',
-          lookup_prefix: 'spl_live_efgh',
+          lookup_prefix: 'piq_live_efgh',
           scopes: ['jobs_read'],
           expires_at: null,
           last_used_at: null,
@@ -194,7 +194,7 @@ describe('dashboard data source selection', () => {
       {
         id: 'key_active',
         name: 'Orders',
-        prefix: 'spl_live_abcd',
+        prefix: 'piq_live_abcd',
         environment: 'live',
         scopes: ['jobs:read', 'jobs:write'],
         lastUsedAt: null,
@@ -249,15 +249,15 @@ describe('dashboard data source selection', () => {
     ]);
     const [url, init] = fetcher.mock.calls[0] ?? [];
     const headers = new Headers(init?.headers);
-    expect(String(url)).toBe('https://api.spool.test/v1/platform/accounts');
+    expect(String(url)).toBe('https://api.piqae.test/v1/platform/accounts');
     expect(headers.get('authorization')).toBe(`Bearer ${oidcAccessToken}`);
-    expect(headers.has('x-spool-environment-id')).toBe(false);
-    expect(headers.has('x-spool-workspace-id')).toBe(false);
+    expect(headers.has('x-piqae-environment-id')).toBe(false);
+    expect(headers.has('x-piqae-workspace-id')).toBe(false);
     expect(JSON.stringify(result)).not.toContain(oidcAccessToken);
   });
 
   it('uses deterministic demo data only after explicit opt-in', async () => {
-    publicEnvironment.PUBLIC_SPOOL_DASHBOARD_MODE = 'demo';
+    publicEnvironment.PUBLIC_PIQAE_DASHBOARD_MODE = 'demo';
     const source = dashboardSource({
       ...baseEvent,
       locals: { authMode: 'demo' } as never

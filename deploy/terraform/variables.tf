@@ -1,6 +1,6 @@
 variable "gcp_project_id" {
   type        = string
-  description = "Dedicated GCP project for the Spool environment."
+  description = "Dedicated GCP project for the Piqae environment."
 }
 
 variable "gcp_region" {
@@ -20,7 +20,7 @@ variable "environment" {
 
 variable "image" {
   type        = string
-  description = "Immutable spool-server OCI image digest."
+  description = "Immutable piqae-server OCI image digest."
   validation {
     condition     = can(regex("@sha256:[0-9a-f]{64}$", var.image))
     error_message = "image must be an immutable OCI reference ending in @sha256:<64 lowercase hex characters>"
@@ -29,7 +29,7 @@ variable "image" {
 
 variable "migration_image" {
   type        = string
-  description = "Immutable spool-migrate OCI image digest."
+  description = "Immutable piqae-migrate OCI image digest."
   validation {
     condition     = can(regex("@sha256:[0-9a-f]{64}$", var.migration_image))
     error_message = "migration_image must be an immutable OCI reference ending in @sha256:<64 lowercase hex characters>"
@@ -149,7 +149,7 @@ variable "oidc_organization_claim" {
 
 variable "oidc_permissions_claim" {
   type        = string
-  description = "Verified array claim mapped to Spool API scopes."
+  description = "Verified array claim mapped to Piqae API scopes."
   default     = "permissions"
 }
 
@@ -193,11 +193,11 @@ variable "load_balancer_domains" {
 
 variable "allow_public_cloud_run_invocation" {
   type        = bool
-  description = "Grant allUsers Cloud Run invocation. Spool application authentication still applies."
+  description = "Grant allUsers Cloud Run invocation. Piqae application authentication still applies."
   default     = false
   validation {
     condition     = !var.enable_global_load_balancer || var.allow_public_cloud_run_invocation
-    error_message = "allow_public_cloud_run_invocation must be true for an external serverless NEG; Spool application auth remains enforced"
+    error_message = "allow_public_cloud_run_invocation must be true for an external serverless NEG; Piqae application auth remains enforced"
   }
 }
 

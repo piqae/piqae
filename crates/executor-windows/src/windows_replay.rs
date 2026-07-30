@@ -6,8 +6,8 @@ use crate::{
     },
     windows_native::{current_fingerprint, normalize_replay_devmode, revalidate_profile_devmode},
 };
-use spool_domain::{JobOptions, NativeProfileKind, Rotation};
-use spool_protocol::executor::{ExecutorError, ExecutorResult, NativeProfilePayload};
+use piqae_domain::{JobOptions, NativeProfileKind, Rotation};
+use piqae_protocol::executor::{ExecutorError, ExecutorResult, NativeProfilePayload};
 use std::{
     ffi::{c_char, c_int, c_ulong, c_void},
     io::Read as _,
@@ -665,14 +665,14 @@ struct Renderer {
 
 impl Renderer {
     fn new(device: &PrinterDevice) -> Result<Self, ExecutorError> {
-        let configured = std::env::var("SPOOL_WINDOWS_MAX_RENDER_DPI")
+        let configured = std::env::var("PIQAE_WINDOWS_MAX_RENDER_DPI")
             .ok()
             .map(|value| value.parse::<i32>())
             .transpose()
             .map_err(|_| {
                 executor_error(
                     "windows_render_dpi_invalid",
-                    "SPOOL_WINDOWS_MAX_RENDER_DPI must be an integer",
+                    "PIQAE_WINDOWS_MAX_RENDER_DPI must be an integer",
                     false,
                     false,
                 )
@@ -681,7 +681,7 @@ impl Renderer {
         if !(72..=MAX_CONFIGURED_RENDER_DPI).contains(&configured) {
             return Err(executor_error(
                 "windows_render_dpi_invalid",
-                "SPOOL_WINDOWS_MAX_RENDER_DPI must be between 72 and 2400",
+                "PIQAE_WINDOWS_MAX_RENDER_DPI must be between 72 and 2400",
                 false,
                 false,
             ));
@@ -934,12 +934,12 @@ impl AlignedDevmode {
 }
 
 fn pdfium_path() -> Result<path::PathBuf, ExecutorError> {
-    let candidate = if let Some(configured) = std::env::var_os("SPOOL_WINDOWS_PDFIUM_PATH") {
+    let candidate = if let Some(configured) = std::env::var_os("PIQAE_WINDOWS_PDFIUM_PATH") {
         let configured = path::PathBuf::from(configured);
         if !configured.is_absolute() {
             return Err(executor_error(
                 "windows_pdfium_path_invalid",
-                "SPOOL_WINDOWS_PDFIUM_PATH must be an absolute path",
+                "PIQAE_WINDOWS_PDFIUM_PATH must be an absolute path",
                 false,
                 false,
             ));
@@ -1004,7 +1004,7 @@ const fn rotation_index(rotation: Rotation) -> c_int {
 fn bitmap_too_large() -> ExecutorError {
     executor_error(
         "windows_page_bitmap_too_large",
-        "rendered page exceeds the 384 MiB per-page safety limit; lower SPOOL_WINDOWS_MAX_RENDER_DPI",
+        "rendered page exceeds the 384 MiB per-page safety limit; lower PIQAE_WINDOWS_MAX_RENDER_DPI",
         false,
         false,
     )

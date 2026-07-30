@@ -1,9 +1,12 @@
 import { env as privateEnv } from '$env/dynamic/private';
 import { env as publicEnv } from '$env/dynamic/public';
+import { productEnvironmentValue } from './product-env';
 import { error, type Cookies, type RequestEvent } from '@sveltejs/kit';
 
-const SESSION_COOKIE = 'spool_local_session';
-const EXPIRY_COOKIE = 'spool_local_session_expiry';
+const SESSION_COOKIE = 'piqae_local_session';
+const EXPIRY_COOKIE = 'piqae_local_session_expiry';
+const LEGACY_SESSION_COOKIE = 'spool_local_session';
+const LEGACY_EXPIRY_COOKIE = 'spool_local_session_expiry';
 const ROTATE_BEFORE_MS = 60 * 60 * 1000;
 
 export interface LocalIdentity {
@@ -30,7 +33,8 @@ interface IdentityResponse {
 }
 
 function apiUrl(event: Pick<RequestEvent, 'url'>, path: string): string {
-  const base = publicEnv.PUBLIC_SPOOL_API_URL || event.url.origin;
+  const base =
+    productEnvironmentValue(publicEnv, 'PUBLIC_PIQAE_API_URL') || event.url.origin;
   return `${base.replace(/\/$/, '')}${path}`;
 }
 
@@ -39,19 +43,23 @@ function cookieOptions(event: Pick<RequestEvent, 'url'>, expires?: Date) {
     path: '/',
     httpOnly: true,
     sameSite: 'strict' as const,
-    secure: privateEnv.SPOOL_COOKIE_SECURE === 'true' || event.url.protocol === 'https:',
+    secure:
+      productEnvironmentValue(privateEnv, 'PIQAE_COOKIE_SECURE') === 'true' ||
+      event.url.protocol === 'https:',
     ...(expires ? { expires } : {})
   };
 }
 
 export function localSessionToken(cookies: Cookies): string | null {
-  return cookies.get(SESSION_COOKIE) ?? null;
+  return cookies.get(SESSION_COOKIE) ?? cookies.get(LEGACY_SESSION_COOKIE) ?? null;
 }
 
 export function clearLocalSession(event: Pick<RequestEvent, 'cookies' | 'url'>): void {
   const options = cookieOptions(event);
   event.cookies.delete(SESSION_COOKIE, options);
   event.cookies.delete(EXPIRY_COOKIE, options);
+  event.cookies.delete(LEGACY_SESSION_COOKIE, options);
+  event.cookies.delete(LEGACY_EXPIRY_COOKIE, options);
 }
 
 function setLocalSession(
@@ -63,6 +71,8 @@ function setLocalSession(
   const options = cookieOptions(event, expires);
   event.cookies.set(SESSION_COOKIE, session.token, options);
   event.cookies.set(EXPIRY_COOKIE, session.expires_at, options);
+  event.cookies.delete(LEGACY_SESSION_COOKIE, options);
+  event.cookies.delete(LEGACY_EXPIRY_COOKIE, options);
 }
 
 async function sessionRequest(
@@ -117,8 +127,15 @@ export async function ensureLocalSession(
 ): Promise<string | null> {
   const token = localSessionToken(event.cookies);
   if (!token) return null;
-  const expiry = Date.parse(event.cookies.get(EXPIRY_COOKIE) ?? '');
-  if (Number.isFinite(expiry) && expiry - Date.now() > ROTATE_BEFORE_MS) return token;
+  const expiryText =
+    event.cookies.get(EXPIRY_COOKIE) ?? event.cookies.get(LEGACY_EXPIRY_COOKIE) ?? '';
+  const expiry = Date.parse(expiryText);
+  if (Number.isFinite(expiry) && expiry - Date.now() > ROTATE_BEFORE_MS) {
+    if (!event.cookies.get(SESSION_COOKIE)) {
+      setLocalSession(event, { token, expires_at: expiryText });
+    }
+    return token;
+  }
   const response = await sessionRequest(event, '/v1/identity/local/sessions/rotate', token);
   if (!response.ok) {
     clearLocalSession(event);

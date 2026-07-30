@@ -1,17 +1,17 @@
-name: spool
+name: piqae
 
 services:
   postgres:
     image: postgres:16.4-alpine
     restart: unless-stopped
     environment:
-      POSTGRES_DB: spool
-      POSTGRES_USER: spool
+      POSTGRES_DB: piqae
+      POSTGRES_USER: piqae
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U spool -d spool"]
+      test: ["CMD-SHELL", "pg_isready -U piqae -d piqae"]
       interval: 5s
       timeout: 3s
       retries: 20
@@ -21,7 +21,7 @@ services:
     restart: unless-stopped
     command: server /data --console-address :9001
     environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-spool}
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-piqae}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD}
     volumes:
       - object-data:/data
@@ -42,19 +42,19 @@ services:
       - -ec
       - |
         mc alias set local http://minio:9000 "$${MINIO_ROOT_USER}" "$${MINIO_ROOT_PASSWORD}"
-        mc mb --ignore-existing local/spool
-        mc anonymous set none local/spool
+        mc mb --ignore-existing local/piqae
+        mc anonymous set none local/piqae
     environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-spool}
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-piqae}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD}
 
   server:
-    image: ${SPOOL_IMAGE:-ghcr.io/c4coffeeco/spool/server:latest}
+    image: ${PIQAE_IMAGE:-ghcr.io/c4coffeeco/piqae/server:latest}
     build:
       context: ../..
       dockerfile: deploy/docker/Dockerfile.server
       args:
-        SPOOL_SERVER_FEATURES: ${SPOOL_SERVER_FEATURES:-}
+        PIQAE_SERVER_FEATURES: ${PIQAE_SERVER_FEATURES:-}
     restart: unless-stopped
     depends_on:
       postgres:
@@ -62,48 +62,48 @@ services:
       minio-init:
         condition: service_completed_successfully
     ports:
-      - "${SPOOL_PORT:-8080}:8080"
+      - "${PIQAE_PORT:-8080}:8080"
     environment:
-      SPOOL_ENVIRONMENT: production
-      SPOOL_SERVICE_ROLE: all
-      SPOOL_RUN_MIGRATIONS_ON_STARTUP: "true"
-      SPOOL_BIND: 0.0.0.0:8080
-      SPOOL_DATABASE_URL: postgres://spool:${POSTGRES_PASSWORD}@postgres:5432/spool
-      SPOOL_OBJECT_STORE: s3
-      SPOOL_S3_ENDPOINT: http://minio:9000
-      SPOOL_S3_BUCKET: spool
-      SPOOL_S3_REGION: us-east-1
-      SPOOL_S3_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-spool}
-      SPOOL_S3_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
-      SPOOL_S3_ALLOW_HTTP: "true"
-      SPOOL_WEBHOOK_MASTER_KEY: ${SPOOL_WEBHOOK_MASTER_KEY:?set SPOOL_WEBHOOK_MASTER_KEY}
-      SPOOL_BOOTSTRAP_API_KEY: ${SPOOL_BOOTSTRAP_API_KEY:-}
-      SPOOL_BOOTSTRAP_WORKSPACE_ID: ${SPOOL_BOOTSTRAP_WORKSPACE_ID:-}
-      SPOOL_BOOTSTRAP_ENVIRONMENT_ID: ${SPOOL_BOOTSTRAP_ENVIRONMENT_ID:-}
-      SPOOL_AUTH_MODE: ${SPOOL_AUTH_MODE:-bootstrap}
-      SPOOL_IDENTITY_PROVIDER: ${SPOOL_IDENTITY_PROVIDER:-local_owner}
-      SPOOL_LOCAL_OWNER_BOOTSTRAP_TOKEN: ${SPOOL_LOCAL_OWNER_BOOTSTRAP_TOKEN:-}
-      SPOOL_LOCAL_OWNER_SESSION_SECONDS: ${SPOOL_LOCAL_OWNER_SESSION_SECONDS:-43200}
-      SPOOL_OIDC_ISSUER: ${SPOOL_OIDC_ISSUER:-}
-      SPOOL_OIDC_AUDIENCE: ${SPOOL_OIDC_AUDIENCE:-}
-      SPOOL_OIDC_CLIENT_ID: ${SPOOL_OIDC_CLIENT_ID:-}
-      SPOOL_OIDC_BINDING_CLAIM: ${SPOOL_OIDC_BINDING_CLAIM:-}
-      SPOOL_OIDC_BINDING_VALUE: ${SPOOL_OIDC_BINDING_VALUE:-}
-      SPOOL_OIDC_JWKS_URL: ${SPOOL_OIDC_JWKS_URL:-}
-      SPOOL_OIDC_ORGANIZATION_CLAIM: ${SPOOL_OIDC_ORGANIZATION_CLAIM:-org_id}
-      SPOOL_OIDC_PERMISSIONS_CLAIM: ${SPOOL_OIDC_PERMISSIONS_CLAIM:-permissions}
-      SPOOL_OIDC_ENVIRONMENT: ${SPOOL_OIDC_ENVIRONMENT:-live}
-      SPOOL_OIDC_ALLOW_UNRESTRICTED: ${SPOOL_OIDC_ALLOW_UNRESTRICTED:-false}
+      PIQAE_ENVIRONMENT: production
+      PIQAE_SERVICE_ROLE: all
+      PIQAE_RUN_MIGRATIONS_ON_STARTUP: "true"
+      PIQAE_BIND: 0.0.0.0:8080
+      PIQAE_DATABASE_URL: postgres://piqae:${POSTGRES_PASSWORD}@postgres:5432/piqae
+      PIQAE_OBJECT_STORE: s3
+      PIQAE_S3_ENDPOINT: http://minio:9000
+      PIQAE_S3_BUCKET: piqae
+      PIQAE_S3_REGION: us-east-1
+      PIQAE_S3_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-piqae}
+      PIQAE_S3_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+      PIQAE_S3_ALLOW_HTTP: "true"
+      PIQAE_WEBHOOK_MASTER_KEY: ${PIQAE_WEBHOOK_MASTER_KEY:?set PIQAE_WEBHOOK_MASTER_KEY}
+      PIQAE_BOOTSTRAP_API_KEY: ${PIQAE_BOOTSTRAP_API_KEY:-}
+      PIQAE_BOOTSTRAP_WORKSPACE_ID: ${PIQAE_BOOTSTRAP_WORKSPACE_ID:-}
+      PIQAE_BOOTSTRAP_ENVIRONMENT_ID: ${PIQAE_BOOTSTRAP_ENVIRONMENT_ID:-}
+      PIQAE_AUTH_MODE: ${PIQAE_AUTH_MODE:-bootstrap}
+      PIQAE_IDENTITY_PROVIDER: ${PIQAE_IDENTITY_PROVIDER:-local_owner}
+      PIQAE_LOCAL_OWNER_BOOTSTRAP_TOKEN: ${PIQAE_LOCAL_OWNER_BOOTSTRAP_TOKEN:-}
+      PIQAE_LOCAL_OWNER_SESSION_SECONDS: ${PIQAE_LOCAL_OWNER_SESSION_SECONDS:-43200}
+      PIQAE_OIDC_ISSUER: ${PIQAE_OIDC_ISSUER:-}
+      PIQAE_OIDC_AUDIENCE: ${PIQAE_OIDC_AUDIENCE:-}
+      PIQAE_OIDC_CLIENT_ID: ${PIQAE_OIDC_CLIENT_ID:-}
+      PIQAE_OIDC_BINDING_CLAIM: ${PIQAE_OIDC_BINDING_CLAIM:-}
+      PIQAE_OIDC_BINDING_VALUE: ${PIQAE_OIDC_BINDING_VALUE:-}
+      PIQAE_OIDC_JWKS_URL: ${PIQAE_OIDC_JWKS_URL:-}
+      PIQAE_OIDC_ORGANIZATION_CLAIM: ${PIQAE_OIDC_ORGANIZATION_CLAIM:-org_id}
+      PIQAE_OIDC_PERMISSIONS_CLAIM: ${PIQAE_OIDC_PERMISSIONS_CLAIM:-permissions}
+      PIQAE_OIDC_ENVIRONMENT: ${PIQAE_OIDC_ENVIRONMENT:-live}
+      PIQAE_OIDC_ALLOW_UNRESTRICTED: ${PIQAE_OIDC_ALLOW_UNRESTRICTED:-false}
       OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: ${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT:-}
       OTEL_EXPORTER_OTLP_TRACES_HEADERS: ${OTEL_EXPORTER_OTLP_TRACES_HEADERS:-}
-      OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME:-spool-control-plane}
+      OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME:-piqae-control-plane}
       OTEL_RESOURCE_ATTRIBUTES: ${OTEL_RESOURCE_ATTRIBUTES:-}
       OTEL_TRACES_SAMPLER: ${OTEL_TRACES_SAMPLER:-parentbased_always_on}
       OTEL_TRACES_SAMPLER_ARG: ${OTEL_TRACES_SAMPLER_ARG:-}
       OTEL_SDK_DISABLED: ${OTEL_SDK_DISABLED:-false}
       RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
     healthcheck:
-      test: ["CMD", "/usr/local/bin/spool-server", "healthcheck", "--url", "http://127.0.0.1:8080/v1/ready"]
+      test: ["CMD", "/usr/local/bin/piqae-server", "healthcheck", "--url", "http://127.0.0.1:8080/v1/ready"]
       interval: 10s
       timeout: 3s
       retries: 12
@@ -111,7 +111,7 @@ services:
 
   web:
     profiles: ["dashboard"]
-    image: ${SPOOL_WEB_IMAGE:-ghcr.io/c4coffeeco/spool/web:latest}
+    image: ${PIQAE_WEB_IMAGE:-ghcr.io/c4coffeeco/piqae/web:latest}
     build:
       context: ../..
       dockerfile: deploy/docker/Dockerfile.web
@@ -120,16 +120,16 @@ services:
       server:
         condition: service_healthy
     ports:
-      - "${SPOOL_WEB_PORT:-3000}:3000"
+      - "${PIQAE_WEB_PORT:-3000}:3000"
     environment:
-      ORIGIN: ${SPOOL_DASHBOARD_ORIGIN:?set SPOOL_DASHBOARD_ORIGIN}
-      SPOOL_AUTH_MODE: ${SPOOL_WEB_AUTH_MODE:-local}
-      PUBLIC_SPOOL_DASHBOARD_MODE: live
-      PUBLIC_SPOOL_API_URL: http://server:8080
-      SPOOL_DASHBOARD_API_KEY: ${SPOOL_BOOTSTRAP_API_KEY:-}
+      ORIGIN: ${PIQAE_DASHBOARD_ORIGIN:?set PIQAE_DASHBOARD_ORIGIN}
+      PIQAE_AUTH_MODE: ${PIQAE_WEB_AUTH_MODE:-local}
+      PUBLIC_PIQAE_DASHBOARD_MODE: live
+      PUBLIC_PIQAE_API_URL: http://server:8080
+      PIQAE_DASHBOARD_API_KEY: ${PIQAE_BOOTSTRAP_API_KEY:-}
       WORKOS_CLIENT_ID: ${WORKOS_CLIENT_ID:-}
       WORKOS_API_KEY: ${WORKOS_API_KEY:-}
-      WORKOS_REDIRECT_URI: ${SPOOL_DASHBOARD_ORIGIN}/auth/callback
+      WORKOS_REDIRECT_URI: ${PIQAE_DASHBOARD_ORIGIN}/auth/callback
       WORKOS_COOKIE_PASSWORD: ${WORKOS_COOKIE_PASSWORD:-}
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/login').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]

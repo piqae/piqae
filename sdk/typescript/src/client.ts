@@ -39,24 +39,26 @@ import type {
   Upload,
   UsageSummary,
   Webhook,
+  WebhookDelivery,
   Workspace,
   WorkspaceMember
 } from './types.js';
 
-interface CommonSpoolClientOptions {
+interface CommonPiqaeClientOptions {
   baseUrl?: string;
   fetch?: typeof globalThis.fetch;
+  eventSource?: typeof EventSource;
   headers?: Record<string, string>;
 }
 
-interface TenantSpoolClientOptions {
+interface TenantPiqaeClientOptions {
   apiKey?: string;
   accessToken?: () => string | Promise<string | undefined> | undefined;
   platformKey?: never;
   platformContext?: never;
 }
 
-interface PlatformSpoolClientOptions {
+interface PlatformPiqaeClientOptions {
   /** Distinct operator-issued service-account credential. Never use a tenant API key. */
   platformKey: string;
   /** Explicit grant boundary applied to every tenant API request. */
@@ -65,12 +67,12 @@ interface PlatformSpoolClientOptions {
   accessToken?: never;
 }
 
-export type SpoolClientOptions = CommonSpoolClientOptions &
-  (TenantSpoolClientOptions | PlatformSpoolClientOptions);
+export type PiqaeClientOptions = CommonPiqaeClientOptions &
+  (TenantPiqaeClientOptions | PlatformPiqaeClientOptions);
 
-type AccessTokenProvider = TenantSpoolClientOptions['accessToken'];
+type AccessTokenProvider = TenantPiqaeClientOptions['accessToken'];
 
-export class SpoolError extends Error {
+export class PiqaeError extends Error {
   readonly code: string;
   readonly status: number;
   readonly requestId: string | undefined;
@@ -88,7 +90,7 @@ export class SpoolError extends Error {
     }
   ) {
     super(error.message);
-    this.name = 'SpoolError';
+    this.name = 'PiqaeError';
     this.code = error.code;
     this.status = status;
     this.requestId = error.request_id;
@@ -97,27 +99,29 @@ export class SpoolError extends Error {
   }
 }
 
-export class SpoolClient {
+export class PiqaeClient {
   readonly baseUrl: string;
   private readonly apiKey: string | undefined;
   private readonly platformKey: string | undefined;
   private readonly platformContext: PlatformContext | undefined;
   private readonly fetcher: typeof globalThis.fetch;
+  private readonly eventSourceConstructor: typeof EventSource | undefined;
   private readonly defaultHeaders: Record<string, string>;
   private readonly accessToken: AccessTokenProvider;
 
-  constructor(options: SpoolClientOptions = {}) {
+  constructor(options: PiqaeClientOptions = {}) {
     if (options.platformContext && !options.platformKey) {
       throw new TypeError('platformContext requires a distinct platformKey');
     }
     if (options.platformKey && (options.apiKey || options.accessToken)) {
       throw new TypeError('platformKey cannot be combined with apiKey or accessToken');
     }
-    this.baseUrl = (options.baseUrl ?? 'https://api.spool.dev').replace(/\/+$/, '');
+    this.baseUrl = (options.baseUrl ?? 'https://api.piqae.com').replace(/\/+$/, '');
     this.apiKey = options.apiKey;
     this.platformKey = options.platformKey;
     this.platformContext = options.platformContext;
     this.fetcher = options.fetch ?? globalThis.fetch;
+    this.eventSourceConstructor = options.eventSource ?? globalThis.EventSource;
     this.defaultHeaders = withoutPlatformSelectionHeaders(options.headers ?? {});
     this.accessToken = options.accessToken;
   }
@@ -133,7 +137,7 @@ export class SpoolClient {
     ) =>
       this.request<BootstrappedLocalOwner>('POST', '/v1/identity/local/bootstrap', {
         body: input,
-        headers: { 'x-spool-bootstrap-token': bootstrapToken }
+        headers: { 'x-piqae-bootstrap-token': bootstrapToken }
       }),
     exchange: (credential: string) =>
       this.request<LocalOwnerSession>('POST', '/v1/identity/local/exchange', {
@@ -332,7 +336,17 @@ export class SpoolClient {
     create: (input: { url: string; events: string[] }) =>
       this.request<Webhook & { secret: string }>('POST', '/v1/webhooks', { body: input }),
     remove: (id: string) =>
-      this.request<void>('DELETE', `/v1/webhooks/${encodeURIComponent(id)}`)
+      this.request<void>('DELETE', `/v1/webhooks/${encodeURIComponent(id)}`),
+    deliveries: (id: string) =>
+      this.request<WebhookDelivery[]>(
+        'GET',
+        `/v1/webhooks/${encodeURIComponent(id)}/deliveries`
+      ),
+    replay: (deliveryId: string) =>
+      this.request<void>(
+        'POST',
+        `/v1/webhook-deliveries/${encodeURIComponent(deliveryId)}/replay`
+      )
   };
 
   /**
@@ -341,7 +355,12 @@ export class SpoolClient {
    * BFF route and SDK users should prefer signed webhooks outside a browser.
    */
   events(path = '/v1/events/stream'): EventSource {
-    return new EventSource(new URL(path, `${this.baseUrl}/`).toString());
+    if (!this.eventSourceConstructor) {
+      throw new TypeError(
+        'PiqaeClient.events requires a browser EventSource or the eventSource constructor option'
+      );
+    }
+    return new this.eventSourceConstructor(new URL(path, `${this.baseUrl}/`).toString());
   }
 
   private async request<T>(
@@ -367,8 +386,8 @@ export class SpoolClient {
       ...options.headers
     };
     if (this.platformContext) {
-      headers['x-spool-workspace-id'] = this.platformContext.workspaceId;
-      headers['x-spool-environment-id'] = this.platformContext.environmentId;
+      headers['x-piqae-workspace-id'] = this.platformContext.workspaceId;
+      headers['x-piqae-environment-id'] = this.platformContext.environmentId;
     }
     if (options.body !== undefined) headers['content-type'] = 'application/json';
     if (authorization) headers.authorization = `Bearer ${authorization}`;
@@ -385,11 +404,11 @@ export class SpoolClient {
       } catch {
         // A proxy may return HTML or an empty response. Preserve a stable error.
       }
-      throw new SpoolError(
+      throw new PiqaeError(
         response.status,
         body?.error ?? {
           code: 'unexpected_response',
-          message: response.statusText || 'Spool request failed',
+          message: response.statusText || 'Piqae request failed',
           retryable: response.status >= 500
         }
       );
@@ -414,8 +433,8 @@ export class SpoolClient {
       const authorization = this.platformKey ?? this.apiKey ?? dynamicToken;
       if (authorization) headers.authorization = `Bearer ${authorization}`;
       if (this.platformContext) {
-        headers['x-spool-workspace-id'] = this.platformContext.workspaceId;
-        headers['x-spool-environment-id'] = this.platformContext.environmentId;
+        headers['x-piqae-workspace-id'] = this.platformContext.workspaceId;
+        headers['x-piqae-environment-id'] = this.platformContext.environmentId;
       }
     }
     const response = await this.fetcher(url, {
@@ -430,7 +449,7 @@ export class SpoolClient {
       } catch {
         // Signed storage URLs can return provider-specific text or XML.
       }
-      throw new SpoolError(
+      throw new PiqaeError(
         response.status,
         body?.error ?? {
           code: 'upload_failed',
@@ -445,8 +464,8 @@ export class SpoolClient {
 }
 
 const PLATFORM_SELECTION_HEADERS = new Set([
-  'x-spool-workspace-id',
-  'x-spool-environment-id'
+  'x-piqae-workspace-id',
+  'x-piqae-environment-id'
 ]);
 
 function withoutPlatformSelectionHeaders(

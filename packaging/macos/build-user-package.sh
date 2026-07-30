@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ "$#" -ne 4 ]]; then
-  echo "usage: $0 /path/Piqae.app /path/spool-agent /path/spool-executor-cups /output/directory" >&2
+  echo "usage: $0 /path/Piqae.app /path/piqae-agent /path/piqae-executor-cups /output/directory" >&2
   exit 2
 fi
 
@@ -32,7 +32,7 @@ if [[ ! "$version" =~ ^[0-9A-Za-z][0-9A-Za-z.-]*$ || ! "$build" =~ ^[1-9][0-9]*$
 fi
 
 mkdir -p "$output_root"
-channel=$(/usr/libexec/PlistBuddy -c "Print :SpoolBuildChannel" "$app/Contents/Info.plist")
+channel=$(/usr/libexec/PlistBuddy -c "Print :PiqaeBuildChannel" "$app/Contents/Info.plist")
 suffix=""
 if [[ "$channel" == "unsigned-preview" ]]; then
   suffix="-unsigned-preview"
@@ -56,26 +56,26 @@ trap cleanup EXIT
 
 mkdir -p "$package_dir/payload"
 ditto "$app" "$package_dir/payload/Piqae.app"
-install -m 0755 "$agent" "$package_dir/payload/spool-agent"
-install -m 0755 "$executor" "$package_dir/payload/spool-executor-cups"
+install -m 0755 "$agent" "$package_dir/payload/piqae-agent"
+install -m 0755 "$executor" "$package_dir/payload/piqae-executor-cups"
 install -m 0755 "$script_root/install-user.sh" "$package_dir/install-user.sh"
 install -m 0755 "$script_root/uninstall-user.sh" "$package_dir/uninstall-user.sh"
 install -m 0644 \
-  "$script_root/com.c4coffee.spool.agent.plist.in" \
-  "$package_dir/payload/com.c4coffee.spool.agent.plist.in"
+  "$script_root/com.piqae.agent.plist.in" \
+  "$package_dir/payload/com.piqae.agent.plist.in"
 install -m 0644 \
-  "$script_root/com.c4coffee.spool.menu.plist.in" \
-  "$package_dir/payload/com.c4coffee.spool.menu.plist.in"
+  "$script_root/com.piqae.menu.plist.in" \
+  "$package_dir/payload/com.piqae.menu.plist.in"
 install -m 0644 "$repository_root/LICENSE" "$package_dir/LICENSE"
 ditto "$repository_root/LICENSES" "$package_dir/LICENSES"
 
 (
   cd "$package_dir"
   shasum -a 256 \
-    "payload/Piqae.app/Contents/MacOS/SpoolMenu" \
-    "payload/Piqae.app/Contents/MacOS/SpoolPrintCoreReplay" \
-    "payload/spool-agent" \
-    "payload/spool-executor-cups" \
+    "payload/Piqae.app/Contents/MacOS/PiqaeMenu" \
+    "payload/Piqae.app/Contents/MacOS/PiqaePrintCoreReplay" \
+    "payload/piqae-agent" \
+    "payload/piqae-executor-cups" \
     > SHA256SUMS
 )
 ditto -c -k --sequesterRsrc --keepParent "$package_dir" "$package_zip"
@@ -102,17 +102,17 @@ mkdir -p "$installer_app/Contents/Resources/PiqaePackage"
 ditto "$package_dir" "$installer_app/Contents/Resources/PiqaePackage"
 install -m 0644 "$script_root/INSTALL.txt" "$installer_stage/Read Me.txt"
 
-identity=${SPOOL_CODE_SIGN_IDENTITY:-}
+identity=${PIQAE_CODE_SIGN_IDENTITY:-}
 if [[ -n "$identity" ]]; then
   if [[ "$identity" != "Developer ID Application:"* ]]; then
-    echo "SPOOL_CODE_SIGN_IDENTITY must name a Developer ID Application certificate" >&2
+    echo "PIQAE_CODE_SIGN_IDENTITY must name a Developer ID Application certificate" >&2
     exit 2
   fi
   codesign \
     --force \
     --timestamp \
     --options runtime \
-    --identifier com.piqae.installer \
+    --identifier com.c4coffee.spool.installer \
     --sign "$identity" \
     "$installer_app"
   codesign --verify --deep --strict --verbose=2 "$installer_app"

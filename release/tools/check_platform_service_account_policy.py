@@ -149,7 +149,7 @@ def validate_evidence(
         if (
             not isinstance(command, str)
             or not command.startswith("cargo test ")
-            or "SPOOL_ALLOW_PHYSICAL_TESTS" in command
+            or "PIQAE_ALLOW_PHYSICAL_TESTS" in command
             or "\n" in command
         ):
             raise PolicyError(f"scenario {identifier} has an unsafe test command")

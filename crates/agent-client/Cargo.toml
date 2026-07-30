@@ -1,5 +1,5 @@
 [package]
-name = "spool-agent-client"
+name = "piqae-agent-client"
 version.workspace = true
 edition.workspace = true
 license = "Apache-2.0"
@@ -16,8 +16,8 @@ reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-spool-domain.workspace = true
-spool-protocol.workspace = true
+piqae-domain.workspace = true
+piqae-protocol.workspace = true
 thiserror.workspace = true
 url.workspace = true
 uuid.workspace = true

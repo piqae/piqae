@@ -1,6 +1,6 @@
 # Contributing
 
-Spool accepts Apache-2.0 contributions with DCO sign-off. Start a deterministic
+Piqae accepts Apache-2.0 contributions with DCO sign-off. Start a deterministic
 virtual node and fake printers from a fresh checkout:
 
 ```console

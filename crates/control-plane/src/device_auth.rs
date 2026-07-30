@@ -5,8 +5,8 @@ use base64::{
 };
 use chrono::{Duration, Utc};
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use piqae_domain::AgentId;
 use sha2::{Digest, Sha256};
-use spool_domain::AgentId;
 use std::str::FromStr;
 use subtle::ConstantTimeEq;
 
@@ -29,10 +29,11 @@ pub async fn authenticate_agent(
     path: &str,
     body: &[u8],
 ) -> Result<AgentIdentity, AppError> {
-    let agent_id_text = required_header(headers, "x-spool-agent-id")?;
+    let agent_id_text = required_product_header(headers, "x-piqae-agent-id", "x-spool-agent-id")?;
     let agent_id = AgentId::from_str(agent_id_text)
         .map_err(|_| AppError::device_unauthorized("invalid_agent_id"))?;
-    let timestamp_text = required_header(headers, "x-spool-timestamp")?;
+    let timestamp_text =
+        required_product_header(headers, "x-piqae-timestamp", "x-spool-timestamp")?;
     let timestamp_ms = timestamp_text
         .parse::<i64>()
         .map_err(|_| AppError::device_unauthorized("invalid_agent_timestamp"))?;
@@ -40,11 +41,12 @@ pub async fn authenticate_agent(
     if now_ms.abs_diff(timestamp_ms) > 60_000 {
         return Err(AppError::device_unauthorized("stale_agent_request"));
     }
-    let nonce = required_header(headers, "x-spool-nonce")?;
+    let nonce = required_product_header(headers, "x-piqae-nonce", "x-spool-nonce")?;
     if nonce.len() < 16 || nonce.len() > 128 {
         return Err(AppError::device_unauthorized("invalid_agent_nonce"));
     }
-    let supplied_digest = required_header(headers, "x-spool-body-sha256")?;
+    let supplied_digest =
+        required_product_header(headers, "x-piqae-body-sha256", "x-spool-body-sha256")?;
     let calculated_digest = format!("{:x}", Sha256::digest(body));
     if supplied_digest
         .as_bytes()
@@ -65,7 +67,8 @@ pub async fn authenticate_agent(
         .map_err(|_| AppError::device_unauthorized("invalid_agent_public_key"))?;
     let verifying_key = VerifyingKey::from_bytes(&public_key)
         .map_err(|_| AppError::device_unauthorized("invalid_agent_public_key"))?;
-    let signature_text = required_header(headers, "x-spool-signature")?;
+    let signature_text =
+        required_product_header(headers, "x-piqae-signature", "x-spool-signature")?;
     let signature_bytes = URL_SAFE_NO_PAD
         .decode(signature_text)
         .or_else(|_| STANDARD_NO_PAD.decode(signature_text))
@@ -88,13 +91,52 @@ pub async fn authenticate_agent(
     })
 }
 
-fn required_header<'a>(
+fn required_product_header<'a>(
     headers: &'a axum::http::HeaderMap,
     name: &'static str,
+    legacy_name: &'static str,
 ) -> Result<&'a str, AppError> {
+    let canonical = header_value(headers, name);
+    let legacy = header_value(headers, legacy_name);
+    match (canonical, legacy) {
+        (Some(value), None) | (None, Some(value)) => Ok(value),
+        (Some(canonical), Some(legacy)) if canonical == legacy => Ok(canonical),
+        (Some(_), Some(_)) => Err(AppError::device_unauthorized(
+            "conflicting_agent_authentication",
+        )),
+        (None, None) => Err(AppError::device_unauthorized(
+            "missing_agent_authentication",
+        )),
+    }
+}
+
+fn header_value<'a>(headers: &'a axum::http::HeaderMap, name: &'static str) -> Option<&'a str> {
     headers
         .get(name)
         .and_then(|value| value.to_str().ok())
         .filter(|value| !value.is_empty())
-        .ok_or_else(|| AppError::device_unauthorized("missing_agent_authentication"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::{HeaderMap, HeaderValue};
+
+    #[test]
+    fn legacy_agent_headers_remain_accepted() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-spool-agent-id", HeaderValue::from_static("agt_legacy"));
+        assert!(matches!(
+            required_product_header(&headers, "x-piqae-agent-id", "x-spool-agent-id"),
+            Ok("agt_legacy")
+        ));
+    }
+
+    #[test]
+    fn conflicting_product_headers_fail_closed() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-piqae-agent-id", HeaderValue::from_static("agt_new"));
+        headers.insert("x-spool-agent-id", HeaderValue::from_static("agt_old"));
+        assert!(required_product_header(&headers, "x-piqae-agent-id", "x-spool-agent-id").is_err());
+    }
 }

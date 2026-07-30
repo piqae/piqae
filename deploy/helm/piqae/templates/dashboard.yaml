@@ -1,0 +1,58 @@
+{{- if .Values.dashboard.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "piqae.fullname" . }}-dashboard
+  labels:
+    {{- include "piqae.labels" . | nindent 4 }}
+    app.kubernetes.io/component: dashboard
+spec:
+  replicas: {{ .Values.dashboard.replicas }}
+  strategy: { type: RollingUpdate, rollingUpdate: { maxUnavailable: 0, maxSurge: 1 } }
+  selector:
+    matchLabels:
+      {{- include "piqae.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: dashboard
+  template:
+    metadata:
+      labels:
+        {{- include "piqae.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: dashboard
+    spec:
+      serviceAccountName: {{ include "piqae.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      securityContext: {{ toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: dashboard
+          image: {{ include "piqae.image" (dict "image" .Values.dashboard.image) }}
+          imagePullPolicy: {{ .Values.dashboard.image.pullPolicy }}
+          securityContext: {{ toYaml .Values.securityContext | nindent 12 }}
+          ports: [{ name: http, containerPort: 3000 }]
+          env:
+            - { name: HOST, value: "0.0.0.0" }
+            - { name: PORT, value: "3000" }
+            - { name: ORIGIN, value: {{ required "dashboard.origin is required" .Values.dashboard.origin | quote }} }
+            - { name: PIQAE_AUTH_MODE, value: {{ .Values.dashboard.authMode | quote }} }
+            - { name: PUBLIC_PIQAE_DASHBOARD_MODE, value: live }
+            - { name: PUBLIC_PIQAE_API_URL, value: "http://{{ include "piqae.fullname" . }}-api:8080" }
+          envFrom:
+            - secretRef: { name: {{ .Values.dashboard.existingSecret }} }
+          startupProbe: { httpGet: { path: /login, port: http }, failureThreshold: 30, periodSeconds: 2 }
+          livenessProbe: { httpGet: { path: /login, port: http }, periodSeconds: 10 }
+          readinessProbe: { httpGet: { path: /login, port: http }, periodSeconds: 5 }
+          resources: {{ toYaml .Values.dashboard.resources | nindent 12 }}
+          volumeMounts: [{ name: tmp, mountPath: /tmp }]
+      volumes: [{ name: tmp, emptyDir: { sizeLimit: 64Mi } }]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "piqae.fullname" . }}-dashboard
+  labels:
+    {{- include "piqae.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "piqae.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: dashboard
+  ports: [{ name: http, port: 3000, targetPort: http }]
+{{- end }}

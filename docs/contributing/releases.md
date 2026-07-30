@@ -14,7 +14,7 @@ workspace, checks dependency policy when `cargo-deny` is available, validates
 license declarations, and requires a clean working tree.
 
 Unlike normal contributor tests, `cargo xtask release check` fails immediately
-unless `SPOOL_TEST_DATABASE_URL` points to a disposable PostgreSQL database. It
+unless `PIQAE_TEST_DATABASE_URL` points to a disposable PostgreSQL database. It
 runs the routing-recovery, platform-service-account authorization, and platform
 customer-account lifecycle database suites through
 `release/tools/check_postgres_release_tests.py`. The wrapper rejects successful

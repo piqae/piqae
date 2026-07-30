@@ -2,7 +2,7 @@
 
 ## Decision
 
-Spool presents each installed operating-system printer destination once and
+Piqae presents each installed operating-system printer destination once and
 allows any number of named, immutable print profiles beneath it. Creating or
 editing a profile opens the operating system's real printer-driver interface.
 The web application deliberately does not recreate vendor settings.
@@ -28,7 +28,7 @@ The platform implementations are intentionally different:
   a vendor-native graphical preferences panel.
 
 This gives an HP printer on macOS and an OKI label printer on Windows the same
-Spool experience without claiming that their drivers expose identical
+Piqae experience without claiming that their drivers expose identical
 capabilities.
 
 ## User-visible model
@@ -56,7 +56,7 @@ fallback rather than the primary model.
 
 | Product term | Meaning | Existing implementation mapping |
 | --- | --- | --- |
-| Node | One enrolled Spool installation on a computer | `Agent` |
+| Node | One enrolled Piqae installation on a computer | `Agent` |
 | Physical device | Actual printer hardware, optionally shared by destinations | New resource |
 | Destination | An installed OS queue on one node | Existing `Printer` |
 | Profile | A versioned native driver configuration for one destination | Expand existing named profile |
@@ -121,7 +121,7 @@ Every layer has a separate identifier:
 device_id       physical hardware, when known
 node_id         enrolled installation
 destination_id  installed OS queue on one node
-profile_id      stable named Spool profile
+profile_id      stable named Piqae profile
 profile_revision immutable captured version
 stock_id        operational media definition
 target_id       stable API routing address
@@ -129,7 +129,7 @@ binding_id      target-to-profile candidate
 ```
 
 A driver's Favorite or macOS preset name is metadata, not identity. It can be
-renamed, changed, or deleted outside Spool.
+renamed, changed, or deleted outside Piqae.
 
 Editing a profile appends a revision. It never changes a configuration already
 referenced by an accepted job. A job records both `profile_id` and
@@ -144,7 +144,7 @@ queue identity. Physical-device grouping uses, in descending confidence:
 4. USB topology plus make/model;
 5. explicit operator confirmation.
 
-Spool must not merge devices automatically using only a friendly queue name.
+Piqae must not merge devices automatically using only a friendly queue name.
 
 ## Native profile contract
 
@@ -229,7 +229,7 @@ whether `needs_test` or `stale` blocks production work.
 
 ### Capture
 
-Create `spool-profile-host-windows`, a small interactive Rust/Win32 process:
+Create `piqae-profile-host-windows`, a small interactive Rust/Win32 process:
 
 1. Receive a one-time capture token, destination ID, and optional existing
    profile revision over the ACL-protected local IPC channel.
@@ -309,7 +309,7 @@ bytes.
 
 ### Capture
 
-Create `SpoolProfileHost` in the native Swift shell:
+Create `PiqaeProfileHost` in the native Swift shell:
 
 1. Ask the agent for a one-time capture session.
 2. Resolve the destination to `NSPrinter`/`PMPrinter`.
@@ -318,7 +318,7 @@ Create `SpoolProfileHost` in the native Swift shell:
 4. Open `NSPrintPanel` directly with that `NSPrintInfo`.
 5. Set the default button title to **Save Profile**. No customer document is
    selected and nothing prints.
-6. Add a Spool accessory controller for name, stock, safe overrides, and a
+6. Add a Piqae accessory controller for name, stock, safe overrides, and a
    summarized confirmation. Vendor panes continue to come from macOS/the
    driver.
 7. On Save, capture:
@@ -357,7 +357,7 @@ extension.
 - Submit the PDF with the captured canonical CUPS/IPP options.
 - Use a CUPS printer instance only when a driver requires saved destination
   options or when it materially improves replay reliability.
-- Continue to address the base destination as one Spool destination.
+- Continue to address the base destination as one Piqae destination.
 
 This is preferred for driverless AirPrint/IPP Everywhere queues and drivers
 whose complete settings are represented as CUPS/IPP attributes.
@@ -389,7 +389,7 @@ Linux uses the same domain and APIs, with a narrower setup experience:
 
 - discover CUPS destinations;
 - expose all standard and vendor CUPS/IPP options;
-- create a named CUPS instance or immutable Spool option set;
+- create a named CUPS instance or immutable Piqae option set;
 - validate against current printer attributes;
 - submit with the captured option set;
 - observe and cancel through CUPS/IPP.
@@ -678,12 +678,12 @@ Security requirements:
 ### macOS menu
 
 ```text
-Spool
+Piqae
 ├─ Agent online
 ├─ Printers
 │  └─ HP OfficeJet Pro
 │     ├─ Ready · 0 queued
-│     ├─ Exposed to Spool ✓
+│     ├─ Exposed to Piqae ✓
 │     ├─ Profiles
 │     │  ├─ A4 colour — Default
 │     │  │  ├─ Test…
@@ -857,7 +857,7 @@ The work can proceed in parallel after the domain contract lands.
 
 ### C. Windows
 
-- implement isolated `spool-profile-host-windows`;
+- implement isolated `piqae-profile-host-windows`;
 - capture/normalize full `DEVMODEW`;
 - fingerprint drivers and validate saved blobs;
 - add PrintTicket conversion/capture where required;

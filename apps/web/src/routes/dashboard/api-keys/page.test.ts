@@ -22,7 +22,7 @@ describe('API-key one-time reveal', () => {
   afterEach(cleanup);
 
   it('shows plaintext only in the immediate create action result', async () => {
-    const secret = 'spl_live_once_only';
+    const secret = 'piq_live_once_only';
     render(Page, {
       data: data as never,
       form: {
@@ -30,7 +30,7 @@ describe('API-key one-time reveal', () => {
         apiKey: {
           id: 'key_01',
           name: 'Order service',
-          prefix: 'spl_live_abcd',
+          prefix: 'piq_live_abcd',
           secret
         }
       } as never

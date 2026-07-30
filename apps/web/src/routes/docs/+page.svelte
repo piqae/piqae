@@ -4,7 +4,7 @@
   const featured = docs.filter((doc) =>
     ['quickstart', 'platform-accounts', 'integration-models'].includes(doc.slug)
   );
-  const firstPrint = `const customer = await spool.accounts.getOrCreate('org_01JQ8K8M6Q', {
+  const firstPrint = `const customer = await piqae.accounts.getOrCreate('org_01JQ8K8M6Q', {
   name: 'Northwind Foods'
 });
 

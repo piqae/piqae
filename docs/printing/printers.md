@@ -2,11 +2,11 @@
 
 **Status:** local discovery and logical printer records implemented.
 
-A Spool printer is a logical destination backed by an operating-system queue:
+A Piqae printer is a logical destination backed by an operating-system queue:
 
 - macOS/Linux: CUPS destination ID;
 - Windows: installed queue name used by Winspool;
-- control plane: stable Spool printer ID plus node ownership.
+- control plane: stable Piqae printer ID plus node ownership.
 
 Friendly display names are not native identifiers. Never reconstruct a queue ID
 from its label. A node may expose multiple printers, and different nodes may

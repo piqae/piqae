@@ -1,7 +1,7 @@
 # Third-party notices
 
-Spool depends on third-party software distributed under its own licences.
-Apache-2.0 applies only to Spool-authored material and does not replace those
+Piqae depends on third-party software distributed under its own licences.
+Apache-2.0 applies only to Piqae-authored material and does not replace those
 terms.
 
 Release artifacts must include:
@@ -16,4 +16,4 @@ Release artifacts must include:
 The generated report and SBOM for a specific artifact are authoritative because
 the exact dependency graph differs by platform and release. Maintainers must
 run `cargo xtask release check` before publishing and must not remove a
-third-party notice merely because Spool itself is Apache-2.0.
+third-party notice merely because Piqae itself is Apache-2.0.

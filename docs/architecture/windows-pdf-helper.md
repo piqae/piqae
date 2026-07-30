@@ -5,7 +5,7 @@ submission and cancellation. Its initial PDF backend can invoke a separately
 installed SumatraPDF executable:
 
 ```text
-SPOOL_WINDOWS_PDF_HELPER=C:\Program Files\SumatraPDF\SumatraPDF.exe
+PIQAE_WINDOWS_PDF_HELPER=C:\Program Files\SumatraPDF\SumatraPDF.exe
 ```
 
 The executor starts the configured executable directly, without `cmd.exe`,
@@ -19,11 +19,11 @@ arguments for page ranges, copies, colour, collation, paper and input bin:
 - <https://www.sumatrapdfreader.org/docs/Command-line-arguments>
 - <https://www.sumatrapdfreader.org/docs/FAQ>
 
-SumatraPDF is GPLv3 software and is **not bundled** with Apache-licensed Spool
+SumatraPDF is GPLv3 software and is **not bundled** with Apache-licensed Piqae
 artifacts. Operators must install and approve their own copy and comply with
 its licence. An unset or invalid helper path fails closed before handoff.
 
-The helper does not return the native Winspool job ID. Spool records a
+The helper does not return the native Winspool job ID. Piqae records a
 backend-scoped correlation marker after a zero exit status. The Windows
 executor recognizes that marker and reports the job as unobservable instead
 of passing it to `GetJobW` or `SetJobW`. If no authoritative native outcome

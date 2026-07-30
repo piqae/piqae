@@ -11,23 +11,23 @@
   const account = $derived(data.account);
   const retrieveSnippet = $derived(
     account
-      ? `import { SpoolPlatform } from '@spool/sdk';
+      ? `import { PiqaePlatform } from '@piqae/sdk';
 
-const spool = new SpoolPlatform({
-  platformKey: process.env.SPOOL_PLATFORM_KEY!
+const piqae = new PiqaePlatform({
+  platformKey: process.env.PIQAE_PLATFORM_KEY!
 });
-const account = await spool.accounts.retrieve(${JSON.stringify(account.externalId)});`
+const account = await piqae.accounts.retrieve(${JSON.stringify(account.externalId)});`
       : ''
   );
   const printSnippet = $derived(
     account
       ? `import { readFile } from 'node:fs/promises';
-import { SpoolPlatform } from '@spool/sdk';
+import { PiqaePlatform } from '@piqae/sdk';
 
-const spool = new SpoolPlatform({
-  platformKey: process.env.SPOOL_PLATFORM_KEY!
+const piqae = new PiqaePlatform({
+  platformKey: process.env.PIQAE_PLATFORM_KEY!
 });
-const account = await spool.accounts.retrieve(${JSON.stringify(account.externalId)});
+const account = await piqae.accounts.retrieve(${JSON.stringify(account.externalId)});
 const pdf = await readFile('./packing-label.pdf');
 const job = await account.printPdf({
   printerId: 'printer_id',

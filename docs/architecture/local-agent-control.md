@@ -1,6 +1,6 @@
 # Local agent control contract
 
-The Spool agent is headless. Native shells are optional clients; they do not
+The Piqae agent is headless. Native shells are optional clients; they do not
 open SQLite, render documents, contact the hosted control plane, or hold the
 device private key.
 
@@ -31,7 +31,7 @@ Shell capabilities are intentionally described narrowly:
 - Windows development shell reads authenticated loopback status, lists queues
   and profiles, and opens native create/edit/clone profile capture. It remains
   Disabled for production release.
-- Linux and macOS show **Open Spool** only when `SPOOL_DASHBOARD_URL` contains
+- Linux and macOS show **Open Piqae** only when `PIQAE_DASHBOARD_URL` contains
   an explicit HTTP(S) dashboard URL. They never open the loopback API root as
   though it were a UI.
 

@@ -1,65 +1,65 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-: "${SPOOL_GCP_PROJECT:?required}"
-: "${SPOOL_PRIMARY_GCP_REGION:?required}"
-: "${SPOOL_SECONDARY_GCP_REGION:?required}"
-: "${SPOOL_PRIMARY_API_SERVICE:?required}"
-: "${SPOOL_PRIMARY_SYNC_SERVICE:?required}"
-: "${SPOOL_PRIMARY_WORKER_SERVICE:?required}"
-: "${SPOOL_SECONDARY_API_SERVICE:?required}"
-: "${SPOOL_SECONDARY_SYNC_SERVICE:?required}"
-: "${SPOOL_SECONDARY_WORKER_SERVICE:?required}"
-: "${SPOOL_PRIMARY_API_PREVIOUS_REVISION:?required}"
-: "${SPOOL_PRIMARY_SYNC_PREVIOUS_REVISION:?required}"
-: "${SPOOL_PRIMARY_WORKER_PREVIOUS_REVISION:?required}"
-: "${SPOOL_SECONDARY_API_PREVIOUS_REVISION:?required}"
-: "${SPOOL_SECONDARY_SYNC_PREVIOUS_REVISION:?required}"
-: "${SPOOL_SECONDARY_WORKER_PREVIOUS_REVISION:?required}"
-: "${SPOOL_MIGRATION_JOB:?required}"
-: "${SPOOL_SERVER_IMAGE:?required}"
-: "${SPOOL_API_ORIGIN:?required}"
+: "${PIQAE_GCP_PROJECT:?required}"
+: "${PIQAE_PRIMARY_GCP_REGION:?required}"
+: "${PIQAE_SECONDARY_GCP_REGION:?required}"
+: "${PIQAE_PRIMARY_API_SERVICE:?required}"
+: "${PIQAE_PRIMARY_SYNC_SERVICE:?required}"
+: "${PIQAE_PRIMARY_WORKER_SERVICE:?required}"
+: "${PIQAE_SECONDARY_API_SERVICE:?required}"
+: "${PIQAE_SECONDARY_SYNC_SERVICE:?required}"
+: "${PIQAE_SECONDARY_WORKER_SERVICE:?required}"
+: "${PIQAE_PRIMARY_API_PREVIOUS_REVISION:?required}"
+: "${PIQAE_PRIMARY_SYNC_PREVIOUS_REVISION:?required}"
+: "${PIQAE_PRIMARY_WORKER_PREVIOUS_REVISION:?required}"
+: "${PIQAE_SECONDARY_API_PREVIOUS_REVISION:?required}"
+: "${PIQAE_SECONDARY_SYNC_PREVIOUS_REVISION:?required}"
+: "${PIQAE_SECONDARY_WORKER_PREVIOUS_REVISION:?required}"
+: "${PIQAE_MIGRATION_JOB:?required}"
+: "${PIQAE_SERVER_IMAGE:?required}"
+: "${PIQAE_API_ORIGIN:?required}"
 
-if [[ ! "${SPOOL_SERVER_IMAGE}" =~ @sha256:[0-9a-f]{64}$ ]]; then
-  echo "SPOOL_SERVER_IMAGE must be digest-pinned" >&2
+if [[ ! "${PIQAE_SERVER_IMAGE}" =~ @sha256:[0-9a-f]{64}$ ]]; then
+  echo "PIQAE_SERVER_IMAGE must be digest-pinned" >&2
   exit 2
 fi
-if [[ ! "${SPOOL_API_ORIGIN}" =~ ^https:// ]]; then
-  echo "SPOOL_API_ORIGIN must use HTTPS" >&2
+if [[ ! "${PIQAE_API_ORIGIN}" =~ ^https:// ]]; then
+  echo "PIQAE_API_ORIGIN must use HTTPS" >&2
   exit 2
 fi
 
-stage_5_seconds="${SPOOL_STAGE_5_PERCENT_SECONDS:-21600}"
-stage_25_seconds="${SPOOL_STAGE_25_PERCENT_SECONDS:-43200}"
-worker_observation_seconds="${SPOOL_WORKER_OBSERVATION_SECONDS:-300}"
-post_cutover_seconds="${SPOOL_POST_CUTOVER_SECONDS:-30}"
+stage_5_seconds="${PIQAE_STAGE_5_PERCENT_SECONDS:-21600}"
+stage_25_seconds="${PIQAE_STAGE_25_PERCENT_SECONDS:-43200}"
+worker_observation_seconds="${PIQAE_WORKER_OBSERVATION_SECONDS:-300}"
+post_cutover_seconds="${PIQAE_POST_CUTOVER_SECONDS:-30}"
 
 keys=(primary_api primary_sync primary_worker secondary_api secondary_sync secondary_worker)
 traffic_indexes=(0 1 3 4)
 worker_indexes=(2 5)
 services=(
-  "${SPOOL_PRIMARY_API_SERVICE}"
-  "${SPOOL_PRIMARY_SYNC_SERVICE}"
-  "${SPOOL_PRIMARY_WORKER_SERVICE}"
-  "${SPOOL_SECONDARY_API_SERVICE}"
-  "${SPOOL_SECONDARY_SYNC_SERVICE}"
-  "${SPOOL_SECONDARY_WORKER_SERVICE}"
+  "${PIQAE_PRIMARY_API_SERVICE}"
+  "${PIQAE_PRIMARY_SYNC_SERVICE}"
+  "${PIQAE_PRIMARY_WORKER_SERVICE}"
+  "${PIQAE_SECONDARY_API_SERVICE}"
+  "${PIQAE_SECONDARY_SYNC_SERVICE}"
+  "${PIQAE_SECONDARY_WORKER_SERVICE}"
 )
 regions=(
-  "${SPOOL_PRIMARY_GCP_REGION}"
-  "${SPOOL_PRIMARY_GCP_REGION}"
-  "${SPOOL_PRIMARY_GCP_REGION}"
-  "${SPOOL_SECONDARY_GCP_REGION}"
-  "${SPOOL_SECONDARY_GCP_REGION}"
-  "${SPOOL_SECONDARY_GCP_REGION}"
+  "${PIQAE_PRIMARY_GCP_REGION}"
+  "${PIQAE_PRIMARY_GCP_REGION}"
+  "${PIQAE_PRIMARY_GCP_REGION}"
+  "${PIQAE_SECONDARY_GCP_REGION}"
+  "${PIQAE_SECONDARY_GCP_REGION}"
+  "${PIQAE_SECONDARY_GCP_REGION}"
 )
 previous=(
-  "${SPOOL_PRIMARY_API_PREVIOUS_REVISION}"
-  "${SPOOL_PRIMARY_SYNC_PREVIOUS_REVISION}"
-  "${SPOOL_PRIMARY_WORKER_PREVIOUS_REVISION}"
-  "${SPOOL_SECONDARY_API_PREVIOUS_REVISION}"
-  "${SPOOL_SECONDARY_SYNC_PREVIOUS_REVISION}"
-  "${SPOOL_SECONDARY_WORKER_PREVIOUS_REVISION}"
+  "${PIQAE_PRIMARY_API_PREVIOUS_REVISION}"
+  "${PIQAE_PRIMARY_SYNC_PREVIOUS_REVISION}"
+  "${PIQAE_PRIMARY_WORKER_PREVIOUS_REVISION}"
+  "${PIQAE_SECONDARY_API_PREVIOUS_REVISION}"
+  "${PIQAE_SECONDARY_SYNC_PREVIOUS_REVISION}"
+  "${PIQAE_SECONDARY_WORKER_PREVIOUS_REVISION}"
 )
 candidate=("" "" "" "" "" "")
 candidate_url=("" "" "" "")
@@ -69,7 +69,7 @@ set_traffic() {
   local index="$1"
   local allocation="$2"
   gcloud run services update-traffic "${services[$index]}" \
-    --project "${SPOOL_GCP_PROJECT}" \
+    --project "${PIQAE_GCP_PROJECT}" \
     --region "${regions[$index]}" \
     --to-revisions "${allocation}" \
     --quiet
@@ -91,18 +91,18 @@ rollback() {
 }
 trap rollback EXIT
 
-gcloud run jobs execute "${SPOOL_MIGRATION_JOB}" \
-  --project "${SPOOL_GCP_PROJECT}" \
-  --region "${SPOOL_PRIMARY_GCP_REGION}" \
+gcloud run jobs execute "${PIQAE_MIGRATION_JOB}" \
+  --project "${PIQAE_GCP_PROJECT}" \
+  --region "${PIQAE_PRIMARY_GCP_REGION}" \
   --wait \
   --quiet
 
 for index in "${!keys[@]}"; do
   deploy_arguments=(
     run deploy "${services[$index]}"
-    --project "${SPOOL_GCP_PROJECT}"
+    --project "${PIQAE_GCP_PROJECT}"
     --region "${regions[$index]}"
-    --image "${SPOOL_SERVER_IMAGE}"
+    --image "${PIQAE_SERVER_IMAGE}"
     --no-traffic
     --quiet
     --format=value\(status.latestCreatedRevisionName\)
@@ -120,7 +120,7 @@ done
 for offset in "${!traffic_indexes[@]}"; do
   index="${traffic_indexes[$offset]}"
   candidate_url[$offset]="$(gcloud run services describe "${services[$index]}" \
-    --project "${SPOOL_GCP_PROJECT}" \
+    --project "${PIQAE_GCP_PROJECT}" \
     --region "${regions[$index]}" \
     --format=json | jq -er '.status.traffic[] | select(.tag == "candidate") | .url')"
   curl --fail --silent --show-error --max-time 10 \
@@ -129,7 +129,7 @@ done
 
 for index in "${worker_indexes[@]}"; do
   ready="$(gcloud run revisions describe "${candidate[$index]}" \
-    --project "${SPOOL_GCP_PROJECT}" \
+    --project "${PIQAE_GCP_PROJECT}" \
     --region "${regions[$index]}" \
     --format='value(status.conditions[?type=Ready].status)')"
   if [[ "${ready}" != "True" ]]; then
@@ -147,7 +147,7 @@ observe_traffic() {
         "${candidate_url[$offset]}/v1/ready" >/dev/null
     done
     curl --fail --silent --show-error --max-time 10 \
-      "${SPOOL_API_ORIGIN}/v1/ready" >/dev/null
+      "${PIQAE_API_ORIGIN}/v1/ready" >/dev/null
     sleep 30
   done
 }
@@ -175,7 +175,7 @@ for index in "${worker_indexes[@]}"; do
   set_traffic "${index}" "${candidate[$index]}=100"
   sleep "${worker_observation_seconds}"
   ready="$(gcloud run revisions describe "${candidate[$index]}" \
-    --project "${SPOOL_GCP_PROJECT}" \
+    --project "${PIQAE_GCP_PROJECT}" \
     --region "${regions[$index]}" \
     --format='value(status.conditions[?type=Ready].status)')"
   if [[ "${ready}" != "True" ]]; then
@@ -185,7 +185,7 @@ for index in "${worker_indexes[@]}"; do
 done
 
 curl --fail --silent --show-error --max-time 10 \
-  "${SPOOL_API_ORIGIN}/v1/ready" >/dev/null
+  "${PIQAE_API_ORIGIN}/v1/ready" >/dev/null
 promotion_complete=true
 trap - EXIT
 echo "Promoted API, sync, and worker pools in both regions; update the reviewed Terraform digest before the next plan."

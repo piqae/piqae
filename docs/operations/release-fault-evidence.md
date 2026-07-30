@@ -10,8 +10,8 @@ No test in this document sends work to a physical printer.
 Run:
 
 ```console
-cargo test -p spool-object-store --test stream_faults --locked
-cargo test -p spool-agent-storage --test offline_recovery --locked
+cargo test -p piqae-object-store --test stream_faults --locked
+cargo test -p piqae-agent-storage --test offline_recovery --locked
 ```
 
 The streaming suite proves that the filesystem object adapter:

@@ -23,9 +23,9 @@ The proxy request and node download are streamed in bounded chunks. Base64 job
 content remains supported for compatibility, but necessarily expands and
 materializes the document and should be reserved for small payloads.
 
-An `upload_url` beginning with `/` is a Spool proxy URL and needs the normal
+An `upload_url` beginning with `/` is a Piqae proxy URL and needs the normal
 API-key header. An absolute URL is a time-limited storage capability: send only
-the returned `upload_headers` and never forward a Spool API key to it.
+the returned `upload_headers` and never forward a Piqae API key to it.
 
 ## Printer and profile discovery
 

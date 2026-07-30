@@ -1,7 +1,7 @@
 //! Bounded framing for the shared executor wire contract.
 //!
 //! Printer drivers and PDF renderers run out of process. This crate owns the
-//! byte-stream boundary while [`spool_protocol::executor`] remains the single
+//! byte-stream boundary while [`piqae_protocol::executor`] remains the single
 //! semantic contract shared with the rest of the workspace.
 
 use bytes::{Buf, BufMut, BytesMut};
@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 use thiserror::Error;
 
-pub use spool_protocol::executor::{
+pub use piqae_protocol::executor::{
     DiscoveredPrinter, ExecutorError, ExecutorOperation, ExecutorRequest, ExecutorResponse,
     ExecutorResult, NativeJobObservation, NativeJobState,
 };

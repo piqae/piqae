@@ -7,11 +7,11 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
+use piqae_auth::Scope;
+use piqae_domain::AgentId;
+use piqae_protocol::agent::AgentCommand;
+use piqae_storage_postgres::{NodeUpdatePolicy, StoredNodeUpdate};
 use serde::Deserialize;
-use spool_auth::Scope;
-use spool_domain::AgentId;
-use spool_protocol::agent::AgentCommand;
-use spool_storage_postgres::{NodeUpdatePolicy, StoredNodeUpdate};
 
 #[derive(Debug, Deserialize)]
 pub struct RequestUpdate {

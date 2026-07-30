@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 vi.mock('$env/dynamic/public', () => ({
-  env: { PUBLIC_SPOOL_VERSION: '0.1.0-test' }
+  env: { PUBLIC_PIQAE_VERSION: '0.1.0-test' }
 }));
 
 import { GET } from './+server';

@@ -1,5 +1,5 @@
 [package]
-name = "spool-control-plane"
+name = "piqae-control-plane"
 version.workspace = true
 edition.workspace = true
 license = "Apache-2.0"
@@ -15,7 +15,7 @@ otlp = [
 ]
 
 [[bin]]
-name = "spool-server"
+name = "piqae-server"
 path = "src/main.rs"
 
 [dependencies]
@@ -54,12 +54,12 @@ ulid.workspace = true
 url.workspace = true
 uuid.workspace = true
 
-spool-domain.workspace = true
-spool-object-store = { path = "../object-store", version = "0.1.0" }
-spool-protocol.workspace = true
-spool-auth = { path = "../auth", version = "0.1.0" }
-spool-storage-postgres = { path = "../storage-postgres", version = "0.1.0" }
-spool-webhooks = { path = "../webhooks", version = "0.1.0" }
+piqae-domain.workspace = true
+piqae-object-store = { path = "../object-store", version = "0.1.0" }
+piqae-protocol.workspace = true
+piqae-auth = { path = "../auth", version = "0.1.0" }
+piqae-storage-postgres = { path = "../storage-postgres", version = "0.1.0" }
+piqae-webhooks = { path = "../webhooks", version = "0.1.0" }
 
 [dev-dependencies]
 http-body-util = "0.1"

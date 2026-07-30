@@ -6,8 +6,8 @@ support-bundle export is Planned, not a working V1 shell action.
 
 Collect the minimum evidence needed:
 
-- Spool version, OS version, architecture, and node ID;
-- timestamps with timezone and Spool job IDs;
+- Piqae version, OS version, architecture, and node ID;
+- timestamps with timezone and Piqae job IDs;
 - logical printer/profile ID and revision;
 - local state transitions and native spooler job ID;
 - redacted agent/executor logs around the failure;

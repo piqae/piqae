@@ -1,6 +1,6 @@
-# Contributing to Spool
+# Contributing to Piqae
 
-Thank you for helping build reliable, open printing infrastructure. Spool is
+Thank you for helping build reliable, open printing infrastructure. Piqae is
 licensed under Apache-2.0, and contributions are accepted under the same terms.
 Every commit must include a
 [Developer Certificate of Origin](https://developercertificate.org/) sign-off:

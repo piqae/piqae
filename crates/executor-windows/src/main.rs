@@ -1,6 +1,6 @@
-use spool_executor_protocol::{read_frame, write_frame};
-use spool_protocol::executor::ExecutorError;
-use spool_protocol::executor::{ExecutorRequest, ExecutorResponse};
+use piqae_executor_protocol::{read_frame, write_frame};
+use piqae_protocol::executor::ExecutorError;
+use piqae_protocol::executor::{ExecutorRequest, ExecutorResponse};
 
 fn main() {
     if let Err(error) = run() {
@@ -23,8 +23,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[cfg(any(windows, test))]
-fn sumatra_settings(options: &spool_domain::JobOptions) -> Result<Vec<String>, ExecutorError> {
-    use spool_domain::{Duplex, Rotation};
+fn sumatra_settings(options: &piqae_domain::JobOptions) -> Result<Vec<String>, ExecutorError> {
+    use piqae_domain::{Duplex, Rotation};
 
     let mut unsupported = Vec::new();
     if options.dpi.is_some() {
@@ -93,8 +93,8 @@ fn sumatra_settings(options: &spool_domain::JobOptions) -> Result<Vec<String>, E
 
 #[cfg(windows)]
 mod platform {
-    use spool_domain::{ContentKind, PrinterCapabilities, PrinterState};
-    use spool_protocol::executor::{
+    use piqae_domain::{ContentKind, PrinterCapabilities, PrinterState};
+    use piqae_protocol::executor::{
         DiscoveredPrinter, ExecutorError, ExecutorOperation, ExecutorResult, NativeJobObservation,
         NativeJobState,
     };
@@ -161,7 +161,7 @@ mod platform {
                 native_profile,
             } => {
                 if let Some(profile) = native_profile.as_ref() {
-                    spool_executor_windows::windows_replay::submit_native_pdf(
+                    piqae_executor_windows::windows_replay::submit_native_pdf(
                         &native_printer_id,
                         &title,
                         &content_path,
@@ -431,16 +431,16 @@ mod platform {
     }
 
     fn submit_pdf_helper(
-        job_id: spool_domain::JobId,
+        job_id: piqae_domain::JobId,
         printer: &str,
         content_path: &str,
-        options: &spool_domain::JobOptions,
+        options: &piqae_domain::JobOptions,
     ) -> Result<ExecutorResult, ExecutorError> {
         let settings = super::sumatra_settings(options)?;
         ensure_printer(printer)?;
-        let helper = std::env::var_os("SPOOL_WINDOWS_PDF_HELPER").ok_or_else(|| ExecutorError {
+        let helper = std::env::var_os("PIQAE_WINDOWS_PDF_HELPER").ok_or_else(|| ExecutorError {
             code: "windows_pdf_helper_unconfigured".into(),
-            message: "set SPOOL_WINDOWS_PDF_HELPER to an approved SumatraPDF executable".into(),
+            message: "set PIQAE_WINDOWS_PDF_HELPER to an approved SumatraPDF executable".into(),
             retryable: false,
             handoff_may_have_succeeded: false,
         })?;
@@ -548,7 +548,7 @@ mod platform {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use spool_domain::{Duplex, JobOptions, Rotation};
+    use piqae_domain::{Duplex, JobOptions, Rotation};
 
     #[test]
     fn documented_sumatra_options_are_mapped() {
@@ -598,7 +598,7 @@ mod tests {
 #[cfg(not(windows))]
 mod platform {
     use super::ExecutorError;
-    use spool_protocol::executor::{ExecutorOperation, ExecutorResult};
+    use piqae_protocol::executor::{ExecutorOperation, ExecutorResult};
 
     pub fn execute(_operation: ExecutorOperation) -> Result<ExecutorResult, ExecutorError> {
         Err(ExecutorError {

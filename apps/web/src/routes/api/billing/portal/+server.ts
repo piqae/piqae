@@ -30,13 +30,13 @@ export const POST: RequestHandler = async (event) => {
     headers: {
       accept: 'application/json',
       authorization: `Bearer ${bearerToken}`,
-      'x-spool-dashboard': '1'
+      'x-piqae-dashboard': '1'
     }
   });
-  if (!response.ok) error(409, 'The current Spool workspace could not be verified');
+  if (!response.ok) error(409, 'The current Piqae workspace could not be verified');
   const workspace = (await response.json()) as { id?: unknown };
   if (typeof workspace.id !== 'string' || workspace.id === '') {
-    error(409, 'The current Spool workspace identity is invalid');
+    error(409, 'The current Piqae workspace identity is invalid');
   }
 
   const stripe = stripeClient();

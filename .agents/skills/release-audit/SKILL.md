@@ -1,12 +1,12 @@
 ---
 name: release-audit
-description: Audit a Spool release candidate against code, tests, packaging, licensing, security, deployment, physical certification, and support claims. Use before preview, private-beta, or public release.
+description: Audit a Piqae release candidate against code, tests, packaging, licensing, security, deployment, physical certification, and support claims. Use before preview, private-beta, or public release.
 ---
 
-# Audit a Spool release
+# Audit a Piqae release
 
 1. Read `AGENTS.md`, `docs/contributing/releases.md`, and the support matrix.
-2. Use `.spool-test-fixtures/release-audit` only for temporary evidence.
+2. Use `.piqae-test-fixtures/release-audit` only for temporary evidence.
 3. Run `cargo xtask release check`.
 4. Verify OpenAPI/SDK consistency, tenant isolation, Compose/Helm validation,
    installer SBOMs, provenance, signatures, update rollback, and N/N-1 support.

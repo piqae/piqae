@@ -7,7 +7,7 @@
     <key>CFBundleDisplayName</key>
     <string>Piqae</string>
     <key>CFBundleExecutable</key>
-    <string>SpoolMenu</string>
+    <string>PiqaeMenu</string>
     <key>CFBundleIdentifier</key>
     <string>com.c4coffee.spool.menu</string>
     <key>CFBundleInfoDictionaryVersion</key>
@@ -20,9 +20,9 @@
     <string>0.1.0</string>
     <key>CFBundleVersion</key>
     <string>1</string>
-    <key>SpoolBuildChannel</key>
+    <key>PiqaeBuildChannel</key>
     <string>unsigned-preview</string>
-    <key>SpoolUpdatesEnabled</key>
+    <key>PiqaeUpdatesEnabled</key>
     <false/>
     <key>SUEnableAutomaticChecks</key>
     <true/>

@@ -3,7 +3,7 @@
 **Status:** Helm infrastructure foundation implemented and manifest-validated;
 no cluster conformance or production release certification has run.
 
-The chart at [`deploy/helm/spool`](../../deploy/helm/spool/README.md) requires
+The chart at [`deploy/helm/piqae`](../../deploy/helm/piqae/README.md) requires
 external PostgreSQL and S3-compatible storage. It renders API, sync, and worker
 Deployments, migration hooks, disruption budgets, autoscaling, topology
 spreading, NetworkPolicies, restricted security contexts, optional dashboard,
@@ -11,8 +11,8 @@ External Secrets, and Ingress or Gateway API routing.
 
 ```sh
 ./deploy/validate.sh
-helm upgrade --install spool deploy/helm/spool \
-  --namespace spool --create-namespace \
+helm upgrade --install piqae deploy/helm/piqae \
+  --namespace piqae --create-namespace \
   --values production-values.yaml \
   --set image.digest=sha256:... \
   --set migration.image.digest=sha256:...

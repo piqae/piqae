@@ -1,12 +1,12 @@
 #![allow(clippy::expect_used, clippy::too_many_lines)]
 
 use chrono::Utc;
-use sha2::{Digest, Sha256};
-use spool_domain::{
+use piqae_domain::{
     AgentId, ContentKind, ContentSource, EnvironmentId, Job, JobId, JobOptions, JobState,
     PrinterCapabilities, PrinterId, WorkspaceId,
 };
-use spool_storage_postgres::{PostgresStore, PrinterProfileSnapshot, StoredTargetBinding};
+use piqae_storage_postgres::{PostgresStore, PrinterProfileSnapshot, StoredTargetBinding};
+use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Row, postgres::PgPoolOptions};
 use std::{collections::BTreeMap, env};
 
@@ -180,6 +180,11 @@ async fn create_waiting_job(
     suffix: &str,
 ) -> JobId {
     let now = Utc::now();
+    let key_prefix = if suffix.starts_with("legacy-") {
+        "spool"
+    } else {
+        "piqae"
+    };
     let job = Job {
         id: JobId::new(),
         workspace_id,
@@ -193,10 +198,13 @@ async fn create_waiting_job(
         },
         options: JobOptions::default(),
         metadata: BTreeMap::from([
-            ("spool.target_id".into(), "tgt_recovery".into()),
-            ("spool.binding_id".into(), "tgb_primary".into()),
-            ("spool.profile_id".into(), "profile_shipping".into()),
-            ("spool.profile_revision".into(), "4".into()),
+            (format!("{key_prefix}.target_id"), "tgt_recovery".into()),
+            (format!("{key_prefix}.binding_id"), "tgb_primary".into()),
+            (
+                format!("{key_prefix}.profile_id"),
+                "profile_shipping".into(),
+            ),
+            (format!("{key_prefix}.profile_revision"), "4".into()),
         ]),
         deliveries: 1,
         state: JobState::WaitingForAgent,
@@ -212,11 +220,11 @@ async fn create_waiting_job(
 
 #[tokio::test]
 async fn postgres_reroute_is_atomic_and_fenced_by_lease_and_acceptance() {
-    let Some(database_url) = env::var("SPOOL_TEST_DATABASE_URL").ok() else {
-        eprintln!("skipped: set SPOOL_TEST_DATABASE_URL to run PostgreSQL routing evidence");
+    let Some(database_url) = env::var("PIQAE_TEST_DATABASE_URL").ok() else {
+        eprintln!("skipped: set PIQAE_TEST_DATABASE_URL to run PostgreSQL routing evidence");
         return;
     };
-    let schema = format!("spool_routing_test_{}", ulid::Ulid::new()).to_ascii_lowercase();
+    let schema = format!("piqae_routing_test_{}", ulid::Ulid::new()).to_ascii_lowercase();
     let admin = PgPoolOptions::new()
         .max_connections(1)
         .connect(&database_url)
@@ -247,9 +255,14 @@ async fn postgres_reroute_is_atomic_and_fenced_by_lease_and_acceptance() {
         environment_id,
         primary_printer,
         primary_agent,
-        "concurrent",
+        "legacy-concurrent",
     )
     .await;
+    let reroutable = first
+        .list_reroutable_target_jobs(workspace_id, environment_id, 100)
+        .await
+        .expect("list reroutable legacy job");
+    assert!(reroutable.iter().any(|job| job.id == concurrent_job));
     let first_attempt = first.reroute_job_before_acceptance(
         workspace_id,
         environment_id,
@@ -285,6 +298,15 @@ async fn postgres_reroute_is_atomic_and_fenced_by_lease_and_acceptance() {
         route_row.get::<String, _>("printer_id"),
         standby_printer.to_string()
     );
+    let rerouted = first
+        .get_job(workspace_id, environment_id, concurrent_job)
+        .await
+        .expect("read rerouted legacy job");
+    assert_eq!(
+        rerouted.metadata.get("piqae.target_id").map(String::as_str),
+        Some("tgt_recovery")
+    );
+    assert!(!rerouted.metadata.contains_key("spool.target_id"));
 
     let leased_job = create_waiting_job(
         &first,

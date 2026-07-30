@@ -117,7 +117,7 @@ function unitsOver(value: number, included: number, unit: number): number {
   return Math.ceil((value - included) / unit);
 }
 
-function spoolCostFor(
+function piqaeCostFor(
   plan: PricingDisplay,
   jobs: number,
   nodes: number,
@@ -152,7 +152,7 @@ function spoolCostFor(
     : { monthlyCents: cents, annualCents: cents * 12 };
 }
 
-export function estimateSpool(
+export function estimatePiqae(
   input: CalculatorInput,
   catalog: CloudPricingCatalog
 ): CostEstimate {
@@ -160,7 +160,7 @@ export function estimateSpool(
   const priced = catalog.plans
     .map((plan) => ({
       plan,
-      cost: spoolCostFor(plan, jobs, input.agents, input.tenants, input.interval)
+      cost: piqaeCostFor(plan, jobs, input.agents, input.tenants, input.interval)
     }))
     .filter(
       (

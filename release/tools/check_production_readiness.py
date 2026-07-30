@@ -29,12 +29,12 @@ OPTIONAL_SCALE_UP_COMPONENTS = {
     "kubernetes",
 }
 REQUIRED_RAILWAY_WEB_KEYS = {
-    "SPOOL_AUTH_MODE",
-    "PUBLIC_SPOOL_DASHBOARD_MODE",
-    "PUBLIC_SPOOL_API_URL",
+    "PIQAE_AUTH_MODE",
+    "PUBLIC_PIQAE_DASHBOARD_MODE",
+    "PUBLIC_PIQAE_API_URL",
     "PUBLIC_SITE_URL",
     "ORIGIN",
-    "SPOOL_COOKIE_SECURE",
+    "PIQAE_COOKIE_SECURE",
     "WORKOS_CLIENT_ID",
     "WORKOS_API_KEY",
     "WORKOS_REDIRECT_URI",
@@ -56,7 +56,7 @@ REQUIRED_RAILWAY_WEB_KEYS = {
     "SENTRY_ORG",
     "SENTRY_PROJECT",
     "SENTRY_RELEASE",
-    "SPOOL_RELEASE_MANIFEST_JSON",
+    "PIQAE_RELEASE_MANIFEST_JSON",
     "PIQAE_RELEASES_S3_ENDPOINT",
     "PIQAE_RELEASES_S3_ACCESS_KEY_ID",
     "PIQAE_RELEASES_S3_SECRET_ACCESS_KEY",
@@ -205,9 +205,9 @@ def structural_errors() -> list[str]:
             'path = "/v1/ready"',
             'path = "/v1/health"',
             "deletion_protection = var.environment == \"production\"",
-            'name  = "SPOOL_DEPLOYMENT"',
+            'name  = "PIQAE_DEPLOYMENT"',
             'value = "cloud"',
-            'name  = "SPOOL_IDENTITY_PROVIDER"',
+            'name  = "PIQAE_IDENTITY_PROVIDER"',
             'value = "workos"',
             'resource "google_cloud_run_v2_job" "migration"',
             'name = "STRIPE_WEBHOOK_SECRET"',
@@ -246,7 +246,7 @@ def structural_errors() -> list[str]:
         errors,
     )
     require_text(
-        ROOT / "deploy/helm/spool/templates/deployments.yaml",
+        ROOT / "deploy/helm/piqae/templates/deployments.yaml",
         [
             "maxUnavailable: 0",
             "readinessProbe:",
@@ -255,7 +255,7 @@ def structural_errors() -> list[str]:
         errors,
     )
     require_text(
-        ROOT / "deploy/helm/spool/templates/migration-job.yaml",
+        ROOT / "deploy/helm/piqae/templates/migration-job.yaml",
         [
             "helm.sh/hook: post-install,pre-upgrade",
             "activeDeadlineSeconds:",
@@ -289,12 +289,12 @@ def structural_errors() -> list[str]:
             "=5,",
             "=25,",
             "rollback",
-            "SPOOL_PRIMARY_API_SERVICE",
-            "SPOOL_PRIMARY_SYNC_SERVICE",
-            "SPOOL_PRIMARY_WORKER_SERVICE",
-            "SPOOL_SECONDARY_API_SERVICE",
-            "SPOOL_SECONDARY_SYNC_SERVICE",
-            "SPOOL_SECONDARY_WORKER_SERVICE",
+            "PIQAE_PRIMARY_API_SERVICE",
+            "PIQAE_PRIMARY_SYNC_SERVICE",
+            "PIQAE_PRIMARY_WORKER_SERVICE",
+            "PIQAE_SECONDARY_API_SERVICE",
+            "PIQAE_SECONDARY_SYNC_SERVICE",
+            "PIQAE_SECONDARY_WORKER_SERVICE",
             'worker_indexes=(2 5)',
         ],
         errors,
@@ -330,11 +330,11 @@ def release_errors(
     for key in REQUIRED_RAILWAY_WEB_KEYS:
         if not values.get(key):
             errors.append(f"production Railway web environment is missing {key}")
-    if values.get("SPOOL_AUTH_MODE") != "workos":
-        errors.append("production SPOOL_AUTH_MODE must be workos")
-    if values.get("PUBLIC_SPOOL_DASHBOARD_MODE") != "live":
+    if values.get("PIQAE_AUTH_MODE") != "workos":
+        errors.append("production PIQAE_AUTH_MODE must be workos")
+    if values.get("PUBLIC_PIQAE_DASHBOARD_MODE") != "live":
         errors.append("production dashboard mode must be live")
-    if values.get("SPOOL_COOKIE_SECURE") != "true":
+    if values.get("PIQAE_COOKIE_SECURE") != "true":
         errors.append("production cookies must be explicitly secure")
     expected_redirect = values.get("ORIGIN", "").rstrip("/") + "/auth/callback"
     if values.get("WORKOS_REDIRECT_URI") != expected_redirect:
@@ -356,7 +356,7 @@ def release_errors(
     if re.search(r"replace|example|latest", values.get("SENTRY_RELEASE", ""), re.IGNORECASE):
         errors.append("SENTRY_RELEASE must identify the immutable promoted release")
     for key in (
-        "PUBLIC_SPOOL_API_URL",
+        "PUBLIC_PIQAE_API_URL",
         "PUBLIC_SITE_URL",
         "ORIGIN",
         "WORKOS_REDIRECT_URI",
@@ -396,9 +396,9 @@ def release_errors(
     ):
         errors.append("Sentry web SDK/runtime integration is not implemented")
     control_plane = (ROOT / "crates/control-plane/src/main.rs").read_text(encoding="utf-8")
-    if "SPOOL_SERVICE_ROLE" not in control_plane:
+    if "PIQAE_SERVICE_ROLE" not in control_plane:
         errors.append("api/sync/worker service-role isolation is not implemented")
-    if "SPOOL_RUN_MIGRATIONS_ON_STARTUP" not in control_plane or "migrate_only" not in control_plane:
+    if "PIQAE_RUN_MIGRATIONS_ON_STARTUP" not in control_plane or "migrate_only" not in control_plane:
         errors.append("server still runs database migrations during replica startup")
     if "STRIPE_WEBHOOK_SECRET" not in control_plane:
         errors.append("control plane does not consume STRIPE_WEBHOOK_SECRET")

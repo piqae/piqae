@@ -10,17 +10,17 @@ each discovered Windows queue and immutable profile, opens the dashboard, and
 starts create/edit/clone native profile capture. It contains no queue, cloud or
 printing code.
 
-`SPOOL_LOCAL_API_URL` defaults to `http://127.0.0.1:39100` and rejects
-non-loopback origins. `SPOOL_LOCAL_TOKEN_FILE` can point at the agent's
-`local.token`; otherwise the shell uses `SPOOL_DATA_DIR/local.token`, then
-`%ProgramData%\Spool\local.token`. `SPOOL_DASHBOARD_URL` controls the Open Piqae
+`PIQAE_LOCAL_API_URL` defaults to `http://127.0.0.1:39100` and rejects
+non-loopback origins. `PIQAE_LOCAL_TOKEN_FILE` can point at the agent's
+`local.token`; otherwise the shell uses `PIQAE_DATA_DIR/local.token`, then
+`%ProgramData%\Piqae\local.token`. `PIQAE_DASHBOARD_URL` controls the Open Piqae
 action.
 
 ## Native profile host
 
 Driver configuration is delegated to the separately built
-`spool-profile-host-windows.exe` binary in `crates/executor-windows`. The shell
-finds it beside its own executable or at `SPOOL_PROFILE_HOST_PATH`, launches it
+`piqae-profile-host-windows.exe` binary in `crates/executor-windows`. The shell
+finds it beside its own executable or at `PIQAE_PROFILE_HOST_PATH`, launches it
 in the interactive user's session, writes exactly one JSON request to standard
 input, reads exactly one bounded JSON response from standard output, and then
 lets the process exit.
@@ -28,7 +28,7 @@ lets the process exit.
 The shell and agent integration must:
 
 - obtain a short-lived, single-use capture token from the local agent;
-- pass that token in both `SPOOL_PROFILE_CAPTURE_TOKEN` and the request;
+- pass that token in both `PIQAE_PROFILE_CAPTURE_TOKEN` and the request;
 - pass the exact installed queue ID rather than a friendly alias;
 - optionally pass the tray window handle so the vendor property sheet is modal
   to the tray UI;
@@ -57,11 +57,11 @@ Signed Windows release packaging includes a hash-pinned WinSparkle 0.9.4 x64
 runtime and an `update-config.json`. The launcher exports this complete trust
 tuple to the tray process:
 
-- `SPOOL_UPDATE_POLICY`
-- `SPOOL_UPDATE_FEED_URL`
-- `SPOOL_UPDATE_ED25519_PUBLIC_KEY`
-- `SPOOL_UPDATE_RUNTIME_VERSION`
-- `SPOOL_UPDATE_RUNTIME_SHA256`
+- `PIQAE_UPDATE_POLICY`
+- `PIQAE_UPDATE_FEED_URL`
+- `PIQAE_UPDATE_ED25519_PUBLIC_KEY`
+- `PIQAE_UPDATE_RUNTIME_VERSION`
+- `PIQAE_UPDATE_RUNTIME_SHA256`
 
 The Rust tray loads the DLL only by absolute path from its own installation
 directory after verifying its SHA-256 digest. It resolves the required C API,

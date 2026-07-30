@@ -1,9 +1,9 @@
-# Spool Cloud
+# Piqae Cloud
 
 **Status:** paid private-beta implementation; not yet a Supported public SaaS
 release.
 
-Spool Cloud is the normal developer path. It supplies hosted identity, durable
+Piqae Cloud is the normal developer path. It supplies hosted identity, durable
 job registration, object storage, live status, signed node downloads, updates,
 monitoring, backups, and billing. Your application uses the same API and SDK as
 a self-hosted deployment.
@@ -11,10 +11,10 @@ a self-hosted deployment.
 ## Choose your backend model
 
 - **Platform account:** your SaaS serves multiple customer organisations. Keep
-  one `spl_platform_...` key on your server and map each customer to an isolated
-  Spool account with Test and Live environments.
+  one `piq_platform_...` key on your server and map each customer to an isolated
+  Piqae account with Test and Live environments.
 - **Workspace API key:** one organisation adds printing to its own backend. Use
-  an environment-bound `spl_test_...` or `spl_live_...` key.
+  an environment-bound `piq_test_...` or `piq_live_...` key.
 - **Interactive operator:** a person uses the dashboard and native tray app to
   pair nodes, capture profiles, monitor queues, and diagnose failures.
 
@@ -44,13 +44,13 @@ disconnect it.
 
 ```ts
 import { readFile } from 'node:fs/promises';
-import { SpoolPlatform } from '@spool/sdk';
+import { PiqaePlatform } from '@piqae/sdk';
 
-const spool = new SpoolPlatform({
-  platformKey: process.env.SPOOL_PLATFORM_KEY!
+const piqae = new PiqaePlatform({
+  platformKey: process.env.PIQAE_PLATFORM_KEY!
 });
 
-const customer = await spool.accounts.getOrCreate('org_01JQ8K8M6Q', {
+const customer = await piqae.accounts.getOrCreate('org_01JQ8K8M6Q', {
   name: 'Northwind Foods'
 });
 
@@ -70,7 +70,7 @@ browser parameter.
 ## Follow delivery
 
 Create a signed `job.updated` webhook and record each event before returning
-2xx. A successful job-creation response means Spool durably owns the job. If no
+2xx. A successful job-creation response means Piqae durably owns the job. If no
 eligible node is online, the control plane retains it until a node reconnects,
 the job expires, or it is cancelled.
 

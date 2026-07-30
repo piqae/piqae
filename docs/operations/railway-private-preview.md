@@ -1,6 +1,6 @@
 # Railway low-cost private preview
 
-**Status:** operational private preview. This shape is suitable for Spool's own
+**Status:** operational private preview. This shape is suitable for Piqae's own
 early use and controlled design partners. It is not approved as a production,
 high-availability, or 99.95% deployment.
 
@@ -14,13 +14,13 @@ Cloud Run or Helm without introducing a second application architecture.
 public Railway web service
              |
              v
-public Railway API (one replica, SPOOL_SERVICE_ROLE=api)
+public Railway API (one replica, PIQAE_SERVICE_ROLE=api)
              |                         |
              v                         v
-      Railway PostgreSQL       spool-documents bucket
+      Railway PostgreSQL       piqae-documents bucket
              ^
              |
-private Railway worker (one replica, SPOOL_SERVICE_ROLE=worker)
+private Railway worker (one replica, PIQAE_SERVICE_ROLE=worker)
 
 separate piqae-releases bucket -> web-owned short-lived download redirects
 ```
@@ -62,8 +62,8 @@ values separately:
 
 | Variable | API | Worker |
 | --- | --- | --- |
-| `SPOOL_SERVICE_ROLE` | `api` | `worker` |
-| `SPOOL_RUN_MIGRATIONS_ON_STARTUP` | `false` | `false` |
+| `PIQAE_SERVICE_ROLE` | `api` | `worker` |
+| `PIQAE_RUN_MIGRATIONS_ON_STARTUP` | `false` | `false` |
 | Public domain | enabled | disabled |
 | Replica floor | 1 | 1 |
 
@@ -102,51 +102,51 @@ Set these non-secret values on both services unless the table above overrides
 them:
 
 ```text
-SPOOL_BIND=0.0.0.0:8080
-SPOOL_DATABASE_URL=${{Postgres.DATABASE_URL}}
-SPOOL_OBJECT_STORE=s3
-SPOOL_S3_ENDPOINT=<Railway bucket endpoint>
-SPOOL_S3_BUCKET=<Railway bucket name>
-SPOOL_S3_REGION=<Railway bucket region>
-SPOOL_S3_ALLOW_HTTP=false
-SPOOL_S3_VIRTUAL_HOSTED_STYLE=false
-SPOOL_DEPLOYMENT=self_hosted
-SPOOL_IDENTITY_PROVIDER=local_owner
-SPOOL_AUTH_MODE=bootstrap
-SPOOL_BILLING_ENABLED=false
-SPOOL_LOCAL_OWNER_SESSION_SECONDS=86400
+PIQAE_BIND=0.0.0.0:8080
+PIQAE_DATABASE_URL=${{Postgres.DATABASE_URL}}
+PIQAE_OBJECT_STORE=s3
+PIQAE_S3_ENDPOINT=<Railway bucket endpoint>
+PIQAE_S3_BUCKET=<Railway bucket name>
+PIQAE_S3_REGION=<Railway bucket region>
+PIQAE_S3_ALLOW_HTTP=false
+PIQAE_S3_VIRTUAL_HOSTED_STYLE=false
+PIQAE_DEPLOYMENT=self_hosted
+PIQAE_IDENTITY_PROVIDER=local_owner
+PIQAE_AUTH_MODE=bootstrap
+PIQAE_BILLING_ENABLED=false
+PIQAE_LOCAL_OWNER_SESSION_SECONDS=86400
 ```
 
 Set these as protected Railway variables, never in Git, build arguments,
 domains, or logs:
 
 ```text
-SPOOL_S3_ACCESS_KEY_ID
-SPOOL_S3_SECRET_ACCESS_KEY
-SPOOL_WEBHOOK_MASTER_KEY
-SPOOL_LOCAL_OWNER_BOOTSTRAP_TOKEN  # one-time only; remove after bootstrap
+PIQAE_S3_ACCESS_KEY_ID
+PIQAE_S3_SECRET_ACCESS_KEY
+PIQAE_WEBHOOK_MASTER_KEY
+PIQAE_LOCAL_OWNER_BOOTSTRAP_TOKEN  # one-time only; remove after bootstrap
 ```
 
-`SPOOL_WEBHOOK_MASTER_KEY` must be a base64-encoded 32-byte key. Use the
-database service reference for `SPOOL_DATABASE_URL` instead of copying its
+`PIQAE_WEBHOOK_MASTER_KEY` must be a base64-encoded 32-byte key. Use the
+database service reference for `PIQAE_DATABASE_URL` instead of copying its
 resolved credential into another configuration surface.
 
 ### Railway bucket addressing
 
-For the current `t3.storageapi.dev` Railway bucket endpoint, Spool must use
+For the current `t3.storageapi.dev` Railway bucket endpoint, Piqae must use
 path-style S3 requests:
 
 ```text
-SPOOL_S3_VIRTUAL_HOSTED_STYLE=false
+PIQAE_S3_VIRTUAL_HOSTED_STYLE=false
 ```
 
-Do not copy a credential response's `urlStyle` field directly into this Spool
-flag. With this endpoint and Spool's current S3 client, virtual-hosted mode
+Do not copy a credential response's `urlStyle` field directly into this Piqae
+flag. With this endpoint and Piqae's current S3 client, virtual-hosted mode
 misaddresses the readiness key and returns an authorization error. Verify the
 integration with a non-customer object:
 
 ```console
-cargo run -p spool-object-store --example seed_readiness
+cargo run -p piqae-object-store --example seed_readiness
 ```
 
 Run that command only in a protected environment containing the bucket
@@ -160,12 +160,12 @@ This preview deliberately uses local-owner identity. WorkOS and Stripe stay
 disabled until their live tenant, session, webhook, and billing evidence gates
 pass.
 
-1. Generate a high-entropy `SPOOL_LOCAL_OWNER_BOOTSTRAP_TOKEN` in a protected
+1. Generate a high-entropy `PIQAE_LOCAL_OWNER_BOOTSTRAP_TOKEN` in a protected
    secret store.
 2. Use it once with `/v1/identity/local/bootstrap`.
 3. Put the returned owner credential in the operator's password manager or OS
    secret store.
-4. Delete `SPOOL_LOCAL_OWNER_BOOTSTRAP_TOKEN` from both Railway services and
+4. Delete `PIQAE_LOCAL_OWNER_BOOTSTRAP_TOKEN` from both Railway services and
    redeploy.
 5. Create scoped API keys through the authenticated application; do not retain
    a legacy bootstrap API key as the normal integration credential.
@@ -180,12 +180,12 @@ Set:
 
 ```text
 ORIGIN=https://<web-service-domain>
-SPOOL_AUTH_MODE=local
-PUBLIC_SPOOL_DASHBOARD_MODE=live
-PUBLIC_SPOOL_API_URL=https://<api-service-domain>
+PIQAE_AUTH_MODE=local
+PUBLIC_PIQAE_DASHBOARD_MODE=live
+PUBLIC_PIQAE_API_URL=https://<api-service-domain>
 PUBLIC_SITE_URL=https://<web-service-domain>
 PUBLIC_MARKETING_INDEXABLE=false
-SPOOL_COOKIE_SECURE=true
+PIQAE_COOKIE_SECURE=true
 STRIPE_CHECKOUT_ENABLED=false
 ```
 
@@ -227,13 +227,13 @@ download exists merely because these routes and credentials are configured.
 
 Ordinary API and worker replicas must not run schema changes. For the initial
 empty database only, one API replica may start once with
-`SPOOL_RUN_MIGRATIONS_ON_STARTUP=true`; turn it off immediately after that
+`PIQAE_RUN_MIGRATIONS_ON_STARTUP=true`; turn it off immediately after that
 deployment succeeds.
 
 For every later release:
 
 1. Back up PostgreSQL and referenced objects.
-2. Run the candidate image once with `spool-server migrate`, using the private
+2. Run the candidate image once with `piqae-server migrate`, using the private
    production database variables.
 3. Require the migration to remain compatible with the current and candidate
    server versions.

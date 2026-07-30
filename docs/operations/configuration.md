@@ -10,16 +10,16 @@ store selection/credentials, authentication mode, and bind address. OIDC also
 requires an exact issuer, JWKS URL, application binding, organization claim,
 and permissions claim.
 
-For local-owner identity set `SPOOL_IDENTITY_PROVIDER=local_owner`, provide
-`SPOOL_LOCAL_OWNER_BOOTSTRAP_TOKEN` only for the one-time first-owner request,
-and use `SPOOL_LOCAL_OWNER_SESSION_SECONDS` for the 15-minute–24-hour session
-lifetime. The dashboard uses `SPOOL_AUTH_MODE=local`; hosted WorkOS deployments
-continue using `SPOOL_AUTH_MODE=workos`. See
+For local-owner identity set `PIQAE_IDENTITY_PROVIDER=local_owner`, provide
+`PIQAE_LOCAL_OWNER_BOOTSTRAP_TOKEN` only for the one-time first-owner request,
+and use `PIQAE_LOCAL_OWNER_SESSION_SECONDS` for the 15-minute–24-hour session
+lifetime. The dashboard uses `PIQAE_AUTH_MODE=local`; hosted WorkOS deployments
+continue using `PIQAE_AUTH_MODE=workos`. See
 [`API authentication`](../api/authentication.md) for the exchange and removal
 procedure.
 
 Use S3-compatible storage in replicated deployments. Filesystem storage is for
-single-process development only. Keep `SPOOL_OIDC_ALLOW_UNRESTRICTED=false` in
+single-process development only. Keep `PIQAE_OIDC_ALLOW_UNRESTRICTED=false` in
 hosted environments and reject plain HTTP object endpoints outside isolated
 development.
 
@@ -39,5 +39,5 @@ state across upgrades. The loopback API refuses non-loopback addresses.
 
 Examples live in
 [`deploy/self-host/.env.example`](../../deploy/self-host/.env.example),
-[`packaging/linux/spool-agent.env.example`](../../packaging/linux/spool-agent.env.example),
+[`packaging/linux/piqae-agent.env.example`](../../packaging/linux/piqae-agent.env.example),
 and the Helm/Terraform values. Examples are templates, not safe secrets.

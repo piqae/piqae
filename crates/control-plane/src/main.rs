@@ -5,7 +5,7 @@ use base64::{
     Engine,
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
 };
-use spool_control_plane::{
+use piqae_control_plane::{
     AppState, AuthCapabilities, BillingCapabilities, DeploymentCapabilities, PlatformCapabilities,
     UpdateCapabilities,
     authentication::{
@@ -18,11 +18,11 @@ use spool_control_plane::{
     router,
     webhook_worker::WebhookWorker,
 };
-use spool_domain::{EnvironmentId, WorkspaceId};
-use spool_object_store::{
+use piqae_domain::{EnvironmentId, WorkspaceId};
+use piqae_object_store::{
     FileObjectStore, GcsConfiguration, GcsObjectStore, ObjectStore, S3Configuration, S3ObjectStore,
 };
-use spool_storage_postgres::PostgresStore;
+use piqae_storage_postgres::PostgresStore;
 use std::{env, net::SocketAddr, str::FromStr, sync::Arc};
 use tracing::Instrument;
 
@@ -58,16 +58,16 @@ async fn main() -> Result<()> {
 #[allow(clippy::too_many_lines)]
 async fn run() -> Result<()> {
     let service_role = ServiceRole::from_environment()?;
-    let database_url = env::var("SPOOL_DATABASE_URL")
+    let database_url = product_env("PIQAE_DATABASE_URL")
         .or_else(|_| env::var("DATABASE_URL"))
-        .context("SPOOL_DATABASE_URL or DATABASE_URL is required")?;
-    let listen = env::var("SPOOL_BIND")
-        .or_else(|_| env::var("SPOOL_LISTEN"))
+        .context("PIQAE_DATABASE_URL or DATABASE_URL is required")?;
+    let listen = product_env("PIQAE_BIND")
+        .or_else(|_| product_env("PIQAE_LISTEN"))
         .unwrap_or_else(|_| "0.0.0.0:8080".into());
     let webhook_key = parse_webhook_key(
-        &env::var("SPOOL_WEBHOOK_MASTER_KEY").context("SPOOL_WEBHOOK_MASTER_KEY is required")?,
+        &product_env("PIQAE_WEBHOOK_MASTER_KEY").context("PIQAE_WEBHOOK_MASTER_KEY is required")?,
     )?;
-    let bootstrap_key = env::var("SPOOL_BOOTSTRAP_API_KEY")
+    let bootstrap_key = product_env("PIQAE_BOOTSTRAP_API_KEY")
         .ok()
         .filter(|value| !value.is_empty());
 
@@ -81,15 +81,15 @@ async fn run() -> Result<()> {
     let object_store = build_object_store().await?;
     let bootstrap = if let Some(bootstrap_key) = bootstrap_key {
         let workspace_id = WorkspaceId::from_str(
-            &env::var("SPOOL_BOOTSTRAP_WORKSPACE_ID")
-                .context("SPOOL_BOOTSTRAP_WORKSPACE_ID is required with bootstrap auth")?,
+            &product_env("PIQAE_BOOTSTRAP_WORKSPACE_ID")
+                .context("PIQAE_BOOTSTRAP_WORKSPACE_ID is required with bootstrap auth")?,
         )
-        .context("invalid SPOOL_BOOTSTRAP_WORKSPACE_ID")?;
+        .context("invalid PIQAE_BOOTSTRAP_WORKSPACE_ID")?;
         let environment_id = EnvironmentId::from_str(
-            &env::var("SPOOL_BOOTSTRAP_ENVIRONMENT_ID")
-                .context("SPOOL_BOOTSTRAP_ENVIRONMENT_ID is required with bootstrap auth")?,
+            &product_env("PIQAE_BOOTSTRAP_ENVIRONMENT_ID")
+                .context("PIQAE_BOOTSTRAP_ENVIRONMENT_ID is required with bootstrap auth")?,
         )
-        .context("invalid SPOOL_BOOTSTRAP_ENVIRONMENT_ID")?;
+        .context("invalid PIQAE_BOOTSTRAP_ENVIRONMENT_ID")?;
         store
             .ensure_bootstrap_tenant(workspace_id, environment_id)
             .await
@@ -109,10 +109,10 @@ async fn run() -> Result<()> {
     let local_identity = local_identity_enabled().then(|| {
         LocalIdentityState::new(
             store.clone(),
-            env::var("SPOOL_LOCAL_OWNER_BOOTSTRAP_TOKEN")
+            product_env("PIQAE_LOCAL_OWNER_BOOTSTRAP_TOKEN")
                 .ok()
                 .as_deref(),
-            env::var("SPOOL_LOCAL_OWNER_SESSION_SECONDS")
+            product_env("PIQAE_LOCAL_OWNER_SESSION_SECONDS")
                 .ok()
                 .and_then(|value| value.parse().ok()),
         )
@@ -136,14 +136,14 @@ async fn run() -> Result<()> {
     if capabilities.auth.provider == "workos" && service_role.accepts_identity_webhooks() {
         application = application.with_workos_webhook_secret(
             env::var("WORKOS_WEBHOOK_SECRET")
-                .or_else(|_| env::var("SPOOL_WORKOS_WEBHOOK_SECRET"))
+                .or_else(|_| product_env("PIQAE_WORKOS_WEBHOOK_SECRET"))
                 .context("WORKOS_WEBHOOK_SECRET is required with WorkOS identity")?,
         );
     }
     if capabilities.billing.enabled {
         application = application.with_stripe_webhook_secret(
             env::var("STRIPE_WEBHOOK_SECRET")
-                .or_else(|_| env::var("SPOOL_STRIPE_WEBHOOK_SECRET"))
+                .or_else(|_| product_env("PIQAE_STRIPE_WEBHOOK_SECRET"))
                 .context("STRIPE_WEBHOOK_SECRET is required when Cloud billing is enabled")?,
         );
     }
@@ -152,11 +152,11 @@ async fn run() -> Result<()> {
             BillingUsageWorker::new(
                 store,
                 env::var("STRIPE_SECRET_KEY")
-                    .or_else(|_| env::var("SPOOL_STRIPE_SECRET_KEY"))
+                    .or_else(|_| product_env("PIQAE_STRIPE_SECRET_KEY"))
                     .context("STRIPE_SECRET_KEY is required by the Cloud billing worker")?,
                 env::var("STRIPE_METER_EVENT_NAME")
-                    .or_else(|_| env::var("SPOOL_STRIPE_METER_EVENT_NAME"))
-                    .unwrap_or_else(|_| "spool_print_overage_blocks".into()),
+                    .or_else(|_| product_env("PIQAE_STRIPE_METER_EVENT_NAME"))
+                    .unwrap_or_else(|_| "piqae_print_overage_blocks".into()),
             )
             .context("build Stripe billing worker HTTP client")?,
         )
@@ -186,11 +186,11 @@ async fn run() -> Result<()> {
     let _billing_usage_worker = billing_usage_worker.map(spawn_billing_usage_worker);
     let address: SocketAddr = listen
         .parse()
-        .context("invalid SPOOL_BIND or SPOOL_LISTEN")?;
+        .context("invalid PIQAE_BIND or PIQAE_LISTEN")?;
     let listener = tokio::net::TcpListener::bind(address)
         .await
         .context("bind HTTP listener")?;
-    tracing::info!(%address, role = service_role.as_str(), "spool server listening");
+    tracing::info!(%address, role = service_role.as_str(), "piqae server listening");
     axum::serve(listener, router(application))
         .with_graceful_shutdown(shutdown_signal())
         .await
@@ -224,7 +224,7 @@ enum ServiceRole {
 
 impl ServiceRole {
     fn from_environment() -> Result<Self> {
-        match env::var("SPOOL_SERVICE_ROLE")
+        match product_env("PIQAE_SERVICE_ROLE")
             .unwrap_or_else(|_| "all".into())
             .as_str()
         {
@@ -233,7 +233,7 @@ impl ServiceRole {
             "worker" => Ok(Self::Worker),
             "all" => Ok(Self::All),
             other => anyhow::bail!(
-                "unsupported SPOOL_SERVICE_ROLE `{other}`; expected api, sync, worker, or all"
+                "unsupported PIQAE_SERVICE_ROLE `{other}`; expected api, sync, worker, or all"
             ),
         }
     }
@@ -257,17 +257,17 @@ impl ServiceRole {
 }
 
 fn startup_migrations_enabled() -> bool {
-    if let Ok(value) = env::var("SPOOL_RUN_MIGRATIONS_ON_STARTUP") {
+    if let Ok(value) = product_env("PIQAE_RUN_MIGRATIONS_ON_STARTUP") {
         return value == "true";
     }
-    !(env::var("SPOOL_DEPLOYMENT").as_deref() == Ok("cloud")
-        && env::var("SPOOL_ENVIRONMENT").as_deref() == Ok("production"))
+    !(product_env("PIQAE_DEPLOYMENT").as_deref() == Ok("cloud")
+        && product_env("PIQAE_ENVIRONMENT").as_deref() == Ok("production"))
 }
 
 async fn migrate_only() -> Result<()> {
-    let database_url = env::var("SPOOL_DATABASE_URL")
+    let database_url = product_env("PIQAE_DATABASE_URL")
         .or_else(|_| env::var("DATABASE_URL"))
-        .context("SPOOL_DATABASE_URL or DATABASE_URL is required")?;
+        .context("PIQAE_DATABASE_URL or DATABASE_URL is required")?;
     let store = PostgresStore::connect(&database_url, 2)
         .await
         .context("connect to PostgreSQL")?;
@@ -275,8 +275,8 @@ async fn migrate_only() -> Result<()> {
 }
 
 fn local_identity_enabled() -> bool {
-    let cloud = env::var("SPOOL_DEPLOYMENT").as_deref() == Ok("cloud");
-    env::var("SPOOL_IDENTITY_PROVIDER").unwrap_or_else(|_| {
+    let cloud = product_env("PIQAE_DEPLOYMENT").as_deref() == Ok("cloud");
+    product_env("PIQAE_IDENTITY_PROVIDER").unwrap_or_else(|_| {
         if cloud {
             "workos".into()
         } else {
@@ -286,9 +286,9 @@ fn local_identity_enabled() -> bool {
 }
 
 fn deployment_capabilities() -> DeploymentCapabilities {
-    let deployment = env::var("SPOOL_DEPLOYMENT").unwrap_or_else(|_| "self_hosted".into());
+    let deployment = product_env("PIQAE_DEPLOYMENT").unwrap_or_else(|_| "self_hosted".into());
     let cloud = deployment == "cloud";
-    let configured_auth = env::var("SPOOL_IDENTITY_PROVIDER").unwrap_or_else(|_| {
+    let configured_auth = product_env("PIQAE_IDENTITY_PROVIDER").unwrap_or_else(|_| {
         if cloud {
             "workos".into()
         } else {
@@ -308,10 +308,10 @@ fn deployment_capabilities() -> DeploymentCapabilities {
             invitations: cloud,
         },
         billing: BillingCapabilities {
-            enabled: cloud && env::var("SPOOL_BILLING_ENABLED").as_deref() != Ok("false"),
+            enabled: cloud && product_env("PIQAE_BILLING_ENABLED").as_deref() != Ok("false"),
         },
         updates: UpdateCapabilities {
-            official_feed: env::var("SPOOL_OFFICIAL_UPDATE_FEED").as_deref() != Ok("false"),
+            official_feed: product_env("PIQAE_OFFICIAL_UPDATE_FEED").as_deref() != Ok("false"),
             custom_feed: !cloud,
         },
         platform: PlatformCapabilities { accounts: true },
@@ -319,7 +319,7 @@ fn deployment_capabilities() -> DeploymentCapabilities {
 }
 
 fn build_oidc_authenticator(store: &PostgresStore) -> Result<Option<OidcAuthenticator>> {
-    match env::var("SPOOL_AUTH_MODE")
+    match product_env("PIQAE_AUTH_MODE")
         .unwrap_or_else(|_| "bootstrap".into())
         .as_str()
     {
@@ -328,82 +328,95 @@ fn build_oidc_authenticator(store: &PostgresStore) -> Result<Option<OidcAuthenti
             OidcAuthenticator::new(
                 store.clone(),
                 OidcConfiguration {
-                    provider: env::var("SPOOL_IDENTITY_PROVIDER")
+                    provider: product_env("PIQAE_IDENTITY_PROVIDER")
                         .ok()
                         .filter(|value| matches!(value.as_str(), "workos" | "oidc"))
                         .unwrap_or_else(|| "oidc".into()),
-                    issuer: env::var("SPOOL_OIDC_ISSUER")
-                        .context("SPOOL_OIDC_ISSUER is required for OIDC")?,
-                    audience: env::var("SPOOL_OIDC_AUDIENCE")
+                    issuer: product_env("PIQAE_OIDC_ISSUER")
+                        .context("PIQAE_OIDC_ISSUER is required for OIDC")?,
+                    audience: product_env("PIQAE_OIDC_AUDIENCE")
                         .ok()
                         .filter(|value| !value.is_empty()),
-                    binding_claim: env::var("SPOOL_OIDC_BINDING_CLAIM")
+                    binding_claim: product_env("PIQAE_OIDC_BINDING_CLAIM")
                         .ok()
                         .filter(|value| !value.is_empty())
                         .or_else(|| {
-                            env::var("SPOOL_OIDC_CLIENT_ID")
+                            product_env("PIQAE_OIDC_CLIENT_ID")
                                 .ok()
                                 .filter(|value| !value.is_empty())
                                 .map(|_| "client_id".into())
                         }),
-                    binding_value: env::var("SPOOL_OIDC_BINDING_VALUE")
+                    binding_value: product_env("PIQAE_OIDC_BINDING_VALUE")
                         .ok()
                         .filter(|value| !value.is_empty())
                         .or_else(|| {
-                            env::var("SPOOL_OIDC_CLIENT_ID")
+                            product_env("PIQAE_OIDC_CLIENT_ID")
                                 .ok()
                                 .filter(|value| !value.is_empty())
                         }),
-                    jwks_url: env::var("SPOOL_OIDC_JWKS_URL")
-                        .context("SPOOL_OIDC_JWKS_URL is required for OIDC")?,
-                    organization_claim: env::var("SPOOL_OIDC_ORGANIZATION_CLAIM")
+                    jwks_url: product_env("PIQAE_OIDC_JWKS_URL")
+                        .context("PIQAE_OIDC_JWKS_URL is required for OIDC")?,
+                    organization_claim: product_env("PIQAE_OIDC_ORGANIZATION_CLAIM")
                         .unwrap_or_else(|_| "org_id".into()),
-                    permissions_claim: env::var("SPOOL_OIDC_PERMISSIONS_CLAIM")
+                    permissions_claim: product_env("PIQAE_OIDC_PERMISSIONS_CLAIM")
                         .unwrap_or_else(|_| "permissions".into()),
-                    environment_kind: env::var("SPOOL_OIDC_ENVIRONMENT")
+                    environment_kind: product_env("PIQAE_OIDC_ENVIRONMENT")
                         .unwrap_or_else(|_| "live".into()),
-                    allow_unrestricted: env::var("SPOOL_OIDC_ALLOW_UNRESTRICTED").as_deref()
+                    allow_unrestricted: product_env("PIQAE_OIDC_ALLOW_UNRESTRICTED").as_deref()
                         == Ok("true"),
                 },
             )
             .map_err(|_| anyhow::anyhow!("invalid OIDC configuration"))?,
         )),
-        other => anyhow::bail!("unsupported SPOOL_AUTH_MODE `{other}`"),
+        other => anyhow::bail!("unsupported PIQAE_AUTH_MODE `{other}`"),
     }
 }
 
 async fn build_object_store() -> Result<Arc<dyn ObjectStore>> {
-    match env::var("SPOOL_OBJECT_STORE")
+    match product_env("PIQAE_OBJECT_STORE")
         .unwrap_or_else(|_| "filesystem".into())
         .as_str()
     {
         "s3" => Ok(Arc::new(S3ObjectStore::new(S3Configuration {
-            bucket: env::var("SPOOL_S3_BUCKET").context("SPOOL_S3_BUCKET is required")?,
-            region: env::var("SPOOL_S3_REGION").unwrap_or_else(|_| "auto".into()),
-            endpoint: env::var("SPOOL_S3_ENDPOINT").ok(),
-            access_key_id: env::var("SPOOL_S3_ACCESS_KEY_ID")
-                .context("SPOOL_S3_ACCESS_KEY_ID is required")?,
-            secret_access_key: env::var("SPOOL_S3_SECRET_ACCESS_KEY")
-                .context("SPOOL_S3_SECRET_ACCESS_KEY is required")?,
-            allow_http: env::var("SPOOL_S3_ALLOW_HTTP").as_deref() == Ok("true"),
-            virtual_hosted_style: env::var("SPOOL_S3_VIRTUAL_HOSTED_STYLE").as_deref()
+            bucket: product_env("PIQAE_S3_BUCKET").context("PIQAE_S3_BUCKET is required")?,
+            region: product_env("PIQAE_S3_REGION").unwrap_or_else(|_| "auto".into()),
+            endpoint: product_env("PIQAE_S3_ENDPOINT").ok(),
+            access_key_id: product_env("PIQAE_S3_ACCESS_KEY_ID")
+                .context("PIQAE_S3_ACCESS_KEY_ID is required")?,
+            secret_access_key: product_env("PIQAE_S3_SECRET_ACCESS_KEY")
+                .context("PIQAE_S3_SECRET_ACCESS_KEY is required")?,
+            allow_http: product_env("PIQAE_S3_ALLOW_HTTP").as_deref() == Ok("true"),
+            virtual_hosted_style: product_env("PIQAE_S3_VIRTUAL_HOSTED_STYLE").as_deref()
                 == Ok("true"),
         })?)),
         "gcs" => Ok(Arc::new(GcsObjectStore::new_gcs(GcsConfiguration {
-            bucket: env::var("SPOOL_GCS_BUCKET").context("SPOOL_GCS_BUCKET is required")?,
+            bucket: product_env("PIQAE_GCS_BUCKET").context("PIQAE_GCS_BUCKET is required")?,
             service_account_path: env::var("GOOGLE_APPLICATION_CREDENTIALS")
                 .ok()
                 .filter(|value| !value.is_empty()),
         })?)),
         "filesystem" => Ok(Arc::new(
             FileObjectStore::new(
-                env::var("SPOOL_OBJECT_STORE_PATH")
-                    .unwrap_or_else(|_| "/var/lib/spool/objects".into()),
+                product_env("PIQAE_OBJECT_STORE_PATH")
+                    .unwrap_or_else(|_| "/var/lib/piqae/objects".into()),
             )
             .await?,
         )),
-        other => anyhow::bail!("unsupported SPOOL_OBJECT_STORE `{other}`"),
+        other => anyhow::bail!("unsupported PIQAE_OBJECT_STORE `{other}`"),
     }
+}
+
+/// Reads the Piqae variable first and its pre-rebrand equivalent second.
+///
+/// New deployments expose only `PIQAE_*`. The fallback keeps existing
+/// self-hosted and managed deployments upgradeable through V1.
+fn product_env(name: &str) -> Result<String, env::VarError> {
+    env::var(name).or_else(|canonical_error| {
+        let Some(suffix) = name.strip_prefix("PIQAE_") else {
+            return Err(canonical_error);
+        };
+        env::var(format!("SPOOL_{suffix}")).map_err(|_| canonical_error)
+    })
 }
 
 async fn healthcheck() -> Result<()> {
@@ -432,10 +445,10 @@ fn parse_webhook_key(value: &str) -> Result<[u8; 32]> {
     let decoded = URL_SAFE_NO_PAD
         .decode(value)
         .or_else(|_| STANDARD.decode(value))
-        .context("SPOOL_WEBHOOK_MASTER_KEY must be base64")?;
+        .context("PIQAE_WEBHOOK_MASTER_KEY must be base64")?;
     decoded
         .try_into()
-        .map_err(|_| anyhow::anyhow!("SPOOL_WEBHOOK_MASTER_KEY must decode to exactly 32 bytes"))
+        .map_err(|_| anyhow::anyhow!("PIQAE_WEBHOOK_MASTER_KEY must decode to exactly 32 bytes"))
 }
 
 async fn shutdown_signal() {

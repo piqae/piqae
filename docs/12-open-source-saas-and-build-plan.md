@@ -103,14 +103,14 @@ The repository-wide licence decision is:
 
 | Area | Licence | Reason |
 | --- | --- | --- |
-| All Spool-authored source, schemas, documentation and examples | Apache-2.0 | A single permissive licence maximises adoption and makes embedding, forking, and self-hosting straightforward. |
+| All Piqae-authored source, schemas, documentation and examples | Apache-2.0 | A single permissive licence maximises adoption and makes embedding, forking, and self-hosting straightforward. |
 
 Do not use BSL, SSPL, Commons Clause, or “source available” while marketing the
 project as open source.
 
-Spool Cloud competes on managed availability, signing, upgrades, monitoring,
+Piqae Cloud competes on managed availability, signing, upgrades, monitoring,
 backups, and support. Core printing functionality is not withheld from
-self-hosters. Spool names and branding are covered separately by
+self-hosters. Piqae names and branding are covered separately by
 `TRADEMARKS.md`.
 
 ### Contribution model

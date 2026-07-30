@@ -6,9 +6,9 @@ installer integration and platform release tiers vary.
 For an interactive desktop install, start browser pairing:
 
 ```sh
-spool-agent \
-  --data-dir /secure/spool \
-  --control-plane-url https://api.spool.example.com \
+piqae-agent \
+  --data-dir /secure/piqae \
+  --control-plane-url https://api.piqae.example.com \
   --pair \
   --enrolment-name 'Packing room'
 ```
@@ -20,7 +20,7 @@ single-use, expires after ten minutes, and is never placed in the URL or log.
 The human web session is not retained by the node.
 
 Headless automation may use an administrator-created enrolment token through
-the `SPOOL_ENROLMENT_TOKEN` environment variable or a protected input wrapper.
+the `PIQAE_ENROLMENT_TOKEN` environment variable or a protected input wrapper.
 Do not put enrolment secrets in command arguments, filenames, CI output, or
 shell history. Successful enrolment writes the device key and configuration
 atomically and refuses to overwrite an existing identity.

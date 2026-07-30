@@ -48,7 +48,7 @@
     theme = theme === 'dark' ? 'light' : 'dark';
     document.documentElement.dataset.theme = theme;
     document.documentElement.style.colorScheme = theme;
-    localStorage.setItem('spool-theme', theme);
+    localStorage.setItem('piqae-theme', theme);
   }
 
   function closeSidebar() {
@@ -90,10 +90,12 @@
 <svelte:head>
   <script>
     try {
-      const saved = localStorage.getItem('spool-theme');
+      const saved = localStorage.getItem('piqae-theme') ?? localStorage.getItem('spool-theme');
       if (saved === 'light' || saved === 'dark') {
         document.documentElement.dataset.theme = saved;
         document.documentElement.style.colorScheme = saved;
+        localStorage.setItem('piqae-theme', saved);
+        localStorage.removeItem('spool-theme');
       }
     } catch {}
   </script>

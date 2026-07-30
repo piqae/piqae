@@ -6,7 +6,7 @@ under `%LOCALAPPDATA%\Programs\Piqae` for new installations, then starts the
 agent and shell at login
 through the current user's `Run` registry key.
 
-It does not register `spool-agent.exe` with the Service Control Manager. The
+It does not register `piqae-agent.exe` with the Service Control Manager. The
 agent is currently a console process and does not implement the SCM lifecycle.
 Machine-wide unattended printing and service-session-to-user-session profile UI
 are not claimed by this package.
@@ -30,7 +30,8 @@ The configuration wizard supports:
   against an HTTPS Piqae control-plane URL. The private Ed25519 device key is
   generated on the Windows computer and is never sent to the server.
 
-Configuration and durable queue data live in `%LOCALAPPDATA%\Spool`. The wizard
+Configuration and durable queue data live in `%LOCALAPPDATA%\Spool`. This
+internal path deliberately remains stable across the visible Piqae rename. The wizard
 removes inherited ACLs from the device key and grants access only to the current
 user. Uninstall deliberately preserves this directory so an accidental
 uninstall cannot destroy queued-job evidence or an enrolled identity.
@@ -46,7 +47,7 @@ does not connect or enrol the Windows agent.
 
 ## Native driver profiles
 
-`spool-profile-host-windows.exe` calls the installed driver's genuine
+`piqae-profile-host-windows.exe` calls the installed driver's genuine
 `DocumentPropertiesW` property sheet and captures the complete
 `DEVMODEW`/private driver bytes. This is the path used for advanced PostScript
 and vendor options such as the OKI Pro1050's stock, feed, alignment, colour, and
@@ -86,7 +87,7 @@ be retained, then manually remove `%LOCALAPPDATA%\Spool`.
 ## Building
 
 GitHub Actions builds the binaries with the MSVC Rust target and compiles
-`Spool.iss` with Inno Setup. Run the **Release** workflow manually for a
+`Piqae.iss` with Inno Setup. Run the **Release** workflow manually for a
 versioned dry-run artifact, or download the `piqae-windows-installer` artifact
 from a CI run. With GitHub CLI authenticated on a development computer:
 

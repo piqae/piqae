@@ -1,6 +1,6 @@
-# Spool developer documentation
+# Piqae developer documentation
 
-Spool Cloud is the default path: add the SDK to a trusted backend, create one
+Piqae Cloud is the default path: add the SDK to a trusted backend, create one
 isolated account per customer, pair their nodes in a browser, and send durable
 print jobs through the same API used by the dashboard.
 
@@ -13,7 +13,7 @@ print jobs through the same API used by the dashboard.
 - [Cloud node setup](getting-started/cloud.md) — install, pair, discover a
   printer, capture a native profile, and send a test job.
 - [PrintNode migration](api/printnode-migration.md) — switch the tested
-  compatibility subset, then adopt native Spool resources.
+  compatibility subset, then adopt native Piqae resources.
 
 ## Build an integration
 

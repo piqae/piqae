@@ -1,0 +1,14 @@
+Piqae has been rendered for namespace {{ .Release.Namespace }}.
+
+Runtime secret: {{ include "piqae.secretName" . }}
+API service: {{ include "piqae.fullname" . }}-api:8080
+Agent sync service: {{ include "piqae.fullname" . }}-sync:8080
+
+Before directing production traffic:
+  1. confirm the migration hook completed;
+  2. confirm /v1/ready is successful on every enabled pool;
+  3. test agent sync, object upload/download, and webhook delivery;
+  4. verify PostgreSQL PITR and object-store retention independently.
+
+The api/sync/worker deployments currently run the same combined server binary.
+They are separate scaling and failure pools, not isolated runtime roles.

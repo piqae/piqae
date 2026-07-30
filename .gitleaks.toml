@@ -1,4 +1,4 @@
-title = "Spool secret-scanning policy"
+title = "Piqae secret-scanning policy"
 
 [extend]
 useDefault = true

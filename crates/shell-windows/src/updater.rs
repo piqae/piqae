@@ -54,22 +54,22 @@ impl UpdateConfiguration {
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
         };
-        let policy = match value("SPOOL_UPDATE_POLICY") {
+        let policy = match value("PIQAE_UPDATE_POLICY") {
             None | Some("disabled") => return Ok(None),
             Some("notify") => UpdatePolicy::Notify,
             Some("automatic") => UpdatePolicy::Automatic,
             Some(_) => {
                 return Err(UpdateError::Configuration(
-                    "SPOOL_UPDATE_POLICY must be disabled, notify, or automatic".into(),
+                    "PIQAE_UPDATE_POLICY must be disabled, notify, or automatic".into(),
                 ));
             }
         };
 
-        let feed_url = value("SPOOL_UPDATE_FEED_URL")
+        let feed_url = value("PIQAE_UPDATE_FEED_URL")
             .ok_or_else(|| UpdateError::Configuration("update feed URL is missing".into()))?;
         validate_feed_url(feed_url)?;
 
-        let public_key = value("SPOOL_UPDATE_ED25519_PUBLIC_KEY").ok_or_else(|| {
+        let public_key = value("PIQAE_UPDATE_ED25519_PUBLIC_KEY").ok_or_else(|| {
             UpdateError::Configuration("update verification key is missing".into())
         })?;
         let decoded_key = STANDARD.decode(public_key).map_err(|_| {
@@ -81,7 +81,7 @@ impl UpdateConfiguration {
             ));
         }
 
-        let runtime_version = value("SPOOL_UPDATE_RUNTIME_VERSION").ok_or_else(|| {
+        let runtime_version = value("PIQAE_UPDATE_RUNTIME_VERSION").ok_or_else(|| {
             UpdateError::Configuration("updater runtime version is missing".into())
         })?;
         if runtime_version != WINSPARKLE_RUNTIME_VERSION {
@@ -89,7 +89,7 @@ impl UpdateConfiguration {
                 "updater runtime must be WinSparkle {WINSPARKLE_RUNTIME_VERSION}"
             )));
         }
-        let runtime_sha256 = value("SPOOL_UPDATE_RUNTIME_SHA256")
+        let runtime_sha256 = value("PIQAE_UPDATE_RUNTIME_SHA256")
             .ok_or_else(|| UpdateError::Configuration("updater runtime digest is missing".into()))?
             .to_ascii_lowercase();
         if runtime_sha256.len() != 64
@@ -391,18 +391,18 @@ mod tests {
 
     fn enabled_environment(policy: &str) -> Vec<(OsString, OsString)> {
         vec![
-            ("SPOOL_UPDATE_POLICY", policy),
+            ("PIQAE_UPDATE_POLICY", policy),
             (
-                "SPOOL_UPDATE_FEED_URL",
+                "PIQAE_UPDATE_FEED_URL",
                 "https://downloads.piqae.com/releases/stable/appcast-windows.xml",
             ),
             (
-                "SPOOL_UPDATE_ED25519_PUBLIC_KEY",
+                "PIQAE_UPDATE_ED25519_PUBLIC_KEY",
                 "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
             ),
-            ("SPOOL_UPDATE_RUNTIME_VERSION", WINSPARKLE_RUNTIME_VERSION),
+            ("PIQAE_UPDATE_RUNTIME_VERSION", WINSPARKLE_RUNTIME_VERSION),
             (
-                "SPOOL_UPDATE_RUNTIME_SHA256",
+                "PIQAE_UPDATE_RUNTIME_SHA256",
                 "9b43b1c16ee39fb9a91b5bd75138767898779510e0836be2919250607cdbe8ab",
             ),
         ]
@@ -419,7 +419,7 @@ mod tests {
         );
         assert_eq!(
             UpdateConfiguration::from_values([(
-                OsString::from("SPOOL_UPDATE_POLICY"),
+                OsString::from("PIQAE_UPDATE_POLICY"),
                 OsString::from("disabled"),
             )])
             .unwrap(),
@@ -430,10 +430,10 @@ mod tests {
     #[test]
     fn enabled_policy_requires_a_complete_trust_tuple() {
         for omitted in [
-            "SPOOL_UPDATE_FEED_URL",
-            "SPOOL_UPDATE_ED25519_PUBLIC_KEY",
-            "SPOOL_UPDATE_RUNTIME_VERSION",
-            "SPOOL_UPDATE_RUNTIME_SHA256",
+            "PIQAE_UPDATE_FEED_URL",
+            "PIQAE_UPDATE_ED25519_PUBLIC_KEY",
+            "PIQAE_UPDATE_RUNTIME_VERSION",
+            "PIQAE_UPDATE_RUNTIME_SHA256",
         ] {
             let environment = enabled_environment("notify")
                 .into_iter()
@@ -457,7 +457,7 @@ mod tests {
             let mut environment = enabled_environment("notify");
             let value = environment
                 .iter_mut()
-                .find(|(name, _)| name == "SPOOL_UPDATE_FEED_URL")
+                .find(|(name, _)| name == "PIQAE_UPDATE_FEED_URL")
                 .unwrap_or_else(|| panic!("missing test feed"));
             value.1 = OsString::from(feed);
             assert!(UpdateConfiguration::from_values(environment).is_err());
@@ -466,7 +466,7 @@ mod tests {
         let mut environment = enabled_environment("notify");
         let value = environment
             .iter_mut()
-            .find(|(name, _)| name == "SPOOL_UPDATE_ED25519_PUBLIC_KEY")
+            .find(|(name, _)| name == "PIQAE_UPDATE_ED25519_PUBLIC_KEY")
             .unwrap_or_else(|| panic!("missing test key"));
         value.1 = OsString::from("not-a-public-key");
         assert!(UpdateConfiguration::from_values(environment).is_err());

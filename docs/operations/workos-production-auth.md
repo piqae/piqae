@@ -38,7 +38,7 @@ authorization boundary.
 The SvelteKit production environment requires:
 
 ```text
-SPOOL_AUTH_MODE=workos
+PIQAE_AUTH_MODE=workos
 WORKOS_CLIENT_ID=<production client ID>
 WORKOS_API_KEY=<production secret key>
 WORKOS_REDIRECT_URI=https://app.piqae.com/auth/callback
@@ -52,15 +52,15 @@ preview environment, or expose either through a `PUBLIC_` variable.
 The production Rust API uses:
 
 ```text
-SPOOL_AUTH_MODE=oidc
-SPOOL_IDENTITY_PROVIDER=workos
-SPOOL_OIDC_ISSUER=https://api.workos.com/user_management/<production-client-id>
-SPOOL_OIDC_JWKS_URL=https://api.workos.com/sso/jwks/<production-client-id>
-SPOOL_OIDC_CLIENT_ID=<production-client-id>
-SPOOL_OIDC_ORGANIZATION_CLAIM=org_id
-SPOOL_OIDC_PERMISSIONS_CLAIM=permissions
-SPOOL_OIDC_ENVIRONMENT=live
-SPOOL_OIDC_ALLOW_UNRESTRICTED=false
+PIQAE_AUTH_MODE=oidc
+PIQAE_IDENTITY_PROVIDER=workos
+PIQAE_OIDC_ISSUER=https://api.workos.com/user_management/<production-client-id>
+PIQAE_OIDC_JWKS_URL=https://api.workos.com/sso/jwks/<production-client-id>
+PIQAE_OIDC_CLIENT_ID=<production-client-id>
+PIQAE_OIDC_ORGANIZATION_CLAIM=org_id
+PIQAE_OIDC_PERMISSIONS_CLAIM=permissions
+PIQAE_OIDC_ENVIRONMENT=live
+PIQAE_OIDC_ALLOW_UNRESTRICTED=false
 WORKOS_WEBHOOK_SECRET=<endpoint signing secret>
 ```
 

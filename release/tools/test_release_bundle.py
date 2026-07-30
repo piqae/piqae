@@ -19,7 +19,7 @@ def write_json(path: Path, value: object) -> None:
 
 class ReleaseBundleTests(unittest.TestCase):
     def fixture(self, root: Path, *, sigstore: bool = False) -> Path:
-        artifact = root / "spool-test.bin"
+        artifact = root / "piqae-test.bin"
         artifact.write_bytes(b"deterministic release artifact\n")
         digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
         write_json(
@@ -27,7 +27,7 @@ class ReleaseBundleTests(unittest.TestCase):
             {
                 "spdxVersion": "SPDX-2.3",
                 "SPDXID": "SPDXRef-DOCUMENT",
-                "name": "Spool test release",
+                "name": "Piqae test release",
                 "creationInfo": {"creators": ["Tool: test_release_bundle"]},
                 "files": [{"SPDXID": "SPDXRef-File", "fileName": artifact.name}],
                 "packages": [],
@@ -95,7 +95,7 @@ class ReleaseBundleTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             self.fixture(root)
-            (root / "linked.bin").symlink_to(root / "spool-test.bin")
+            (root / "linked.bin").symlink_to(root / "piqae-test.bin")
             with self.assertRaisesRegex(release_bundle.AuditError, "symlinks"):
                 release_bundle.prepare(root, "v0.1.0-test", COMMIT, None)
 

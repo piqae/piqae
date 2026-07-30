@@ -1,9 +1,9 @@
-# Spool deployment foundations
+# Piqae deployment foundations
 
-Spool supports two self-hosting shapes:
+Piqae supports two self-hosting shapes:
 
 - `self-host/`: one-node Docker Compose for evaluation and small installations;
-- `helm/spool/`: production Kubernetes control plane using external PostgreSQL
+- `helm/piqae/`: production Kubernetes control plane using external PostgreSQL
   and S3-compatible storage.
 
 The current low-cost hosted launch shape uses public web and API services plus
@@ -26,7 +26,7 @@ No public Service ──> worker Pods  ─┘   external S3
 Optional public route ─> dashboard ───> api Service
 ```
 
-Today each pool runs the same combined `spool-server` process. PostgreSQL
+Today each pool runs the same combined `piqae-server` process. PostgreSQL
 leases and transactional outboxes make that topology safe, while separate
 Deployments provide disruption and scaling boundaries. Do not use NetworkPolicy
 or cost estimates as if unused roles were disabled inside a pool.
@@ -61,8 +61,8 @@ cluster/cloud account.
 Run the fail-closed production preflight with:
 
 ```sh
-SPOOL_PRODUCTION_RAILWAY_ENV_FILE=/protected/railway-production-web.env \
-SPOOL_PRODUCTION_EVIDENCE_DIR=/protected/release-evidence \
+PIQAE_PRODUCTION_RAILWAY_ENV_FILE=/protected/railway-production-web.env \
+PIQAE_PRODUCTION_EVIDENCE_DIR=/protected/release-evidence \
   ./deploy/production-check.sh
 ```
 
@@ -99,7 +99,7 @@ it records the exact successful deployment IDs and separation boundaries:
         "public_domain": false
       }
     },
-    "document_bucket": "spool-documents",
+    "document_bucket": "piqae-documents",
     "release_bucket": "piqae-releases"
   }
 }
@@ -129,9 +129,9 @@ required to launch the Railway private beta. When promoting that optional
 managed-HA target, run the stricter profile:
 
 ```sh
-SPOOL_PRODUCTION_RAILWAY_ENV_FILE=/protected/railway-production-web.env \
-SPOOL_PRODUCTION_TFVARS_FILE=/protected/production.tfvars \
-SPOOL_PRODUCTION_EVIDENCE_DIR=/protected/release-evidence \
+PIQAE_PRODUCTION_RAILWAY_ENV_FILE=/protected/railway-production-web.env \
+PIQAE_PRODUCTION_TFVARS_FILE=/protected/production.tfvars \
+PIQAE_PRODUCTION_EVIDENCE_DIR=/protected/release-evidence \
   ./deploy/production-check.sh managed-ha
 ```
 

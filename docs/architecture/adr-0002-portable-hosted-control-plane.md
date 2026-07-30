@@ -20,5 +20,5 @@ and generic OIDC or a one-time local owner bootstrap.
 ## Consequences
 
 The managed service can scale without defining a separate proprietary
-architecture. Customers can run Spool inside their own infrastructure, and a
+architecture. Customers can run Piqae inside their own infrastructure, and a
 future white-labelled deployment does not fork the printing domain.

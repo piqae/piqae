@@ -10,17 +10,17 @@ mod linux {
     };
 
     #[derive(Debug)]
-    pub struct SpoolTray {
+    pub struct PiqaeTray {
         status: String,
     }
 
-    impl ksni::Tray for SpoolTray {
+    impl ksni::Tray for PiqaeTray {
         fn id(&self) -> String {
-            "spool".into()
+            "piqae".into()
         }
 
         fn title(&self) -> String {
-            "Spool".into()
+            "Piqae".into()
         }
 
         fn icon_name(&self) -> String {
@@ -45,7 +45,7 @@ mod linux {
                 items.push(MenuItem::Separator);
                 items.push(
                     StandardItem {
-                        label: "Open Spool".into(),
+                        label: "Open Piqae".into(),
                         activate: Box::new(move |_| {
                             let _ = Command::new("xdg-open").arg(&dashboard_url).spawn();
                         }),
@@ -59,7 +59,7 @@ mod linux {
     }
 
     pub fn run() -> Result<(), Box<dyn std::error::Error>> {
-        let tray = SpoolTray {
+        let tray = PiqaeTray {
             status: fetch_status().unwrap_or_else(|| "Agent unavailable".into()),
         };
         let _handle = tray.spawn()?;
@@ -69,8 +69,8 @@ mod linux {
     }
 
     fn fetch_status() -> Option<String> {
-        let token_path = std::env::var_os("SPOOL_DATA_DIR")
-            .map_or_else(|| PathBuf::from(".spool"), PathBuf::from)
+        let token_path = std::env::var_os("PIQAE_DATA_DIR")
+            .map_or_else(|| PathBuf::from(".piqae"), PathBuf::from)
             .join("local.token");
         let token = std::fs::read_to_string(token_path).ok()?;
         let mut stream = TcpStream::connect_timeout(
@@ -107,7 +107,7 @@ mod linux {
     }
 
     fn dashboard_url() -> Option<String> {
-        let value = std::env::var("SPOOL_DASHBOARD_URL").ok()?;
+        let value = std::env::var("PIQAE_DASHBOARD_URL").ok()?;
         let value = value.trim();
         if value.contains(['\r', '\n'])
             || !(value.starts_with("https://") || value.starts_with("http://"))
@@ -121,12 +121,12 @@ mod linux {
 #[cfg(target_os = "linux")]
 fn main() {
     if let Err(error) = linux::run() {
-        eprintln!("Spool Linux shell failed: {error}");
+        eprintln!("Piqae Linux shell failed: {error}");
         std::process::exit(1);
     }
 }
 
 #[cfg(not(target_os = "linux"))]
 fn main() {
-    eprintln!("spool-shell-linux is only available on Linux");
+    eprintln!("piqae-shell-linux is only available on Linux");
 }

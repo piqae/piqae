@@ -1,12 +1,12 @@
 //! Killable, one-request-per-process native executor supervisor.
 
 use async_trait::async_trait;
-use spool_agent_core::{
+use piqae_agent_core::{
     Executor, ExecutorFailure, LocalSubmission, NativeAcceptance, NativeJobReference,
 };
-use spool_domain::{ContentKind, JobId};
-use spool_executor_protocol::{FrameError, read_frame_async, write_frame_async};
-use spool_protocol::executor::{
+use piqae_domain::{ContentKind, JobId};
+use piqae_executor_protocol::{FrameError, read_frame_async, write_frame_async};
+use piqae_protocol::executor::{
     ExecutorOperation, ExecutorRequest, ExecutorResponse, ExecutorResult, NativeJobObservation,
 };
 use std::path::PathBuf;
@@ -305,7 +305,7 @@ fn unexpected_response(operation: &str) -> ExecutorFailure {
 fn invalid_local_job_id() -> ExecutorFailure {
     ExecutorFailure {
         code: "invalid_local_job_id".into(),
-        message: "local job ID is not a canonical Spool job ID".into(),
+        message: "local job ID is not a canonical Piqae job ID".into(),
         retryable: false,
         handoff_may_have_succeeded: false,
         native_code: None,

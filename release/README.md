@@ -1,6 +1,6 @@
 # Release evidence
 
-Spool treats a compiled installer as a candidate, not a release. A releasable
+Piqae treats a compiled installer as a candidate, not a release. A releasable
 bundle contains all of the following in one directory:
 
 - one or more immutable artifacts;

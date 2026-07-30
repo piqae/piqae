@@ -14,10 +14,10 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use chrono::{Duration, Utc};
+use piqae_auth::Scope;
+use piqae_domain::{AgentId, ContentKind, ContentSource, Job, JobOptions, JobState, PrinterId};
+use piqae_storage_postgres::{PrinterProfileSnapshot, StoredAgent, StoredPrinter};
 use serde::{Deserialize, Serialize};
-use spool_auth::Scope;
-use spool_domain::{AgentId, ContentKind, ContentSource, Job, JobOptions, JobState, PrinterId};
-use spool_storage_postgres::{PrinterProfileSnapshot, StoredAgent, StoredPrinter};
 use std::{
     collections::{HashMap, HashSet},
     str::FromStr,
@@ -42,7 +42,7 @@ pub(crate) async fn whoami(
     authenticate_compatibility(&state, &headers, Scope::JobsRead).await?;
     Ok(Json(WhoAmI {
         id: 1,
-        email: "spool@self-hosted.invalid",
+        email: "piqae@self-hosted.invalid",
         can_create_sub_accounts: false,
         credits: 0,
         num_computers: 0,
@@ -248,17 +248,17 @@ pub(crate) async fn create_print_job(
     let now = Utc::now();
     let mut metadata = std::collections::BTreeMap::new();
     if let Some(profile) = &profile {
-        metadata.insert("spool.profile_id".into(), profile.profile_id.clone());
+        metadata.insert("piqae.profile_id".into(), profile.profile_id.clone());
         metadata.insert(
-            "spool.profile_revision".into(),
+            "piqae.profile_revision".into(),
             profile.revision.to_string(),
         );
         if let Some(stock_id) = &profile.stock_id {
-            metadata.insert("spool.stock_id".into(), stock_id.clone());
+            metadata.insert("piqae.stock_id".into(), stock_id.clone());
         }
     }
     let job = Job {
-        id: spool_domain::JobId::new(),
+        id: piqae_domain::JobId::new(),
         workspace_id: tenant.workspace_id,
         environment_id: tenant.environment_id,
         printer_id,
@@ -759,7 +759,7 @@ pub(crate) struct CompatibilityPrinter {
     #[serde(rename = "default")]
     is_default: bool,
     state: &'static str,
-    capabilities: spool_domain::PrinterCapabilities,
+    capabilities: piqae_domain::PrinterCapabilities,
 }
 
 #[derive(Debug, Serialize)]
@@ -1026,7 +1026,7 @@ async fn compatibility_printer(
         computer: CompatibilityComputerReference { id: computer_id },
         is_default: false,
         state: match printer.state {
-            spool_domain::PrinterState::Online | spool_domain::PrinterState::Busy => "online",
+            piqae_domain::PrinterState::Online | piqae_domain::PrinterState::Busy => "online",
             _ => "offline",
         },
         capabilities: printer.capabilities,
@@ -1051,7 +1051,7 @@ fn parse_profile_target_resource(resource: &str) -> Option<(PrinterId, &str, u64
 fn profile_capabilities(
     printer: &StoredPrinter,
     profile: &PrinterProfileSnapshot,
-) -> spool_domain::PrinterCapabilities {
+) -> piqae_domain::PrinterCapabilities {
     let mut capabilities = printer.capabilities.clone();
     let allows = |option: &str| {
         profile
@@ -1111,7 +1111,7 @@ async fn compatibility_profile_printer(
         computer: CompatibilityComputerReference { id: computer_id },
         is_default: profile.is_default,
         state: match printer.state {
-            spool_domain::PrinterState::Online | spool_domain::PrinterState::Busy => "online",
+            piqae_domain::PrinterState::Online | piqae_domain::PrinterState::Busy => "online",
             _ => "offline",
         },
         capabilities: profile_capabilities(printer, &profile),
@@ -1303,7 +1303,7 @@ const fn compatibility_state(state: JobState) -> &'static str {
 #[cfg(test)]
 mod profile_target_tests {
     use super::*;
-    use spool_domain::{AgentId, PrinterCapabilities, PrinterState};
+    use piqae_domain::{AgentId, PrinterCapabilities, PrinterState};
 
     fn profile() -> PrinterProfileSnapshot {
         PrinterProfileSnapshot {

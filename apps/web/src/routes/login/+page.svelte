@@ -29,7 +29,7 @@
           autocomplete="current-password"
           spellcheck="false"
           required
-          placeholder="spl_owner_…"
+          placeholder="piq_owner_…"
         />
         {#if form?.invalid}
           <p class="form-error" role="alert">That owner credential was not accepted.</p>

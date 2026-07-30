@@ -36,7 +36,7 @@ Policy validation describes the required scenarios but does not prove the
 PostgreSQL authorization boundary. A release candidate must also run:
 
 ```console
-SPOOL_TEST_DATABASE_URL=postgres://postgres:password@127.0.0.1:5432/spool_test \
+PIQAE_TEST_DATABASE_URL=postgres://postgres:password@127.0.0.1:5432/piqae_test \
   python3 release/tools/check_postgres_release_tests.py
 ```
 

@@ -1,5 +1,5 @@
 [package]
-name = "spool-executor-cups"
+name = "piqae-executor-cups"
 version.workspace = true
 edition.workspace = true
 license = "Apache-2.0"
@@ -12,11 +12,11 @@ base64.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-spool-domain.workspace = true
-spool-executor-protocol = { path = "../executor-protocol", version = "0.1.0" }
-spool-protocol.workspace = true
+piqae-domain.workspace = true
+piqae-executor-protocol = { path = "../executor-protocol", version = "0.1.0" }
+piqae-protocol.workspace = true
 
 [dev-dependencies]
-spool-executor-supervisor = { path = "../executor-supervisor", version = "0.1.0" }
+piqae-executor-supervisor = { path = "../executor-supervisor", version = "0.1.0" }
 tokio.workspace = true
 uuid.workspace = true

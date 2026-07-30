@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { env as publicEnv } from '$env/dynamic/public';
+
   let {
     title,
     description,
@@ -16,14 +18,14 @@
   } = $props();
 
   const siteName = 'Piqae';
-  const origin = import.meta.env.PUBLIC_SITE_URL?.replace(/\/$/, '');
+  const origin = publicEnv.PUBLIC_SITE_URL?.replace(/\/$/, '');
   const canonical = $derived(origin ? `${origin}${path}` : null);
   const indexable = $derived(
-    !noindex && import.meta.env.PUBLIC_MARKETING_INDEXABLE === 'true' && Boolean(origin)
+    !noindex && publicEnv.PUBLIC_MARKETING_INDEXABLE === 'true' && Boolean(origin)
   );
   const socialImage = $derived(image ?? (origin ? `${origin}/og-default.svg` : null));
-  const googleVerification = import.meta.env.PUBLIC_GOOGLE_SITE_VERIFICATION;
-  const bingVerification = import.meta.env.PUBLIC_BING_SITE_VERIFICATION;
+  const googleVerification = publicEnv.PUBLIC_GOOGLE_SITE_VERIFICATION;
+  const bingVerification = publicEnv.PUBLIC_BING_SITE_VERIFICATION;
   const serializedStructuredData = $derived(
     structuredData ? JSON.stringify(structuredData).replaceAll('<', '\\u003c') : null
   );

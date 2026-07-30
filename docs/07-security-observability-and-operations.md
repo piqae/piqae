@@ -154,7 +154,7 @@ Defences:
 These rules are shared by local submissions and hosted URI descriptors.
 Trusted local/self-hosted installations can opt into private, loopback, and
 link-local sources with `--allow-private-uri-sources` or
-`SPOOL_ALLOW_PRIVATE_URI_SOURCES=true`; the default is `false`, and the
+`PIQAE_ALLOW_PRIVATE_URI_SOURCES=true`; the default is `false`, and the
 always-blocked classes remain blocked. Digest authentication is explicitly
 disabled in V1 rather than being silently downgraded. Credentials are
 job-scoped and deleted with content metadata.
@@ -300,7 +300,7 @@ probe object is healthy, while a backend error makes the service unready.
 
 ## Webhook delivery semantics
 
-Webhook delivery is durable and at least once. Spool claims no more than 100
+Webhook delivery is durable and at least once. Piqae claims no more than 100
 due deliveries for five minutes and processes at most eight requests
 concurrently. Each request has a five-second DNS budget and a ten-second HTTP
 budget, so the claim remains valid beyond the bounded worst-case duration of a
@@ -309,10 +309,10 @@ destinations. Failed deliveries retain the existing retry and dead-letter
 policy.
 
 The event ID, `created_at`, event type, data, and serialized JSON body remain
-stable across retries. The `spool-attempt`, `spool-timestamp`, and
-`spool-signature` headers are generated for each attempt. A process failure or
+stable across retries. The `piqae-attempt`, `piqae-timestamp`, and
+`piqae-signature` headers are generated for each attempt. A process failure or
 an ambiguous network response can still produce a duplicate delivery.
-Consumers must therefore deduplicate using `spool-event-id` (the same value as
+Consumers must therefore deduplicate using `piqae-event-id` (the same value as
 the payload `id`) and make handlers idempotent before returning a successful
 2xx response.
 
@@ -365,7 +365,7 @@ observable, idempotent, and tested under failure.
 - status page and public incident history;
 - metering is derived from immutable job events, not mutable counters.
 
-Spool Cloud charges only when a Live job first reaches
+Piqae Cloud charges only when a Live job first reaches
 `accepted_by_spooler`. Registration, Test jobs, retries, expired jobs that
 never reach the operating-system spooler, and later state updates do not add
 usage. The immutable usage ledger is authoritative; Stripe receives an

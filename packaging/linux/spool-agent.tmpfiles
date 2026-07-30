@@ -1,2 +1,0 @@
-d /var/lib/spool 0700 spool spool -
-d /etc/spool 0750 root spool -

@@ -1,5 +1,5 @@
 [package]
-name = "spool-platform-adapters"
+name = "piqae-platform-adapters"
 version.workspace = true
 edition.workspace = true
 license = "Apache-2.0"
@@ -14,10 +14,10 @@ windows-spooler = []
 
 [dependencies]
 async-trait.workspace = true
-spool-protocol.workspace = true
+piqae-protocol.workspace = true
 
 [dev-dependencies]
-spool-domain.workspace = true
+piqae-domain.workspace = true
 tokio.workspace = true
 
 [lints]

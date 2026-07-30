@@ -4,13 +4,13 @@
 //! bounded operational actions through this contract.
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use rand::RngCore;
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
-use spool_domain::{
+use piqae_domain::{
     DriverFingerprint, JobOptions, NativePrinterOption, NativeProfileKind, PrinterCapabilities,
     ProfileCaptureOperation, ProfileDependency, ProfileStatus, ProfileSummary, SafeProfileOverride,
 };
+use rand::RngCore;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use thiserror::Error;
@@ -351,7 +351,7 @@ pub struct ConfirmLoadedMedia {
     pub device_id: String,
     pub source: String,
     pub stock_id: Option<String>,
-    pub confidence: spool_domain::LoadedMediaConfidence,
+    pub confidence: piqae_domain::LoadedMediaConfidence,
     pub confirmed_by: Option<String>,
 }
 

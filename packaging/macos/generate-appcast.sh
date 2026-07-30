@@ -5,10 +5,10 @@ archives=${1:-}
 output=${2:-}
 sparkle_bin=${SPARKLE_BIN_DIR:-}
 private_key_file=${SPARKLE_PRIVATE_KEY_FILE:-}
-download_prefix=${SPOOL_SPARKLE_DOWNLOAD_URL_PREFIX:-}
+download_prefix=${PIQAE_SPARKLE_DOWNLOAD_URL_PREFIX:-}
 
 if [[ -z "$archives" || ! -d "$archives" || -z "$output" ]]; then
-  echo "usage: SPARKLE_BIN_DIR=… SPARKLE_PRIVATE_KEY_FILE=… SPOOL_SPARKLE_DOWNLOAD_URL_PREFIX=https://… $0 /archives /archives/appcast.xml" >&2
+  echo "usage: SPARKLE_BIN_DIR=… SPARKLE_PRIVATE_KEY_FILE=… PIQAE_SPARKLE_DOWNLOAD_URL_PREFIX=https://… $0 /archives /archives/appcast.xml" >&2
   exit 2
 fi
 if [[ "$output" != "$archives/"* || "$output" != *.xml ]]; then

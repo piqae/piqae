@@ -1,2 +1,2 @@
-The canonical Apache License, Version 2.0 text for Spool is available at
+The canonical Apache License, Version 2.0 text for Piqae is available at
 ../LICENSE.

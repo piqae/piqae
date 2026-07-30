@@ -7,14 +7,16 @@ when the agent is unavailable.
 
 Configuration:
 
-- `SPOOL_LOCAL_API_URL` defaults to `http://127.0.0.1:39100` and must remain an
+- `PIQAE_LOCAL_API_URL` defaults to `http://127.0.0.1:39100` and must remain an
   HTTP loopback URL.
-- `SPOOL_LOCAL_TOKEN_FILE` selects the agent's `local.token`.
-- Otherwise `SPOOL_DATA_DIR/local.token` is used when `SPOOL_DATA_DIR` is set.
+- `PIQAE_LOCAL_TOKEN_FILE` selects the agent's `local.token`.
+- Otherwise `PIQAE_DATA_DIR/local.token` is used when `PIQAE_DATA_DIR` is set.
 - The macOS fallback is
-  `~/Library/Application Support/Spool/local.token`.
-- `SPOOL_DASHBOARD_URL` enables **Manage Printers** and **Open Dashboard**.
-- `SPOOL_AGENT_LOG_FILE` overrides `/var/log/spool-agent.log`.
+  `~/Library/Application Support/Spool/local.token`. This internal path remains
+  stable across the visible Piqae rename so existing identities and queues are
+  not stranded.
+- `PIQAE_DASHBOARD_URL` enables **Manage Printers** and **Open Dashboard**.
+- `PIQAE_AGENT_LOG_FILE` overrides `/var/log/piqae-agent.log`.
 
 Build and test:
 
@@ -28,10 +30,10 @@ The default generated app is an unsigned Preview build. Its bundle metadata
 explicitly disables Sparkle, and the menu reports that updates are unavailable.
 It does not bypass Gatekeeper.
 
-`build-app.sh` accepts `SPOOL_VERSION`, `SPOOL_BUILD_NUMBER`, and
-`SPOOL_APP_BUNDLE`. A release build may additionally provide all three of
-`SPOOL_CODE_SIGN_IDENTITY`, `SPOOL_SPARKLE_FEED_URL`, and
-`SPOOL_SPARKLE_PUBLIC_ED_KEY`. The identity must be an available Developer ID
+`build-app.sh` accepts `PIQAE_VERSION`, `PIQAE_BUILD_NUMBER`, and
+`PIQAE_APP_BUNDLE`. A release build may additionally provide all three of
+`PIQAE_CODE_SIGN_IDENTITY`, `PIQAE_SPARKLE_FEED_URL`, and
+`PIQAE_SPARKLE_PUBLIC_ED_KEY`. The identity must be an available Developer ID
 Application identity and the feed must use HTTPS. Partial update configuration
 fails closed. Release builds embed Sparkle 2.9.2 and sign its nested code before
 signing the app with the hardened runtime.
@@ -49,15 +51,15 @@ release bucket before promoting the appcast and shared manifest.
 
 ## Per-user package
 
-`packaging/macos/build-user-package.sh` combines an app, `spool-agent`, and
-`spool-executor-cups` into a notarised per-user DMG and a diagnostic ZIP. A
+`packaging/macos/build-user-package.sh` combines an app, `piqae-agent`, and
+`piqae-executor-cups` into a notarised per-user DMG and a diagnostic ZIP. A
 normal user opens the DMG and double-clicks **Install Piqae**; no Terminal or
 administrator access is required. Its installer uses:
 
 - `~/Applications/Piqae.app`;
 - `~/Library/Application Support/Spool/bin` for the agent and executor;
 - `~/Library/Application Support/Spool` for durable identity, queue, and local
-  API token;
+  API token (a deliberately stable, internal compatibility path);
 - `~/Library/LaunchAgents` for separate agent and menu launch agents; and
 - `~/Library/Logs/Spool/agent.log`.
 
@@ -70,7 +72,7 @@ preserves data on uninstall. Unsigned packages are labelled Preview and do not
 remove quarantine or apply a Gatekeeper workaround.
 
 Sparkle currently replaces only `Piqae.app`, including the menu and
-`SpoolPrintCoreReplay`. It does not replace or restart the separately installed
+`PiqaePrintCoreReplay`. It does not replace or restart the separately installed
 Rust agent/executor. A full-node update therefore still uses the per-user
 package's idle-checked installer. Do not represent the Sparkle foundation as an
 atomic full-node updater.
@@ -111,14 +113,14 @@ DELETE /v1/local/profile-capture-sessions/{session_id}
 ```
 
 The first response supplies a short-lived, single-use `capture_token`; complete
-and cancel send it in `X-Spool-Capture-Token`. Edit and clone sessions also
+and cancel send it in `X-Piqae-Capture-Token`. Edit and clone sessions also
 return the current `native_configuration`, allowing the panel to begin with
 the exact saved native settings. Native configurations are capped at 1 MiB in
 the shell and must remain local to the agent.
 
 ## Headless PrintCore replay
 
-`SpoolPrintCoreReplay` is the bounded, local-only PDF handoff helper used when
+`PiqaePrintCoreReplay` is the bounded, local-only PDF handoff helper used when
 a job pins a `macos_printcore` profile. It restores the captured
 `NSPrintInfo.printSettings`, `PMPrintSettings`, and `PMPageFormat`, binds the
 exact requested `NSPrinter`, applies only allowlisted stable job overrides, and
@@ -128,7 +130,7 @@ It works on a private `NSPrintInfo` copy and never changes the driver defaults.
 Build it directly with:
 
 ```sh
-swift build --package-path shells/macos -c release --product SpoolPrintCoreReplay
+swift build --package-path shells/macos -c release --product PiqaePrintCoreReplay
 ```
 
 The helper reads exactly one JSON value from stdin (maximum 2 MiB):
@@ -136,7 +138,7 @@ The helper reads exactly one JSON value from stdin (maximum 2 MiB):
 ```json
 {
   "printer_native_id": "HP_LaserJet",
-  "pdf_path": "/absolute/spool/content/job.pdf",
+  "pdf_path": "/absolute/piqae/content/job.pdf",
   "job_title": "Packing slip 1234",
   "native_profile": {
     "kind": "macos_printcore",
@@ -184,4 +186,4 @@ Failures include a stable `code`, a bounded `message`, `retryable`, and
 `handoff_may_have_succeeded`. A failure after `NSPrintOperation.run()` begins is
 marked ambiguous and must not be retried automatically. The process exits zero
 on success and one on failure. The app bundle builder embeds the helper at
-`Piqae.app/Contents/MacOS/SpoolPrintCoreReplay`.
+`Piqae.app/Contents/MacOS/PiqaePrintCoreReplay`.

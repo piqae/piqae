@@ -1,7 +1,7 @@
 #![allow(clippy::expect_used, clippy::too_many_lines)]
 
 use chrono::{Duration, Utc};
-use spool_storage_postgres::{
+use piqae_storage_postgres::{
     PostgresStore, StorageError, WorkOsIdentityData, WorkOsIdentityEvent, WorkOsMembershipAccess,
     WorkOsProjectionResult,
 };
@@ -49,11 +49,11 @@ fn membership_event(
 
 #[tokio::test]
 async fn workos_projection_is_idempotent_ordered_and_organization_scoped() {
-    let Some(database_url) = env::var("SPOOL_TEST_DATABASE_URL").ok() else {
-        eprintln!("skipped: set SPOOL_TEST_DATABASE_URL to run WorkOS projection evidence");
+    let Some(database_url) = env::var("PIQAE_TEST_DATABASE_URL").ok() else {
+        eprintln!("skipped: set PIQAE_TEST_DATABASE_URL to run WorkOS projection evidence");
         return;
     };
-    let schema = format!("spool_workos_test_{}", ulid::Ulid::new()).to_ascii_lowercase();
+    let schema = format!("piqae_workos_test_{}", ulid::Ulid::new()).to_ascii_lowercase();
     let admin = PgPoolOptions::new()
         .max_connections(1)
         .connect(&database_url)

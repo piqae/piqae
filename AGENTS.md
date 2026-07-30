@@ -1,11 +1,11 @@
-# Spool agent guide
+# Piqae agent guide
 
 This file applies to the entire repository. More specific `AGENTS.md` files may
 narrow these rules but must not weaken safety or support-claim requirements.
 
 ## Product invariants
 
-- Spool is Apache-2.0 open-source printing infrastructure.
+- Piqae is Apache-2.0 open-source printing infrastructure.
 - The durable agent owns identity, queueing, recovery, and cloud synchronization.
   Tray/menu shells are thin and disposable.
 - Installed operating-system drivers remain the authority for vendor options.
@@ -39,7 +39,7 @@ repository-local state.
 - Never print to physical hardware without explicit user authorization naming
   the printer and expected fixture. Normal tests must use fake or virtual
   printers.
-- Never set `SPOOL_ALLOW_PHYSICAL_TESTS=1` on the user's behalf unless that
+- Never set `PIQAE_ALLOW_PHYSICAL_TESTS=1` on the user's behalf unless that
   authorization is present in the active request.
 - Never expose enrollment tokens, API keys, device keys, print documents, local
   bearer tokens, or unredacted production logs.

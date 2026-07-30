@@ -68,7 +68,7 @@ class PlatformServiceAccountPolicyTests(unittest.TestCase):
             {
                 "id": identifier,
                 "status": "passed",
-                "command": "cargo test -p spool-control-plane platform_credentials",
+                "command": "cargo test -p piqae-control-plane platform_credentials",
                 "reference": f"reports/{identifier}.json",
                 "synthetic_secrets_only": True,
             }

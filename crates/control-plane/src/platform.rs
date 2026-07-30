@@ -7,8 +7,8 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
+use piqae_storage_postgres::StoredPlatformAccount;
 use serde::Deserialize;
-use spool_storage_postgres::StoredPlatformAccount;
 use std::collections::BTreeMap;
 
 #[derive(Debug, Deserialize)]
@@ -23,7 +23,9 @@ async fn authenticate_manager(
     state: &AppState,
     headers: &HeaderMap,
 ) -> Result<PlatformManagerContext, AppError> {
-    if headers.contains_key("x-spool-workspace-id")
+    if headers.contains_key("x-piqae-workspace-id")
+        || headers.contains_key("x-piqae-environment-id")
+        || headers.contains_key("x-spool-workspace-id")
         || headers.contains_key("x-spool-environment-id")
     {
         return Err(AppError::unauthorized());

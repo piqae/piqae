@@ -39,11 +39,11 @@ only at a disposable PostgreSQL database; the test creates and drops its own
 random schema and never touches printer executors:
 
 ```console
-SPOOL_TEST_DATABASE_URL=postgres://postgres:password@127.0.0.1:5432/spool_test \
-  cargo test -p spool-storage-postgres --test routing_recovery -- --nocapture
+PIQAE_TEST_DATABASE_URL=postgres://postgres:password@127.0.0.1:5432/piqae_test \
+  cargo test -p piqae-storage-postgres --test routing_recovery -- --nocapture
 ```
 
-Without `SPOOL_TEST_DATABASE_URL`, the test reports that database evidence was
+Without `PIQAE_TEST_DATABASE_URL`, the test reports that database evidence was
 skipped so a normal unit-test run does not unexpectedly connect to developer or
 production infrastructure. Release evidence must include a non-skipped run.
 
@@ -55,11 +55,11 @@ durable node acceptance each prevent reassignment.
 Platform service-account release evidence uses the same disposable database:
 
 ```console
-SPOOL_TEST_DATABASE_URL=postgres://postgres:password@127.0.0.1:5432/spool_test \
-  cargo test -p spool-storage-postgres --test platform_service_accounts -- --nocapture
+PIQAE_TEST_DATABASE_URL=postgres://postgres:password@127.0.0.1:5432/piqae_test \
+  cargo test -p piqae-storage-postgres --test platform_service_accounts -- --nocapture
 
-SPOOL_TEST_DATABASE_URL=postgres://postgres:password@127.0.0.1:5432/spool_test \
-  cargo test -p spool-control-plane --test platform_service_accounts_postgres -- --nocapture
+PIQAE_TEST_DATABASE_URL=postgres://postgres:password@127.0.0.1:5432/piqae_test \
+  cargo test -p piqae-control-plane --test platform_service_accounts_postgres -- --nocapture
 ```
 
 Normal contributor checks may omit both PostgreSQL suites. The release-only
@@ -68,7 +68,7 @@ fails closed if any target is
 missing, skipped, filtered to zero tests, or unsuccessful:
 
 ```console
-SPOOL_TEST_DATABASE_URL=postgres://postgres:password@127.0.0.1:5432/spool_test \
+PIQAE_TEST_DATABASE_URL=postgres://postgres:password@127.0.0.1:5432/piqae_test \
   python3 release/tools/check_postgres_release_tests.py
 ```
 
@@ -81,7 +81,7 @@ boundary, make time or I/O controllable, and retain the original behavior claim.
 cargo xtask fixture reset
 ```
 
-This removes only the repository-local `.spool-dev` and
-`.spool-test-fixtures` directories. It does not touch installed printers,
+This removes only the repository-local `.piqae-dev` and
+`.piqae-test-fixtures` directories. It does not touch installed printers,
 operating-system queues, user application data, or databases outside this
 checkout.

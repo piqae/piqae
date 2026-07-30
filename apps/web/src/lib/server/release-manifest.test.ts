@@ -11,23 +11,23 @@ const supportedManifest = {
   channel: 'stable',
   currentVersion: '1.2.3',
   updatedAt: '2026-07-29T10:00:00.000Z',
-  releasesUrl: 'https://releases.spool.test/',
-  repositoryUrl: 'https://github.com/example/spool',
+  releasesUrl: 'https://releases.piqae.test/',
+  repositoryUrl: 'https://github.com/example/piqae',
   artifacts: [
     {
       id: 'macos-universal',
       platform: 'macos',
       title: 'macOS node',
       version: '1.2.3',
-      fileName: 'Spool-1.2.3.zip',
+      fileName: 'Piqae-1.2.3.zip',
       architectures: ['arm64', 'x86_64'],
       minimumOs: 'macOS 13+',
       status: 'supported',
       statusReason: 'Release gates passed.',
-      downloadUrl: 'https://releases.spool.test/Spool-1.2.3.zip',
-      releaseUrl: 'https://releases.spool.test/1.2.3',
+      downloadUrl: 'https://releases.piqae.test/Piqae-1.2.3.zip',
+      releaseUrl: 'https://releases.piqae.test/1.2.3',
       sha256: 'a'.repeat(64),
-      checksumUrl: 'https://releases.spool.test/Spool-1.2.3.zip.sha256',
+      checksumUrl: 'https://releases.piqae.test/Piqae-1.2.3.zip.sha256',
       signing: { status: 'verified', label: 'Developer ID and notarised' },
       notes: ['Universal app']
     }
@@ -37,7 +37,7 @@ const supportedManifest = {
       version: '1.2.2',
       publishedAt: '2026-07-01T10:00:00.000Z',
       status: 'supported',
-      releaseUrl: 'https://releases.spool.test/1.2.2',
+      releaseUrl: 'https://releases.piqae.test/1.2.2',
       notes: ['Previous stable']
     }
   ]
@@ -63,7 +63,7 @@ describe('server-owned release manifest', () => {
     expect(parsed.artifacts[0]).toMatchObject({
       status: 'supported',
       sha256: 'a'.repeat(64),
-      downloadUrl: 'https://releases.spool.test/Spool-1.2.3.zip'
+      downloadUrl: 'https://releases.piqae.test/Piqae-1.2.3.zip'
     });
     expect(parsed.olderReleases).toHaveLength(1);
   });
@@ -80,9 +80,9 @@ describe('server-owned release manifest', () => {
 
   it('rejects insecure, credentialed, and fragmented release URLs', () => {
     for (const releaseUrl of [
-      'http://releases.spool.test/1.2.3',
-      'https://user:secret@releases.spool.test/1.2.3',
-      'https://releases.spool.test/1.2.3#mutable'
+      'http://releases.piqae.test/1.2.3',
+      'https://user:secret@releases.piqae.test/1.2.3',
+      'https://releases.piqae.test/1.2.3#mutable'
     ]) {
       const manifest = structuredClone(supportedManifest);
       manifest.artifacts.at(0)!.releaseUrl = releaseUrl;

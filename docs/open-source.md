@@ -1,6 +1,6 @@
 # Open source and self-hosting
 
-Spool is Apache-2.0 printing infrastructure. Self-hosting includes the complete
+Piqae is Apache-2.0 printing infrastructure. Self-hosting includes the complete
 control plane, dashboard, platform accounts, API keys, webhooks, native
 profiles, durable queues, diagnostics, update policy, and local-owner or OIDC
 authentication. It requires no WorkOS account, Stripe account, licence server,

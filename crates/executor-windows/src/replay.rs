@@ -1,9 +1,9 @@
 use crate::native_profile::{
     NativeProfileError, WindowsDriverFingerprint, WindowsNativeProfileCapture,
 };
+use piqae_domain::{Duplex, JobOptions, SafeProfileOverride};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
-use spool_domain::{Duplex, JobOptions, SafeProfileOverride};
 use std::collections::BTreeSet;
 
 const DEVMODE_FIELDS_OFFSET: usize = 72;
@@ -469,7 +469,7 @@ mod tests {
             copies: Some(3),
             color: Some(false),
             collate: Some(true),
-            duplex: Some(spool_domain::Duplex::ShortEdge),
+            duplex: Some(piqae_domain::Duplex::ShortEdge),
             dpi: Some("600x300".into()),
             paper: Some("A4 Borderless".into()),
             ..Default::default()
@@ -527,8 +527,8 @@ mod tests {
     #[test]
     fn digest_is_stable_and_prefixed() {
         assert_eq!(
-            profile_blob_digest(b"spool"),
-            "sha256:627c012b20c46af50a2a1164318d3eff7582317b0eb842ec8f7896796147db80"
+            profile_blob_digest(b"profile fixture"),
+            "sha256:f43544dd86059ef7a63432d45bf5f7dd7ebad27abbffa1bddf587a5888ea447e"
         );
     }
 

@@ -1,5 +1,5 @@
 [package]
-name = "spool-storage-postgres"
+name = "piqae-storage-postgres"
 version.workspace = true
 edition.workspace = true
 license = "Apache-2.0"
@@ -15,10 +15,10 @@ sqlx = { workspace = true, features = ["macros"] }
 thiserror.workspace = true
 uuid.workspace = true
 ulid.workspace = true
-spool-domain.workspace = true
+piqae-domain.workspace = true
 
 [dev-dependencies]
-spool-auth = { path = "../auth", version = "0.1.0" }
+piqae-auth = { path = "../auth", version = "0.1.0" }
 tokio.workspace = true
 
 [lints]

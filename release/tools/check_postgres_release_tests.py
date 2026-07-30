@@ -30,7 +30,7 @@ GATES = (
             "cargo",
             "test",
             "-p",
-            "spool-storage-postgres",
+            "piqae-storage-postgres",
             "--test",
             "routing_recovery",
             "--locked",
@@ -45,7 +45,7 @@ GATES = (
             "cargo",
             "test",
             "-p",
-            "spool-storage-postgres",
+            "piqae-storage-postgres",
             "--test",
             "platform_service_accounts",
             "--locked",
@@ -60,7 +60,7 @@ GATES = (
             "cargo",
             "test",
             "-p",
-            "spool-control-plane",
+            "piqae-control-plane",
             "--test",
             "platform_service_accounts_postgres",
             "--locked",
@@ -75,7 +75,7 @@ GATES = (
             "cargo",
             "test",
             "-p",
-            "spool-control-plane",
+            "piqae-control-plane",
             "--test",
             "platform_accounts",
             "--locked",
@@ -88,15 +88,15 @@ GATES = (
 
 
 def require_database_url(environment: dict[str, str]) -> str:
-    value = environment.get("SPOOL_TEST_DATABASE_URL", "").strip()
+    value = environment.get("PIQAE_TEST_DATABASE_URL", "").strip()
     if not value:
         raise PostgresEvidenceError(
-            "release PostgreSQL evidence requires SPOOL_TEST_DATABASE_URL; "
+            "release PostgreSQL evidence requires PIQAE_TEST_DATABASE_URL; "
             "normal contributor tests may omit it"
         )
     if not re.match(r"^postgres(?:ql)?://", value):
         raise PostgresEvidenceError(
-            "SPOOL_TEST_DATABASE_URL must use a PostgreSQL connection URL"
+            "PIQAE_TEST_DATABASE_URL must use a PostgreSQL connection URL"
         )
     return value
 

@@ -31,9 +31,9 @@ jobs:
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
       - if: runner.os == 'Linux'
-        run: cargo clippy -p spool-control-plane --all-targets --features otlp --locked -- -D warnings
+        run: cargo clippy -p piqae-control-plane --all-targets --features otlp --locked -- -D warnings
       - if: runner.os == 'Linux'
-        run: cargo test -p spool-control-plane --features otlp --locked
+        run: cargo test -p piqae-control-plane --features otlp --locked
 
   web:
     name: Web and SDK
@@ -50,8 +50,16 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm check
       - run: pnpm test
+      - name: Verify generated SDK types
+        run: pnpm --filter @piqae/sdk generate:check
+      - name: Build and lint the SDK package
+        run: |
+          pnpm --filter @piqae/sdk build
+          pnpm --filter @piqae/sdk lint
+      - name: Install the packed SDK in a clean consumer
+        run: pnpm --filter @piqae/sdk smoke:package
       - name: Build the Node web artifact
-        run: pnpm --filter @spool/web build
+        run: pnpm --filter @piqae/web build
       - name: Validate Piqae edge routing
         run: |
           node --test deploy/cloudflare/domain-router/router.test.mjs
@@ -82,7 +90,7 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
-      - run: pnpm --package=@redocly/cli@1.34.3 dlx redocly lint contracts/openapi/spool-v1.yaml
+      - run: pnpm --package=@redocly/cli@1.34.3 dlx redocly lint contracts/openapi/piqae-v1.yaml
 
   terraform:
     name: Terraform
@@ -123,17 +131,17 @@ jobs:
           RUSTFLAGS: -C target-feature=+crt-static
         run: >-
           cargo build --locked --release --target x86_64-pc-windows-msvc --bins
-          -p spool-agent
-          -p spoolctl
-          -p spool-executor-windows
-          -p spool-shell-windows
+          -p piqae-agent
+          -p piqaectl
+          -p piqae-executor-windows
+          -p piqae-shell-windows
       - name: Stage installer input
         shell: pwsh
         run: |
           $source = "target\x86_64-pc-windows-msvc\release"
-          $stage = "artifacts\spool-windows-x86_64"
+          $stage = "artifacts\piqae-windows-x86_64"
           New-Item -ItemType Directory -Force "$stage\service", "$stage\LICENSES" | Out-Null
-          Copy-Item "$source\spool-agent.exe", "$source\spoolctl.exe", "$source\spool-executor-windows.exe", "$source\spool-profile-host-windows.exe", "$source\spool-shell-windows.exe" $stage
+          Copy-Item "$source\piqae-agent.exe", "$source\piqaectl.exe", "$source\piqae-executor-windows.exe", "$source\piqae-profile-host-windows.exe", "$source\piqae-shell-windows.exe" $stage
           Copy-Item "packaging\windows\*" "$stage\service" -Recurse
           Copy-Item "LICENSE", "README.md" $stage
           Copy-Item "LICENSES\*" "$stage\LICENSES" -Recurse
@@ -144,17 +152,17 @@ jobs:
       - name: Compile installer
         shell: pwsh
         run: |
-          $source = (Resolve-Path "artifacts\spool-windows-x86_64").Path
+          $source = (Resolve-Path "artifacts\piqae-windows-x86_64").Path
           $output = (Resolve-Path "artifacts").Path
           $compiler = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
-          & $compiler "/DSourceDir=$source" "/DOutputDir=$output" "/DAppVersion=0.1.0-ci.$env:GITHUB_RUN_NUMBER" "packaging\windows\Spool.iss"
+          & $compiler "/DSourceDir=$source" "/DOutputDir=$output" "/DAppVersion=0.1.0-ci.$env:GITHUB_RUN_NUMBER" "packaging\windows\Piqae.iss"
           if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed with exit code $LASTEXITCODE" }
-          $installer = "artifacts\spool-windows-x86_64-setup.exe"
+          $installer = "artifacts\piqae-windows-x86_64-setup.exe"
           $hash = (Get-FileHash -Algorithm SHA256 $installer).Hash.ToLowerInvariant()
           "$hash  $([System.IO.Path]::GetFileName($installer))" |
             Out-File -Encoding ascii "$installer.sha256"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: spool-windows-installer
-          path: artifacts/spool-windows-x86_64-setup.exe*
+          name: piqae-windows-installer
+          path: artifacts/piqae-windows-x86_64-setup.exe*
           if-no-files-found: error

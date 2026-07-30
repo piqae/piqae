@@ -4,7 +4,7 @@ import { buildAttribution, type MarketingAttribution } from '$lib/marketing/attr
 
 export const GET: RequestHandler = ({ url, cookies, request }) => {
   let existing: MarketingAttribution | undefined;
-  const stored = cookies.get('spool_attribution');
+  const stored = cookies.get('piqae_attribution');
   if (stored) {
     try {
       existing = JSON.parse(Buffer.from(stored, 'base64url').toString('utf8')) as MarketingAttribution;
@@ -13,7 +13,7 @@ export const GET: RequestHandler = ({ url, cookies, request }) => {
     }
   }
   const attribution = buildAttribution(url, existing, request.headers.get('referer') ?? undefined);
-  cookies.set('spool_attribution', Buffer.from(JSON.stringify(attribution), 'utf8').toString('base64url'), {
+  cookies.set('piqae_attribution', Buffer.from(JSON.stringify(attribution), 'utf8').toString('base64url'), {
     path: '/',
     httpOnly: true,
     sameSite: 'lax',

@@ -4,9 +4,9 @@ use crate::{AppState, error::AppError, repository::RepositoryError};
 use axum::{Json, body::Bytes, extract::State, http::HeaderMap};
 use chrono::{DateTime, Utc};
 use hmac::{Hmac, Mac};
+use piqae_storage_postgres::{WorkOsIdentityData, WorkOsIdentityEvent, WorkOsProjectionResult};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use spool_storage_postgres::{WorkOsIdentityData, WorkOsIdentityEvent, WorkOsProjectionResult};
 
 type HmacSha256 = Hmac<Sha256>;
 const WORKOS_SIGNATURE_TOLERANCE_MILLISECONDS: i64 = 300_000;

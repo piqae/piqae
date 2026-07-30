@@ -1,7 +1,8 @@
 import { env as privateEnv } from '$env/dynamic/private';
 import { env as publicEnv } from '$env/dynamic/public';
+import { productEnvironmentValue } from './product-env';
 import type { RequestEvent } from '@sveltejs/kit';
-import { SpoolClient, SpoolError } from '@spool/sdk';
+import { PiqaeClient, PiqaeError } from '@piqae/sdk';
 import { createLiveApi, mockApi, parseDashboardMeta, type DashboardApi } from '$lib/api';
 import type { DashboardMeta } from '$lib/view-types';
 
@@ -30,16 +31,17 @@ export function preventSecretCaching(event: Pick<RequestEvent, 'setHeaders'>): v
 }
 
 function configuredMode(): DashboardMode {
-  const value = publicEnv.PUBLIC_SPOOL_DASHBOARD_MODE;
+  const value = productEnvironmentValue(publicEnv, 'PUBLIC_PIQAE_DASHBOARD_MODE');
   if (value === 'demo') return 'demo';
   if (value === undefined || value === '' || value === 'live') return 'live';
-  throw new Error('PUBLIC_SPOOL_DASHBOARD_MODE must be live or demo');
+  throw new Error('PUBLIC_PIQAE_DASHBOARD_MODE must be live or demo');
 }
 
 export function dashboardConnection(
   event: Pick<RequestEvent, 'url' | 'locals'>
 ): DashboardConnection {
-  const baseUrl = publicEnv.PUBLIC_SPOOL_API_URL || event.url.origin;
+  const baseUrl =
+    productEnvironmentValue(publicEnv, 'PUBLIC_PIQAE_API_URL') || event.url.origin;
   let bearerToken: string | undefined;
 
   if (event.locals.authMode === 'workos') {
@@ -48,7 +50,9 @@ export function dashboardConnection(
       throw new Error('The verified hosted session does not contain an OIDC access token.');
     }
   } else {
-    bearerToken = event.locals.localSessionToken ?? privateEnv.SPOOL_DASHBOARD_API_KEY;
+    bearerToken =
+      event.locals.localSessionToken ??
+      productEnvironmentValue(privateEnv, 'PIQAE_DASHBOARD_API_KEY');
     if (!bearerToken) {
       throw new Error(
         'Local live dashboard authentication requires a local-owner session.'
@@ -68,13 +72,13 @@ export function dashboardSource(event: Pick<RequestEvent, 'fetch' | 'url' | 'loc
 
 export function dashboardSdk(
   event: Pick<RequestEvent, 'fetch' | 'url' | 'locals'>
-): SpoolClient {
+): PiqaeClient {
   const { baseUrl, bearerToken } = dashboardConnection(event);
-  return new SpoolClient({
+  return new PiqaeClient({
     baseUrl,
     fetch: event.fetch,
     apiKey: bearerToken,
-    headers: { 'x-spool-dashboard': '1' }
+    headers: { 'x-piqae-dashboard': '1' }
   });
 }
 
@@ -86,7 +90,8 @@ export async function dashboardMeta(
   event: Pick<RequestEvent, 'fetch' | 'url' | 'locals'>
 ): Promise<DashboardMeta> {
   if (configuredMode() === 'demo') return mockApi.meta();
-  const baseUrl = publicEnv.PUBLIC_SPOOL_API_URL || event.url.origin;
+  const baseUrl =
+    productEnvironmentValue(publicEnv, 'PUBLIC_PIQAE_API_URL') || event.url.origin;
   try {
     const response = await event.fetch(`${baseUrl.replace(/\/$/, '')}/v1/meta`, {
       headers: { accept: 'application/json' }
@@ -111,7 +116,7 @@ export async function dashboardMeta(
 }
 
 export function presentDashboardError(error: unknown): DashboardLoadError {
-  if (error instanceof SpoolError) {
+  if (error instanceof PiqaeError) {
     return {
       title: 'Control plane request failed',
       message: error.message,

@@ -1,17 +1,17 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use chrono::{Duration, Utc};
 use ed25519_dalek::{Signer, SigningKey};
-use semver::Version;
-use sha2::{Digest as _, Sha256};
-use spool_update_guardian::{
+use piqae_update_guardian::{
     ActivationObservation, Admission, AdmissionBlock, CandidateVerification, GuardianConfig,
     GuardianError, GuardianPhase, GuardianState, GuardianStore, HealthObservation, JournalStore,
     PlatformArtifactVerifier, RuntimeActivity, RuntimeHealth, RuntimeManager, RuntimePlan,
     RuntimeSlot, UpdateCommand, UpdateGuardian, verify_candidate,
 };
-use spool_update_metadata::{
+use piqae_update_metadata::{
     MetadataRole, ReleaseMetadata, SignedMetadata, UpdateChannel, UpdateTarget, key_id,
 };
+use semver::Version;
+use sha2::{Digest as _, Sha256};
 use std::fs::OpenOptions;
 use std::io::Write as _;
 use std::path::Path;
@@ -68,7 +68,7 @@ fn signed_metadata(bytes: &[u8]) -> (SignedMetadata, SigningKey) {
     )
 }
 
-fn candidate(path: &Path) -> spool_update_guardian::VerifiedCandidate {
+fn candidate(path: &Path) -> piqae_update_guardian::VerifiedCandidate {
     let bytes = b"signed package";
     std::fs::write(path, bytes).unwrap_or_default();
     let (metadata, key) = signed_metadata(bytes);
@@ -105,7 +105,7 @@ struct FakeRuntime {
 impl RuntimeManager for FakeRuntime {
     fn stage(
         &mut self,
-        candidate: &spool_update_guardian::VerifiedCandidate,
+        candidate: &piqae_update_guardian::VerifiedCandidate,
     ) -> Result<RuntimePlan, String> {
         self.calls.push("stage");
         Ok(RuntimePlan {

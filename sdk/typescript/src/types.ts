@@ -1,4 +1,4 @@
-export type SpoolId = string;
+export type PiqaeId = string;
 
 export type JobState =
   | 'registered'
@@ -98,7 +98,7 @@ export interface CreateUpload {
 }
 
 export interface Upload {
-  id: SpoolId;
+  id: PiqaeId;
   /** Storage implementation detail. Do not persist or construct this value. */
   object_key: string;
   media_type: UploadMediaType;
@@ -121,7 +121,7 @@ export interface CreatedUpload extends Upload {
 }
 
 export interface Workspace {
-  id: SpoolId;
+  id: PiqaeId;
   name: string;
   slug: string;
   status: 'active' | 'suspended' | 'cancelled';
@@ -130,7 +130,7 @@ export interface Workspace {
 }
 
 export interface WorkspaceMember {
-  id: SpoolId;
+  id: PiqaeId;
   email: string;
   name: string | null;
   role: 'owner' | 'admin' | 'developer' | 'operator' | 'viewer' | 'billing';
@@ -140,12 +140,12 @@ export interface WorkspaceMember {
 }
 
 export interface PlatformContext {
-  workspaceId: SpoolId;
-  environmentId: SpoolId;
+  workspaceId: PiqaeId;
+  environmentId: PiqaeId;
 }
 
 export interface PlatformAccountEnvironment {
-  id: SpoolId;
+  id: PiqaeId;
   kind: 'test' | 'live';
 }
 
@@ -155,7 +155,7 @@ export interface PlatformAccountEnvironments {
 }
 
 export interface PlatformAccount {
-  id: SpoolId;
+  id: PiqaeId;
   external_id: string;
   name: string;
   status: 'active' | 'suspended' | 'cancelled';
@@ -175,10 +175,10 @@ export interface UpsertPlatformAccount {
  * Platform grant provisioning is intentionally not part of the tenant API.
  */
 export interface PlatformGrant {
-  id: SpoolId;
-  service_account_id: SpoolId;
-  workspace_id: SpoolId;
-  environment_id: SpoolId;
+  id: PiqaeId;
+  service_account_id: PiqaeId;
+  workspace_id: PiqaeId;
+  environment_id: PiqaeId;
   scopes: ApiKeyScope[];
   expires_at: string | null;
   revoked_at: string | null;
@@ -186,7 +186,7 @@ export interface PlatformGrant {
 }
 
 export interface PlatformServiceAccount {
-  id: SpoolId;
+  id: PiqaeId;
   name: string;
   grants: PlatformGrant[];
   created_at: string;
@@ -194,11 +194,11 @@ export interface PlatformServiceAccount {
 }
 
 export interface CurrentIdentity {
-  id: SpoolId;
+  id: PiqaeId;
   email: string;
   name: string | null;
-  workspace_id: SpoolId;
-  environment_id: SpoolId;
+  workspace_id: PiqaeId;
+  environment_id: PiqaeId;
   roles: WorkspaceMember['role'][];
 }
 
@@ -252,7 +252,7 @@ export interface CreatedApiKey extends ApiKey {
 }
 
 export interface Agent {
-  id: SpoolId;
+  id: PiqaeId;
   name: string;
   platform: string;
   state: 'connected' | 'disconnected' | 'paused' | 'degraded';
@@ -273,7 +273,7 @@ export interface CreateDeviceAuthorization {
 }
 
 export interface CreatedDeviceAuthorization {
-  id: SpoolId;
+  id: PiqaeId;
   device_code: string;
   user_code: string;
   verification_uri: string;
@@ -282,13 +282,13 @@ export interface CreatedDeviceAuthorization {
 }
 
 export interface DeviceAuthorizationStatus {
-  id: SpoolId;
+  id: PiqaeId;
   state: 'pending' | 'approved' | 'denied' | 'consumed' | 'expired';
   expires_at: string;
 }
 
 export interface DeviceAuthorizationReview {
-  id: SpoolId;
+  id: PiqaeId;
   proposed_name: string;
   hostname: string;
   platform: string;
@@ -298,9 +298,9 @@ export interface DeviceAuthorizationReview {
 }
 
 export interface DeviceAuthorizationExchange {
-  node_id: SpoolId;
-  workspace_id: SpoolId;
-  environment_id: SpoolId;
+  node_id: PiqaeId;
+  workspace_id: PiqaeId;
+  environment_id: PiqaeId;
   server_time: string;
   sync_after_ms: number;
 }
@@ -325,14 +325,14 @@ export interface NodeUpdateState {
 }
 
 export interface NodeUpdate {
-  node_id: SpoolId;
+  node_id: PiqaeId;
   policy: NodeUpdatePolicy;
   status: NodeUpdateState;
 }
 
 export interface Printer {
-  id: SpoolId;
-  agent_id: SpoolId;
+  id: PiqaeId;
+  agent_id: PiqaeId;
   name: string;
   state: 'online' | 'offline' | 'paused' | 'busy' | 'paper_out' | 'error' | 'unknown';
   capabilities: PrinterCapabilities;
@@ -453,7 +453,7 @@ export interface StockSafeAreaMm {
  * inside the node profile and cannot be edited through this object.
  */
 export interface StockAttributes {
-  kind?: 'sheet' | 'label' | 'roll' | 'continuous' | 'envelope' | 'card' | string;
+  kind?: 'sheet' | 'label' | 'roll' | 'continuous' | 'envelope' | 'card';
   width_mm?: number;
   height_mm?: number;
   length_mm?: number;
@@ -468,7 +468,7 @@ export interface StockAttributes {
 }
 
 export interface Stock {
-  id: SpoolId;
+  id: PiqaeId;
   name: string;
   sku: string | null;
   description: string | null;
@@ -494,10 +494,10 @@ export interface PatchStock {
 }
 
 export interface Target {
-  id: SpoolId;
+  id: PiqaeId;
   name: string;
   description: string | null;
-  stock_id: SpoolId | null;
+  stock_id: PiqaeId | null;
   enabled: boolean;
   routing_policy: 'primary_then_standby';
   created_at: string;
@@ -507,7 +507,7 @@ export interface Target {
 export interface CreateTarget {
   name: string;
   description?: string;
-  stock_id?: SpoolId;
+  stock_id?: PiqaeId;
   enabled?: boolean;
   routing_policy?: 'primary_then_standby';
 }
@@ -515,18 +515,18 @@ export interface CreateTarget {
 export interface PatchTarget {
   name?: string;
   description?: string;
-  stock_id?: SpoolId;
+  stock_id?: PiqaeId;
   clear_stock?: boolean;
   enabled?: boolean;
   routing_policy?: 'primary_then_standby';
 }
 
 export interface TargetBinding {
-  id: SpoolId;
-  target_id: SpoolId;
-  printer_id: SpoolId;
-  agent_id: SpoolId;
-  profile_id: SpoolId;
+  id: PiqaeId;
+  target_id: PiqaeId;
+  printer_id: PiqaeId;
+  agent_id: PiqaeId;
+  profile_id: PiqaeId;
   profile_revision: number;
   role: 'primary' | 'standby';
   enabled: boolean;
@@ -535,8 +535,8 @@ export interface TargetBinding {
 }
 
 export interface CreateTargetBinding {
-  printer_id: SpoolId;
-  profile_id: SpoolId;
+  printer_id: PiqaeId;
+  profile_id: PiqaeId;
   profile_revision: number;
   role: 'primary' | 'standby';
   enabled?: boolean;
@@ -561,9 +561,9 @@ export interface BindingReadiness {
 }
 
 export interface TargetReadiness {
-  target_id: SpoolId;
+  target_id: PiqaeId;
   status: 'ready' | 'target_has_no_ready_binding';
-  selected_binding_id: SpoolId | null;
+  selected_binding_id: PiqaeId | null;
   bindings: BindingReadiness[];
 }
 
@@ -585,7 +585,7 @@ export interface JobOptions {
 }
 
 export type JobContent =
-  | { type: 'upload'; upload_id: SpoolId }
+  | { type: 'upload'; upload_id: PiqaeId }
   | { type: 'base64'; data: string }
   | { type: 'uri'; uri: string };
 
@@ -602,13 +602,13 @@ export interface CreateJobBase {
 
 export type CreateJob = CreateJobBase &
   (
-    | { printer_id: SpoolId; target_id?: never }
-    | { target_id: SpoolId; printer_id?: never }
+    | { printer_id: PiqaeId; target_id?: never }
+    | { target_id: PiqaeId; printer_id?: never }
   );
 
 export interface Job {
-  id: SpoolId;
-  printer_id: SpoolId;
+  id: PiqaeId;
+  printer_id: PiqaeId;
   title: string;
   source?: string | null;
   content_type: 'pdf' | 'raw';
@@ -620,8 +620,8 @@ export interface Job {
 }
 
 export interface JobEvent {
-  id: SpoolId;
-  job_id: SpoolId;
+  id: PiqaeId;
+  job_id: PiqaeId;
   sequence: number;
   state: JobState;
   reason?: string | null;
@@ -630,15 +630,25 @@ export interface JobEvent {
 }
 
 export interface Webhook {
-  id: SpoolId;
+  id: PiqaeId;
   url: string;
   events: string[];
   enabled: boolean;
   created_at: string;
 }
 
+export interface WebhookDelivery {
+  id: PiqaeId;
+  event_id: PiqaeId;
+  attempt: number;
+  next_attempt_at: string;
+  response_status: number | null;
+  delivered_at: string | null;
+  dead_lettered_at: string | null;
+}
+
 export interface AgentEnrolment {
-  id: SpoolId;
+  id: PiqaeId;
   token: string;
   expires_at: string;
 }

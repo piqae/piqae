@@ -4,5 +4,5 @@ import { pricingCatalog } from '$lib/server/pricing';
 
 export const load: PageServerLoad = async ({ fetch }) => ({
   printNodeSnapshot: await loadPrintNodePricingSnapshot(fetch),
-  spoolPricing: pricingCatalog()
+  piqaePricing: pricingCatalog()
 });
