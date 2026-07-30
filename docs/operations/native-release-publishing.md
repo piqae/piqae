@@ -155,10 +155,10 @@ and queue reconciliation have been observed.
 
 ## Current blockers
 
-- macOS build `0.1.0 (5)` completed Developer ID signing for the app, agent,
+- macOS build `0.1.0 (7)` completed Developer ID signing for the app, agent,
   executor, and installer; Apple notarisation/stapling for the app and DMG;
   Sparkle Ed25519 signing; immutable publication; and public checksum
-  verification in GitHub Actions run `30506739537`.
+  verification in GitHub Actions run `30507639987`.
 - macOS Sparkle replaces the app bundle, not the separately installed Rust
   node and executor.
 - Windows WinSparkle source integration still needs a Windows CI run,
