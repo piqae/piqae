@@ -103,6 +103,18 @@ verify_object() {
     <<<"$head" >/dev/null
 }
 
+file_size() {
+  local file=$1
+  local bytes
+  bytes=$(LC_ALL=C wc -c <"$file")
+  bytes=${bytes//[[:space:]]/}
+  if [[ ! "$bytes" =~ ^[0-9]+$ ]]; then
+    echo "could not determine release object size: $file" >&2
+    exit 1
+  fi
+  printf '%s\n' "$bytes"
+}
+
 case "$mode" in
 immutable)
   local_file=$first
@@ -114,7 +126,7 @@ immutable)
   }
   validate_immutable_key "$immutable_key"
   sha=$(shasum -a 256 "$local_file" | awk '{print $1}')
-  size=$(stat -f %z "$local_file" 2>/dev/null || stat -c %s "$local_file")
+  size=$(file_size "$local_file")
   if [[ "$(object_count "$immutable_key")" != 0 ]]; then
     if verify_object "$immutable_key" "$sha" "$size"; then
       # A retry may reuse an immutable object only when its bytes are identical.
@@ -152,7 +164,7 @@ promote)
     "$scratch" \
     --output json >/dev/null
   actual_sha=$(shasum -a 256 "$scratch" | awk '{print $1}')
-  actual_size=$(stat -f %z "$scratch" 2>/dev/null || stat -c %s "$scratch")
+  actual_size=$(file_size "$scratch")
   if [[ "$actual_sha" != "$expected_sha" || "$actual_size" != "$expected_size" ]]; then
     echo "immutable release object failed download verification: $immutable_key" >&2
     exit 1
