@@ -28,6 +28,9 @@ export const load: LayoutServerLoad = async (event) => {
       const signInUrl = await authKit.getSignInUrl({ returnTo: event.url.pathname });
       redirect(302, signInUrl);
     }
+    if (!event.locals.auth?.organizationId) {
+      redirect(303, '/onboarding');
+    }
     return {
       dashboardMode: mode,
       meta,
@@ -35,7 +38,7 @@ export const load: LayoutServerLoad = async (event) => {
         id: user.id,
         email: user.email,
         name: `${user.firstName ?? ''} ${user.lastName ?? ''}`.trim() || null,
-        organizationId: event.locals.auth?.organizationId ?? null,
+        organizationId: event.locals.auth.organizationId,
         role: event.locals.auth?.role ?? null
       }
     };

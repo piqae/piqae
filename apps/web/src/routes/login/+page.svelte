@@ -44,6 +44,9 @@
         Continue with WorkOS <Icon name="arrow-right" size={13} />
       </a>
       <div class="divider"><span>or</span></div>
+      <a class="button self-host" href={`/auth/signup?return_to=${encodeURIComponent(data.returnTo)}`}>
+        Create a Piqae account <Icon name="arrow-right" size={12} />
+      </a>
       <a class="button self-host" href="/docs/self-host">
         Configure self-hosted identity <Icon name="external" size={12} />
       </a>

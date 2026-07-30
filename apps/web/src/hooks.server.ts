@@ -61,6 +61,7 @@ const applicationHandle: Handle = async ({ event, resolve }) => {
     event.url.pathname.startsWith('/auth/') ||
     event.url.pathname.startsWith('/dashboard') ||
     event.url.pathname.startsWith('/login') ||
+    event.url.pathname.startsWith('/onboarding') ||
     event.url.pathname.startsWith('/pair') ||
     event.url.pathname.startsWith('/preview/') ||
     event.url.pathname === '/compare/qz-tray' ||

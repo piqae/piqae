@@ -18,7 +18,7 @@
     <a class="active" href="#general">General</a>
     <a href="#printing">Printing policy</a>
     <a href="#retention">Data retention</a>
-    {#if data.meta.auth.invitations}<a href="#team">Team</a>{/if}
+    {#if data.meta.auth.invitations}<a href="/dashboard/settings/team">Team</a>{/if}
     {#if data.meta.billing.enabled && (data.viewer?.role === 'owner' || data.viewer?.role === 'billing')}
       <a href="/dashboard/settings/billing">Billing</a>
     {/if}
