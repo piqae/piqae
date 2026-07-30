@@ -75,11 +75,14 @@ Rust agent/executor. A full-node update therefore still uses the per-user
 package's idle-checked installer. Do not represent the Sparkle foundation as an
 atomic full-node updater.
 
-Automatic Sparkle checks and silent updates are disabled. A credentialed build
-adds **Check for Updates…**. If installation reaches the relaunch boundary
-while the local API reports queued/active jobs or a profile panel is open, the
-menu postpones replacement and polls the authenticated local status until the
-node is idle. An unavailable agent is not assumed idle.
+Credentialed builds check the signed Sparkle feed in the background and add
+**Check for Piqae App Update…**. Sparkle still requires the operator to accept
+the download and installation; silent installation is disabled. When a release
+is found, the menu names its version and truthfully labels it as an app update.
+If installation reaches the relaunch boundary while the local API reports
+queued/active jobs or a profile panel is open, the menu shows that the app
+update is waiting for idle and polls authenticated local status until the node
+is idle. An unavailable agent is not assumed idle.
 
 The **Local driver test…** action requires a present local printer, a profile,
 and explicit confirmation. It does not require cloud/API exposure and never
