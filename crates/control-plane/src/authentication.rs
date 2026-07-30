@@ -8,7 +8,7 @@ use spool_auth::{
     verify_api_key, verify_local_owner_session, verify_platform_service_account_key,
 };
 use spool_domain::{EnvironmentId, WorkspaceId};
-use spool_storage_postgres::PostgresStore;
+use spool_storage_postgres::{PostgresStore, WorkOsMembershipAccess};
 use std::{
     collections::HashMap,
     sync::Arc,
@@ -626,6 +626,23 @@ impl OidcAuthenticator {
             )
             .await
             .map_err(|_| AuthenticationError)?;
+        if self.configuration.provider == "workos" {
+            let subject = claims
+                .values
+                .get("sub")
+                .and_then(serde_json::Value::as_str)
+                .filter(|value| !value.is_empty())
+                .ok_or(AuthenticationError)?;
+            if self
+                .store
+                .workos_membership_access(organization_id, subject)
+                .await
+                .map_err(|_| AuthenticationError)?
+                == WorkOsMembershipAccess::Denied
+            {
+                return Err(AuthenticationError);
+            }
+        }
         let permissions = if self.configuration.allow_unrestricted {
             Permissions::ALL
         } else {

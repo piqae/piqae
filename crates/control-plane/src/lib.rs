@@ -15,6 +15,7 @@ pub mod request_id;
 pub mod routing;
 pub mod updates;
 pub mod webhook_worker;
+pub mod workos_identity;
 
 use authentication::{Authenticator, TenantContext};
 use axum::{
@@ -49,6 +50,7 @@ pub struct AppState {
     pub capabilities: DeploymentCapabilities,
     pub local_identity: Option<identity::LocalIdentityState>,
     pub stripe_webhook_secret: Option<Arc<str>>,
+    pub workos_webhook_secret: Option<Arc<str>>,
 }
 
 impl fmt::Debug for AppState {
@@ -102,6 +104,7 @@ impl AppState {
             capabilities: DeploymentCapabilities::default(),
             local_identity: None,
             stripe_webhook_secret: None,
+            workos_webhook_secret: None,
         }
     }
 
@@ -120,6 +123,12 @@ impl AppState {
     #[must_use]
     pub fn with_stripe_webhook_secret(mut self, secret: impl Into<Arc<str>>) -> Self {
         self.stripe_webhook_secret = Some(secret.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_workos_webhook_secret(mut self, secret: impl Into<Arc<str>>) -> Self {
+        self.workos_webhook_secret = Some(secret.into());
         self
     }
 
@@ -218,6 +227,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/ready", get(api::ready))
         .route("/v1/meta", get(api::meta))
         .merge(identity::router())
+        .merge(workos_identity_router())
         .merge(pairing_router())
         .route("/v1/platform/accounts", get(platform::list))
         .route(
@@ -355,6 +365,15 @@ fn pairing_router() -> Router<AppState> {
             "/v1/device-authorizations/{device_code}/exchange",
             post(pairing::exchange),
         )
+}
+
+fn workos_identity_router() -> Router<AppState> {
+    Router::new()
+        .route(
+            "/v1/integrations/workos/webhook",
+            post(workos_identity::webhook),
+        )
+        .layer(DefaultBodyLimit::max(1024 * 1024))
 }
 
 fn node_operator_router() -> Router<AppState> {

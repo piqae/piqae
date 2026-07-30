@@ -133,6 +133,13 @@ async fn run() -> Result<()> {
         object_store,
     )
     .with_capabilities(capabilities.clone());
+    if capabilities.auth.provider == "workos" && service_role.accepts_identity_webhooks() {
+        application = application.with_workos_webhook_secret(
+            env::var("WORKOS_WEBHOOK_SECRET")
+                .or_else(|_| env::var("SPOOL_WORKOS_WEBHOOK_SECRET"))
+                .context("WORKOS_WEBHOOK_SECRET is required with WorkOS identity")?,
+        );
+    }
     if capabilities.billing.enabled {
         application = application.with_stripe_webhook_secret(
             env::var("STRIPE_WEBHOOK_SECRET")
@@ -233,6 +240,10 @@ impl ServiceRole {
 
     const fn runs_workers(self) -> bool {
         matches!(self, Self::Worker | Self::All)
+    }
+
+    const fn accepts_identity_webhooks(self) -> bool {
+        !matches!(self, Self::Worker)
     }
 
     const fn as_str(self) -> &'static str {

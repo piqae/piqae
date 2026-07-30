@@ -691,6 +691,36 @@ paths:
         "400": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
+  /v1/integrations/workos/webhook:
+    post:
+      summary: Project a signed WorkOS identity event
+      description: |
+        Spool Cloud only. The raw request is verified against
+        `WorkOS-Signature`; event IDs and payload hashes are idempotent, and
+        older organization, user, or membership events cannot overwrite a
+        newer projection.
+      tags: [Identity]
+      operationId: projectWorkOsWebhook
+      security: []
+      parameters:
+        - name: WorkOS-Signature
+          in: header
+          required: true
+          schema: { type: string, maxLength: 4096 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "200":
+          description: Event accepted, ignored as stale, or previously projected.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WorkOsWebhookReceipt" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
   /v1/device-authorizations:
     post:
       summary: Start browser pairing for a node
@@ -2309,6 +2339,16 @@ components:
       properties:
         received: { type: boolean, const: true }
         duplicate: { type: boolean }
+    WorkOsWebhookReceipt:
+      type: object
+      additionalProperties: false
+      required: [received, duplicate, applied]
+      properties:
+        received: { type: boolean, const: true }
+        duplicate: { type: boolean }
+        applied:
+          type: boolean
+          description: False when the event was a duplicate, stale, or intentionally ignored.
     CompatibilityWhoAmI:
       type: object
       required: [id, email, canCreateSubAccounts, credits, numComputers, totalPrints, versions]

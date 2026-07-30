@@ -241,6 +241,54 @@ pub enum StripeProjectionResult {
 }
 
 #[derive(Clone, Debug)]
+pub struct WorkOsIdentityEvent {
+    pub id: String,
+    pub event_type: String,
+    pub payload_sha256: String,
+    pub data: WorkOsIdentityData,
+}
+
+#[derive(Clone, Debug)]
+pub enum WorkOsIdentityData {
+    Organization {
+        organization_id: String,
+        name: String,
+        status: String,
+        event_at: DateTime<Utc>,
+    },
+    User {
+        user_id: String,
+        email: Option<String>,
+        display_name: Option<String>,
+        status: String,
+        event_at: DateTime<Utc>,
+    },
+    Membership {
+        membership_id: String,
+        organization_id: String,
+        user_id: String,
+        role: String,
+        status: String,
+        event_at: DateTime<Utc>,
+    },
+    Ignored,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkOsProjectionResult {
+    Applied,
+    Duplicate,
+    Stale,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkOsMembershipAccess {
+    Active,
+    Denied,
+    Unknown,
+}
+
+#[derive(Clone, Debug)]
 pub struct ClaimedUsageExport {
     pub id: String,
     pub workspace_id: WorkspaceId,
@@ -690,6 +738,259 @@ impl PostgresStore {
         })?;
         transaction.commit().await?;
         Ok((workspace_id, environment_id))
+    }
+
+    pub async fn workos_membership_access(
+        &self,
+        organization_id: &str,
+        user_id: &str,
+    ) -> Result<WorkOsMembershipAccess, StorageError> {
+        if organization_id.is_empty() || user_id.is_empty() {
+            return Err(StorageError::InvalidData(
+                "invalid WorkOS membership lookup".into(),
+            ));
+        }
+        let row = sqlx::query(
+            "SELECT
+                workspace.status AS workspace_status,
+                identity.identity_status AS user_status,
+                member.status AS membership_status
+             FROM workspaces workspace
+             LEFT JOIN users identity
+               ON identity.workos_user_id = $2
+             LEFT JOIN workspace_members member
+               ON member.workspace_id = workspace.id
+              AND member.user_id = identity.id
+             WHERE workspace.identity_provider = 'workos'
+               AND workspace.identity_organization_id = $1",
+        )
+        .bind(organization_id)
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(row) = row else {
+            return Ok(WorkOsMembershipAccess::Unknown);
+        };
+        let workspace_status: String = row.try_get("workspace_status")?;
+        let user_status: Option<String> = row.try_get("user_status")?;
+        let membership_status: Option<String> = row.try_get("membership_status")?;
+        if workspace_status != "active" || user_status.as_deref() == Some("inactive") {
+            return Ok(WorkOsMembershipAccess::Denied);
+        }
+        Ok(match membership_status.as_deref() {
+            Some("active") => WorkOsMembershipAccess::Active,
+            Some(_) => WorkOsMembershipAccess::Denied,
+            None => WorkOsMembershipAccess::Unknown,
+        })
+    }
+
+    pub async fn project_workos_identity_event(
+        &self,
+        event: &WorkOsIdentityEvent,
+    ) -> Result<WorkOsProjectionResult, StorageError> {
+        if event.id.is_empty()
+            || event.id.len() > 160
+            || event.event_type.is_empty()
+            || event.event_type.len() > 160
+            || event.payload_sha256.len() != 64
+        {
+            return Err(StorageError::InvalidData(
+                "invalid WorkOS identity projection".into(),
+            ));
+        }
+        validate_workos_identity_data(&event.data)?;
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 17))")
+            .bind(&event.id)
+            .execute(&mut *transaction)
+            .await?;
+        if let Some(stored_hash) = sqlx::query_scalar::<_, String>(
+            "SELECT payload_sha256
+             FROM identity_webhook_receipts
+             WHERE provider = 'workos' AND event_id = $1",
+        )
+        .bind(&event.id)
+        .fetch_optional(&mut *transaction)
+        .await?
+        {
+            transaction.commit().await?;
+            return if stored_hash == event.payload_sha256 {
+                Ok(WorkOsProjectionResult::Duplicate)
+            } else {
+                Err(StorageError::IdempotencyConflict)
+            };
+        }
+
+        let applied = match &event.data {
+            WorkOsIdentityData::Organization {
+                organization_id,
+                name,
+                status,
+                event_at,
+            } => {
+                let workspace = ensure_workos_workspace(&mut transaction, organization_id).await?;
+                sqlx::query(
+                    "UPDATE workspaces
+                     SET name = $2,
+                         status = $3,
+                         identity_updated_at = $4,
+                         updated_at = now()
+                     WHERE id = $1
+                       AND (
+                         identity_updated_at IS NULL
+                         OR identity_updated_at <= $4
+                       )",
+                )
+                .bind(&workspace)
+                .bind(name)
+                .bind(status)
+                .bind(event_at)
+                .execute(&mut *transaction)
+                .await?
+                .rows_affected()
+                    > 0
+            }
+            WorkOsIdentityData::User {
+                user_id,
+                email,
+                display_name,
+                status,
+                event_at,
+            } => {
+                let identity = ensure_workos_user(&mut transaction, user_id).await?;
+                let updated = sqlx::query(
+                    "UPDATE users
+                     SET email = COALESCE($2, email),
+                         display_name = COALESCE($3, display_name),
+                         identity_status = $4,
+                         identity_updated_at = $5
+                     WHERE id = $1
+                       AND (
+                         identity_updated_at IS NULL
+                         OR identity_updated_at <= $5
+                       )",
+                )
+                .bind(&identity)
+                .bind(email)
+                .bind(display_name)
+                .bind(status)
+                .bind(event_at)
+                .execute(&mut *transaction)
+                .await?
+                .rows_affected()
+                    > 0;
+                if status == "inactive" {
+                    sqlx::query(
+                        "UPDATE workspace_members
+                         SET status = 'inactive', updated_at = GREATEST(updated_at, $2)
+                         WHERE user_id = $1 AND updated_at <= $2",
+                    )
+                    .bind(&identity)
+                    .bind(event_at)
+                    .execute(&mut *transaction)
+                    .await?;
+                }
+                updated
+            }
+            WorkOsIdentityData::Membership {
+                membership_id,
+                organization_id,
+                user_id,
+                role,
+                status,
+                event_at,
+            } => {
+                let workspace = ensure_workos_workspace(&mut transaction, organization_id).await?;
+                let identity = ensure_workos_user(&mut transaction, user_id).await?;
+                sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 18))")
+                    .bind(membership_id)
+                    .execute(&mut *transaction)
+                    .await?;
+                let existing = sqlx::query(
+                    "SELECT workspace_id, user_id, workos_membership_id, updated_at
+                     FROM workspace_members
+                     WHERE workos_membership_id = $1
+                        OR (workspace_id = $2 AND user_id = $3)
+                     ORDER BY CASE WHEN workos_membership_id = $1 THEN 0 ELSE 1 END
+                     LIMIT 1",
+                )
+                .bind(membership_id)
+                .bind(&workspace)
+                .bind(&identity)
+                .fetch_optional(&mut *transaction)
+                .await?;
+                if let Some(existing) = existing {
+                    let stored_workspace: String = existing.try_get("workspace_id")?;
+                    let stored_user: String = existing.try_get("user_id")?;
+                    let stored_membership: Option<String> =
+                        existing.try_get("workos_membership_id")?;
+                    if stored_workspace != workspace
+                        || stored_user != identity
+                        || stored_membership
+                            .as_deref()
+                            .is_some_and(|value| value != membership_id)
+                    {
+                        return Err(StorageError::IdempotencyConflict);
+                    }
+                    sqlx::query(
+                        "UPDATE workspace_members
+                         SET workos_membership_id = $3,
+                             role = $4,
+                             status = $5,
+                             role_updated_at = CASE
+                               WHEN role <> $4 THEN $6
+                               ELSE role_updated_at
+                             END,
+                             updated_at = $6
+                         WHERE workspace_id = $1 AND user_id = $2
+                           AND updated_at <= $6",
+                    )
+                    .bind(&workspace)
+                    .bind(&identity)
+                    .bind(membership_id)
+                    .bind(role)
+                    .bind(status)
+                    .bind(event_at)
+                    .execute(&mut *transaction)
+                    .await?
+                    .rows_affected()
+                        > 0
+                } else {
+                    sqlx::query(
+                        "INSERT INTO workspace_members (
+                            workspace_id, user_id, role, workos_membership_id,
+                            status, role_updated_at, updated_at
+                         ) VALUES ($1,$2,$3,$4,$5,$6,$6)",
+                    )
+                    .bind(&workspace)
+                    .bind(&identity)
+                    .bind(role)
+                    .bind(membership_id)
+                    .bind(status)
+                    .bind(event_at)
+                    .execute(&mut *transaction)
+                    .await?;
+                    true
+                }
+            }
+            WorkOsIdentityData::Ignored => false,
+        };
+        sqlx::query(
+            "INSERT INTO identity_webhook_receipts (
+                provider, event_id, event_type, payload_sha256
+             ) VALUES ('workos',$1,$2,$3)",
+        )
+        .bind(&event.id)
+        .bind(&event.event_type)
+        .bind(&event.payload_sha256)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(if applied {
+            WorkOsProjectionResult::Applied
+        } else {
+            WorkOsProjectionResult::Stale
+        })
     }
 
     pub async fn bootstrap_local_owner(
@@ -5759,6 +6060,184 @@ fn workspace_member_from_row(row: &PgRow) -> Result<StoredWorkspaceMember, Stora
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
     })
+}
+
+fn validate_workos_identity_data(data: &WorkOsIdentityData) -> Result<(), StorageError> {
+    let valid_id = |value: &str| !value.is_empty() && value.len() <= 160;
+    let valid_timestamp = |value: &DateTime<Utc>| {
+        *value >= DateTime::<Utc>::UNIX_EPOCH && *value <= Utc::now() + chrono::Duration::minutes(5)
+    };
+    let valid = match data {
+        WorkOsIdentityData::Organization {
+            organization_id,
+            name,
+            status,
+            event_at,
+        } => {
+            valid_id(organization_id)
+                && !name.trim().is_empty()
+                && name.len() <= 320
+                && matches!(status.as_str(), "active" | "cancelled")
+                && valid_timestamp(event_at)
+        }
+        WorkOsIdentityData::User {
+            user_id,
+            email,
+            display_name,
+            status,
+            event_at,
+        } => {
+            valid_id(user_id)
+                && email
+                    .as_deref()
+                    .is_none_or(|value| !value.is_empty() && value.len() <= 320)
+                && display_name
+                    .as_deref()
+                    .is_none_or(|value| value.len() <= 320)
+                && matches!(status.as_str(), "active" | "inactive")
+                && valid_timestamp(event_at)
+        }
+        WorkOsIdentityData::Membership {
+            membership_id,
+            organization_id,
+            user_id,
+            role,
+            status,
+            event_at,
+        } => {
+            valid_id(membership_id)
+                && valid_id(organization_id)
+                && valid_id(user_id)
+                && matches!(
+                    role.as_str(),
+                    "owner" | "admin" | "developer" | "operator" | "viewer" | "billing"
+                )
+                && matches!(status.as_str(), "pending" | "active" | "inactive")
+                && valid_timestamp(event_at)
+        }
+        WorkOsIdentityData::Ignored => true,
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(StorageError::InvalidData(
+            "invalid WorkOS identity projection".into(),
+        ))
+    }
+}
+
+async fn ensure_workos_workspace(
+    transaction: &mut Transaction<'_, Postgres>,
+    organization_id: &str,
+) -> Result<String, StorageError> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 19))")
+        .bind(organization_id)
+        .execute(&mut **transaction)
+        .await?;
+    let workspace = if let Some(id) = sqlx::query_scalar::<_, String>(
+        "SELECT id
+         FROM workspaces
+         WHERE (identity_provider = 'workos' AND identity_organization_id = $1)
+            OR workos_organization_id = $1
+         ORDER BY CASE
+           WHEN identity_provider = 'workos' AND identity_organization_id = $1 THEN 0
+           ELSE 1
+         END
+         LIMIT 1",
+    )
+    .bind(organization_id)
+    .fetch_optional(&mut **transaction)
+    .await?
+    {
+        sqlx::query(
+            "UPDATE workspaces
+             SET workos_organization_id = $2,
+                 identity_provider = 'workos',
+                 identity_organization_id = $2
+             WHERE id = $1",
+        )
+        .bind(&id)
+        .bind(organization_id)
+        .execute(&mut **transaction)
+        .await?;
+        id
+    } else {
+        let id = WorkspaceId::new().to_string();
+        let slug = format!("{}-{}", slugify(organization_id), &id[id.len() - 6..]);
+        sqlx::query(
+            "INSERT INTO workspaces (
+                id, name, slug, workos_organization_id,
+                identity_provider, identity_organization_id
+             ) VALUES ($1,$2,$3,$2,'workos',$2)",
+        )
+        .bind(&id)
+        .bind(organization_id)
+        .bind(slug)
+        .execute(&mut **transaction)
+        .await?;
+        id
+    };
+    for kind in ["test", "live"] {
+        let name = if kind == "live" { "Live" } else { "Test" };
+        sqlx::query(
+            "INSERT INTO environments (id, workspace_id, kind, name)
+             VALUES ($1,$2,$3,$4)
+             ON CONFLICT (workspace_id, kind) DO NOTHING",
+        )
+        .bind(EnvironmentId::new().to_string())
+        .bind(&workspace)
+        .bind(kind)
+        .bind(name)
+        .execute(&mut **transaction)
+        .await?;
+    }
+    sqlx::query(
+        "INSERT INTO workspace_entitlements (
+            workspace_id, plan, included_jobs, node_limit,
+            metadata_retention_days, document_retention_hours,
+            accept_new_cloud_jobs, job_overage_unit, job_overage_cents
+         ) VALUES ($1,'free',$2,$3,$4,$5,true,NULL,NULL)
+         ON CONFLICT (workspace_id) DO NOTHING",
+    )
+    .bind(&workspace)
+    .bind(FREE_PLAN.included_jobs)
+    .bind(FREE_PLAN.node_limit)
+    .bind(FREE_PLAN.metadata_retention_days)
+    .bind(FREE_PLAN.document_retention_hours)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(workspace)
+}
+
+async fn ensure_workos_user(
+    transaction: &mut Transaction<'_, Postgres>,
+    workos_user_id: &str,
+) -> Result<String, StorageError> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 20))")
+        .bind(workos_user_id)
+        .execute(&mut **transaction)
+        .await?;
+    if let Some(id) =
+        sqlx::query_scalar::<_, String>("SELECT id FROM users WHERE workos_user_id = $1")
+            .bind(workos_user_id)
+            .fetch_optional(&mut **transaction)
+            .await?
+    {
+        return Ok(id);
+    }
+    let id = format!("usr_{}", Uuid::now_v7());
+    let placeholder_email = format!("{workos_user_id}@invalid.piqae.local");
+    sqlx::query(
+        "INSERT INTO users (
+            id, workos_user_id, email, identity_status
+         ) VALUES ($1,$2,$3,'active')",
+    )
+    .bind(&id)
+    .bind(workos_user_id)
+    .bind(placeholder_email)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(id)
 }
 
 fn slugify(value: &str) -> String {

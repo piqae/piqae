@@ -18,7 +18,8 @@ use spool_storage_postgres::{
     StoredDeviceAuthorization, StoredNodeUpdate, StoredPlatformAccount, StoredPrinter, StoredStock,
     StoredTarget, StoredTargetBinding, StoredTenantEvent, StoredUpload, StoredUsageSummary,
     StoredWebhook, StoredWebhookDelivery, StripeBillingEvent, StripeProjectionResult,
-    SyncedPrinter, UpsertedPlatformAccount, WebhookDeliveryWork,
+    SyncedPrinter, UpsertedPlatformAccount, WebhookDeliveryWork, WorkOsIdentityEvent,
+    WorkOsProjectionResult,
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -130,6 +131,12 @@ pub trait Repository: Send + Sync + 'static {
         _event: &StripeBillingEvent,
         _request_id: &str,
     ) -> Result<StripeProjectionResult, RepositoryError> {
+        Err(RepositoryError::NotFound)
+    }
+    async fn project_workos_identity_event(
+        &self,
+        _event: &WorkOsIdentityEvent,
+    ) -> Result<WorkOsProjectionResult, RepositoryError> {
         Err(RepositoryError::NotFound)
     }
     async fn environment_kind(
@@ -718,6 +725,15 @@ impl Repository for PostgresStore {
         request_id: &str,
     ) -> Result<StripeProjectionResult, RepositoryError> {
         PostgresStore::project_stripe_billing_event(self, event, request_id)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn project_workos_identity_event(
+        &self,
+        event: &WorkOsIdentityEvent,
+    ) -> Result<WorkOsProjectionResult, RepositoryError> {
+        PostgresStore::project_workos_identity_event(self, event)
             .await
             .map_err(Into::into)
     }
