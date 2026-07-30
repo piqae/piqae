@@ -5,9 +5,9 @@ use semver::Version;
 use sha2::{Digest as _, Sha256};
 use spool_update_guardian::{
     ActivationObservation, Admission, AdmissionBlock, CandidateVerification, GuardianConfig,
-    GuardianPhase, GuardianStore, HealthObservation, JournalStore, PlatformArtifactVerifier,
-    RuntimeActivity, RuntimeHealth, RuntimeManager, RuntimePlan, RuntimeSlot, UpdateCommand,
-    UpdateGuardian, verify_candidate,
+    GuardianError, GuardianPhase, GuardianState, GuardianStore, HealthObservation, JournalStore,
+    PlatformArtifactVerifier, RuntimeActivity, RuntimeHealth, RuntimeManager, RuntimePlan,
+    RuntimeSlot, UpdateCommand, UpdateGuardian, verify_candidate,
 };
 use spool_update_metadata::{
     MetadataRole, ReleaseMetadata, SignedMetadata, UpdateChannel, UpdateTarget, key_id,
@@ -149,6 +149,25 @@ impl RuntimeHealth for FakeHealth {
         } else {
             Ok(self.0.remove(0))
         }
+    }
+}
+
+#[derive(Default)]
+struct FailCompletionStore {
+    current: Option<GuardianState>,
+}
+
+impl GuardianStore for FailCompletionStore {
+    fn load(&self) -> Result<Option<GuardianState>, GuardianError> {
+        Ok(self.current.clone())
+    }
+
+    fn append(&mut self, state: &GuardianState) -> Result<(), GuardianError> {
+        if matches!(state.phase, GuardianPhase::Completed { .. }) {
+            return Err(std::io::Error::other("simulated durable write failure").into());
+        }
+        self.current = Some(state.clone());
+        Ok(())
     }
 }
 
@@ -555,5 +574,48 @@ fn health_attempt_limit_enters_rollback_without_sleeping() {
     assert!(matches!(
         guardian.state().phase,
         GuardianPhase::RollingBack { .. }
+    ));
+}
+
+#[test]
+fn failed_completion_persistence_does_not_advance_in_memory_trust() {
+    let directory = tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
+    let artifact = directory.path().join("piqae.zip");
+    let mut guardian = UpdateGuardian::open(
+        config(),
+        FailCompletionStore::default(),
+        Version::new(1, 0, 0),
+        1,
+    )
+    .unwrap_or_else(|error| panic!("open: {error}"));
+    guardian
+        .request(
+            UpdateCommand {
+                command_id: "completion-persistence".into(),
+                requested_at_unix_ms: 1,
+                candidate: candidate(&artifact),
+            },
+            idle(),
+            2,
+        )
+        .unwrap_or_default();
+    let mut runtime = FakeRuntime::default();
+    let mut health = FakeHealth(vec![HealthObservation::Healthy]);
+    guardian
+        .advance(idle(), 3, &mut runtime, &mut health)
+        .unwrap_or_default();
+    guardian
+        .advance(idle(), 4, &mut runtime, &mut health)
+        .unwrap_or_default();
+    assert!(
+        guardian
+            .advance(idle(), 5, &mut runtime, &mut health)
+            .is_err()
+    );
+    assert_eq!(guardian.state().installed_release, Version::new(1, 0, 0));
+    assert_eq!(guardian.state().trusted_metadata_version, 0);
+    assert!(matches!(
+        guardian.state().phase,
+        GuardianPhase::HealthChecking { .. }
     ));
 }

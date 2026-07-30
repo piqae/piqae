@@ -737,7 +737,6 @@ impl<S: GuardianStore> UpdateGuardian<S> {
                     .map_err(GuardianError::Health)?
                 {
                     HealthObservation::Healthy => {
-                        self.state.installed_release = plan.staged.version.clone();
                         let metadata_version = self
                             .state
                             .command
@@ -745,14 +744,7 @@ impl<S: GuardianStore> UpdateGuardian<S> {
                             .ok_or(GuardianError::MissingCommand)?
                             .candidate
                             .metadata_version;
-                        self.state.trusted_metadata_version = metadata_version;
-                        self.transition(
-                            GuardianPhase::Completed {
-                                installed: plan.staged,
-                                rollback: plan.previous,
-                            },
-                            now_unix_ms,
-                        )
+                        self.complete(plan, metadata_version, now_unix_ms)
                     }
                     HealthObservation::Unhealthy(reason) => {
                         self.begin_rollback(plan, &format!("unhealthy:{reason}"), now_unix_ms)
@@ -809,6 +801,28 @@ impl<S: GuardianStore> UpdateGuardian<S> {
             },
             now_unix_ms,
         )
+    }
+
+    fn complete(
+        &mut self,
+        plan: RuntimePlan,
+        metadata_version: u64,
+        now_unix_ms: i64,
+    ) -> Result<(), GuardianError> {
+        let prior = self.state.clone();
+        self.state.installed_release = plan.staged.version.clone();
+        self.state.trusted_metadata_version = metadata_version;
+        let result = self.transition(
+            GuardianPhase::Completed {
+                installed: plan.staged,
+                rollback: plan.previous,
+            },
+            now_unix_ms,
+        );
+        if result.is_err() {
+            self.state = prior;
+        }
+        result
     }
 
     fn begin_rollback(
