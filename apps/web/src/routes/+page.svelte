@@ -74,7 +74,7 @@
       <span class="m-eyebrow">How it works</span>
       <div class="section-heading">
         <h2 class="m-heading">Build once. Print wherever the work happens.</h2>
-        <a href="/how-it-works">Explore the print path <span>→</span></a>
+        <a href="/docs/quickstart">Open the quickstart <span>→</span></a>
       </div>
       <div class="steps">
         <article>
@@ -115,7 +115,7 @@
             <span><i></i> Durable cloud and local queues</span>
             <span><i></i> Native capability at every site</span>
           </div>
-          <a href="/how-it-works">See how Piqae Cloud works <span>→</span></a>
+          <a href="/docs/jobs">Read the job lifecycle guide <span>→</span></a>
         </div>
       </div>
     </div>

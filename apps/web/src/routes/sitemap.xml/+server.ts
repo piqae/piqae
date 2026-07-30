@@ -4,7 +4,6 @@ import { printNodePricingReviewDueAt } from '$lib/marketing/calculator';
 
 const stableRoutes = [
   '/',
-  '/how-it-works',
   '/downloads',
   '/pricing',
   '/about',

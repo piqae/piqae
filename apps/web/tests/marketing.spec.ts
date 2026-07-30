@@ -2,7 +2,6 @@ import { expect, test } from '@playwright/test';
 
 const publicRoutes = [
   ['/', 'Printing infrastructure, ready for your product.'],
-  ['/how-it-works', 'From your app to the right printer—without the guesswork.'],
   ['/pricing', 'Pricing for every print path, starting at $0.'],
   ['/about', 'Built where every label matters.'],
   ['/compare', 'Find the printing platform that fits how you build.'],
@@ -12,6 +11,25 @@ const publicRoutes = [
   ['/open-source', 'Open by design. Yours to run.'],
   ['/security', 'Built for the documents your business depends on.']
 ] as const;
+
+test('primary public destinations never return a server error', async ({ request }) => {
+  const destinations = [
+    '/docs',
+    '/docs/quickstart',
+    '/downloads',
+    ...publicRoutes.map(([path]) => path)
+  ];
+  for (const route of destinations) {
+    const response = await request.get(route);
+    expect(response.status(), route).toBeLessThan(400);
+  }
+});
+
+test('the retired product page redirects to useful documentation', async ({ request }) => {
+  const response = await request.get('/how-it-works', { maxRedirects: 0 });
+  expect(response.status()).toBe(308);
+  expect(response.headers().location).toBe('/docs');
+});
 
 test('marketing routes have unique content and remain launch-gated', async ({ page }) => {
   for (const [route, heading] of publicRoutes) {
