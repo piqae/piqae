@@ -1,5 +1,5 @@
 import { env as privateEnv } from '$env/dynamic/private';
-import { GetObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import { GetObjectCommand, HeadObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import {
   parseReleaseManifest,
@@ -21,6 +21,7 @@ const releaseAssetPattern =
   /^(?:appcast-(?:macos|windows)\.xml|piqae-[A-Za-z0-9][A-Za-z0-9._-]{0,160}\.(?:dmg|exe|zip|json|txt|sha256))$/;
 const maximumManifestBytes = 128 * 1024;
 const manifestReadTimeoutMilliseconds = 2_000;
+const assetLookupTimeoutMilliseconds = 2_000;
 
 export function releaseOriginConfig(
   environment: Record<string, string | undefined> = privateEnv
@@ -57,6 +58,22 @@ export async function signedReleaseAssetUrl(
   if (!config || !key) return null;
 
   const client = releaseS3Client(config);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), assetLookupTimeoutMilliseconds);
+  try {
+    await client.send(
+      new HeadObjectCommand({
+        Bucket: config.bucket,
+        Key: key
+      }),
+      { abortSignal: controller.signal }
+    );
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+
   const inline = asset.endsWith('.xml') || asset.endsWith('.json') || asset.endsWith('.txt');
   const command = new GetObjectCommand({
     Bucket: config.bucket,
