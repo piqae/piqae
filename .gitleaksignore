@@ -1,0 +1,28 @@
+# Reviewed false positives from immutable history. Keep these suppressions
+# fingerprint-specific so new credential-shaped values still fail closed.
+#
+# Deployment test environment variable name; no value was committed.
+e0c9a0a1aa1b0fe309f8eb343ced104c69a06d45:deploy/cloud/test-promote.sh:generic-api-key:54
+
+# Public idempotency examples and deterministic test fixtures, not credentials.
+8d05f503a76692d644df3ef22b15ba71d2e090ed:apps/web/src/routes/docs/+page.svelte:generic-api-key:15
+8d05f503a76692d644df3ef22b15ba71d2e090ed:apps/web/src/lib/docs-content.ts:generic-api-key:56
+8d05f503a76692d644df3ef22b15ba71d2e090ed:docs/api/platform-service-accounts.md:generic-api-key:36
+8d05f503a76692d644df3ef22b15ba71d2e090ed:docs/getting-started/cloud.md:generic-api-key:60
+033e50923b779e80864d64e2880ad104e152ed43:sdk/typescript/README.md:generic-api-key:28
+43a3d5fe220fea0218bebe6e7166a7258ddd1b53:apps/web/src/routes/dashboard/accounts/[external_id]/+page.svelte:generic-api-key:36
+728d3c5ec4d1a8004212af08db564a455cd8c8d7:sdk/typescript/tests/platform.test.ts:generic-api-key:196
+0b0749a2c700578d2137ef581bfa019871263c55:docs/api/quickstart.md:generic-api-key:20
+
+# The release auditor scans for this PEM marker; it is not key material.
+0a2d76280ba47792d2c4b584de67e93fd44b74c2:release/tools/release_bundle.py:private-key:28
+
+# PrintNode migration documentation uses shell-variable and placeholder values.
+14e912892c49199f94e107f0d08e0de4d562ce52:docs/api/printnode-migration.md:curl-auth-header:25
+14e912892c49199f94e107f0d08e0de4d562ce52:docs/api/printnode-migration.md:curl-auth-user:19
+14e912892c49199f94e107f0d08e0de4d562ce52:docs/api/printnode-migration.md:curl-auth-user:25
+14e912892c49199f94e107f0d08e0de4d562ce52:docs/api/printnode-migration.md:generic-api-key:28
+
+# Archived architecture examples use non-routable example.com placeholders.
+e7703e78135dcbfc2022f72dd4d6e9e67b21b972:docs/12-open-source-saas-and-build-plan.md:curl-auth-header:214
+e7703e78135dcbfc2022f72dd4d6e9e67b21b972:docs/12-open-source-saas-and-build-plan.md:curl-auth-header:223
