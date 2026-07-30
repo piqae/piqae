@@ -1,9 +1,65 @@
 @import '@fontsource-variable/inter/opsz.css';
 @import '@fontsource-variable/instrument-sans/wdth.css';
 
+@font-face {
+  font-family: 'Exact';
+  src: url('/assets/fonts/exact/exact-xlight.woff2') format('woff2');
+  font-display: swap;
+  font-style: normal;
+  font-weight: 200;
+}
+
+@font-face {
+  font-family: 'Exact';
+  src: url('/assets/fonts/exact/exact-light.woff2') format('woff2');
+  font-display: swap;
+  font-style: normal;
+  font-weight: 300;
+}
+
+@font-face {
+  font-family: 'Exact';
+  src: url('/assets/fonts/exact/exact-regular.woff2') format('woff2');
+  font-display: swap;
+  font-style: normal;
+  font-weight: 400;
+}
+
+@font-face {
+  font-family: 'Exact';
+  src: url('/assets/fonts/exact/exact-italic.woff2') format('woff2');
+  font-display: swap;
+  font-style: italic;
+  font-weight: 400;
+}
+
+@font-face {
+  font-family: 'Exact';
+  src: url('/assets/fonts/exact/exact-medium.woff2') format('woff2');
+  font-display: swap;
+  font-style: normal;
+  font-weight: 500;
+}
+
+@font-face {
+  font-family: 'Exact';
+  src: url('/assets/fonts/exact/exact-bold.woff2') format('woff2');
+  font-display: swap;
+  font-style: normal;
+  font-weight: 700;
+}
+
+@font-face {
+  font-family: 'Exact';
+  src: url('/assets/fonts/exact/exact-black.woff2') format('woff2');
+  font-display: swap;
+  font-style: normal;
+  font-weight: 900;
+}
+
 .marketing {
   color-scheme: light;
-  --m-font-editorial: Georgia, 'Times New Roman', Times, serif;
+  --m-font-editorial: 'Exact', Georgia, 'Times New Roman', Times, serif;
   --m-font-display: 'Instrument Sans Variable', 'Inter Variable', Inter, ui-sans-serif, system-ui,
     sans-serif;
   --m-font-body: 'Inter Variable', Inter, ui-sans-serif, system-ui, sans-serif;
@@ -91,6 +147,7 @@
 .marketing .m-display {
   max-width: 920px;
   font-size: clamp(54px, 8.4vw, 110px);
+  font-weight: 700;
   line-height: 0.92;
 }
 
