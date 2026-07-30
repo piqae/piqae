@@ -6163,7 +6163,7 @@ async fn ensure_workos_workspace(
         id
     } else {
         let id = WorkspaceId::new().to_string();
-        let slug = format!("{}-{}", slugify(organization_id), &id[id.len() - 6..]);
+        let slug = workos_workspace_slug(organization_id, &id);
         sqlx::query(
             "INSERT INTO workspaces (
                 id, name, slug, workos_organization_id,
@@ -6260,6 +6260,17 @@ fn slugify(value: &str) -> String {
     } else {
         slug
     }
+}
+
+fn workos_workspace_slug(organization_id: &str, workspace_id: &str) -> String {
+    let suffix = &workspace_id[workspace_id.len() - 6..];
+    format!(
+        "{}-{suffix}",
+        slugify(organization_id)
+            .chars()
+            .take(120 - suffix.len() - 1)
+            .collect::<String>()
+    )
 }
 
 async fn insert_event(
@@ -6633,5 +6644,12 @@ mod tests {
     fn workspace_slugs_are_bounded_to_portable_ascii() {
         assert_eq!(slugify("  C4 Coffee / Auckland  "), "c4-coffee-auckland");
         assert_eq!(slugify("***"), "workspace");
+    }
+
+    #[test]
+    fn workos_workspace_slugs_are_bounded_and_keep_the_unique_suffix() {
+        let slug = workos_workspace_slug(&"organization-".repeat(20), "workspace_123456");
+        assert_eq!(slug.len(), 120);
+        assert!(slug.ends_with("-123456"));
     }
 }

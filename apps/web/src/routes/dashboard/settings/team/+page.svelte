@@ -12,7 +12,9 @@
 />
 
 {#if form?.message}
-  <div class="notice" role="status">{form.message}</div>
+  <div class:failure={form.error} class="notice" role={form.error ? 'alert' : 'status'}>
+    {form.message}
+  </div>
 {/if}
 
 <div class="page-grid">
@@ -189,6 +191,11 @@
     border-radius: var(--radius-md);
     color: var(--text-primary);
     font-size: 10px;
+  }
+
+  .notice.failure {
+    background: color-mix(in oklch, var(--danger), transparent 88%);
+    border-color: color-mix(in oklch, var(--danger), transparent 60%);
   }
 
   .workspace-list,

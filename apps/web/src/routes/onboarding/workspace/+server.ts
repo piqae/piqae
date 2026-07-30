@@ -26,8 +26,14 @@ export const POST: RequestHandler = async (event) => {
   ) {
     error(400, 'The workspace request expired; reload and try again');
   }
-  const organization = await createOrganization(name, `piqae:${user.id}:${token}`);
-  await ensureOrganizationMembership(organization.id, user.id, 'owner');
+  const recoveryKey = `piqae:${user.id}:${token}`;
+  const organization = await createOrganization(name, recoveryKey);
+  await ensureOrganizationMembership(
+    organization.id,
+    user.id,
+    'owner',
+    `${recoveryKey}:owner-membership`
+  );
   const response = await authKit.switchOrganization(event, {
     organizationId: organization.id
   });

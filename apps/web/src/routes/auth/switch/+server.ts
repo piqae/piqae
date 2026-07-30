@@ -2,6 +2,7 @@ import { authKit } from '@workos/authkit-sveltekit';
 import { error, redirect } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { authMode } from '$lib/server/auth-config';
+import { safeReturnTo } from '$lib/server/safe-return-to';
 import { listUserMemberships } from '$lib/server/workos-admin';
 
 export const POST: RequestHandler = async (event) => {
@@ -10,7 +11,10 @@ export const POST: RequestHandler = async (event) => {
   if (!user) redirect(303, '/login');
   const form = await event.request.formData();
   const organizationId = form.get('organization_id');
-  const returnTo = safeReturnTo(form.get('return_to'));
+  const requestedReturnTo = form.get('return_to');
+  const returnTo = safeReturnTo(
+    typeof requestedReturnTo === 'string' ? requestedReturnTo : null
+  );
   if (typeof organizationId !== 'string' || !organizationId) {
     error(400, 'A workspace is required');
   }
@@ -27,9 +31,3 @@ export const POST: RequestHandler = async (event) => {
   response.headers.set('Location', returnTo);
   return response;
 };
-
-function safeReturnTo(value: FormDataEntryValue | null): string {
-  return typeof value === 'string' && value.startsWith('/') && !value.startsWith('//')
-    ? value
-    : '/dashboard';
-}

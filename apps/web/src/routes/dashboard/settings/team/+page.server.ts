@@ -36,43 +36,42 @@ export const load: PageServerLoad = async (event) => {
 
 export const actions: Actions = {
   invite: async (event) => {
-    const current = actor(event);
-    if (!current) redirect(303, '/login');
-    if (!canManage(current.role)) return fail(403, { message: 'Only owners and admins can invite members.' });
+    const current = workosActor(event);
+    if (!canManage(current.role)) return actionFailure(403, 'Only owners and admins can invite members.');
     const form = await event.request.formData();
     const email = text(form, 'email').toLowerCase();
     const role = text(form, 'role');
     if (!validEmail(email) || !isOrganizationRole(role)) {
-      return fail(400, { message: 'Enter a valid email address and role.' });
+      return actionFailure(400, 'Enter a valid email address and role.');
     }
     if (role === 'owner' && current.role !== 'owner') {
-      return fail(403, { message: 'Only an owner can invite another owner.' });
+      return actionFailure(403, 'Only an owner can invite another owner.');
     }
     try {
       await sendInvitation(current.organizationId, current.userId, email, role);
-      return { message: `Invitation sent to ${email}.` };
+      return { error: false, message: `Invitation sent to ${email}.` };
     } catch (error) {
       return workosFailure(error, 'The invitation could not be sent.');
     }
   },
   updateRole: async (event) => {
-    const current = actor(event);
-    if (!current) redirect(303, '/login');
-    if (!canManage(current.role)) return fail(403, { message: 'Only owners and admins can update roles.' });
+    const current = workosActor(event);
+    if (!canManage(current.role)) return actionFailure(403, 'Only owners and admins can update roles.');
     const form = await event.request.formData();
     const membershipId = text(form, 'membership_id');
     const role = text(form, 'role');
     if (!membershipId || !isOrganizationRole(role)) {
-      return fail(400, { message: 'Choose a valid member and role.' });
+      return actionFailure(400, 'Choose a valid member and role.');
     }
     const members = await listOrganizationMembers(current.organizationId);
     const target = members.find((member) => member.id === membershipId);
-    if (!target) return fail(404, { message: 'That member is not in this workspace.' });
+    if (!target) return actionFailure(404, 'That member is not in this workspace.');
     const authorizationFailure = roleChangeFailure(current.role, target, role, members);
-    if (authorizationFailure) return fail(403, { message: authorizationFailure });
+    if (authorizationFailure) return actionFailure(403, authorizationFailure);
     try {
       await updateMembershipRole(membershipId, role);
       return {
+        error: false,
         message:
           target.userId === current.userId
             ? 'Role updated. Refresh your session to load the new permissions.'
@@ -83,44 +82,41 @@ export const actions: Actions = {
     }
   },
   remove: async (event) => {
-    const current = actor(event);
-    if (!current) redirect(303, '/login');
-    if (!canManage(current.role)) return fail(403, { message: 'Only owners and admins can remove access.' });
+    const current = workosActor(event);
+    if (!canManage(current.role)) return actionFailure(403, 'Only owners and admins can remove access.');
     const form = await event.request.formData();
     const membershipId = text(form, 'membership_id');
     const members = await listOrganizationMembers(current.organizationId);
     const target = members.find((member) => member.id === membershipId);
-    if (!target) return fail(404, { message: 'That member is not in this workspace.' });
+    if (!target) return actionFailure(404, 'That member is not in this workspace.');
     const authorizationFailure = removalFailure(current.role, target, members);
-    if (authorizationFailure) return fail(403, { message: authorizationFailure });
+    if (authorizationFailure) return actionFailure(403, authorizationFailure);
     try {
       await removeMembershipAccess(membershipId);
-      return { message: `Access removed for ${target.email}.` };
+      return { error: false, message: `Access removed for ${target.email}.` };
     } catch (error) {
       return workosFailure(error, 'Member access could not be removed.');
     }
   },
   revokeInvitation: async (event) => {
-    const current = actor(event);
-    if (!current) redirect(303, '/login');
-    if (!canManage(current.role)) return fail(403, { message: 'Only owners and admins can revoke invitations.' });
+    const current = workosActor(event);
+    if (!canManage(current.role)) return actionFailure(403, 'Only owners and admins can revoke invitations.');
     const form = await event.request.formData();
     const invitationId = text(form, 'invitation_id');
     const invitations = await listOrganizationInvitations(current.organizationId);
     if (!invitations.some((invitation) => invitation.id === invitationId)) {
-      return fail(404, { message: 'That invitation is not in this workspace.' });
+      return actionFailure(404, 'That invitation is not in this workspace.');
     }
     try {
       await revokeInvitation(invitationId);
-      return { message: 'Invitation revoked.' };
+      return { error: false, message: 'Invitation revoked.' };
     } catch (error) {
       return workosFailure(error, 'The invitation could not be revoked.');
     }
   },
   resendInvitation: async (event) => {
-    const current = actor(event);
-    if (!current) redirect(303, '/login');
-    if (!canManage(current.role)) return fail(403, { message: 'Only owners and admins can resend invitations.' });
+    const current = workosActor(event);
+    if (!canManage(current.role)) return actionFailure(403, 'Only owners and admins can resend invitations.');
     const form = await event.request.formData();
     const invitationId = text(form, 'invitation_id');
     const invitations = await listOrganizationInvitations(current.organizationId);
@@ -129,16 +125,23 @@ export const actions: Actions = {
         (invitation) => invitation.id === invitationId && invitation.state === 'pending'
       )
     ) {
-      return fail(404, { message: 'That pending invitation is not in this workspace.' });
+      return actionFailure(404, 'That pending invitation is not in this workspace.');
     }
     try {
       await resendInvitation(invitationId);
-      return { message: 'Invitation resent.' };
+      return { error: false, message: 'Invitation resent.' };
     } catch (error) {
       return workosFailure(error, 'The invitation could not be resent.');
     }
   }
 };
+
+function workosActor(event: RequestEvent): NonNullable<ReturnType<typeof actor>> {
+  if (authMode !== 'workos') redirect(303, '/dashboard/settings');
+  const current = actor(event);
+  if (!current) redirect(303, '/login');
+  return current;
+}
 
 function actor(event: RequestEvent): {
   userId: string;
@@ -205,10 +208,14 @@ function validEmail(value: string): boolean {
 
 function workosFailure(error: unknown, fallback: string) {
   if (error instanceof WorkOsAdminError && error.status === 409) {
-    return fail(409, { message: 'That membership or invitation already exists.' });
+    return actionFailure(409, 'That membership or invitation already exists.');
   }
   if (error instanceof WorkOsAdminError && error.status === 422) {
-    return fail(422, { message: 'WorkOS rejected the requested membership change.' });
+    return actionFailure(422, 'WorkOS rejected the requested membership change.');
   }
-  return fail(502, { message: fallback });
+  return actionFailure(502, fallback);
+}
+
+function actionFailure(status: number, message: string) {
+  return fail(status, { error: true, message });
 }

@@ -2,6 +2,7 @@ import { workosConfig } from '$lib/server/auth-config';
 
 const WORKOS_API_ORIGIN = 'https://api.workos.com';
 const REQUEST_TIMEOUT_MS = 8_000;
+const MAX_LIST_PAGES = 1_000;
 const ORGANIZATION_ROLES = [
   'owner',
   'admin',
@@ -15,6 +16,9 @@ export type OrganizationRole = (typeof ORGANIZATION_ROLES)[number];
 
 interface WorkOsList<T> {
   data: T[];
+  list_metadata?: {
+    after?: string | null;
+  };
 }
 
 interface WorkOsOrganization {
@@ -34,6 +38,7 @@ interface WorkOsMembership {
   status: 'active' | 'inactive' | 'pending';
   role: WorkOsRole;
   roles?: WorkOsRole[];
+  user: WorkOsUser;
 }
 
 interface WorkOsUser {
@@ -95,27 +100,21 @@ export function organizationRoles(): readonly OrganizationRole[] {
 }
 
 export async function listUserMemberships(userId: string): Promise<SafeOrganizationMembership[]> {
-  const response = await workosRequest<WorkOsList<WorkOsMembership>>(
+  const memberships = await workosList<WorkOsMembership>(
     `/user_management/organization_memberships?user_id=${encodeURIComponent(userId)}&statuses=active&limit=100`
   );
-  return response.data.map(safeMembership).filter((value) => value !== null);
+  return memberships.map(safeMembership).filter((value) => value !== null);
 }
 
 export async function listOrganizationMembers(
   organizationId: string
 ): Promise<SafeOrganizationMember[]> {
-  const [memberships, users] = await Promise.all([
-    workosRequest<WorkOsList<WorkOsMembership>>(
-      `/user_management/organization_memberships?organization_id=${encodeURIComponent(organizationId)}&limit=100`
-    ),
-    workosRequest<WorkOsList<WorkOsUser>>(
-      `/user_management/users?organization_id=${encodeURIComponent(organizationId)}&limit=100`
-    )
-  ]);
-  const usersById = new Map(users.data.map((user) => [user.id, user]));
-  return memberships.data.flatMap((membership) => {
+  const memberships = await workosList<WorkOsMembership>(
+    `/user_management/organization_memberships?organization_id=${encodeURIComponent(organizationId)}&limit=100`
+  );
+  return memberships.flatMap((membership) => {
     const safe = safeMembership(membership);
-    const user = usersById.get(membership.user_id);
+    const user = membership.user;
     if (!safe || !user) return [];
     const name = [user.first_name, user.last_name].filter(Boolean).join(' ');
     return [
@@ -131,10 +130,10 @@ export async function listOrganizationMembers(
 export async function listOrganizationInvitations(
   organizationId: string
 ): Promise<SafeInvitation[]> {
-  const response = await workosRequest<WorkOsList<WorkOsInvitation>>(
+  const invitations = await workosList<WorkOsInvitation>(
     `/user_management/invitations?organization_id=${encodeURIComponent(organizationId)}&limit=100`
   );
-  return response.data.flatMap((invitation) => {
+  return invitations.flatMap((invitation) => {
     if (!invitation.role_slug || !isOrganizationRole(invitation.role_slug)) return [];
     return [
       {
@@ -151,19 +150,31 @@ export async function listOrganizationInvitations(
 
 export async function createOrganization(
   name: string,
-  idempotencyKey: string
+  recoveryKey: string
 ): Promise<WorkOsOrganization> {
-  return workosRequest('/organizations', {
-    method: 'POST',
-    body: { name },
-    idempotencyKey
-  });
+  const path = `/organizations/external_id/${encodeURIComponent(recoveryKey)}`;
+  try {
+    return await workosRequest(path);
+  } catch (error) {
+    if (!(error instanceof WorkOsAdminError) || error.status !== 404) throw error;
+  }
+  try {
+    return await workosRequest('/organizations', {
+      method: 'POST',
+      body: { name, external_id: recoveryKey },
+      idempotencyKey: recoveryKey
+    });
+  } catch (error) {
+    if (!(error instanceof WorkOsAdminError) || error.status !== 409) throw error;
+    return workosRequest(path);
+  }
 }
 
 export async function ensureOrganizationMembership(
   organizationId: string,
   userId: string,
-  role: OrganizationRole
+  role: OrganizationRole,
+  idempotencyKey?: string
 ): Promise<void> {
   const memberships = await listUserMemberships(userId);
   if (memberships.some((membership) => membership.organizationId === organizationId)) return;
@@ -173,7 +184,8 @@ export async function ensureOrganizationMembership(
       organization_id: organizationId,
       user_id: userId,
       role_slug: role
-    }
+    },
+    idempotencyKey
   });
 }
 
@@ -236,6 +248,22 @@ function safeMembership(membership: WorkOsMembership): SafeOrganizationMembershi
     status: membership.status,
     role
   };
+}
+
+async function workosList<T>(path: string): Promise<T[]> {
+  const data: T[] = [];
+  const cursors = new Set<string>();
+  let after: string | null = null;
+  for (let page = 0; page < MAX_LIST_PAGES; page += 1) {
+    const cursor: string = after ? `&after=${encodeURIComponent(after)}` : '';
+    const response: WorkOsList<T> = await workosRequest<WorkOsList<T>>(`${path}${cursor}`);
+    data.push(...response.data);
+    after = response.list_metadata?.after ?? null;
+    if (!after) return data;
+    if (cursors.has(after)) throw new WorkOsAdminError(502, 'pagination_cycle');
+    cursors.add(after);
+  }
+  throw new WorkOsAdminError(502, 'pagination_limit');
 }
 
 async function workosRequest<T>(
