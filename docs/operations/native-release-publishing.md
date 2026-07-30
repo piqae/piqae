@@ -155,19 +155,21 @@ and queue reconciliation have been observed.
 
 ## Current blockers
 
-- Apple Developer ID, notarisation, and Sparkle release evidence are not
-  configured in the repository.
+- macOS build `0.1.0 (5)` completed Developer ID signing for the app, agent,
+  executor, and installer; Apple notarisation/stapling for the app and DMG;
+  Sparkle Ed25519 signing; immutable publication; and public checksum
+  verification in GitHub Actions run `30506739537`.
 - macOS Sparkle replaces the app bundle, not the separately installed Rust
   node and executor.
 - Windows WinSparkle source integration still needs a Windows CI run,
   clean-install evidence, busy-node deferral evidence, and rollback evidence.
 - Atomic full-node update restoration has no release evidence.
-- GitHub Actions is currently prevented from starting jobs by the repository
-  account's billing/spending state. Fix that or connect approved Blacksmith
-  runners before treating any workflow as executed evidence.
 - Signed clean-install and physical-printer matrices remain open.
-- No stable artifact should be advertised until these claims are reflected as
-  Supported in [`release/support-matrix.yaml`](../../release/support-matrix.yaml).
+- The published macOS DMG is labelled Preview. No platform or automatic-update
+  feature should be advertised as Supported until
+  [`release/support-matrix.yaml`](../../release/support-matrix.yaml) records
+  the required installation, physical-printer, busy-queue, upgrade, health,
+  and rollback evidence.
 
 See [Node updates](../nodes/updates.md) and
 [Release checks](../contributing/releases.md).

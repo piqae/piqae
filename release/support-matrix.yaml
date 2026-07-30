@@ -5,10 +5,10 @@ platforms:
     reason: physical PDF and RAW release gates have not run
   macos_13_plus_aarch64:
     tier: preview
-    reason: signed/notarised clean-install and physical printing gates have not run
+    reason: signed and notarised DMG is published, but clean-install and physical printing gates have not run
   macos_15_x86_64:
     tier: preview
-    reason: signed/notarised clean-install and physical printing gates have not run
+    reason: signed and notarised DMG is published, but clean-install and physical printing gates have not run
   ubuntu_22_04_24_04_x86_64:
     tier: preview
     reason: packaging and physical printing gates have not run
@@ -39,7 +39,7 @@ features:
     reason: Helm policy renders and validates locally but Kind disruption and rollback evidence is incomplete
   signed_automatic_node_updates:
     tier: disabled
-    reason: production signing credentials and atomic full-node rollback evidence do not exist
+    reason: macOS signing and app-only Sparkle checks exist, but atomic full-node activation and rollback evidence do not
   printnode_compatibility:
     tier: preview
     reason: only the documented compatibility subset is covered by fixtures
