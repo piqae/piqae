@@ -18,7 +18,13 @@ module ReleasePolicy
   module_function
 
   def load_yaml(path)
-    value = YAML.safe_load(File.read(path, encoding: "UTF-8"), [], [], false)
+    value = YAML.safe_load(
+      File.read(path, encoding: "UTF-8"),
+      permitted_classes: [],
+      permitted_symbols: [],
+      aliases: false,
+      filename: path
+    )
     raise "#{path}: root must be an object" unless value.is_a?(Hash)
 
     value
