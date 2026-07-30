@@ -3,7 +3,6 @@
   import MarketingShell from '$lib/components/marketing/MarketingShell.svelte';
   import PricingCards from '$lib/components/marketing/PricingCards.svelte';
   import Seo from '$lib/components/marketing/Seo.svelte';
-  import WorkflowExplorer from '$lib/components/marketing/WorkflowExplorer.svelte';
   import type { CloudPricingCatalog } from '$lib/marketing/types';
 
   let { data }: { data: { pricing: CloudPricingCatalog } } = $props();
@@ -19,7 +18,7 @@
       '@type': 'Organization',
       name: 'Piqae',
       url: 'https://piqae.com',
-      sameAs: ['https://github.com/C4CoffeeCo/piqae']
+      sameAs: ['https://github.com/piqae/piqae']
     },
     {
       '@context': 'https://schema.org',
@@ -96,8 +95,6 @@
       </div>
     </div>
   </section>
-
-  <WorkflowExplorer />
 
   <section class="global-section">
     <div class="global-frame">
