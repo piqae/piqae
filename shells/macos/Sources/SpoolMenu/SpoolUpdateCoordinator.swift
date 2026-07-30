@@ -11,13 +11,30 @@ final class SpoolUpdateCoordinator: NSObject, SPUUpdaterDelegate {
     private var latestStatus: LocalStatus?
     private var foregroundOperationCount = 0
     private var handoffTask: Task<Void, Never>?
+    private var availableVersion: String?
+
+    var onPresentationChange: (() -> Void)?
 
     var isEnabled: Bool {
         updaterController != nil
     }
 
     var canCheckForUpdates: Bool {
-        updaterController?.updater.canCheckForUpdates ?? false
+        presentation.canOpenUpdater
+            && (updaterController?.updater.canCheckForUpdates ?? false)
+    }
+
+    var presentation: UpdateMenuPresentation {
+        guard updaterController != nil else {
+            return .unavailable
+        }
+        if handoffTask != nil, let availableVersion {
+            return .waitingForIdle(version: availableVersion)
+        }
+        if let availableVersion {
+            return .available(version: availableVersion)
+        }
+        return .readyToCheck
     }
 
     init(client: LocalAPIClient?, bundle: Bundle = .main) {
@@ -54,6 +71,16 @@ final class SpoolUpdateCoordinator: NSObject, SPUUpdaterDelegate {
         updaterController?.checkForUpdates(sender)
     }
 
+    func updater(_ updater: SPUUpdater, didFindValidUpdate item: SUAppcastItem) {
+        availableVersion = item.displayVersionString
+        onPresentationChange?()
+    }
+
+    func updaterDidNotFindUpdate(_ updater: SPUUpdater) {
+        availableVersion = nil
+        onPresentationChange?()
+    }
+
     func updater(
         _ updater: SPUUpdater,
         shouldPostponeRelaunchForUpdate item: SUAppcastItem,
@@ -85,12 +112,14 @@ final class SpoolUpdateCoordinator: NSObject, SPUUpdaterDelegate {
                 try? await Task.sleep(for: Self.pollInterval)
             }
         }
+        onPresentationChange?()
         return true
     }
 
     func updater(_ updater: SPUUpdater, didAbortWithError error: any Error) {
         handoffTask?.cancel()
         handoffTask = nil
+        onPresentationChange?()
     }
 
     private static func hasTrustedUpdateConfiguration(bundle: Bundle) -> Bool {

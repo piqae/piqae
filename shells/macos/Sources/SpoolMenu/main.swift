@@ -61,6 +61,9 @@ final class SpoolMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             lastError = error.localizedDescription
         }
         updateCoordinator = SpoolUpdateCoordinator(client: client)
+        updateCoordinator?.onPresentationChange = { [weak self] in
+            self?.rebuildMenu()
+        }
 
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         item.button?.image = symbol(
@@ -505,9 +508,8 @@ final class SpoolMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         dashboard.image = symbol("rectangle.3.group", description: "Dashboard")
 
         let updates = menu.addItem(
-            withTitle: updateCoordinator?.isEnabled == true
-                ? "Check for Updates…"
-                : "Updates unavailable in this build",
+            withTitle: updateCoordinator?.presentation.title
+                ?? UpdateMenuPresentation.unavailable.title,
             action: #selector(checkForUpdates(_:)),
             keyEquivalent: ""
         )

@@ -379,12 +379,12 @@ mod windows_shell {
         {
             Some(UpdateAvailability::Available) => append_action(
                 menu,
-                "Check for updates…",
+                "Check for Piqae updates…",
                 MenuAction::CheckForUpdates,
                 &mut actions,
             ),
             Some(UpdateAvailability::Unavailable) => {
-                append_disabled(menu, "Updates unavailable");
+                append_disabled(menu, "Updates unavailable in this build");
             }
             _ => {}
         }

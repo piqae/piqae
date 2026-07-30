@@ -2,6 +2,39 @@ import XCTest
 @testable import SpoolMenuCore
 
 final class UpdateReadinessTests: XCTestCase {
+    func testUpdateMenuTruthfullyDescribesAppOnlyUpdateChannel() {
+        XCTAssertEqual(
+            UpdateMenuPresentation.unavailable.title,
+            "App updates unavailable in this build"
+        )
+        XCTAssertFalse(UpdateMenuPresentation.unavailable.canOpenUpdater)
+        XCTAssertEqual(
+            UpdateMenuPresentation.readyToCheck.title,
+            "Check for Piqae App Update…"
+        )
+        XCTAssertTrue(UpdateMenuPresentation.readyToCheck.canOpenUpdater)
+        XCTAssertEqual(
+            UpdateMenuPresentation.available(version: "1.2.3").title,
+            "Piqae App 1.2.3 Available…"
+        )
+        XCTAssertTrue(
+            UpdateMenuPresentation.available(version: "1.2.3").canOpenUpdater
+        )
+        XCTAssertEqual(
+            UpdateMenuPresentation.waitingForIdle(version: "1.2.3").title,
+            "Piqae App 1.2.3 Waiting for Idle"
+        )
+        XCTAssertFalse(
+            UpdateMenuPresentation.waitingForIdle(version: "1.2.3").canOpenUpdater
+        )
+        XCTAssertEqual(
+            UpdateMenuPresentation.available(
+                version: " \n1234567890123456789012345678901234567890\r"
+            ).title,
+            "Piqae App 12345678901234567890123456789012 Available…"
+        )
+    }
+
     func testRequiresAgentStatusBeforeReplacingNativeComponents() {
         XCTAssertEqual(
             UpdateHandoffReadiness(status: nil, foregroundOperation: false),

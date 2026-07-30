@@ -28,15 +28,17 @@ the Downloads page must not offer a supported download.
 
 ### macOS
 
-Credentialed builds can embed Sparkle 2 and expose **Check for Updates…**.
-Sparkle validates the update archive's Ed25519 signature declared by the
-appcast in addition to macOS code signing, and postpones replacement while the
-local queue, active work, or profile editor is busy.
+Credentialed builds embed Sparkle 2, check the signed feed in the background,
+and expose **Check for Piqae App Update…**. Sparkle validates the update
+archive's Ed25519 signature declared by the appcast in addition to macOS code
+signing, and postpones replacement while the local queue, active work, or
+profile editor is busy. Download and installation still require operator
+confirmation.
 
 Sparkle currently replaces only `Piqae.app`, including the menu shell and
 `SpoolPrintCoreReplay`. It does not replace or restart the separately installed
-Rust agent and CUPS executor. Automatic and silent checks remain disabled.
-Updating every node component still requires the idle-checked per-user package
+Rust agent and CUPS executor. Silent installation remains disabled. Updating
+every node component still requires the idle-checked per-user package
 installer.
 
 ### Windows
