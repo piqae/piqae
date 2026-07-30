@@ -214,6 +214,16 @@ fn candidate_verification_rejects_tampered_bytes_and_metadata_replay() {
 }
 
 #[test]
+fn deferred_candidate_detects_bytes_replaced_after_initial_verification() {
+    let directory = tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
+    let artifact = directory.path().join("piqae.zip");
+    let verified = candidate(&artifact);
+    assert!(verified.revalidate_local_artifact(1024).is_ok());
+    std::fs::write(&artifact, b"replaced bytes").unwrap_or_default();
+    assert!(verified.revalidate_local_artifact(1024).is_err());
+}
+
+#[test]
 fn busy_node_persists_command_and_defers_every_runtime_side_effect() {
     let directory = tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
     let journal = directory.path().join("guardian.jsonl");

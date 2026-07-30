@@ -117,6 +117,39 @@ pub struct VerifiedCandidate {
     pub artifact_length: u64,
 }
 
+impl VerifiedCandidate {
+    /// Revalidates persisted artifact bytes immediately before platform
+    /// staging. This closes the gap between initial verification and a later
+    /// restart or deferred idle window.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the artifact is no longer the same bounded regular
+    /// file covered by the signed metadata.
+    pub fn revalidate_local_artifact(&self, maximum: u64) -> Result<(), GuardianError> {
+        if self.artifact_length == 0 || self.artifact_length > maximum {
+            return Err(GuardianError::ArtifactLengthOutOfBounds {
+                length: self.artifact_length,
+                maximum,
+            });
+        }
+        let metadata = fs::symlink_metadata(&self.artifact_path)?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(GuardianError::ArtifactNotRegularFile);
+        }
+        if metadata.len() != self.artifact_length {
+            return Err(GuardianError::ArtifactLengthMismatch {
+                expected: self.artifact_length,
+                actual: metadata.len(),
+            });
+        }
+        if sha256_file(&self.artifact_path, maximum)? != self.artifact_sha256 {
+            return Err(GuardianError::ArtifactDigestMismatch);
+        }
+        Ok(())
+    }
+}
+
 /// Platform-specific signature verification remains mandatory and fail-closed.
 pub trait PlatformArtifactVerifier {
     /// Verifies the operating-system signature or notarisation evidence.
@@ -293,6 +326,10 @@ pub enum ActivationObservation {
 
 /// Implemented by a signed native package. Methods must be idempotent because
 /// the guardian may call them after process restart.
+///
+/// [`RuntimeManager::stage`] must call
+/// [`VerifiedCandidate::revalidate_local_artifact`] and repeat the platform
+/// signature check immediately before materializing bytes.
 pub trait RuntimeManager {
     /// Materializes a verified candidate and resolves the prior runtime.
     ///
