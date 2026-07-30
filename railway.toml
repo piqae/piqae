@@ -3,6 +3,7 @@ builder = "DOCKERFILE"
 dockerfilePath = "deploy/docker/Dockerfile.server"
 
 [deploy]
+preDeployCommand = ["/usr/local/bin/spool-server migrate"]
 healthcheckPath = "/v1/ready"
 healthcheckTimeout = 300
 restartPolicyType = "ON_FAILURE"
