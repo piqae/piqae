@@ -18,15 +18,15 @@ public enum MacPrintProfileCaptureError: Error, LocalizedError, Equatable {
         case let .printerUnavailable(name):
             "The macOS printer “\(name)” is no longer available."
         case let .printerChanged(expected, selected):
-            "This profile belongs to “\(expected)”. The panel selected “\(selected)” instead."
+            "This print preset belongs to “\(expected)”. The panel selected “\(selected)” instead."
         case .invalidProfileName:
-            "Enter a name for this print profile."
+            "Enter a name for this print preset."
         case .invalidPropertyList:
             "The printer driver returned settings that cannot be stored safely."
         case let .printCoreFailure(operation, status):
             "\(operation) failed with PrintCore status \(status)."
         case .invalidStoredConfiguration:
-            "The saved macOS print profile could not be restored."
+            "The saved macOS print preset could not be restored."
         case .captureTooLarge:
             "The printer driver settings exceed Piqae’s local capture limit."
         }

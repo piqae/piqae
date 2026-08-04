@@ -21,7 +21,7 @@ final class ProfileAccessoryController: NSViewController, NSPrintPanelAccessoriz
     }
 
     override var title: String? {
-        get { "Piqae Profile" }
+        get { "Piqae Print Preset" }
         set {}
     }
 
@@ -43,7 +43,7 @@ final class ProfileAccessoryController: NSViewController, NSPrintPanelAccessoriz
 
     override func loadView() {
         nameField.placeholderString = "A4 colour · Tray 1"
-        nameField.setAccessibilityLabel("Profile name")
+        nameField.setAccessibilityLabel("Print preset name")
         nameField.lineBreakMode = .byTruncatingTail
         stockField.placeholderString = "Optional · e.g. LABEL-100X150"
         stockField.setAccessibilityLabel("Stock ID")
@@ -66,7 +66,7 @@ final class ProfileAccessoryController: NSViewController, NSPrintPanelAccessoriz
 
         let note = NSTextField(
             wrappingLabelWithString:
-                "All other driver settings are captured exactly and locked to this profile."
+                "All other driver settings are captured exactly and locked to this preset."
         )
         note.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         note.textColor = .secondaryLabelColor
@@ -101,7 +101,7 @@ final class ProfileAccessoryController: NSViewController, NSPrintPanelAccessoriz
     func localizedSummaryItems() -> [[NSPrintPanel.AccessorySummaryKey: String]] {
         [
             [
-                .itemName: "Piqae profile",
+                .itemName: "Piqae print preset",
                 .itemDescription: profileName.isEmpty ? "Unnamed" : profileName,
             ],
             [

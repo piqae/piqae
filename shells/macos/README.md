@@ -87,15 +87,18 @@ queued/active jobs or a profile panel is open, the menu shows that the app
 update is waiting for idle and polls authenticated local status until the node
 is idle. An unavailable agent is not assumed idle.
 
-The **Local driver test…** action requires a present local printer, a profile,
+The **Test Printer…** action requires a present local printer, a profile,
 and explicit confirmation. It does not require cloud/API exposure and never
 falls back to unprofiled job submission.
 
-## Native print profiles
+## Print presets (native profiles)
 
-Every printer menu contains its saved profiles and **Add Profile…**. A profile
-can be edited or cloned from its submenu. These actions open the real macOS
-`NSPrintPanel` for that destination with **Save Profile** as the confirmation
+The menu calls native print profiles **Print Presets** because each one can
+include paper, tray, colour, duplex, resolution, and vendor-specific settings.
+The API and storage model retain the precise `profile` terminology. Every
+printer menu contains its presets and **Add Print Preset…**. A preset can be
+edited or duplicated from its submenu. These actions open the real macOS
+`NSPrintPanel` for that destination with **Save Preset** as the confirmation
 button. The profile host does not create an `NSPrintOperation`, load a customer
 document, or submit anything to the spooler during capture.
 

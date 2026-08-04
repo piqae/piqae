@@ -7,7 +7,7 @@ promote the platform to Supported without the remaining installation, update,
 rollback, and printer evidence.
 
 **Implemented in source:** CUPS discovery/submission, durable local queue,
-authenticated loopback API, menu-bar status/printers/profiles, native PrintCore
+authenticated loopback API, menu-bar status/printers/print presets, native PrintCore
 profile capture, immutable edit/clone revisions, and headless PrintCore replay.
 
 **Tested:** automated Rust and Swift suites run in development. A real HP A4
@@ -21,9 +21,9 @@ shells/macos/build-app.sh
 open shells/macos/build/Piqae.app
 ```
 
-The menu app connects only to the local loopback agent. Add Profile opens the
+The menu app connects only to the local loopback agent. Add Print Preset opens the
 real macOS print panel and saves driver settings without printing. Edit restores
-the exact prior PrintCore revision; Clone creates a new profile.
+the exact prior PrintCore revision; Duplicate creates a new profile.
 
 Complex vendor panes are captured as opaque native state. Piqae does not
 recreate them in the web UI. Test every saved profile on its actual printer and
