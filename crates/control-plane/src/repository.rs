@@ -1866,7 +1866,16 @@ struct MemoryState {
     /// that in-place key rotation depends on.
     agent_installations: HashMap<(WorkspaceId, EnvironmentId, String), AgentId>,
     agent_public_keys: HashMap<AgentId, Vec<u8>>,
-    enrolments: HashMap<String, (WorkspaceId, EnvironmentId, String, DateTime<Utc>, Option<AgentId>)>,
+    enrolments: HashMap<
+        String,
+        (
+            WorkspaceId,
+            EnvironmentId,
+            String,
+            DateTime<Utc>,
+            Option<AgentId>,
+        ),
+    >,
     device_authorizations: HashMap<String, MemoryDeviceAuthorization>,
     node_updates: HashMap<AgentId, StoredNodeUpdate>,
     webhooks: HashMap<String, (WorkspaceId, EnvironmentId, StoredWebhook, Vec<u8>)>,

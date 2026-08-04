@@ -347,7 +347,9 @@ pub async fn target_readiness(
     Path(target_id): Path<String>,
 ) -> Result<Json<StoredTargetReadiness>, AppError> {
     let tenant = authenticate_native(&state, &headers, Scope::PrintersRead).await?;
-    Ok(Json(compute_target_readiness(&state, tenant, &target_id).await?))
+    Ok(Json(
+        compute_target_readiness(&state, tenant, &target_id).await?,
+    ))
 }
 
 async fn compute_target_readiness(
@@ -449,25 +451,59 @@ pub async fn design_specification(
     Path(target_id): Path<String>,
 ) -> Result<Json<DesignSpecificationResponse>, AppError> {
     let tenant = authenticate_native(&state, &headers, Scope::PrintersRead).await?;
-    let target = state.repository.get_target(tenant.workspace_id, tenant.environment_id, &target_id).await?;
+    let target = state
+        .repository
+        .get_target(tenant.workspace_id, tenant.environment_id, &target_id)
+        .await?;
     let stock = match target.stock_id.as_deref() {
-        Some(id) => Some(state.repository.get_stock(tenant.workspace_id, tenant.environment_id, id).await?),
+        Some(id) => Some(
+            state
+                .repository
+                .get_stock(tenant.workspace_id, tenant.environment_id, id)
+                .await?,
+        ),
         None => None,
     };
     let readiness = compute_target_readiness(&state, tenant, &target_id).await?;
-    let bindings = state.repository.list_target_bindings(tenant.workspace_id, tenant.environment_id, &target_id).await?;
+    let bindings = state
+        .repository
+        .list_target_bindings(tenant.workspace_id, tenant.environment_id, &target_id)
+        .await?;
     let mut destinations = Vec::with_capacity(bindings.len());
     for binding in bindings {
-        let printer = state.repository.get_printer(tenant.workspace_id, tenant.environment_id, binding.printer_id).await?;
-        let profile = printer.profiles.iter().find(|profile| {
-            profile.profile_id == binding.profile_id && profile.revision == binding.profile_revision
-        }).cloned().ok_or(RepositoryError::NotFound)?;
-        destinations.push(DesignSpecificationDestination { binding, printer, profile });
+        let printer = state
+            .repository
+            .get_printer(
+                tenant.workspace_id,
+                tenant.environment_id,
+                binding.printer_id,
+            )
+            .await?;
+        let profile = printer
+            .profiles
+            .iter()
+            .find(|profile| {
+                profile.profile_id == binding.profile_id
+                    && profile.revision == binding.profile_revision
+            })
+            .cloned()
+            .ok_or(RepositoryError::NotFound)?;
+        destinations.push(DesignSpecificationDestination {
+            binding,
+            printer,
+            profile,
+        });
     }
     let canonical = serde_json::to_vec(&(&target, &stock, &readiness, &destinations))
         .map_err(|_| AppError::service_unavailable("design_specification_serialization_failed"))?;
     let revision = format!("spec_{:x}", Sha256::digest(canonical));
-    Ok(Json(DesignSpecificationResponse { target, stock, readiness, destinations, specification_revision: revision }))
+    Ok(Json(DesignSpecificationResponse {
+        target,
+        stock,
+        readiness,
+        destinations,
+        specification_revision: revision,
+    }))
 }
 
 const NODE_HEARTBEAT_STALE_AFTER_SECONDS: i64 = 90;
