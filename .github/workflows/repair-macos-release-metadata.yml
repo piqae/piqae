@@ -1,0 +1,84 @@
+name: Repair macOS release metadata
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Existing stable macOS version
+        required: true
+      build_number:
+        description: Existing stable macOS build number
+        required: true
+      confirm:
+        description: Type REPAIR
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: piqae-native-stable-promotion
+  cancel-in-progress: false
+
+jobs:
+  repair:
+    if: inputs.confirm == 'REPAIR'
+    environment: native-release
+    runs-on: ${{ vars.PIQAE_RELEASE_LINUX_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.PIQAE_RELEASES_S3_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.PIQAE_RELEASES_S3_SECRET_ACCESS_KEY }}
+      AWS_EC2_METADATA_DISABLED: 'true'
+      PIQAE_RELEASES_S3_ENDPOINT: ${{ secrets.PIQAE_RELEASES_S3_ENDPOINT }}
+      PIQAE_RELEASES_S3_BUCKET: ${{ secrets.PIQAE_RELEASES_S3_BUCKET }}
+      PIQAE_RELEASES_S3_REGION: ${{ secrets.PIQAE_RELEASES_S3_REGION }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Repair and verify stable appcast URL
+        shell: bash
+        env:
+          RELEASE_BUILD: ${{ inputs.build_number }}
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          if [[ ! "$RELEASE_VERSION" =~ ^[0-9]+([.][0-9]+){2}$ \
+            || ! "$RELEASE_BUILD" =~ ^[1-9][0-9]*$ ]]; then
+            echo 'Version or build number is invalid.' >&2
+            exit 2
+          fi
+          mkdir -p repair
+          packaging/release/publish-s3-object.sh fetch \
+            native/stable/appcast-macos.xml repair/appcast-macos.xml
+          python3 - repair/appcast-macos.xml "$RELEASE_VERSION" "$RELEASE_BUILD" <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+
+          path, version, build = sys.argv[1:]
+          tree = ET.parse(path)
+          root = tree.getroot()
+          item = root.find('./channel/item')
+          enclosure = item.find('enclosure') if item is not None else None
+          if item is None or enclosure is None:
+              raise SystemExit('Stable appcast does not contain a release enclosure.')
+          short_version = item.find('{http://www.andymatuschak.org/xml-namespaces/sparkle}shortVersionString')
+          bundle_version = item.find('{http://www.andymatuschak.org/xml-namespaces/sparkle}version')
+          if short_version is None or short_version.text != version:
+              raise SystemExit('Stable appcast version does not match the repair request.')
+          if bundle_version is None or bundle_version.text != build:
+              raise SystemExit('Stable appcast build does not match the repair request.')
+          filename = f'piqae-macos-{version}-{build}-update.zip'
+          enclosure.set('url', f'https://downloads.piqae.com/releases/stable/{filename}')
+          tree.write(path, encoding='utf-8', xml_declaration=True)
+          PY
+          immutable="native/releases/$RELEASE_VERSION/macos-$RELEASE_BUILD-metadata-repair-$GITHUB_RUN_ATTEMPT/appcast-macos.xml"
+          packaging/release/publish-s3-object.sh immutable \
+            repair/appcast-macos.xml "$immutable" application/xml
+          packaging/release/publish-s3-object.sh promote \
+            "$immutable" native/stable/appcast-macos.xml application/xml
+          expected="https://downloads.piqae.com/releases/stable/piqae-macos-${RELEASE_VERSION}-${RELEASE_BUILD}-update.zip"
+          actual=$(python3 - repair/appcast-macos.xml <<'PY'
+          import xml.etree.ElementTree as ET
+          print(ET.parse('repair/appcast-macos.xml').getroot().find('./channel/item/enclosure').get('url'))
+          PY
+          )
+          test "$actual" = "$expected"
