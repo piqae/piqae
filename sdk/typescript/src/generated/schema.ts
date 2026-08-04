@@ -491,6 +491,29 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/platform/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Inspect whether platform account management is enabled for this workspace
+         * @description Authenticated tenant operation used to tailor the dashboard. This does
+         *     not create a platform service account or disclose its identifier or
+         *     credential. Ordinary Test and Live API keys may inspect only their own
+         *     workspace's status.
+         */
+        get: operations["getPlatformStatus"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/platform/accounts/{external_id}": {
         parameters: {
             query?: never;
@@ -1791,6 +1814,10 @@ export interface components {
             created_at: string;
             /** Format: date-time */
             updated_at: string;
+        };
+        PlatformStatus: {
+            /** @description Whether this workspace owns an active platform integration. */
+            enabled: boolean;
         };
         PlatformAccountEnvironment: {
             id: string;
@@ -3602,6 +3629,27 @@ export interface operations {
             };
             401: components["responses"]["Error"];
             403: components["responses"]["Error"];
+        };
+    };
+    getPlatformStatus: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Workspace-scoped platform account status. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PlatformStatus"];
+                };
+            };
+            401: components["responses"]["Error"];
         };
     };
     getPlatformAccount: {

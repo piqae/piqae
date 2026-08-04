@@ -1424,6 +1424,24 @@ impl PostgresStore {
         .ok_or(StorageError::NotFound)
     }
 
+    pub async fn has_platform_manager_for_owner_workspace(
+        &self,
+        owner_workspace_id: WorkspaceId,
+    ) -> Result<bool, StorageError> {
+        sqlx::query_scalar(
+            "SELECT EXISTS (
+                SELECT 1 FROM platform_service_accounts account
+                JOIN workspaces owner ON owner.id = account.owner_workspace_id
+                WHERE account.owner_workspace_id = $1 AND account.revoked_at IS NULL
+                  AND owner.status = 'active'
+             )",
+        )
+        .bind(owner_workspace_id.to_string())
+        .fetch_one(&self.pool)
+        .await
+        .map_err(Into::into)
+    }
+
     pub async fn list_platform_accounts(
         &self,
         service_account_id: &str,

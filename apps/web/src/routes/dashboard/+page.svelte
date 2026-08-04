@@ -26,7 +26,9 @@
 
   const overview = $derived(data.overview);
   const detail = $derived(data.detail);
-  const views = $derived(operationalViews(data.meta));
+  const views = $derived(
+    operationalViews({ platform: { accounts: data.meta.platform.accounts && data.platformEnabled } })
+  );
 
   let query = $state('');
   let stateFilter = $state('all');

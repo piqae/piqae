@@ -231,6 +231,7 @@ pub fn router(state: AppState) -> Router {
         .merge(identity::router())
         .merge(workos_identity_router())
         .merge(pairing_router())
+        .route("/v1/platform/status", get(platform::status))
         .route("/v1/platform/accounts", get(platform::list))
         .route(
             "/v1/platform/accounts/{external_id}",

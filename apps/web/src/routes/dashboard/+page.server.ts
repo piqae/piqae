@@ -51,17 +51,30 @@ type LoadedLists = {
 
 export const load: PageServerLoad = async (event) => {
   const { meta } = await event.parent();
+  const { api } = dashboardSource(event);
+  let platformEnabled = false;
+  if (meta.platform.accounts) {
+    try {
+      platformEnabled = await api.platformEnabled();
+    } catch {
+      // Platform status must never make the ordinary operational dashboard
+      // unavailable. Account operations remain hidden and fail closed.
+    }
+  }
+  const effectiveMeta = {
+    ...meta,
+    platform: { accounts: meta.platform.accounts && platformEnabled }
+  };
   const requestedView = event.url.searchParams.get('view');
-  const view = isOperationalView(requestedView, meta) ? requestedView : 'jobs';
+  const view = isOperationalView(requestedView, effectiveMeta) ? requestedView : 'jobs';
 
   try {
-    const { api } = dashboardSource(event);
     const [overview, jobs, printers, agents, accounts] = await Promise.all([
       api.overview(),
       api.jobs(),
       api.printers(),
       api.agents(),
-      meta.platform.accounts
+      effectiveMeta.platform.accounts
         ? api.accounts()
         : Promise.resolve({ data: [] as DashboardAccount[], nextCursor: null })
     ]);
@@ -75,6 +88,7 @@ export const load: PageServerLoad = async (event) => {
 
     return {
       view,
+      platformEnabled,
       overview,
       ...lists,
       detail: await loadDetail(event, api, lists),
@@ -83,6 +97,7 @@ export const load: PageServerLoad = async (event) => {
   } catch (error) {
     return {
       view,
+      platformEnabled,
       overview: emptyOverview,
       jobs: [],
       printers: [],
