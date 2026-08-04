@@ -45,7 +45,7 @@ jobs:
         id: release
         shell: bash
         env:
-          CANONICAL_REPOSITORY: ${{ vars.PIQAE_CANONICAL_REPOSITORY || 'C4CoffeeCo/piqae' }}
+          CANONICAL_REPOSITORY: ${{ vars.PIQAE_CANONICAL_REPOSITORY || 'piqae/piqae' }}
           REF_PROTECTED: ${{ github.ref_protected }}
           REQUESTED_BUILD: ${{ inputs.build_number }}
           REQUESTED_PUBLISH: ${{ inputs.publish }}
@@ -248,7 +248,7 @@ jobs:
       - uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
         id: metadata
         with:
-          images: ghcr.io/c4coffeeco/piqae/${{ matrix.name }}
+          images: ghcr.io/piqae/piqae/${{ matrix.name }}
           tags: |
             type=raw,value=v${{ needs.prepare.outputs.version }}
             type=sha
@@ -263,7 +263,7 @@ jobs:
       - uses: actions/attest-build-provenance@96b4a1ef7235a096b17240c259729fdd70c83d45 # v2
         if: needs.prepare.outputs.publish == 'true'
         with:
-          subject-name: ghcr.io/c4coffeeco/piqae/${{ matrix.name }}
+          subject-name: ghcr.io/piqae/piqae/${{ matrix.name }}
           subject-digest: ${{ steps.build.outputs.digest }}
           push-to-registry: true
 
@@ -284,7 +284,7 @@ jobs:
           merge-multiple: true
       - name: Attach Linux assets and publish the draft prerelease
         env:
-          CANONICAL_REPOSITORY: ${{ vars.PIQAE_CANONICAL_REPOSITORY || 'C4CoffeeCo/piqae' }}
+          CANONICAL_REPOSITORY: ${{ vars.PIQAE_CANONICAL_REPOSITORY || 'piqae/piqae' }}
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
         shell: bash

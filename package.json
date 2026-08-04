@@ -17,10 +17,10 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/C4CoffeeCo/piqae.git"
+    "url": "git+https://github.com/piqae/piqae.git"
   },
   "bugs": {
-    "url": "https://github.com/C4CoffeeCo/piqae/issues"
+    "url": "https://github.com/piqae/piqae/issues"
   },
   "homepage": "https://piqae.com"
 }

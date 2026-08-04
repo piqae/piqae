@@ -20,7 +20,7 @@
         Cloud operates the durable queue.
       </p>
       <div class="m-actions">
-        <a class="m-button primary" href="https://github.com/C4CoffeeCo/piqae">View on GitHub</a>
+        <a class="m-button primary" href="https://github.com/piqae/piqae">View on GitHub</a>
         <a class="m-button" href="/docs/self-hosting">Self-hosting guide</a>
       </div>
     </div>
@@ -113,8 +113,8 @@
           trademark policy are authoritative; this summary is not legal advice.
         </p>
         <div class="m-actions">
-          <a class="m-button primary" href="https://github.com/C4CoffeeCo/piqae/blob/main/LICENSE">Read the licence</a>
-          <a class="m-button" href="https://github.com/C4CoffeeCo/piqae/blob/main/TRADEMARKS.md">Trademark policy</a>
+          <a class="m-button primary" href="https://github.com/piqae/piqae/blob/main/LICENSE">Read the licence</a>
+          <a class="m-button" href="https://github.com/piqae/piqae/blob/main/TRADEMARKS.md">Trademark policy</a>
         </div>
       </div>
     </div>

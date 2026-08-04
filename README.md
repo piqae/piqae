@@ -74,10 +74,10 @@ printers. Production trace export is covered in the
 ## Packages
 
 - TypeScript: `npm install @piqae/sdk`
-- Containers: `ghcr.io/c4coffeeco/piqae/server`, `ghcr.io/c4coffeeco/piqae/migrate`, and
-  `ghcr.io/c4coffeeco/piqae/web`
+- Containers: `ghcr.io/piqae/piqae/server`, `ghcr.io/piqae/piqae/migrate`, and
+  `ghcr.io/piqae/piqae/web`
 - Native candidates: draft releases in
-  [GitHub Releases](https://github.com/C4CoffeeCo/piqae/releases)
+  [GitHub Releases](https://github.com/piqae/piqae/releases)
 
 Publishing remains fail-closed until the repository has moved to
 `piqae/piqae` and the npm trusted publisher has been configured. See the

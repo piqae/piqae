@@ -57,7 +57,7 @@
   </section>
   <footer>
     <a href="/docs">Documentation</a>
-    <a href="https://github.com/C4CoffeeCo/piqae">Open source</a>
+    <a href="https://github.com/piqae/piqae">Open source</a>
     <a href="/docs/self-host">Self-host</a>
   </footer>
 </main>

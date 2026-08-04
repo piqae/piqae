@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.c4coffee.spool.menu</string>
+    <string>com.piqae.node.menu</string>
     <key>ProgramArguments</key>
     <array>
         <string>/usr/bin/open</string>

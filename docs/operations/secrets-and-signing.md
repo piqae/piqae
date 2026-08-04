@@ -95,7 +95,7 @@ Use one of these mutually exclusive public-trust paths:
 2. **Microsoft Artifact Signing:** managed public-trust signing with GitHub OIDC
    and no exportable certificate. At the time of this decision, Microsoft
    accepts Public Trust organizations only in the USA, Canada, EU, and UK, so a
-   New Zealand C4 Coffee Co. billing/legal identity is not eligible. Recheck the
+   Confirm the current Piqae publisher's billing/legal identity is eligible. Recheck the
    official availability list before reconsidering it; do not misrepresent the
    legal entity or billing country. If it becomes eligible, store the Azure
    tenant, client, subscription, signing-account endpoint, and

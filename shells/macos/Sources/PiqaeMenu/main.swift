@@ -20,7 +20,7 @@ private func restartInstalledAgent() throws {
     let process = Process()
     process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
     process.arguments = [
-        "kickstart", "-k", "gui/\(getuid())/com.c4coffee.spool.agent",
+        "kickstart", "-k", "gui/\(getuid())/com.piqae.node.agent",
     ]
     process.standardOutput = Pipe()
     process.standardError = Pipe()

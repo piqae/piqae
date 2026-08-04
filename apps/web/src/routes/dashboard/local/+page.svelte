@@ -121,7 +121,7 @@
 
   const demoStatus: LocalStatus = {
     agent_id: 'agt_demo_mac',
-    workspace_name: 'C4 Coffee',
+    workspace_name: 'Example Studio',
     version: '0.1.0',
     connection: 'connected',
     queued_jobs: 1,

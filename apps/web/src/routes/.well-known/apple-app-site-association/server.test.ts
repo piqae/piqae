@@ -27,7 +27,7 @@ describe('Apple application-site association', () => {
       applinks: {
         details: [
           {
-            appIDs: ['A1B2C3D4E5.com.c4coffee.spool.menu'],
+            appIDs: ['A1B2C3D4E5.com.piqae.node.menu'],
             components: [{ '/': '/connect', comment: 'Piqae node connector consent handoff' }]
           }
         ]

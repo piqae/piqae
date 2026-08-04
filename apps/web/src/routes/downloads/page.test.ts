@@ -88,7 +88,7 @@ describe('downloads', () => {
     ).toBeInTheDocument();
     expect(screen.getByRole('link', { name: /View Mac release status/ })).toHaveAttribute(
       'href',
-      'https://github.com/C4CoffeeCo/piqae/releases'
+      'https://github.com/piqae/piqae/releases'
     );
     expect(screen.getByText('This device')).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Ready to print in minutes.' })).toBeInTheDocument();
@@ -118,7 +118,7 @@ describe('downloads', () => {
     if (!mac) throw new Error('macOS fixture missing');
     mac.status = status;
     mac.fileName = 'Piqae.dmg';
-    mac.downloadUrl = 'https://github.com/C4CoffeeCo/piqae/releases/download/v0.1.0/Piqae.dmg';
+    mac.downloadUrl = 'https://github.com/piqae/piqae/releases/download/v0.1.0/Piqae.dmg';
     mac.sha256 = 'a'.repeat(64);
     mac.signing = { status: 'verified', label: 'Signed and notarised by Apple' };
 

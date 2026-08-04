@@ -181,11 +181,11 @@ jobs:
               throw "Unsigned preview publication refuses a signed candidate."
             }
             if (
-              "${{ github.repository }}" -ne "C4CoffeeCo/piqae" -or
+              "${{ github.repository }}" -ne "piqae/piqae" -or
               "${{ github.ref_type }}" -ne "tag" -or
               "${{ github.ref_name }}" -notmatch "^v[0-9]+\.[0-9]+\.[0-9]+-windows-preview\.[0-9]+$"
             ) {
-              throw "Public unsigned previews require a v<version>-windows-preview.<number> tag in C4CoffeeCo/piqae."
+              throw "Public unsigned previews require a v<version>-windows-preview.<number> tag in piqae/piqae."
             }
             if ("${{ github.ref_name }}" -notmatch "^v$([regex]::Escape($version))-windows-preview\.[0-9]+$") {
               throw "The preview tag version must match the requested package version '$version'."
@@ -611,7 +611,7 @@ jobs:
       group: piqae-native-stable-promotion
       cancel-in-progress: false
     env:
-      CANONICAL_REPOSITORY: ${{ vars.PIQAE_CANONICAL_REPOSITORY || 'C4CoffeeCo/piqae' }}
+      CANONICAL_REPOSITORY: ${{ vars.PIQAE_CANONICAL_REPOSITORY || 'piqae/piqae' }}
       RELEASE_VERSION: ${{ needs.package.outputs.version }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4

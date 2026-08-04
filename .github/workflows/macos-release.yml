@@ -497,7 +497,7 @@ jobs:
       group: piqae-native-stable-promotion
       cancel-in-progress: false
     env:
-      CANONICAL_REPOSITORY: ${{ vars.PIQAE_CANONICAL_REPOSITORY || 'C4CoffeeCo/piqae' }}
+      CANONICAL_REPOSITORY: ${{ vars.PIQAE_CANONICAL_REPOSITORY || 'piqae/piqae' }}
       RELEASE_BUILD: ${{ needs.candidate.outputs.build_number }}
       RELEASE_VERSION: ${{ needs.candidate.outputs.version }}
     steps:

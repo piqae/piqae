@@ -65,7 +65,7 @@
       </p>
       <div class="m-actions">
         <a class="m-button primary" href="/docs/security">Read security documentation</a>
-        <a class="m-button" href="https://github.com/C4CoffeeCo/piqae/security">Report a vulnerability</a>
+        <a class="m-button" href="https://github.com/piqae/piqae/security">Report a vulnerability</a>
       </div>
     </div>
   </section>

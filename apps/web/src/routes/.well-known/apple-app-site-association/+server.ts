@@ -16,7 +16,7 @@ export const GET: RequestHandler = () => {
       applinks: {
         details: [
           {
-            appIDs: [`${teamID}.com.c4coffee.spool.menu`],
+            appIDs: [`${teamID}.com.piqae.node.menu`],
             components: [{ '/': '/connect', comment: 'Piqae node connector consent handoff' }]
           }
         ]

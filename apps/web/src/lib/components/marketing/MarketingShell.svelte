@@ -89,7 +89,7 @@
         <a href="/docs">Documentation</a>
         <a href="/docs/quickstart">Quickstart</a>
         <a href="/open-source">Open source</a>
-        <a href="https://github.com/C4CoffeeCo/piqae">GitHub</a>
+        <a href="https://github.com/piqae/piqae">GitHub</a>
       </div>
       <div>
         <strong>Compare</strong>

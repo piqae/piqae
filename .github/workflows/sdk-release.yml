@@ -62,7 +62,7 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         working-directory: sdk/typescript
         env:
-          CANONICAL_REPOSITORY: ${{ vars.PIQAE_CANONICAL_REPOSITORY || 'C4CoffeeCo/piqae' }}
+          CANONICAL_REPOSITORY: ${{ vars.PIQAE_CANONICAL_REPOSITORY || 'piqae/piqae' }}
         run: |
           if [ "$GITHUB_REPOSITORY" != "$CANONICAL_REPOSITORY" ]; then
             echo "npm publishing is enabled only in $CANONICAL_REPOSITORY." >&2

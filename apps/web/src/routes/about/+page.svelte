@@ -4,8 +4,8 @@
 </script>
 
 <Seo
-  title="Why we built Piqae — The C4 Coffee story"
-  description="Piqae grew from C4 Coffee's need to print coffee bag labels, shipping labels, and operational work reliably."
+  title="Why we built Piqae — Reliable printing from the web"
+  description="Piqae grew from the need to print product labels, shipping labels, and operational work reliably."
   path="/about"
 />
 
@@ -15,18 +15,18 @@
       <span class="m-eyebrow">Why we built Piqae</span>
       <h1 class="m-title">Built where every label matters.</h1>
       <p class="m-lede">
-        Piqae began inside C4 Coffee, where coffee bag labels, shipping labels, and daily
+        Piqae began in a busy coffee operation, where product labels, shipping labels, and daily
         production depend on software reaching the right printer at the right moment.
       </p>
     </div>
   </section>
 
   <section class="story-visual m-container">
-    <div role="img" aria-label="Reserved for cleared C4 Coffee bag-label photography">
-      <strong>C4</strong>
-      <span>Cleared coffee bag and label photography will publish here through Payload.</span>
+    <div role="img" aria-label="Reserved for product-label printing photography">
+      <strong>P</strong>
+      <span>Product and label photography will publish here through Payload.</span>
     </div>
-    <div role="img" aria-label="Reserved for cleared C4 Coffee printing workflow photography">
+    <div role="img" aria-label="Reserved for printing workflow photography">
       <span>Printer workflow</span>
     </div>
   </section>
@@ -34,7 +34,7 @@
   <section class="m-section">
     <div class="m-narrow m-prose">
       <p class="drop">
-        Great operational software should make the physical work feel effortless. At C4, printing
+        Great operational software should make the physical work feel effortless. Printing
         connects orders and production systems to the labels people use all day.
       </p>
       <h2>Made for the reality behind the screen.</h2>
@@ -58,7 +58,7 @@
         <a class="m-button" href="/open-source">Explore the source</a>
       </div>
       <p class="asset-note">
-        Publication note: real C4 images and any quantitative claims remain unpublished until
+        Publication note: real operational images and any quantitative claims remain unpublished until
         rights, privacy, and source evidence are recorded in the CMS.
       </p>
     </div>

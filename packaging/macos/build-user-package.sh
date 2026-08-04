@@ -112,7 +112,7 @@ if [[ -n "$identity" ]]; then
     --force \
     --timestamp \
     --options runtime \
-    --identifier com.c4coffee.spool.installer \
+    --identifier com.piqae.node.installer \
     --sign "$identity" \
     "$installer_app"
   codesign --verify --deep --strict --verbose=2 "$installer_app"

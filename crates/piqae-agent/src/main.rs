@@ -4696,7 +4696,7 @@ mod tests {
             .expect("duplicate response");
         assert!(
             renewals.load(Ordering::Relaxed) >= 1,
-            "the restart path must renew while preparing the durable job"
+            "the restarted materialization must renew its lease before acceptance"
         );
         assert_eq!(restarted.pending_events(0, 10).expect("events").len(), 1);
     }
