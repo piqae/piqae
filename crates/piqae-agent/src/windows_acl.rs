@@ -11,6 +11,15 @@
 //! permissive parent directory cannot re-grant access. Every failure is
 //! reported to the caller: a secret that could not be protected must not be
 //! treated as written.
+//!
+//! The Win32 security APIs have no safe binding, so the workspace-wide
+//! `unsafe_code` denial is lifted for this module alone. Every block below
+//! carries a `SAFETY` note and every call is checked before its result is used.
+
+#![allow(
+    unsafe_code,
+    reason = "isolated, documented Win32 security calls with no safe equivalent"
+)]
 
 use anyhow::{Context, Result, bail};
 use std::{os::windows::ffi::OsStrExt as _, path::Path};
@@ -96,7 +105,9 @@ impl OwnedToken {
         if needed == 0 {
             bail!("size this process's token user information");
         }
-        let mut buffer = vec![0_u8; needed as usize];
+        let mut buffer = vec![0_u64; (needed as usize).div_ceil(size_of::<u64>())];
+        let capacity = u32::try_from(buffer.len() * size_of::<u64>())
+            .context("size this process's token user information")?;
         // SAFETY: `buffer` is at least `needed` bytes and stays alive for the
         // lifetime of the returned value, which borrows the SID inside it.
         let read = unsafe {
@@ -104,7 +115,7 @@ impl OwnedToken {
                 self.0,
                 TokenUser,
                 buffer.as_mut_ptr().cast(),
-                needed,
+                capacity,
                 &raw mut needed,
             )
         };
@@ -125,12 +136,15 @@ impl Drop for OwnedToken {
 }
 
 /// Owns the buffer that a borrowed owner SID points into.
+///
+/// Backed by `u64` storage so the buffer satisfies the pointer alignment of the
+/// `TOKEN_USER` that the security APIs write into it.
 struct TokenUserInformation {
-    buffer: Vec<u8>,
+    buffer: Vec<u64>,
 }
 
 impl TokenUserInformation {
-    fn sid(&self) -> PSID {
+    const fn sid(&self) -> PSID {
         // SAFETY: `GetTokenInformation` with `TokenUser` fills the buffer with
         // a `TOKEN_USER` whose `User.Sid` points inside that same buffer.
         unsafe { (*self.buffer.as_ptr().cast::<TOKEN_USER>()).User.Sid }
@@ -184,7 +198,7 @@ impl OwnerOnlyAcl {
         Ok(Self { storage })
     }
 
-    fn as_mut_ptr(&mut self) -> *mut ACL {
+    const fn as_mut_ptr(&mut self) -> *mut ACL {
         self.storage.as_mut_ptr().cast::<ACL>()
     }
 }
