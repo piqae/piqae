@@ -24,6 +24,7 @@
 
   const sections = $derived(
     [
+      ...(data.sections.platform ? [{ id: 'platform', label: 'Platform' }] : []),
       { id: 'api-keys', label: 'API keys' },
       { id: 'webhooks', label: 'Webhooks' },
       ...(data.sections.team ? [{ id: 'team', label: 'Team' }] : []),
@@ -38,6 +39,10 @@
   // from a previous submission never renders as a fresh error.
   let mutationPending = $state(false);
   let copied = $state<string | null>(null);
+
+  let platformDialog = $state(false);
+  let platformAttempted = $state(false);
+  let platformDismissed = $state(false);
 
   let apiKeyDialog = $state(false);
   let apiKeyAttempted = $state(false);
@@ -65,6 +70,13 @@
       ? form
       : null
   );
+  const platformResult = $derived(
+    !mutationPending &&
+      form?.mutation === 'enablePlatform' &&
+      (platformAttempted || !platformDismissed)
+      ? form
+      : null
+  );
   const webhookResult = $derived(
     !mutationPending &&
       form?.mutation === 'createWebhook' &&
@@ -78,6 +90,13 @@
     apiKeyDismissed = true;
     copied = null;
     apiKeyDialog = false;
+  }
+
+  function dismissPlatformSession() {
+    platformAttempted = false;
+    platformDismissed = true;
+    copied = null;
+    platformDialog = false;
   }
 
   function dismissWebhookSession() {
@@ -163,6 +182,50 @@
   </nav>
 
   <div class="sections">
+    {#if data.sections.platform && data.platform}
+      <section class="panel" id="platform">
+        <SectionHeader
+          title="Platform integration"
+          description="Manage isolated customer accounts and connect their nodes from your own product. The integration credential belongs only on your server."
+        >
+          {#snippet actions()}
+            {#await data.platform}
+              <button class="button primary" disabled>Checking…</button>
+            {:then platform}
+              {#if !platform?.enabled}
+                <button
+                  class="button primary"
+                  onclick={() => {
+                    copied = null;
+                    platformDialog = true;
+                  }}
+                >
+                  Enable platform mode
+                </button>
+              {/if}
+            {/await}
+          {/snippet}
+        </SectionHeader>
+        {#await data.platform}
+          <div class="loading">Checking platform mode…</div>
+        {:then platform}
+          {#if platform?.dataError}<DataError error={platform.dataError} />{/if}
+          <div class="inset">
+            <DefinitionList
+              columns={2}
+              items={[
+                { term: 'Status', value: platform?.enabled ? 'Enabled' : 'Not enabled' },
+                {
+                  term: 'Customer isolation',
+                  value: platform?.enabled ? 'Test and Live per customer' : 'Available after enabling'
+                }
+              ]}
+            />
+          </div>
+        {/await}
+      </section>
+    {/if}
+
     <!-- API keys -->
     <section class="panel" id="api-keys">
       <SectionHeader
@@ -628,6 +691,73 @@
 {#snippet docsLink()}
   <a href="/docs">Open docs</a>
 {/snippet}
+
+<!-- Enable platform mode -->
+<Dialog
+  bind:open={platformDialog}
+  labelledBy="enable-platform-title"
+  title="Enable platform mode?"
+  description="This creates a powerful server-side credential for managing isolated customer accounts."
+  onclose={dismissPlatformSession}
+>
+  <div class="ui-dialog__body">
+    {#if !live}
+      <p class="ui-note warning">Demo mode: preview only. No platform credential will be created.</p>
+    {/if}
+    <form
+      id="enable-platform-form"
+      method="POST"
+      action="?/enablePlatform"
+      use:enhance={() => {
+        mutationPending = true;
+        platformAttempted = true;
+        copied = null;
+        return async ({ update }) => {
+          await update({ reset: false });
+          mutationPending = false;
+        };
+      }}
+    >
+      <p class="ui-note neutral">
+        Store the credential in your backend secret manager. Never put it in browser code, a
+        downloadable node installer, or a customer-facing application.
+      </p>
+    </form>
+    {#if platformResult?.error}
+      <p class="ui-note error" role="alert">{platformResult.error.message}</p>
+    {/if}
+    {#if platformResult?.platform}
+      <section class="secret" aria-live="polite">
+        <div><strong>Platform credential · shown once</strong></div>
+        <code>{platformResult.platform.secret}</code>
+        <button
+          class="button compact"
+          type="button"
+          onclick={() => copy(platformResult.platform.secret)}
+        >
+          <Icon name="copy" size={13} />
+          {copied === platformResult.platform.secret ? 'Copied' : 'Copy credential'}
+        </button>
+      </section>
+    {/if}
+  </div>
+
+  {#snippet footer()}
+    <button class="button" type="button" onclick={dismissPlatformSession}>
+      {platformResult?.platform ? 'Close' : 'Cancel'}
+    </button>
+    {#if !platformResult?.platform}
+      <button
+        class="button primary"
+        type="submit"
+        form="enable-platform-form"
+        disabled={mutationPending || !live}
+      >
+        {mutationPending ? 'Enabling…' : 'Enable and create credential'}
+      </button>
+    {/if}
+  {/snippet}
+</Dialog>
 
 <!-- Create API key -->
 <Dialog

@@ -570,6 +570,34 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/PlatformStatus" }
         "401": { $ref: "#/components/responses/Error" }
+  /v1/platform/enable:
+    post:
+      summary: Enable platform account management for the current workspace
+      description: |
+        Creates one platform service account and exact Test and Live grants for
+        the authenticated owner workspace. This operation accepts only an
+        authorised human dashboard bearer; API keys and platform credentials
+        are rejected. The secret is returned once and cannot be retrieved
+        later. Repeating the operation returns a conflict without rotating or
+        revealing the existing credential.
+      tags: [Platform]
+      operationId: enablePlatform
+      security: [{ bearer: [] }]
+      responses:
+        "201":
+          description: Platform mode enabled and one-time credential issued.
+          headers:
+            Cache-Control:
+              schema: { type: string, example: "no-store" }
+            Pragma:
+              schema: { type: string, example: "no-cache" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PlatformEnableResult" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
   /v1/platform/accounts/{external_id}:
     parameters:
       - name: external_id
@@ -2552,6 +2580,16 @@ components:
         enabled:
           type: boolean
           description: Whether this workspace owns an active platform integration.
+    PlatformEnableResult:
+      type: object
+      additionalProperties: false
+      required: [enabled, secret]
+      properties:
+        enabled: { type: boolean, const: true }
+        secret:
+          type: string
+          writeOnly: true
+          description: One-time platform credential for server-side storage.
     PlatformAccountEnvironment:
       type: object
       additionalProperties: false

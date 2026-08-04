@@ -16,6 +16,7 @@ import * as demo from './demo-data';
 export interface DashboardApi {
   meta(): Promise<DashboardMeta>;
   platformEnabled(): Promise<boolean>;
+  enablePlatform(): Promise<{ enabled: true; secret: string }>;
   overview(): Promise<DashboardOverview>;
   agents(): Promise<DashboardPage<DashboardAgent>>;
   printers(): Promise<DashboardPage<DashboardPrinter>>;
@@ -43,6 +44,7 @@ export const mockApi: DashboardApi = {
       platform: { accounts: true }
     }),
   platformEnabled: () => delay(true),
+  enablePlatform: () => delay({ enabled: true, secret: 'demo-platform-secret' }),
   overview: () =>
     delay({
       agents: {
@@ -203,8 +205,9 @@ export function createLiveApi(
     contentRetained: true
   });
 
-  const platformRequest = async (path: string): Promise<Response> =>
+  const platformRequest = async (path: string, init: RequestInit = {}): Promise<Response> =>
     fetcher(`${baseUrl.replace(/\/$/, '')}${path}`, {
+      ...init,
       headers: {
         accept: 'application/json',
         'x-piqae-dashboard': '1',
@@ -319,6 +322,17 @@ export function createLiveApi(
       }
       const value: unknown = await response.json();
       return isRecord(value) && value.enabled === true;
+    },
+    enablePlatform: async () => {
+      const response = await platformRequest('/v1/platform/enable', { method: 'POST' });
+      if (!response.ok) {
+        throw new Error(`Piqae platform enablement request failed with HTTP ${response.status}.`);
+      }
+      const value: unknown = await response.json();
+      if (!isRecord(value) || value.enabled !== true || typeof value.secret !== 'string') {
+        throw new Error('Piqae platform enablement response was invalid.');
+      }
+      return { enabled: true, secret: value.secret };
     },
     accounts: async () => {
       const response = await platformRequest('/v1/platform/accounts');

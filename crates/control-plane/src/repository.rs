@@ -59,6 +59,8 @@ pub enum RepositoryError {
     BillingBlocked,
     #[error("cloud node quota exceeded")]
     NodeQuotaExceeded,
+    #[error("platform mode is already enabled")]
+    PlatformAlreadyEnabled,
     #[error("persistence failure: {0}")]
     Persistence(String),
 }
@@ -73,6 +75,7 @@ impl From<StorageError> for RepositoryError {
             StorageError::QuotaExceeded => Self::QuotaExceeded,
             StorageError::BillingBlocked => Self::BillingBlocked,
             StorageError::NodeQuotaExceeded => Self::NodeQuotaExceeded,
+            StorageError::PlatformAlreadyEnabled => Self::PlatformAlreadyEnabled,
             other => Self::Persistence(other.to_string()),
         }
     }
@@ -86,6 +89,16 @@ pub trait Repository: Send + Sync + 'static {
         _owner_workspace_id: WorkspaceId,
     ) -> Result<bool, RepositoryError> {
         Ok(false)
+    }
+    async fn enable_platform_manager(
+        &self,
+        _id: &str,
+        _name: &str,
+        _secret_hash: &str,
+        _owner_workspace_id: WorkspaceId,
+        _request_id: &str,
+    ) -> Result<(), RepositoryError> {
+        Err(RepositoryError::NotFound)
     }
     async fn list_platform_accounts(
         &self,
@@ -766,6 +779,19 @@ impl Repository for PostgresStore {
         owner_workspace_id: WorkspaceId,
     ) -> Result<bool, RepositoryError> {
         self.has_platform_manager_for_owner_workspace(owner_workspace_id)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn enable_platform_manager(
+        &self,
+        id: &str,
+        name: &str,
+        secret_hash: &str,
+        owner_workspace_id: WorkspaceId,
+        request_id: &str,
+    ) -> Result<(), RepositoryError> {
+        self.enable_platform_service_account(id, name, secret_hash, owner_workspace_id, request_id)
             .await
             .map_err(Into::into)
     }
@@ -2120,6 +2146,7 @@ type MemoryEnrolment = (
 
 #[derive(Debug, Default)]
 struct MemoryState {
+    platform_managers: HashMap<WorkspaceId, String>,
     api_keys: HashMap<String, (WorkspaceId, EnvironmentId, StoredApiKey, String)>,
     jobs: HashMap<JobId, MemoryJob>,
     printers: HashMap<PrinterId, (WorkspaceId, EnvironmentId, StoredPrinter)>,
@@ -2231,6 +2258,36 @@ impl MemoryRepository {
 #[async_trait]
 impl Repository for MemoryRepository {
     async fn ready(&self) -> Result<(), RepositoryError> {
+        Ok(())
+    }
+
+    async fn has_platform_manager(
+        &self,
+        owner_workspace_id: WorkspaceId,
+    ) -> Result<bool, RepositoryError> {
+        Ok(self
+            .state
+            .read()
+            .await
+            .platform_managers
+            .contains_key(&owner_workspace_id))
+    }
+
+    async fn enable_platform_manager(
+        &self,
+        id: &str,
+        _name: &str,
+        _secret_hash: &str,
+        owner_workspace_id: WorkspaceId,
+        _request_id: &str,
+    ) -> Result<(), RepositoryError> {
+        let mut state = self.state.write().await;
+        if state.platform_managers.contains_key(&owner_workspace_id) {
+            return Err(RepositoryError::PlatformAlreadyEnabled);
+        }
+        state
+            .platform_managers
+            .insert(owner_workspace_id, id.to_owned());
         Ok(())
     }
 

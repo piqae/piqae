@@ -9,6 +9,13 @@ Platform accounts give a trusted SaaS backend one server-side Piqae credential
 while keeping every customer in a separate workspace. The intended integration
 should feel like this:
 
+Piqae Cloud workspace owners and admins enable Platform mode in **Dashboard →
+Settings → Platform integration**. Enabling is explicit: it atomically creates
+one platform identity, grants it the owner workspace's Test and Live
+environments, records an audit event, and displays the credential once. Store
+that credential in the integrating platform's server-side secret manager. It
+must never be embedded in browser JavaScript or a node download link.
+
 ```ts
 import { readFile } from 'node:fs/promises';
 import { PiqaePlatform } from '@piqae/sdk';
@@ -231,14 +238,14 @@ with the local operator CLI, and retain the same external IDs.
 These remain database-backed `piqaectl` operations rather than public platform
 APIs:
 
-- create the platform service-account credential;
 - rotate or revoke the whole credential;
 - delete an already revoked credential with explicit confirmation;
 - grant or revoke access to a pre-existing workspace/environment; and
 - customize grant scopes or expiry outside the account get-or-create policy.
 
-For a self-hosted deployment, create the first identity against an existing
-owner workspace and one of its environments:
+Self-hosted deployments with the local dashboard can use the same explicit
+enablement action. Operators that keep dashboard mutations disabled can create
+the first identity against an existing owner workspace and one environment:
 
 ```console
 export PIQAE_DATABASE_URL='postgres://...'

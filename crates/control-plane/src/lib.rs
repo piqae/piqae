@@ -232,6 +232,7 @@ pub fn router(state: AppState) -> Router {
         .merge(workos_identity_router())
         .merge(pairing_router())
         .route("/v1/platform/status", get(platform::status))
+        .route("/v1/platform/enable", post(platform::enable))
         .route("/v1/platform/accounts", get(platform::list))
         .route(
             "/v1/platform/accounts/{external_id}",
@@ -1054,6 +1055,76 @@ mod tests {
             .await
             .expect("readiness response");
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn platform_enablement_is_one_time_workspace_scoped_and_not_cacheable() {
+        let application = application().await;
+        let before = json_response(
+            &application.router,
+            api_request("GET", "/v1/platform/status", "piq_test_integration", None),
+        )
+        .await;
+        assert_eq!(before["enabled"], false);
+
+        let response = application
+            .router
+            .clone()
+            .oneshot(api_request(
+                "POST",
+                "/v1/platform/enable",
+                "piq_test_integration",
+                None,
+            ))
+            .await
+            .expect("enablement response");
+        assert_eq!(response.status(), StatusCode::CREATED);
+        assert_eq!(
+            response
+                .headers()
+                .get("cache-control")
+                .and_then(|value| value.to_str().ok()),
+            Some("no-store")
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get("pragma")
+                .and_then(|value| value.to_str().ok()),
+            Some("no-cache")
+        );
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("enablement body")
+            .to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&body).expect("enablement JSON");
+        assert_eq!(body["enabled"], true);
+        assert!(
+            body["secret"]
+                .as_str()
+                .is_some_and(|secret| secret.starts_with("piq_platform_"))
+        );
+
+        let after = json_response(
+            &application.router,
+            api_request("GET", "/v1/platform/status", "piq_test_integration", None),
+        )
+        .await;
+        assert_eq!(after["enabled"], true);
+
+        let repeated = application
+            .router
+            .oneshot(api_request(
+                "POST",
+                "/v1/platform/enable",
+                "piq_test_integration",
+                None,
+            ))
+            .await
+            .expect("repeat enablement response");
+        assert_eq!(repeated.status(), StatusCode::CONFLICT);
     }
 
     #[tokio::test]

@@ -604,6 +604,8 @@ pub enum StorageError {
     BillingBlocked,
     #[error("cloud node quota exceeded")]
     NodeQuotaExceeded,
+    #[error("platform mode is already enabled")]
+    PlatformAlreadyEnabled,
     #[error("stored data is invalid: {0}")]
     InvalidData(String),
     #[error("database operation failed: {0}")]
@@ -2321,6 +2323,92 @@ impl PostgresStore {
             id,
             serde_json::json!({"name": name, "scopes": scopes, "expires_at": expires_at}),
             None,
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    pub async fn enable_platform_service_account(
+        &self,
+        id: &str,
+        name: &str,
+        secret_hash: &str,
+        workspace_id: WorkspaceId,
+        request_id: &str,
+    ) -> Result<(), StorageError> {
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query_scalar::<_, String>(
+            "SELECT id FROM workspaces WHERE id = $1 AND status = 'active' FOR UPDATE",
+        )
+        .bind(workspace_id.to_string())
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(StorageError::NotFound)?;
+        let already_enabled: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                SELECT 1 FROM platform_service_accounts
+                WHERE owner_workspace_id = $1 AND revoked_at IS NULL
+             )",
+        )
+        .bind(workspace_id.to_string())
+        .fetch_one(&mut *transaction)
+        .await?;
+        if already_enabled {
+            return Err(StorageError::PlatformAlreadyEnabled);
+        }
+        let environment_ids = sqlx::query_scalar::<_, String>(
+            "SELECT id FROM environments
+             WHERE workspace_id = $1 AND kind IN ('test', 'live')
+             ORDER BY kind",
+        )
+        .bind(workspace_id.to_string())
+        .fetch_all(&mut *transaction)
+        .await?;
+        if environment_ids.len() != 2 {
+            return Err(StorageError::InvalidData(
+                "platform owner does not have Test and Live environments".into(),
+            ));
+        }
+        sqlx::query(
+            "INSERT INTO platform_service_accounts (
+                id, name, secret_hash, owner_workspace_id
+             ) VALUES ($1,$2,$3,$4)",
+        )
+        .bind(id)
+        .bind(name)
+        .bind(secret_hash)
+        .bind(workspace_id.to_string())
+        .execute(&mut *transaction)
+        .await?;
+        let scopes = PLATFORM_ACCOUNT_SCOPES
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        for environment_id in environment_ids {
+            sqlx::query(
+                "INSERT INTO platform_workspace_grants (
+                    id, service_account_id, workspace_id, environment_id, scopes
+                 ) VALUES ($1,$2,$3,$4,$5)",
+            )
+            .bind(format!("pgr_{}", Uuid::now_v7()))
+            .bind(id)
+            .bind(workspace_id.to_string())
+            .bind(environment_id)
+            .bind(&scopes)
+            .execute(&mut *transaction)
+            .await?;
+        }
+        insert_platform_audit_event(
+            &mut transaction,
+            workspace_id,
+            None,
+            "workspace_member",
+            None,
+            "platform_service_account.enabled",
+            id,
+            serde_json::json!({"name": name, "scopes": scopes}),
+            Some(request_id),
         )
         .await?;
         transaction.commit().await?;

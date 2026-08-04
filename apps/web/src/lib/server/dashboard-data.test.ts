@@ -256,6 +256,34 @@ describe('dashboard data source selection', () => {
     expect(JSON.stringify(result)).not.toContain(oidcAccessToken);
   });
 
+  it('enables platform mode with a server-side human bearer and no tenant selectors', async () => {
+    fetcher.mockResolvedValueOnce(
+      Response.json(
+        { enabled: true, secret: 'redacted-one-time-platform-credential' },
+        { status: 201, headers: { 'cache-control': 'no-store' } }
+      )
+    );
+    const source = dashboardSource({
+      ...baseEvent,
+      locals: {
+        authMode: 'workos',
+        auth: { accessToken: oidcAccessToken }
+      } as never
+    });
+
+    await expect(source.api.enablePlatform()).resolves.toEqual({
+      enabled: true,
+      secret: 'redacted-one-time-platform-credential'
+    });
+    const [url, init] = fetcher.mock.calls[0] ?? [];
+    const headers = new Headers(init?.headers);
+    expect(String(url)).toBe('https://api.piqae.test/v1/platform/enable');
+    expect(init?.method).toBe('POST');
+    expect(headers.get('authorization')).toBe(`Bearer ${oidcAccessToken}`);
+    expect(headers.has('x-piqae-environment-id')).toBe(false);
+    expect(headers.has('x-piqae-workspace-id')).toBe(false);
+  });
+
   it('uses deterministic demo data only after explicit opt-in', async () => {
     publicEnvironment.PUBLIC_PIQAE_DASHBOARD_MODE = 'demo';
     const source = dashboardSource({

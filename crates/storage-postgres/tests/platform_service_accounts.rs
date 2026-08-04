@@ -322,6 +322,62 @@ async fn postgres_platform_grants_are_exact_scoped_and_revocable() {
         );
     }
 
+    let (owner_workspace, owner_live) = insert_tenant(&pool, "Enablement").await;
+    let owner_test = EnvironmentId::new();
+    sqlx::query(
+        "INSERT INTO environments (id, workspace_id, kind, name)
+         VALUES ($1, $2, 'test', 'Test')",
+    )
+    .bind(owner_test.to_string())
+    .bind(owner_workspace.to_string())
+    .execute(&pool)
+    .await
+    .expect("owner Test environment fixture");
+    let enabled_credential =
+        generate_platform_service_account_key().expect("generate enablement credential");
+    let enabled_id = enabled_credential.id.to_string();
+    store
+        .enable_platform_service_account(
+            &enabled_id,
+            "Dashboard platform integration",
+            &enabled_credential.password_hash,
+            owner_workspace,
+            "req_platform_enablement_test",
+        )
+        .await
+        .expect("atomically enable platform identity");
+    for environment_id in [owner_test, owner_live] {
+        let grant = store
+            .platform_grant_for_authentication(&enabled_id, owner_workspace, environment_id)
+            .await
+            .expect("owner Test and Live grant");
+        assert_eq!(grant.scopes.len(), 12);
+    }
+    let repeated = store
+        .enable_platform_service_account(
+            &format!("pacc_{}", Uuid::now_v7()),
+            "Duplicate platform integration",
+            &enabled_credential.password_hash,
+            owner_workspace,
+            "req_platform_enablement_repeat",
+        )
+        .await;
+    assert!(matches!(
+        repeated,
+        Err(StorageError::PlatformAlreadyEnabled)
+    ));
+    let enabled_audit: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM audit_events
+         WHERE workspace_id = $1
+           AND action = 'platform_service_account.enabled'
+           AND request_id = 'req_platform_enablement_test'",
+    )
+    .bind(owner_workspace.to_string())
+    .fetch_one(&pool)
+    .await
+    .expect("query platform enablement audit evidence");
+    assert_eq!(enabled_audit, 1);
+
     pool.close().await;
     sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
         .execute(&admin)
