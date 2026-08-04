@@ -69,6 +69,8 @@ Ed25519 private key. GitHub `native-signing` currently expects:
 MACOS_CERTIFICATE_P12_BASE64
 MACOS_CERTIFICATE_PASSWORD
 MACOS_APPLICATION_IDENTITY
+MACOS_INSTALLER_CERTIFICATE_P12_BASE64
+MACOS_INSTALLER_CERTIFICATE_PASSWORD
 MACOS_INSTALLER_IDENTITY
 APPLE_ID
 APPLE_TEAM_ID
@@ -80,8 +82,9 @@ SPARKLE_PUBLIC_ED_KEY
 Prefer an App Store Connect team API key for future notarisation rotation where
 the workflow supports it. Apple private keys are downloadable only once. Keep
 the `.p8`, issuer ID, and key ID together in 1Password, but in separate fields.
-The PKCS#12 must contain both the Developer ID Application and Developer ID
-Installer identities. The latter signs the standard macOS Installer package.
+Keep the Developer ID Application and Developer ID Installer identities in
+separate encrypted PKCS#12 bundles. The latter signs the standard macOS
+Installer package and can rotate independently.
 The public Sparkle key belongs in repository or environment configuration; its
 private key remains recoverable only through the protected vault and signing
 environment.
