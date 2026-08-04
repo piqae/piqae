@@ -50,13 +50,24 @@ export async function verifyWebhookSignature(
     false,
     ['verify']
   );
-  let bytes: Uint8Array;
-  try {
-    bytes = Uint8Array.from(atob(supplied), (character) => character.charCodeAt(0));
-  } catch {
-    return false;
-  }
+  const bytes = decodeBase64(supplied);
+  if (!bytes) return false;
   return crypto.subtle.verify('HMAC', key, bytes, signed);
+}
+
+/** Decode standard base64 into a byte view backed by a plain ArrayBuffer. */
+function decodeBase64(value: string) {
+  let binary: string;
+  try {
+    binary = atob(value);
+  } catch {
+    return null;
+  }
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return bytes;
 }
 
 function header(headers: Headers | PiqaeWebhookHeaders, name: keyof PiqaeWebhookHeaders) {
