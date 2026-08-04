@@ -11,6 +11,7 @@ use sha2::{Digest as _, Sha256};
 use std::path::Path;
 use zeroize::Zeroize as _;
 
+#[cfg(any(target_os = "macos", target_os = "ios", windows))]
 const SERVICE: &str = "io.piqae.node.content-encryption";
 const MAX_ENCODED_KEY_BYTES: u64 = 16 * 1024;
 
@@ -190,6 +191,7 @@ fn parse_private(bytes: &[u8]) -> Result<SecretKey> {
     SecretKey::from_slice(bytes).context("invalid P-256 content encryption key")
 }
 
+#[cfg(any(target_os = "macos", target_os = "ios", windows, test))]
 fn credential_account(path: &Path) -> String {
     let digest = Sha256::digest(path.as_os_str().to_string_lossy().as_bytes());
     format!("installation-{}", hex::encode(&digest[..16]))
