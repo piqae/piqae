@@ -11,7 +11,7 @@ publish = false
 axum.workspace = true
 serde.workspace = true
 piqae-domain.workspace = true
-piqae-local-ipc = { path = "../local-ipc", version = "0.1.1" }
+piqae-local-ipc = { path = "../local-ipc", version = "0.1.2" }
 thiserror.workspace = true
 tokio.workspace = true
 tower-http.workspace = true

@@ -4,7 +4,7 @@ set -euo pipefail
 shell_root=$(cd "$(dirname "$0")" && pwd)
 configuration=${CONFIGURATION:-release}
 bundle=${PIQAE_APP_BUNDLE:-"$shell_root/build/Piqae.app"}
-version=${PIQAE_VERSION:-0.1.1}
+version=${PIQAE_VERSION:-0.1.2}
 build_number=${PIQAE_BUILD_NUMBER:-1}
 feed_url=${PIQAE_SPARKLE_FEED_URL:-}
 public_key=${PIQAE_SPARKLE_PUBLIC_ED_KEY:-}

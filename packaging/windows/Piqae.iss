@@ -5,7 +5,7 @@
   #define OutputDir "."
 #endif
 #ifndef AppVersion
-  #define AppVersion "0.1.1-dev"
+  #define AppVersion "0.1.2-dev"
 #endif
 #ifndef UpdateConfigFile
   #define UpdateConfigFile SourceDir + "\service\update-config.preview.json"
