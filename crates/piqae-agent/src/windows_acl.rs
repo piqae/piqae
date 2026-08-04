@@ -12,6 +12,11 @@
 //! reported to the caller: a secret that could not be protected must not be
 //! treated as written.
 
+#![allow(
+    unsafe_code,
+    reason = "this module is the isolated, documented Win32 ACL FFI boundary"
+)]
+
 use anyhow::{Context, Result, bail};
 use std::{os::windows::ffi::OsStrExt as _, path::Path};
 use windows_sys::Win32::{
@@ -96,7 +101,11 @@ impl OwnedToken {
         if needed == 0 {
             bail!("size this process's token user information");
         }
-        let mut buffer = vec![0_u8; needed as usize];
+        // `TOKEN_USER` is pointer-aligned. A byte vector has alignment 1 even
+        // when its allocator happens to return a more-aligned address, so use
+        // machine-word storage and expose only the byte count Windows asked for.
+        let words = (needed as usize).div_ceil(size_of::<usize>());
+        let mut buffer = vec![0_usize; words];
         // SAFETY: `buffer` is at least `needed` bytes and stays alive for the
         // lifetime of the returned value, which borrows the SID inside it.
         let read = unsafe {
@@ -126,10 +135,14 @@ impl Drop for OwnedToken {
 
 /// Owns the buffer that a borrowed owner SID points into.
 struct TokenUserInformation {
-    buffer: Vec<u8>,
+    buffer: Vec<usize>,
 }
 
 impl TokenUserInformation {
+    #[allow(
+        clippy::missing_const_for_fn,
+        reason = "this borrowed Win32 view is only meaningful at runtime"
+    )]
     fn sid(&self) -> PSID {
         // SAFETY: `GetTokenInformation` with `TokenUser` fills the buffer with
         // a `TOKEN_USER` whose `User.Sid` points inside that same buffer.
@@ -184,6 +197,10 @@ impl OwnerOnlyAcl {
         Ok(Self { storage })
     }
 
+    #[allow(
+        clippy::missing_const_for_fn,
+        reason = "the pointer is only passed to runtime Win32 calls"
+    )]
     fn as_mut_ptr(&mut self) -> *mut ACL {
         self.storage.as_mut_ptr().cast::<ACL>()
     }
