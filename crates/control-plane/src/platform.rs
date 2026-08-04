@@ -8,7 +8,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use piqae_storage_postgres::StoredPlatformAccount;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 #[derive(Debug, Deserialize)]
@@ -17,6 +17,39 @@ pub struct UpsertPlatformAccountRequest {
     name: String,
     #[serde(default)]
     metadata: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PlatformStatusResponse {
+    enabled: bool,
+}
+
+pub async fn status(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<PlatformStatusResponse>, AppError> {
+    if headers.contains_key("x-piqae-workspace-id")
+        || headers.contains_key("x-piqae-environment-id")
+        || headers.contains_key("x-spool-workspace-id")
+        || headers.contains_key("x-spool-environment-id")
+    {
+        return Err(AppError::unauthorized());
+    }
+    let authorization = headers
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(AppError::unauthorized)?;
+    let tenant = state
+        .authenticator
+        .authenticate_bearer(authorization)
+        .await
+        .map_err(|_| AppError::unauthorized())?;
+    Ok(Json(PlatformStatusResponse {
+        enabled: state
+            .repository
+            .has_platform_manager(tenant.workspace_id)
+            .await?,
+    }))
 }
 
 async fn authenticate_manager(

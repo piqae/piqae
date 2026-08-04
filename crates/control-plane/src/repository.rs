@@ -81,6 +81,12 @@ impl From<StorageError> for RepositoryError {
 #[async_trait]
 pub trait Repository: Send + Sync + 'static {
     async fn ready(&self) -> Result<(), RepositoryError>;
+    async fn has_platform_manager(
+        &self,
+        _owner_workspace_id: WorkspaceId,
+    ) -> Result<bool, RepositoryError> {
+        Ok(false)
+    }
     async fn list_platform_accounts(
         &self,
         _service_account_id: &str,
@@ -753,6 +759,15 @@ pub trait Repository: Send + Sync + 'static {
 impl Repository for PostgresStore {
     async fn ready(&self) -> Result<(), RepositoryError> {
         self.readiness().await.map_err(Into::into)
+    }
+
+    async fn has_platform_manager(
+        &self,
+        owner_workspace_id: WorkspaceId,
+    ) -> Result<bool, RepositoryError> {
+        self.has_platform_manager_for_owner_workspace(owner_workspace_id)
+            .await
+            .map_err(Into::into)
     }
 
     async fn list_platform_accounts(

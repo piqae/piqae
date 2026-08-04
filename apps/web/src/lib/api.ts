@@ -15,6 +15,7 @@ import * as demo from './demo-data';
 
 export interface DashboardApi {
   meta(): Promise<DashboardMeta>;
+  platformEnabled(): Promise<boolean>;
   overview(): Promise<DashboardOverview>;
   agents(): Promise<DashboardPage<DashboardAgent>>;
   printers(): Promise<DashboardPage<DashboardPrinter>>;
@@ -41,6 +42,7 @@ export const mockApi: DashboardApi = {
       updates: { officialFeed: true, customFeed: true },
       platform: { accounts: true }
     }),
+  platformEnabled: () => delay(true),
   overview: () =>
     delay({
       agents: {
@@ -310,6 +312,14 @@ export function createLiveApi(
             createdAt: apiKey.created_at
           }))
       ),
+    platformEnabled: async () => {
+      const response = await platformRequest('/v1/platform/status');
+      if (!response.ok) {
+        throw new Error(`Piqae platform status request failed with HTTP ${response.status}.`);
+      }
+      const value: unknown = await response.json();
+      return isRecord(value) && value.enabled === true;
+    },
     accounts: async () => {
       const response = await platformRequest('/v1/platform/accounts');
       if (!response.ok) {

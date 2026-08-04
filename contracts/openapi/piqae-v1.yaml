@@ -553,6 +553,23 @@ paths:
                 items: { $ref: "#/components/schemas/PlatformAccount" }
         "401": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
+  /v1/platform/status:
+    get:
+      summary: Inspect whether platform account management is enabled for this workspace
+      description: |
+        Authenticated tenant operation used to tailor the dashboard. This does
+        not create a platform service account or disclose its identifier or
+        credential. Ordinary Test and Live API keys may inspect only their own
+        workspace's status.
+      tags: [Platform]
+      operationId: getPlatformStatus
+      responses:
+        "200":
+          description: Workspace-scoped platform account status.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PlatformStatus" }
+        "401": { $ref: "#/components/responses/Error" }
   /v1/platform/accounts/{external_id}:
     parameters:
       - name: external_id
@@ -2528,6 +2545,13 @@ components:
         status: { type: string, enum: [pending, active, inactive] }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
+    PlatformStatus:
+      type: object
+      required: [enabled]
+      properties:
+        enabled:
+          type: boolean
+          description: Whether this workspace owns an active platform integration.
     PlatformAccountEnvironment:
       type: object
       additionalProperties: false
