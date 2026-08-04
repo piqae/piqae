@@ -1,6 +1,6 @@
 [Unit]
 Description=Piqae headless print agent
-Documentation=https://github.com/C4CoffeeCo/piqae
+Documentation=https://github.com/piqae/piqae
 Wants=network-online.target
 After=network-online.target cups.service
 

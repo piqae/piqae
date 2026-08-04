@@ -5,7 +5,7 @@ Piqae has three distribution channels:
 | Channel | Names | Release trigger |
 | --- | --- | --- |
 | npm | `@piqae/sdk` | `sdk-vX.Y.Z` tag |
-| GitHub Container Registry | `ghcr.io/c4coffeeco/piqae/server`, `ghcr.io/c4coffeeco/piqae/migrate`, `ghcr.io/c4coffeeco/piqae/web` | `vX.Y.Z` tag |
+| GitHub Container Registry | `ghcr.io/piqae/piqae/server`, `ghcr.io/piqae/piqae/migrate`, `ghcr.io/piqae/piqae/web` | `vX.Y.Z` tag |
 | GitHub Releases | Piqae native archives, installers, checksums, and provenance | `vX.Y.Z` tag |
 
 The SDK workflow verifies generated OpenAPI types, TypeScript, tests, package
@@ -22,7 +22,7 @@ artifacts and never become GitHub Release assets.
 
 ## One-time setup
 
-1. Move the repository to `https://github.com/C4CoffeeCo/piqae`.
+1. Verify the canonical repository is `https://github.com/piqae/piqae`.
 2. Make the repository public only after the full-history secret scan passes.
 3. Reserve the `@piqae` npm organisation and configure a trusted publisher for
    package `@piqae/sdk`, repository `piqae/piqae`, workflow

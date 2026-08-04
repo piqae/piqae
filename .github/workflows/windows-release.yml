@@ -582,7 +582,7 @@ jobs:
               artifacts: [],
               olderReleases: [],
               releasesUrl: "https://piqae.com/downloads",
-              repositoryUrl: "https://github.com/C4CoffeeCo/piqae"
+              repositoryUrl: "https://github.com/piqae/piqae"
             }' > promotion/current-manifest.json
           fi
           jq \

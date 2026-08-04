@@ -401,7 +401,7 @@ docker compose --env-file .env up -d`,
     blocks: [
       {
         heading: 'Set up',
-        code: `git clone https://github.com/C4CoffeeCo/piqae.git
+        code: `git clone https://github.com/piqae/piqae.git
 cd piqae
 cargo xtask doctor
 cargo xtask dev`,

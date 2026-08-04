@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.c4coffee.spool.agent</string>
+    <string>com.piqae.node.agent</string>
     <key>ProgramArguments</key>
     <array>
         <string>@INSTALL_ROOT@/piqae-agent</string>

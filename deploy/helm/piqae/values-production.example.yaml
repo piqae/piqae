@@ -1,7 +1,7 @@
 # Replace every example value. This file demonstrates the production shape; it
 # is deliberately not directly deployable.
 image:
-  repository: ghcr.io/c4coffeeco/piqae/server
+  repository: ghcr.io/piqae/piqae/server
   tag: ""
   digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
   pullPolicy: IfNotPresent
@@ -35,7 +35,7 @@ externalSecret:
 
 migration:
   image:
-    repository: ghcr.io/c4coffeeco/piqae/migrate
+    repository: ghcr.io/piqae/piqae/migrate
     tag: ""
     digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
     pullPolicy: IfNotPresent
