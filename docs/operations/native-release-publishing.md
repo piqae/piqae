@@ -1,8 +1,10 @@
 # Native release publishing
 
-**Status:** protected hosting and fail-closed package workflows are being
-connected. No Piqae native release is currently Supported or published as a
-stable signed download.
+**Status:** protected hosting and fail-closed package workflows are connected
+for Preview candidates. No Piqae native platform is currently Supported.
+
+Secret custody, local-build boundaries, and the low-cost Windows signing
+options are defined in [Secrets, signing, and low-cost builds](secrets-and-signing.md).
 
 This runbook separates four states:
 
@@ -17,7 +19,10 @@ Reaching an earlier state never implies a later one.
 
 ## Storage layout
 
-Native release artifacts use the dedicated Railway bucket `piqae-releases`.
+Native release artifacts use the dedicated private Cloudflare R2 bucket
+`piqae-releases`. The production web service has a bucket-scoped read-only
+identity; the protected GitHub release environment has a separate bucket-scoped
+read/write publisher identity.
 Customer print documents use `piqae-documents`; credentials and retention
 policies must not be shared between the two.
 
@@ -81,12 +86,18 @@ For each platform:
 13. Confirm `/downloads` and both public appcast routes from outside Railway.
 14. Roll out to canary nodes and observe before widening.
 
+The weekly **Published update feed** check dereferences every published appcast
+enclosure. Windows returning 404 is accepted while that platform has no public
+feed; once present, the enclosure is required to remain below the stable Piqae
+origin and return downloadable bytes.
+
 Do not put signing keys, bucket credentials, notarisation credentials, or
 release tokens in appcasts, workflow artifacts, command arguments, or logs.
-The web service uses its release-origin credentials only for reads. Enforce
-read-only scope where Railway exposes it; otherwise isolate them to this bucket
-and never reuse the publisher credential. Publishing uses a separate
-write-capable credential.
+The web service uses its release-origin credentials only for reads. Give its R2
+API token `Object Read` access to only `piqae-releases`. Publishing uses a
+separate token with `Object Read & Write` access to only that bucket. Do not
+enable an `r2.dev` public URL: downloads remain behind the constrained Piqae
+route and short-lived signed redirects.
 
 ## CI signing authority
 
@@ -95,7 +106,7 @@ runner compute. Keep two separate GitHub environments:
 
 - `native-signing` exposes only platform code-signing, notarisation, and update
   signing material to the macOS and Windows candidate jobs.
-- `native-release` exposes only the dedicated Railway release-bucket
+- `native-release` exposes only the dedicated release-bucket
   credentials to the serialized promotion jobs.
 
 The macOS signing environment requires:
@@ -111,15 +122,35 @@ SPARKLE_PRIVATE_KEY_BASE64
 SPARKLE_PUBLIC_ED_KEY
 ```
 
-The Windows signing environment requires:
+The Windows signing environment always requires the WinSparkle update key and
+signer trust policy:
 
 ```text
-WINDOWS_AUTHENTICODE_PFX_BASE64
-WINDOWS_AUTHENTICODE_PFX_PASSWORD
 WINDOWS_RFC3161_TIMESTAMP_URL
+WINDOWS_EXPECTED_CERTIFICATE_SUBJECT
+WINDOWS_EXPECTED_CERTIFICATE_THUMBPRINT
 WINSPARKLE_ED25519_PRIVATE_KEY_BASE64
 WINSPARKLE_ED25519_PUBLIC_KEY
 ```
+
+Set `WINDOWS_SIGNING_PROVIDER=digicert-keylocker` for the preferred remote-HSM
+path, then configure:
+
+```text
+DIGICERT_SM_HOST
+DIGICERT_SM_API_KEY
+DIGICERT_SM_CLIENT_CERT_FILE_B64
+DIGICERT_SM_CLIENT_CERT_PASSWORD
+DIGICERT_SM_KEYPAIR_ALIAS
+```
+
+The client certificate authenticates the narrowly scoped DigiCert service
+user; it is not the Authenticode private key. The release workflow installs the
+pinned DigiCert KSP integration, synchronizes only the public code-signing
+certificate, signs hashes remotely, and verifies the resulting subject and
+thumbprint. Retain `WINDOWS_SIGNING_PROVIDER=pfx` only as a compatibility path
+using `WINDOWS_AUTHENTICODE_PFX_BASE64` and
+`WINDOWS_AUTHENTICODE_PFX_PASSWORD`.
 
 The Sparkle and WinSparkle private keys need encrypted offline recovery copies.
 Losing an update key after clients trust its public key can strand installed
@@ -131,6 +162,18 @@ Unsigned manual builds remain private workflow artifacts. A tag or a manual
 Stable promotion then enters `native-release`, verifies each immutable S3
 object's SHA-256 and length, promotes the installer before its appcast, and
 promotes the combined manifest last.
+
+`.github/workflows/release.yml` is the only tag entry point. It calls the
+macOS and Windows workflows as reusable stages, builds Linux and container
+artifacts once, waits for both public update-feed checks, then changes the
+draft GitHub release into a prerelease. The release bucket and signed appcasts
+remain the updater authority; GitHub Releases is the human-facing mirror and
+must never become a second independently built channel.
+
+The `native-signing` environment may be used only from `main` and `v*` refs.
+The `native-release` environment permits only `v*` refs and requires a reviewer.
+Repository Actions default to read-only permissions; individual jobs request
+write access only for attestations, packages, or release publication.
 
 ## Failure and rollback
 
@@ -159,6 +202,12 @@ and queue reconciliation have been observed.
   executor, and installer; Apple notarisation/stapling for the app and DMG;
   Sparkle Ed25519 signing; immutable publication; and public checksum
   verification in GitHub Actions run `30507639987`.
+- The currently published macOS `0.1.0 (8)` appcast omits `/stable/` from its
+  enclosure URL and the shared stable manifest is absent. The archive exists at
+  the correct stable path, but desktop discovery remains broken until a
+  protected release repairs both channel pointers.
+- No Windows appcast is published; its stable route correctly remains absent
+  while Windows release evidence is incomplete.
 - macOS Sparkle replaces the app bundle, not the separately installed Rust
   node and executor.
 - Windows WinSparkle source integration still needs a Windows CI run,

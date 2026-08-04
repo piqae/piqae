@@ -4,24 +4,58 @@ on:
   pull_request:
   push:
     branches: [main]
+  schedule:
+    - cron: "17 8 * * 1"
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: supply-chain-${{ github.ref }}
+  group: supply-chain-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
+  changes:
+    name: Select policy scope
+    runs-on: ${{ vars.PIQAE_CI_LIGHT_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 5
+    outputs:
+      dependencies: ${{ steps.scope.outputs.dependencies }}
+    steps:
+      - name: Check out source history
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+      - name: Classify changed paths
+        id: scope
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch || "$GITHUB_EVENT_NAME" == schedule ]]; then
+            python3 release/tools/ci_changed_paths.py --all >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [[ -z "$BASE_SHA" || "$BASE_SHA" =~ ^0+$ ]] \
+            || ! git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null
+          then
+            git ls-tree -r --name-only -z "$HEAD_SHA" |
+              python3 release/tools/ci_changed_paths.py --nul >> "$GITHUB_OUTPUT"
+          else
+            git diff --name-only -z "$BASE_SHA" "$HEAD_SHA" |
+              python3 release/tools/ci_changed_paths.py --nul >> "$GITHUB_OUTPUT"
+          fi
+
   policy:
     name: Release policy and tooling
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.PIQAE_CI_LIGHT_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 10
     steps:
       - name: Check out source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - name: Test release evidence tooling
+      - name: Test release evidence and CI tooling
         run: python3 -m unittest discover -s release/tools -p 'test_*.py' -v
       - name: Enforce truthful support tiers
         run: >-
@@ -34,19 +68,22 @@ jobs:
 
   rust-dependencies:
     name: Rust dependency policy
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
+    needs: changes
+    if: needs.changes.outputs.dependencies == 'true'
+    runs-on: ${{ vars.PIQAE_CI_LINUX_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 10
     steps:
       - name: Check out source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Install pinned Rust toolchain
-        run: |
-          rustup toolchain install 1.88.0 --profile minimal
-          rustup default 1.88.0
-      - name: Install pinned audit tools
-        run: |
-          cargo install cargo-deny --locked --version 0.20.2
-          cargo install cargo-audit --locked --version 0.22.2
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: 1.88.0
+      - name: Install checksum-verified audit tools
+        uses: taiki-e/install-action@18b1216eba7f8039b0f8d131d5473787f0edce68 # v2
+        with:
+          tool: cargo-deny@0.20.2,cargo-audit@0.22.2
+          fallback: none
       - name: Enforce dependency source, license, and advisory policy
         run: cargo deny check --hide-inclusion-graph
       - name: Enforce RustSec vulnerability policy
@@ -54,24 +91,35 @@ jobs:
 
   secrets:
     name: Repository secret history
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.PIQAE_CI_LIGHT_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 10
     steps:
       - name: Check out complete history
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
-      - name: Scan with digest-pinned Gitleaks
-        run: >-
-          docker run --rm
-          -v "$GITHUB_WORKSPACE:/repo"
-          -w /repo
-          ghcr.io/gitleaks/gitleaks@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f
-          git --redact=100 --config .gitleaks.toml --log-opts="--all"
+      - name: Scan the changed history with digest-pinned Gitleaks
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == schedule || "$GITHUB_EVENT_NAME" == workflow_dispatch || -z "$BASE_SHA" || "$BASE_SHA" =~ ^0+$ ]]; then
+            log_options=--all
+          else
+            log_options="$BASE_SHA..$HEAD_SHA"
+          fi
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/repo" \
+            -w /repo \
+            ghcr.io/gitleaks/gitleaks@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f \
+            git --redact=100 --config .gitleaks.toml --log-opts="$log_options"
 
   source-sbom:
     name: Source dependency SBOM
-    runs-on: ubuntu-latest
+    needs: changes
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ${{ vars.PIQAE_CI_LINUX_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 10
     steps:
       - name: Check out source
@@ -86,10 +134,120 @@ jobs:
           upload-release-assets: false
       - name: Validate SPDX contract
         run: python3 release/tools/release_bundle.py validate-sbom piqae-source.spdx.json
-      - name: Upload source SBOM
+      - name: Upload short-lived source SBOM
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: piqae-source-sbom
           path: piqae-source.spdx.json
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 7
+
+  update-feed:
+    name: Published update feed
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ${{ vars.PIQAE_CI_LIGHT_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 5
+    steps:
+      - name: Require every published appcast enclosure to be downloadable
+        shell: bash
+        run: |
+          macos_appcast=$(mktemp)
+          curl --fail --location --silent --show-error --max-time 30 \
+            https://downloads.piqae.com/releases/stable/appcast-macos.xml \
+            --output "$macos_appcast"
+          macos_urls=$(mktemp)
+          python3 - "$macos_appcast" > "$macos_urls" <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+
+          root = ET.parse(sys.argv[1]).getroot()
+          enclosures = root.findall("./channel/item/enclosure")
+          if not enclosures:
+              raise SystemExit("macOS appcast has no enclosures")
+          for enclosure in enclosures:
+              url = enclosure.get("url")
+              if not url:
+                  raise SystemExit("macOS appcast has an enclosure without a URL")
+              print(url)
+          PY
+          mapfile -t macos_enclosures < "$macos_urls"
+          for macos_enclosure in "${macos_enclosures[@]}"; do
+            case "$macos_enclosure" in
+              https://downloads.piqae.com/releases/stable/piqae-macos-*) ;;
+              *) echo "macOS appcast escaped the stable release origin." >&2; exit 1 ;;
+            esac
+            curl --fail --location --silent --show-error --max-time 30 \
+              --max-redirs 3 --proto '=https' --proto-redir '=https' \
+              --range 0-0 "$macos_enclosure" --output /dev/null
+          done
+
+          manifest=$(mktemp)
+          curl --fail --location --silent --show-error --max-time 30 \
+            https://downloads.piqae.com/releases/stable/manifest.json \
+            --output "$manifest"
+          jq -e \
+            '.schemaVersion == 1
+             and .channel == "stable"
+             and (.artifacts | type == "array")
+             and any(.artifacts[];
+               .id == "macos-universal"
+               and (.downloadUrl | startswith("https://downloads.piqae.com/releases/stable/")))' \
+            "$manifest" >/dev/null
+
+          windows_status=$(curl --location --silent --show-error --max-time 30 \
+            --output /tmp/piqae-windows-appcast.xml --write-out '%{http_code}' \
+            https://downloads.piqae.com/releases/stable/appcast-windows.xml)
+          if [[ "$windows_status" == 200 ]]; then
+            windows_urls=$(mktemp)
+            python3 - /tmp/piqae-windows-appcast.xml > "$windows_urls" <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+
+          root = ET.parse(sys.argv[1]).getroot()
+          enclosures = root.findall("./channel/item/enclosure")
+          if not enclosures:
+              raise SystemExit("Windows appcast has no enclosures")
+          for enclosure in enclosures:
+              url = enclosure.get("url")
+              if not url:
+                  raise SystemExit("Windows appcast has an enclosure without a URL")
+              print(url)
+          PY
+            mapfile -t windows_enclosures < "$windows_urls"
+            for windows_enclosure in "${windows_enclosures[@]}"; do
+              case "$windows_enclosure" in
+                https://downloads.piqae.com/releases/stable/piqae-windows-*) ;;
+                *) echo "Windows appcast escaped the stable release origin." >&2; exit 1 ;;
+              esac
+              curl --fail --location --silent --show-error --max-time 30 \
+                --max-redirs 3 --proto '=https' --proto-redir '=https' \
+                --range 0-0 "$windows_enclosure" --output /dev/null
+            done
+          elif [[ "$windows_status" != 404 ]]; then
+            echo "Windows appcast returned unexpected HTTP $windows_status." >&2
+            exit 1
+          fi
+
+  result:
+    name: Supply-chain result
+    needs: [changes, policy, rust-dependencies, secrets, source-sbom, update-feed]
+    if: always()
+    runs-on: ${{ vars.PIQAE_CI_LIGHT_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 5
+    steps:
+      - name: Require every selected policy job to succeed
+        env:
+          CHANGES: ${{ needs.changes.result }}
+          POLICY: ${{ needs.policy.result }}
+          RUST_DEPENDENCIES: ${{ needs.rust-dependencies.result }}
+          SECRETS: ${{ needs.secrets.result }}
+          SOURCE_SBOM: ${{ needs.source-sbom.result }}
+          UPDATE_FEED: ${{ needs.update-feed.result }}
+        run: |
+          for result in "$CHANGES" "$POLICY" "$RUST_DEPENDENCIES" "$SECRETS" "$SOURCE_SBOM" "$UPDATE_FEED"
+          do
+            if [[ "$result" != success && "$result" != skipped ]]; then
+              echo "A selected supply-chain job ended with '$result'." >&2
+              exit 1
+            fi
+          done

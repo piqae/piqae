@@ -96,6 +96,13 @@ pub enum ControlRequest {
     Resume {
         respond_to: oneshot::Sender<Result<(), ControlFailure>>,
     },
+    ReloadConnectors {
+        respond_to: oneshot::Sender<Result<(), ControlFailure>>,
+    },
+    RevokeConnector {
+        connector_id: String,
+        respond_to: oneshot::Sender<Result<(), ControlFailure>>,
+    },
     SubmitJob {
         request: Box<LocalCreateJob>,
         respond_to: oneshot::Sender<Result<LocalJobAccepted, ControlFailure>>,
@@ -271,6 +278,11 @@ pub fn router(state: LocalApiState) -> Router {
         .route("/v1/local/printers/{printer_id}/test-page", post(test_page))
         .route("/v1/local/pause", post(pause))
         .route("/v1/local/resume", post(resume))
+        .route("/v1/local/connectors/reload", post(reload_connectors))
+        .route(
+            "/v1/local/connectors/{connector_id}",
+            axum::routing::delete(revoke_connector),
+        )
         .route("/v1/jobs", post(submit_job))
         // Leave enough envelope room for the 50 MiB content limit after
         // Base64 expansion. URI submissions remain the low-memory path.
@@ -591,6 +603,38 @@ async fn pause(State(state): State<LocalApiState>, headers: HeaderMap) -> Respon
 async fn resume(State(state): State<LocalApiState>, headers: HeaderMap) -> Response {
     control_action(state, headers, |respond_to| ControlRequest::Resume {
         respond_to,
+    })
+    .await
+}
+
+async fn reload_connectors(State(state): State<LocalApiState>, headers: HeaderMap) -> Response {
+    control_action(state, headers, |respond_to| {
+        ControlRequest::ReloadConnectors { respond_to }
+    })
+    .await
+}
+
+async fn revoke_connector(
+    State(state): State<LocalApiState>,
+    Path(connector_id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if !authenticate(&state, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    if connector_id.len() > 128
+        || !connector_id.starts_with("ncon_")
+        || !connector_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    control_action(state, headers, |respond_to| {
+        ControlRequest::RevokeConnector {
+            connector_id,
+            respond_to,
+        }
     })
     .await
 }
@@ -937,6 +981,61 @@ mod tests {
             .expect("response");
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         assert!(receive.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn connector_controls_require_authentication_and_validate_ids() {
+        let (state, mut receive) = test_state();
+        let unauthorized = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/local/connectors/reload")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+        let invalid = router(state)
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/v1/local/connectors/../escape")
+                    .header("authorization", "Bearer secret")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert!(matches!(
+            invalid.status(),
+            StatusCode::BAD_REQUEST | StatusCode::NOT_FOUND
+        ));
+        assert!(receive.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn authenticated_connector_reload_dispatches_control_request() {
+        let (state, mut receive) = test_state();
+        let responder = tokio::spawn(async move {
+            if let Some(ControlRequest::ReloadConnectors { respond_to }) = receive.recv().await {
+                let _ = respond_to.send(Ok(()));
+            }
+        });
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/local/connectors/reload")
+                    .header("authorization", "Bearer secret")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        responder.await.expect("responder");
     }
 
     #[tokio::test]

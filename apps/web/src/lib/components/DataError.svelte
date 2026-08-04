@@ -39,9 +39,9 @@
     border-radius: 8px;
   }
   .data-error div { min-width: 0; display: grid; }
-  strong { font-size: 11px; font-weight: 550; }
-  p { margin: 2px 0 0; color: var(--text-secondary); font-size: 10px; line-height: 15px; }
-  small { margin-top: 3px; color: var(--text-tertiary); font-size: 8px; }
+  strong { font-size: var(--text-compact); font-weight: 550; }
+  p { margin: 2px 0 0; color: var(--text-secondary); font-size: var(--text-meta); line-height: var(--text-meta-line); }
+  small { margin-top: 3px; color: var(--text-tertiary); font-size: var(--text-meta); }
   @media (max-width: 560px) {
     .data-error { grid-template-columns: 32px 1fr; }
     .data-error button { grid-column: 2; justify-self: start; }

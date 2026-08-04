@@ -38,7 +38,7 @@ public final class MacPrintProfileCapturer {
             safeOverrides: session.safeOverrides ?? ["copies"]
         )
         let panel = NSPrintPanel()
-        panel.setDefaultButtonTitle("Save Profile")
+        panel.setDefaultButtonTitle("Save Preset")
         // A job-style hint opts into Apple's simplified accordion panel. On
         // current macOS that interface scrolls section-by-section, which is a
         // poor fit for inspecting complex vendor driver panes. Nil selects the

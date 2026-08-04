@@ -37,11 +37,16 @@
     return `${formatUsd(item.jobOverageCents)} / ${wholeNumber.format(item.jobOverageUnit)}`;
   }
 
-  function acceptedJobsFor(item: PricingDisplay): { amount: number; period: string } {
-    if (interval === 'annual' && item.annualIncludedAcceptedJobs !== null) {
-      return { amount: item.annualIncludedAcceptedJobs, period: 'per annual billing period' };
+  function reportedCompleteJobsFor(item: PricingDisplay): { amount: number; period: string } {
+    if (interval === 'annual') {
+      return {
+        amount:
+          item.annualIncludedReportedCompleteJobs ??
+          item.includedReportedCompleteJobs * 12,
+        period: 'per annual billing period'
+      };
     }
-    return { amount: item.includedAcceptedJobs, period: 'per month' };
+    return { amount: item.includedReportedCompleteJobs, period: 'per month' };
   }
 
   function retentionMaximum(hours: number): string {
@@ -89,9 +94,9 @@
             <small aria-hidden="true">&nbsp;</small>
           {/if}
           <p>
-            {wholeNumber.format(acceptedJobsFor(item).amount)} accepted jobs
+            {wholeNumber.format(reportedCompleteJobsFor(item).amount)} reported-complete jobs
             <span>
-              {acceptedJobsFor(item).period === 'per annual billing period' ? 'per year' : 'per month'}
+              {reportedCompleteJobsFor(item).period === 'per annual billing period' ? 'per year' : 'per month'}
               · {wholeNumber.format(item.includedNodes)} {item.includedNodes === 1 ? 'node' : 'nodes'}
             </span>
           </p>
@@ -105,6 +110,26 @@
         </a>
       </article>
     {/each}
+    <article class="home-plan enterprise">
+      <div class="home-plan-header">
+        <div class="home-plan-title">
+          <h3>Piqae Enterprise</h3>
+          <span class="badge">Tailored</span>
+        </div>
+        <p>Scale fleets, customer deployments, and support around your product.</p>
+      </div>
+      <div class="home-plan-cost">
+        <div><strong>Custom</strong></div>
+        <small>Volume and deployment pricing</small>
+        <p>
+          Higher fleet limits and rollout support
+          <span>· SSO · custom node and update policies</span>
+        </p>
+      </div>
+      <a class="home-plan-cta" href="/start?plan=pro&source=home-enterprise">
+        Talk to us
+      </a>
+    </article>
   </div>
 {:else}
   <div class="pricing-controls" role="group" aria-label="Billing interval">
@@ -178,11 +203,11 @@
       </thead>
       <tbody>
         <tr>
-          <th scope="row">Accepted jobs</th>
+          <th scope="row">Reported-complete jobs</th>
           {#each plans as item}
             <td class:featured={item.plan === 'pro'}>
-              <strong>{wholeNumber.format(acceptedJobsFor(item).amount)}</strong>
-              <small>{acceptedJobsFor(item).period}</small>
+              <strong>{wholeNumber.format(reportedCompleteJobsFor(item).amount)}</strong>
+              <small>{reportedCompleteJobsFor(item).period}</small>
             </td>
           {/each}
         </tr>
@@ -262,10 +287,10 @@
         </div>
         <dl>
           <div>
-            <dt>Accepted jobs</dt>
+            <dt>Reported-complete jobs</dt>
             <dd>
-              {wholeNumber.format(acceptedJobsFor(item).amount)}
-              · {acceptedJobsFor(item).period}
+              {wholeNumber.format(reportedCompleteJobsFor(item).amount)}
+              · {reportedCompleteJobsFor(item).period}
             </dd>
           </div>
           <div><dt>Nodes</dt><dd>{wholeNumber.format(item.includedNodes)}</dd></div>
@@ -487,8 +512,8 @@
   .pricing-controls.home span { color: #74aaff; }
   .home-pricing-grid {
     display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: clamp(24px, 7vw, 92px);
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: clamp(16px, 3.5vw, 52px);
   }
   .home-pricing-grid article,
   .home-pricing-grid article.featured {
@@ -547,6 +572,11 @@
     align-items: baseline;
     flex-wrap: wrap;
   }
+  .home-plan.enterprise .home-plan-cost strong {
+    font-family: var(--m-font-display);
+    font-size: clamp(40px, 3.5vw, 54px);
+    font-weight: 580;
+  }
   .home-plan-cost strong {
     color: white;
     font-family: var(--m-font-editorial);
@@ -598,14 +628,17 @@
   @media (max-width: 1050px) {
     .pricing-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .home-pricing-grid {
-      gap: 12px;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 30px 12px;
     }
+    .home-plan.enterprise { grid-column: 1 / -1; }
     .home-pricing-grid article,
     .home-pricing-grid article.featured { padding-inline: 22px; }
   }
   @media (max-width: 720px) {
     .pricing-controls.home { margin: 48px 0 28px; }
     .home-pricing-grid { grid-template-columns: 1fr; gap: 0; }
+    .home-plan.enterprise { grid-column: auto; }
     .home-pricing-grid article,
     .home-pricing-grid article.featured {
       min-height: 0;

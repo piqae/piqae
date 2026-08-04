@@ -4,30 +4,37 @@ Piqae Cloud has one Free plan and one Pro plan. The control plane owns the
 entitlement and usage projection; marketing content and Stripe Price objects
 must match this contract before Checkout is enabled.
 
-| Plan | Price | Included Live jobs | Nodes | Overage |
+| Plan | Price | Included reported-complete Live jobs | Nodes | Overage |
 | --- | --- | ---: | ---: | --- |
 | Free | USD $0 | 100/month | 1 | None |
 | Pro monthly | USD $9/month | 25,000/month | 25 | USD $0.25/additional 1,000 |
 | Pro annual | USD $90/year | 300,000/annual Stripe period | 25 | USD $0.25/additional 1,000 |
 
 Workspace members and virtual Test jobs are not metered. Pro includes platform
-customer accounts; their Live accepted-job usage is charged to the owning
+customer accounts; their reported-complete Live-job usage is charged to the owning
 platform workspace.
 
 ## What counts
 
-A job adds one unit only when the node reports
-`accepted_by_spooler` for the first time in a Live environment. The database
-enforces one acceptance unit per job. These do not add another unit:
+A job adds one unit only when the node reports `completed_reported` for the
+first time in a Live environment. The database enforces one billable unit per
+job. These do not add a unit:
 
 - Test-environment jobs;
-- job registration without spooler acceptance;
+- job registration or spooler acceptance without reported completion;
 - idempotent API retries;
 - node lease or download retries;
-- later `spooling`, `printing`, `completed_reported`, or
-  `delivery_uncertain` events.
+- `failed_retryable`, `failed_terminal`, `blocked`, `cancelled`, `expired`, or
+  `delivery_uncertain` terminal outcomes.
 
-`accepted_by_spooler` proves operating-system handoff, not physical output.
+`completed_reported` is the strongest completion signal Piqae receives from a
+node, operating system, driver, or printer. It is not independent proof that
+ink reached paper.
+
+The July 2026 cutover retains immutable legacy `print_job_accepted` ledger rows
+for audit and invoice continuity. New usage rows use
+`print_job_reported_complete`; the cross-kind uniqueness constraint prevents a
+job from being counted twice.
 
 ## Read current usage
 
@@ -38,7 +45,7 @@ curl https://api.piqae.example/v1/billing/summary \
 
 Use `GET /v1/usage?month=YYYY-MM` for a tenant-scoped UTC calendar month. The
 billing summary includes the effective entitlement, subscription state,
-current-period accepted-job usage, active-node count, and whether new Cloud
+current-period reported-complete usage, active-node count, and whether new Cloud
 jobs may be accepted.
 
 The TypeScript SDK exposes the same server projection:

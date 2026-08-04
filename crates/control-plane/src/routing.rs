@@ -14,7 +14,8 @@ use piqae_storage_postgres::{
     StoredAgent, StoredBindingReadiness, StoredStock, StoredTarget, StoredTargetBinding,
     StoredTargetReadiness,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::str::FromStr;
 
 #[derive(Debug, Deserialize)]
@@ -346,9 +347,19 @@ pub async fn target_readiness(
     Path(target_id): Path<String>,
 ) -> Result<Json<StoredTargetReadiness>, AppError> {
     let tenant = authenticate_native(&state, &headers, Scope::PrintersRead).await?;
+    Ok(Json(
+        compute_target_readiness(&state, tenant, &target_id).await?,
+    ))
+}
+
+async fn compute_target_readiness(
+    state: &AppState,
+    tenant: crate::authentication::TenantContext,
+    target_id: &str,
+) -> Result<StoredTargetReadiness, AppError> {
     let target = state
         .repository
-        .get_target(tenant.workspace_id, tenant.environment_id, &target_id)
+        .get_target(tenant.workspace_id, tenant.environment_id, target_id)
         .await?;
     let target_stock_available = if let Some(stock_id) = target.stock_id.as_deref() {
         !state
@@ -361,7 +372,7 @@ pub async fn target_readiness(
     };
     let bindings = state
         .repository
-        .list_target_bindings(tenant.workspace_id, tenant.environment_id, &target_id)
+        .list_target_bindings(tenant.workspace_id, tenant.environment_id, target_id)
         .await?;
     let agents = state
         .repository
@@ -405,8 +416,8 @@ pub async fn target_readiness(
         .iter()
         .find(|binding| binding.status == "ready")
         .map(|binding| binding.binding.id.clone());
-    Ok(Json(StoredTargetReadiness {
-        target_id,
+    Ok(StoredTargetReadiness {
+        target_id: target_id.to_owned(),
         status: if selected_binding_id.is_some() {
             "ready"
         } else {
@@ -415,6 +426,83 @@ pub async fn target_readiness(
         .into(),
         selected_binding_id,
         bindings: evaluated,
+    })
+}
+
+#[derive(Debug, Serialize)]
+pub struct DesignSpecificationDestination {
+    binding: StoredTargetBinding,
+    printer: piqae_storage_postgres::StoredPrinter,
+    profile: piqae_storage_postgres::PrinterProfileSnapshot,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DesignSpecificationResponse {
+    target: StoredTarget,
+    stock: Option<StoredStock>,
+    readiness: StoredTargetReadiness,
+    destinations: Vec<DesignSpecificationDestination>,
+    specification_revision: String,
+}
+
+pub async fn design_specification(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(target_id): Path<String>,
+) -> Result<Json<DesignSpecificationResponse>, AppError> {
+    let tenant = authenticate_native(&state, &headers, Scope::PrintersRead).await?;
+    let target = state
+        .repository
+        .get_target(tenant.workspace_id, tenant.environment_id, &target_id)
+        .await?;
+    let stock = match target.stock_id.as_deref() {
+        Some(id) => Some(
+            state
+                .repository
+                .get_stock(tenant.workspace_id, tenant.environment_id, id)
+                .await?,
+        ),
+        None => None,
+    };
+    let readiness = compute_target_readiness(&state, tenant, &target_id).await?;
+    let bindings = state
+        .repository
+        .list_target_bindings(tenant.workspace_id, tenant.environment_id, &target_id)
+        .await?;
+    let mut destinations = Vec::with_capacity(bindings.len());
+    for binding in bindings {
+        let printer = state
+            .repository
+            .get_printer(
+                tenant.workspace_id,
+                tenant.environment_id,
+                binding.printer_id,
+            )
+            .await?;
+        let profile = printer
+            .profiles
+            .iter()
+            .find(|profile| {
+                (profile.profile_id.as_str(), profile.revision)
+                    == (binding.profile_id.as_str(), binding.profile_revision)
+            })
+            .cloned()
+            .ok_or(RepositoryError::NotFound)?;
+        destinations.push(DesignSpecificationDestination {
+            binding,
+            printer,
+            profile,
+        });
+    }
+    let canonical = serde_json::to_vec(&(&target, &stock, &readiness, &destinations))
+        .map_err(|_| AppError::service_unavailable("design_specification_serialization_failed"))?;
+    let revision = format!("spec_{:x}", Sha256::digest(canonical));
+    Ok(Json(DesignSpecificationResponse {
+        target,
+        stock,
+        readiness,
+        destinations,
+        specification_revision: revision,
     }))
 }
 

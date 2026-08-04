@@ -27,7 +27,7 @@
       <article class="m-card"><h2>Device identity</h2><p>Enrolled agents authenticate requests with signed, replay-resistant device credentials.</p></article>
       <article class="m-card"><h2>Bounded content</h2><p>Downloads, URIs, files, render work, and waits are constrained rather than trusted indefinitely.</p></article>
       <article class="m-card"><h2>Secret hygiene</h2><p>API keys, enrollment tokens, device keys, lease capabilities, and documents are excluded from client telemetry.</p></article>
-      <article class="m-card"><h2>Auditable events</h2><p>State changes are append-oriented and the accepted-job usage event is idempotent.</p></article>
+      <article class="m-card"><h2>Auditable events</h2><p>State changes are append-oriented and the reported-complete usage event is idempotent.</p></article>
       <article class="m-card"><h2>Honest status</h2><p>Native spooler acceptance and reported completion are not presented as verified physical delivery.</p></article>
     </div>
   </section>

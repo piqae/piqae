@@ -1,6 +1,7 @@
 # Operations guides
 
 - [Production release and promotion](production-release.md)
+- [CI and release operations](ci-and-release.md)
 - [Package publishing](package-publishing.md)
 - [Configuration](configuration.md)
 - [Upgrades](upgrades.md)

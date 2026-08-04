@@ -25,6 +25,16 @@ e0c9a0a1aa1b0fe309f8eb343ced104c69a06d45:deploy/cloud/test-promote.sh:generic-ap
 14e912892c49199f94e107f0d08e0de4d562ce52:docs/api/printnode-migration.md:generic-api-key:28
 17cb7b3bbf41d184fd107b4206e22b27e3bf403b:docs/api/printnode-migration.md:curl-auth-user:22
 
+# Node-connect fixtures use deliberately invalid, non-secret capability shapes.
+47cf42d2913fc264d55c75f42a658e8a795b6e4b:crates/piqae-agent/src/main.rs:generic-api-key:4538
+47cf42d2913fc264d55c75f42a658e8a795b6e4b:crates/piqae-agent/src/main.rs:generic-api-key:4543
+47cf42d2913fc264d55c75f42a658e8a795b6e4b:crates/piqae-agent/src/main.rs:generic-api-key:4549
+47cf42d2913fc264d55c75f42a658e8a795b6e4b:shells/macos/Tests/PiqaeMenuCoreTests/NodeConnectApplicationLinkTests.swift:generic-api-key:7
+47cf42d2913fc264d55c75f42a658e8a795b6e4b:shells/macos/Tests/PiqaeMenuCoreTests/NodeConnectApplicationLinkTests.swift:generic-api-key:18
+47cf42d2913fc264d55c75f42a658e8a795b6e4b:shells/macos/Tests/PiqaeMenuCoreTests/NodeConnectApplicationLinkTests.swift:generic-api-key:26
+47cf42d2913fc264d55c75f42a658e8a795b6e4b:shells/macos/Tests/PiqaeMenuCoreTests/NodeConnectApplicationLinkTests.swift:generic-api-key:46
+47cf42d2913fc264d55c75f42a658e8a795b6e4b:shells/macos/Tests/PiqaeMenuCoreTests/NodeConnectApplicationLinkTests.swift:generic-api-key:79
+
 # Archived architecture examples use non-routable example.com placeholders.
 e7703e78135dcbfc2022f72dd4d6e9e67b21b972:docs/12-open-source-saas-and-build-plan.md:curl-auth-header:214
 e7703e78135dcbfc2022f72dd4d6e9e67b21b972:docs/12-open-source-saas-and-build-plan.md:curl-auth-header:223

@@ -1,6 +1,7 @@
 //! Authoritative Piqae HTTP control plane.
 
 pub mod api;
+pub mod auth_maintenance_worker;
 pub mod authentication;
 pub mod billing;
 pub mod billing_usage_worker;
@@ -10,6 +11,7 @@ pub mod error;
 pub mod identity;
 pub mod pairing;
 pub mod platform;
+pub mod rate_limit;
 pub mod repository;
 pub mod request_id;
 pub mod routing;
@@ -255,6 +257,10 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/printers", get(api::list_printers))
         .route("/v1/printers/{printer_id}", get(api::get_printer))
         .route(
+            "/v1/printers/{printer_id}/content-encryption-key",
+            get(api::printer_content_encryption_key),
+        )
+        .route(
             "/v1/stocks",
             get(routing::list_stocks).post(routing::create_stock),
         )
@@ -282,9 +288,37 @@ pub fn router(state: AppState) -> Router {
             "/v1/targets/{target_id}/readiness",
             get(routing::target_readiness),
         )
+        .route(
+            "/v1/targets/{target_id}/design-specification",
+            get(routing::design_specification),
+        )
         .route("/v1/agent-enrolments", post(api::create_agent_enrolment))
-        .route("/v1/agents/enrol", post(api::enrol_agent))
+        .route(
+            "/v1/node-connect-sessions",
+            post(api::create_node_connect_session),
+        )
+        .route(
+            "/v1/node-connect-sessions/{session_id}",
+            get(api::get_node_connect_session),
+        )
+        .route(
+            "/v1/nodes/{node_id}/connectors",
+            get(api::list_node_connectors),
+        )
+        .route(
+            "/v1/nodes/{node_id}/connectors/{connector_id}",
+            axum::routing::delete(api::revoke_node_connector),
+        )
+        .merge(enrolment_router())
         .route("/v1/uploads", post(api::create_upload))
+        .route(
+            "/v1/agent/content-encryption-key",
+            axum::routing::put(api::register_agent_content_encryption_key),
+        )
+        .route(
+            "/v1/agent/content-encryption-key/{key_id}",
+            axum::routing::delete(api::revoke_agent_content_encryption_key),
+        )
         .route("/v1/uploads/{upload_id}", get(api::get_upload))
         .route(
             "/v1/uploads/{upload_id}/content",
@@ -343,11 +377,37 @@ pub fn router(state: AppState) -> Router {
 }
 
 fn pairing_router() -> Router<AppState> {
+    // Creating an authorization writes a durable row for an unauthenticated
+    // caller, so it gets the tightest budget. Polling and exchange are read
+    // paths a legitimately pairing node hits every two seconds for up to ten
+    // minutes, so they get room for a plausible fleet pairing at once.
+    let creation = rate_limit::RateLimiter::new(10, 60, 60);
+    let polling = rate_limit::RateLimiter::new(300, 3_000, 60);
     Router::new()
         .route("/v1/device-authorizations", post(pairing::create))
-        .route(
-            "/v1/device-authorizations/{device_code}",
-            get(pairing::status),
+        .layer(middleware::from_fn_with_state(
+            creation,
+            rate_limit::middleware,
+        ))
+        .merge(
+            Router::new()
+                .route("/v1/device-authorizations/status", post(pairing::status))
+                .route(
+                    "/v1/device-authorizations/exchange",
+                    post(pairing::exchange),
+                )
+                .route(
+                    "/v1/device-authorizations/{device_code}",
+                    get(pairing::status_by_path),
+                )
+                .route(
+                    "/v1/device-authorizations/{device_code}/exchange",
+                    post(pairing::exchange_by_path),
+                )
+                .layer(middleware::from_fn_with_state(
+                    polling,
+                    rate_limit::middleware,
+                )),
         )
         .route(
             "/v1/device-authorizations/{authorization_id}/review",
@@ -361,10 +421,23 @@ fn pairing_router() -> Router<AppState> {
             "/v1/device-authorizations/{authorization_id}/deny",
             post(pairing::deny),
         )
+}
+
+fn enrolment_router() -> Router<AppState> {
+    // A one-time enrolment token is consumed by an otherwise unauthenticated
+    // caller. The budget leaves ample room for retries around a real install
+    // while bounding automated attempts against the token space.
+    let limiter = rate_limit::RateLimiter::new(20, 120, 60);
+    Router::new()
+        .route("/v1/agents/enrol", post(api::enrol_agent))
         .route(
-            "/v1/device-authorizations/{device_code}/exchange",
-            post(pairing::exchange),
+            "/v1/node-connect-sessions/preview",
+            post(api::preview_node_connect_session),
         )
+        .layer(middleware::from_fn_with_state(
+            limiter,
+            rate_limit::middleware,
+        ))
 }
 
 fn workos_identity_router() -> Router<AppState> {
@@ -647,7 +720,22 @@ mod tests {
         path: &str,
         body: Vec<u8>,
     ) -> Request<Body> {
-        let timestamp = Utc::now().timestamp_millis();
+        signed_request_at(
+            application,
+            method,
+            path,
+            body,
+            Utc::now().timestamp_millis(),
+        )
+    }
+
+    fn signed_request_at(
+        application: &TestApplication,
+        method: &str,
+        path: &str,
+        body: Vec<u8>,
+        timestamp: i64,
+    ) -> Request<Body> {
         let nonce = uuid::Uuid::new_v4();
         let digest = format!("{:x}", Sha256::digest(&body));
         let canonical = format!("{method}\n{path}\n{timestamp}\n{nonce}\n{digest}");
@@ -666,6 +754,294 @@ mod tests {
             )
             .body(Body::from(body))
             .expect("valid signed request")
+    }
+
+    #[tokio::test]
+    async fn a_node_with_a_drifting_clock_is_tolerated_then_told_the_server_time() {
+        let application = application().await;
+        let now = Utc::now();
+        let body = serde_json::to_vec(&AgentSyncRequest {
+            agent_id: application.agent_id,
+            protocol_version: 1,
+            agent_version: "test-clock-skew".into(),
+            printer_revision: 0,
+            acknowledged_command_cursor: None,
+            event_cursor: None,
+            queue: QueueSnapshot {
+                queued_jobs: 0,
+                active_jobs: 0,
+                content_bytes: 0,
+                accepts_jobs: true,
+            },
+            health: AgentHealth {
+                started_at: now,
+                observed_at: now,
+                sqlite_integrity_ok: true,
+                executor_crashes: 0,
+                last_error_code: None,
+            },
+            printers: None,
+            events: Vec::new(),
+        })
+        .expect("sync body");
+
+        // Four minutes of drift is ordinary on a machine without NTP and must
+        // not stop it printing.
+        let tolerated = application
+            .router
+            .clone()
+            .oneshot(signed_request_at(
+                &application,
+                "POST",
+                "/v1/agent/sync",
+                body.clone(),
+                Utc::now().timestamp_millis() - 240_000,
+            ))
+            .await
+            .expect("tolerated skew response");
+        assert_eq!(tolerated.status(), StatusCode::OK);
+
+        // Beyond the window the request is refused — but the response still
+        // carries the server clock, which is what lets the node self-correct
+        // instead of failing forever.
+        let rejected = application
+            .router
+            .clone()
+            .oneshot(signed_request_at(
+                &application,
+                "POST",
+                "/v1/agent/sync",
+                body,
+                Utc::now().timestamp_millis() - 600_000,
+            ))
+            .await
+            .expect("rejected skew response");
+        assert_eq!(rejected.status(), StatusCode::UNAUTHORIZED);
+        let server_time = rejected
+            .headers()
+            .get("x-piqae-server-time")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<i64>().ok())
+            .expect("server time on a rejected request");
+        assert!(
+            (server_time - Utc::now().timestamp_millis()).abs() < 60_000,
+            "server time {server_time} is not the current server clock"
+        );
+    }
+
+    #[tokio::test]
+    async fn pairing_completes_without_the_device_code_entering_a_request_path() {
+        let application = application().await;
+        let created = json_response(
+            &application.router,
+            Request::builder()
+                .method("POST")
+                .uri("/v1/device-authorizations")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "public_key": STANDARD_NO_PAD.encode([7_u8; 32]),
+                        "installation_id": "installation-1",
+                        "proposed_name": "Packing room",
+                        "hostname": "packing-1",
+                        "platform": "linux",
+                        "architecture": "x86_64",
+                        "installation_mode": "user",
+                        "agent_version": "0.1.0",
+                        "protocol_version": 1,
+                    })
+                    .to_string(),
+                ))
+                .expect("create request"),
+        )
+        .await;
+        let device_code = created["device_code"].as_str().expect("device code");
+        let authorization_id = created["id"].as_str().expect("authorization id");
+        let user_code = created["user_code"].as_str().expect("user code");
+
+        let pending = json_response(
+            &application.router,
+            api_request(
+                "POST",
+                "/v1/device-authorizations/status",
+                "",
+                Some(&serde_json::json!({ "device_code": device_code }).to_string()),
+            ),
+        )
+        .await;
+        assert_eq!(pending["state"], "pending");
+
+        let approved = application
+            .router
+            .clone()
+            .oneshot(api_request(
+                "POST",
+                &format!("/v1/device-authorizations/{authorization_id}/approve"),
+                "piq_test_integration",
+                Some(&serde_json::json!({ "user_code": user_code }).to_string()),
+            ))
+            .await
+            .expect("approve response");
+        assert_eq!(approved.status(), StatusCode::OK);
+
+        let exchanged = json_response(
+            &application.router,
+            api_request(
+                "POST",
+                "/v1/device-authorizations/exchange",
+                "",
+                Some(&serde_json::json!({ "device_code": device_code }).to_string()),
+            ),
+        )
+        .await;
+        assert!(exchanged["node_id"].is_string(), "{exchanged}");
+    }
+
+    #[tokio::test]
+    async fn a_rotation_tells_the_approver_which_node_it_replaces() {
+        let application = application().await;
+        let pair = async |installation: &str| {
+            let created = json_response(
+                &application.router,
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/device-authorizations")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "public_key": STANDARD_NO_PAD.encode([7_u8; 32]),
+                            "installation_id": installation,
+                            "proposed_name": "Packing room",
+                            "hostname": "packing-1",
+                            "platform": "linux",
+                            "architecture": "x86_64",
+                            "installation_mode": "user",
+                            "agent_version": "0.1.0",
+                            "protocol_version": 1,
+                        })
+                        .to_string(),
+                    ))
+                    .expect("create request"),
+            )
+            .await;
+            (
+                created["id"].as_str().unwrap_or_default().to_owned(),
+                created["user_code"].as_str().unwrap_or_default().to_owned(),
+                created["device_code"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned(),
+            )
+        };
+        let review = async |authorization_id: &str| {
+            json_response(
+                &application.router,
+                api_request(
+                    "GET",
+                    &format!("/v1/device-authorizations/{authorization_id}/review"),
+                    "piq_test_integration",
+                    None,
+                ),
+            )
+            .await
+        };
+
+        // First pairing of an installation admits a new node.
+        let (first_id, first_code, first_device_code) = pair("installation-rotating").await;
+        assert!(review(&first_id).await["replaces_node_id"].is_null());
+        let approved = application
+            .router
+            .clone()
+            .oneshot(api_request(
+                "POST",
+                &format!("/v1/device-authorizations/{first_id}/approve"),
+                "piq_test_integration",
+                Some(&serde_json::json!({ "user_code": first_code }).to_string()),
+            ))
+            .await
+            .expect("approve response");
+        assert_eq!(approved.status(), StatusCode::OK);
+        let node = json_response(
+            &application.router,
+            api_request(
+                "POST",
+                "/v1/device-authorizations/exchange",
+                "",
+                Some(&serde_json::json!({ "device_code": first_device_code }).to_string()),
+            ),
+        )
+        .await;
+        let node_id = node["node_id"].as_str().expect("node id").to_owned();
+
+        // Pairing the same installation again is a key rotation, and the
+        // approver must be told whose key they are retiring.
+        let (second_id, _, _) = pair("installation-rotating").await;
+        assert_eq!(
+            review(&second_id).await["replaces_node_id"]
+                .as_str()
+                .expect("replaced node"),
+            node_id
+        );
+    }
+
+    #[tokio::test]
+    async fn unauthenticated_pairing_creation_is_rate_limited() {
+        let application = application().await;
+        let create = || {
+            Request::builder()
+                .method("POST")
+                .uri("/v1/device-authorizations")
+                .header("content-type", "application/json")
+                .header("x-forwarded-for", "203.0.113.9")
+                .body(Body::from(
+                    serde_json::json!({
+                        "public_key": STANDARD_NO_PAD.encode([7_u8; 32]),
+                        "installation_id": "installation-1",
+                        "proposed_name": "Packing room",
+                        "hostname": "packing-1",
+                        "platform": "linux",
+                        "architecture": "x86_64",
+                        "installation_mode": "user",
+                        "agent_version": "0.1.0",
+                        "protocol_version": 1,
+                    })
+                    .to_string(),
+                ))
+                .expect("create request")
+        };
+        let mut statuses = Vec::new();
+        for _ in 0..12 {
+            statuses.push(
+                application
+                    .router
+                    .clone()
+                    .oneshot(create())
+                    .await
+                    .expect("create response")
+                    .status(),
+            );
+        }
+        assert!(
+            statuses.contains(&StatusCode::TOO_MANY_REQUESTS),
+            "unauthenticated row creation was never throttled: {statuses:?}"
+        );
+    }
+
+    async fn json_response(router: &Router, request: Request<Body>) -> serde_json::Value {
+        let response = router.clone().oneshot(request).await.expect("response");
+        let status = response.status();
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        assert!(
+            status.is_success(),
+            "unexpected {status}: {}",
+            String::from_utf8_lossy(&body)
+        );
+        serde_json::from_slice(&body).expect("JSON body")
     }
 
     #[tokio::test]

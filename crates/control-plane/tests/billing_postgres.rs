@@ -421,13 +421,17 @@ async fn cloud_billing_is_tenant_scoped_idempotent_and_stripe_projected() {
         .await
         .expect("usage A");
     assert_eq!(usage_a.status(), StatusCode::OK);
-    assert_eq!(json(usage_a).await["accepted_live_jobs"], 100);
+    let usage_a = json(usage_a).await;
+    assert_eq!(usage_a["reported_complete_live_jobs"], 100);
+    assert!(usage_a.get("accepted_live_jobs").is_none());
     let usage_b = application
         .clone()
         .oneshot(bearer_request("GET", "/v1/usage", "tenant-b-live", None))
         .await
         .expect("usage B");
-    assert_eq!(json(usage_b).await["accepted_live_jobs"], 0);
+    let usage_b = json(usage_b).await;
+    assert_eq!(usage_b["reported_complete_live_jobs"], 0);
+    assert!(usage_b.get("accepted_live_jobs").is_none());
 
     let created = Utc::now().timestamp();
     let subscription = serde_json::json!({
@@ -544,18 +548,52 @@ async fn cloud_billing_is_tenant_scoped_idempotent_and_stripe_projected() {
                 panic!("job lifecycle transition {current_state} -> {state:?}: {error}")
             });
     }
-    let accepted_ledger_entries: i64 = sqlx::query_scalar(
+    let usage_before_reported_completion: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM usage_ledger
          WHERE workspace_id = $1 AND environment_id = $2
-           AND job_id = $3 AND kind = 'print_job_accepted'",
+           AND job_id = $3
+           AND kind IN ('print_job_accepted', 'print_job_reported_complete')",
     )
     .bind(tenant_a.workspace_id.to_string())
     .bind(tenant_a.live_environment_id.to_string())
     .bind(pro_job_id.to_string())
     .fetch_one(&pool)
     .await
-    .expect("accepted usage entries");
-    assert_eq!(accepted_ledger_entries, 1);
+    .expect("pre-completion usage entries");
+    assert_eq!(usage_before_reported_completion, 0);
+
+    store
+        .apply_agent_event(
+            tenant_a.workspace_id,
+            tenant_a.live_environment_id,
+            tenant_a.live_agent_id,
+            &JobEvent {
+                id: EventId::new(),
+                job_id: pro_job_id,
+                sequence: 0,
+                state: JobState::CompletedReported,
+                reason: None,
+                message: None,
+                agent_id: Some(tenant_a.live_agent_id),
+                native_job_id: Some("native-billing-once".to_owned()),
+                occurred_at: Utc::now(),
+            },
+        )
+        .await
+        .expect("reported-complete transition")
+        .expect("new agent event");
+    let reported_complete_entries: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM usage_ledger
+         WHERE workspace_id = $1 AND environment_id = $2
+           AND job_id = $3 AND kind = 'print_job_reported_complete'",
+    )
+    .bind(tenant_a.workspace_id.to_string())
+    .bind(tenant_a.live_environment_id.to_string())
+    .bind(pro_job_id.to_string())
+    .fetch_one(&pool)
+    .await
+    .expect("reported-complete usage entries");
+    assert_eq!(reported_complete_entries, 1);
     let summary = application
         .clone()
         .oneshot(bearer_request(
@@ -687,6 +725,53 @@ async fn cloud_billing_is_tenant_scoped_idempotent_and_stripe_projected() {
         .await
         .expect("existing installation remains idempotent");
     assert_eq!(replay.agent_id, tenant_b.live_agent_id);
+    let changed_key_replay = store
+        .enrol_agent_with_billing(
+            "existing-secret",
+            &[12_u8; 32],
+            "Attacker rename",
+            replay_host,
+            "test",
+            "test",
+            "9.9.9",
+            1,
+            true,
+        )
+        .await;
+    assert!(
+        matches!(
+            changed_key_replay,
+            Err(piqae_storage_postgres::StorageError::NotFound)
+        ),
+        "a consumed capability must not rotate an existing public key"
+    );
+    sqlx::query(
+        "UPDATE enrolment_tokens SET expires_at = now() - interval '11 minutes'
+         WHERE id = 'enrolment-existing'",
+    )
+    .execute(&pool)
+    .await
+    .expect("expire replay recovery window");
+    let stale_replay = store
+        .enrol_agent_with_billing(
+            "existing-secret",
+            &replay_key,
+            "Existing node",
+            replay_host,
+            "test",
+            "test",
+            "0.1.0",
+            1,
+            true,
+        )
+        .await;
+    assert!(
+        matches!(
+            stale_replay,
+            Err(piqae_storage_postgres::StorageError::NotFound)
+        ),
+        "recovery retries must expire"
+    );
 
     sqlx::query(
         "INSERT INTO device_authorizations (

@@ -3,6 +3,16 @@
 Typed, dependency-free TypeScript client for Piqae's native API. It works in
 Node.js, browsers, serverless runtimes, and against a local-only agent.
 
+Install the public package from npm:
+
+```console
+pnpm add @piqae/sdk
+```
+
+Release tarballs and checksums are also attached to `sdk-vX.Y.Z` GitHub
+Releases, and the package is mirrored to GitHub Packages for authenticated
+GitHub consumers.
+
 ## SaaS platforms
 
 Use one server-only platform key and one immutable external ID for each
@@ -38,6 +48,36 @@ Create, retrieve, list, or archive customer accounts through
 remains an operator or hosted account-setup action. Never expose it to browser,
 mobile, desktop, or node code.
 
+## Preview embedded node onboarding
+
+A platform backend can create a short-lived connection session through
+`customer.nodes.createConnectSession(...)`, render its `connect_url`, and poll
+the session until it reports `connected`. The one-time capability must remain
+opaque to browser code and logs. The native app shows server-resolved workspace
+and requesting-service identity, asks the user to select printers, and proves
+possession of the existing installation key before a connector is added.
+
+This onboarding path is Preview. The macOS source implements the native link and
+consent flow, but no signed/notarised artifact is currently published from this
+repository. Windows and Linux expose download/manual fallback choices only; they
+do not yet provide the same native link flow. A download URL in the API is a
+navigation choice, not evidence of an available or Supported installer.
+
+## Preview content encryption
+
+`encryptJobContent()` creates a versioned client-side AES-GCM envelope and
+wraps its one-time content key to dedicated node P-256 ECDH keys using
+HKDF-SHA-256 and authenticated AES-256-GCM key wrapping. It
+authenticates the content type, target, profile revision, and expiry.
+`printers.contentEncryptionKey()` discovers a tenant-scoped recipient and
+`jobs.createEncrypted(input, envelope, idempotencyKey)` uploads ciphertext and
+submits the encrypted manifest. The node verifies and decrypts locally; the
+ordinary PDF/RAW path remains available for compatibility. This implemented
+path remains Preview and is Disabled as a production support claim pending
+independent cryptographic review, hardware-backed key work, signed native
+releases, crash/soak evidence and physical fixtures.
+See `docs/api/content-confidential-printing.md` in the repository.
+
 ## One workspace
 
 ```ts
@@ -67,7 +107,7 @@ without duplicating billing rules in your application:
 const billing = await piqae.billing.summary();
 const july = await piqae.usage.retrieve('2026-07');
 
-console.log(billing.plan, billing.usage.accepted_live_jobs);
+console.log(billing.plan, billing.usage.reported_complete_live_jobs);
 console.log(july.period_start, july.period_end);
 ```
 
@@ -103,15 +143,47 @@ await piqae.jobs.create(
 summaries, safe overrides, and current target readiness. Vendor-native settings
 are display-only facts captured by the node.
 
+Design editors can fetch those constraints atomically and retain the revision
+with the saved artwork:
+
+```ts
+const spec = await customer.targets.designSpecification('tgt_01K...');
+if (spec.readiness.status !== 'ready') throw new Error('Print setup is not ready');
+console.log(spec.stock?.attributes, spec.destinations, spec.specification_revision);
+```
+
+Reconcile queues with exact server-side filters:
+
+```ts
+const failed = await customer.jobs.list({
+  state: 'failed_retryable',
+  metadata_key: 'order_id',
+  metadata_value: '481'
+});
+```
+
+Verify webhooks before parsing their JSON. Pass the exact raw body; the default
+five-minute tolerance rejects stale signatures. Persist each delivery ID and
+reject duplicates separately, because a valid delivery can be replayed within
+that tolerance window:
+
+```ts
+import { verifyWebhookSignature } from '@piqae/sdk';
+
+const valid = await verifyWebhookSignature(secret, rawBody, request.headers);
+if (!valid) throw new Error('Invalid Piqae webhook signature');
+```
+
 Lower-level trusted integrations can also construct an explicit account grant
 context:
 
 ```ts
+const customerRecord = await applicationDatabase.customers.findById('customer_481');
 const customerPiqae = new PiqaeClient({
   platformKey: process.env.PIQAE_PLATFORM_KEY,
   platformContext: {
-    workspaceId: customer.piqaeWorkspaceId,
-    environmentId: customer.piqaeEnvironmentId
+    workspaceId: customerRecord.piqaeWorkspaceId,
+    environmentId: customerRecord.piqaeEnvironmentId
   }
 });
 ```

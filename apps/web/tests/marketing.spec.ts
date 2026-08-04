@@ -2,16 +2,34 @@ import { expect, test } from '@playwright/test';
 
 const publicRoutes = [
   ['/', 'Printing infrastructure, ready for your product.'],
-  ['/how-it-works', 'From your app to the right printer—without the guesswork.'],
-  ['/pricing', 'Pricing for every print path, starting at $0.'],
+  ['/pricing', 'Pay only for prints reported complete.'],
   ['/about', 'Built where every label matters.'],
-  ['/compare', 'Find the printing platform that fits how you build.'],
-  ['/compare/printnode', 'Two remote print APIs, with different control boundaries.'],
-  ['/alternatives/printnode', 'An alternative is useful only when it changes your constraints.'],
-  ['/migrate/printnode', 'Change the print path without betting the operation.'],
-  ['/open-source', 'Open by design. Yours to run.'],
+  ['/compare', 'A simpler print API, without the closed edge.'],
+  ['/compare/printnode', 'A familiar print API with a more open operating model.'],
+  ['/alternatives/printnode', 'Remote printing that is easier to adopt—and easier to leave.'],
+  ['/migrate/printnode', 'Keep the request shape. Change who owns the print path.'],
+  ['/open-source', 'Open at the edge. Portable at the core.'],
   ['/security', 'Built for the documents your business depends on.']
 ] as const;
+
+test('primary public destinations never return a server error', async ({ request }) => {
+  const destinations = [
+    '/docs',
+    '/docs/quickstart',
+    '/downloads',
+    ...publicRoutes.map(([path]) => path)
+  ];
+  for (const route of destinations) {
+    const response = await request.get(route);
+    expect(response.status(), route).toBeLessThan(400);
+  }
+});
+
+test('the retired product page redirects to useful documentation', async ({ request }) => {
+  const response = await request.get('/how-it-works', { maxRedirects: 0 });
+  expect(response.status()).toBe(308);
+  expect(response.headers().location).toBe('/docs');
+});
 
 test('marketing routes have unique content and remain launch-gated', async ({ page }) => {
   for (const [route, heading] of publicRoutes) {
@@ -32,7 +50,7 @@ test('homepage and mobile navigation expose the primary conversion paths', async
   await page.goto('/');
   await expect(
     page.getByRole('img', {
-      name: /Piqae dashboard showing printer-computer health/
+      name: /Piqae dashboard showing node health/
     })
   ).toBeVisible();
   await expect(page.getByRole('link', { name: 'Compare Piqae and PrintNode' })).toBeVisible();

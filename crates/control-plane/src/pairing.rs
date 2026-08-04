@@ -60,11 +60,28 @@ pub struct DeviceAuthorizationReview {
     pub architecture: String,
     pub state: String,
     pub expires_at: chrono::DateTime<Utc>,
+    /// The node whose device key this approval would replace.
+    ///
+    /// Present when the request comes from an installation already paired to
+    /// this workspace — an in-place key rotation. Approving retires that node's
+    /// current key, which is a materially different decision from admitting a
+    /// new node, so it must be visible before approval rather than after.
+    pub replaces_node_id: Option<piqae_domain::AgentId>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct DecideDeviceAuthorizationRequest {
     pub user_code: String,
+}
+
+/// Carries the device code in a request body instead of the request path.
+///
+/// The device code is a bearer secret for the pairing exchange. In a path it
+/// reaches every proxy access log, CDN log, and trace between the node and the
+/// control plane, none of which Piqae controls.
+#[derive(Debug, Deserialize)]
+pub struct DeviceCodeRequest {
+    pub device_code: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -134,11 +151,30 @@ pub async fn create(
 
 pub async fn status(
     State(state): State<AppState>,
+    Json(request): Json<DeviceCodeRequest>,
+) -> Result<Json<DeviceAuthorizationStatus>, AppError> {
+    status_for_code(&state, &request.device_code).await
+}
+
+/// Polls pairing state with the device code in the request path.
+///
+/// Retained for nodes released before the code moved into the request body.
+/// New callers must use `POST /v1/device-authorizations/status`.
+pub async fn status_by_path(
+    State(state): State<AppState>,
     Path(device_code): Path<String>,
+) -> Result<Json<DeviceAuthorizationStatus>, AppError> {
+    warn_deprecated_path_code("status");
+    status_for_code(&state, &device_code).await
+}
+
+async fn status_for_code(
+    state: &AppState,
+    device_code: &str,
 ) -> Result<Json<DeviceAuthorizationStatus>, AppError> {
     let authorization = state
         .repository
-        .device_authorization_by_hash(&digest(&device_code))
+        .device_authorization_by_hash(&digest(device_code))
         .await?;
     Ok(Json(DeviceAuthorizationStatus {
         id: authorization.id,
@@ -147,15 +183,32 @@ pub async fn status(
     }))
 }
 
+fn warn_deprecated_path_code(operation: &'static str) {
+    tracing::warn!(
+        operation,
+        error.type = "deprecated_path_device_code",
+        "a node sent its device code in the request path; upgrade the node so \
+         the code stays out of proxy access logs"
+    );
+}
+
 pub async fn review(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(authorization_id): Path<String>,
 ) -> Result<Json<DeviceAuthorizationReview>, AppError> {
-    authenticate_native(&state, &headers, Scope::AgentsWrite).await?;
+    let tenant = authenticate_native(&state, &headers, Scope::AgentsWrite).await?;
     let authorization = state
         .repository
         .device_authorization_by_id(&authorization_id)
+        .await?;
+    let replaces_node_id = state
+        .repository
+        .node_replaced_by_device_authorization(
+            &authorization_id,
+            tenant.workspace_id,
+            tenant.environment_id,
+        )
         .await?;
     Ok(Json(DeviceAuthorizationReview {
         id: authorization.id,
@@ -165,6 +218,7 @@ pub async fn review(
         architecture: authorization.architecture,
         state: authorization.state,
         expires_at: authorization.expires_at,
+        replaces_node_id,
     }))
 }
 
@@ -218,12 +272,31 @@ pub async fn deny(
 
 pub async fn exchange(
     State(state): State<AppState>,
+    Json(request): Json<DeviceCodeRequest>,
+) -> Result<Json<DeviceAuthorizationExchange>, AppError> {
+    exchange_for_code(&state, &request.device_code).await
+}
+
+/// Exchanges an approved device code supplied in the request path.
+///
+/// Retained for nodes released before the code moved into the request body.
+/// New callers must use `POST /v1/device-authorizations/exchange`.
+pub async fn exchange_by_path(
+    State(state): State<AppState>,
     Path(device_code): Path<String>,
+) -> Result<Json<DeviceAuthorizationExchange>, AppError> {
+    warn_deprecated_path_code("exchange");
+    exchange_for_code(&state, &device_code).await
+}
+
+async fn exchange_for_code(
+    state: &AppState,
+    device_code: &str,
 ) -> Result<Json<DeviceAuthorizationExchange>, AppError> {
     let enrolled = state
         .repository
         .exchange_device_authorization_with_billing(
-            &digest(&device_code),
+            &digest(device_code),
             state.capabilities.billing.enabled,
         )
         .await?;

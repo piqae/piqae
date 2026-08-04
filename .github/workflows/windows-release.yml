@@ -6,16 +6,32 @@ on:
       version:
         description: SemVer release version without a leading v
         required: true
-        default: 0.1.0
+        default: "0.1.1"
       publish:
-        description: Promote a fully signed build to the stable Railway release feed
-        type: boolean
+        description: Publish a signed stable release
         required: true
+        type: boolean
         default: false
-  push:
-    tags:
-      - "v*"
-
+      publish_unsigned_preview:
+        description: Publish an explicitly unsigned GitHub prerelease from a v*-windows-preview.* tag
+        required: true
+        type: boolean
+        default: false
+  workflow_call:
+    inputs:
+      version:
+        description: SemVer release version without a leading v
+        required: true
+        type: string
+      publish:
+        description: Promote after the native-release environment gate
+        required: true
+        type: boolean
+      publish_unsigned_preview:
+        description: Publish an explicitly unsigned GitHub prerelease
+        required: false
+        type: boolean
+        default: false
 permissions:
   contents: read
 
@@ -26,12 +42,14 @@ concurrency:
 jobs:
   package:
     name: Package x86_64 Windows
-    runs-on: windows-latest
+    runs-on: ${{ vars.PIQAE_RELEASE_WINDOWS_RUNNER || 'windows-latest' }}
     environment: native-signing
     outputs:
       artifact_name: ${{ steps.release.outputs.artifact_name }}
       publish: ${{ steps.release.outputs.publish }}
+      publish_unsigned_preview: ${{ steps.release.outputs.publish_unsigned_preview }}
       signed: ${{ steps.release.outputs.signed }}
+      signing_provider: ${{ steps.release.outputs.signing_provider }}
       version: ${{ steps.release.outputs.version }}
     permissions:
       contents: read
@@ -39,11 +57,17 @@ jobs:
       attestations: write
     env:
       TARGET: x86_64-pc-windows-msvc
+      WINDOWS_SIGNING_PROVIDER: ${{ vars.WINDOWS_SIGNING_PROVIDER || 'pfx' }}
       WINDOWS_PFX_BASE64: ${{ secrets.WINDOWS_AUTHENTICODE_PFX_BASE64 }}
       WINDOWS_PFX_PASSWORD: ${{ secrets.WINDOWS_AUTHENTICODE_PFX_PASSWORD }}
       WINDOWS_TIMESTAMP_URL: ${{ vars.WINDOWS_RFC3161_TIMESTAMP_URL }}
       WINDOWS_EXPECTED_CERTIFICATE_SUBJECT: ${{ vars.WINDOWS_EXPECTED_CERTIFICATE_SUBJECT }}
       WINDOWS_EXPECTED_CERTIFICATE_THUMBPRINT: ${{ vars.WINDOWS_EXPECTED_CERTIFICATE_THUMBPRINT }}
+      SM_HOST: ${{ vars.DIGICERT_SM_HOST }}
+      SM_API_KEY: ${{ secrets.DIGICERT_SM_API_KEY }}
+      SM_CLIENT_CERT_FILE_B64: ${{ secrets.DIGICERT_SM_CLIENT_CERT_FILE_B64 }}
+      SM_CLIENT_CERT_PASSWORD: ${{ secrets.DIGICERT_SM_CLIENT_CERT_PASSWORD }}
+      SM_KEYPAIR_ALIAS: ${{ secrets.DIGICERT_SM_KEYPAIR_ALIAS }}
       WINSPARKLE_PRIVATE_KEY_BASE64: ${{ secrets.WINSPARKLE_ED25519_PRIVATE_KEY_BASE64 }}
       WINSPARKLE_PUBLIC_KEY: ${{ vars.WINSPARKLE_ED25519_PUBLIC_KEY }}
       WINDOWS_UPDATE_FEED_URL: https://downloads.piqae.com/releases/stable/appcast-windows.xml
@@ -66,18 +90,47 @@ jobs:
           if ($version -notmatch "^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$") {
             throw "Version must be SemVer-like and must not include a leading v."
           }
+          if (
+            "${{ github.ref_type }}" -eq "tag" -and
+            $version -cne "${{ inputs.version }}"
+          ) {
+            throw "Tag version '$version' does not match requested version '${{ inputs.version }}'."
+          }
           "version=$version" >> $env:GITHUB_OUTPUT
 
+          if ($env:WINDOWS_SIGNING_PROVIDER -notin @("pfx", "digicert-keylocker")) {
+            throw "WINDOWS_SIGNING_PROVIDER must be 'pfx' or 'digicert-keylocker'."
+          }
+          $authenticodeRequirements = if ($env:WINDOWS_SIGNING_PROVIDER -eq "digicert-keylocker") {
+            [ordered]@{
+              digicert_host = $env:SM_HOST
+              digicert_api_key = $env:SM_API_KEY
+              digicert_client_certificate = $env:SM_CLIENT_CERT_FILE_B64
+              digicert_client_certificate_password = $env:SM_CLIENT_CERT_PASSWORD
+              digicert_keypair_alias = $env:SM_KEYPAIR_ALIAS
+            }
+          } else {
+            [ordered]@{
+              authenticode_certificate = $env:WINDOWS_PFX_BASE64
+              authenticode_password = $env:WINDOWS_PFX_PASSWORD
+            }
+          }
           $requirements = [ordered]@{
-            authenticode_certificate = $env:WINDOWS_PFX_BASE64
-            authenticode_password = $env:WINDOWS_PFX_PASSWORD
             timestamp_url = $env:WINDOWS_TIMESTAMP_URL
             expected_certificate_subject = $env:WINDOWS_EXPECTED_CERTIFICATE_SUBJECT
             expected_certificate_thumbprint = $env:WINDOWS_EXPECTED_CERTIFICATE_THUMBPRINT
             winsparkle_private_key = $env:WINSPARKLE_PRIVATE_KEY_BASE64
             winsparkle_public_key = $env:WINSPARKLE_PUBLIC_KEY
           }
-          $present = @($requirements.GetEnumerator() | Where-Object { $_.Value }).Count
+          foreach ($entry in $authenticodeRequirements.GetEnumerator()) {
+            $requirements[$entry.Key] = $entry.Value
+          }
+          $forceUnsignedPreview = "${{ inputs.publish_unsigned_preview }}" -eq "true"
+          $present = if ($forceUnsignedPreview) {
+            0
+          } else {
+            @($requirements.GetEnumerator() | Where-Object { $_.Value }).Count
+          }
           if ($present -eq 0) {
             "signed=false" >> $env:GITHUB_OUTPUT
             "artifact_name=piqae-windows-x86_64-unsigned-preview" >> $env:GITHUB_OUTPUT
@@ -95,6 +148,7 @@ jobs:
               throw "WINDOWS_EXPECTED_CERTIFICATE_THUMBPRINT must be a 40-character SHA-1 certificate thumbprint."
             }
             "signed=true" >> $env:GITHUB_OUTPUT
+            "signing_provider=$env:WINDOWS_SIGNING_PROVIDER" >> $env:GITHUB_OUTPUT
             "artifact_name=piqae-windows-x86_64-signed" >> $env:GITHUB_OUTPUT
             "SIGNED RELEASE: expected Authenticode signer and WinSparkle Ed25519 gates are configured." |
               Out-File -Encoding ascii "SIGNING-STATUS.txt"
@@ -105,11 +159,40 @@ jobs:
             throw "Signing configuration is partial. Missing: $($missing -join ', ')"
           }
           $signed = $present -eq $requirements.Count
-          $publish = "${{ github.ref_type }}" -eq "tag" -or "${{ inputs.publish }}" -eq "true"
+          $publish = "${{ inputs.publish }}" -eq "true"
+          $publishUnsignedPreview = "${{ inputs.publish_unsigned_preview }}" -eq "true"
+          if ($publish -and $publishUnsignedPreview) {
+            throw "Signed stable publication and unsigned preview publication are mutually exclusive."
+          }
+          if (
+            $publish -and (
+              "${{ github.ref_type }}" -ne "tag" -or
+              "${{ github.ref_name }}" -notmatch "^v[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$" -or
+              "${{ github.ref_protected }}" -ne "true"
+            )
+          ) {
+            throw "Stable publication requires a protected v* tag ref."
+          }
           if ($publish -and -not $signed) {
             throw "Stable publication requires Authenticode and WinSparkle signing."
           }
+          if ($publishUnsignedPreview) {
+            if ($signed) {
+              throw "Unsigned preview publication refuses a signed candidate."
+            }
+            if (
+              "${{ github.repository }}" -ne "piqae/piqae" -or
+              "${{ github.ref_type }}" -ne "tag" -or
+              "${{ github.ref_name }}" -notmatch "^v[0-9]+\.[0-9]+\.[0-9]+-windows-preview\.[0-9]+$"
+            ) {
+              throw "Public unsigned previews require a v<version>-windows-preview.<number> tag in piqae/piqae."
+            }
+            if ("${{ github.ref_name }}" -notmatch "^v$([regex]::Escape($version))-windows-preview\.[0-9]+$") {
+              throw "The preview tag version must match the requested package version '$version'."
+            }
+          }
           "publish=$($publish.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+          "publish_unsigned_preview=$($publishUnsignedPreview.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
 
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
@@ -201,16 +284,46 @@ jobs:
             & "packaging/windows/New-UpdateConfig.ps1" -OutputPath $output
           }
 
+      - name: Materialize DigiCert client identity
+        if: steps.release.outputs.signed == 'true' && steps.release.outputs.signing_provider == 'digicert-keylocker'
+        shell: pwsh
+        run: |
+          $clientCertificate = Join-Path $env:RUNNER_TEMP "digicert-client-auth.p12"
+          [IO.File]::WriteAllBytes(
+            $clientCertificate,
+            [Convert]::FromBase64String($env:SM_CLIENT_CERT_FILE_B64)
+          )
+          "SM_CLIENT_CERT_FILE=$clientCertificate" >> $env:GITHUB_ENV
+
+      - name: Configure DigiCert KeyLocker remote signer
+        if: steps.release.outputs.signed == 'true' && steps.release.outputs.signing_provider == 'digicert-keylocker'
+        uses: digicert/code-signing-software-trust-action@fae23a455ba4bde62b64fd7cb2f81ade788f5a95 # v1
+        with:
+          use-binary-sha256-checksum: true
+          use-github-caching-service: true
+
+      - name: Synchronize DigiCert public certificate
+        if: steps.release.outputs.signed == 'true' && steps.release.outputs.signing_provider == 'digicert-keylocker'
+        shell: pwsh
+        run: |
+          smctl windows certsync --keypair-alias $env:SM_KEYPAIR_ALIAS
+          if ($LASTEXITCODE -ne 0) {
+            throw "DigiCert KeyLocker certificate synchronization failed."
+          }
+
       - name: Authenticode-sign staged Piqae binaries
         if: steps.release.outputs.signed == 'true'
         id: authenticode
         shell: pwsh
         run: |
           $certificate = Join-Path $env:RUNNER_TEMP "piqae-authenticode.pfx"
-          [IO.File]::WriteAllBytes(
-            $certificate,
-            [Convert]::FromBase64String($env:WINDOWS_PFX_BASE64)
-          )
+          if ("${{ steps.release.outputs.signing_provider }}" -eq "pfx") {
+            [IO.File]::WriteAllBytes(
+              $certificate,
+              [Convert]::FromBase64String($env:WINDOWS_PFX_BASE64)
+            )
+            "certificate=$certificate" >> $env:GITHUB_OUTPUT
+          }
           $signTool = Get-ChildItem `
             "${env:ProgramFiles(x86)}\Windows Kits\10\bin" `
             -Filter "signtool.exe" `
@@ -221,17 +334,23 @@ jobs:
           if (-not $signTool) {
             throw "Windows SDK signtool.exe was not found."
           }
-          "certificate=$certificate" >> $env:GITHUB_OUTPUT
           "signtool=$signTool" >> $env:GITHUB_OUTPUT
           $binaries = Get-ChildItem "artifacts\stage\piqae-*.exe"
           foreach ($binary in $binaries) {
-            & $signTool sign `
-              /fd SHA256 `
-              /td SHA256 `
-              /tr $env:WINDOWS_TIMESTAMP_URL `
-              /f $certificate `
-              /p $env:WINDOWS_PFX_PASSWORD `
-              $binary.FullName
+            $signArguments = @(
+              "sign", "/fd", "SHA256", "/td", "SHA256",
+              "/tr", $env:WINDOWS_TIMESTAMP_URL
+            )
+            if ("${{ steps.release.outputs.signing_provider }}" -eq "digicert-keylocker") {
+              $signArguments += @(
+                "/sha1",
+                ($env:WINDOWS_EXPECTED_CERTIFICATE_THUMBPRINT -replace "\s", "")
+              )
+            } else {
+              $signArguments += @("/f", $certificate, "/p", $env:WINDOWS_PFX_PASSWORD)
+            }
+            $signArguments += $binary.FullName
+            & $signTool @signArguments
             if ($LASTEXITCODE -ne 0) {
               throw "Authenticode signing failed for $($binary.Name)."
             }
@@ -271,13 +390,23 @@ jobs:
             "packaging\windows\Piqae.iss"
           )
           if ("${{ steps.release.outputs.signed }}" -eq "true") {
-            $signCommand = (
-              '"{0}" sign /fd SHA256 /td SHA256 /tr "{1}" /f "{2}" /p "{3}" $f' -f
-              "${{ steps.authenticode.outputs.signtool }}",
-              $env:WINDOWS_TIMESTAMP_URL,
-              "${{ steps.authenticode.outputs.certificate }}",
-              $env:WINDOWS_PFX_PASSWORD
-            )
+            if ("${{ steps.release.outputs.signing_provider }}" -eq "digicert-keylocker") {
+              $thumbprint = $env:WINDOWS_EXPECTED_CERTIFICATE_THUMBPRINT -replace "\s", ""
+              $signCommand = (
+                '"{0}" sign /fd SHA256 /td SHA256 /tr "{1}" /sha1 "{2}" $f' -f
+                "${{ steps.authenticode.outputs.signtool }}",
+                $env:WINDOWS_TIMESTAMP_URL,
+                $thumbprint
+              )
+            } else {
+              $signCommand = (
+                '"{0}" sign /fd SHA256 /td SHA256 /tr "{1}" /f "{2}" /p "{3}" $f' -f
+                "${{ steps.authenticode.outputs.signtool }}",
+                $env:WINDOWS_TIMESTAMP_URL,
+                "${{ steps.authenticode.outputs.certificate }}",
+                $env:WINDOWS_PFX_PASSWORD
+              )
+            }
             $arguments = @(
               "/Spiqaesign=$signCommand",
               "/DInnoSignToolName=piqaesign"
@@ -363,6 +492,11 @@ jobs:
           REPOSITORY_PRIVATE: ${{ github.event.repository.private }}
         run: |
           Copy-Item "SIGNING-STATUS.txt" "artifacts\release\SIGNING-STATUS.txt"
+          if ("${{ steps.release.outputs.signed }}" -ne "true") {
+            $source = "artifacts\release\piqae-windows-x86_64-setup.exe"
+            $preview = "artifacts\release\piqae-windows-${{ steps.release.outputs.version }}-x86_64-unsigned-preview-setup.exe"
+            Move-Item -LiteralPath $source -Destination $preview
+          }
           if ($env:REPOSITORY_PRIVATE -eq "true") {
             Add-Content `
               "artifacts\release\SIGNING-STATUS.txt" `
@@ -390,6 +524,7 @@ jobs:
           name: ${{ steps.release.outputs.artifact_name }}
           path: artifacts/release/*
           if-no-files-found: error
+          retention-days: 14
 
       - name: Remove temporary signing material
         if: always() && steps.release.outputs.signed == 'true'
@@ -397,15 +532,78 @@ jobs:
         run: |
           Remove-Item `
             (Join-Path $env:RUNNER_TEMP "piqae-authenticode.pfx"), `
+            (Join-Path $env:RUNNER_TEMP "digicert-client-auth.p12"), `
             (Join-Path $env:RUNNER_TEMP "winsparkle-ed25519.key") `
             -Force `
             -ErrorAction SilentlyContinue
 
+  evidence:
+    name: Audit Windows release evidence
+    needs: package
+    permissions:
+      actions: read
+      attestations: write
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/release-evidence.yml
+    with:
+      artifact_name: ${{ needs.package.outputs.artifact_name }}
+      release_name: windows-${{ needs.package.outputs.version }}
+
+  publish_unsigned_preview:
+    name: Publish unsigned Windows prerelease
+    needs: [package, evidence]
+    if: needs.package.outputs.publish_unsigned_preview == 'true'
+    runs-on: ${{ vars.PIQAE_RELEASE_LINUX_RUNNER || 'ubuntu-latest' }}
+    environment: native-release
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ${{ needs.package.outputs.artifact_name }}
+          path: artifacts
+
+      - name: Verify and publish the explicitly unsigned preview
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ needs.package.outputs.version }}
+        run: |
+          set -euo pipefail
+          installer="artifacts/piqae-windows-${RELEASE_VERSION}-x86_64-unsigned-preview-setup.exe"
+          test -f "$installer"
+          grep -Fqx \
+            "UNSIGNED PREVIEW: no Authenticode or update-signing credentials were supplied." \
+            artifacts/SIGNING-STATUS.txt
+          (cd artifacts && sha256sum --check SHA256SUMS)
+          notes_file="$RUNNER_TEMP/windows-preview-notes.md"
+          printf '%s\n' \
+            '# Unsigned Windows Preview' \
+            '' \
+            '**This installer is not Authenticode-signed. Windows will show an Unknown publisher / Microsoft Defender SmartScreen warning.**' \
+            '' \
+            'Use this preview only for evaluation. It has no automatic update feed and Windows remains outside Piqae production support until the documented physical-printer, clean-install, recovery, and signing gates pass.' \
+            '' \
+            'Verify the downloaded installer against `SHA256SUMS` and the GitHub build-provenance attestation before running it.' \
+            > "$notes_file"
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            test "$(gh release view "$GITHUB_REF_NAME" --json isPrerelease --jq .isPrerelease)" = true
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              --verify-tag \
+              --prerelease \
+              --title "Piqae ${RELEASE_VERSION} — unsigned Windows preview" \
+              --notes-file "$notes_file"
+          fi
+          gh release upload "$GITHUB_REF_NAME" artifacts/* --clobber
+
   publish:
     name: Promote signed Windows release
-    needs: package
+    needs: [package, evidence]
     if: needs.package.outputs.publish == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ${{ vars.PIQAE_RELEASE_LINUX_RUNNER || 'ubuntu-latest' }}
     environment: native-release
     permissions:
       contents: write
@@ -413,6 +611,7 @@ jobs:
       group: piqae-native-stable-promotion
       cancel-in-progress: false
     env:
+      CANONICAL_REPOSITORY: ${{ vars.PIQAE_CANONICAL_REPOSITORY || 'piqae/piqae' }}
       RELEASE_VERSION: ${{ needs.package.outputs.version }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -480,19 +679,22 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
-          if [[ "$GITHUB_REPOSITORY" != "piqae/piqae" ]]; then
-            echo "GitHub release publishing is enabled only in piqae/piqae." >&2
+          if [[ "$GITHUB_REPOSITORY" != "$CANONICAL_REPOSITORY" ]]; then
+            echo "GitHub release publishing is enabled only in $CANONICAL_REPOSITORY." >&2
             exit 1
           fi
           tag="v${RELEASE_VERSION}"
-          if ! gh release view "$tag" >/dev/null 2>&1; then
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release view "$tag" --json isDraft --jq '.isDraft' | grep -Fx true
+          else
             gh release create "$tag" --draft --verify-tag \
               --title "Piqae $tag" \
               --notes "Preview candidate. Review checksums, provenance, signatures, notarisation evidence, and the support matrix before publishing."
           fi
           gh release upload "$tag" \
             promotion/piqae-windows-* \
-            promotion/appcast-windows.xml
+            promotion/appcast-windows.xml \
+            --clobber
 
       - name: Upload and verify immutable Windows release
         shell: bash
@@ -574,7 +776,9 @@ jobs:
             if [[ "$code" -ne 3 ]]; then
               exit "$code"
             fi
-            jq -n '{
+            jq -n \
+              --arg repository_url "https://github.com/$CANONICAL_REPOSITORY" \
+              '{
               schemaVersion: 1,
               channel: "stable",
               currentVersion: "0.0.0",
@@ -582,16 +786,18 @@ jobs:
               artifacts: [],
               olderReleases: [],
               releasesUrl: "https://piqae.com/downloads",
-              repositoryUrl: "https://github.com/piqae/piqae"
+              repositoryUrl: $repository_url
             }' > promotion/current-manifest.json
           fi
           jq \
             --slurpfile platform promotion/windows.json \
+            --arg repository_url "https://github.com/$CANONICAL_REPOSITORY" \
             --arg version "$RELEASE_VERSION" \
             --arg now "$(jq -r '.publishedAt' promotion/windows.json)" \
             '.channel = "stable"
              | .currentVersion = $version
              | .updatedAt = $now
+             | .repositoryUrl = $repository_url
              | .artifacts = ([.artifacts[] | select(.id != $platform[0].artifact.id)] + [$platform[0].artifact])' \
             promotion/current-manifest.json > promotion/manifest.json
           jq -e \
@@ -616,3 +822,32 @@ jobs:
           # The shared manifest is the final stable-channel commit point.
           packaging/release/publish-s3-object.sh promote \
             "$immutable_manifest" native/stable/manifest.json application/json
+
+      - name: Verify public Windows update feed and manifest
+        shell: bash
+        run: |
+          appcast=$(mktemp)
+          curl --fail --location --silent --show-error --max-time 30 \
+            https://downloads.piqae.com/releases/stable/appcast-windows.xml \
+            --output "$appcast"
+          enclosure=$(xmllint --xpath \
+            'string(/*[local-name()="rss"]/*[local-name()="channel"]/*[local-name()="item"][1]/*[local-name()="enclosure"]/@url)' \
+            "$appcast")
+          expected="https://downloads.piqae.com/releases/stable/piqae-windows-${RELEASE_VERSION}-x86_64-setup.exe"
+          if [[ "$enclosure" != "$expected" ]]; then
+            echo "The public Windows appcast does not reference the promoted installer." >&2
+            exit 1
+          fi
+          curl --fail --location --silent --show-error --max-time 30 \
+            --range 0-0 "$enclosure" --output /dev/null
+          curl --fail --location --silent --show-error --max-time 30 \
+            https://downloads.piqae.com/releases/stable/manifest.json \
+            | jq -e \
+              --arg version "$RELEASE_VERSION" \
+              --arg download "$expected" \
+              '.currentVersion == $version
+               and any(.artifacts[];
+                 .id == "windows-x86_64"
+                 and .version == $version
+                 and .downloadUrl == $download)' \
+              >/dev/null

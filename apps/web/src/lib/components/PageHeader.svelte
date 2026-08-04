@@ -39,17 +39,15 @@
   .eyebrow {
     margin-bottom: 2px;
     color: var(--text-tertiary);
-    font-size: 11px;
+    font-size: var(--text-meta);
     font-weight: 500;
-    letter-spacing: 0.025em;
-    text-transform: uppercase;
   }
 
   h1 {
     margin: 0;
     font-family: var(--font-display);
-    font-size: 18px;
-    line-height: 26px;
+    font-size: var(--text-title);
+    line-height: var(--text-title-line);
     font-weight: 570;
     letter-spacing: -0.027em;
   }
@@ -57,8 +55,8 @@
   p {
     margin: 3px 0 0;
     color: var(--text-secondary);
-    font-size: 12px;
-    line-height: 18px;
+    font-size: var(--text-compact);
+    line-height: var(--text-compact-line);
   }
 
   .actions {

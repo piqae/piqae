@@ -12,9 +12,9 @@ base64.workspace = true
 clap.workspace = true
 reqwest.workspace = true
 serde_json.workspace = true
-piqae-auth = { path = "../../crates/auth", version = "0.1.0" }
-piqae-domain = { path = "../../crates/domain", version = "0.1.0" }
-piqae-storage-postgres = { path = "../../crates/storage-postgres", version = "0.1.0" }
+piqae-auth = { path = "../../crates/auth", version = "0.1.1" }
+piqae-domain = { path = "../../crates/domain", version = "0.1.1" }
+piqae-storage-postgres = { path = "../../crates/storage-postgres", version = "0.1.1" }
 tokio.workspace = true
 uuid.workspace = true
 

@@ -137,7 +137,7 @@ export const POST: RequestHandler = async (event) => {
       client_reference_id: workspaceId,
       customer: customer.id,
       allow_promotion_codes: false,
-      success_url: `${event.url.origin}/dashboard/settings/billing?checkout=success`,
+      success_url: `${event.url.origin}/dashboard/settings?checkout=success#billing`,
       cancel_url: `${event.url.origin}/pricing?checkout=cancelled`,
       metadata: {
         workspace_id: workspaceId,

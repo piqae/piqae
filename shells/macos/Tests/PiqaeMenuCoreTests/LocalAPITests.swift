@@ -50,8 +50,31 @@ final class LocalAPITests: XCTestCase {
 
     func testCurrentPrinterDefaultsAreExplicitlyDynamicAndNotPinned() {
         XCTAssertEqual(CurrentPrinterDefaultsProfile.name, "Current printer defaults")
-        XCTAssertTrue(CurrentPrinterDefaultsProfile.detail.contains("not a saved profile"))
+        XCTAssertTrue(CurrentPrinterDefaultsProfile.detail.contains("not a saved preset"))
         XCTAssertFalse(CurrentPrinterDefaultsProfile.canSubmitPinnedJob)
+    }
+
+    func testMenuPresentationOmitsEmptyActivityCounts() {
+        XCTAssertEqual(
+            MenuPresentation.printerActivityTitle(state: "online", queued: 0, active: 0),
+            "Online"
+        )
+        XCTAssertEqual(
+            MenuPresentation.printerActivityTitle(state: "online", queued: 2, active: 0),
+            "Online · 2 queued"
+        )
+        XCTAssertEqual(
+            MenuPresentation.printerActivityTitle(state: "online", queued: 0, active: 1),
+            "Online · 1 active"
+        )
+    }
+
+    func testMenuUsesPrintPresetsAsTheUserFacingTerm() {
+        XCTAssertEqual(MenuPresentation.cloudAndAPIAccessTitle, "Cloud & API access")
+        XCTAssertEqual(
+            MenuPresentation.printPresetSectionTitle(count: 3),
+            "PRINT PRESETS (3)"
+        )
     }
 
     func testConfigurationUsesExplicitEnvironment() throws {

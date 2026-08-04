@@ -28,7 +28,7 @@ tags:
   - name: Platform
     description: Manage customer workspaces from a trusted platform backend or owner dashboard.
   - name: Billing
-    description: Inspect canonical Cloud entitlements, accepted-job usage, and Stripe projections.
+    description: Inspect canonical Cloud entitlements, reported-complete usage, and Stripe projections.
   - name: Jobs
     description: Register and observe durable print jobs.
   - name: Printers
@@ -39,6 +39,8 @@ tags:
     description: Deprecated V1 aliases for local Piqae nodes.
   - name: Nodes
     description: Pair, observe, operate, and update computers running Piqae.
+  - name: Node protocol
+    description: Private node enrolment, synchronization, leasing, and status protocol.
   - name: Events
     description: Consume immutable state changes.
   - name: Webhooks
@@ -624,9 +626,9 @@ paths:
       summary: Inspect the workspace billing projection and current-period usage
       description: |
         Returns the canonical Free or Pro entitlement for Piqae Cloud. For a
-        platform owner workspace, accepted-job usage includes its owned customer
-        workspaces. Self-hosted deployments return `enabled: false` and never
-        enforce Cloud limits.
+        platform owner workspace, reported-complete usage includes its owned
+        customer workspaces. Self-hosted deployments return `enabled: false`
+        and never enforce Cloud limits.
       tags: [Billing]
       operationId: getBillingSummary
       responses:
@@ -640,12 +642,14 @@ paths:
         "404": { $ref: "#/components/responses/Error" }
   /v1/usage:
     get:
-      summary: Inspect immutable accepted-job usage for the authenticated workspace
+      summary: Inspect immutable reported-complete usage for the authenticated workspace
       description: |
-        Counts each Live-environment job exactly once when an agent reports
-        `accepted_by_spooler`. Test jobs, retries, and later delivery states do
-        not add usage. This tenant-scoped endpoint never exposes sibling
-        platform-customer usage.
+        Counts each Live-environment job exactly once when a node reports
+        `completed_reported`. Failed, blocked or jammed, cancelled, expired,
+        delivery-uncertain, Test-environment, and virtual jobs do not add
+        usage. A reported completion is the strongest available node or
+        operating-system signal; it is not proof that ink reached paper. This
+        tenant-scoped endpoint never exposes sibling platform-customer usage.
       tags: [Billing]
       operationId: getUsage
       parameters:
@@ -658,7 +662,7 @@ paths:
             pattern: '^[0-9]{4}-(0[1-9]|1[0-2])$'
       responses:
         "200":
-          description: Tenant-scoped accepted-job usage.
+          description: Tenant-scoped reported-complete usage.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/UsageSummary" }
@@ -737,11 +741,57 @@ paths:
             schema: { $ref: "#/components/schemas/CreateDeviceAuthorization" }
       responses:
         "201":
-          description: Ten-minute, single-use device and human codes.
+          description: Ten-minute device and human codes for one pairing attempt.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/CreatedDeviceAuthorization" }
         "400": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
+  /v1/device-authorizations/status:
+    post:
+      summary: Poll browser-pairing state
+      description: >-
+        The device code is a bearer secret and is carried in the request body so
+        that it is not recorded by proxy, CDN, or gateway access logs.
+      tags: [Nodes]
+      operationId: getDeviceAuthorizationStatus
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DeviceCodeRequest" }
+      responses:
+        "200":
+          description: Current authorization state without workspace details.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DeviceAuthorizationStatus" }
+        "404": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
+  /v1/device-authorizations/exchange:
+    post:
+      summary: Exchange one approved device code for node identity
+      description: >-
+        The device code is carried in the request body. Repeating an exchange
+        with the same code returns the same node identity, so a node that is
+        interrupted mid-pairing can safely retry.
+      tags: [Nodes]
+      operationId: exchangeDeviceAuthorizationByBody
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DeviceCodeRequest" }
+      responses:
+        "200":
+          description: Node identity assignment. The private device key never leaves the node.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DeviceAuthorizationExchange" }
+        "404": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
   /v1/device-authorizations/{device_code}:
     parameters:
       - name: device_code
@@ -752,7 +802,13 @@ paths:
           pattern: '^piq_dev_'
           description: Piqae device code.
     get:
-      summary: Poll browser-pairing state
+      summary: Poll browser-pairing state (deprecated)
+      description: >-
+        Deprecated. Placing the device code in the request path exposes it to
+        every proxy and CDN access log between the node and the control plane.
+        Retained for nodes released before the code moved into the request body;
+        use POST /v1/device-authorizations/status instead.
+      deprecated: true
       tags: [Nodes]
       operationId: getDeviceAuthorization
       security: []
@@ -763,6 +819,7 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/DeviceAuthorizationStatus" }
         "404": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
   /v1/device-authorizations/{authorization_id}/approve:
     parameters:
       - $ref: "#/components/parameters/DeviceAuthorizationId"
@@ -831,7 +888,13 @@ paths:
           pattern: '^piq_dev_'
           description: Piqae device code.
     post:
-      summary: Exchange one approved device code for node identity
+      summary: Exchange one approved device code for node identity (deprecated)
+      description: >-
+        Deprecated. Placing the device code in the request path exposes it to
+        every proxy and CDN access log between the node and the control plane.
+        Retained for nodes released before the code moved into the request body;
+        use POST /v1/device-authorizations/exchange instead.
+      deprecated: true
       tags: [Nodes]
       operationId: exchangeDeviceAuthorization
       security: []
@@ -843,6 +906,7 @@ paths:
               schema: { $ref: "#/components/schemas/DeviceAuthorizationExchange" }
         "402": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
   /v1/api-keys:
     get:
       summary: List API key metadata for the current environment
@@ -960,6 +1024,29 @@ paths:
       parameters:
         - $ref: "#/components/parameters/Limit"
         - $ref: "#/components/parameters/After"
+        - name: state
+          in: query
+          required: false
+          description: Exact native lifecycle state.
+          schema: { $ref: "#/components/schemas/JobState" }
+        - name: printer_id
+          in: query
+          required: false
+          schema: { type: string }
+        - name: target_id
+          in: query
+          required: false
+          schema: { type: string }
+        - name: metadata_key
+          in: query
+          required: false
+          description: Metadata key to match; metadata_value may refine it.
+          schema: { type: string, minLength: 1, maxLength: 120 }
+        - name: metadata_value
+          in: query
+          required: false
+          description: Exact metadata value; requires metadata_key.
+          schema: { type: string, maxLength: 500 }
       responses:
         "200":
           description: Cursor-paginated jobs.
@@ -1035,6 +1122,127 @@ paths:
           $ref: "#/components/responses/Error"
         "403":
           $ref: "#/components/responses/Error"
+  /v1/node-connect-sessions:
+    post:
+      summary: Create a tenant-scoped embedded node connection session
+      description: |
+        Server-only operation for a trusted application backend. The returned
+        connect URL is an Associated Domains verified HTTPS Universal Link and
+        carries its one-time enrollment capability in the URL fragment so it is
+        not sent in HTTP requests or access logs. The legacy piqae custom scheme
+        is accepted only by existing macOS Preview clients and is deprecated.
+        Return URLs
+        are bound to server-side invitation state, must be HTTPS except HTTP
+        localhost, and cannot contain credentials or fragments. They are never
+        trusted from the application-link fragment. Native application-link
+        handoff is currently implemented only by the macOS Preview shell;
+        Windows and Linux clients require the documented manual fallback.
+      tags: [Nodes]
+      operationId: createNodeConnectSession
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateNodeConnectSession" }
+      responses:
+        "201":
+          description: Short-lived node connection session.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NodeConnectSession" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+  /v1/node-connect-sessions/{session_id}:
+    parameters:
+      - name: session_id
+        in: path
+        required: true
+        schema: { type: string, pattern: '^enr_' }
+    get:
+      summary: Inspect a tenant-scoped node connection session
+      description: Server-only polling projection; enrollment capabilities are never returned.
+      tags: [Nodes]
+      operationId: getNodeConnectSession
+      responses:
+        "200":
+          description: Current connection state.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NodeConnectSession" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /v1/node-connect-sessions/preview:
+    post:
+      summary: Preview a native node connection invitation without consuming it
+      description: |
+        Called by the Piqae node after receiving a capability through the
+        application-link fragment. The capability is carried in the bounded
+        request body and errors are intentionally indistinguishable. The
+        returned workspace identity is resolved from server-owned tenant data.
+        When platform authentication created the session, requesting-service
+        identity is also a server-authenticated snapshot; it is null for direct
+        workspace credentials.
+      tags: [Nodes]
+      operationId: previewNodeConnectSession
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ConnectSessionPreviewRequest" }
+      responses:
+        "200":
+          description: Verified invitation claims for local consent.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ConnectSessionPreview" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
+  /v1/nodes/{node_id}/connectors:
+    parameters:
+      - name: node_id
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      summary: List this tenant's connector grants for a node
+      description: Never reveals the installation identity or grants belonging to other tenants.
+      tags: [Nodes]
+      operationId: listNodeConnectors
+      responses:
+        "200":
+          description: Tenant-scoped connector grants.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/NodeConnector" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /v1/nodes/{node_id}/connectors/{connector_id}:
+    parameters:
+      - name: node_id
+        in: path
+        required: true
+        schema: { type: string }
+      - name: connector_id
+        in: path
+        required: true
+        schema: { type: string, pattern: '^ncon_' }
+    delete:
+      summary: Revoke this tenant's connector grant
+      description: Revokes only the addressed tenant projection; it does not disconnect other services from the physical installation.
+      tags: [Nodes]
+      operationId: revokeNodeConnector
+      responses:
+        "204": { description: Connector revoked. }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
   /v1/printers:
     get:
       summary: List printers
@@ -1083,6 +1291,25 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Printer" }
         "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /v1/printers/{printer_id}/content-encryption-key:
+    parameters:
+      - name: printer_id
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      summary: Retrieve the active dedicated content-encryption key for a printer's node
+      tags: [Printers, Jobs]
+      operationId: getPrinterContentEncryptionKey
+      responses:
+        "200":
+          description: Tenant-scoped encryption recipient. This key cannot authenticate a node.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NodeContentEncryptionKey" }
         "401": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
@@ -1261,6 +1488,26 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/TargetReadiness" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+  /v1/targets/{target_id}/design-specification:
+    parameters:
+      - $ref: "#/components/parameters/TargetId"
+    get:
+      summary: Get a consolidated, design-facing print specification
+      description: |
+        Returns the stock geometry, current target readiness, and the exact
+        immutable printer/profile revisions behind each binding. Opaque native
+        driver blobs are intentionally never returned. Clients should retain
+        the returned revisions with saved designs and re-fetch before printing.
+      tags: [Routing, Printers]
+      operationId: getTargetDesignSpecification
+      responses:
+        "200":
+          description: Consolidated design and production constraints.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DesignSpecification" }
         "401": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
@@ -1804,6 +2051,50 @@ paths:
           $ref: "#/components/responses/Error"
         "401":
           $ref: "#/components/responses/Error"
+  /v1/agent/content-encryption-key:
+    put:
+      summary: Register or rotate the node's dedicated content-encryption key
+      tags: [Agents]
+      operationId: registerAgentContentEncryptionKey
+      security:
+        - agentId: []
+          agentTimestamp: []
+          agentNonce: []
+          agentBodyDigest: []
+          agentSignature: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RegisterNodeContentEncryptionKey" }
+      responses:
+        "200":
+          description: Active key.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NodeContentEncryptionKey" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+  /v1/agent/content-encryption-key/{key_id}:
+    parameters:
+      - name: key_id
+        in: path
+        required: true
+        schema: { type: string }
+    delete:
+      summary: Revoke a dedicated node content-encryption key
+      tags: [Agents]
+      operationId: revokeAgentContentEncryptionKey
+      security:
+        - agentId: []
+          agentTimestamp: []
+          agentNonce: []
+          agentBodyDigest: []
+          agentSignature: []
+      responses:
+        "204": { description: Key revoked. }
+        "401": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
   /v1/agent/jobs/{job_id}/accept:
     parameters:
       - $ref: "#/components/parameters/JobId"
@@ -2291,11 +2582,23 @@ components:
       type: object
       additionalProperties: false
       required:
-        [period_start, period_end, accepted_live_jobs, active_nodes]
+        [
+          period_start,
+          period_end,
+          reported_complete_live_jobs,
+          active_nodes,
+        ]
       properties:
         period_start: { type: string, format: date-time }
         period_end: { type: string, format: date-time }
-        accepted_live_jobs: { type: integer, format: int64, minimum: 0 }
+        reported_complete_live_jobs:
+          type: integer
+          format: int64
+          minimum: 0
+          description: |
+            Billable Live-environment jobs first reported `completed_reported`
+            during the period, plus legacy pre-cutover accepted-job ledger
+            records retained for audit continuity.
         active_nodes: { type: integer, minimum: 0 }
     BillingEntitlement:
       type: object
@@ -2499,6 +2802,51 @@ components:
         installation_mode: { type: string, enum: [user, machine, local] }
         agent_version: { type: string, minLength: 1, maxLength: 40 }
         protocol_version: { type: integer, minimum: 1 }
+    CreateNodeConnectSession:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 120 }
+        return_url: { type: string, format: uri }
+        expires_in_seconds: { type: integer, minimum: 60, maximum: 900, default: 600 }
+    NodeConnectDownload:
+      type: object
+      additionalProperties: false
+      required: [platform, url]
+      properties:
+        platform: { type: string, enum: [macos, windows, linux] }
+        url:
+          type: string
+          format: uri-reference
+          description: Navigation choice for that OS; it does not assert that a signed or Supported artifact is published.
+    NodeConnectSession:
+      type: object
+      additionalProperties: false
+      required: [id, state, expires_at, node_id, downloads]
+      properties:
+        id: { type: string, pattern: '^enr_' }
+        state: { type: string, enum: [pending, connected, expired] }
+        expires_at: { type: string, format: date-time }
+        node_id: { type: [string, "null"] }
+        connect_url: { type: [string, "null"], format: uri, description: Associated Domains verified HTTPS Universal Link returned only at creation. }
+        return_url: { type: [string, "null"], format: uri, description: Returned only at creation. }
+        downloads:
+          type: array
+          items: { $ref: "#/components/schemas/NodeConnectDownload" }
+    NodeConnector:
+      type: object
+      additionalProperties: false
+      required: [id, node_id, permissions, revoked_at, created_at]
+      properties:
+        id: { type: string, pattern: '^ncon_' }
+        node_id: { type: string }
+        permissions:
+          type: object
+          additionalProperties: true
+          description: Versioned connector capabilities; unknown keys must be ignored.
+        revoked_at: { type: [string, "null"], format: date-time }
+        created_at: { type: string, format: date-time }
     CreatedDeviceAuthorization:
       type: object
       additionalProperties: false
@@ -2518,6 +2866,17 @@ components:
       required: [user_code]
       properties:
         user_code: { type: string, pattern: '^[2-9A-HJ-NP-Z]{4}-?[2-9A-HJ-NP-Z]{4}$' }
+    DeviceCodeRequest:
+      type: object
+      additionalProperties: false
+      required: [device_code]
+      properties:
+        device_code:
+          type: string
+          pattern: '^piq_dev_'
+          description: >-
+            Piqae device code. Carried in the request body rather than the path
+            because it is a bearer secret for the pairing exchange.
     DeviceAuthorizationStatus:
       type: object
       additionalProperties: false
@@ -2538,6 +2897,12 @@ components:
         architecture: { type: string }
         state: { type: string, enum: [pending, approved, denied, consumed, expired] }
         expires_at: { type: string, format: date-time }
+        replaces_node_id:
+          type: [string, "null"]
+          description: >-
+            The node whose device key this approval would replace, when the
+            request comes from an installation already paired to this workspace.
+            Null when approving admits a new node.
     DeviceAuthorizationExchange:
       type: object
       additionalProperties: false
@@ -2739,6 +3104,20 @@ components:
         protocol_version:
           type: integer
           enum: [1]
+        installation_id:
+          type: string
+          minLength: 8
+          maxLength: 128
+          description: Stable physical installation ID when adding an isolated connector.
+        allowed_printer_ids:
+          type: array
+          maxItems: 128
+          uniqueItems: true
+          items: { type: string, minLength: 1, maxLength: 128 }
+          description: Exact printer IDs approved by the local operator; empty never means all.
+        installation_proof:
+          type: string
+          description: Ed25519 signature by the immutable physical installation key over the versioned invitation, connector key, and printer grant.
     EnrolResponse:
       type: object
       required: [agent_id, environment, server_time, sync_after_ms]
@@ -2754,6 +3133,40 @@ components:
           type: integer
           format: int64
           minimum: 0
+        connector_id:
+          type: string
+          pattern: '^ncon_'
+    ConnectSessionPreviewRequest:
+      type: object
+      additionalProperties: false
+      required: [token]
+      properties:
+        token: { type: string, pattern: '^piq_enr_', maxLength: 128 }
+    ConnectSessionPreview:
+      type: object
+      additionalProperties: false
+      required:
+        - workspace_id
+        - workspace_name
+        - requesting_service_account_id
+        - requesting_service_name
+        - environment_id
+        - requested_scopes
+        - printer_grant
+        - expires_at
+        - return_url
+      properties:
+        workspace_id: { type: string, description: Server-resolved customer workspace identifier. }
+        workspace_name: { type: string, description: Server-resolved customer workspace display name; not the requesting integrator identity. }
+        requesting_service_account_id: { type: [string, "null"], description: "Server-authenticated platform service account snapshot, or null for a direct workspace credential." }
+        requesting_service_name: { type: [string, "null"], description: "Server-authenticated platform display name snapshot, or null for a direct workspace credential." }
+        environment_id: { type: string }
+        requested_scopes:
+          type: array
+          items: { type: string, enum: [discover_printers, print, monitor_jobs] }
+        printer_grant: { type: string, enum: [select] }
+        expires_at: { type: string, format: date-time }
+        return_url: { type: [string, "null"], format: uri, description: Server-bound completion destination; never accepted from an application-link fragment. }
     QueueSnapshot:
       type: object
       additionalProperties: false
@@ -2901,6 +3314,22 @@ components:
               minimum: 0
         - type: object
           additionalProperties: false
+          required: [type, url, sha256, bytes, manifest]
+          properties:
+            type:
+              const: encrypted_download
+            url:
+              type: string
+            sha256:
+              $ref: "#/components/schemas/Sha256"
+            bytes:
+              type: integer
+              format: int64
+              minimum: 0
+            manifest:
+              $ref: "#/components/schemas/EncryptedJobManifest"
+        - type: object
+          additionalProperties: false
           required: [type, data, sha256, bytes]
           properties:
             type:
@@ -3039,6 +3468,16 @@ components:
                   type: string
             - type: object
               additionalProperties: false
+              required: [type, upload_id, manifest]
+              properties:
+                type:
+                  const: encrypted_upload
+                upload_id:
+                  type: string
+                manifest:
+                  $ref: "#/components/schemas/EncryptedJobManifest"
+            - type: object
+              additionalProperties: false
               required: [type, data]
               properties:
                 type:
@@ -3071,6 +3510,198 @@ components:
           type: object
           additionalProperties:
             type: string
+    EncryptedJobRecipientKey:
+      type: object
+      additionalProperties: false
+      description: >-
+        A dedicated node content-encryption public key. This is not, and must
+        never be substituted with, the node's Ed25519 authentication/signing key.
+        Recipient discovery and encrypted-job submission are Preview contracts;
+        the plaintext job endpoint does not accept this object.
+      required: [key_id, algorithm, public_key_spki]
+      properties:
+        key_id:
+          type: string
+          minLength: 8
+          maxLength: 255
+        algorithm:
+          const: ECDH-P256-HKDF-SHA256
+        public_key_spki:
+          type: string
+          description: DER SubjectPublicKeyInfo encoded as unpadded base64url.
+          minLength: 100
+          maxLength: 256
+          pattern: "^[A-Za-z0-9_-]+$"
+    EncryptedJobBinding:
+      type: object
+      additionalProperties: false
+      description: Production constraints authenticated as AES-GCM additional data.
+      required: [envelope_id, workspace_id, environment_id, content_type, printer_id, target_id, profile_revision, options, deliveries, expires_at, raw_authorized]
+      properties:
+        envelope_id: { type: string, pattern: '^env_[A-Za-z0-9_-]{20,255}$' }
+        workspace_id: { type: string }
+        environment_id: { type: string }
+        content_type:
+          enum: [pdf, raw]
+        printer_id: { type: string }
+        target_id:
+          type: string
+          minLength: 1
+        profile_revision:
+          type: string
+          minLength: 1
+        options: { $ref: "#/components/schemas/EncryptedJobOptions" }
+        deliveries: { type: integer, minimum: 1, maximum: 100 }
+        expires_at:
+          type: string
+          format: date-time
+        raw_authorized: { type: boolean }
+    EncryptedJobEnvelope:
+      type: object
+      additionalProperties: false
+      description: >-
+        Preview, versioned client-encrypted content envelope. AES-256-GCM
+        authenticates the canonical binding and each fresh content key is
+        wrapped independently using ephemeral P-256 ECDH, HKDF-SHA256, and
+        authenticated AES-256-GCM key wrap to dedicated node keys.
+        The ciphertext digest is checked before transport/decryption. This
+        foundation does not make the existing plaintext PDF/RAW job API
+        content-confidential and is not a zero-knowledge claim.
+      required:
+        [version, suite, binding, ciphertext_sha256, iv, ciphertext, recipients]
+      properties:
+        version:
+          const: piqae-encrypted-job-v3
+        suite:
+          const: ECDH-ES-P256+HKDF-SHA256+A256GCMKW+A256GCM
+        binding:
+          $ref: "#/components/schemas/EncryptedJobBinding"
+        ciphertext_sha256:
+          type: string
+          description: SHA-256 of ciphertext and authentication tag, as unpadded base64url.
+          pattern: "^[A-Za-z0-9_-]{43}$"
+        iv:
+          type: string
+          description: Fresh 96-bit AES-GCM IV, as unpadded base64url.
+          pattern: "^[A-Za-z0-9_-]{16}$"
+        ciphertext:
+          type: string
+          description: AES-GCM ciphertext with its 128-bit authentication tag, as unpadded base64url.
+          pattern: "^[A-Za-z0-9_-]+$"
+        recipients:
+          type: array
+          minItems: 1
+          maxItems: 32
+          items:
+            type: object
+            additionalProperties: false
+            required: [key_id, algorithm, ephemeral_public_key, hkdf_salt, key_wrap_iv, encrypted_content_key]
+            properties:
+              key_id:
+                type: string
+                minLength: 1
+                maxLength: 255
+              algorithm:
+                const: ECDH-ES-P256+HKDF-SHA256+A256GCMKW
+              ephemeral_public_key:
+                type: string
+                description: Ephemeral P-256 public key as a 65-byte uncompressed SEC1 point, encoded as unpadded base64url.
+                pattern: "^[A-Za-z0-9_-]{87}$"
+              hkdf_salt:
+                type: string
+                description: Fresh 256-bit HKDF salt, encoded as unpadded base64url.
+                pattern: "^[A-Za-z0-9_-]{43}$"
+              key_wrap_iv:
+                type: string
+                description: Fresh 96-bit AES-GCM key-wrap IV, encoded as unpadded base64url.
+                pattern: "^[A-Za-z0-9_-]{16}$"
+              encrypted_content_key:
+                type: string
+                description: 32-byte content key ciphertext and 16-byte AES-GCM tag, encoded as unpadded base64url.
+                pattern: "^[A-Za-z0-9_-]{64}$"
+    EncryptedJobManifest:
+      type: object
+      additionalProperties: false
+      required: [version, suite, binding, ciphertext_sha256, iv, recipients]
+      properties:
+        version: { const: piqae-encrypted-job-v3 }
+        suite: { const: ECDH-ES-P256+HKDF-SHA256+A256GCMKW+A256GCM }
+        binding: { $ref: "#/components/schemas/EncryptedJobBinding" }
+        ciphertext_sha256:
+          type: string
+          pattern: "^[A-Za-z0-9_-]{43}$"
+        iv:
+          type: string
+          pattern: "^[A-Za-z0-9_-]{16}$"
+        recipients:
+          type: array
+          minItems: 1
+          maxItems: 32
+          items:
+            type: object
+            additionalProperties: false
+            required: [key_id, algorithm, ephemeral_public_key, hkdf_salt, key_wrap_iv, encrypted_content_key]
+            properties:
+              key_id: { type: string, minLength: 1, maxLength: 255 }
+              algorithm: { const: ECDH-ES-P256+HKDF-SHA256+A256GCMKW }
+              ephemeral_public_key: { type: string, pattern: "^[A-Za-z0-9_-]{87}$" }
+              hkdf_salt: { type: string, pattern: "^[A-Za-z0-9_-]{43}$" }
+              key_wrap_iv: { type: string, pattern: "^[A-Za-z0-9_-]{16}$" }
+              encrypted_content_key:
+                type: string
+                pattern: "^[A-Za-z0-9_-]{64}$"
+    RegisterNodeContentEncryptionKey:
+      type: object
+      additionalProperties: false
+      required: [key_id, algorithm, public_key_spki]
+      properties:
+        key_id: { type: string, minLength: 8, maxLength: 255 }
+        algorithm: { const: ECDH-P256-HKDF-SHA256 }
+        public_key_spki:
+          type: string
+          minLength: 100
+          maxLength: 256
+          pattern: "^[A-Za-z0-9_-]+$"
+    NodeContentEncryptionKey:
+      type: object
+      additionalProperties: false
+      description: The active dedicated content-encryption recipient key for a node.
+      required: [key_id, algorithm, public_key_spki, node_id, created_at]
+      properties:
+        key_id: { type: string, minLength: 8, maxLength: 255 }
+        algorithm: { const: ECDH-P256-HKDF-SHA256 }
+        public_key_spki:
+          type: string
+          description: DER SubjectPublicKeyInfo encoded as unpadded base64url.
+          minLength: 100
+          maxLength: 256
+          pattern: "^[A-Za-z0-9_-]+$"
+        node_id: { type: string }
+        created_at: { type: string, format: date-time }
+    EncryptedJobOptions:
+      type: object
+      additionalProperties: false
+      required: [bin, collate, color, copies, dpi, duplex, fit_to_page, media, nup, pages, paper, rotate, native_options]
+      properties:
+        bin: { type: [string, "null"] }
+        collate: { type: [boolean, "null"] }
+        color: { type: [boolean, "null"] }
+        copies: { type: [integer, "null"], minimum: 1 }
+        dpi: { type: [string, "null"] }
+        duplex:
+          type: [string, "null"]
+          enum: [one-sided, long-edge, short-edge, null]
+        fit_to_page: { type: [boolean, "null"] }
+        media: { type: [string, "null"] }
+        nup: { type: [integer, "null"], minimum: 1 }
+        pages: { type: [string, "null"] }
+        paper: { type: [string, "null"] }
+        rotate:
+          type: [integer, "null"]
+          enum: [0, 90, 180, 270, null]
+        native_options:
+          type: object
+          additionalProperties: { type: string }
     JobOptions:
       type: object
       additionalProperties: false
@@ -3169,7 +3800,8 @@ components:
         - failed_terminal
     JobEvent:
       type: object
-      required: [id, job_id, sequence, state, occurred_at]
+      required:
+        [id, job_id, sequence, state, reason, message, agent_id, native_job_id, occurred_at]
       properties:
         id:
           type: string
@@ -3183,6 +3815,10 @@ components:
         reason:
           type: [string, "null"]
         message:
+          type: [string, "null"]
+        agent_id:
+          type: [string, "null"]
+        native_job_id:
           type: [string, "null"]
         occurred_at:
           type: string
@@ -3329,6 +3965,31 @@ components:
         bindings:
           type: array
           items: { $ref: "#/components/schemas/BindingReadiness" }
+    DesignSpecificationDestination:
+      type: object
+      additionalProperties: false
+      required: [binding, printer, profile]
+      properties:
+        binding: { $ref: "#/components/schemas/TargetBinding" }
+        printer: { $ref: "#/components/schemas/Printer" }
+        profile: { $ref: "#/components/schemas/PrinterProfileSnapshot" }
+    DesignSpecification:
+      type: object
+      additionalProperties: false
+      required: [target, stock, readiness, destinations, specification_revision]
+      properties:
+        target: { $ref: "#/components/schemas/Target" }
+        stock:
+          oneOf:
+            - { $ref: "#/components/schemas/Stock" }
+            - { type: "null" }
+        readiness: { $ref: "#/components/schemas/TargetReadiness" }
+        destinations:
+          type: array
+          items: { $ref: "#/components/schemas/DesignSpecificationDestination" }
+        specification_revision:
+          type: string
+          description: Stable digest-like revision derived from target, stock, capability, profile and binding revisions.
     Printer:
       type: object
       required:

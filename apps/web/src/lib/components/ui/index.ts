@@ -1,5 +1,14 @@
 export { default as DataPanel } from './DataPanel.svelte';
+export { default as DefinitionList } from './DefinitionList.svelte';
+export { default as Dialog } from './Dialog.svelte';
+export { default as Drawer } from './Drawer.svelte';
+export { default as EmptyState } from './EmptyState.svelte';
+export { default as Field } from './Field.svelte';
+export { default as Metric } from './Metric.svelte';
+export { default as Panel } from './Panel.svelte';
 export { default as SearchField } from './SearchField.svelte';
+export { default as SectionHeader } from './SectionHeader.svelte';
 export { default as SegmentedControl } from './SegmentedControl.svelte';
 export { default as Toolbar } from './Toolbar.svelte';
+export type { Definition } from './DefinitionList.svelte';
 export type { SegmentedOption } from './SegmentedControl.svelte';

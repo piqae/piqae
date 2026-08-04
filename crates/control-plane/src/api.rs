@@ -19,7 +19,9 @@ use axum::{
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{Duration, Utc};
+use ed25519_dalek::{Signature, Verifier as _, VerifyingKey};
 use futures::StreamExt;
+use p256::pkcs8::DecodePublicKey as _;
 use piqae_auth::{Environment, Scope, generate_api_key};
 use piqae_domain::{
     AgentId, ContentKind, ContentSource, EnvironmentId, Job, JobEvent, JobId, JobOptions, JobState,
@@ -29,11 +31,12 @@ use piqae_object_store::{ObjectByteStream, ObjectStoreError, digest_hex};
 use piqae_protocol::agent::{
     AgentAcceptJobRequest, AgentAcceptJobResponse, AgentReleaseLeaseRequest,
     AgentRenewLeaseRequest, AgentRenewLeaseResponse, AgentSyncRequest, AgentSyncResponse,
-    ContentDescriptor, EnrolRequest, EnrolResponse, JobOffer,
+    ConnectSessionPreview, ConnectSessionPreviewRequest, ContentDescriptor, EnrolRequest,
+    EnrolResponse, JobOffer,
 };
 use piqae_storage_postgres::{
-    StoredAgent, StoredApiKey, StoredPrinter, StoredTargetBinding, StoredUpload, StoredWebhook,
-    StoredWebhookDelivery, SyncedPrinter,
+    StoredAgent, StoredApiKey, StoredNodeConnector, StoredPrinter, StoredTargetBinding,
+    StoredUpload, StoredWebhook, StoredWebhookDelivery, SyncedPrinter,
 };
 use rand::{RngCore, rngs::OsRng};
 use serde::{Deserialize, Serialize};
@@ -390,6 +393,46 @@ pub async fn get_printer(
     ))
 }
 
+pub async fn list_node_connectors(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(node_id): Path<String>,
+) -> Result<Json<Vec<StoredNodeConnector>>, AppError> {
+    let tenant = authenticate_native(&state, &headers, Scope::AgentsRead).await?;
+    let node_id = AgentId::from_str(&node_id)
+        .map_err(|_| AppError::invalid("invalid_node_id", "The node ID is invalid."))?;
+    state
+        .repository
+        .get_agent(tenant.workspace_id, tenant.environment_id, node_id)
+        .await?;
+    Ok(Json(
+        state
+            .repository
+            .list_node_connectors(tenant.workspace_id, tenant.environment_id, node_id)
+            .await?,
+    ))
+}
+
+pub async fn revoke_node_connector(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((node_id, connector_id)): Path<(String, String)>,
+) -> Result<StatusCode, AppError> {
+    let tenant = authenticate_native(&state, &headers, Scope::AgentsWrite).await?;
+    let node_id = AgentId::from_str(&node_id)
+        .map_err(|_| AppError::invalid("invalid_node_id", "The node ID is invalid."))?;
+    state
+        .repository
+        .revoke_node_connector(
+            tenant.workspace_id,
+            tenant.environment_id,
+            node_id,
+            &connector_id,
+        )
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 #[derive(Debug, Deserialize)]
 pub struct CreateEnrolmentRequest {
     name: String,
@@ -406,6 +449,237 @@ pub struct EnrolmentResponse {
     id: String,
     token: String,
     expires_at: chrono::DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateNodeConnectSessionRequest {
+    name: String,
+    return_url: Option<String>,
+    #[serde(default = "default_enrolment_expiry")]
+    expires_in_seconds: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct NodeConnectDownload {
+    platform: &'static str,
+    url: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+pub struct NodeConnectSessionResponse {
+    id: String,
+    state: &'static str,
+    expires_at: chrono::DateTime<Utc>,
+    node_id: Option<AgentId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    connect_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    return_url: Option<String>,
+    downloads: Vec<NodeConnectDownload>,
+}
+
+pub async fn create_node_connect_session(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<CreateNodeConnectSessionRequest>,
+) -> Result<Response, AppError> {
+    let tenant = authenticate_native(&state, &headers, Scope::AgentsWrite).await?;
+    if request.name.trim().is_empty()
+        || request.name.chars().count() > 120
+        || !(60..=900).contains(&request.expires_in_seconds)
+    {
+        return Err(AppError::invalid(
+            "invalid_connect_session",
+            "Name and expiry are outside the supported limits.",
+        ));
+    }
+    let return_url = request
+        .return_url
+        .as_deref()
+        .map(validate_return_url)
+        .transpose()?;
+    let mut secret = [0_u8; 24];
+    OsRng.fill_bytes(&mut secret);
+    let token = format!("piq_enr_{}", URL_SAFE_NO_PAD.encode(secret));
+    let secret_hash = format!("{:x}", Sha256::digest(token.as_bytes()));
+    let id = format!("enr_{}", ulid::Ulid::new());
+    let expires_at = Utc::now() + Duration::seconds(request.expires_in_seconds);
+    let requesting_service_account_id = tenant.platform_service_account_id.map(|id| id.to_string());
+    state
+        .repository
+        .create_connect_enrolment(
+            &id,
+            tenant.workspace_id,
+            tenant.environment_id,
+            &secret_hash,
+            expires_at,
+            return_url.as_deref(),
+            requesting_service_account_id.as_deref(),
+        )
+        .await?;
+    let fragment = format!("enrolment_token={}", percent_encode(&token));
+    let response = NodeConnectSessionResponse {
+        id: id.clone(),
+        state: "pending",
+        expires_at,
+        node_id: None,
+        connect_url: Some(format!("https://app.piqae.com/connect#{fragment}")),
+        return_url,
+        downloads: connect_downloads(),
+    };
+    state
+        .publish(
+            tenant,
+            "node.connect_session.created",
+            &serde_json::json!({
+                "id": id,
+                "expires_at": expires_at
+            }),
+        )
+        .await?;
+    Ok((StatusCode::CREATED, Json(response)).into_response())
+}
+
+pub async fn get_node_connect_session(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(session_id): Path<String>,
+) -> Result<Json<NodeConnectSessionResponse>, AppError> {
+    let tenant = authenticate_native(&state, &headers, Scope::AgentsRead).await?;
+    let (expires_at, node_id) = state
+        .repository
+        .enrolment_status(&session_id, tenant.workspace_id, tenant.environment_id)
+        .await?;
+    let state_name = if node_id.is_some() {
+        "connected"
+    } else if expires_at <= Utc::now() {
+        "expired"
+    } else {
+        "pending"
+    };
+    Ok(Json(NodeConnectSessionResponse {
+        id: session_id,
+        state: state_name,
+        expires_at,
+        node_id,
+        connect_url: None,
+        return_url: None,
+        downloads: connect_downloads(),
+    }))
+}
+
+pub async fn preview_node_connect_session(
+    State(state): State<AppState>,
+    Json(request): Json<ConnectSessionPreviewRequest>,
+) -> Result<Json<ConnectSessionPreview>, AppError> {
+    if request.token.len() > 128 || !request.token.starts_with("piq_enr_") {
+        return Err(AppError::unauthorized());
+    }
+    let secret_hash = format!("{:x}", Sha256::digest(request.token.as_bytes()));
+    let preview = state
+        .repository
+        .connect_session_preview(&secret_hash)
+        .await
+        .map_err(|_| AppError::unauthorized())?;
+    Ok(Json(ConnectSessionPreview {
+        workspace_id: preview.workspace_id.to_string(),
+        workspace_name: preview.workspace_name,
+        requesting_service_account_id: preview.requesting_service_account_id,
+        requesting_service_name: preview.requesting_service_name,
+        environment_id: preview.environment_id.to_string(),
+        requested_scopes: vec![
+            "discover_printers".into(),
+            "print".into(),
+            "monitor_jobs".into(),
+        ],
+        printer_grant: "select".into(),
+        expires_at: preview.expires_at,
+        return_url: preview.return_url,
+    }))
+}
+
+fn validate_return_url(value: &str) -> Result<String, AppError> {
+    let parsed = url::Url::parse(value).map_err(|_| {
+        AppError::invalid(
+            "invalid_return_url",
+            "Return URL must be an absolute HTTPS URL.",
+        )
+    })?;
+    let local_http = parsed.scheme() == "http"
+        && matches!(parsed.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"));
+    if parsed.scheme() != "https" && !local_http {
+        return Err(AppError::invalid(
+            "invalid_return_url",
+            "Return URL must use HTTPS (localhost HTTP is allowed for development).",
+        ));
+    }
+    if parsed.username() != "" || parsed.password().is_some() || parsed.fragment().is_some() {
+        return Err(AppError::invalid(
+            "invalid_return_url",
+            "Return URL cannot contain credentials or a fragment.",
+        ));
+    }
+    Ok(parsed.to_string())
+}
+
+fn percent_encode(value: &str) -> String {
+    url::form_urlencoded::byte_serialize(value.as_bytes()).collect()
+}
+
+fn connect_downloads() -> Vec<NodeConnectDownload> {
+    vec![
+        NodeConnectDownload {
+            platform: "macos",
+            url: "/downloads?platform=macos",
+        },
+        NodeConnectDownload {
+            platform: "windows",
+            url: "/downloads?platform=windows",
+        },
+        NodeConnectDownload {
+            platform: "linux",
+            url: "/downloads?platform=linux",
+        },
+    ]
+}
+
+#[cfg(test)]
+mod connect_session_tests {
+    use super::{validate_return_url, verify_connector_proof};
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    use ed25519_dalek::{Signer as _, SigningKey};
+
+    #[test]
+    fn return_urls_are_fail_closed() {
+        assert!(validate_return_url("https://partner.example/printing/complete?job=42").is_ok());
+        assert!(validate_return_url("http://localhost:5173/complete").is_ok());
+        assert!(validate_return_url("http://partner.example/complete").is_err());
+        assert!(validate_return_url("https://user:secret@partner.example/complete").is_err());
+        assert!(validate_return_url("https://partner.example/complete#token").is_err());
+        assert!(validate_return_url("/relative").is_err());
+    }
+
+    #[test]
+    fn installation_proof_rejects_every_tamper() {
+        let key = SigningKey::from_bytes(&[7_u8; 32]);
+        let message = b"piqae-connect-v1\ninvitation\ninstallation\nconnector\nprinter";
+        let proof = URL_SAFE_NO_PAD.encode(key.sign(message).to_bytes());
+        assert!(verify_connector_proof(key.verifying_key().as_bytes(), &proof, message).is_ok());
+        assert!(
+            verify_connector_proof(
+                key.verifying_key().as_bytes(),
+                &proof,
+                b"piqae-connect-v1\ntampered"
+            )
+            .is_err()
+        );
+        let attacker = SigningKey::from_bytes(&[8_u8; 32]);
+        let attacker_proof = URL_SAFE_NO_PAD.encode(attacker.sign(message).to_bytes());
+        assert!(
+            verify_connector_proof(key.verifying_key().as_bytes(), &attacker_proof, message)
+                .is_err()
+        );
+    }
 }
 
 pub async fn create_agent_enrolment(
@@ -478,20 +752,63 @@ pub async fn enrol_agent(
         ));
     }
     let secret_hash = format!("{:x}", Sha256::digest(request.token.as_bytes()));
-    let enrolled = state
-        .repository
-        .enrol_agent_with_billing(
-            &secret_hash,
-            &public_key,
-            &request.name,
-            &request.hostname,
-            &request.platform,
-            &request.architecture,
-            &request.agent_version,
-            request.protocol_version,
-            state.capabilities.billing.enabled,
-        )
-        .await?;
+    if request.installation_id.is_some() && request.allowed_printer_ids.is_empty() {
+        return Err(AppError::invalid(
+            "printer_consent_required",
+            "At least one locally approved printer is required for a connector.",
+        ));
+    }
+    if let Some(installation_id) = request.installation_id.as_deref() {
+        let existing_key = state
+            .repository
+            .node_installation_public_key(installation_id)
+            .await
+            .map_err(|_| AppError::unauthorized())?;
+        let proof = request
+            .installation_proof
+            .as_deref()
+            .ok_or_else(AppError::unauthorized)?;
+        let message = piqae_protocol::agent::connector_proof_message(
+            &request.token,
+            installation_id,
+            &request.public_key,
+            &request.allowed_printer_ids,
+        );
+        verify_connector_proof(&existing_key, proof, &message)?;
+    }
+    let enrolled = if let Some(installation_id) = request.installation_id.as_deref() {
+        state
+            .repository
+            .enrol_agent_connector_with_billing(
+                &secret_hash,
+                &public_key,
+                &request.name,
+                &request.hostname,
+                &request.platform,
+                &request.architecture,
+                &request.agent_version,
+                request.protocol_version,
+                state.capabilities.billing.enabled,
+                installation_id,
+                &request.allowed_printer_ids,
+            )
+            .await?
+    } else {
+        state
+            .repository
+            .enrol_agent_with_billing(
+                &secret_hash,
+                &public_key,
+                &request.name,
+                &request.hostname,
+                &request.platform,
+                &request.architecture,
+                &request.agent_version,
+                request.protocol_version,
+                state.capabilities.billing.enabled,
+            )
+            .await?
+    };
     Ok((
         StatusCode::CREATED,
         Json(EnrolResponse {
@@ -499,9 +816,31 @@ pub async fn enrol_agent(
             environment: enrolled.environment_id.to_string(),
             server_time: Utc::now(),
             sync_after_ms: 0,
+            connector_id: enrolled.connector_id,
         }),
     )
         .into_response())
+}
+
+fn verify_connector_proof(
+    public_key: &[u8],
+    encoded_signature: &str,
+    message: &[u8],
+) -> Result<(), AppError> {
+    let verifying_key = VerifyingKey::from_bytes(
+        &public_key
+            .try_into()
+            .map_err(|_| AppError::unauthorized())?,
+    )
+    .map_err(|_| AppError::unauthorized())?;
+    let proof = URL_SAFE_NO_PAD
+        .decode(encoded_signature)
+        .or_else(|_| base64::engine::general_purpose::STANDARD_NO_PAD.decode(encoded_signature))
+        .map_err(|_| AppError::unauthorized())?;
+    let signature = Signature::from_slice(&proof).map_err(|_| AppError::unauthorized())?;
+    verifying_key
+        .verify(message, &signature)
+        .map_err(|_| AppError::unauthorized())
 }
 
 pub async fn list_webhooks(
@@ -669,6 +1008,117 @@ pub struct UploadResponse {
     upload_method: &'static str,
     upload_headers: BTreeMap<String, String>,
     requires_completion: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RegisterContentEncryptionKeyRequest {
+    key_id: String,
+    algorithm: String,
+    public_key_spki: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ContentEncryptionKeyResponse {
+    key_id: String,
+    algorithm: String,
+    public_key_spki: String,
+    node_id: AgentId,
+    created_at: chrono::DateTime<Utc>,
+}
+
+pub async fn register_agent_content_encryption_key(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<ContentEncryptionKeyResponse>, AppError> {
+    let identity = authenticate_agent(
+        &state,
+        &headers,
+        "PUT",
+        "/v1/agent/content-encryption-key",
+        &body,
+    )
+    .await?;
+    let request: RegisterContentEncryptionKeyRequest = serde_json::from_slice(&body)?;
+    if request.algorithm != "ECDH-P256-HKDF-SHA256"
+        || !(8..=255).contains(&request.key_id.len())
+        || !valid_content_encryption_public_key(&request.public_key_spki)
+        || !request
+            .public_key_spki
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
+        return Err(AppError::invalid(
+            "invalid_content_encryption_key",
+            "The dedicated encryption key is invalid.",
+        ));
+    }
+    let key = state
+        .repository
+        .rotate_content_encryption_key(
+            identity.tenant.workspace_id,
+            identity.tenant.environment_id,
+            identity.agent_id,
+            &request.key_id,
+            &request.algorithm,
+            &request.public_key_spki,
+        )
+        .await?;
+    Ok(Json(ContentEncryptionKeyResponse {
+        key_id: key.key_id,
+        algorithm: key.algorithm,
+        public_key_spki: key.public_key_spki,
+        node_id: key.agent_id,
+        created_at: key.created_at,
+    }))
+}
+
+fn valid_content_encryption_public_key(encoded: &str) -> bool {
+    URL_SAFE_NO_PAD
+        .decode(encoded)
+        .is_ok_and(|der| p256::PublicKey::from_public_key_der(&der).is_ok())
+}
+
+pub async fn revoke_agent_content_encryption_key(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(key_id): Path<String>,
+    body: Bytes,
+) -> Result<StatusCode, AppError> {
+    let path = format!("/v1/agent/content-encryption-key/{key_id}");
+    let identity = authenticate_agent(&state, &headers, "DELETE", &path, &body).await?;
+    state
+        .repository
+        .revoke_content_encryption_key(
+            identity.tenant.workspace_id,
+            identity.tenant.environment_id,
+            identity.agent_id,
+            &key_id,
+        )
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn printer_content_encryption_key(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(printer_id): Path<String>,
+) -> Result<Json<ContentEncryptionKeyResponse>, AppError> {
+    let tenant = authenticate_native(&state, &headers, Scope::PrintersRead).await?;
+    let printer_id = PrinterId::from_str(&printer_id)
+        .map_err(|_| AppError::invalid("invalid_printer_id", "The printer ID is invalid."))?;
+    let key = state
+        .repository
+        .content_encryption_key_for_printer(tenant.workspace_id, tenant.environment_id, printer_id)
+        .await?;
+    Ok(Json(ContentEncryptionKeyResponse {
+        key_id: key.key_id,
+        algorithm: key.algorithm,
+        public_key_spki: key.public_key_spki,
+        node_id: key.agent_id,
+        created_at: key.created_at,
+    }))
 }
 
 const MAX_UPLOAD_BYTES: i64 = 50 * 1024 * 1024;
@@ -922,6 +1372,11 @@ pub struct ListQuery {
     #[serde(default = "default_limit")]
     limit: i64,
     after: Option<String>,
+    state: Option<JobState>,
+    printer_id: Option<String>,
+    target_id: Option<String>,
+    metadata_key: Option<String>,
+    metadata_value: Option<String>,
 }
 
 const fn default_limit() -> i64 {
@@ -943,12 +1398,26 @@ pub async fn create_job(
     let tenant = authenticate_native(&state, &headers, Scope::JobsWrite).await?;
     validate_create(&request)?;
     let destination = resolve_job_destination(&state, tenant, &request).await?;
+    validate_encrypted_job(&state, tenant, &request, &destination).await?;
     let request_bytes = serde_json::to_vec(&request)?;
     let now = Utc::now();
     let persisted =
         persist_job_content(&state, tenant, request.content_type, request.content).await?;
     let mut metadata = request.metadata;
     metadata.extend(destination.metadata);
+    let job_expires_at = match &persisted.source {
+        ContentSource::EncryptedUpload { manifest, .. } => {
+            chrono::DateTime::parse_from_rfc3339(&manifest.binding.expires_at)
+                .map(|value| value.with_timezone(&Utc))
+                .map_err(|_| {
+                    AppError::invalid(
+                        "invalid_encrypted_job_binding",
+                        "Encrypted expiry is invalid.",
+                    )
+                })?
+        }
+        _ => now + Duration::seconds(request.expire_after_seconds),
+    };
     let job = Job {
         id: JobId::new(),
         workspace_id: tenant.workspace_id,
@@ -963,7 +1432,7 @@ pub async fn create_job(
         deliveries: request.deliveries,
         state: JobState::Registered,
         created_at: now,
-        expires_at: now + Duration::seconds(request.expire_after_seconds),
+        expires_at: job_expires_at,
     };
     let idempotency = headers
         .get("idempotency-key")
@@ -1056,6 +1525,111 @@ async fn resolve_job_destination(
             "Provide exactly one printer_id or target_id.",
         )),
     }
+}
+
+async fn validate_encrypted_job(
+    state: &AppState,
+    tenant: TenantContext,
+    request: &CreateJobRequest,
+    destination: &ResolvedJobDestination,
+) -> Result<(), AppError> {
+    let ContentSource::EncryptedUpload { manifest, .. } = &request.content else {
+        return Ok(());
+    };
+    let binding_expiry = chrono::DateTime::parse_from_rfc3339(&manifest.binding.expires_at)
+        .map(|value| value.with_timezone(&Utc))
+        .map_err(|_| {
+            AppError::invalid(
+                "invalid_encrypted_job_binding",
+                "Encrypted expiry is invalid.",
+            )
+        })?;
+    let digest_valid = URL_SAFE_NO_PAD
+        .decode(&manifest.ciphertext_sha256)
+        .is_ok_and(|value| value.len() == 32);
+    let iv_valid = URL_SAFE_NO_PAD
+        .decode(&manifest.iv)
+        .is_ok_and(|value| value.len() == 12);
+    let recipient_ids = manifest
+        .recipients
+        .iter()
+        .map(|recipient| recipient.key_id.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    let recipients_valid = (1..=32).contains(&manifest.recipients.len())
+        && recipient_ids.len() == manifest.recipients.len()
+        && manifest.recipients.iter().all(|recipient| {
+            recipient.algorithm == "ECDH-P256-HKDF-SHA256"
+                && URL_SAFE_NO_PAD
+                    .decode(&recipient.ephemeral_public_key)
+                    .is_ok_and(|value| value.len() == 65 && value.first() == Some(&4))
+                && URL_SAFE_NO_PAD
+                    .decode(&recipient.hkdf_salt)
+                    .is_ok_and(|value| value.len() == 32)
+                && URL_SAFE_NO_PAD
+                    .decode(&recipient.key_wrap_iv)
+                    .is_ok_and(|value| value.len() == 12)
+                && URL_SAFE_NO_PAD
+                    .decode(&recipient.encrypted_content_key)
+                    .is_ok_and(|value| value.len() == 48)
+        });
+    if !target_binding_matches(request.target_id.as_deref(), &manifest.binding.target_id)
+        || manifest.binding.workspace_id != tenant.workspace_id.to_string()
+        || manifest.binding.environment_id != tenant.environment_id.to_string()
+        || manifest.binding.printer_id != destination.printer_id.to_string()
+        || manifest.binding.content_type != request.content_type
+        || manifest.binding.options != request.options
+        || manifest.binding.deliveries != request.deliveries
+        || manifest.binding.raw_authorized != (request.content_type == ContentKind::Raw)
+        || binding_expiry <= Utc::now()
+        || binding_expiry > Utc::now() + Duration::days(14)
+        || manifest.version != "piqae-encrypted-job-v3"
+        || manifest.suite != "ECDH-P256+HKDF-SHA256+A256GCMKW+A256GCM"
+        || !manifest.binding.envelope_id.starts_with("env_")
+        || !(24..=259).contains(&manifest.binding.envelope_id.len())
+        || !manifest.binding.envelope_id[4..]
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        || !digest_valid
+        || !iv_valid
+        || !recipients_valid
+    {
+        return Err(AppError::invalid(
+            "invalid_encrypted_job_binding",
+            "Encrypted content binding does not match this job.",
+        ));
+    }
+    let binding = destination.binding.as_ref().ok_or_else(|| {
+        AppError::invalid(
+            "encrypted_job_requires_target",
+            "Encrypted jobs require an immutable target binding.",
+        )
+    })?;
+    let expected_revision = format!("{}:{}", binding.profile_id, binding.profile_revision);
+    if manifest.binding.profile_revision != expected_revision {
+        return Err(AppError::invalid(
+            "encrypted_profile_mismatch",
+            "The encrypted profile revision is not the selected target revision.",
+        ));
+    }
+    let key = state
+        .repository
+        .content_encryption_key_for_printer(
+            tenant.workspace_id,
+            tenant.environment_id,
+            destination.printer_id,
+        )
+        .await?;
+    if !manifest
+        .recipients
+        .iter()
+        .any(|recipient| recipient.key_id == key.key_id && recipient.algorithm == key.algorithm)
+    {
+        return Err(AppError::invalid(
+            "encrypted_recipient_unavailable",
+            "The selected node cannot decrypt this envelope.",
+        ));
+    }
+    Ok(())
 }
 
 async fn resolve_target_destination(
@@ -1207,6 +1781,7 @@ pub(crate) struct PersistedJobContent {
     pub owned_upload: Option<StoredUpload>,
 }
 
+#[allow(clippy::too_many_lines)]
 pub(crate) async fn persist_job_content(
     state: &AppState,
     tenant: TenantContext,
@@ -1231,6 +1806,31 @@ pub(crate) async fn persist_job_content(
             }
             Ok(PersistedJobContent {
                 source: ContentSource::Upload { upload_id },
+                owned_upload: None,
+            })
+        }
+        ContentSource::EncryptedUpload {
+            upload_id,
+            manifest,
+        } => {
+            let upload = state
+                .repository
+                .get_upload(tenant.workspace_id, tenant.environment_id, &upload_id)
+                .await?;
+            if upload.state != "complete"
+                || upload.media_type != "application/octet-stream"
+                || !decoded_digest_matches(&manifest.ciphertext_sha256, &upload.expected_sha256)
+            {
+                return Err(AppError::invalid(
+                    "invalid_encrypted_upload",
+                    "Ciphertext upload is incomplete or does not match its authenticated manifest.",
+                ));
+            }
+            Ok(PersistedJobContent {
+                source: ContentSource::EncryptedUpload {
+                    upload_id,
+                    manifest,
+                },
                 owned_upload: None,
             })
         }
@@ -1308,6 +1908,63 @@ pub(crate) async fn persist_job_content(
     }
 }
 
+fn target_binding_matches(request_target_id: Option<&str>, manifest_target_id: &str) -> bool {
+    request_target_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        == Some(manifest_target_id)
+}
+
+fn decoded_digest_matches(encoded_digest: &str, expected_sha256: &str) -> bool {
+    URL_SAFE_NO_PAD
+        .decode(encoded_digest)
+        .ok()
+        .map(hex::encode)
+        .is_some_and(|digest| digest.eq_ignore_ascii_case(expected_sha256))
+}
+
+#[cfg(test)]
+mod encrypted_binding_tests {
+    use super::{
+        decoded_digest_matches, target_binding_matches, valid_content_encryption_public_key,
+    };
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    use p256::pkcs8::EncodePublicKey as _;
+
+    #[test]
+    fn decoded_ciphertext_digest_accepts_canonical_hex_case_only() {
+        let encoded = URL_SAFE_NO_PAD.encode([0xab_u8; 32]);
+        assert!(decoded_digest_matches(&encoded, &"AB".repeat(32)));
+        assert!(decoded_digest_matches(&encoded, &"ab".repeat(32)));
+        assert!(!decoded_digest_matches(&encoded, &"AC".repeat(32)));
+        assert!(!decoded_digest_matches("not+base64", &"ab".repeat(32)));
+    }
+
+    #[test]
+    fn encrypted_target_binding_uses_the_normalized_request_identifier() {
+        assert!(target_binding_matches(Some("  tgt_exact\n"), "tgt_exact"));
+        assert!(!target_binding_matches(Some("tgt_other"), "tgt_exact"));
+        assert!(!target_binding_matches(Some("   "), ""));
+        assert!(!target_binding_matches(None, "tgt_exact"));
+    }
+
+    #[test]
+    fn content_encryption_recipient_must_be_a_valid_p256_spki() {
+        let secret = p256::SecretKey::random(&mut rand::rngs::OsRng);
+        let der = secret.public_key().to_public_key_der();
+        assert!(der.is_ok());
+        let Some(der) = der.ok() else {
+            return;
+        };
+        assert!(valid_content_encryption_public_key(
+            &URL_SAFE_NO_PAD.encode(der.as_bytes())
+        ));
+        assert!(!valid_content_encryption_public_key(
+            &URL_SAFE_NO_PAD.encode([0_u8; 91])
+        ));
+    }
+}
+
 pub(crate) async fn cleanup_owned_upload(
     state: &AppState,
     tenant: TenantContext,
@@ -1351,10 +2008,38 @@ pub async fn list_jobs(
         .map(JobId::from_str)
         .transpose()
         .map_err(|_| AppError::invalid("invalid_cursor", "The pagination cursor is invalid."))?;
+    if query.metadata_value.is_some() && query.metadata_key.is_none() {
+        return Err(AppError::invalid(
+            "invalid_job_filter",
+            "metadata_value requires metadata_key.",
+        ));
+    }
+    let printer_id = query
+        .printer_id
+        .as_deref()
+        .map(PrinterId::from_str)
+        .transpose()
+        .map_err(|_| AppError::invalid("invalid_job_filter", "printer_id is invalid."))?;
     let mut jobs = state
         .repository
-        .list_jobs(tenant.workspace_id, tenant.environment_id, after, limit + 1)
+        .list_jobs(tenant.workspace_id, tenant.environment_id, after, 500)
         .await?;
+    jobs.retain(|job| {
+        query.state.is_none_or(|value| job.state == value)
+            && printer_id.is_none_or(|value| job.printer_id == value)
+            && query
+                .target_id
+                .as_ref()
+                .is_none_or(|value| job.metadata.get("piqae.target_id") == Some(value))
+            && query.metadata_key.as_ref().is_none_or(|key| {
+                job.metadata.get(key).is_some_and(|value| {
+                    query
+                        .metadata_value
+                        .as_ref()
+                        .is_none_or(|expected| value == expected)
+                })
+            })
+    });
     let has_more = jobs.len() > usize::try_from(limit).unwrap_or(500);
     jobs.truncate(usize::try_from(limit).unwrap_or(500));
     let next_cursor = has_more
@@ -1572,6 +2257,26 @@ pub async fn agent_sync(
                     bytes: u64::try_from(upload.expected_bytes).map_err(|_| {
                         AppError::service_unavailable("invalid_stored_content_length")
                     })?,
+                }
+            }
+            ContentSource::EncryptedUpload {
+                upload_id,
+                manifest,
+            } => {
+                let upload = state
+                    .repository
+                    .get_upload(tenant.workspace_id, tenant.environment_id, upload_id)
+                    .await?;
+                if upload.state != "complete" {
+                    return Err(AppError::service_unavailable("job_upload_is_not_complete"));
+                }
+                ContentDescriptor::EncryptedDownload {
+                    url: format!("/v1/agent/jobs/{}/content", lease.job.id),
+                    sha256: upload.expected_sha256,
+                    bytes: u64::try_from(upload.expected_bytes).map_err(|_| {
+                        AppError::service_unavailable("invalid_stored_content_length")
+                    })?,
+                    manifest: manifest.clone(),
                 }
             }
             ContentSource::Base64 { data } => {
@@ -1799,7 +2504,9 @@ pub async fn get_agent_content(
             parsed_job_id,
         )
         .await?;
-    let ContentSource::Upload { upload_id } = job.content else {
+    let (ContentSource::Upload { upload_id } | ContentSource::EncryptedUpload { upload_id, .. }) =
+        job.content
+    else {
         return Err(AppError::invalid(
             "content_not_downloadable",
             "This job does not use uploaded content.",

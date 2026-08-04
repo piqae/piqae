@@ -8,8 +8,8 @@ export interface PricingDisplay {
   monthlyCents: number;
   annualCents: number;
   headline: string;
-  includedAcceptedJobs: number;
-  annualIncludedAcceptedJobs: number | null;
+  includedReportedCompleteJobs: number;
+  annualIncludedReportedCompleteJobs: number | null;
   includedNodes: number;
   workspaceMembers: 'unlimited';
   customerAccounts: 'not_included' | 'included';
@@ -32,7 +32,7 @@ export interface PricingDisplay {
 export interface CloudPricingCatalog {
   version: string;
   currency: 'USD';
-  billableEvent: 'accepted_by_spooler';
+  billableEvent: 'completed_reported';
   plans: PricingDisplay[];
 }
 

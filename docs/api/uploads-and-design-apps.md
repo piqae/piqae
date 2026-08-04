@@ -65,6 +65,12 @@ A target binds that stock to one or more exact printer/profile revisions.
 `GET /v1/targets/{target_id}/readiness` reports the currently selected primary
 or standby binding and why other bindings are unavailable.
 
+`GET /v1/targets/{target_id}/design-specification` performs these joins in one
+tenant-scoped read and returns a `specification_revision` that changes with the
+target, stock, binding, capability, or immutable profile inputs. Save that
+revision with artwork and re-fetch before printing to detect production setup
+changes.
+
 Before presenting a printable template, a design application should:
 
 1. load the target and stock;
@@ -84,7 +90,10 @@ environment. Resource IDs from another tenant return the same not-found
 response as unknown IDs. Do not add workspace-selection headers to print API
 calls.
 
-A SaaS integrator should create a separate environment-scoped key for each
-customer workspace. Cross-workspace provisioning requires a future explicit
-platform/service-account grant; ordinary print keys must never become
-cross-tenant administration credentials.
+A single-workspace integrator should create a separate environment-scoped key
+for each customer workspace. A multi-tenant SaaS backend can instead use the
+implemented-preview platform service-account grant and account-scoped SDK
+facade described in [the web design platform guide](web-design-platform-integration.md).
+That feature remains Disabled as a production support claim until its release
+evidence passes. Ordinary print keys must never become cross-tenant
+administration credentials.

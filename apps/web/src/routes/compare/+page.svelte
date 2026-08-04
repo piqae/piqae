@@ -6,21 +6,21 @@
     {
       label: 'Direct comparison',
       title: 'Piqae vs PrintNode',
-      body: 'Compare deployment, source access, pricing shape, formats, agent model, and current maturity.',
+      body: 'Compare open deployment, completion-based usage, migration coverage, native nodes, and release evidence.',
       href: '/compare/printnode',
       live: true
     },
     {
       label: 'Buyer guide',
       title: 'A PrintNode alternative',
-      body: 'Decide whether control, open source, or self-hosting changes the right choice for your workflow.',
+      body: 'See where a lower-cost managed queue, an open edge, and a self-hosted exit change the decision.',
       href: '/alternatives/printnode',
       live: true
     },
     {
       label: 'Migration',
       title: 'Move from PrintNode',
-      body: 'Inventory endpoints, map semantics, canary printers, and preserve a tested rollback.',
+      body: 'Change the base URL for the tested subset, map identities, canary printers, and preserve rollback.',
       href: '/migrate/printnode',
       live: true
     },
@@ -50,7 +50,7 @@
 
 <Seo
   title="Compare Piqae — Printing APIs and infrastructure"
-  description="Factual product comparisons, a PrintNode migration guide, and a sourced cost calculator for teams evaluating printing infrastructure."
+  description="Compare Piqae with remote printing platforms across open source, deployment, reported-complete usage, migration, and managed queue operations."
   path="/compare"
 />
 
@@ -58,10 +58,11 @@
   <section class="m-page-hero">
     <div class="m-container">
       <span class="m-eyebrow">Compare</span>
-      <h1 class="m-title">Find the printing platform that fits how you build.</h1>
+      <h1 class="m-title">A simpler print API, without the closed edge.</h1>
       <p class="m-lede">
-        Compare control, deployment, pricing, migration effort, and product maturity with sourced
-        guides designed to help you make a confident choice.
+        Piqae combines an Apache-2.0 node and control plane with a managed durable Cloud queue.
+        Compare cost, integration, deployment control, and release evidence without hiding the
+        reasons another product may still fit.
       </p>
     </div>
   </section>
@@ -83,13 +84,13 @@
     <div class="m-container method-grid">
       <div>
         <span class="m-eyebrow">Our comparison standard</span>
-        <h2 class="m-heading">Useful enough to disagree with.</h2>
+        <h2 class="m-heading">Confident claims. Visible evidence.</h2>
       </div>
       <div>
         <p>We use official primary sources for competitor facts and show when they were checked.</p>
-        <p>We include reasons to choose the other product, not only reasons to choose Piqae.</p>
+        <p>We state where Piqae is structurally better and where another product is more mature.</p>
         <p>Numeric claims expire after 90 days and stay out of search until they are reviewed.</p>
-        <p>“Spooler accepted” never becomes a claim that a document physically printed.</p>
+        <p>Reported completion is our billable event, but an OS or device report is not physical proof of ink on paper.</p>
       </div>
     </div>
   </section>

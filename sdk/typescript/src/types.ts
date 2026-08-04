@@ -1,5 +1,13 @@
 export type PiqaeId = string;
 
+export interface NodeConnector {
+  id: string;
+  node_id: string;
+  permissions: Record<string, unknown>;
+  revoked_at: string | null;
+  created_at: string;
+}
+
 export type JobState =
   | 'registered'
   | 'content_pending'
@@ -51,8 +59,8 @@ export interface UsageSummary {
   period_start: string;
   /** Exclusive end of the requested UTC or Stripe subscription period. */
   period_end: string;
-  /** Live jobs counted exactly once at operating-system spooler acceptance. */
-  accepted_live_jobs: number;
+  /** Live jobs counted exactly once when the node reports completion. */
+  reported_complete_live_jobs: number;
   active_nodes: number;
 }
 
@@ -295,6 +303,12 @@ export interface DeviceAuthorizationReview {
   architecture: string;
   state: 'pending' | 'approved' | 'denied' | 'consumed' | 'expired';
   expires_at: string;
+  /**
+   * The node whose device key this approval would replace, when the request
+   * comes from an installation already paired to this workspace. Null when
+   * approving admits a new node.
+   */
+  replaces_node_id?: PiqaeId | null;
 }
 
 export interface DeviceAuthorizationExchange {
@@ -330,6 +344,22 @@ export interface NodeUpdate {
   status: NodeUpdateState;
 }
 
+export interface CreateNodeConnectSession {
+  name: string;
+  return_url?: string;
+  expires_in_seconds?: number;
+}
+
+export interface NodeConnectSession {
+  id: string;
+  state: 'pending' | 'connected' | 'expired';
+  expires_at: string;
+  node_id: PiqaeId | null;
+  connect_url?: string | null;
+  return_url?: string | null;
+  downloads: Array<{ platform: 'macos' | 'windows' | 'linux'; url: string }>;
+}
+
 export interface Printer {
   id: PiqaeId;
   agent_id: PiqaeId;
@@ -343,6 +373,14 @@ export interface Printer {
   /** Named printer option snapshots synced from the agent. */
   profiles: PrinterProfileSnapshot[];
   updated_at: string;
+}
+
+export interface NodeContentEncryptionKey {
+  key_id: string;
+  algorithm: 'ECDH-P256-HKDF-SHA256';
+  public_key_spki: string;
+  node_id: PiqaeId;
+  created_at: string;
 }
 
 export type PrintRateUnit = 'ppm' | 'ipm' | 'lmp' | 'cpm';
@@ -567,6 +605,31 @@ export interface TargetReadiness {
   bindings: BindingReadiness[];
 }
 
+export interface DesignSpecificationDestination {
+  binding: TargetBinding;
+  printer: Printer;
+  /** Exact immutable profile revision selected by the binding. */
+  profile: PrinterProfileSnapshot;
+}
+
+/** One read model for sizing an editor canvas and checking production readiness. */
+export interface DesignSpecification {
+  target: Target;
+  stock: Stock | null;
+  readiness: TargetReadiness;
+  destinations: DesignSpecificationDestination[];
+  /** Changes when any design or production constraint in this projection changes. */
+  specification_revision: string;
+}
+
+export interface JobListOptions extends ListOptions {
+  state?: JobState;
+  printer_id?: PiqaeId;
+  target_id?: string;
+  metadata_key?: string;
+  metadata_value?: string;
+}
+
 export interface JobOptions {
   bin?: string;
   collate?: boolean;
@@ -586,6 +649,11 @@ export interface JobOptions {
 
 export type JobContent =
   | { type: 'upload'; upload_id: PiqaeId }
+  | {
+      type: 'encrypted_upload';
+      upload_id: PiqaeId;
+      manifest: import('./encrypted-jobs.js').EncryptedJobManifest;
+    }
   | { type: 'base64'; data: string }
   | { type: 'uri'; uri: string };
 

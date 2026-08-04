@@ -6,12 +6,12 @@ import PricingPagePlans from './PricingPagePlans.svelte';
 describe('pricing page plans', () => {
   afterEach(cleanup);
 
-  it('presents Free, Pro, and self-hosted choices with accurate annual pricing', async () => {
+  it('presents Free, Pro, and open-source choices with accurate annual pricing', async () => {
     render(PricingPagePlans, { plans: cloudPricingCatalog.plans });
 
     expect(screen.getByRole('heading', { name: 'Piqae Free' })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Piqae Pro' })).toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: 'Self-hosted' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Open source' })).toBeInTheDocument();
     expect(screen.getByText('Best value')).toBeInTheDocument();
     expect(screen.getAllByText('Unlimited', { selector: 'dd' })).toHaveLength(2);
 
@@ -19,6 +19,8 @@ describe('pricing page plans', () => {
 
     expect(screen.getByText('$7.50')).toBeInTheDocument();
     expect(screen.getByText('$90 billed annually')).toBeInTheDocument();
+    expect(screen.getByText('1,200')).toBeInTheDocument();
+    expect(screen.getByText('300,000')).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'Choose Pro' })).toHaveAttribute(
       'href',
       '/start?plan=pro&interval=annual&source=pricing'

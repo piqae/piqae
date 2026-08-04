@@ -519,7 +519,7 @@ Sell outcomes the cloud uniquely provides:
 Suggested metering:
 
 - generous free developer/test tier;
-- bill on jobs accepted by the OS spooler, not pages;
+- bill on jobs reported complete, not requests or pages;
 - do not charge simulated test-mode jobs;
 - include agents/printers generously;
 - simple included volume plus transparent overage;

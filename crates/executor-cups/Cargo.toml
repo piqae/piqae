@@ -13,10 +13,10 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 piqae-domain.workspace = true
-piqae-executor-protocol = { path = "../executor-protocol", version = "0.1.0" }
+piqae-executor-protocol = { path = "../executor-protocol", version = "0.1.1" }
 piqae-protocol.workspace = true
 
 [dev-dependencies]
-piqae-executor-supervisor = { path = "../executor-supervisor", version = "0.1.0" }
+piqae-executor-supervisor = { path = "../executor-supervisor", version = "0.1.1" }
 tokio.workspace = true
 uuid.workspace = true

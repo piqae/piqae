@@ -4,22 +4,59 @@ on:
   pull_request:
   push:
     branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
-  rust:
-    name: Rust (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
+  changes:
+    name: Select CI scope
+    runs-on: ${{ vars.PIQAE_CI_LIGHT_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 5
+    outputs:
+      dependencies: ${{ steps.scope.outputs.dependencies }}
+      macos: ${{ steps.scope.outputs.macos }}
+      openapi: ${{ steps.scope.outputs.openapi }}
+      rust: ${{ steps.scope.outputs.rust }}
+      terraform: ${{ steps.scope.outputs.terraform }}
+      web: ${{ steps.scope.outputs.web }}
+      windows: ${{ steps.scope.outputs.windows }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - name: Classify changed paths
+        id: scope
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
+            python3 release/tools/ci_changed_paths.py --all >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [[ -z "$BASE_SHA" || "$BASE_SHA" =~ ^0+$ ]] \
+            || ! git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null
+          then
+            git ls-tree -r --name-only -z "$HEAD_SHA" |
+              python3 release/tools/ci_changed_paths.py --nul >> "$GITHUB_OUTPUT"
+          else
+            git diff --name-only -z "$BASE_SHA" "$HEAD_SHA" |
+              python3 release/tools/ci_changed_paths.py --nul >> "$GITHUB_OUTPUT"
+          fi
+
+  rust-linux:
+    name: Rust (ubuntu-latest)
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ${{ vars.PIQAE_CI_LINUX_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
@@ -27,22 +64,128 @@ jobs:
           toolchain: 1.88.0
           components: rustfmt,clippy
       - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+        with:
+          shared-key: ci-linux
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install CUPS development libraries
-        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends libcups2-dev
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
-      - if: runner.os == 'Linux'
-        run: cargo clippy -p piqae-control-plane --all-targets --features otlp --locked -- -D warnings
-      - if: runner.os == 'Linux'
-        run: cargo test -p piqae-control-plane --features otlp --locked
+      - run: cargo clippy -p piqae-control-plane --all-targets --features otlp --locked -- -D warnings
+      - run: cargo test -p piqae-control-plane --features otlp --locked
+
+  rust-macos:
+    name: Rust (macos-latest)
+    needs: changes
+    if: needs.changes.outputs.macos == 'true'
+    runs-on: ${{ vars.PIQAE_CI_MACOS_RUNNER || 'macos-latest' }}
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: 1.88.0
+          components: clippy
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+        with:
+          shared-key: ci-macos
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Check macOS node packages
+        run: >-
+          cargo clippy --locked --all-targets
+          -p piqae-agent
+          -p piqae-executor-cups
+          -- -D warnings
+      - name: Test macOS node packages
+        run: cargo test --locked -p piqae-agent -p piqae-executor-cups
+      - name: Test macOS menu shell
+        run: swift test --package-path shells/macos
+
+  rust-windows:
+    name: Rust (windows-latest)
+    needs: changes
+    if: needs.changes.outputs.windows == 'true'
+    runs-on: ${{ vars.PIQAE_CI_WINDOWS_RUNNER || 'windows-latest' }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: 1.88.0
+          components: clippy
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+        with:
+          shared-key: ci-windows
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Check Windows node packages
+        run: >-
+          cargo clippy --locked --all-targets --target x86_64-pc-windows-msvc
+          -p piqae-agent
+          -p piqaectl
+          -p piqae-executor-windows
+          -p piqae-shell-windows
+          -- -D warnings
+      - name: Test Windows node packages
+        run: >-
+          cargo test --locked --target x86_64-pc-windows-msvc
+          -p piqae-agent
+          -p piqaectl
+          -p piqae-executor-windows
+          -p piqae-shell-windows
+      - name: Build Windows binaries
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: >-
+          cargo build --locked --release --target x86_64-pc-windows-msvc --bins
+          -p piqae-agent
+          -p piqaectl
+          -p piqae-executor-windows
+          -p piqae-shell-windows
+      - name: Stage installer input
+        shell: pwsh
+        run: |
+          $source = "target\x86_64-pc-windows-msvc\release"
+          $stage = "artifacts\piqae-windows-x86_64"
+          New-Item -ItemType Directory -Force "$stage\service", "$stage\LICENSES" | Out-Null
+          Copy-Item "$source\piqae-agent.exe", "$source\piqaectl.exe", "$source\piqae-executor-windows.exe", "$source\piqae-profile-host-windows.exe", "$source\piqae-shell-windows.exe" $stage
+          Copy-Item "packaging\windows\*" "$stage\service" -Recurse
+          Copy-Item "LICENSE", "NOTICE", "README.md" $stage
+          Copy-Item "LICENSES\*" "$stage\LICENSES" -Recurse
+          & "packaging/windows/Fetch-Pdfium.ps1" -DestinationDirectory $stage
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup --yes --no-progress
+      - name: Compile development installer
+        shell: pwsh
+        run: |
+          $source = (Resolve-Path "artifacts\piqae-windows-x86_64").Path
+          $output = (Resolve-Path "artifacts").Path
+          $compiler = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          & $compiler "/DSourceDir=$source" "/DOutputDir=$output" "/DAppVersion=0.1.1-ci.$env:GITHUB_RUN_NUMBER" "packaging\windows\Piqae.iss"
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed with exit code $LASTEXITCODE" }
+          $installer = "artifacts\piqae-windows-x86_64-setup.exe"
+          $hash = (Get-FileHash -Algorithm SHA256 $installer).Hash.ToLowerInvariant()
+          "$hash  $([System.IO.Path]::GetFileName($installer))" |
+            Out-File -Encoding ascii "$installer.sha256"
+      - name: Upload short-lived development installer
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: piqae-windows-installer
+          path: artifacts/piqae-windows-x86_64-setup.exe*
+          if-no-files-found: error
+          retention-days: 3
 
   web:
     name: Web and SDK
-    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.web == 'true'
+    runs-on: ${{ vars.PIQAE_CI_LINUX_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
@@ -73,7 +216,10 @@ jobs:
 
   supply-chain:
     name: Supply chain
-    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.dependencies == 'true'
+    runs-on: ${{ vars.PIQAE_CI_LINUX_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
@@ -81,12 +227,16 @@ jobs:
           toolchain: 1.88.0
       - uses: taiki-e/install-action@18b1216eba7f8039b0f8d131d5473787f0edce68 # v2
         with:
-          tool: cargo-deny
+          tool: cargo-deny@0.20.2
+          fallback: none
       - run: cargo deny check --allow warnings --hide-inclusion-graph
 
   openapi:
     name: API contract
-    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.openapi == 'true'
+    runs-on: ${{ vars.PIQAE_CI_LIGHT_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
@@ -99,7 +249,10 @@ jobs:
 
   terraform:
     name: Terraform
-    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.terraform == 'true'
+    runs-on: ${{ vars.PIQAE_CI_LIGHT_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 10
     defaults:
       run:
         working-directory: deploy/terraform
@@ -112,62 +265,84 @@ jobs:
       - run: terraform init -backend=false -input=false
       - run: terraform validate -no-color
 
-  macos-shell:
+  macos-shell-compatibility:
     name: macOS menu shell
-    runs-on: macos-14
+    needs: [changes, rust-macos]
+    if: always()
+    runs-on: ${{ vars.PIQAE_CI_LIGHT_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - run: swift build --package-path shells/macos
-
-  windows-installer:
-    name: Windows development installer
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
-        with:
-          toolchain: 1.88.0
-          targets: x86_64-pc-windows-msvc
-      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
-        with:
-          key: windows-installer
-      - name: Build Windows binaries
+      - name: Preserve the existing required-check contract
         env:
-          RUSTFLAGS: -C target-feature=+crt-static
-        run: >-
-          cargo build --locked --release --target x86_64-pc-windows-msvc --bins
-          -p piqae-agent
-          -p piqaectl
-          -p piqae-executor-windows
-          -p piqae-shell-windows
-      - name: Stage installer input
-        shell: pwsh
+          REQUIRED: ${{ needs.changes.outputs.macos }}
+          RESULT: ${{ needs.rust-macos.result }}
         run: |
-          $source = "target\x86_64-pc-windows-msvc\release"
-          $stage = "artifacts\piqae-windows-x86_64"
-          New-Item -ItemType Directory -Force "$stage\service", "$stage\LICENSES" | Out-Null
-          Copy-Item "$source\piqae-agent.exe", "$source\piqaectl.exe", "$source\piqae-executor-windows.exe", "$source\piqae-profile-host-windows.exe", "$source\piqae-shell-windows.exe" $stage
-          Copy-Item "packaging\windows\*" "$stage\service" -Recurse
-          Copy-Item "LICENSE", "README.md" $stage
-          Copy-Item "LICENSES\*" "$stage\LICENSES" -Recurse
-          & "packaging/windows/Fetch-Pdfium.ps1" -DestinationDirectory $stage
-      - name: Install Inno Setup
-        shell: pwsh
-        run: choco install innosetup --yes --no-progress
-      - name: Compile installer
-        shell: pwsh
+          if [[ "$REQUIRED" == true && "$RESULT" != success ]]; then
+            echo "Combined macOS Rust and Swift validation did not succeed." >&2
+            exit 1
+          fi
+
+  windows-installer-compatibility:
+    name: Windows development installer
+    needs: [changes, rust-windows]
+    if: always()
+    runs-on: ${{ vars.PIQAE_CI_LIGHT_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 5
+    steps:
+      - name: Preserve the existing required-check contract
+        env:
+          REQUIRED: ${{ needs.changes.outputs.windows }}
+          RESULT: ${{ needs.rust-windows.result }}
         run: |
-          $source = (Resolve-Path "artifacts\piqae-windows-x86_64").Path
-          $output = (Resolve-Path "artifacts").Path
-          $compiler = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
-          & $compiler "/DSourceDir=$source" "/DOutputDir=$output" "/DAppVersion=0.1.0-ci.$env:GITHUB_RUN_NUMBER" "packaging\windows\Piqae.iss"
-          if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed with exit code $LASTEXITCODE" }
-          $installer = "artifacts\piqae-windows-x86_64-setup.exe"
-          $hash = (Get-FileHash -Algorithm SHA256 $installer).Hash.ToLowerInvariant()
-          "$hash  $([System.IO.Path]::GetFileName($installer))" |
-            Out-File -Encoding ascii "$installer.sha256"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: piqae-windows-installer
-          path: artifacts/piqae-windows-x86_64-setup.exe*
-          if-no-files-found: error
+          if [[ "$REQUIRED" == true && "$RESULT" != success ]]; then
+            echo "Combined Windows Rust and installer validation did not succeed." >&2
+            exit 1
+          fi
+
+  result:
+    name: CI result
+    needs:
+      - changes
+      - macos-shell-compatibility
+      - openapi
+      - rust-linux
+      - rust-macos
+      - rust-windows
+      - supply-chain
+      - terraform
+      - web
+      - windows-installer-compatibility
+    if: always()
+    runs-on: ${{ vars.PIQAE_CI_LIGHT_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 5
+    steps:
+      - name: Require every selected job to succeed
+        env:
+          CHANGES: ${{ needs.changes.result }}
+          MACOS_COMPATIBILITY: ${{ needs.macos-shell-compatibility.result }}
+          OPENAPI: ${{ needs.openapi.result }}
+          RUST_LINUX: ${{ needs.rust-linux.result }}
+          RUST_MACOS: ${{ needs.rust-macos.result }}
+          RUST_WINDOWS: ${{ needs.rust-windows.result }}
+          SUPPLY_CHAIN: ${{ needs.supply-chain.result }}
+          TERRAFORM: ${{ needs.terraform.result }}
+          WEB: ${{ needs.web.result }}
+          WINDOWS_COMPATIBILITY: ${{ needs.windows-installer-compatibility.result }}
+        run: |
+          for result in \
+            "$CHANGES" \
+            "$MACOS_COMPATIBILITY" \
+            "$OPENAPI" \
+            "$RUST_LINUX" \
+            "$RUST_MACOS" \
+            "$RUST_WINDOWS" \
+            "$SUPPLY_CHAIN" \
+            "$TERRAFORM" \
+            "$WEB" \
+            "$WINDOWS_COMPATIBILITY"
+          do
+            if [[ "$result" != success && "$result" != skipped ]]; then
+              echo "A selected CI job ended with '$result'." >&2
+              exit 1
+            fi
+          done

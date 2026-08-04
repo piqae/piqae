@@ -4,15 +4,15 @@ import { cloudPricingCatalog, pricingCatalog } from './pricing';
 describe('server-owned Cloud pricing catalog', () => {
   it('locks the paid private-beta commercial contract', () => {
     expect(cloudPricingCatalog).toMatchObject({
-      billableEvent: 'accepted_by_spooler',
+      billableEvent: 'completed_reported',
       currency: 'USD',
       plans: [
         {
           plan: 'free',
           monthlyCents: 0,
           annualCents: 0,
-          includedAcceptedJobs: 100,
-          annualIncludedAcceptedJobs: null,
+          includedReportedCompleteJobs: 100,
+          annualIncludedReportedCompleteJobs: null,
           includedNodes: 1,
           metadataRetentionDays: 7,
           documentRetention: { maximumHours: 24, enforcement: 'preview_policy' },
@@ -22,8 +22,8 @@ describe('server-owned Cloud pricing catalog', () => {
           plan: 'pro',
           monthlyCents: 900,
           annualCents: 9_000,
-          includedAcceptedJobs: 25_000,
-          annualIncludedAcceptedJobs: 300_000,
+          includedReportedCompleteJobs: 25_000,
+          annualIncludedReportedCompleteJobs: 300_000,
           includedNodes: 25,
           jobOverageUnit: 1_000,
           jobOverageCents: 25,
@@ -44,8 +44,8 @@ describe('server-owned Cloud pricing catalog', () => {
     expect(rendered.plans[1]).toMatchObject({
       monthlyCents: 900,
       annualCents: 9_000,
-      includedAcceptedJobs: 25_000,
-      annualIncludedAcceptedJobs: 300_000,
+      includedReportedCompleteJobs: 25_000,
+      annualIncludedReportedCompleteJobs: 300_000,
       includedNodes: 25,
       jobOverageCents: 25
     });

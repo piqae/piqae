@@ -103,6 +103,13 @@ pub enum ConnectionState {
     Connecting,
     Offline,
     Degraded,
+    /// The control plane rejected this node's identity.
+    ///
+    /// Distinct from `Offline` because retrying does not help: the node has
+    /// been revoked, or its key no longer matches the enrolled one, and an
+    /// operator must re-pair it. Reporting this as `Offline` sends people
+    /// looking for a network fault that does not exist.
+    Unauthorized,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

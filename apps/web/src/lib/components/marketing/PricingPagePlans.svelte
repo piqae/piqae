@@ -23,11 +23,16 @@
     };
   }
 
-  function acceptedJobs(item: PricingDisplay): { amount: number; period: string } {
-    if (interval === 'annual' && item.annualIncludedAcceptedJobs !== null) {
-      return { amount: item.annualIncludedAcceptedJobs, period: 'per year' };
+  function reportedCompleteJobs(item: PricingDisplay): { amount: number; period: string } {
+    if (interval === 'annual') {
+      return {
+        amount:
+          item.annualIncludedReportedCompleteJobs ??
+          item.includedReportedCompleteJobs * 12,
+        period: 'per year'
+      };
     }
-    return { amount: item.includedAcceptedJobs, period: 'per month' };
+    return { amount: item.includedReportedCompleteJobs, period: 'per month' };
   }
 </script>
 
@@ -78,10 +83,10 @@
         <h3>Included usage</h3>
         <dl>
           <div>
-            <dt>Accepted jobs</dt>
+            <dt>Reported-complete jobs</dt>
             <dd>
-              {wholeNumber.format(acceptedJobs(item).amount)}
-              <small>{acceptedJobs(item).period}</small>
+              {wholeNumber.format(reportedCompleteJobs(item).amount)}
+              <small>{reportedCompleteJobs(item).period}</small>
             </dd>
           </div>
           <div>
@@ -106,10 +111,46 @@
     </article>
   {/each}
 
+  <article class="enterprise">
+    <header>
+      <div class="plan-title">
+        <h2>Piqae Enterprise</h2>
+        <span class="badge">Tailored</span>
+      </div>
+      <p>Managed printing infrastructure for larger fleets and platform rollouts.</p>
+    </header>
+
+    <div class="price">
+      <div><strong>Custom</strong></div>
+      <small>Volume and deployment pricing</small>
+    </div>
+
+    <a class="plan-cta primary" href="/start?plan=pro&source=pricing-enterprise">Talk to us</a>
+
+    <div class="included">
+      <h3>Designed around you</h3>
+      <dl>
+        <div><dt>Reported-complete jobs</dt><dd>Volume<small>contracted allowance</small></dd></div>
+        <div><dt>Printer computers</dt><dd>Custom<small>fleet policy</small></dd></div>
+      </dl>
+    </div>
+
+    <div class="features">
+      <h3>What you get</h3>
+      <ul>
+        <li>Everything in Piqae Pro</li>
+        <li>SSO and organisation rollout support</li>
+        <li>Custom node branding and update policies</li>
+        <li>Deployment and data-region planning</li>
+        <li>Commercial support and SLA options by agreement</li>
+      </ul>
+    </div>
+  </article>
+
   <article class="self-hosted">
     <header>
-      <div class="plan-title"><h2>Self-hosted</h2></div>
-      <p>Run the complete Apache-2.0 printing stack in your own environment.</p>
+      <div class="plan-title"><h2>Open source</h2></div>
+      <p>Run the complete Apache-2.0 printing stack in infrastructure you operate.</p>
     </header>
 
     <div class="price">
@@ -117,13 +158,13 @@
       <small>Software licence</small>
     </div>
 
-    <a class="plan-cta" href="/open-source">Explore self-hosting</a>
+    <a class="plan-cta" href="/open-source">Explore open source</a>
 
     <div class="included">
       <h3>Included usage</h3>
       <dl>
         <div>
-          <dt>Accepted jobs</dt>
+          <dt>Reported-complete jobs</dt>
           <dd>Unlimited<small>self-hosted</small></dd>
         </div>
         <div>
@@ -137,10 +178,11 @@
       <h3>What you get</h3>
       <ul>
         <li>Complete open-source stack</li>
-        <li>Cloud, local, or private networking</li>
+        <li>Complete control plane, node, API, and queue</li>
         <li>Community support</li>
         <li>No Piqae Cloud job charges</li>
-        <li>Paid enterprise assistance available</li>
+        <li>You operate availability, backups, upgrades, and monitoring</li>
+        <li>Paid implementation assistance available</li>
       </ul>
     </div>
   </article>
@@ -175,7 +217,7 @@
   .billing-controls span { color: #70aaff; }
   .plan-grid {
     display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: repeat(4, minmax(0, 1fr));
     gap: 18px;
   }
   article {
@@ -305,16 +347,13 @@
     transform: translateY(-1px) rotate(-45deg);
   }
   li.inherits { background: white; font-weight: 650; }
-  @media (max-width: 980px) {
+  @media (max-width: 1180px) {
     .plan-grid { grid-template-columns: 1fr 1fr; }
-    .self-hosted { grid-column: 1 / -1; }
-    .self-hosted header { min-height: 115px; }
   }
   @media (max-width: 680px) {
     .billing-controls { margin-bottom: 18px; }
     .billing-controls button { padding-inline: 10px; }
     .plan-grid { grid-template-columns: 1fr; }
-    .self-hosted { grid-column: auto; }
     article { padding: 25px 22px; border-radius: 11px; }
     header,
     .self-hosted header { min-height: 0; }

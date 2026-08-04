@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 import PiqaeMenuCore
 import PiqaeProfileHost
 
@@ -13,6 +14,21 @@ private enum QueueLoadResult: Sendable {
     case loaded([LocalQueueJob])
     case unsupported
     case unavailable
+}
+
+private func restartInstalledAgent() throws {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+    process.arguments = [
+        "kickstart", "-k", "gui/\(getuid())/com.piqae.node.agent",
+    ]
+    process.standardOutput = Pipe()
+    process.standardError = Pipe()
+    try process.run()
+    process.waitUntilExit()
+    guard process.terminationStatus == 0 else {
+        throw NodeConnectAgentBridgeError.failed
+    }
 }
 
 private final class ProfileActionContext: NSObject {
@@ -51,6 +67,7 @@ final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var actionTask: Task<Void, Never>?
     private var refreshTimer: Timer?
     private var updateCoordinator: PiqaeUpdateCoordinator?
+    private let connectReplayGuard = NodeConnectReplayGuard()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         do {
@@ -91,6 +108,134 @@ final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         refreshTask?.cancel()
         actionTask?.cancel()
         refreshTimer?.invalidate()
+    }
+
+    func application(_ application: NSApplication, open urls: [URL]) {
+        for url in urls.prefix(4) {
+            Task { await handleConnectApplicationLink(url) }
+        }
+    }
+
+    func application(
+        _ application: NSApplication,
+        continue userActivity: NSUserActivity,
+        restorationHandler: @escaping ([any NSUserActivityRestoring]) -> Void
+    ) -> Bool {
+        guard userActivity.activityType == NSUserActivityTypeBrowsingWeb,
+              let url = userActivity.webpageURL else { return false }
+        Task { await handleConnectApplicationLink(url) }
+        return true
+    }
+
+    private func handleConnectApplicationLink(_ url: URL) async {
+        let link: NodeConnectApplicationLink
+        do {
+            link = try NodeConnectApplicationLink(url: url)
+        } catch {
+            showAlert(title: "Invalid Piqae connection", message: "This connection link is invalid or unsafe.")
+            return
+        }
+        guard await connectReplayGuard.begin(link) else { return }
+        var consumed = false
+        defer { Task { await connectReplayGuard.finish(link, consumed: consumed) } }
+        do {
+            guard let client else { throw NodeConnectAgentBridgeError.unavailable }
+            async let currentStatusRequest = client.status()
+            async let currentPrintersRequest = client.printers()
+            let (currentStatus, currentPrinters) = try await (
+                currentStatusRequest,
+                currentPrintersRequest
+            )
+            guard currentStatus.queuedJobs == 0, currentStatus.activeJobs == 0 else {
+                showAlert(
+                    title: "Finish current print jobs first",
+                    message: "Piqae will not change connected services while jobs are queued or active."
+                )
+                return
+            }
+            guard !currentPrinters.isEmpty else {
+                showAlert(
+                    title: "No printers available",
+                    message: "Add a local printer before connecting this service."
+                )
+                return
+            }
+            let bridge = try NodeConnectAgentBridge()
+            let preview = try await Task.detached {
+                try bridge.preview(capability: link.enrolmentCapability)
+            }.value
+            let selected = presentConnectorConsent(preview: preview, printers: currentPrinters)
+            guard !selected.isEmpty else { return }
+            let statusBeforeAccept = try await client.status()
+            guard statusBeforeAccept.queuedJobs == 0, statusBeforeAccept.activeJobs == 0 else {
+                showAlert(
+                    title: "Print activity started",
+                    message: "The connection was not changed because a print job started while approval was open. Try again when the queue is idle."
+                )
+                return
+            }
+            try await Task.detached {
+                try bridge.accept(capability: link.enrolmentCapability, printerIDs: selected)
+            }.value
+            consumed = true
+            do {
+                try await Task.detached {
+                    try restartInstalledAgent()
+                }.value
+            } catch {
+                showAlert(
+                    title: "Connected — restart Piqae",
+                    message: "The connector was saved securely, but Piqae could not restart automatically. Restart Piqae to activate it."
+                )
+                return
+            }
+            showAlert(
+                title: "Connected with Piqae",
+                message: "\(preview.requestingServiceName ?? preview.workspaceName) can now print only to the printers you selected.",
+                style: .informational
+            )
+            if let returnURL = preview.returnURL { NSWorkspace.shared.open(returnURL) }
+        } catch {
+            showAlert(
+                title: "Connection not completed",
+                message: error.localizedDescription
+            )
+        }
+    }
+
+    private func presentConnectorConsent(
+        preview: NodeConnectPreview,
+        printers availablePrinters: [LocalPrinter]
+    ) -> [String] {
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        let requester = preview.requestingServiceName.map { "Piqae integration \($0)" }
+            ?? "Piqae workspace \(preview.workspaceName)"
+        alert.messageText = "Connect \(requester)?"
+        alert.informativeText = "Customer workspace \(preview.workspaceName) (\(preview.workspaceID)) requests: \(preview.requestedScopes.joined(separator: ", ")). Select the local printers it may use. You can disconnect it later."
+        alert.addButton(withTitle: "Connect selected printers")
+        alert.addButton(withTitle: "Cancel")
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 6
+        let choices = availablePrinters.map { printer -> NSButton in
+            let button = NSButton(checkboxWithTitle: printer.name, target: nil, action: nil)
+            button.state = .off
+            button.identifier = NSUserInterfaceItemIdentifier(printer.printerID)
+            stack.addArrangedSubview(button)
+            return button
+        }
+        alert.accessoryView = stack
+        NSApplication.shared.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn else { return [] }
+        let selected = choices.compactMap { button in
+            button.state == .on ? button.identifier?.rawValue : nil
+        }
+        if selected.isEmpty {
+            showAlert(title: "Select a printer", message: "No printer access was granted.")
+        }
+        return selected
     }
 
     func menuWillOpen(_ menu: NSMenu) {
@@ -274,17 +419,19 @@ final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             )
             root.image = symbol(printerSymbol(for: printer), description: printer.state)
             let printerMenu = NSMenu()
-            let state = printer.state.replacingOccurrences(of: "_", with: " ").capitalized
-            let count = printer.queueCounts.map {
-                " · \($0.queued) queued · \($0.active) active"
-            } ?? ""
-            printerMenu.addItem(informational("\(state)\(count)"))
+            printerMenu.addItem(
+                informational(
+                    MenuPresentation.printerActivityTitle(
+                        state: printer.state,
+                        queued: printer.queueCounts?.queued,
+                        active: printer.queueCounts?.active
+                    )
+                )
+            )
 
             if let exposed = printer.exposed {
                 let exposure = NSMenuItem(
-                    title: exposed
-                        ? "Cloud & API access on"
-                        : "Allow cloud & API jobs",
+                    title: MenuPresentation.cloudAndAPIAccessTitle,
                     action: #selector(toggleExposure(_:)),
                     keyEquivalent: ""
                 )
@@ -292,15 +439,10 @@ final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 exposure.representedObject = printer.printerID
                 exposure.state = exposed ? .on : .off
                 printerMenu.addItem(exposure)
-                printerMenu.addItem(
-                    informational(
-                        exposed
-                            ? "Remote jobs can use this printer’s saved profiles"
-                            : "Off · this printer can only be used on this Mac"
-                    )
-                )
             } else {
-                printerMenu.addItem(informational("Cloud availability requires an updated node"))
+                let exposure = informational("Cloud & API access unavailable")
+                exposure.toolTip = "Update the node to manage remote access for this printer."
+                printerMenu.addItem(exposure)
             }
 
             printerMenu.addItem(.separator())
@@ -323,7 +465,9 @@ final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let captureAvailability = PrinterProfileCaptureAvailability(
             printerState: printer.state
         )
-        printerMenu.addItem(informational("SAVED PROFILES (\(profiles.count))"))
+        printerMenu.addItem(
+            informational(MenuPresentation.printPresetSectionTitle(count: profiles.count))
+        )
 
         let defaultsRoot = NSMenuItem(
             title: CurrentPrinterDefaultsProfile.name,
@@ -342,7 +486,7 @@ final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         )
         let saveDefaults = defaultsMenu.addItem(
             withTitle: currentDefaults == nil
-                ? "Save as Default Profile…"
+                ? "Save as Default Preset…"
                 : "Save Fixed Native Settings…",
             action: currentDefaults == nil
                 ? #selector(addProfile(_:))
@@ -397,7 +541,7 @@ final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             edit.isEnabled = captureAvailability.canCapture
 
             let clone = profileMenu.addItem(
-                withTitle: "Clone as New Profile…",
+                withTitle: "Duplicate as New Preset…",
                 action: #selector(cloneProfile(_:)),
                 keyEquivalent: ""
             )
@@ -407,7 +551,7 @@ final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 profileID: profile.profileID,
                 revision: profile.revision
             )
-            clone.image = symbol("plus.square.on.square", description: "Clone profile")
+            clone.image = symbol("plus.square.on.square", description: "Duplicate print preset")
             clone.isEnabled = captureAvailability.canCapture
             profileRoot.submenu = profileMenu
             printerMenu.addItem(profileRoot)
@@ -417,20 +561,20 @@ final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             printerMenu.addItem(
                 informational(
                     profilesSupported
-                        ? "No immutable profiles saved for jobs"
-                        : "Profile listing requires an updated node"
+                        ? "No print presets saved"
+                        : "Print presets require an updated node"
                 )
             )
         }
 
         let add = printerMenu.addItem(
-            withTitle: "Add Saved Profile…",
+            withTitle: "Add Print Preset…",
             action: #selector(addProfile(_:)),
             keyEquivalent: ""
         )
         add.target = self
         add.representedObject = ProfileActionContext(printerID: printer.printerID)
-        add.image = symbol("plus", description: "Add saved print profile")
+        add.image = symbol("plus", description: "Add print preset")
         add.isEnabled = client != nil && status != nil && captureAvailability.canCapture
     }
 
@@ -440,26 +584,24 @@ final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             printerState: printer.state
         )
         let test = NSMenuItem(
-            title: "Local driver test…",
+            title: "Test Printer…",
             action: #selector(confirmDriverTest(_:)),
             keyEquivalent: ""
         )
         test.target = self
         test.representedObject = printer.printerID
-        test.image = symbol("doc.text", description: "Local driver test")
+        test.image = symbol("doc.text", description: "Test printer")
         test.isEnabled =
             profilesSupported
             && !availableProfiles.isEmpty
             && captureAvailability.canCapture
         printerMenu.addItem(test)
         if !profilesSupported {
-            printerMenu.addItem(informational("Requires a node with print-profile support"))
+            test.toolTip = "Update the node to test print presets."
         } else if availableProfiles.isEmpty {
-            printerMenu.addItem(
-                informational("Save printer defaults as a profile to test")
-            )
+            test.toolTip = "Save a print preset before testing this printer."
         } else if let recovery = captureAvailability.recoveryMessage {
-            printerMenu.addItem(informational(recovery))
+            test.toolTip = recovery
         }
     }
 
@@ -474,7 +616,7 @@ final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             )
             return
         }
-        for job in recentJobs.prefix(5) {
+        for job in recentJobs.prefix(3) {
             let state = job.state.replacingOccurrences(of: "_", with: " ").capitalized
             menu.addItem(informational("\(shortened(job.title, limit: 34)) — \(state)"))
         }
@@ -489,23 +631,15 @@ final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         addPrinter.target = self
         addPrinter.image = symbol("plus", description: "Add printer")
 
-        let manage = menu.addItem(
-            withTitle: "Manage Printers",
-            action: #selector(managePrinters),
-            keyEquivalent: ""
-        )
-        manage.target = self
-        manage.isEnabled = dashboardURL() != nil
-        manage.image = symbol("printer", description: "Manage printers")
-
-        let dashboard = menu.addItem(
-            withTitle: "Open Dashboard",
-            action: #selector(openDashboard),
-            keyEquivalent: "o"
-        )
-        dashboard.target = self
-        dashboard.isEnabled = dashboardURL() != nil
-        dashboard.image = symbol("rectangle.3.group", description: "Dashboard")
+        if dashboardURL() != nil {
+            let dashboard = menu.addItem(
+                withTitle: "Open Dashboard",
+                action: #selector(openDashboard),
+                keyEquivalent: "o"
+            )
+            dashboard.target = self
+            dashboard.image = symbol("rectangle.3.group", description: "Dashboard")
+        }
 
         let updates = menu.addItem(
             withTitle: updateCoordinator?.presentation.title
@@ -636,7 +770,7 @@ final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     completion: completion
                 )
                 showAlert(
-                    title: "Profile saved",
+                    title: "Print preset saved",
                     message:
                         "\(saved.name) is available for \(printer.name)"
                         + (saved.revision.map { " as revision \($0)." } ?? "."),
@@ -652,7 +786,7 @@ final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     try? await client.cancelProfileCapture(session: session)
                 }
                 showAlert(
-                    title: "Piqae could not save the profile",
+                    title: "Piqae could not save the print preset",
                     message: error.localizedDescription
                 )
                 refresh()
@@ -682,18 +816,18 @@ final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         let alert = NSAlert()
         alert.alertStyle = .warning
-        alert.messageText = "Print a local driver test?"
+        alert.messageText = "Test this printer?"
         alert.informativeText =
-            "Printer: \(printer.name)\nChoose the print profile to confirm. " +
+            "Printer: \(printer.name)\nChoose the print preset to confirm. " +
             "This A4 page validates only the local macOS driver path."
         alert.accessoryView = picker
-        alert.addButton(withTitle: "Print Local Test")
+        alert.addButton(withTitle: "Print Test Page")
         alert.addButton(withTitle: "Cancel")
         NSApplication.shared.activate(ignoringOtherApps: true)
         guard alert.runModal() == .alertFirstButtonReturn else { return }
 
         let selected = availableProfiles[picker.indexOfSelectedItem]
-        performAction(successMessage: "Local driver test accepted for \(printer.name).") { client in
+        performAction(successMessage: "Test page accepted for \(printer.name).") { client in
             _ = try await client.submitDriverTest(
                 printerID: printer.printerID,
                 profileID: selected.profileID
@@ -740,13 +874,6 @@ final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         showAlert(
             title: "Open Printers & Scanners",
             message: "Open System Settings, then choose Printers & Scanners."
-        )
-    }
-
-    @objc private func managePrinters() {
-        guard let dashboard = dashboardURL() else { return }
-        NSWorkspace.shared.open(
-            dashboard.appendingPathComponent("dashboard/local", isDirectory: false)
         )
     }
 

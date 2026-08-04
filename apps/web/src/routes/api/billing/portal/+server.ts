@@ -44,7 +44,7 @@ export const POST: RequestHandler = async (event) => {
   if (!customer) error(404, 'No managed Stripe customer exists for this workspace');
   const session = await stripe.billingPortal.sessions.create({
     customer: customer.id,
-    return_url: `${event.url.origin}/dashboard/settings/billing`
+    return_url: `${event.url.origin}/dashboard/settings#billing`
   });
   return json(
     { url: session.url },

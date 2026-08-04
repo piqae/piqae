@@ -20,6 +20,8 @@ describe('homepage pricing', () => {
 
     expect(screen.getByText('$7.50')).toBeInTheDocument();
     expect(screen.getByText(/\$90 billed annually/)).toBeInTheDocument();
+    expect(screen.getByText(/1,200 reported-complete jobs/)).toBeInTheDocument();
+    expect(screen.getByText(/300,000 reported-complete jobs/)).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'Choose Pro' })).toHaveAttribute(
       'href',
       '/start?plan=pro&interval=annual&source=home-pricing'

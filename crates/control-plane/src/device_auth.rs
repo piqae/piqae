@@ -10,6 +10,27 @@ use sha2::{Digest, Sha256};
 use std::str::FromStr;
 use subtle::ConstantTimeEq;
 
+/// Tolerated difference between a node's signing clock and the server clock.
+///
+/// Nodes on suspended laptops, virtual machines, and appliances without NTP
+/// routinely drift by minutes. A window this wide keeps ordinary drift out of
+/// the support queue, and `NONCE_RETENTION` is derived from it so widening the
+/// window can never shorten replay protection.
+const MAXIMUM_CLOCK_SKEW_MS: i64 = 300_000;
+
+/// How long a consumed nonce stays reserved.
+///
+/// A signed request stays acceptable until its own timestamp plus the skew
+/// window, so a nonce observed now cannot be replayed after this point. The
+/// extra minute absorbs clock movement on the control plane itself.
+const NONCE_RETENTION_MS: i64 = MAXIMUM_CLOCK_SKEW_MS + 60_000;
+
+/// A signature stays acceptable until its own timestamp plus the skew window,
+/// so retaining nonces for any less would let a captured request be replayed
+/// once its reservation expired. Enforced at compile time because widening the
+/// window is exactly the change that would otherwise break it silently.
+const _: () = assert!(NONCE_RETENTION_MS > MAXIMUM_CLOCK_SKEW_MS);
+
 #[derive(Clone, Copy, Debug)]
 pub struct AgentIdentity {
     pub agent_id: AgentId,
@@ -38,7 +59,14 @@ pub async fn authenticate_agent(
         .parse::<i64>()
         .map_err(|_| AppError::device_unauthorized("invalid_agent_timestamp"))?;
     let now_ms = Utc::now().timestamp_millis();
-    if now_ms.abs_diff(timestamp_ms) > 60_000 {
+    let skew_ms = now_ms - timestamp_ms;
+    if skew_ms.abs() > MAXIMUM_CLOCK_SKEW_MS {
+        tracing::warn!(
+            agent.id = %agent_id_text,
+            clock.skew_ms = skew_ms,
+            error.type = "stale_agent_request",
+            "rejected a node request outside the signing clock window"
+        );
         return Err(AppError::device_unauthorized("stale_agent_request"));
     }
     let nonce = required_product_header(headers, "x-piqae-nonce", "x-spool-nonce")?;
@@ -82,7 +110,11 @@ pub async fn authenticate_agent(
         .map_err(|_| AppError::device_unauthorized("invalid_agent_signature"))?;
     state
         .repository
-        .reserve_agent_nonce(agent_id, nonce, Utc::now() + Duration::minutes(2))
+        .reserve_agent_nonce(
+            agent_id,
+            nonce,
+            Utc::now() + Duration::milliseconds(NONCE_RETENTION_MS),
+        )
         .await
         .map_err(|_| AppError::device_unauthorized("agent_nonce_replayed"))?;
     Ok(AgentIdentity {

@@ -67,7 +67,7 @@
 
   header span {
     color: var(--accent-hover);
-    font-size: 10px;
+    font-size: var(--text-compact);
     font-weight: 550;
     letter-spacing: 0.02em;
   }
@@ -138,7 +138,7 @@
     color: var(--text-tertiary);
     background: var(--surface);
     border-bottom: 1px solid var(--border-subtle);
-    font: 9px var(--font-mono);
+    font: var(--text-meta) var(--font-mono);
     text-transform: uppercase;
   }
 
@@ -151,7 +151,7 @@
     background: transparent;
     border: 0;
     border-radius: var(--radius-sm);
-    font: 9px Inter, sans-serif;
+    font: var(--text-meta) Inter, sans-serif;
     cursor: pointer;
   }
 
@@ -165,7 +165,7 @@
     margin: 0;
     padding: 14px;
     color: var(--text-secondary);
-    font: 11px/18px var(--font-mono);
+    font: var(--text-compact)/var(--text-code-line) var(--font-mono);
     tab-size: 2;
   }
 
@@ -189,14 +189,14 @@
 
   aside strong {
     color: var(--text-primary);
-    font-size: 11px;
+    font-size: var(--text-compact);
     font-weight: 550;
   }
 
   aside p {
     margin: 2px 0 0;
     color: var(--text-secondary);
-    font-size: 10px;
+    font-size: var(--text-compact);
     line-height: 16px;
   }
 
@@ -211,7 +211,7 @@
 
   footer p {
     color: var(--text-secondary);
-    font-size: 10px;
+    font-size: var(--text-compact);
   }
 
   footer div {
@@ -226,7 +226,7 @@
     background: var(--surface);
     border: 1px solid var(--border-default);
     border-radius: var(--radius-md);
-    font-size: 9px;
+    font-size: var(--text-meta);
   }
 
   @media (max-width: 760px) {

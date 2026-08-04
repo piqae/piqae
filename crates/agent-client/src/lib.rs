@@ -7,13 +7,20 @@ use piqae_domain::{AgentId, JobId};
 use piqae_protocol::agent::{
     AgentAcceptJobRequest, AgentAcceptJobResponse, AgentReleaseLeaseRequest,
     AgentRenewLeaseRequest, AgentRenewLeaseResponse, AgentSyncRequest, AgentSyncResponse,
-    CreateDeviceAuthorizationRequest, CreatedDeviceAuthorization, DeviceAuthorizationExchange,
-    DeviceAuthorizationStatus, EnrolRequest, EnrolResponse,
+    ConnectSessionPreview, ConnectSessionPreviewRequest, CreateDeviceAuthorizationRequest,
+    CreatedDeviceAuthorization, DeviceAuthorizationExchange, DeviceAuthorizationStatus,
+    EnrolRequest, EnrolResponse,
 };
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use std::time::Duration;
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicI64, Ordering},
+    },
+    time::Duration,
+};
 use thiserror::Error;
 use url::Url;
 use uuid::Uuid;
@@ -30,12 +37,106 @@ pub enum ClientError {
     Json(#[from] serde_json::Error),
     #[error("control-plane request failed: {0}")]
     Http(#[from] reqwest::Error),
+    #[error("control plane rejected this node's identity: {code}")]
+    Unauthorized { code: String },
     #[error("control plane returned HTTP {status}: {body}")]
     Status { status: u16, body: String },
     #[error("control-plane response exceeds {MAX_RESPONSE_BYTES} bytes")]
     ResponseTooLarge,
     #[error("device authorization request failed")]
     DeviceAuthorization,
+}
+
+impl ClientError {
+    /// Reports whether the control plane rejected this node's signature rather
+    /// than failing for a transport or server-side reason.
+    #[must_use]
+    pub const fn is_unauthorized(&self) -> bool {
+        matches!(self, Self::Unauthorized { .. })
+    }
+
+    /// The control-plane error code for a rejected node request.
+    #[must_use]
+    pub const fn unauthorized_code(&self) -> Option<&str> {
+        match self {
+            Self::Unauthorized { code } => Some(code.as_str()),
+            _ => None,
+        }
+    }
+}
+
+/// The node's running estimate of the control plane's clock.
+///
+/// Signed requests carry a timestamp the control plane checks against a bounded
+/// window, so a node whose own clock has drifted — a suspended laptop, a
+/// virtual machine, an appliance with no NTP — would otherwise be rejected
+/// forever with no way to discover why. Every response, *including the
+/// rejection*, carries the server clock, so observing it here lets the node
+/// correct itself on the next attempt without operator involvement.
+#[derive(Clone, Debug, Default)]
+pub struct ServerClock {
+    offset_ms: Arc<AtomicI64>,
+}
+
+impl ServerClock {
+    /// Records the control plane's clock from one response.
+    pub fn observe(&self, headers: &HeaderMap) {
+        let Some(server_ms) = server_time_ms(headers) else {
+            return;
+        };
+        self.offset_ms
+            .store(server_ms - Utc::now().timestamp_millis(), Ordering::Relaxed);
+    }
+
+    /// The timestamp to sign with, corrected by the last observed offset.
+    #[must_use]
+    pub fn signing_timestamp_ms(&self) -> i64 {
+        Utc::now()
+            .timestamp_millis()
+            .saturating_add(self.offset_ms.load(Ordering::Relaxed))
+    }
+
+    /// How far this node's clock is behind the control plane, in milliseconds.
+    #[must_use]
+    pub fn offset_ms(&self) -> i64 {
+        self.offset_ms.load(Ordering::Relaxed)
+    }
+}
+
+fn server_time_ms(headers: &HeaderMap) -> Option<i64> {
+    if let Some(milliseconds) = headers
+        .get("x-piqae-server-time")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<i64>().ok())
+    {
+        return Some(milliseconds);
+    }
+    // Any HTTP/1.1 origin sends `Date`, so a node still corrects itself when a
+    // proxy strips unknown headers. One-second resolution is far finer than the
+    // drift that actually causes rejection.
+    headers
+        .get(reqwest::header::DATE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| chrono::DateTime::parse_from_rfc2822(value).ok())
+        .map(|value| value.timestamp_millis())
+}
+
+fn status_error(status: u16, bytes: &[u8]) -> ClientError {
+    let body: String = String::from_utf8_lossy(bytes).chars().take(1024).collect();
+    if status == 401 {
+        let code = serde_json::from_slice::<serde_json::Value>(bytes)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("error")?
+                    .get("code")?
+                    .as_str()
+                    .map(ToOwned::to_owned)
+            })
+            .unwrap_or_else(|| "unauthorized".to_owned());
+        return ClientError::Unauthorized { code };
+    }
+    ClientError::Status { status, body }
 }
 
 #[derive(Debug)]
@@ -69,6 +170,11 @@ impl DeviceIdentity {
     #[must_use]
     pub fn public_key_base64(&self) -> String {
         STANDARD_NO_PAD.encode(self.signing_key.verifying_key().as_bytes())
+    }
+
+    #[must_use]
+    pub fn sign_base64(&self, message: &[u8]) -> String {
+        STANDARD_NO_PAD.encode(self.signing_key.sign(message).to_bytes())
     }
 
     #[must_use]
@@ -130,6 +236,7 @@ fn insert_header(
 pub struct AgentClient {
     base_url: Url,
     client: reqwest::Client,
+    clock: ServerClock,
 }
 
 impl AgentClient {
@@ -144,7 +251,17 @@ impl AgentClient {
             .timeout(Duration::from_secs(40))
             .user_agent(concat!("piqae-agent/", env!("CARGO_PKG_VERSION")))
             .build()?;
-        Ok(Self { base_url, client })
+        Ok(Self {
+            base_url,
+            client,
+            clock: ServerClock::default(),
+        })
+    }
+
+    /// The clock this client signs with, corrected against the control plane.
+    #[must_use]
+    pub const fn clock(&self) -> &ServerClock {
+        &self.clock
     }
 
     /// Consumes a one-time enrolment token without device authentication.
@@ -155,6 +272,27 @@ impl AgentClient {
     /// response-decoding failure.
     pub async fn enrol(&self, request: &EnrolRequest) -> Result<EnrolResponse, ClientError> {
         self.post_json("v1/agents/enrol", request, None).await
+    }
+
+    /// Inspects a one-time connect invitation without consuming it. Errors are
+    /// redacted so the capability is never copied into diagnostics.
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted authorization error when transport, validation, or decoding fails.
+    pub async fn preview_connect_session(
+        &self,
+        token: &str,
+    ) -> Result<ConnectSessionPreview, ClientError> {
+        self.post_json(
+            "v1/node-connect-sessions/preview",
+            &ConnectSessionPreviewRequest {
+                token: token.to_owned(),
+            },
+            None,
+        )
+        .await
+        .map_err(|_| ClientError::DeviceAuthorization)
     }
 
     /// Starts a ten-minute browser authorization without sending the private key.
@@ -172,6 +310,10 @@ impl AgentClient {
 
     /// Polls one device authorization without exposing its code in error values.
     ///
+    /// The device code travels in the request body. In a request path it would
+    /// be recorded by every proxy and CDN access log between this node and the
+    /// control plane.
+    ///
     /// # Errors
     ///
     /// Returns a redacted device-authorization error when polling fails.
@@ -179,9 +321,13 @@ impl AgentClient {
         &self,
         device_code: &str,
     ) -> Result<DeviceAuthorizationStatus, ClientError> {
-        self.get_json(&format!("v1/device-authorizations/{device_code}"), None)
-            .await
-            .map_err(|_| ClientError::DeviceAuthorization)
+        self.post_json(
+            "v1/device-authorizations/status",
+            &serde_json::json!({ "device_code": device_code }),
+            None,
+        )
+        .await
+        .map_err(|_| ClientError::DeviceAuthorization)
     }
 
     /// Exchanges one approved device authorization for its assigned node identity.
@@ -194,8 +340,8 @@ impl AgentClient {
         device_code: &str,
     ) -> Result<DeviceAuthorizationExchange, ClientError> {
         self.post_json(
-            &format!("v1/device-authorizations/{device_code}/exchange"),
-            &serde_json::json!({}),
+            "v1/device-authorizations/exchange",
+            &serde_json::json!({ "device_code": device_code }),
             None,
         )
         .await
@@ -215,6 +361,43 @@ impl AgentClient {
     ) -> Result<AgentSyncResponse, ClientError> {
         self.post_json("v1/agent/sync", request, Some(identity))
             .await
+    }
+
+    /// Registers this node's public content-encryption key using device authentication.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for signing, serialization, transport, status, or decoding failure.
+    pub async fn register_content_encryption_key(
+        &self,
+        identity: &DeviceIdentity,
+        key_id: &str,
+        public_key_spki: &str,
+    ) -> Result<serde_json::Value, ClientError> {
+        let body = serde_json::to_vec(&serde_json::json!({
+            "key_id": key_id, "algorithm": "ECDH-P256-HKDF-SHA256", "public_key_spki": public_key_spki
+        }))?;
+        let path = "/v1/agent/content-encryption-key";
+        let mut builder = self
+            .client
+            .put(self.base_url.join(path.trim_start_matches('/'))?)
+            .header("content-type", "application/json")
+            .body(body.clone());
+        builder = builder.headers(identity.signed_headers(
+            "PUT",
+            path,
+            &body,
+            self.clock.signing_timestamp_ms(),
+            Uuid::new_v4(),
+        )?);
+        let mut response = builder.send().await?;
+        self.clock.observe(response.headers());
+        let status = response.status();
+        let bytes = bounded_response_bytes(&mut response).await?;
+        if !status.is_success() {
+            return Err(status_error(status.as_u16(), &bytes));
+        }
+        Ok(serde_json::from_slice(&bytes)?)
     }
 
     /// Confirms a lease only after the job is durable in local `SQLite`.
@@ -299,7 +482,7 @@ impl AgentClient {
             "GET",
             &request_path,
             &[],
-            Utc::now().timestamp_millis(),
+            self.clock.signing_timestamp_ms(),
             Uuid::new_v4(),
         )?;
         insert_header(&mut headers, "x-piqae-lease-id", &lease_id.to_string())?;
@@ -310,13 +493,11 @@ impl AgentClient {
             .headers(headers)
             .send()
             .await?;
+        self.clock.observe(response.headers());
         let status = response.status();
         if !status.is_success() {
             let bytes = response.bytes().await?;
-            return Err(ClientError::Status {
-                status: status.as_u16(),
-                body: String::from_utf8_lossy(&bytes).chars().take(1024).collect(),
-            });
+            return Err(status_error(status.as_u16(), &bytes));
         }
         Ok(response)
     }
@@ -340,56 +521,36 @@ impl AgentClient {
                 "POST",
                 &request_path,
                 &body,
-                Utc::now().timestamp_millis(),
+                self.clock.signing_timestamp_ms(),
                 Uuid::new_v4(),
             )?);
         }
-        let response = builder.send().await?;
+        let mut response = builder.send().await?;
+        self.clock.observe(response.headers());
         let status = response.status();
-        let bytes = response.bytes().await?;
-        if bytes.len() > MAX_RESPONSE_BYTES {
-            return Err(ClientError::ResponseTooLarge);
-        }
+        let bytes = bounded_response_bytes(&mut response).await?;
         if !status.is_success() {
-            return Err(ClientError::Status {
-                status: status.as_u16(),
-                body: String::from_utf8_lossy(&bytes).chars().take(1024).collect(),
-            });
+            return Err(status_error(status.as_u16(), &bytes));
         }
         Ok(serde_json::from_slice(&bytes)?)
     }
+}
 
-    async fn get_json<Res: serde::de::DeserializeOwned>(
-        &self,
-        path: &str,
-        identity: Option<&DeviceIdentity>,
-    ) -> Result<Res, ClientError> {
-        let url = self.base_url.join(path)?;
-        let request_path = format!("/{}", path.trim_start_matches('/'));
-        let mut builder = self.client.get(url);
-        if let Some(identity) = identity {
-            builder = builder.headers(identity.signed_headers(
-                "GET",
-                &request_path,
-                &[],
-                Utc::now().timestamp_millis(),
-                Uuid::new_v4(),
-            )?);
-        }
-        let response = builder.send().await?;
-        let status = response.status();
-        let bytes = response.bytes().await?;
-        if bytes.len() > MAX_RESPONSE_BYTES {
+async fn bounded_response_bytes(response: &mut reqwest::Response) -> Result<Vec<u8>, ClientError> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
+    {
+        return Err(ClientError::ResponseTooLarge);
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        if bytes.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES {
             return Err(ClientError::ResponseTooLarge);
         }
-        if !status.is_success() {
-            return Err(ClientError::Status {
-                status: status.as_u16(),
-                body: String::from_utf8_lossy(&bytes).chars().take(1024).collect(),
-            });
-        }
-        Ok(serde_json::from_slice(&bytes)?)
+        bytes.extend_from_slice(&chunk);
     }
+    Ok(bytes)
 }
 
 #[cfg(test)]
@@ -419,6 +580,60 @@ mod tests {
         let canonical = format!("POST\n/v1/agent/sync\n123\n{nonce}\n{digest}");
         key.verify(canonical.as_bytes(), &signature)
             .expect("valid signature");
+    }
+
+    #[test]
+    fn a_drifted_node_signs_with_the_control_planes_clock() {
+        let clock = ServerClock::default();
+        assert_eq!(clock.offset_ms(), 0);
+        let server_ms = Utc::now().timestamp_millis() + 3_600_000;
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-piqae-server-time",
+            HeaderValue::from_str(&server_ms.to_string()).expect("header"),
+        );
+        clock.observe(&headers);
+        // An hour of drift must be corrected to within a small execution delay,
+        // not merely reduced.
+        assert!(
+            (clock.signing_timestamp_ms() - server_ms).abs() < 5_000,
+            "offset {}",
+            clock.offset_ms()
+        );
+    }
+
+    #[test]
+    fn the_date_header_corrects_a_node_behind_a_header_stripping_proxy() {
+        let clock = ServerClock::default();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            reqwest::header::DATE,
+            HeaderValue::from_static("Sun, 06 Nov 1994 08:49:37 GMT"),
+        );
+        clock.observe(&headers);
+        assert_eq!(server_time_ms(&headers), Some(784_111_777_000));
+        assert!(clock.offset_ms() != 0);
+    }
+
+    #[test]
+    fn responses_without_a_clock_leave_the_offset_untouched() {
+        let clock = ServerClock::default();
+        clock.observe(&HeaderMap::new());
+        assert_eq!(clock.offset_ms(), 0);
+    }
+
+    #[test]
+    fn a_rejected_signature_is_distinguishable_from_a_server_fault() {
+        let rejected = status_error(401, br#"{"error":{"code":"stale_agent_request"}}"#);
+        assert!(rejected.is_unauthorized());
+        assert_eq!(rejected.unauthorized_code(), Some("stale_agent_request"));
+
+        let unparseable = status_error(401, b"not json");
+        assert_eq!(unparseable.unauthorized_code(), Some("unauthorized"));
+
+        let outage = status_error(503, b"{}");
+        assert!(!outage.is_unauthorized());
+        assert!(matches!(outage, ClientError::Status { status: 503, .. }));
     }
 
     #[test]
@@ -494,6 +709,40 @@ mod tests {
             .verifying_key()
             .verify(canonical.as_bytes(), &signature)
             .expect("valid content request signature");
+    }
+
+    #[tokio::test]
+    async fn content_key_registration_is_signed_on_exact_path_and_response_bounded() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = vec![0_u8; 16 * 1024];
+            let read = stream.read(&mut request).await.unwrap();
+            request.truncate(read);
+            stream
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        MAX_RESPONSE_BYTES + 1
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            String::from_utf8(request).unwrap()
+        });
+        let identity = DeviceIdentity::from_secret_bytes(AgentId::new(), &[3_u8; 32]);
+        let client = AgentClient::new(Url::parse(&format!("http://{address}/")).unwrap()).unwrap();
+        let error = client
+            .register_content_encryption_key(&identity, "cek_test", "spki")
+            .await
+            .expect_err("oversized response must fail before buffering");
+        assert!(matches!(error, ClientError::ResponseTooLarge));
+        let request = server.await.unwrap();
+        assert!(request.starts_with("PUT /v1/agent/content-encryption-key HTTP/1.1\r\n"));
+        let headers = parse_http_headers(&request);
+        assert!(headers.contains_key("x-piqae-signature"));
     }
 
     fn parse_http_headers(request: &str) -> std::collections::HashMap<String, String> {

@@ -28,10 +28,10 @@
       mainEntity: [
         {
           '@type': 'Question',
-          name: 'Does spooler acceptance mean the page printed?',
+          name: 'What is a reported-complete job?',
           acceptedAnswer: {
             '@type': 'Answer',
-            text: 'No. It means the operating system accepted the handoff. Hardware may still fail, jam, or report an ambiguous result.'
+            text: 'It is a Live job for which the node or operating system reports completion. It is the strongest available completion signal, but it is not physical proof that ink reached paper.'
           }
         },
         {
@@ -39,7 +39,7 @@
           name: 'What happens when the Free plan reaches its limit?',
           acceptedAnswer: {
             '@type': 'Answer',
-            text: 'New Cloud jobs are rejected with quota_exceeded until the workspace upgrades. Already accepted jobs continue delivery.'
+            text: 'New Cloud jobs are rejected with quota_exceeded until the workspace upgrades. Jobs already registered continue their durable lifecycle.'
           }
         },
         {
@@ -47,7 +47,7 @@
           name: 'Are test jobs billable?',
           acceptedAnswer: {
             '@type': 'Answer',
-            text: 'No. Only live-environment jobs that reach the OS-spooler-accepted event enter the usage ledger.'
+            text: 'No. Only Live-environment jobs reported complete enter the usage ledger. Failed, blocked or jammed, cancelled, expired, and delivery-uncertain jobs do not count.'
           }
         },
         {
@@ -65,7 +65,7 @@
 
 <Seo
   title="Piqae pricing — Cloud and self-hosted printing"
-  description="Start free, pay for jobs accepted by the operating-system spooler, or run the Apache-2.0 Piqae stack on your own infrastructure."
+  description="Start free and pay only for Cloud jobs reported complete, choose Enterprise, or run the complete Apache-2.0 Piqae stack yourself."
   path="/pricing"
   structuredData={pricingStructuredData}
 />
@@ -81,10 +81,10 @@
     </div>
     <div class="m-container hero-copy">
       <span class="m-eyebrow">Pricing</span>
-      <h1>Pricing for every print path, starting at $0.</h1>
+      <h1>Pay only for prints reported complete.</h1>
       <p class="m-lede">
-        Start with Piqae Cloud, move to Pro when printing becomes business-critical, or run the
-        complete open-source stack yourself.
+        Failed, jammed or blocked, cancelled, expired, and delivery-uncertain jobs do not consume
+        Cloud usage. Start free, scale with Pro or Enterprise, or operate the open-source stack.
       </p>
     </div>
   </section>
@@ -105,17 +105,18 @@
         <span class="m-eyebrow">Straightforward usage</span>
         <h2 class="m-heading">Pay for printing, not failed attempts.</h2>
         <p>
-          Piqae counts a Cloud job only after the operating system accepts it. Test jobs,
-          cancellations, and failures before that point do not consume paid usage.
+          Piqae counts a Cloud job only after the node or operating system reports completion.
+          Test jobs and any job that ends failed, blocked, cancelled, expired, or uncertain do
+          not consume paid usage.
         </p>
       </div>
       <div class="m-grid-3">
         <article class="m-card">
           <span class="definition-number">01</span>
-          <h3>Accepted job</h3>
+          <h3>Reported-complete job</h3>
           <p>
-            Counted once after a live-environment agent reports that the OS spooler accepted the
-            job. Test jobs and pre-handoff failures are free.
+            Counted once when a Live job reaches <code>completed_reported</code>. This is the
+            strongest available system signal, not a claim that Piqae physically inspected the page.
           </p>
         </article>
         <article class="m-card">
@@ -180,23 +181,23 @@
       <span class="m-eyebrow">Questions</span>
       <h2 class="m-heading">Good to know.</h2>
       <details>
-        <summary>Does spooler acceptance mean the page printed?</summary>
-        <p>No. It means the operating system accepted the handoff. Hardware may still fail, jam, or report an ambiguous result.</p>
+        <summary>What is a reported-complete job?</summary>
+        <p>A Live job for which the node or operating system reports completion. It is the strongest available signal, but it is not physical proof that ink reached paper.</p>
       </details>
       <details>
         <summary>What happens when the Free plan reaches its limit?</summary>
-        <p>New Cloud jobs are rejected with a structured <code>quota_exceeded</code> response. Jobs already accepted continue delivery.</p>
+        <p>New Cloud jobs are rejected with a structured <code>quota_exceeded</code> response. Jobs already registered continue their durable lifecycle.</p>
       </details>
       <details>
         <summary>Are test jobs billable?</summary>
-        <p>No. Only live-environment jobs that reach the OS-spooler-accepted event enter the usage ledger.</p>
+        <p>No. Only Live-environment jobs reported complete enter the usage ledger. Failed, blocked or jammed, cancelled, expired, and delivery-uncertain jobs do not count.</p>
       </details>
       <details>
         <summary>How does the annual Pro allowance work?</summary>
         <p>
-          Monthly Pro includes 25,000 accepted jobs each month. Annual Pro includes 300,000
-          accepted jobs across its annual Stripe billing period, with overage measured against
-          that annual allowance.
+          Monthly Pro includes 25,000 reported-complete jobs each month. Annual Pro includes
+          300,000 reported-complete jobs across its annual Stripe billing period, with overage
+          measured against that annual allowance.
         </p>
       </details>
       <details>

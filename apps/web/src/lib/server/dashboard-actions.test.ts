@@ -8,10 +8,15 @@ const { publicEnvironment, privateEnvironment } = vi.hoisted(() => ({
 vi.mock('$env/dynamic/public', () => ({ env: publicEnvironment }));
 vi.mock('$env/dynamic/private', () => ({ env: privateEnvironment }));
 
-import { actions as agentActions } from '../../routes/dashboard/agents/+page.server';
-import { actions as apiKeyActions } from '../../routes/dashboard/api-keys/+page.server';
-import { actions as webhookActions } from '../../routes/dashboard/webhooks/+page.server';
-import { actions as jobActions } from '../../routes/dashboard/jobs/[id]/+page.server';
+// Node enrolment and job cancellation live on the operations page; credential
+// and webhook mutations live on the merged settings page.
+import { actions as operationsActions } from '../../routes/dashboard/+page.server';
+import { actions as settingsActions } from '../../routes/dashboard/settings/+page.server';
+
+const agentActions = operationsActions;
+const jobActions = operationsActions;
+const apiKeyActions = settingsActions;
+const webhookActions = settingsActions;
 
 const accessToken = 'eyJ.test-hosted-access-token.signature';
 const fetcher = vi.fn<typeof fetch>();
@@ -194,7 +199,7 @@ describe('dashboard mutation actions', () => {
       Response.json({ id: 'job_01', state: 'cancelled', title: 'Packing slip' })
     );
 
-    const result = await jobActions.cancel!(actionEvent({}, { id: 'job_01' }) as never);
+    const result = await jobActions.cancelJob!(actionEvent({ job_id: 'job_01' }) as never);
 
     expect(requestDetails()).toMatchObject({
       url: 'https://api.piqae.test/v1/jobs/job_01/cancel',
@@ -202,7 +207,7 @@ describe('dashboard mutation actions', () => {
       authorization: `Bearer ${accessToken}`
     });
     expect(result).toEqual({
-      mutation: 'cancel',
+      mutation: 'cancelJob',
       cancelledJobId: 'job_01',
       state: 'cancelled'
     });
@@ -220,7 +225,7 @@ describe('dashboard mutation actions', () => {
       apiKeyActions.createApiKey!(
         actionEvent({ name: 'Demo key', scopes: ['jobs_read'] }) as never
       ),
-      jobActions.cancel!(actionEvent({}, { id: 'job_demo' }) as never)
+      jobActions.cancelJob!(actionEvent({ job_id: 'job_demo' }) as never)
     ]);
 
     for (const result of results) expect(result).toMatchObject({ status: 400 });

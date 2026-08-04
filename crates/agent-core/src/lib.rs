@@ -178,7 +178,37 @@ impl ContentStore {
         input: impl AsyncRead + Unpin,
     ) -> Result<PathBuf, AgentError> {
         let stored = self
-            .put_inner(Some(expected_sha256.to_ascii_lowercase()), input)
+            .put_inner(
+                Some(expected_sha256.to_ascii_lowercase()),
+                input,
+                false,
+                Self::MAX_CONTENT_BYTES,
+            )
+            .await?;
+        Ok(stored.path)
+    }
+
+    /// Streams and verifies content using a caller-supplied upper bound.
+    /// Intended for encoded transport formats whose fixed authentication
+    /// overhead is slightly larger than the decoded document limit.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for stream or filesystem I/O, when the input exceeds
+    /// `limit`, or when its computed digest differs from `expected_sha256`.
+    pub async fn put_verified_with_limit(
+        &self,
+        expected_sha256: &str,
+        input: impl AsyncRead + Unpin,
+        limit: u64,
+    ) -> Result<PathBuf, AgentError> {
+        let stored = self
+            .put_inner(
+                Some(expected_sha256.to_ascii_lowercase()),
+                input,
+                false,
+                limit,
+            )
             .await?;
         Ok(stored.path)
     }
@@ -191,18 +221,39 @@ impl ContentStore {
     /// Returns an error when the input or local filesystem cannot be read or
     /// written.
     pub async fn put(&self, input: impl AsyncRead + Unpin) -> Result<StoredContent, AgentError> {
-        self.put_inner(None, input).await
+        self.put_inner(None, input, false, Self::MAX_CONTENT_BYTES)
+            .await
+    }
+
+    /// Stores decrypted job bytes under a unique, non-content-addressed name.
+    /// The engine recognizes this name and removes it after definitive native
+    /// handoff or a non-retryable outcome.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the input or local filesystem cannot be read or written.
+    pub async fn put_confidential(
+        &self,
+        input: impl AsyncRead + Unpin,
+    ) -> Result<StoredContent, AgentError> {
+        self.put_inner(None, input, true, Self::MAX_CONTENT_BYTES)
+            .await
     }
 
     async fn put_inner(
         &self,
         expected: Option<String>,
         mut input: impl AsyncRead + Unpin,
+        confidential: bool,
+        limit: u64,
     ) -> Result<StoredContent, AgentError> {
         if let Some(expected) = &expected {
             let final_path = self.root.join(expected);
             if tokio::fs::try_exists(&final_path).await? {
                 let bytes = tokio::fs::metadata(&final_path).await?.len();
+                if bytes > limit {
+                    return Err(AgentError::ContentTooLarge { limit });
+                }
                 return Ok(StoredContent {
                     sha256: expected.clone(),
                     path: final_path,
@@ -212,11 +263,13 @@ impl ContentStore {
         }
         let temporary_path = self.root.join(format!(".{}.part", Uuid::new_v4()));
         let mut partial = PartialContent::new(temporary_path);
-        let mut output = tokio::fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(partial.path())
-            .await?;
+        let mut options = tokio::fs::OpenOptions::new();
+        options.create_new(true).write(true);
+        #[cfg(unix)]
+        {
+            options.mode(0o600);
+        }
+        let mut output = options.open(partial.path()).await?;
         let mut hasher = Sha256::new();
         let mut total_bytes = 0_u64;
         let mut buffer = vec![0_u8; 64 * 1024];
@@ -228,11 +281,9 @@ impl ContentStore {
             hasher.update(&buffer[..count]);
             output.write_all(&buffer[..count]).await?;
             total_bytes = total_bytes.saturating_add(u64::try_from(count).unwrap_or(u64::MAX));
-            if total_bytes > Self::MAX_CONTENT_BYTES {
+            if total_bytes > limit {
                 drop(output);
-                return Err(AgentError::ContentTooLarge {
-                    limit: Self::MAX_CONTENT_BYTES,
-                });
+                return Err(AgentError::ContentTooLarge { limit });
             }
         }
         output.sync_all().await?;
@@ -244,7 +295,11 @@ impl ContentStore {
                 return Err(AgentError::ContentDigestMismatch { expected, actual });
             }
         }
-        let final_path = self.root.join(&actual);
+        let final_path = if confidential {
+            self.root.join(format!("confidential-{}", Uuid::new_v4()))
+        } else {
+            self.root.join(&actual)
+        };
 
         match tokio::fs::rename(partial.path(), &final_path).await {
             Ok(()) => {
@@ -373,6 +428,11 @@ impl<E: Executor, C: Clock> AgentEngine<E, C> {
 
         let options: JobOptions = serde_json::from_str(&job.options_json)?;
         let native_profile = self.native_profile_for_job(&job)?;
+        let confidential_path = Path::new(&job.content_path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("confidential-"))
+            .then(|| PathBuf::from(&job.content_path));
         let submission = LocalSubmission {
             job_id: job.job_id.clone(),
             submission_id: job.submission_id,
@@ -401,6 +461,9 @@ impl<E: Executor, C: Clock> AgentEngine<E, C> {
                     now + Self::DEFAULT_RECONCILIATION_INTERVAL_MS,
                     now + Self::DEFAULT_UNCERTAINTY_AFTER_MS,
                 )?;
+                if let Some(path) = confidential_path.as_ref() {
+                    let _ = tokio::fs::remove_file(path).await;
+                }
             }
             Err(error) => {
                 let (state, reason) = if error.handoff_may_have_succeeded {
@@ -418,6 +481,11 @@ impl<E: Executor, C: Clock> AgentEngine<E, C> {
                     &error.message,
                     &serde_json::to_string(&error)?,
                 )?;
+                if !error.retryable {
+                    if let Some(path) = confidential_path.as_ref() {
+                        let _ = tokio::fs::remove_file(path).await;
+                    }
+                }
             }
         }
         Ok(())
@@ -1139,6 +1207,21 @@ mod tests {
             .await
             .expect_err("mismatch");
         assert!(matches!(error, AgentError::ContentDigestMismatch { .. }));
+    }
+
+    #[tokio::test]
+    async fn verified_content_honours_a_caller_supplied_limit() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let store = ContentStore::open(directory.path()).await.expect("open");
+        let content = b"authenticated ciphertext";
+        let digest = format!("{:x}", Sha256::digest(content));
+        let error = store
+            .put_verified_with_limit(&digest, BufReader::new(content.as_slice()), 8)
+            .await
+            .expect_err("limit");
+        assert!(matches!(error, AgentError::ContentTooLarge { limit: 8 }));
+        let mut entries = tokio::fs::read_dir(directory.path()).await.expect("list");
+        assert!(entries.next_entry().await.expect("entry").is_none());
     }
 
     #[tokio::test]

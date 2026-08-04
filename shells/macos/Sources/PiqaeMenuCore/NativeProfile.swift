@@ -302,6 +302,6 @@ public enum PrinterProfileCaptureAvailability: Equatable, Sendable {
 
 public enum CurrentPrinterDefaultsProfile {
     public static let name = "Current printer defaults"
-    public static let detail = "Live macOS defaults · not a saved profile"
+    public static let detail = "Live macOS defaults · not a saved preset"
     public static let canSubmitPinnedJob = false
 }

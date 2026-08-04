@@ -54,7 +54,7 @@
           src="/images/piqae-dashboard-overview.png"
           width="1440"
           height="900"
-          alt="Piqae dashboard showing printer-computer health, available printers, onboarding progress, attention items, and recent print jobs"
+          alt="Piqae dashboard showing node health, available printers, onboarding progress, attention items, and recent print jobs"
           fetchpriority="high"
         />
       </div>
@@ -62,7 +62,7 @@
     <div class="truth-note">
       <span>One place to run every print workflow</span>
       <p>
-        See printers, agents, queues, and jobs across every customer and location. Piqae keeps
+        See printers, nodes, queues, and jobs across every customer and location. Piqae keeps
         each handoff clear, including the boundary between operating-system acceptance and the
         physical result.
       </p>
@@ -74,7 +74,7 @@
       <span class="m-eyebrow">How it works</span>
       <div class="section-heading">
         <h2 class="m-heading">Build once. Print wherever the work happens.</h2>
-        <a href="/how-it-works">Explore the print path <span>→</span></a>
+        <a href="/docs/quickstart">Open the quickstart <span>→</span></a>
       </div>
       <div class="steps">
         <article>
@@ -115,7 +115,7 @@
             <span><i></i> Durable cloud and local queues</span>
             <span><i></i> Native capability at every site</span>
           </div>
-          <a href="/how-it-works">See how Piqae Cloud works <span>→</span></a>
+          <a href="/docs/jobs">Read the job lifecycle guide <span>→</span></a>
         </div>
       </div>
     </div>
@@ -259,8 +259,8 @@
     <div class="m-container">
       <div class="pricing-intro">
         <span class="m-eyebrow">Piqae Cloud pricing</span>
-        <h2 class="m-heading">Start small. Pay for the printing you use.</h2>
-        <p>No control plane to operate and no long contract. Start free, then move to Pro as your print volume grows.</p>
+        <h2 class="m-heading">Start small. Pay only for jobs reported complete.</h2>
+        <p>Failed, blocked, cancelled, expired, and delivery-uncertain jobs do not count. Start free, grow with Pro, or tailor an Enterprise rollout.</p>
       </div>
       <PricingCards homepage plans={data.pricing.plans} />
       <p class="pricing-foot">
@@ -326,18 +326,20 @@
   }
   .dashboard-showcase {
     position: relative;
-    padding: clamp(8px, 1.4vw, 16px);
-    border: 1px solid rgb(23 22 27 / .12);
-    border-radius: 24px;
-    background: linear-gradient(145deg, #fdfdfc, #dedee1);
+    overflow: hidden;
+    padding: 0;
+    border: 1px solid rgb(8 9 12 / .72);
+    border-radius: 18px;
+    background: #08090c;
     box-shadow:
-      0 42px 110px rgb(20 22 30 / .19),
-      0 8px 30px rgb(20 22 30 / .08);
+      0 48px 120px rgb(20 22 30 / .24),
+      0 12px 38px rgb(20 22 30 / .12),
+      inset 0 0 0 1px rgb(255 255 255 / .05);
   }
   .dashboard-showcase::before {
     position: absolute;
     z-index: -1;
-    inset: 10% 8% -8%;
+    inset: 18% 6% -12%;
     border-radius: 50%;
     background: rgb(0 106 255 / .16);
     filter: blur(70px);
@@ -347,10 +349,10 @@
     position: relative;
     aspect-ratio: 1440 / 900;
     overflow: hidden;
-    border: 1px solid rgb(255 255 255 / .1);
-    border-radius: 16px;
+    border: 0;
+    border-radius: 17px;
     background: #08090c;
-    box-shadow: 0 2px 8px rgb(0 0 0 / .22);
+    box-shadow: none;
   }
   .dashboard-capture img {
     position: absolute;
@@ -843,8 +845,8 @@
     .advantages-grid p { min-height: 0; }
     .api-stage pre { min-height: 285px; font-size: 11px; }
     .api-result { align-items: start; grid-template-columns: 1fr; gap: 4px; padding-block: 12px; }
-    .dashboard-showcase { padding: 5px; border-radius: 14px; }
-    .dashboard-capture { border-radius: 10px; }
+    .dashboard-showcase { border-radius: 12px; }
+    .dashboard-capture { border-radius: 11px; }
     .global-copy { padding: 48px 0 0; }
     .global-copy .m-heading { font-size: clamp(44px, 13vw, 62px); }
   }

@@ -101,7 +101,7 @@ describe('hosted billing contract', () => {
       unit_amount: 25,
       metadata: {
         piqae_plan: 'pro',
-        piqae_metric: 'accepted_live_jobs_overage',
+        piqae_metric: 'reported_complete_live_jobs_overage',
         piqae_included_jobs: '25000',
         piqae_overage_unit: '1000'
       },
@@ -117,21 +117,6 @@ describe('hosted billing contract', () => {
     expect(stripeOveragePriceMatchesCatalog(overage, 'pro', 'monthly')).toBe(true);
     expect(
       stripeOveragePriceMatchesCatalog(
-        {
-          ...overage,
-          metadata: {
-            spool_plan: 'pro',
-            spool_metric: 'accepted_live_jobs_overage',
-            spool_included_jobs: '25000',
-            spool_overage_unit: '1000'
-          }
-        },
-        'pro',
-        'monthly'
-      )
-    ).toBe(true);
-    expect(
-      stripeOveragePriceMatchesCatalog(
         { ...overage, metadata: { ...overage.metadata, piqae_overage_unit: '1' } },
         'pro',
         'monthly'
@@ -145,7 +130,7 @@ describe('hosted billing contract', () => {
       unit_amount: 25,
       metadata: {
         piqae_plan: 'pro',
-        piqae_metric: 'accepted_live_jobs_overage',
+        piqae_metric: 'reported_complete_live_jobs_overage',
         piqae_included_jobs: '300000',
         piqae_overage_unit: '1000'
       },
@@ -198,7 +183,7 @@ describe('hosted billing contract', () => {
         2_100_000
       )
     ).not.toBe(first);
-    expect(first).toMatch(/^spool-checkout-/);
+    expect(first).toMatch(/^piqae-checkout-/);
   });
 
   it('uses one stable Stripe customer creation key per Piqae workspace', () => {
@@ -209,7 +194,7 @@ describe('hosted billing contract', () => {
       stripeCustomerIdempotencyKey('workspace_456')
     );
     expect(stripeCustomerIdempotencyKey('workspace_123')).not.toContain('workspace_123');
-    expect(stripeCustomerIdempotencyKey('workspace_123')).toMatch(/^spool-customer-/);
+    expect(stripeCustomerIdempotencyKey('workspace_123')).toMatch(/^piqae-customer-/);
   });
 
   it('prevents duplicate Checkout for every non-terminal Stripe subscription', () => {
@@ -241,7 +226,7 @@ describe('hosted billing contract', () => {
         usage: {
           period_start: '2026-07-01T00:00:00Z',
           period_end: '2026-08-01T00:00:00Z',
-          accepted_live_jobs: 26_000,
+          reported_complete_live_jobs: 26_000,
           active_nodes: 2
         },
         overage_live_jobs: 1_000
@@ -250,7 +235,7 @@ describe('hosted billing contract', () => {
       plan: 'pro',
       billingInterval: 'monthly',
       entitlement: { includedLiveJobs: 25_000, nodeLimit: 25 },
-      usage: { acceptedLiveJobs: 26_000, activeNodes: 2 },
+      usage: { reportedCompleteLiveJobs: 26_000, activeNodes: 2 },
       overageLiveJobs: 1_000
     });
 
@@ -266,7 +251,7 @@ describe('hosted billing contract', () => {
         usage: {
           period_start: '2026-07-01T00:00:00Z',
           period_end: '2026-08-01T00:00:00Z',
-          accepted_live_jobs: -1,
+          reported_complete_live_jobs: -1,
           active_nodes: 0
         },
         overage_live_jobs: 0

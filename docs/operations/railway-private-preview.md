@@ -22,7 +22,7 @@ public Railway API (one replica, PIQAE_SERVICE_ROLE=api)
              |
 private Railway worker (one replica, PIQAE_SERVICE_ROLE=worker)
 
-separate piqae-releases bucket -> web-owned short-lived download redirects
+private Cloudflare R2 piqae-releases bucket -> web-owned short-lived download redirects
 ```
 
 - The web and API services have public Railway domains behind the Piqae custom
@@ -40,8 +40,8 @@ separate piqae-releases bucket -> web-owned short-lived download redirects
   US West region. Its Railway bucket is in Singapore. This is operational but
   adds document latency and transfer distance; measure it and migrate to a
   colocated object store before opening the service broadly.
-- Native installers and update metadata use the separate `piqae-releases`
-  bucket. Never grant the web or a release publisher access to customer print
+- Native installers and update metadata use the separate private Cloudflare R2
+  `piqae-releases` bucket. Never grant the web or a release publisher access to customer print
   objects merely because both stores expose an S3-compatible API.
 
 Keep the API and worker at one always-running replica. Autosleep is a poor fit
@@ -216,9 +216,9 @@ PIQAE_RELEASES_S3_VIRTUAL_HOSTED_STYLE
 The public routes map constrained filenames to
 `native/<stable|preview>/<artifact>` and issue short-lived redirects. Missing
 configuration or an absent object returns not found. Release publishers use
-different write-capable credentials. The web path performs reads only; enforce
-read-only scope where Railway supports it and never use the web credential to
-publish or replace an appcast.
+different write-capable credentials. The web path performs reads only through
+an R2 `Object Read only` token scoped to this bucket. Never use the web
+credential to publish or replace an appcast.
 
 See [Native release publishing](native-release-publishing.md). No stable native
 download exists merely because these routes and credentials are configured.

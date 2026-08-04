@@ -1,10 +1,77 @@
-import { cleanup, render, screen } from '@testing-library/svelte';
-import { afterEach, describe, expect, it } from 'vitest';
+import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { loadReleaseManifest } from '$lib/server/release-manifest';
+
+vi.mock('$app/navigation', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('$app/navigation')>()),
+  replaceState: (url: string | URL) => window.history.replaceState({}, '', url)
+}));
+
 import Page from './+page.svelte';
 
 describe('downloads', () => {
   afterEach(cleanup);
+
+  it('removes a connect capability from the URL before offering an explicit copy action', async () => {
+    const token = `piq_enr_${'a'.repeat(32)}`;
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
+    window.history.replaceState({}, '', `/downloads#enrolment_token=${token}`);
+
+    render(Page, {
+      data: {
+        meta: {
+          deployment: 'cloud',
+          version: '0.1.0',
+          auth: { provider: 'workos', workspaceSwitching: true, invitations: true },
+          billing: { enabled: true },
+          updates: { officialFeed: true, customFeed: false }
+        },
+        manifest: loadReleaseManifest({}),
+        detected: { platform: 'macos', architecture: null, label: 'this Mac' },
+        recommendedArtifactId: 'macos-universal'
+      } as never
+    });
+
+    expect(
+      await screen.findByRole('heading', { name: 'Your one-time connection code is ready.' })
+    ).toBeInTheDocument();
+    expect(window.location.hash).toBe('');
+    expect(document.body).not.toHaveTextContent(token);
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Copy one-time connection code' }));
+    expect(writeText).toHaveBeenCalledWith(token);
+    expect(screen.getByRole('button', { name: 'Connection code copied' })).toBeInTheDocument();
+  });
+
+  it('reports a rejected clipboard write without claiming the connection code was copied', async () => {
+    const token = `piq_enr_${'b'.repeat(32)}`;
+    const writeText = vi.fn().mockRejectedValue(new DOMException('Clipboard permission denied'));
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
+    window.history.replaceState({}, '', `/downloads#enrolment_token=${token}`);
+
+    render(Page, {
+      data: {
+        meta: {
+          deployment: 'cloud',
+          version: '0.1.0',
+          auth: { provider: 'workos', workspaceSwitching: true, invitations: true },
+          billing: { enabled: true },
+          updates: { officialFeed: true, customFeed: false }
+        },
+        manifest: loadReleaseManifest({}),
+        detected: { platform: 'macos', architecture: null, label: 'this Mac' },
+        recommendedArtifactId: 'macos-universal'
+      } as never
+    });
+
+    const copy = await screen.findByRole('button', { name: 'Copy one-time connection code' });
+    await fireEvent.click(copy);
+
+    expect(writeText).toHaveBeenCalledWith(token);
+    expect(screen.getByRole('button', { name: 'Copy failed — try again' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Connection code copied' })).not.toBeInTheDocument();
+  });
 
   it('leads with the detected platform while keeping unsupported builds truthful', () => {
     render(Page, {

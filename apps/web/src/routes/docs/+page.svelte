@@ -62,7 +62,7 @@ await customer.printPdf({
 
   .home > header > span {
     color: var(--accent-hover);
-    font-size: 10px;
+    font-size: var(--text-compact);
     font-weight: 550;
     letter-spacing: 0.02em;
   }
@@ -107,12 +107,12 @@ await customer.printPdf({
     color: var(--text-secondary);
     background: var(--surface);
     border-bottom: 1px solid var(--border-subtle);
-    font-size: 10px;
+    font-size: var(--text-compact);
   }
 
   .code-top code {
     color: var(--text-tertiary);
-    font: 9px var(--font-mono);
+    font: var(--text-meta) var(--font-mono);
   }
 
   pre {
@@ -120,7 +120,7 @@ await customer.printPdf({
     margin: 0;
     padding: 20px;
     color: var(--text-secondary);
-    font: 11px/19px var(--font-mono);
+    font: var(--text-compact)/var(--text-code-line) var(--font-mono);
   }
 
   .features {
@@ -168,7 +168,7 @@ await customer.printPdf({
   .features p {
     margin: 5px 0 13px;
     color: var(--text-tertiary);
-    font-size: 10px;
+    font-size: var(--text-compact);
     line-height: 16px;
   }
 
@@ -178,7 +178,7 @@ await customer.printPdf({
     gap: 5px;
     margin-top: auto;
     color: var(--text-secondary);
-    font-size: 9px;
+    font-size: var(--text-meta);
   }
 
   @media (max-width: 800px) {
@@ -206,7 +206,7 @@ await customer.printPdf({
     }
 
     pre {
-      font-size: 9px;
+      font-size: var(--text-meta);
       line-height: 16px;
     }
   }

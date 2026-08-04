@@ -7,8 +7,9 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
   id-token: write
+  packages: write
 
 concurrency:
   group: sdk-release-${{ github.ref }}
@@ -17,7 +18,8 @@ concurrency:
 jobs:
   package:
     name: Verify and package @piqae/sdk
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.PIQAE_CI_LINUX_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
@@ -51,18 +53,48 @@ jobs:
         run: |
           mkdir -p ../../artifacts
           npm pack --pack-destination ../../artifacts
+          cd ../../artifacts
+          sha256sum piqae-sdk-*.tgz > SHA256SUMS-sdk
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: piqae-sdk-${{ github.ref_name }}
-          path: artifacts/piqae-sdk-*.tgz
+          path: |
+            artifacts/piqae-sdk-*.tgz
+            artifacts/SHA256SUMS-sdk
           if-no-files-found: error
+          retention-days: 14
       - name: Publish to npm with trusted provenance
         if: startsWith(github.ref, 'refs/tags/')
         working-directory: sdk/typescript
+        env:
+          CANONICAL_REPOSITORY: ${{ vars.PIQAE_CANONICAL_REPOSITORY || 'piqae/piqae' }}
         run: |
-          if [ "${GITHUB_REPOSITORY}" != "piqae/piqae" ]; then
-            echo "npm publishing is enabled only after the repository is piqae/piqae." >&2
+          if [ "$GITHUB_REPOSITORY" != "$CANONICAL_REPOSITORY" ]; then
+            echo "npm publishing is enabled only in $CANONICAL_REPOSITORY." >&2
             exit 1
           fi
           npm install --global npm@11.19.0
           npm publish --access public --provenance
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          node-version: 22
+          registry-url: https://npm.pkg.github.com
+          scope: '@piqae'
+      - name: Mirror package to GitHub Packages
+        if: startsWith(github.ref, 'refs/tags/')
+        working-directory: sdk/typescript
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npm publish --registry https://npm.pkg.github.com --access public
+      - name: Attach SDK package to the GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            artifacts/piqae-sdk-*.tgz \
+            artifacts/SHA256SUMS-sdk \
+            --verify-tag \
+            --title "Piqae TypeScript SDK ${GITHUB_REF_NAME#sdk-v}" \
+            --generate-notes

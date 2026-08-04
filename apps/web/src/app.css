@@ -14,6 +14,34 @@
   --radius-lg: 8px;
   --radius-overlay: 10px;
 
+  /*
+   * Type scale from docs/15-linear-aligned-visual-system.md. Nothing in the
+   * dashboard sets a font-size below --text-meta; 12px is the floor that keeps
+   * functional text at WCAG AA.
+   */
+  --text-title: 18px;
+  --text-title-line: 26px;
+  --text-section: 13px;
+  --text-section-line: 20px;
+  --text-body: 13px;
+  --text-body-line: 20px;
+  --text-compact: 13px;
+  --text-compact-line: 18px;
+  --text-meta: 12px;
+  --text-meta-line: 16px;
+  --text-code: 12px;
+  --text-code-line: 18px;
+
+  /* Control and row geometry from the same document. */
+  --control-compact: 28px;
+  --control-normal: 32px;
+  --control-primary: 36px;
+  --row-dense: 32px;
+  --row-normal: 36px;
+  --icon-common: 14px;
+  --icon-prominent: 16px;
+  --topbar-height: 48px;
+
   /* Piqae UI semantic tokens. Product views consume these aliases, not raw hues. */
   --color-canvas: oklch(14.2% 0.006 265);
   --color-sidebar: oklch(11.8% 0.006 265);
@@ -194,16 +222,17 @@ button {
 }
 
 .button {
-  min-height: 30px;
+  min-height: var(--control-normal);
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 7px;
   border: 1px solid var(--border-default);
   border-radius: var(--radius-md);
-  padding: 0 10px;
+  padding: 0 11px;
   background: var(--surface-raised);
   color: var(--text-primary);
+  font-size: var(--text-compact);
   font-weight: 500;
   letter-spacing: -0.006em;
   box-shadow: var(--shadow-control);
@@ -255,10 +284,42 @@ button:disabled {
   color: var(--danger);
 }
 
-.button.small {
-  min-height: 26px;
-  padding: 0 8px;
-  font-size: 12px;
+.button.small,
+.button.compact {
+  min-height: var(--control-compact);
+  padding: 0 9px;
+  font-size: var(--text-meta);
+}
+
+.button.danger-solid {
+  color: white;
+  background: var(--danger);
+  border-color: var(--danger);
+}
+
+.button.danger-solid:hover {
+  background: color-mix(in oklch, var(--danger), black 10%);
+}
+
+.icon-button {
+  width: var(--control-compact);
+  height: var(--control-compact);
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  color: var(--text-secondary);
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition:
+    color 100ms ease,
+    background-color 100ms ease;
+}
+
+.icon-button:hover {
+  color: var(--text-primary);
+  background: var(--surface-hover);
 }
 
 .field {
@@ -268,29 +329,34 @@ button:disabled {
 
 .field > span {
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: var(--text-meta);
+  line-height: var(--text-meta-line);
   font-weight: 500;
 }
 
-.input {
+.input,
+.select {
   width: 100%;
-  height: 32px;
-  padding: 0 9px;
+  height: var(--control-normal);
+  padding: 0 10px;
   color: var(--text-primary);
   background: var(--surface);
   border: 1px solid var(--border-default);
   border-radius: var(--radius-md);
+  font-size: var(--text-body);
 }
 
 .input::placeholder {
   color: var(--text-tertiary);
 }
 
-.input:hover {
+.input:hover,
+.select:hover {
   border-color: var(--border-strong);
 }
 
-.input:focus {
+.input:focus,
+.select:focus {
   border-color: var(--accent);
   outline: 2px solid var(--accent-soft);
 }
@@ -303,7 +369,7 @@ button:disabled {
 
 /* Reusable Piqae UI kit primitives. */
 .ui-toolbar {
-  min-height: 53px;
+  min-height: 52px;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -312,17 +378,17 @@ button:disabled {
 .ui-toolbar__meta {
   margin-left: auto;
   color: var(--text-tertiary);
-  font-size: 10px;
+  font-size: var(--text-meta);
   font-variant-numeric: tabular-nums;
 }
 
 .ui-search {
-  width: 220px;
-  height: 29px;
+  width: 240px;
+  height: var(--control-normal);
   display: flex;
   align-items: center;
   gap: 7px;
-  padding: 0 8px;
+  padding: 0 9px;
   color: var(--text-tertiary);
   background: var(--surface);
   border: 1px solid var(--border-default);
@@ -342,7 +408,7 @@ button:disabled {
   background: transparent;
   border: 0;
   outline: 0;
-  font-size: 11px;
+  font-size: var(--text-body);
 }
 
 .ui-search input::placeholder {
@@ -352,7 +418,7 @@ button:disabled {
 .ui-segmented {
   display: inline-flex;
   align-items: center;
-  gap: 1px;
+  gap: 2px;
   padding: 2px;
   background: var(--surface);
   border: 1px solid var(--border-default);
@@ -361,19 +427,22 @@ button:disabled {
 }
 
 .ui-segmented button {
-  height: 23px;
-  padding: 0 8px;
-  color: var(--text-tertiary);
-  text-transform: capitalize;
+  height: 26px;
+  padding: 0 11px;
+  color: var(--text-secondary);
   background: transparent;
   border: 0;
   border-radius: var(--radius-sm);
-  font-size: 10px;
+  font-size: var(--text-compact);
+  font-weight: 500;
   cursor: pointer;
+  transition:
+    color 100ms ease,
+    background-color 100ms ease;
 }
 
 .ui-segmented button:hover {
-  color: var(--text-secondary);
+  color: var(--text-primary);
 }
 
 .ui-segmented button[aria-pressed='true'] {
@@ -383,13 +452,13 @@ button:disabled {
 }
 
 .ui-select {
-  height: 29px;
-  padding: 0 25px 0 8px;
+  height: var(--control-normal);
+  padding: 0 27px 0 10px;
   color: var(--text-secondary);
   background-color: var(--surface);
   border: 1px solid var(--border-default);
   border-radius: var(--radius-md);
-  font-size: 10px;
+  font-size: var(--text-compact);
   box-shadow: var(--shadow-control);
 }
 
@@ -400,22 +469,21 @@ button:disabled {
 .ui-data-table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 11px;
+  font-size: var(--text-compact);
 }
 
 .ui-data-table th {
-  height: 31px;
+  height: var(--row-dense);
   padding: 0 12px;
   color: var(--text-tertiary);
-  font-size: 9px;
-  font-weight: 520;
+  font-size: var(--text-meta);
+  font-weight: 500;
   text-align: left;
-  text-transform: uppercase;
-  letter-spacing: 0.045em;
   border-bottom: 1px solid var(--border-subtle);
 }
 
 .ui-data-table td {
+  height: var(--row-normal);
   padding: 0 12px;
   border-bottom: 1px solid var(--border-subtle);
 }
@@ -426,6 +494,33 @@ button:disabled {
 
 .ui-data-table tbody tr:hover {
   background: color-mix(in oklch, var(--surface-hover), transparent 32%);
+}
+
+/* Row-level helpers shared by every table view. */
+.ui-data-table .right {
+  text-align: right;
+}
+
+.ui-data-table .cell-stack {
+  display: grid;
+  line-height: var(--text-compact-line);
+}
+
+.ui-data-table .cell-stack small {
+  color: var(--text-tertiary);
+  font-size: var(--text-meta);
+}
+
+.ui-data-table .cell-inline {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.ui-data-table .cell-inline :global(svg) {
+  flex: 0 0 auto;
+  color: var(--text-tertiary);
 }
 
 @media (max-width: 720px) {
@@ -444,11 +539,120 @@ button:disabled {
 }
 
 .empty-state {
-  min-height: 220px;
+  min-height: 200px;
   display: grid;
   place-items: center;
-  text-align: center;
+  padding: 24px;
   color: var(--text-secondary);
+  font-size: var(--text-body);
+  text-align: center;
+}
+
+/*
+ * Overlay chrome. Owned here so api-keys, webhooks, nodes and job detail stop
+ * each shipping their own dialog, backdrop and footer rules.
+ */
+.ui-dialog {
+  width: min(480px, calc(100vw - 24px));
+  /* Cap the height so the footer stays reachable on short viewports; the body
+     scrolls instead of pushing the actions off-screen. */
+  max-height: calc(100dvh - 32px);
+  /* The dialog itself must not scroll, or the footer drops below its own
+     scroll container and stops being clickable. Only the body scrolls. */
+  overflow: hidden;
+  padding: 0;
+  color: var(--text-primary);
+  background: var(--surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-overlay);
+  box-shadow: var(--shadow-overlay);
+}
+
+/*
+ * Only lay the dialog out once it is open. An unconditional `display` here
+ * would beat the user-agent `dialog:not([open]) { display: none }` rule —
+ * author styles always win over UA styles — and paint closed dialogs inline.
+ */
+.ui-dialog[open] {
+  display: flex;
+  flex-direction: column;
+}
+
+.ui-dialog::backdrop {
+  background: rgb(7 9 13 / 0.6);
+}
+
+.ui-dialog__header,
+.ui-dialog__footer {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 13px 16px;
+}
+
+.ui-dialog__header {
+  justify-content: space-between;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.ui-dialog__header h2 {
+  margin: 0;
+  font-size: var(--text-section);
+  line-height: var(--text-section-line);
+  font-weight: 560;
+}
+
+.ui-dialog__header p {
+  margin: 3px 0 0;
+  color: var(--text-secondary);
+  font-size: var(--text-meta);
+  line-height: var(--text-meta-line);
+}
+
+.ui-dialog__body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  display: grid;
+  align-content: start;
+  gap: 14px;
+  padding: 16px;
+}
+
+.ui-dialog__footer {
+  justify-content: flex-end;
+  border-top: 1px solid var(--border-subtle);
+}
+
+/* Inline messages used inside dialogs and section forms. */
+.ui-note {
+  margin: 0;
+  padding: 9px 10px;
+  border-radius: var(--radius-md);
+  font-size: var(--text-meta);
+  line-height: var(--text-meta-line);
+}
+
+.ui-note.neutral {
+  color: var(--text-secondary);
+  background: var(--canvas);
+  border: 1px solid var(--border-subtle);
+}
+
+.ui-note.warning {
+  color: var(--warning);
+  background: var(--warning-soft);
+}
+
+.ui-note.error {
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+
+.ui-note.success {
+  color: var(--success);
+  background: var(--success-soft);
 }
 
 @media (prefers-reduced-motion: reduce) {

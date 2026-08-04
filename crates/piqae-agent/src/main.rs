@@ -1,11 +1,24 @@
+mod connector_runtime;
+mod content_key_store;
 mod uri_fetch;
+#[cfg(windows)]
+mod windows_acl;
 
+use aes_gcm::{
+    Aes256Gcm, KeyInit as _,
+    aead::{Aead, Payload},
+};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use base64::{Engine as _, engine::general_purpose::STANDARD};
+use base64::{
+    Engine as _,
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+};
 use chrono::Utc;
 use clap::{Parser, ValueEnum};
 use futures::TryStreamExt;
+use hkdf::Hkdf;
+use p256::{PublicKey, SecretKey, ecdh::diffie_hellman, pkcs8::EncodePublicKey as _};
 use piqae_agent_client::{AgentClient, ClientError, DeviceIdentity};
 use piqae_agent_core::{
     AgentEngine, ContentStore, Executor, ExecutorFailure, FakeExecutor, LocalSubmission,
@@ -40,8 +53,10 @@ use piqae_protocol::{
     },
     executor::{DiscoveredPrinter, ExecutorOperation, ExecutorResult, NativeJobObservation},
 };
+use sha2::{Digest as _, Sha256};
 use std::{
     future::Future,
+    io::Read as _,
     io::Write as _,
     net::SocketAddr,
     path::{Path, PathBuf},
@@ -51,7 +66,7 @@ use std::{
     },
     time::Duration,
 };
-use tokio::sync::{Notify, RwLock, mpsc};
+use tokio::sync::{Mutex, Notify, RwLock, mpsc, oneshot};
 use tokio_util::io::StreamReader;
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
@@ -79,6 +94,10 @@ enum ExecutorMode {
 
 #[derive(Debug, Parser)]
 #[command(version, about = "Piqae headless print node")]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "CLI action flags are mutually constrained by clap"
+)]
 struct Arguments {
     /// Runtime mode. Hosted modes require enrolment before cloud sync begins.
     #[arg(long, env = "PIQAE_AGENT_MODE", default_value = "local")]
@@ -121,9 +140,32 @@ struct Arguments {
     #[arg(long, env = "PIQAE_ENROLMENT_TOKEN", hide_env_values = true)]
     enrolment_token: Option<String>,
 
+    /// Read the one-time enrolment token from standard input and exit.
+    ///
+    /// Native launchers use this instead of argv or environment variables so
+    /// the capability is not exposed by process inspection or shell history.
+    #[arg(
+        long,
+        conflicts_with_all = ["enrolment_token", "pair", "rotate_key"]
+    )]
+    enrolment_token_stdin: bool,
+
+    /// Preview an invitation read from standard input without consuming it.
+    #[arg(long, conflicts_with_all = ["enrolment_token", "enrolment_token_stdin", "pair", "rotate_key", "add_connector_json_stdin"])]
+    preview_connect_token_stdin: bool,
+
+    /// Add a locally approved connector from a bounded JSON document on stdin.
+    #[arg(long, conflicts_with_all = ["enrolment_token", "enrolment_token_stdin", "pair", "rotate_key", "preview_connect_token_stdin"])]
+    add_connector_json_stdin: bool,
+
     /// Pair this installation through a browser approval flow, then exit.
     #[arg(long, conflicts_with = "enrolment_token")]
     pair: bool,
+
+    /// Replace this node's device key through a browser approval flow, keeping
+    /// its node ID, printers, and routing. Requires an already-paired node.
+    #[arg(long, conflicts_with_all = ["enrolment_token", "pair"])]
+    rotate_key: bool,
 
     /// Human-readable installation name used with --enrolment-token or --pair.
     #[arg(long)]
@@ -135,6 +177,9 @@ struct CloudConfiguration {
     client: AgentClient,
     identity: DeviceIdentity,
     agent_id: AgentId,
+    content_encryption_key: Arc<SecretKey>,
+    content_encryption_key_id: String,
+    allowed_printer_ids: Option<std::collections::BTreeSet<String>>,
 }
 
 #[derive(Debug)]
@@ -142,6 +187,137 @@ enum RuntimeExecutor {
     Disabled,
     Fake(FakeExecutor),
     Process(SupervisedExecutor),
+}
+
+/// One bounded native handoff boundary shared by every connector runtime.
+/// Tokio's mutex queues waiters FIFO, preventing a connector from bypassing
+/// already-waiting peers while also ensuring drivers never receive concurrent
+/// operations from this process.
+#[derive(Debug, Clone)]
+struct SharedRuntimeExecutor(Arc<Mutex<RuntimeExecutor>>);
+
+#[derive(Debug, Clone)]
+struct StopSignal {
+    sender: tokio::sync::watch::Sender<bool>,
+}
+
+impl Default for StopSignal {
+    fn default() -> Self {
+        let (sender, _) = tokio::sync::watch::channel(false);
+        Self { sender }
+    }
+}
+
+impl StopSignal {
+    fn stop(&self) {
+        self.sender.send_replace(true);
+    }
+    fn is_stopped(&self) -> bool {
+        *self.sender.borrow()
+    }
+    async fn cancelled(&self) {
+        let mut receiver = self.sender.subscribe();
+        if *receiver.borrow() {
+            return;
+        }
+        let _ = receiver.changed().await;
+    }
+}
+
+enum ConnectorSupervisorCommand {
+    Reload {
+        respond_to: oneshot::Sender<Result<(), ControlFailure>>,
+    },
+    Revoke {
+        connector_id: String,
+        respond_to: oneshot::Sender<Result<(), ControlFailure>>,
+    },
+}
+
+fn reject_connector_supervisor_command(
+    error: mpsc::error::TrySendError<ConnectorSupervisorCommand>,
+) {
+    let (is_full, command) = match error {
+        mpsc::error::TrySendError::Full(command) => (true, command),
+        mpsc::error::TrySendError::Closed(command) => (false, command),
+    };
+    match command {
+        ConnectorSupervisorCommand::Reload { respond_to } => {
+            let failure = if is_full {
+                control_failure(
+                    "connector_reload_deferred",
+                    "connector supervisor is busy; periodic recovery will retry",
+                )
+            } else {
+                control_failure(
+                    "connector_supervisor_unavailable",
+                    "connector supervisor is unavailable",
+                )
+            };
+            let _ = respond_to.send(Err(failure));
+        }
+        ConnectorSupervisorCommand::Revoke { respond_to, .. } => {
+            let failure = if is_full {
+                control_failure(
+                    "connector_revoke_deferred",
+                    "connector supervisor is busy; retry revocation",
+                )
+            } else {
+                control_failure(
+                    "connector_supervisor_unavailable",
+                    "connector supervisor is unavailable",
+                )
+            };
+            let _ = respond_to.send(Err(failure));
+        }
+    }
+}
+
+struct ConnectorWorker {
+    allowed_printer_ids: std::collections::BTreeSet<String>,
+    sync_stop: StopSignal,
+    scheduler_stop: StopSignal,
+    sync: tokio::task::JoinHandle<()>,
+    scheduler: tokio::task::JoinHandle<()>,
+}
+
+struct LegacyCloudWorker {
+    stop: StopSignal,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl SharedRuntimeExecutor {
+    async fn discover_printers(&self) -> Result<Vec<DiscoveredPrinter>, ControlFailure> {
+        self.0.lock().await.discover_printers().await
+    }
+
+    async fn native_queue(
+        &self,
+        native_printer_id: &str,
+    ) -> Result<Vec<piqae_protocol::executor::NativeQueueJob>, ControlFailure> {
+        self.0.lock().await.native_queue(native_printer_id).await
+    }
+}
+
+#[async_trait]
+impl Executor for SharedRuntimeExecutor {
+    async fn submit(
+        &mut self,
+        submission: LocalSubmission,
+    ) -> Result<NativeAcceptance, ExecutorFailure> {
+        self.0.lock().await.submit(submission).await
+    }
+
+    async fn observe(
+        &mut self,
+        reference: NativeJobReference,
+    ) -> Result<NativeJobObservation, ExecutorFailure> {
+        self.0.lock().await.observe(reference).await
+    }
+
+    async fn cancel(&mut self, reference: NativeJobReference) -> Result<(), ExecutorFailure> {
+        self.0.lock().await.cancel(reference).await
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -259,13 +435,31 @@ fn disabled_executor_failure() -> ExecutorFailure {
 }
 
 #[tokio::main]
+#[allow(
+    clippy::too_many_lines,
+    reason = "startup keeps process-boundary ownership wiring explicit"
+)]
 async fn main() -> Result<()> {
     let arguments = Arguments::parse();
+    if arguments.preview_connect_token_stdin {
+        let token = read_enrolment_token_from_stdin()?;
+        return preview_connector(&arguments, &token).await;
+    }
+    if arguments.add_connector_json_stdin {
+        return add_connector(&arguments, read_connector_consent(std::io::stdin())?).await;
+    }
+    if arguments.enrolment_token_stdin {
+        let token = read_enrolment_token_from_stdin()?;
+        return enrol_installation(&arguments, &token).await;
+    }
     if let Some(token) = arguments.enrolment_token.as_deref() {
         return enrol_installation(&arguments, token).await;
     }
     if arguments.pair {
-        return pair_installation(&arguments).await;
+        return pair_installation(&arguments, PairingIntent::FirstPairing).await;
+    }
+    if arguments.rotate_key {
+        return pair_installation(&arguments, PairingIntent::KeyRotation).await;
     }
 
     tracing_subscriber::fmt()
@@ -275,8 +469,18 @@ async fn main() -> Result<()> {
         .json()
         .init();
 
+    anyhow::ensure!(
+        arguments.local_bind.ip().is_loopback(),
+        "PIQAE_LOCAL_BIND must use a loopback address; the authenticated local API must not be exposed to the network"
+    );
+
     std::fs::create_dir_all(&arguments.data_dir)
         .with_context(|| format!("create {}", arguments.data_dir.display()))?;
+    // Loading is intentionally fail-closed: a corrupt or unsupported
+    // multi-connector registry must not silently fall back to another tenant's
+    // legacy identity. An absent registry preserves single-connector behavior.
+    let connector_registry = connector_runtime::ConnectorRegistry::load(&arguments.data_dir)?;
+    let configured_connectors = connector_registry.enabled().count();
     let database_path = arguments.data_dir.join("agent.sqlite3");
     let store = AgentStore::open(&database_path)
         .with_context(|| format!("open {}", database_path.display()))?;
@@ -310,7 +514,8 @@ async fn main() -> Result<()> {
             )
         }
     };
-    let engine = AgentEngine::new(store, executor, SystemClock);
+    let executor = SharedRuntimeExecutor(Arc::new(Mutex::new(executor)));
+    let engine = AgentEngine::new(store, executor.clone(), SystemClock);
 
     let connection = Arc::new(RwLock::new(if arguments.mode == AgentMode::Local {
         ConnectionState::LocalOnly
@@ -321,6 +526,7 @@ async fn main() -> Result<()> {
     let cloud_sync_wakeup = Arc::new(Notify::new());
     let printer_inventory_dirty = Arc::new(AtomicBool::new(true));
     let (control_tx, control_rx) = mpsc::channel(32);
+    let (connector_supervisor_tx, connector_supervisor_rx) = mpsc::channel(32);
     tokio::spawn(control_loop(
         control_rx,
         engine,
@@ -332,25 +538,51 @@ async fn main() -> Result<()> {
         Arc::clone(&paused),
         Arc::clone(&cloud_sync_wakeup),
         Arc::clone(&printer_inventory_dirty),
+        connector_supervisor_tx,
     ));
 
-    if arguments.mode != AgentMode::Local {
+    // A populated registry supersedes the legacy cloud identity. Running both
+    // could lease the same tenant twice during migration. With no registry,
+    // the original CLI/configuration path remains byte-for-byte compatible.
+    let legacy_cloud_worker = if arguments.mode != AgentMode::Local && configured_connectors == 0 {
         let cloud = cloud_configuration(&arguments)?;
-        tokio::spawn(cloud_sync_loop(
+        let stop = StopSignal::default();
+        let task = tokio::spawn(cloud_sync_loop(
             cloud,
             database_path.clone(),
             cloud_content_store,
-            cloud_uri_fetcher,
-            printer_discovery,
+            cloud_uri_fetcher.clone(),
+            printer_discovery.clone(),
             Arc::clone(&connection),
             Arc::clone(&paused),
             Arc::clone(&cloud_sync_wakeup),
             Arc::clone(&printer_inventory_dirty),
+            stop.clone(),
         ));
+        Some(LegacyCloudWorker { stop, task })
+    } else {
+        None
+    };
+
+    if connector_workers_enabled(arguments.mode) {
+        tokio::spawn(connector_supervisor_loop(
+            arguments.data_dir.clone(),
+            connector_supervisor_rx,
+            executor,
+            cloud_uri_fetcher,
+            printer_discovery,
+            legacy_cloud_worker,
+        ));
+    } else {
+        // Local-only operation must never activate credentials left in a
+        // connector registry. Dropping the receiver also makes connector
+        // control requests fail closed instead of pretending they reloaded.
+        drop(connector_supervisor_rx);
     }
 
     info!(
         mode = ?arguments.mode,
+        configured_connectors,
         database = %database_path.display(),
         bind = %arguments.local_bind,
         "Piqae node started"
@@ -361,6 +593,228 @@ async fn main() -> Result<()> {
     )
     .await
     .context("serve local API")
+}
+
+const MAX_ENROLMENT_TOKEN_INPUT_BYTES: u64 = 256;
+const MAX_CONNECTOR_CONSENT_BYTES: u64 = 32 * 1024;
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConnectorConsentInput {
+    token: String,
+    printer_ids: Vec<String>,
+}
+
+fn read_enrolment_token_from_stdin() -> Result<String> {
+    read_enrolment_token(std::io::stdin())
+}
+
+fn read_enrolment_token(reader: impl std::io::Read) -> Result<String> {
+    let mut bytes = Vec::new();
+    reader
+        .take(MAX_ENROLMENT_TOKEN_INPUT_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .context("read enrolment token from standard input")?;
+    if bytes.len() as u64 > MAX_ENROLMENT_TOKEN_INPUT_BYTES {
+        anyhow::bail!("enrolment token input exceeds 256 bytes");
+    }
+    let token = std::str::from_utf8(&bytes)
+        .context("enrolment token input must be UTF-8")?
+        .trim();
+    if token.is_empty() {
+        anyhow::bail!("enrolment token input cannot be empty");
+    }
+    Ok(token.to_owned())
+}
+
+fn read_connector_consent(reader: impl std::io::Read) -> Result<ConnectorConsentInput> {
+    let mut bytes = Vec::new();
+    reader
+        .take(MAX_CONNECTOR_CONSENT_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_CONNECTOR_CONSENT_BYTES {
+        anyhow::bail!("connector consent input exceeds 32 KiB");
+    }
+    let consent: ConnectorConsentInput =
+        serde_json::from_slice(&bytes).context("connector consent input is invalid")?;
+    if !consent.token.starts_with("piq_enr_")
+        || consent.token.len() > 128
+        || consent.printer_ids.is_empty()
+        || consent.printer_ids.len() > 128
+        || consent
+            .printer_ids
+            .iter()
+            .any(|id| id.is_empty() || id.len() > 128)
+        || consent
+            .printer_ids
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+            != consent.printer_ids.len()
+    {
+        anyhow::bail!("connector consent is outside supported limits");
+    }
+    Ok(consent)
+}
+
+fn installed_control_plane(arguments: &Arguments) -> Result<(Url, ExistingInstallation, PathBuf)> {
+    let config_path = arguments.data_dir.join("agent-config.json");
+    let installation = existing_installation(&config_path)?;
+    let body: serde_json::Value = serde_json::from_slice(&std::fs::read(&config_path)?)?;
+    let base_url = body
+        .get("control_plane_url")
+        .and_then(serde_json::Value::as_str)
+        .context("installed configuration has no control-plane URL")?
+        .parse()?;
+    let key_path = body
+        .get("device_key_file")
+        .and_then(serde_json::Value::as_str)
+        .map(PathBuf::from)
+        .context("installed configuration has no device key path")?;
+    Ok((base_url, installation, key_path))
+}
+
+fn installed_local_bind(arguments: &Arguments) -> Result<SocketAddr> {
+    let config_path = arguments.data_dir.join("agent-config.json");
+    let body: serde_json::Value = serde_json::from_slice(&std::fs::read(&config_path)?)?;
+    let bind = body
+        .get("local_bind")
+        .and_then(serde_json::Value::as_str)
+        .context("installed configuration has no local API bind address")?
+        .parse::<SocketAddr>()
+        .context("installed configuration has an invalid local API bind address")?;
+    anyhow::ensure!(
+        bind.ip().is_loopback(),
+        "installed local API bind address is not loopback"
+    );
+    Ok(bind)
+}
+
+async fn preview_connector(arguments: &Arguments, token: &str) -> Result<()> {
+    let (base_url, _, _) = installed_control_plane(arguments)?;
+    let preview = AgentClient::new(base_url)?
+        .preview_connect_session(token)
+        .await
+        .context("preview Piqae connector invitation")?;
+    println!("{}", serde_json::to_string(&preview)?);
+    Ok(())
+}
+
+async fn add_connector(arguments: &Arguments, consent: ConnectorConsentInput) -> Result<()> {
+    let ConnectorConsentInput { token, printer_ids } = consent;
+    let mut allowed_printer_ids = printer_ids;
+    allowed_printer_ids.sort();
+    let (base_url, installation, installation_key_path) = installed_control_plane(arguments)?;
+    let fingerprint = hex::encode(Sha256::digest(token.as_bytes()));
+    let relative_key = PathBuf::from("connectors")
+        .join("keys")
+        .join(format!("{fingerprint}.key"));
+    let key_path = arguments.data_dir.join(&relative_key);
+    let identity = if key_path.exists() {
+        let encoded = std::fs::read_to_string(&key_path)?;
+        let bytes = hex::decode(encoded.trim()).context("decode pending connector key")?;
+        let secret: [u8; 32] = bytes
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("pending connector key is invalid"))?;
+        DeviceIdentity::from_secret_bytes(AgentId::new(), &secret)
+    } else {
+        let generated = DeviceIdentity::generate(AgentId::new());
+        write_new_device_key(&key_path, &generated.secret_bytes())?;
+        generated
+    };
+    let connector_public_key = identity.public_key_base64();
+    let installation_secret = hex::decode(std::fs::read_to_string(&installation_key_path)?.trim())?;
+    let installation_secret: [u8; 32] = installation_secret
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("installed device key is invalid"))?;
+    let installation_identity = DeviceIdentity::from_secret_bytes(
+        installation
+            .agent_id
+            .parse()
+            .context("installed agent id is invalid")?,
+        &installation_secret,
+    );
+    let proof_message = piqae_protocol::agent::connector_proof_message(
+        &token,
+        &installation.installation_id,
+        &connector_public_key,
+        &allowed_printer_ids,
+    );
+    let installation_proof = installation_identity.sign_base64(&proof_message);
+    let enrolled = AgentClient::new(base_url.clone())?
+        .enrol(&EnrolRequest {
+            token,
+            public_key: connector_public_key,
+            name: installation_hostname(),
+            hostname: installation_hostname(),
+            platform: std::env::consts::OS.to_owned(),
+            architecture: std::env::consts::ARCH.to_owned(),
+            installation_mode: InstallationMode::User,
+            agent_version: env!("CARGO_PKG_VERSION").to_owned(),
+            protocol_version: CURRENT_PROTOCOL_VERSION,
+            installation_id: Some(installation.installation_id),
+            allowed_printer_ids: allowed_printer_ids.clone(),
+            installation_proof: Some(installation_proof),
+        })
+        .await
+        .context("accept Piqae connector invitation")?;
+    let connector_id = enrolled
+        .connector_id
+        .context("control plane omitted connector id")?;
+    let mut registry = connector_runtime::ConnectorRegistry::load(&arguments.data_dir)?;
+    if registry
+        .enabled()
+        .any(|record| record.connector_id == connector_id)
+    {
+        registry.update_allowed_printers(&connector_id, allowed_printer_ids)?;
+        if let Err(error) = signal_connector_reload(arguments).await {
+            warn!(%error, "existing connector is durable but immediate reload was deferred");
+        }
+        println!(
+            "{}",
+            serde_json::json!({"state":"connected","agent_id":enrolled.agent_id})
+        );
+        return Ok(());
+    }
+    registry.add(connector_runtime::ConnectorRecord {
+        connector_id,
+        agent_id: enrolled.agent_id.to_string(),
+        control_plane_url: base_url,
+        device_key_file: relative_key,
+        enabled: true,
+        allowed_printer_ids,
+    })?;
+    if let Err(error) = signal_connector_reload(arguments).await {
+        warn!(%error, "connector is durable but the running node could not be notified; periodic recovery will retry");
+    }
+    println!(
+        "{}",
+        serde_json::json!({"state":"connected","agent_id":enrolled.agent_id})
+    );
+    Ok(())
+}
+
+async fn signal_connector_reload(arguments: &Arguments) -> Result<()> {
+    let token_path = arguments.data_dir.join("local.token");
+    let token = std::fs::read_to_string(&token_path)
+        .with_context(|| format!("read {}", token_path.display()))?;
+    let local_bind = installed_local_bind(arguments)?;
+    let response = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()?
+        .post(format!("http://{local_bind}/v1/local/connectors/reload"))
+        .bearer_auth(token.trim())
+        .send()
+        .await
+        .context("signal running node to reload connectors")?;
+    if !response.status().is_success() {
+        anyhow::bail!("running node rejected connector reload");
+    }
+    Ok(())
+}
+
+fn connector_workers_enabled(mode: AgentMode) -> bool {
+    mode != AgentMode::Local
 }
 
 async fn enrol_installation(arguments: &Arguments, token: &str) -> Result<()> {
@@ -413,6 +867,9 @@ async fn enrol_installation(arguments: &Arguments, token: &str) -> Result<()> {
             installation_mode: InstallationMode::User,
             agent_version: env!("CARGO_PKG_VERSION").to_owned(),
             protocol_version: CURRENT_PROTOCOL_VERSION,
+            installation_id: None,
+            allowed_printer_ids: Vec::new(),
+            installation_proof: None,
         })
         .await;
     let enrolled = match enrolled {
@@ -447,11 +904,27 @@ async fn enrol_installation(arguments: &Arguments, token: &str) -> Result<()> {
     Ok(())
 }
 
+/// Why a node is running the browser-pairing flow.
+///
+/// Both cases exchange an operator approval for a device key, but they differ
+/// in what already exists locally and what must survive the exchange.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PairingIntent {
+    /// No identity exists yet. Refuse to run if one does, so an accidental
+    /// re-pair cannot silently discard a working node.
+    FirstPairing,
+    /// An identity exists and its key is being replaced. The stored
+    /// installation ID is reused so the control plane rebinds the existing
+    /// node rather than admitting a second one, keeping the node ID, its
+    /// printers, and any routing that points at them.
+    KeyRotation,
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "keeps the secret-bearing browser-pairing lifecycle in one auditable flow"
 )]
-async fn pair_installation(arguments: &Arguments) -> Result<()> {
+async fn pair_installation(arguments: &Arguments, intent: PairingIntent) -> Result<()> {
     let base_url = arguments
         .control_plane_url
         .clone()
@@ -463,11 +936,18 @@ async fn pair_installation(arguments: &Arguments) -> Result<()> {
         .clone()
         .unwrap_or_else(|| arguments.data_dir.join("device.key"));
     let config_path = arguments.data_dir.join("agent-config.json");
-    if key_path.exists() || config_path.exists() {
-        anyhow::bail!(
-            "this installation already has a device identity; revoke or migrate it explicitly"
-        );
-    }
+    let existing = match intent {
+        PairingIntent::FirstPairing => {
+            if key_path.exists() || config_path.exists() {
+                anyhow::bail!(
+                    "this installation already has a device identity; run --rotate-key to \
+                     replace its key, or revoke and migrate it explicitly"
+                );
+            }
+            None
+        }
+        PairingIntent::KeyRotation => Some(existing_installation(&config_path)?),
+    };
     let hostname = installation_hostname();
     let name = arguments
         .enrolment_name
@@ -475,12 +955,17 @@ async fn pair_installation(arguments: &Arguments) -> Result<()> {
         .map(str::trim)
         .filter(|name| !name.is_empty())
         .unwrap_or(hostname.as_str());
+    let installation_id = existing.as_ref().map_or_else(
+        || uuid::Uuid::now_v7().to_string(),
+        |existing| existing.installation_id.clone(),
+    );
     let identity = DeviceIdentity::generate(AgentId::new());
     let client = AgentClient::new(base_url.clone())?;
+    let installation_id_for_config = installation_id.clone();
     let authorization = client
         .create_device_authorization(&CreateDeviceAuthorizationRequest {
             public_key: identity.public_key_base64(),
-            installation_id: uuid::Uuid::now_v7().to_string(),
+            installation_id,
             proposed_name: name.to_owned(),
             hostname,
             platform: std::env::consts::OS.to_owned(),
@@ -526,7 +1011,21 @@ async fn pair_installation(arguments: &Arguments) -> Result<()> {
             _ => anyhow::bail!("control plane returned an unknown pairing state"),
         }
     };
-    write_new_device_key(&key_path, &identity.secret_bytes())?;
+    if let Some(existing) = &existing {
+        // The approving operator chose a workspace. If that is not the
+        // workspace this node already belongs to, the exchange admitted a new
+        // node instead of rebinding this one, and overwriting the local key
+        // would strand the original. Stop before touching anything on disk.
+        if exchange.node_id.to_string() != existing.agent_id {
+            anyhow::bail!(
+                "rotation was approved into a different node ({}) than this installation ({}); \
+                 the existing device key is unchanged. Approve the rotation from the workspace \
+                 that owns this node.",
+                exchange.node_id,
+                existing.agent_id
+            );
+        }
+    }
     let mode = match arguments.mode {
         AgentMode::Hosted => "hosted",
         AgentMode::SelfHosted | AgentMode::Local => "self-hosted",
@@ -537,13 +1036,27 @@ async fn pair_installation(arguments: &Arguments) -> Result<()> {
         "agent_id": exchange.node_id,
         "workspace_id": exchange.workspace_id,
         "environment_id": exchange.environment_id,
+        "installation_id": installation_id_for_config,
         "device_key_file": key_path,
         "data_dir": arguments.data_dir,
         "local_bind": arguments.local_bind,
     });
-    if let Err(error) = write_new_json(&config_path, &config) {
-        let _ = std::fs::remove_file(&key_path);
-        return Err(error).context("persist paired node configuration");
+    match intent {
+        PairingIntent::FirstPairing => {
+            write_new_device_key(&key_path, &identity.secret_bytes())?;
+            if let Err(error) = write_new_json(&config_path, &config) {
+                let _ = std::fs::remove_file(&key_path);
+                return Err(error).context("persist paired node configuration");
+            }
+        }
+        PairingIntent::KeyRotation => {
+            // The control plane already trusts the new key, so the old one is
+            // dead either way. Replace it atomically: a crash between these
+            // steps must leave a complete key file, never a truncated one.
+            replace_device_key(&key_path, &identity.secret_bytes())
+                .context("replace this node's device key")?;
+            replace_json(&config_path, &config).context("persist rotated node configuration")?;
+        }
     }
     println!(
         "{}",
@@ -552,9 +1065,52 @@ async fn pair_installation(arguments: &Arguments) -> Result<()> {
             "workspace_id": exchange.workspace_id,
             "environment_id": exchange.environment_id,
             "config_file": config_path,
+            "rotated": intent == PairingIntent::KeyRotation,
         }))?
     );
     Ok(())
+}
+
+/// One installation's durable identity, as recorded at pairing time.
+#[derive(Debug)]
+struct ExistingInstallation {
+    agent_id: String,
+    installation_id: String,
+}
+
+/// Reads the identity a rotation must preserve.
+///
+/// Nodes paired before installation IDs were recorded cannot be rotated in
+/// place: without one the control plane would admit a second node and leave
+/// the original stranded. Say so plainly instead of silently doing that.
+fn existing_installation(config_path: &Path) -> Result<ExistingInstallation> {
+    let body = std::fs::read_to_string(config_path).with_context(|| {
+        format!(
+            "read {}; --rotate-key requires an already-paired node",
+            config_path.display()
+        )
+    })?;
+    let config: serde_json::Value =
+        serde_json::from_str(&body).with_context(|| format!("parse {}", config_path.display()))?;
+    let text = |key: &str| {
+        config
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+    };
+    Ok(ExistingInstallation {
+        agent_id: text("agent_id")
+            .with_context(|| format!("{} does not record this node's ID", config_path.display()))?,
+        installation_id: text("installation_id").with_context(|| {
+            format!(
+                "{} predates in-place key rotation and does not record an installation ID. \
+                 Revoke this node in the control plane and pair it again with --pair.",
+                config_path.display()
+            )
+        })?,
+    })
 }
 
 fn open_verification_url(url: &Url) {
@@ -586,8 +1142,29 @@ fn write_new_device_key(path: &Path, secret: &[u8; 32]) -> Result<()> {
         .parent()
         .context("device key path has no parent directory")?;
     std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    write_device_key_file(path, secret, true)
+}
+
+/// Replaces an existing device key without ever leaving a partial key on disk.
+///
+/// The key is written to a sibling temporary file with the same restricted
+/// permissions, flushed, and then renamed over the original. A crash at any
+/// point leaves either the old key or the new one, and both are complete.
+fn replace_device_key(path: &Path, secret: &[u8; 32]) -> Result<()> {
+    let parent = path
+        .parent()
+        .context("device key path has no parent directory")?;
+    std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    let staged = path.with_extension("key.rotating");
+    let _ = std::fs::remove_file(&staged);
+    write_device_key_file(&staged, secret, true)?;
+    std::fs::rename(&staged, path)
+        .with_context(|| format!("replace {} with {}", path.display(), staged.display()))
+}
+
+fn write_device_key_file(path: &Path, secret: &[u8; 32], create_new: bool) -> Result<()> {
     let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
+    options.write(true).create_new(create_new);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt as _;
@@ -599,7 +1176,53 @@ fn write_new_device_key(path: &Path, secret: &[u8; 32]) -> Result<()> {
     file.write_all(hex::encode(secret).as_bytes())
         .with_context(|| format!("write {}", path.display()))?;
     file.sync_all()
-        .with_context(|| format!("sync {}", path.display()))
+        .with_context(|| format!("sync {}", path.display()))?;
+    drop(file);
+    restrict_secret_to_owner(path)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "ios", windows)))]
+fn write_new_secret_file(path: &Path, secret: &[u8]) -> Result<()> {
+    let parent = path
+        .parent()
+        .context("secret path has no parent directory")?;
+    std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(path)
+        .with_context(|| format!("create {}", path.display()))?;
+    file.write_all(secret)
+        .with_context(|| format!("write {}", path.display()))?;
+    file.sync_all()
+        .with_context(|| format!("sync {}", path.display()))?;
+    drop(file);
+    restrict_secret_to_owner(path)
+}
+
+/// Restricts a secret file to its owner on platforms without POSIX modes.
+///
+/// On Unix the mode is applied at creation. On Windows a newly created file
+/// inherits the directory's ACL, which for a machine-mode install under
+/// `ProgramData` grants every authenticated user read access — so the device
+/// key must be given an explicit owner-only ACL after it is written.
+#[cfg(not(windows))]
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "matches the fallible Windows implementation of the same operation"
+)]
+const fn restrict_secret_to_owner(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(windows)]
+fn restrict_secret_to_owner(path: &Path) -> Result<()> {
+    windows_acl::restrict_to_owner(path)
 }
 
 fn write_new_json(path: &Path, value: &serde_json::Value) -> Result<()> {
@@ -615,6 +1238,25 @@ fn write_new_json(path: &Path, value: &serde_json::Value) -> Result<()> {
         .with_context(|| format!("sync {}", path.display()))
 }
 
+/// Rewrites a configuration file atomically, preserving the previous contents
+/// if any step fails.
+fn replace_json(path: &Path, value: &serde_json::Value) -> Result<()> {
+    let body = serde_json::to_vec_pretty(value)?;
+    let staged = path.with_extension("json.replacing");
+    let _ = std::fs::remove_file(&staged);
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&staged)
+        .with_context(|| format!("create {}", staged.display()))?;
+    file.write_all(&body)
+        .with_context(|| format!("write {}", staged.display()))?;
+    file.sync_all()
+        .with_context(|| format!("sync {}", staged.display()))?;
+    drop(file);
+    std::fs::rename(&staged, path).with_context(|| format!("replace {}", path.display()))
+}
+
 #[allow(
     clippy::cognitive_complexity,
     clippy::too_many_arguments,
@@ -622,7 +1264,7 @@ fn write_new_json(path: &Path, value: &serde_json::Value) -> Result<()> {
 )]
 async fn control_loop(
     mut requests: mpsc::Receiver<ControlRequest>,
-    mut engine: AgentEngine<RuntimeExecutor>,
+    mut engine: AgentEngine<SharedRuntimeExecutor>,
     content_store: ContentStore,
     uri_fetcher: UriFetcher,
     version: String,
@@ -631,6 +1273,7 @@ async fn control_loop(
     paused: Arc<AtomicBool>,
     cloud_sync_wakeup: Arc<Notify>,
     printer_inventory_dirty: Arc<AtomicBool>,
+    connector_supervisor: mpsc::Sender<ConnectorSupervisorCommand>,
 ) {
     let mut scheduler = tokio::time::interval(Duration::from_millis(250));
     scheduler.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -663,6 +1306,7 @@ async fn control_loop(
                     agent_id.as_deref(),
                     &connection,
                     &paused,
+                    &connector_supervisor,
                 ).await;
                 if sync_relevant {
                     cloud_sync_wakeup.notify_one();
@@ -683,20 +1327,343 @@ async fn control_loop(
     warn!("local control channel closed");
 }
 
+async fn connector_scheduler_loop(
+    connector_id: String,
+    mut engine: AgentEngine<SharedRuntimeExecutor>,
+    paused: Arc<AtomicBool>,
+    cloud_sync_wakeup: Arc<Notify>,
+    stop: StopSignal,
+) {
+    let mut scheduler = tokio::time::interval(Duration::from_millis(250));
+    scheduler.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            _ = scheduler.tick() => {}
+            () = stop.cancelled() => break,
+        }
+        if paused.load(Ordering::Relaxed) {
+            continue;
+        }
+        let before = engine.store().latest_pending_cloud_event_sequence();
+        if let Err(error) = engine.run_once().await {
+            error!(%connector_id, %error, "connector print scheduler iteration failed");
+        }
+        let after = engine.store().latest_pending_cloud_event_sequence();
+        if matches!((before, after), (Ok(before), Ok(after)) if after > before) {
+            cloud_sync_wakeup.notify_one();
+        }
+    }
+}
+
+#[allow(
+    clippy::cognitive_complexity,
+    clippy::needless_collect,
+    reason = "supervisor snapshots keys before mutating worker ownership"
+)]
+async fn connector_supervisor_loop(
+    data_dir: PathBuf,
+    mut commands: mpsc::Receiver<ConnectorSupervisorCommand>,
+    executor: SharedRuntimeExecutor,
+    uri_fetcher: UriFetcher,
+    printer_discovery: PrinterDiscovery,
+    mut legacy_cloud_worker: Option<LegacyCloudWorker>,
+) {
+    let mut workers = std::collections::BTreeMap::<String, ConnectorWorker>::new();
+    if let Err(error) =
+        retire_legacy_cloud_worker_if_needed(&data_dir, &mut legacy_cloud_worker).await
+    {
+        error!(%error, "initial legacy cloud worker retirement failed");
+    }
+    if let Err(error) = reload_connector_workers(
+        &data_dir,
+        &mut workers,
+        &executor,
+        &uri_fetcher,
+        &printer_discovery,
+    )
+    .await
+    {
+        error!(%error, "initial connector worker load failed");
+    }
+    let mut recovery = tokio::time::interval(Duration::from_secs(30));
+    recovery.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        let command = tokio::select! {
+            command = commands.recv() => command,
+            _ = recovery.tick() => {
+                if let Err(error) = retire_legacy_cloud_worker_if_needed(&data_dir, &mut legacy_cloud_worker).await {
+                    warn!(%error, "periodic legacy cloud worker retirement deferred");
+                    continue;
+                }
+                if let Err(error) = reload_connector_workers(&data_dir, &mut workers, &executor, &uri_fetcher, &printer_discovery).await {
+                    warn!(%error, "periodic connector recovery deferred");
+                }
+                continue;
+            }
+        };
+        let Some(command) = command else {
+            break;
+        };
+        match command {
+            ConnectorSupervisorCommand::Reload { respond_to } => {
+                let result =
+                    match retire_legacy_cloud_worker_if_needed(&data_dir, &mut legacy_cloud_worker)
+                        .await
+                    {
+                        Ok(()) => {
+                            reload_connector_workers(
+                                &data_dir,
+                                &mut workers,
+                                &executor,
+                                &uri_fetcher,
+                                &printer_discovery,
+                            )
+                            .await
+                        }
+                        Err(error) => Err(error),
+                    }
+                    .map_err(|error| {
+                        control_failure("connector_reload_failed", &error.to_string())
+                    });
+                let _ = respond_to.send(result);
+            }
+            ConnectorSupervisorCommand::Revoke {
+                connector_id,
+                respond_to,
+            } => {
+                let result = async {
+                    let mut registry = connector_runtime::ConnectorRegistry::load(&data_dir)?;
+                    if !registry.revoke(&connector_id)? {
+                        anyhow::bail!("connector was not active");
+                    }
+                    stop_connector_worker(&mut workers, &connector_id).await?;
+                    Ok(())
+                }
+                .await
+                .map_err(|error: anyhow::Error| {
+                    control_failure("connector_revoke_failed", &error.to_string())
+                });
+                let _ = respond_to.send(result);
+            }
+        }
+    }
+    if let Some(worker) = legacy_cloud_worker.take() {
+        stop_legacy_cloud_worker(worker).await;
+    }
+    for id in workers.keys().cloned().collect::<Vec<_>>() {
+        if let Err(error) = stop_connector_worker(&mut workers, &id).await {
+            warn!(connector_id = %id, %error, "connector worker shutdown was forced");
+        }
+    }
+}
+
+async fn retire_legacy_cloud_worker_if_needed(
+    data_dir: &Path,
+    worker: &mut Option<LegacyCloudWorker>,
+) -> Result<()> {
+    if worker.is_none()
+        || connector_runtime::ConnectorRegistry::load(data_dir)?
+            .enabled()
+            .next()
+            .is_none()
+    {
+        return Ok(());
+    }
+    if let Some(worker) = worker.take() {
+        stop_legacy_cloud_worker(worker).await;
+    }
+    Ok(())
+}
+
+async fn stop_legacy_cloud_worker(worker: LegacyCloudWorker) {
+    worker.stop.stop();
+    let mut task = worker.task;
+    if tokio::time::timeout(Duration::from_secs(10), &mut task)
+        .await
+        .is_err()
+    {
+        warn!("legacy cloud worker exceeded the shutdown deadline; aborting it");
+        task.abort();
+        let _ = task.await;
+    }
+}
+
+#[allow(
+    clippy::cognitive_complexity,
+    clippy::needless_collect,
+    reason = "reload independently reconciles removals, grant changes, paths, and starts while aggregating per-connector failures"
+)]
+async fn reload_connector_workers(
+    data_dir: &Path,
+    workers: &mut std::collections::BTreeMap<String, ConnectorWorker>,
+    executor: &SharedRuntimeExecutor,
+    uri_fetcher: &UriFetcher,
+    printer_discovery: &PrinterDiscovery,
+) -> Result<()> {
+    let registry = connector_runtime::ConnectorRegistry::load(data_dir)?;
+    let enabled = registry
+        .enabled()
+        .map(|r| (r.connector_id.clone(), r.clone()))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let mut failures = Vec::new();
+    for id in workers
+        .keys()
+        .filter(|id| !enabled.contains_key(*id))
+        .cloned()
+        .collect::<Vec<_>>()
+    {
+        if let Err(error) = stop_connector_worker(workers, &id).await {
+            warn!(connector_id = %id, %error, "removed connector worker shutdown was forced");
+            failures.push(format!("{id}: {error}"));
+        }
+    }
+    for (id, record) in enabled {
+        let grants = record.allowed_printer_ids.iter().cloned().collect();
+        if workers
+            .get(&id)
+            .is_some_and(|worker| worker.allowed_printer_ids == grants)
+        {
+            continue;
+        }
+        if workers.contains_key(&id) {
+            if let Err(error) = stop_connector_worker(workers, &id).await {
+                warn!(connector_id = %id, %error, "changed connector worker shutdown was forced");
+                failures.push(format!("{id}: {error}"));
+                continue;
+            }
+        }
+        let paths = match registry.paths(&id) {
+            Ok(paths) => paths,
+            Err(error) => {
+                warn!(connector_id = %id, %error, "connector runtime paths could not be resolved");
+                failures.push(format!("{id}: {error}"));
+                continue;
+            }
+        };
+        match start_connector_worker(
+            record,
+            paths,
+            executor.clone(),
+            uri_fetcher.clone(),
+            printer_discovery.clone(),
+        )
+        .await
+        {
+            Ok(worker) => {
+                workers.insert(id, worker);
+            }
+            Err(error) => {
+                warn!(connector_id = %id, %error, "connector worker could not be started");
+                failures.push(format!("{id}: {error}"));
+            }
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        anyhow::bail!("connector reload partially failed: {}", failures.join("; "))
+    }
+}
+
+async fn start_connector_worker(
+    record: connector_runtime::ConnectorRecord,
+    paths: connector_runtime::ConnectorRuntimePaths,
+    executor: SharedRuntimeExecutor,
+    uri_fetcher: UriFetcher,
+    printer_discovery: PrinterDiscovery,
+) -> Result<ConnectorWorker> {
+    let parent = paths
+        .database
+        .parent()
+        .context("connector database has no parent")?;
+    std::fs::create_dir_all(parent)?;
+    let store = AgentStore::open(&paths.database)?;
+    if !store.integrity_check()? {
+        anyhow::bail!("connector database integrity check failed");
+    }
+    let paused = Arc::new(AtomicBool::new(
+        store.setting("paused")?.as_deref() == Some("true"),
+    ));
+    let wakeup = Arc::new(Notify::new());
+    let sync_stop = StopSignal::default();
+    let scheduler_stop = StopSignal::default();
+    // Resolve every fallible runtime dependency before spawning either half;
+    // a failed key/content setup must not leave an orphan scheduler behind.
+    let cloud = cloud_configuration_from_connector(&record, &paths.device_key)?;
+    let content = ContentStore::open(paths.content).await?;
+    let scheduler = tokio::spawn(connector_scheduler_loop(
+        record.connector_id.clone(),
+        AgentEngine::new(store, executor, SystemClock),
+        paused.clone(),
+        wakeup.clone(),
+        scheduler_stop.clone(),
+    ));
+    let sync = tokio::spawn(cloud_sync_loop(
+        cloud,
+        paths.database,
+        content,
+        uri_fetcher,
+        printer_discovery,
+        Arc::new(RwLock::new(ConnectionState::Connecting)),
+        paused,
+        wakeup,
+        Arc::new(AtomicBool::new(true)),
+        sync_stop.clone(),
+    ));
+    Ok(ConnectorWorker {
+        allowed_printer_ids: record.allowed_printer_ids.iter().cloned().collect(),
+        sync_stop,
+        scheduler_stop,
+        sync,
+        scheduler,
+    })
+}
+
+async fn stop_connector_worker(
+    workers: &mut std::collections::BTreeMap<String, ConnectorWorker>,
+    connector_id: &str,
+) -> Result<()> {
+    let Some(worker) = workers.remove(connector_id) else {
+        return Ok(());
+    };
+    worker.sync_stop.stop();
+    worker.scheduler_stop.stop();
+    let mut sync = worker.sync;
+    let mut scheduler = worker.scheduler;
+    if tokio::time::timeout(Duration::from_secs(10), async {
+        let _ = (&mut sync).await;
+        let _ = (&mut scheduler).await;
+    })
+    .await
+    .is_err()
+    {
+        warn!(%connector_id, "connector workers exceeded the shutdown deadline; aborting them");
+        sync.abort();
+        scheduler.abort();
+        let _ = sync.await;
+        let _ = scheduler.await;
+        anyhow::bail!("connector workers exceeded the shutdown deadline and were aborted");
+    }
+    Ok(())
+}
+
 #[allow(
     clippy::too_many_arguments,
+    clippy::cognitive_complexity,
+    clippy::cognitive_complexity,
     clippy::too_many_lines,
     reason = "keeps the exhaustive authenticated control command dispatch in one audit point"
 )]
 async fn handle_control_request(
     request: ControlRequest,
-    engine: &mut AgentEngine<RuntimeExecutor>,
+    engine: &mut AgentEngine<SharedRuntimeExecutor>,
     content_store: &ContentStore,
     uri_fetcher: &UriFetcher,
     version: &str,
     agent_id: Option<&str>,
     connection: &RwLock<ConnectionState>,
     paused: &AtomicBool,
+    connector_supervisor: &mpsc::Sender<ConnectorSupervisorCommand>,
 ) {
     match request {
         ControlRequest::Status { respond_to } => {
@@ -860,6 +1827,24 @@ async fn handle_control_request(
                 .map(|()| paused.store(false, Ordering::Relaxed));
             let _ = respond_to.send(result);
         }
+        ControlRequest::ReloadConnectors { respond_to } => {
+            if let Err(error) =
+                connector_supervisor.try_send(ConnectorSupervisorCommand::Reload { respond_to })
+            {
+                reject_connector_supervisor_command(error);
+            }
+        }
+        ControlRequest::RevokeConnector {
+            connector_id,
+            respond_to,
+        } => {
+            if let Err(error) = connector_supervisor.try_send(ConnectorSupervisorCommand::Revoke {
+                connector_id,
+                respond_to,
+            }) {
+                reject_connector_supervisor_command(error);
+            }
+        }
         ControlRequest::SubmitJob {
             request,
             respond_to,
@@ -911,7 +1896,7 @@ fn local_status(
 }
 
 async fn submit_local_job(
-    engine: &mut AgentEngine<RuntimeExecutor>,
+    engine: &mut AgentEngine<SharedRuntimeExecutor>,
     content_store: &ContentStore,
     uri_fetcher: &UriFetcher,
     request: LocalCreateJob,
@@ -958,7 +1943,7 @@ async fn submit_local_job(
 }
 
 async fn refresh_local_printers(
-    engine: &mut AgentEngine<RuntimeExecutor>,
+    engine: &mut AgentEngine<SharedRuntimeExecutor>,
 ) -> Result<Vec<LocalPrinter>, ControlFailure> {
     let discovered = engine.executor_mut().discover_printers().await?;
     let present_native_ids = discovered
@@ -1469,7 +2454,7 @@ fn validate_options(
 }
 
 async fn printer_queue(
-    engine: &mut AgentEngine<RuntimeExecutor>,
+    engine: &mut AgentEngine<SharedRuntimeExecutor>,
     printer_id: &str,
 ) -> Result<LocalPrinterQueue, ControlFailure> {
     let printer = engine
@@ -1515,7 +2500,7 @@ async fn printer_queue(
 }
 
 async fn submit_test_page(
-    engine: &mut AgentEngine<RuntimeExecutor>,
+    engine: &mut AgentEngine<SharedRuntimeExecutor>,
     content_store: &ContentStore,
     printer_id: &str,
     profile_id: &str,
@@ -1717,7 +2702,7 @@ fn storage_control_failure(error: StorageError) -> ControlFailure {
 }
 
 async fn accept_stored_local_job(
-    engine: &mut AgentEngine<RuntimeExecutor>,
+    engine: &mut AgentEngine<SharedRuntimeExecutor>,
     request: LocalCreateJob,
     stored: piqae_agent_core::StoredContent,
     profile_pin: Option<(String, u64)>,
@@ -1799,10 +2784,49 @@ fn cloud_configuration(arguments: &Arguments) -> Result<CloudConfiguration> {
     let secret: [u8; 32] = bytes
         .try_into()
         .map_err(|_| anyhow::anyhow!("device key must contain exactly 32 bytes"))?;
+    let (content_encryption_key, content_encryption_key_id) =
+        content_key_store::load_or_create(&arguments.data_dir.join("content-encryption.key"))?;
     Ok(CloudConfiguration {
         client: AgentClient::new(base_url)?,
         identity: DeviceIdentity::from_secret_bytes(agent_id, &secret),
         agent_id,
+        content_encryption_key: Arc::new(content_encryption_key),
+        content_encryption_key_id,
+        allowed_printer_ids: None,
+    })
+}
+
+fn cloud_configuration_from_connector(
+    record: &connector_runtime::ConnectorRecord,
+    key_path: &Path,
+) -> Result<CloudConfiguration> {
+    let raw_agent_id = record
+        .agent_id
+        .strip_prefix("agt_")
+        .unwrap_or(&record.agent_id);
+    let agent_id: AgentId =
+        serde_json::from_value(serde_json::Value::String(raw_agent_id.to_owned()))
+            .with_context(|| format!("parse agent id for connector {}", record.connector_id))?;
+    let encoded = std::fs::read_to_string(key_path)
+        .with_context(|| format!("read connector {} device key", record.connector_id))?;
+    let bytes = hex::decode(encoded.trim())
+        .with_context(|| format!("decode connector {} device key", record.connector_id))?;
+    let secret: [u8; 32] = bytes.try_into().map_err(|_| {
+        anyhow::anyhow!(
+            "connector {} device key must contain exactly 32 bytes",
+            record.connector_id
+        )
+    })?;
+    let encryption_path = key_path.with_extension("content-encryption.key");
+    let (content_encryption_key, content_encryption_key_id) =
+        content_key_store::load_or_create(&encryption_path)?;
+    Ok(CloudConfiguration {
+        client: AgentClient::new(record.control_plane_url.clone())?,
+        identity: DeviceIdentity::from_secret_bytes(agent_id, &secret),
+        agent_id,
+        content_encryption_key: Arc::new(content_encryption_key),
+        content_encryption_key_id,
+        allowed_printer_ids: Some(record.allowed_printer_ids.iter().cloned().collect()),
     })
 }
 
@@ -1820,6 +2844,7 @@ async fn cloud_sync_loop(
     paused: Arc<AtomicBool>,
     cloud_sync_wakeup: Arc<Notify>,
     printer_inventory_dirty: Arc<AtomicBool>,
+    stop: StopSignal,
 ) {
     let store = match AgentStore::open(&database_path) {
         Ok(store) => store,
@@ -1829,6 +2854,7 @@ async fn cloud_sync_loop(
             return;
         }
     };
+    sweep_confidential_files(&store);
     run_cloud_sync_loop(
         cloud,
         store,
@@ -1839,12 +2865,14 @@ async fn cloud_sync_loop(
         paused,
         cloud_sync_wakeup,
         printer_inventory_dirty,
+        stop,
     )
     .await;
 }
 
 #[allow(
     clippy::too_many_arguments,
+    clippy::cognitive_complexity,
     reason = "cloud synchronization dependencies are explicit process-boundary capabilities"
 )]
 async fn run_cloud_sync_loop(
@@ -1857,11 +2885,49 @@ async fn run_cloud_sync_loop(
     paused: Arc<AtomicBool>,
     cloud_sync_wakeup: Arc<Notify>,
     printer_inventory_dirty: Arc<AtomicBool>,
+    stop: StopSignal,
 ) {
+    let public_key_spki = match cloud
+        .content_encryption_key
+        .public_key()
+        .to_public_key_der()
+    {
+        Ok(der) => URL_SAFE_NO_PAD.encode(der.as_bytes()),
+        Err(error) => {
+            error!(%error, "content encryption key cannot be encoded");
+            *connection.write().await = ConnectionState::Degraded;
+            return;
+        }
+    };
+    loop {
+        match cloud
+            .client
+            .register_content_encryption_key(
+                &cloud.identity,
+                &cloud.content_encryption_key_id,
+                &public_key_spki,
+            )
+            .await
+        {
+            Ok(_) => break,
+            Err(error) => {
+                warn!(%error, "content encryption key registration deferred");
+                *connection.write().await = ConnectionState::Degraded;
+                tokio::select! {
+                    () = tokio::time::sleep(Duration::from_secs(5)) => {}
+                    () = stop.cancelled() => return,
+                }
+            }
+        }
+    }
     let started_at = Utc::now();
     let mut failures = 0_u32;
     let mut last_printer_refresh: Option<tokio::time::Instant> = None;
     loop {
+        if stop.is_stopped() {
+            break;
+        }
+        sweep_confidential_files(&store);
         resume_pending_cloud_accepts(&cloud, &mut store).await;
         let refresh_printers = printer_inventory_dirty.swap(false, Ordering::AcqRel)
             || last_printer_refresh
@@ -1873,6 +2939,7 @@ async fn run_cloud_sync_loop(
             started_at,
             paused.load(Ordering::Relaxed),
             refresh_printers,
+            cloud.allowed_printer_ids.as_ref(),
         )
         .await
         {
@@ -1901,6 +2968,7 @@ async fn run_cloud_sync_loop(
                         paused: &paused,
                         failures: &mut failures,
                         connection: &connection,
+                        stop: &stop,
                     },
                 )
                 .await
@@ -1910,6 +2978,34 @@ async fn run_cloud_sync_loop(
         tokio::select! {
             () = tokio::time::sleep(delay) => {}
             () = cloud_sync_wakeup.notified() => {}
+            () = stop.cancelled() => break,
+        }
+    }
+}
+
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "bounded cleanup reports independent filesystem failures"
+)]
+fn sweep_confidential_files(store: &AgentStore) {
+    let files = match store.confidential_files_due(Utc::now().timestamp_millis()) {
+        Ok(files) => files,
+        Err(error) => {
+            warn!(%error, "confidential file sweep query failed");
+            return;
+        }
+    };
+    for file in files {
+        match std::fs::remove_file(&file.path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                warn!(%error, "confidential file cleanup failed");
+                continue;
+            }
+        }
+        if let Err(error) = store.mark_confidential_file_deleted(&file.job_id) {
+            warn!(%error, "confidential file cleanup could not be recorded");
         }
     }
 }
@@ -1921,10 +3017,14 @@ async fn prepare_sync_request(
     started_at: chrono::DateTime<Utc>,
     paused: bool,
     refresh_printers: bool,
+    allowed_printer_ids: Option<&std::collections::BTreeSet<String>>,
 ) -> Result<AgentSyncRequest> {
     let printers = if refresh_printers {
         match discover_cloud_printers(store, printer_discovery).await {
-            Ok(printers) => {
+            Ok(mut printers) => {
+                printers.retain(|printer| {
+                    printer_is_allowed(allowed_printer_ids, &printer.id.to_string())
+                });
                 let current = store
                     .setting("printer_inventory_revision")?
                     .and_then(|revision| revision.parse::<u64>().ok())
@@ -1952,6 +3052,7 @@ struct SyncContext<'a> {
     paused: &'a AtomicBool,
     failures: &'a mut u32,
     connection: &'a RwLock<ConnectionState>,
+    stop: &'a StopSignal,
 }
 
 async fn sync_succeeded(response: AgentSyncResponse, context: SyncContext<'_>) -> Duration {
@@ -1974,6 +3075,7 @@ async fn sync_succeeded(response: AgentSyncResponse, context: SyncContext<'_>) -
             context.content_store,
             context.uri_fetcher,
             offer,
+            context.stop,
         )
         .await
         {
@@ -2051,11 +3153,32 @@ async fn accept_offer(
     content_store: &ContentStore,
     uri_fetcher: &UriFetcher,
     offer: JobOffer,
+    stop: &StopSignal,
 ) -> Result<()> {
+    if !printer_is_allowed(
+        cloud.allowed_printer_ids.as_ref(),
+        &offer.job.printer_id.to_string(),
+    ) {
+        cloud
+            .client
+            .release_lease(
+                &cloud.identity,
+                offer.job.id,
+                &AgentReleaseLeaseRequest {
+                    lease_id: offer.lease_id,
+                    lease_token: offer.lease_token.clone(),
+                    reason: "printer_not_granted".into(),
+                },
+            )
+            .await
+            .context("release lease for printer outside connector grant")?;
+        anyhow::bail!("cloud offered a job outside this connector's printer grant");
+    }
     let lease_id = offer.lease_id;
     let lease_token = offer.lease_token.clone();
     let job_id = offer.job.id;
-    let result = maintain_lease(
+    let result = tokio::select! {
+      result = maintain_lease(
         offer.lease_expires_at,
         LEASE_RENEWAL_INTERVAL,
         accept_offer_under_lease(cloud, store, content_store, uri_fetcher, offer),
@@ -2076,8 +3199,9 @@ async fn accept_offer(
             .map(|response| response.lease_expires_at)
             .map_err(|_| anyhow::anyhow!("job lease renewal failed"))
         },
-    )
-    .await;
+      ) => result,
+      () = stop.cancelled() => Err(anyhow::anyhow!("connector revoked while job was leased")),
+    };
     if let Err(error) = &result {
         let has_durable_intent = match store.pending_cloud_accepts() {
             Ok(intents) => intents
@@ -2113,6 +3237,13 @@ async fn accept_offer(
     result
 }
 
+fn printer_is_allowed(
+    allowed: Option<&std::collections::BTreeSet<String>>,
+    printer_id: &str,
+) -> bool {
+    allowed.is_none_or(|ids| ids.contains(printer_id))
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "keeps the lease-fenced acceptance and durable-intent boundary auditable in one flow"
@@ -2127,6 +3258,15 @@ async fn accept_offer_under_lease(
     let job_id = offer.job.id;
     let logical_printer_id = offer.job.printer_id.to_string();
     let profile_pin = profile_pin_metadata(&offer.job.metadata)?;
+    if matches!(&offer.content, ContentDescriptor::EncryptedDownload { .. })
+        && profile_pin.is_none()
+    {
+        return Err(OfferRejection::new(
+            "encrypted_profile_pin_required",
+            "encrypted content requires an exact local target/profile pin".into(),
+        )
+        .into());
+    }
     let printer = store
         .printer(&logical_printer_id)?
         .with_context(|| format!("printer_not_found: {logical_printer_id}"))?;
@@ -2165,6 +3305,25 @@ async fn accept_offer_under_lease(
                 ),
             )
             .into());
+        }
+        if let ContentDescriptor::EncryptedDownload { manifest, .. } = &offer.content {
+            let expected = format!("{}:{}", pin.profile_id, pin.profile_revision);
+            if manifest.binding.profile_revision != expected
+                || pin.target_id.as_deref() != Some(manifest.binding.target_id.as_str())
+                || manifest.binding.content_type != offer.job.content_kind
+                || manifest.binding.printer_id != offer.job.printer_id.to_string()
+                || manifest.binding.options != offer.job.options
+                || manifest.binding.deliveries != offer.job.deliveries
+                || manifest.binding.raw_authorized != (offer.job.content_kind == ContentKind::Raw)
+                || manifest.version != "piqae-encrypted-job-v3"
+                || manifest.suite != "ECDH-P256+HKDF-SHA256+A256GCMKW+A256GCM"
+            {
+                return Err(OfferRejection::new(
+                    "encrypted_binding_mismatch",
+                    "encrypted content is not bound to the locally pinned target/profile".into(),
+                )
+                .into());
+            }
         }
     }
     validate_options(&printer, &offer.job.options).map_err(|failure| {
@@ -2382,6 +3541,10 @@ fn lease_renewal_delay(expires_at: chrono::DateTime<Utc>, maximum_interval: Dura
         .max(minimum_delay)
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "encrypted and plaintext materialization share one lease-fenced boundary"
+)]
 async fn materialize_descriptor(
     cloud: &CloudConfiguration,
     content_store: &ContentStore,
@@ -2441,6 +3604,80 @@ async fn materialize_descriptor(
                 sha256,
             })
         }
+        ContentDescriptor::EncryptedDownload {
+            url: _,
+            sha256,
+            bytes,
+            manifest,
+        } => {
+            let manifest_digest = URL_SAFE_NO_PAD
+                .decode(&manifest.ciphertext_sha256)
+                .context("decode encrypted manifest digest")?;
+            if manifest_digest.len() != 32 || hex::encode(manifest_digest) != sha256 {
+                anyhow::bail!("encrypted manifest digest does not match the leased ciphertext");
+            }
+            if bytes > MAX_CIPHERTEXT_BYTES {
+                anyhow::bail!("offered ciphertext exceeds local limit");
+            }
+            if manifest
+                .binding
+                .expires_at
+                .parse::<chrono::DateTime<Utc>>()
+                .is_err()
+                || manifest
+                    .binding
+                    .expires_at
+                    .parse::<chrono::DateTime<Utc>>()?
+                    <= Utc::now()
+            {
+                anyhow::bail!("encrypted job binding is expired or invalid");
+            }
+            let recipient = manifest
+                .recipients
+                .iter()
+                .find(|recipient| {
+                    recipient.key_id == cloud.content_encryption_key_id
+                        && recipient.algorithm == "ECDH-P256-HKDF-SHA256"
+                })
+                .context("encrypted job has no recipient for this node key")?;
+            let response = cloud
+                .client
+                .download_content(&cloud.identity, job_id, lease_id, lease_token)
+                .await?;
+            if response
+                .content_length()
+                .is_some_and(|length| length > MAX_CIPHERTEXT_BYTES)
+            {
+                anyhow::bail!("ciphertext response exceeds local limit");
+            }
+            let stream = response.bytes_stream().map_err(std::io::Error::other);
+            let ciphertext_path = content_store
+                .put_verified_with_limit(&sha256, StreamReader::new(stream), MAX_CIPHERTEXT_BYTES)
+                .await?;
+            let result = async {
+                let ciphertext = tokio::fs::read(&ciphertext_path)
+                    .await
+                    .context("read verified ciphertext")?;
+                let plaintext = zeroize::Zeroizing::new(decrypt_encrypted_content(
+                    &cloud.content_encryption_key,
+                    recipient,
+                    &manifest,
+                    &ciphertext,
+                )?);
+                if plaintext.len()
+                    > usize::try_from(ContentStore::MAX_CONTENT_BYTES).unwrap_or(usize::MAX)
+                {
+                    anyhow::bail!("decrypted content exceeds local limit");
+                }
+                content_store
+                    .put_confidential(std::io::Cursor::new(plaintext))
+                    .await
+                    .context("persist decrypted content")
+            }
+            .await;
+            let _ = tokio::fs::remove_file(&ciphertext_path).await;
+            result
+        }
         ContentDescriptor::Uri {
             uri,
             authentication,
@@ -2462,13 +3699,150 @@ async fn materialize_descriptor(
     }
 }
 
+fn decrypt_encrypted_content(
+    private_key: &SecretKey,
+    recipient: &piqae_domain::EncryptedContentRecipient,
+    manifest: &piqae_domain::EncryptedContentManifest,
+    ciphertext: &[u8],
+) -> Result<Vec<u8>> {
+    validate_encrypted_ciphertext_size(ciphertext.len())?;
+    if manifest.version != "piqae-encrypted-job-v3"
+        || manifest.suite != "ECDH-P256+HKDF-SHA256+A256GCMKW+A256GCM"
+        || recipient.algorithm != "ECDH-P256-HKDF-SHA256"
+    {
+        anyhow::bail!("unsupported encrypted job envelope or recipient algorithm");
+    }
+    let ephemeral_bytes = URL_SAFE_NO_PAD
+        .decode(&recipient.ephemeral_public_key)
+        .context("decode ephemeral P-256 public key")?;
+    if ephemeral_bytes.len() != 65 {
+        anyhow::bail!("ephemeral P-256 public key has invalid length");
+    }
+    let ephemeral =
+        PublicKey::from_sec1_bytes(&ephemeral_bytes).context("parse ephemeral P-256 public key")?;
+    let salt = URL_SAFE_NO_PAD
+        .decode(&recipient.hkdf_salt)
+        .context("decode recipient HKDF salt")?;
+    if salt.len() != 32 {
+        anyhow::bail!("recipient HKDF salt has invalid length");
+    }
+    let wrap_iv = URL_SAFE_NO_PAD
+        .decode(&recipient.key_wrap_iv)
+        .context("decode content-key wrap IV")?;
+    if wrap_iv.len() != 12 {
+        anyhow::bail!("content-key wrap IV has invalid length");
+    }
+    let wrapped = URL_SAFE_NO_PAD
+        .decode(&recipient.encrypted_content_key)
+        .context("decode wrapped content key")?;
+    if wrapped.len() != 48 {
+        anyhow::bail!("wrapped content key has invalid length");
+    }
+    let aad = serde_json::to_vec(&manifest.binding).context("encode authenticated binding")?;
+    let shared = diffie_hellman(private_key.to_nonzero_scalar(), ephemeral.as_affine());
+    let mut info = b"piqae-content-key-wrap-v3\0".to_vec();
+    info.extend_from_slice(manifest.binding.envelope_id.as_bytes());
+    info.push(0);
+    info.extend_from_slice(recipient.key_id.as_bytes());
+    let hkdf = Hkdf::<Sha256>::new(Some(&salt), shared.raw_secret_bytes().as_slice());
+    let mut wrapping_key = zeroize::Zeroizing::new([0_u8; 32]);
+    hkdf.expand(&info, wrapping_key.as_mut())
+        .map_err(|_| anyhow::anyhow!("derive content-key wrapping key"))?;
+    let wrapping_cipher = Aes256Gcm::new_from_slice(wrapping_key.as_slice())
+        .map_err(|_| anyhow::anyhow!("invalid content-key wrapping key"))?;
+    let content_key = zeroize::Zeroizing::new(
+        wrapping_cipher
+            .decrypt(
+                wrap_iv.as_slice().into(),
+                Payload {
+                    msg: &wrapped,
+                    aad: &aad,
+                },
+            )
+            .map_err(|_| anyhow::anyhow!("wrapped content key authentication failed"))?,
+    );
+    if content_key.len() != 32 {
+        anyhow::bail!("unwrapped content key has invalid length");
+    }
+    let iv = URL_SAFE_NO_PAD
+        .decode(&manifest.iv)
+        .context("decode encryption IV")?;
+    if iv.len() != 12 {
+        anyhow::bail!("encryption IV has invalid length");
+    }
+    let cipher = Aes256Gcm::new_from_slice(&content_key)
+        .map_err(|_| anyhow::anyhow!("invalid content key"))?;
+    cipher
+        .decrypt(
+            iv.as_slice().into(),
+            Payload {
+                msg: ciphertext,
+                aad: &aad,
+            },
+        )
+        .map_err(|_| anyhow::anyhow!("encrypted content authentication failed"))
+}
+
+const AES_GCM_TAG_BYTES: u64 = 16;
+const MAX_CIPHERTEXT_BYTES: u64 = ContentStore::MAX_CONTENT_BYTES + AES_GCM_TAG_BYTES;
+
+fn validate_encrypted_ciphertext_size(bytes: usize) -> Result<()> {
+    if u64::try_from(bytes).unwrap_or(u64::MAX) > MAX_CIPHERTEXT_BYTES {
+        anyhow::bail!("encrypted content exceeds local limit");
+    }
+    Ok(())
+}
+
+/// How long a node waits between attempts after its identity was rejected.
+///
+/// Revocation is not fixed by retrying, so hammering the control plane serves
+/// nobody. The node still retries slowly because the two recoverable causes —
+/// a corrected clock, or an operator restoring the node — resolve without a
+/// restart, and the next attempt is what discovers that.
+const UNAUTHORIZED_RETRY_SECONDS: u64 = 60;
+
+/// Classifies one sync failure into the connection state an operator should see.
+///
+/// A rejected signature and an unreachable network are the same event to a
+/// retry loop but entirely different problems to the person holding the
+/// printer, so they must not share a status.
+fn failure_state(error: &ClientError) -> ConnectionState {
+    match error.unauthorized_code() {
+        // The node's clock is outside the signing window. The client corrects
+        // its offset from the rejection itself, so the next attempt should
+        // succeed; report a transient fault rather than a revoked identity.
+        Some("stale_agent_request") => ConnectionState::Degraded,
+        Some(_) => ConnectionState::Unauthorized,
+        None => ConnectionState::Offline,
+    }
+}
+
 async fn sync_failed(
     error: &ClientError,
     failures: &mut u32,
     connection: &RwLock<ConnectionState>,
 ) -> Duration {
     *failures = failures.saturating_add(1);
-    *connection.write().await = ConnectionState::Offline;
+    let state = failure_state(error);
+    *connection.write().await = state;
+    if state == ConnectionState::Unauthorized {
+        error!(
+            code = error.unauthorized_code().unwrap_or("unauthorized"),
+            retry_seconds = UNAUTHORIZED_RETRY_SECONDS,
+            "the control plane rejected this node's identity; it has been \
+             revoked or its device key no longer matches. Pair this node again \
+             to restore cloud printing."
+        );
+        return Duration::from_secs(UNAUTHORIZED_RETRY_SECONDS);
+    }
+    if let Some(code) = error.unauthorized_code() {
+        warn!(
+            code,
+            "this node's clock is outside the control-plane signing window; \
+             the offset has been corrected and the next attempt will use it. \
+             Enable time synchronization to avoid repeating this."
+        );
+    }
     let exponent = (*failures).min(5);
     let delay = 1_u64.checked_shl(exponent).unwrap_or(30).min(30);
     warn!(%error, retry_seconds = delay, "agent sync failed");
@@ -2748,6 +4122,243 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
+    fn test_connector_record(id: &str) -> connector_runtime::ConnectorRecord {
+        connector_runtime::ConnectorRecord {
+            connector_id: id.to_owned(),
+            agent_id: format!("agt_{id}"),
+            control_plane_url: Url::parse("https://api.piqae.example/").expect("url"),
+            device_key_file: format!("connectors/{id}/device.key").into(),
+            enabled: true,
+            allowed_printer_ids: vec!["prn_test".to_owned()],
+        }
+    }
+
+    #[tokio::test]
+    async fn stop_signal_remembers_stop_without_a_waiter() {
+        let stop = StopSignal::default();
+        stop.stop();
+        tokio::time::timeout(Duration::from_millis(50), stop.cancelled())
+            .await
+            .expect("pre-existing stop must not be lost");
+        assert!(stop.is_stopped());
+    }
+
+    #[tokio::test]
+    async fn connector_control_distinguishes_busy_from_unavailable() {
+        let (sender, _receiver) = mpsc::channel(1);
+        let (occupied_tx, _occupied_rx) = oneshot::channel();
+        sender
+            .try_send(ConnectorSupervisorCommand::Reload {
+                respond_to: occupied_tx,
+            })
+            .expect("occupy supervisor queue");
+        let (busy_tx, busy_rx) = oneshot::channel();
+        let busy = sender
+            .try_send(ConnectorSupervisorCommand::Revoke {
+                connector_id: "ncon_busy".to_owned(),
+                respond_to: busy_tx,
+            })
+            .expect_err("full queue");
+        reject_connector_supervisor_command(busy);
+        assert_eq!(
+            busy_rx
+                .await
+                .expect("busy response")
+                .expect_err("busy failure")
+                .code,
+            "connector_revoke_deferred"
+        );
+
+        let (closed_sender, closed_receiver) = mpsc::channel(1);
+        drop(closed_receiver);
+        let (closed_tx, closed_rx) = oneshot::channel();
+        let closed = closed_sender
+            .try_send(ConnectorSupervisorCommand::Reload {
+                respond_to: closed_tx,
+            })
+            .expect_err("closed queue");
+        reject_connector_supervisor_command(closed);
+        assert_eq!(
+            closed_rx
+                .await
+                .expect("closed response")
+                .expect_err("closed failure")
+                .code,
+            "connector_supervisor_unavailable"
+        );
+    }
+
+    #[tokio::test]
+    async fn first_enabled_connector_stops_legacy_worker_before_returning() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let stop = StopSignal::default();
+        let stopped = Arc::new(AtomicBool::new(false));
+        let task = {
+            let stop = stop.clone();
+            let stopped = Arc::clone(&stopped);
+            tokio::spawn(async move {
+                stop.cancelled().await;
+                stopped.store(true, Ordering::SeqCst);
+            })
+        };
+        let mut legacy = Some(LegacyCloudWorker { stop, task });
+
+        // An empty registry keeps the compatible legacy path alive.
+        retire_legacy_cloud_worker_if_needed(directory.path(), &mut legacy)
+            .await
+            .expect("empty registry");
+        assert!(legacy.is_some());
+        assert!(!stopped.load(Ordering::SeqCst));
+
+        let mut registry =
+            connector_runtime::ConnectorRegistry::load(directory.path()).expect("load registry");
+        registry
+            .add(test_connector_record("ncon_first"))
+            .expect("add connector");
+        retire_legacy_cloud_worker_if_needed(directory.path(), &mut legacy)
+            .await
+            .expect("retire legacy worker");
+        assert!(legacy.is_none());
+        assert!(stopped.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn connector_reload_preserves_successes_and_aggregates_other_failures() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let mut registry =
+            connector_runtime::ConnectorRegistry::load(directory.path()).expect("load registry");
+        registry
+            .add(test_connector_record("ncon_bad"))
+            .expect("add bad connector");
+        registry
+            .add(test_connector_record("ncon_good"))
+            .expect("add good connector");
+
+        let sync_stop = StopSignal::default();
+        let scheduler_stop = StopSignal::default();
+        let sync = {
+            let stop = sync_stop.clone();
+            tokio::spawn(async move { stop.cancelled().await })
+        };
+        let scheduler = {
+            let stop = scheduler_stop.clone();
+            tokio::spawn(async move { stop.cancelled().await })
+        };
+        let mut workers = std::collections::BTreeMap::from([(
+            "ncon_good".to_owned(),
+            ConnectorWorker {
+                allowed_printer_ids: std::iter::once("prn_test".to_owned()).collect(),
+                sync_stop,
+                scheduler_stop,
+                sync,
+                scheduler,
+            },
+        )]);
+        let executor = SharedRuntimeExecutor(Arc::new(Mutex::new(RuntimeExecutor::Disabled)));
+        let error = reload_connector_workers(
+            directory.path(),
+            &mut workers,
+            &executor,
+            &UriFetcher::new(false),
+            &PrinterDiscovery::Disabled,
+        )
+        .await
+        .expect_err("missing bad connector key must fail the aggregate");
+        assert!(error.to_string().contains("ncon_bad"));
+        assert!(workers.contains_key("ncon_good"));
+        stop_connector_worker(&mut workers, "ncon_good")
+            .await
+            .expect("stop preserved worker");
+    }
+
+    #[tokio::test]
+    async fn connector_shutdown_signals_sync_and_scheduler_before_waiting() {
+        let sync_stop = StopSignal::default();
+        let scheduler_stop = StopSignal::default();
+        let scheduler_observed = Arc::new(AtomicBool::new(false));
+        let sync = {
+            let stop = sync_stop.clone();
+            tokio::spawn(async move {
+                stop.cancelled().await;
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            })
+        };
+        let scheduler = {
+            let stop = scheduler_stop.clone();
+            let observed = Arc::clone(&scheduler_observed);
+            tokio::spawn(async move {
+                stop.cancelled().await;
+                observed.store(true, Ordering::SeqCst);
+            })
+        };
+        let mut workers = std::collections::BTreeMap::from([(
+            "ncon_test".to_owned(),
+            ConnectorWorker {
+                allowed_printer_ids: std::collections::BTreeSet::new(),
+                sync_stop,
+                scheduler_stop,
+                sync,
+                scheduler,
+            },
+        )]);
+
+        let shutdown = tokio::spawn(async move {
+            let _ = stop_connector_worker(&mut workers, "ncon_test").await;
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(scheduler_observed.load(Ordering::SeqCst));
+        shutdown.await.expect("shutdown task");
+    }
+
+    #[test]
+    fn connector_printer_grants_are_isolated_and_empty_fails_closed() {
+        let first = std::iter::once("prn_first".to_owned()).collect();
+        let second = std::iter::once("prn_second".to_owned()).collect();
+        let empty = std::collections::BTreeSet::new();
+        assert!(printer_is_allowed(Some(&first), "prn_first"));
+        assert!(!printer_is_allowed(Some(&first), "prn_second"));
+        assert!(printer_is_allowed(Some(&second), "prn_second"));
+        assert!(!printer_is_allowed(Some(&second), "prn_first"));
+        assert!(!printer_is_allowed(Some(&empty), "prn_first"));
+        assert!(printer_is_allowed(None, "prn_legacy"));
+    }
+
+    #[test]
+    fn local_mode_never_activates_connector_workers() {
+        assert!(!connector_workers_enabled(AgentMode::Local));
+        assert!(connector_workers_enabled(AgentMode::Hosted));
+        assert!(connector_workers_enabled(AgentMode::SelfHosted));
+    }
+
+    #[test]
+    fn connector_reload_uses_the_installed_loopback_bind() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        write_new_json(
+            &directory.path().join("agent-config.json"),
+            &serde_json::json!({ "local_bind": "127.0.0.1:49231" }),
+        )
+        .expect("write config");
+        let arguments = Arguments::try_parse_from([
+            "piqae-agent",
+            "--data-dir",
+            directory.path().to_str().expect("utf8 path"),
+            "--local-bind",
+            "127.0.0.1:39100",
+        ])
+        .expect("arguments");
+        assert_eq!(
+            installed_local_bind(&arguments).expect("installed bind"),
+            "127.0.0.1:49231".parse().expect("socket address")
+        );
+
+        replace_json(
+            &directory.path().join("agent-config.json"),
+            &serde_json::json!({ "local_bind": "0.0.0.0:49231" }),
+        )
+        .expect("replace config");
+        assert!(installed_local_bind(&arguments).is_err());
+    }
+
     #[test]
     fn enrolment_writes_a_new_key_without_overwriting_identity() {
         let directory = tempfile::tempdir().expect("tempdir");
@@ -2771,6 +4382,183 @@ mod tests {
                 0o600
             );
         }
+    }
+
+    #[test]
+    fn rotation_replaces_the_key_in_place_and_keeps_it_owner_only() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let key_path = directory.path().join("device.key");
+        write_new_device_key(&key_path, &[0x5a; 32]).expect("write key");
+        replace_device_key(&key_path, &[0x11; 32]).expect("rotate key");
+        assert_eq!(
+            std::fs::read_to_string(&key_path).expect("read key"),
+            hex::encode([0x11; 32])
+        );
+        // The staging file must never survive a successful rotation: it holds
+        // a usable device key.
+        assert!(!key_path.with_extension("key.rotating").exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(
+                std::fs::metadata(&key_path)
+                    .expect("metadata")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[test]
+    fn rotation_reuses_the_recorded_installation_so_the_node_survives() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let config_path = directory.path().join("agent-config.json");
+        write_new_json(
+            &config_path,
+            &serde_json::json!({
+                "agent_id": "agt_01J0",
+                "installation_id": "018f-abcd",
+            }),
+        )
+        .expect("write config");
+        let existing = existing_installation(&config_path).expect("read installation");
+        assert_eq!(existing.agent_id, "agt_01J0");
+        assert_eq!(existing.installation_id, "018f-abcd");
+    }
+
+    #[test]
+    fn rotation_refuses_a_configuration_without_an_installation_id() {
+        // Rotating without one would pair a second node and strand the first.
+        let directory = tempfile::tempdir().expect("tempdir");
+        let config_path = directory.path().join("agent-config.json");
+        write_new_json(&config_path, &serde_json::json!({ "agent_id": "agt_01J0" }))
+            .expect("write config");
+        let error = existing_installation(&config_path).expect_err("must refuse");
+        assert!(
+            format!("{error}").contains("installation ID"),
+            "unhelpful error: {error}"
+        );
+        assert!(existing_installation(&directory.path().join("missing.json")).is_err());
+    }
+
+    #[test]
+    fn configuration_replacement_survives_a_failed_write() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let config_path = directory.path().join("agent-config.json");
+        write_new_json(&config_path, &serde_json::json!({ "agent_id": "old" })).expect("write");
+        replace_json(&config_path, &serde_json::json!({ "agent_id": "new" })).expect("replace");
+        let body = std::fs::read_to_string(&config_path).expect("read");
+        assert!(body.contains("new"), "{body}");
+        assert!(!config_path.with_extension("json.replacing").exists());
+    }
+
+    #[test]
+    fn a_revoked_node_is_reported_differently_from_an_unreachable_one() {
+        use piqae_agent_client::ClientError;
+        assert_eq!(
+            failure_state(&ClientError::Unauthorized {
+                code: "unknown_agent".into()
+            }),
+            ConnectionState::Unauthorized
+        );
+        // Clock skew is self-correcting, so it must not be reported as a
+        // revoked identity that an operator has to act on.
+        assert_eq!(
+            failure_state(&ClientError::Unauthorized {
+                code: "stale_agent_request".into()
+            }),
+            ConnectionState::Degraded
+        );
+        assert_eq!(
+            failure_state(&ClientError::Status {
+                status: 503,
+                body: String::new()
+            }),
+            ConnectionState::Offline
+        );
+    }
+
+    #[test]
+    fn rotation_and_first_pairing_are_mutually_exclusive() {
+        assert!(
+            Arguments::try_parse_from([
+                "piqae-agent",
+                "--control-plane-url",
+                "http://127.0.0.1:8080",
+                "--pair",
+                "--rotate-key",
+            ])
+            .is_err()
+        );
+        let rotate = Arguments::try_parse_from([
+            "piqae-agent",
+            "--control-plane-url",
+            "http://127.0.0.1:8080",
+            "--rotate-key",
+        ])
+        .expect("rotate arguments");
+        assert!(rotate.rotate_key);
+        assert!(!rotate.pair);
+    }
+
+    #[test]
+    fn stdin_enrolment_is_bounded_trimmed_and_not_an_argv_secret() {
+        assert_eq!(
+            read_enrolment_token(&b"  piq_enr_secret\n"[..]).expect("token"),
+            "piq_enr_secret"
+        );
+        assert!(read_enrolment_token(&b" \n"[..]).is_err());
+        assert!(read_enrolment_token(vec![b'x'; 257].as_slice()).is_err());
+
+        let arguments = Arguments::try_parse_from([
+            "piqae-agent",
+            "--enrolment-token-stdin",
+            "--control-plane-url",
+            "https://api.piqae.com",
+        ])
+        .expect("stdin enrolment arguments");
+        assert!(arguments.enrolment_token_stdin);
+        assert!(arguments.enrolment_token.is_none());
+        assert!(
+            Arguments::try_parse_from([
+                "piqae-agent",
+                "--enrolment-token-stdin",
+                "--enrolment-token",
+                "piq_enr_secret",
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn connector_consent_is_bounded_explicit_and_never_an_argv_secret() {
+        let input =
+            br#"{"token":"piq_enr_0123456789abcdef0123456789abcdef","printer_ids":["prn_1"]}"#;
+        let consent = read_connector_consent(input.as_slice()).expect("consent");
+        assert_eq!(consent.printer_ids, ["prn_1"]);
+        assert!(
+            read_connector_consent(
+                br#"{"token":"piq_enr_0123456789abcdef0123456789abcdef","printer_ids":[]}"#
+                    .as_slice()
+            )
+            .is_err()
+        );
+        assert!(read_connector_consent(
+            br#"{"token":"piq_enr_0123456789abcdef0123456789abcdef","printer_ids":["prn_1","prn_1"]}"#.as_slice()
+        ).is_err());
+        let arguments = Arguments::try_parse_from(["piqae-agent", "--add-connector-json-stdin"])
+            .expect("connector stdin arguments");
+        assert!(arguments.add_connector_json_stdin);
+        assert!(
+            Arguments::try_parse_from([
+                "piqae-agent",
+                "--add-connector-json-stdin",
+                "--preview-connect-token-stdin"
+            ])
+            .is_err()
+        );
     }
 
     #[test]
@@ -2944,11 +4732,15 @@ mod tests {
         });
 
         let agent_id = AgentId::new();
+        let test_encryption_key = SecretKey::random(&mut rand::rngs::OsRng);
         let cloud = CloudConfiguration {
             client: AgentClient::new(Url::parse(&format!("http://{address}/")).expect("base URL"))
                 .expect("client"),
             identity: DeviceIdentity::generate(agent_id),
             agent_id,
+            content_encryption_key: Arc::new(test_encryption_key),
+            content_encryption_key_id: "cek_test".into(),
+            allowed_printer_ids: None,
         };
         let mut store = AgentStore::in_memory().expect("store");
         let job = cloud_job();
@@ -3161,5 +4953,109 @@ mod tests {
         assert_eq!(pin.profile_id, "prf_legacy");
         assert_eq!(pin.profile_revision, 3);
         assert_eq!(pin.stock_id.as_deref(), Some("stk_legacy"));
+    }
+
+    #[test]
+    fn encrypted_content_requires_exact_authenticated_binding() {
+        use aes_gcm::aead::Aead as _;
+        let private = SecretKey::random(&mut rand::rngs::OsRng);
+        let content_key = [9_u8; 32];
+        let iv = [4_u8; 12];
+        let binding = piqae_domain::EncryptedContentBinding {
+            envelope_id: "env_012345678901234567890123".into(),
+            workspace_id: "wsp_test".into(),
+            environment_id: "env_test".into(),
+            content_type: ContentKind::Pdf,
+            printer_id: "prt_test".into(),
+            target_id: "tgt_test".into(),
+            profile_revision: "prf_test:3".into(),
+            options: piqae_domain::JobOptions::default(),
+            deliveries: 1,
+            expires_at: "2099-01-01T00:00:00Z".into(),
+            raw_authorized: false,
+        };
+        let aad = serde_json::to_vec(&binding).expect("aad");
+        assert_eq!(
+            String::from_utf8(aad.clone()).expect("utf8"),
+            "{\"envelope_id\":\"env_012345678901234567890123\",\"workspace_id\":\"wsp_test\",\"environment_id\":\"env_test\",\"content_type\":\"pdf\",\"printer_id\":\"prt_test\",\"target_id\":\"tgt_test\",\"profile_revision\":\"prf_test:3\",\"options\":{\"bin\":null,\"collate\":null,\"color\":null,\"copies\":null,\"dpi\":null,\"duplex\":null,\"fit_to_page\":null,\"media\":null,\"nup\":null,\"pages\":null,\"paper\":null,\"rotate\":null,\"native_options\":{}},\"deliveries\":1,\"expires_at\":\"2099-01-01T00:00:00Z\",\"raw_authorized\":false}"
+        );
+        let cipher = Aes256Gcm::new_from_slice(&content_key).expect("aes key");
+        let ciphertext = cipher
+            .encrypt(
+                (&iv).into(),
+                Payload {
+                    msg: b"%PDF-test",
+                    aad: &aad,
+                },
+            )
+            .expect("encrypt");
+        let ephemeral = SecretKey::random(&mut rand::rngs::OsRng);
+        let ephemeral_public = ephemeral.public_key();
+        let salt = [7_u8; 32];
+        let wrap_iv = [8_u8; 12];
+        let key_id = "cek_test";
+        let shared = diffie_hellman(
+            ephemeral.to_nonzero_scalar(),
+            private.public_key().as_affine(),
+        );
+        let info = format!(
+            "piqae-content-key-wrap-v3\0{}\0{key_id}",
+            binding.envelope_id
+        );
+        let hkdf = Hkdf::<Sha256>::new(Some(&salt), shared.raw_secret_bytes().as_slice());
+        let mut wrapping_key = [0_u8; 32];
+        hkdf.expand(info.as_bytes(), &mut wrapping_key)
+            .expect("derive wrapping key");
+        let wrapping_cipher = Aes256Gcm::new_from_slice(&wrapping_key).expect("wrapping cipher");
+        let wrapped = wrapping_cipher
+            .encrypt(
+                (&wrap_iv).into(),
+                Payload {
+                    msg: &content_key,
+                    aad: &aad,
+                },
+            )
+            .expect("wrap content key");
+        let recipient = piqae_domain::EncryptedContentRecipient {
+            key_id: key_id.into(),
+            algorithm: "ECDH-P256-HKDF-SHA256".into(),
+            ephemeral_public_key: URL_SAFE_NO_PAD.encode(ephemeral_public.to_sec1_bytes().as_ref()),
+            hkdf_salt: URL_SAFE_NO_PAD.encode(salt),
+            key_wrap_iv: URL_SAFE_NO_PAD.encode(wrap_iv),
+            encrypted_content_key: URL_SAFE_NO_PAD.encode(wrapped),
+        };
+        let manifest = piqae_domain::EncryptedContentManifest {
+            version: "piqae-encrypted-job-v3".into(),
+            suite: "ECDH-P256+HKDF-SHA256+A256GCMKW+A256GCM".into(),
+            binding,
+            ciphertext_sha256: URL_SAFE_NO_PAD.encode(Sha256::digest(&ciphertext)),
+            iv: URL_SAFE_NO_PAD.encode(iv),
+            recipients: vec![recipient.clone()],
+        };
+        assert_eq!(
+            decrypt_encrypted_content(&private, &recipient, &manifest, &ciphertext)
+                .expect("decrypt"),
+            b"%PDF-test"
+        );
+        let mut tampered = manifest.clone();
+        tampered.binding.profile_revision = "prf_test:4".into();
+        assert!(decrypt_encrypted_content(&private, &recipient, &tampered, &ciphertext).is_err());
+
+        let mut legacy = tampered;
+        legacy.binding.profile_revision = "prf_test:3".into();
+        legacy.version = "piqae-encrypted-job-v2".into();
+        legacy.suite = "RSA-OAEP-256+A256GCM".into();
+        assert!(decrypt_encrypted_content(&private, &recipient, &legacy, &ciphertext).is_err());
+
+        let mut wrong_salt = recipient;
+        wrong_salt.hkdf_salt = URL_SAFE_NO_PAD.encode([6_u8; 32]);
+        assert!(decrypt_encrypted_content(&private, &wrong_salt, &manifest, &ciphertext).is_err());
+    }
+
+    #[test]
+    fn encrypted_ciphertext_is_bounded_before_decryption() {
+        let maximum = usize::try_from(MAX_CIPHERTEXT_BYTES).expect("ciphertext limit fits usize");
+        assert!(validate_encrypted_ciphertext_size(maximum).is_ok());
+        assert!(validate_encrypted_ciphertext_size(maximum + 1).is_err());
     }
 }

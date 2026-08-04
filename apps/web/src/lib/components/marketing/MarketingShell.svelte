@@ -19,7 +19,6 @@
     : '/start?plan=pro&interval=annual&source=footer-contact';
 
   const nav = [
-    { label: 'Product', href: '/how-it-works' },
     { label: 'Compare', href: '/compare' },
     { label: 'Pricing', href: '/pricing' },
     { label: 'Downloads', href: '/downloads' },
@@ -80,8 +79,7 @@
     </div>
     <div class="footer-links m-container">
       <div>
-        <strong>Product</strong>
-        <a href="/how-it-works">How it works</a>
+        <strong>Piqae</strong>
         <a href="/pricing">Pricing</a>
         <a href="/downloads">Downloads</a>
         <a href="/security">Security</a>

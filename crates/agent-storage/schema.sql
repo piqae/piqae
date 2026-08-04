@@ -243,6 +243,8 @@ CREATE TABLE IF NOT EXISTS jobs (
   accepted_unix_ms INTEGER NOT NULL,
   updated_unix_ms INTEGER NOT NULL,
   cloud_managed INTEGER NOT NULL DEFAULT 0 CHECK (cloud_managed IN (0, 1)),
+  confidential INTEGER NOT NULL DEFAULT 0 CHECK (confidential IN (0, 1)),
+  confidential_delete_after_unix_ms INTEGER,
   target_id TEXT,
   binding_id TEXT,
   profile_id TEXT,

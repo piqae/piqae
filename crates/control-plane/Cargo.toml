@@ -36,6 +36,7 @@ opentelemetry = { version = "0.32", default-features = false, features = ["trace
 opentelemetry-http = { version = "0.32", default-features = false, optional = true }
 opentelemetry-otlp = { version = "0.32", default-features = false, features = ["http-proto", "internal-logs", "trace"], optional = true }
 opentelemetry_sdk = { version = "0.32", default-features = false, features = ["experimental_trace_batch_span_processor_with_async_runtime", "internal-logs", "rt-tokio", "trace"], optional = true }
+p256.workspace = true
 rand.workspace = true
 reqwest.workspace = true
 serde.workspace = true
@@ -55,11 +56,11 @@ url.workspace = true
 uuid.workspace = true
 
 piqae-domain.workspace = true
-piqae-object-store = { path = "../object-store", version = "0.1.0" }
+piqae-object-store = { path = "../object-store", version = "0.1.1" }
 piqae-protocol.workspace = true
-piqae-auth = { path = "../auth", version = "0.1.0" }
-piqae-storage-postgres = { path = "../storage-postgres", version = "0.1.0" }
-piqae-webhooks = { path = "../webhooks", version = "0.1.0" }
+piqae-auth = { path = "../auth", version = "0.1.1" }
+piqae-storage-postgres = { path = "../storage-postgres", version = "0.1.1" }
+piqae-webhooks = { path = "../webhooks", version = "0.1.1" }
 
 [dev-dependencies]
 http-body-util = "0.1"

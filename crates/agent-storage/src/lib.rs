@@ -271,6 +271,12 @@ pub struct CloudAcceptIntent {
     pub local_sequence: u64,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConfidentialFile {
+    pub job_id: String,
+    pub path: String,
+}
+
 impl std::fmt::Debug for CloudAcceptIntent {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -311,6 +317,7 @@ impl AgentStore {
         Self::configure(Connection::open_in_memory()?)
     }
 
+    #[allow(clippy::too_many_lines)]
     fn configure(connection: Connection) -> Result<Self, StorageError> {
         connection.busy_timeout(std::time::Duration::from_secs(5))?;
         connection.pragma_update(None, "foreign_keys", "ON")?;
@@ -328,6 +335,25 @@ impl AgentStore {
             connection.execute(
                 "ALTER TABLE jobs ADD COLUMN cloud_managed INTEGER NOT NULL
                  DEFAULT 0 CHECK (cloud_managed IN (0, 1))",
+                [],
+            )?;
+        }
+        let has_confidential: bool = connection.query_row(
+            "SELECT EXISTS (SELECT 1 FROM pragma_table_info('jobs') WHERE name = 'confidential')",
+            [],
+            |row| row.get(0),
+        )?;
+        if !has_confidential {
+            connection.execute("ALTER TABLE jobs ADD COLUMN confidential INTEGER NOT NULL DEFAULT 0 CHECK (confidential IN (0, 1))", [])?;
+        }
+        let has_confidential_delete_after: bool = connection.query_row(
+            "SELECT EXISTS (SELECT 1 FROM pragma_table_info('jobs') WHERE name = 'confidential_delete_after_unix_ms')",
+            [],
+            |row| row.get(0),
+        )?;
+        if !has_confidential_delete_after {
+            connection.execute(
+                "ALTER TABLE jobs ADD COLUMN confidential_delete_after_unix_ms INTEGER",
                 [],
             )?;
         }
@@ -1984,6 +2010,7 @@ impl AgentStore {
     ///
     /// Returns an error for a non-cloud job, conflicting immutable metadata,
     /// invalid lease data, or a failed transaction.
+    #[allow(clippy::too_many_lines)]
     pub fn prepare_cloud_job(
         &mut self,
         job: &AcceptedJob,
@@ -2056,14 +2083,24 @@ impl AgentStore {
              DO UPDATE SET reference_count = reference_count + 1",
             params![job.content_sha256, job.content_path, job.accepted_unix_ms],
         )?;
+        let confidential = std::path::Path::new(&job.content_path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("confidential-"));
+        let confidential_delete_after = confidential.then_some(
+            job.expires_unix_ms
+                .unwrap_or(job.accepted_unix_ms + 15 * 60 * 1000)
+                .min(job.accepted_unix_ms + 15 * 60 * 1000),
+        );
         transaction.execute(
             "INSERT INTO jobs
              (job_id, submission_id, printer_id, printer_native_id,
               printer_sequence, title, content_sha256, content_path,
               content_kind, options_json, state, expires_unix_ms,
-              accepted_unix_ms, updated_unix_ms, cloud_managed)
+              accepted_unix_ms, updated_unix_ms, cloud_managed,
+              confidential, confidential_delete_after_unix_ms)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
-                     'cloud_accept_pending', ?11, ?12, ?12, 1)",
+                     'cloud_accept_pending', ?11, ?12, ?12, 1, ?13, ?14)",
             params![
                 job.job_id,
                 job.submission_id,
@@ -2077,6 +2114,8 @@ impl AgentStore {
                 job.options_json,
                 job.expires_unix_ms,
                 job.accepted_unix_ms,
+                i64::from(confidential),
+                confidential_delete_after,
             ],
         )?;
         let local = query_job(&transaction, &job.job_id)?
@@ -2099,6 +2138,45 @@ impl AgentStore {
     /// # Errors
     ///
     /// Returns an error when `SQLite` cannot decode an intent.
+    pub fn confidential_files_due(
+        &self,
+        now_unix_ms: i64,
+    ) -> Result<Vec<ConfidentialFile>, StorageError> {
+        let mut statement = self.connection.prepare(
+            "SELECT job_id, content_path FROM jobs
+             WHERE confidential = 1 AND (
+               confidential_delete_after_unix_ms <= ?1 OR
+               state IN ('accepted_by_spooler','completed_reported','delivery_uncertain','failed_terminal','cancelled','expired')
+             ) LIMIT 256",
+        )?;
+        let rows = statement.query_map([now_unix_ms], |row| {
+            Ok(ConfidentialFile {
+                job_id: row.get(0)?,
+                path: row.get(1)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Removes the durable confidential-file record after its plaintext file is gone.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the local database update fails.
+    pub fn mark_confidential_file_deleted(&self, job_id: &str) -> Result<(), StorageError> {
+        self.connection.execute(
+            "UPDATE jobs SET confidential = 0, confidential_delete_after_unix_ms = NULL
+             WHERE job_id = ?1 AND confidential = 1",
+            [job_id],
+        )?;
+        Ok(())
+    }
+
+    /// Returns accepted cloud jobs whose acknowledgement has not reached the control plane.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the durable queue cannot be read or decoded.
     pub fn pending_cloud_accepts(&self) -> Result<Vec<CloudAcceptIntent>, StorageError> {
         let mut statement = self.connection.prepare(
             "SELECT job_id, lease_id, lease_token, lease_expires_unix_ms,
@@ -3362,6 +3440,25 @@ fn row_to_job(row: &rusqlite::Row<'_>) -> Result<LocalJob, rusqlite::Error> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn configure_adds_confidential_retention_column_independently() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch(SCHEMA).unwrap();
+        connection
+            .execute(
+                "ALTER TABLE jobs DROP COLUMN confidential_delete_after_unix_ms",
+                [],
+            )
+            .unwrap();
+        let store = AgentStore::configure(connection).unwrap();
+        let present: bool = store.connection.query_row(
+            "SELECT EXISTS (SELECT 1 FROM pragma_table_info('jobs') WHERE name = 'confidential_delete_after_unix_ms')",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert!(present);
+    }
+
     fn job(id: &str, printer: &str, accepted: i64) -> AcceptedJob {
         AcceptedJob {
             job_id: id.into(),
@@ -3654,6 +3751,35 @@ mod tests {
             store.setting("command_cursor").unwrap().as_deref(),
             Some("cursor-with-\"quotes\"")
         );
+    }
+
+    #[test]
+    fn confidential_file_association_is_durable_and_retry_retention_is_bounded() {
+        let mut store = AgentStore::in_memory().unwrap();
+        let mut encrypted = job("encrypted", "printer", 1_000);
+        encrypted.cloud_managed = true;
+        encrypted.content_path = "/content/confidential-fixture".into();
+        store
+            .prepare_cloud_job(&encrypted, "lease", "secret", 60_000)
+            .unwrap();
+        assert!(
+            store
+                .confidential_files_due(1_000 + 15 * 60 * 1000 - 1)
+                .unwrap()
+                .is_empty()
+        );
+        let due = store
+            .confidential_files_due(1_000 + 15 * 60 * 1000)
+            .unwrap();
+        assert_eq!(
+            due,
+            [ConfidentialFile {
+                job_id: "encrypted".into(),
+                path: "/content/confidential-fixture".into()
+            }]
+        );
+        store.mark_confidential_file_deleted("encrypted").unwrap();
+        assert!(store.confidential_files_due(i64::MAX).unwrap().is_empty());
     }
 
     #[test]

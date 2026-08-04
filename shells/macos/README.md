@@ -5,6 +5,21 @@ contains no print driver, queue, database, device credential, or cloud client.
 Operational actions use the authenticated loopback API and time out quickly
 when the agent is unavailable.
 
+`PiqaeMenuCore` includes strict parsing for the reserved native connect-link
+shape, HTTPS-only return destinations (with loopback HTTP for development),
+explicit non-empty printer/permission consent, and capability-hash replay
+suppression without retaining the capability. The app claims
+`applinks:app.piqae.com` and handles the verified `/connect` Universal Link.
+The `piqae://` route remains deprecated compatibility for existing Preview
+links and is not emitted for new sessions. The app
+uses the headless agent's bounded stdin-only preview and acceptance commands;
+the capability never enters process arguments, environment variables, files,
+or diagnostics. Piqae resolves the requesting workspace before showing local
+consent, requires the queue to be idle, starts with every printer unchecked,
+persists the isolated connector before restarting the agent, and follows only
+a server-validated return URL after success. Windows and Linux application-link
+registration remain gated on equivalent signed-shell consent flows.
+
 Configuration:
 
 - `PIQAE_LOCAL_API_URL` defaults to `http://127.0.0.1:39100` and must remain an
@@ -38,16 +53,17 @@ Application identity and the feed must use HTTPS. Partial update configuration
 fails closed. Release builds embed Sparkle 2.9.2 and sign its nested code before
 signing the app with the hardened runtime.
 
-The dedicated `macos-release.yml` workflow builds arm64/x86_64 binaries, runs
-the Swift suite, creates an SPDX SBOM and checksums, and records provenance.
-With no credentials, a manually dispatched run produces only artifacts whose
-names and evidence say `unsigned-preview`; update checks remain disabled. A tag
-fails unless the complete Developer ID, Apple notarisation, and Sparkle Ed25519
-secret set is present. Credentialed runs Developer ID-sign the app, node,
-executor, and installer; notarise and staple both the app and installer disk
-image; generate an appcast; and verify the update archive's Ed25519 signature
-with the public key. A publication run uploads immutable artifacts to the
-release bucket before promoting the appcast and shared manifest.
+The reusable `macos-release.yml` stage builds arm64/x86_64 binaries, runs the
+Swift suite, creates an SPDX SBOM and checksums, and records provenance. The
+single **Piqae release** orchestrator can request a non-publishing manual
+candidate. When credentials are absent, its names and evidence say
+`unsigned-preview` and update checks remain disabled. A tag fails unless the
+complete Developer ID, Apple notarisation, and Sparkle
+Ed25519 secret set is present. Credentialed runs Developer ID-sign the app,
+node, executor, and installer; notarise and staple both the app and installer
+disk image; generate an appcast; and verify the update archive's Ed25519
+signature with the public key. A publication run uploads immutable artifacts
+to the release bucket before promoting the appcast and shared manifest.
 
 ## Per-user package
 
@@ -86,15 +102,18 @@ queued/active jobs or a profile panel is open, the menu shows that the app
 update is waiting for idle and polls authenticated local status until the node
 is idle. An unavailable agent is not assumed idle.
 
-The **Local driver test…** action requires a present local printer, a profile,
+The **Test Printer…** action requires a present local printer, a profile,
 and explicit confirmation. It does not require cloud/API exposure and never
 falls back to unprofiled job submission.
 
-## Native print profiles
+## Print presets (native profiles)
 
-Every printer menu contains its saved profiles and **Add Profile…**. A profile
-can be edited or cloned from its submenu. These actions open the real macOS
-`NSPrintPanel` for that destination with **Save Profile** as the confirmation
+The menu calls native print profiles **Print Presets** because each one can
+include paper, tray, colour, duplex, resolution, and vendor-specific settings.
+The API and storage model retain the precise `profile` terminology. Every
+printer menu contains its presets and **Add Print Preset…**. A preset can be
+edited or duplicated from its submenu. These actions open the real macOS
+`NSPrintPanel` for that destination with **Save Preset** as the confirmation
 button. The profile host does not create an `NSPrintOperation`, load a customer
 document, or submit anything to the spooler during capture.
 
