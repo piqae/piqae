@@ -186,22 +186,24 @@ export const actions: Actions = {
         error: { message: 'Node name must be between 2 and 120 characters.' }
       });
     }
-    if (!Number.isInteger(expiresInSeconds) || expiresInSeconds < 60 || expiresInSeconds > 3600) {
+    if (!Number.isInteger(expiresInSeconds) || expiresInSeconds < 60 || expiresInSeconds > 900) {
       return fail(400, {
         mutation: 'createEnrolment',
-        error: { message: 'Expiry must be between 60 and 3,600 seconds.' }
+        error: { message: 'Expiry must be between 60 and 900 seconds.' }
       });
     }
     try {
-      const enrolment = await dashboardSdk(event).agents.createEnrolment({
+      const enrolment = await dashboardSdk(event).connectSessions.create({
         name,
-        expires_in_seconds: expiresInSeconds
+        expires_in_seconds: expiresInSeconds,
+        return_url: new URL('/dashboard?view=nodes', event.url.origin).toString()
       });
+      if (!enrolment.connect_url) throw new Error('The connection session did not provide a link.');
       return {
         mutation: 'createEnrolment',
         enrolment: {
           id: enrolment.id,
-          token: enrolment.token,
+          connectUrl: enrolment.connect_url,
           expiresAt: enrolment.expires_at
         }
       };

@@ -4,6 +4,11 @@ export interface NodeConnectFragment {
 
 const ENROLMENT_TOKEN = /^piq_enr_[A-Za-z0-9_-]{32}$/;
 
+export function nativeNodeConnectUrl(enrolmentToken: string): string | null {
+  if (!ENROLMENT_TOKEN.test(enrolmentToken)) return null;
+  return `piqae://connect#enrolment_token=${encodeURIComponent(enrolmentToken)}`;
+}
+
 /**
  * Takes the one-time node capability out of the address bar without ever
  * sending it to the server or persisting it in web storage.

@@ -2,6 +2,7 @@
   import { enhance } from '$app/forms';
   import { goto } from '$app/navigation';
   import { page } from '$app/state';
+  import { onMount } from 'svelte';
   import Icon from '$lib/components/Icon.svelte';
   import DataError from '$lib/components/DataError.svelte';
   import PageHeader from '$lib/components/PageHeader.svelte';
@@ -145,10 +146,17 @@
   let enrolmentOpen = $state(false);
   let enrolmentPending = $state(false);
   let enrolmentAttempted = $state(false);
-  let copied = $state(false);
   const enrolmentResult = $derived(
     enrolmentAttempted && !enrolmentPending && form?.mutation === 'createEnrolment' ? form : null
   );
+
+  onMount(() => {
+    if (page.url.searchParams.get('connect-node') !== '1') return;
+    enrolmentOpen = true;
+    const next = new URL(page.url);
+    next.searchParams.delete('connect-node');
+    void goto(`${next.pathname}${next.search}${next.hash}`, { replaceState: true, noScroll: true });
+  });
 
   // Cancellation dialog.
   let cancelOpen = $state(false);
@@ -160,10 +168,6 @@
       !['completed_reported', 'cancelled', 'expired', 'failed_terminal'].includes(detail.job.state)
   );
 
-  async function copyToken(token: string) {
-    await navigator.clipboard.writeText(token);
-    copied = true;
-  }
 </script>
 
 <svelte:head>
@@ -181,7 +185,6 @@
   <button
     class="button primary"
     onclick={() => {
-      copied = false;
       enrolmentAttempted = false;
       enrolmentOpen = true;
     }}
@@ -568,7 +571,7 @@
   bind:open={enrolmentOpen}
   labelledBy="enrolment-title"
   title="Add a node"
-  description="Install the native app, then approve its short-lived browser pairing request."
+  description="Install the native app, then approve a short-lived, printer-scoped connection."
 >
   <div class="ui-dialog__body">
     {#if data.dashboardMode === 'demo'}
@@ -577,13 +580,13 @@
 
     <ol class="steps" aria-label="Add node steps">
       <li><span>1</span><div><strong>Install</strong><small><a href="/downloads">Download the native node</a> on the printer computer.</small></div></li>
-      <li><span>2</span><div><strong>Connect node</strong><small>Choose Connect node in the native tray or menu app.</small></div></li>
-      <li><span>3</span><div><strong>Approve</strong><small>Match the computer and one-time code in the browser, then approve it.</small></div></li>
+      <li><span>2</span><div><strong>Create invitation</strong><small>Name this computer and create a short-lived connection.</small></div></li>
+      <li><span>3</span><div><strong>Choose printers</strong><small>Open Piqae and approve only the printers this workspace may use.</small></div></li>
     </ol>
 
     <p class="ui-note success">
-      Browser pairing is recommended — the device key stays on the printer computer and the browser
-      approves only its public identity. <a href="/pair">Pairing instructions</a>
+      The one-time invitation is handed directly to the installed app. Device keys stay on the
+      printer computer and the invitation is never placed in a server request URL.
     </p>
 
     <form
@@ -593,25 +596,19 @@
       use:enhance={() => {
         enrolmentPending = true;
         enrolmentAttempted = true;
-        copied = false;
         return async ({ update }) => {
           await update({ reset: false });
           enrolmentPending = false;
         };
       }}
     >
-      <div class="manual">
-        <strong>Manual token fallback</strong>
-        <span>Use only when the native app cannot open the browser pairing flow.</span>
-      </div>
       <Field label="Node name">
         <input class="input" name="name" minlength="2" maxlength="120" required placeholder="Warehouse Mac mini" />
       </Field>
       <Field label="Token expiry">
         <select class="input" name="expires_in_seconds">
           <option value="600">10 minutes</option>
-          <option value="1800">30 minutes</option>
-          <option value="3600">1 hour</option>
+          <option value="900">15 minutes</option>
         </select>
       </Field>
     </form>
@@ -623,13 +620,12 @@
     {#if enrolmentResult?.enrolment}
       <section class="secret" aria-live="polite">
         <div>
-          <strong>Node token · shown once</strong>
+          <strong>Connection invitation · shown once</strong>
           <span>Expires {new Date(enrolmentResult.enrolment.expiresAt).toLocaleString()}</span>
         </div>
-        <code>{enrolmentResult.enrolment.token}</code>
-        <button class="button compact" type="button" onclick={() => copyToken(enrolmentResult.enrolment.token)}>
-          <Icon name="copy" size={13} /> {copied ? 'Copied' : 'Copy token'}
-        </button>
+        <a class="button compact" href={enrolmentResult.enrolment.connectUrl}>
+          <Icon name="external" size={13} /> Open Piqae to connect
+        </a>
       </section>
     {/if}
   </div>
@@ -642,7 +638,7 @@
       form="enrolment-form"
       disabled={enrolmentPending || data.dashboardMode !== 'live'}
     >
-      {enrolmentPending ? 'Creating…' : 'Create manual token'}
+      {enrolmentPending ? 'Creating…' : 'Create connection'}
     </button>
   {/snippet}
 </Dialog>
@@ -894,31 +890,19 @@
     font-weight: 530;
   }
 
-  .steps small,
-  .manual span {
+  .steps small {
     color: var(--text-tertiary);
     font-size: var(--text-meta);
     line-height: var(--text-meta-line);
   }
 
-  .steps a,
-  .ui-note a {
+  .steps a {
     color: var(--accent);
   }
 
   form {
     display: grid;
     gap: 12px;
-  }
-
-  .manual {
-    display: grid;
-    gap: 1px;
-  }
-
-  .manual strong {
-    font-size: var(--text-compact);
-    font-weight: 530;
   }
 
   .secret {
@@ -945,12 +929,6 @@
   .secret span {
     color: var(--text-tertiary);
     font-size: var(--text-meta);
-  }
-
-  .secret code {
-    overflow-wrap: anywhere;
-    color: var(--text-secondary);
-    font: var(--text-code) / var(--text-code-line) var(--font-mono);
   }
 
   .secret .button {

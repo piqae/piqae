@@ -64,12 +64,15 @@ describe('dashboard mutation actions', () => {
     publicEnvironment.PUBLIC_PIQAE_DASHBOARD_MODE = 'live';
   });
 
-  it('creates an enrolment with hosted auth kept out of the one-time result', async () => {
+  it('creates a native connection invitation with hosted auth kept out of the result', async () => {
     fetcher.mockResolvedValueOnce(
       Response.json({
         id: 'enr_01',
-        token: 'piqae_enrol_once',
-        expires_at: '2026-07-29T12:10:00.000Z'
+        state: 'pending',
+        expires_at: '2026-07-29T12:10:00.000Z',
+        node_id: null,
+        connect_url: `https://app.piqae.com/connect#enrolment_token=piq_enr_${'a'.repeat(32)}`,
+        downloads: []
       })
     );
 
@@ -78,14 +81,18 @@ describe('dashboard mutation actions', () => {
     );
 
     expect(requestDetails()).toEqual({
-      url: 'https://api.piqae.test/v1/agent-enrolments',
+      url: 'https://api.piqae.test/v1/node-connect-sessions',
       method: 'POST',
       authorization: `Bearer ${accessToken}`,
-      body: { name: 'Warehouse agent', expires_in_seconds: 600 }
+      body: {
+        name: 'Warehouse agent',
+        expires_in_seconds: 600,
+        return_url: 'https://dashboard.piqae.test/dashboard?view=nodes'
+      }
     });
     expect(result).toMatchObject({
       mutation: 'createEnrolment',
-      enrolment: { token: 'piqae_enrol_once' }
+      enrolment: { connectUrl: expect.stringContaining('https://app.piqae.com/connect#') }
     });
     expect(setHeaders).toHaveBeenCalledWith({ 'cache-control': 'no-store, private' });
     expect(JSON.stringify(result)).not.toContain(accessToken);

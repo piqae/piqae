@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
+import { cleanup, render, screen } from '@testing-library/svelte';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { loadReleaseManifest } from '$lib/server/release-manifest';
 
@@ -12,10 +12,8 @@ import Page from './+page.svelte';
 describe('downloads', () => {
   afterEach(cleanup);
 
-  it('removes a connect capability from the URL before offering an explicit copy action', async () => {
+  it('removes a connect capability from the URL before offering an app handoff', async () => {
     const token = `piq_enr_${'a'.repeat(32)}`;
-    const writeText = vi.fn().mockResolvedValue(undefined);
-    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
     window.history.replaceState({}, '', `/downloads#enrolment_token=${token}`);
 
     render(Page, {
@@ -34,43 +32,12 @@ describe('downloads', () => {
     });
 
     expect(
-      await screen.findByRole('heading', { name: 'Your one-time connection code is ready.' })
+      await screen.findByRole('heading', { name: 'Connect the Piqae app on this computer.' })
     ).toBeInTheDocument();
     expect(window.location.hash).toBe('');
     expect(document.body).not.toHaveTextContent(token);
-
-    await fireEvent.click(screen.getByRole('button', { name: 'Copy one-time connection code' }));
-    expect(writeText).toHaveBeenCalledWith(token);
-    expect(screen.getByRole('button', { name: 'Connection code copied' })).toBeInTheDocument();
-  });
-
-  it('reports a rejected clipboard write without claiming the connection code was copied', async () => {
-    const token = `piq_enr_${'b'.repeat(32)}`;
-    const writeText = vi.fn().mockRejectedValue(new DOMException('Clipboard permission denied'));
-    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
-    window.history.replaceState({}, '', `/downloads#enrolment_token=${token}`);
-
-    render(Page, {
-      data: {
-        meta: {
-          deployment: 'cloud',
-          version: '0.1.0',
-          auth: { provider: 'workos', workspaceSwitching: true, invitations: true },
-          billing: { enabled: true },
-          updates: { officialFeed: true, customFeed: false }
-        },
-        manifest: loadReleaseManifest({}),
-        detected: { platform: 'macos', architecture: null, label: 'this Mac' },
-        recommendedArtifactId: 'macos-universal'
-      } as never
-    });
-
-    const copy = await screen.findByRole('button', { name: 'Copy one-time connection code' });
-    await fireEvent.click(copy);
-
-    expect(writeText).toHaveBeenCalledWith(token);
-    expect(screen.getByRole('button', { name: 'Copy failed — try again' })).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Connection code copied' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Open Piqae to connect' })).toBeInTheDocument();
+    expect(screen.getByText(/do not need a separate Piqae account/i)).toBeInTheDocument();
   });
 
   it('leads with the detected platform while keeping unsupported builds truthful', () => {

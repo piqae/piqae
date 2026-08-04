@@ -23,15 +23,18 @@ The agent has a durable connector registry, separate signing and content keys,
 SQLite/content roots, synchronization cursors and outboxes per connector, plus
 bounded fair scheduling across enabled connectors. Connector enrolment requires
 proof by the immutable physical-installation key and persists the exact local
-printer selection; an empty selection never means all printers.
+printer selection; an empty selection never means all printers. A local-first
+installation activates only connectors accepted through the native consent
+flow. Its menu aggregates their live health without disclosing one connector
+to another.
 
 This remains a **Preview implementation**, not a Supported fleet claim. macOS
-has the Piqae-branded application-link and local consent flow in source and
-tested unsigned packaging. Windows and Linux have the shared headless
+has the Piqae-branded browser-to-app handoff and local consent flow in signed,
+notarised packaging. Windows and Linux have the shared headless
 stdin-only preview/accept transaction but do not register an application link
-or provide an equivalent native consent shell. No platform has the signed,
-clean-install, physical-printer, concurrent-fleet and revocation-soak evidence
-required for production promotion.
+or provide an equivalent native consent shell. No platform yet has the
+clean-install physical-printer, concurrent-fleet and revocation-soak evidence
+required for Supported promotion.
 
 Each connector's discovery projection and queue are tenant-scoped. The local
 operator grants concrete printer IDs; another connector cannot infer that a
