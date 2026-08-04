@@ -40,6 +40,11 @@ async fn postgres_reported_complete_billing_upgrades_from_previous_schema() {
     let pool = schema_pool(&database_url, &schema).await;
 
     let all = sqlx::migrate!("../../migrations/postgres");
+    let expected_latest = all
+        .iter()
+        .map(|migration| migration.version)
+        .max()
+        .expect("at least one PostgreSQL migration");
     let previous = Migrator {
         migrations: Cow::Owned(
             all.iter()
@@ -63,7 +68,7 @@ async fn postgres_reported_complete_billing_upgrades_from_previous_schema() {
         .fetch_one(&pool)
         .await
         .expect("read latest schema version");
-    assert_eq!(latest, 17);
+    assert_eq!(latest, expected_latest);
     let billable_index: Option<String> =
         sqlx::query_scalar("SELECT to_regclass('usage_one_billable_print_per_job_idx')::text")
             .fetch_one(&pool)
