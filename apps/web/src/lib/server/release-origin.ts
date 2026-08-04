@@ -19,7 +19,7 @@ export interface ReleaseOriginConfig {
 }
 
 const releaseAssetPattern =
-  /^(?:appcast-(?:macos|windows)\.xml|piqae-[A-Za-z0-9][A-Za-z0-9._-]{0,160}\.(?:dmg|pkg|exe|zip|json|txt|sha256))$/;
+  /^(?:manifest\.json(?:\.sha256)?|appcast-(?:macos|windows)\.xml|piqae-[A-Za-z0-9][A-Za-z0-9._-]{0,160}\.(?:dmg|pkg|exe|zip|json|txt|sha256))$/;
 const maximumManifestBytes = 128 * 1024;
 const manifestReadTimeoutMilliseconds = 2_000;
 const assetLookupTimeoutMilliseconds = 2_000;

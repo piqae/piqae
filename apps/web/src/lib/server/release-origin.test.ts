@@ -46,6 +46,9 @@ describe('native release origin', () => {
     expect(releaseObjectKey('preview', 'appcast-windows.xml')).toBe(
       'native/preview/appcast-windows.xml'
     );
+    expect(releaseObjectKey('stable', 'manifest.json')).toBe(
+      'native/stable/manifest.json'
+    );
     expect(releaseObjectKey('nightly', 'piqae-macos-universal.dmg')).toBeNull();
     expect(releaseObjectKey('stable', '../customer-document.pdf')).toBeNull();
     expect(releaseObjectKey('stable', 'unlisted.pdf')).toBeNull();

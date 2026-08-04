@@ -46,7 +46,9 @@ jobs:
       SPARKLE_PRIVATE_KEY_BASE64: ${{ secrets.SPARKLE_PRIVATE_KEY_BASE64 }}
       SPARKLE_PUBLIC_ED_KEY: ${{ secrets.SPARKLE_PUBLIC_ED_KEY }}
       SPARKLE_FEED_URL: https://downloads.piqae.com/releases/stable/appcast-macos.xml
-      SPARKLE_DOWNLOAD_URL_PREFIX: https://downloads.piqae.com/releases/stable
+      # Sparkle treats a prefix without a trailing slash as a file URL and
+      # replaces its final path component.
+      SPARKLE_DOWNLOAD_URL_PREFIX: https://downloads.piqae.com/releases/stable/
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
@@ -759,9 +761,17 @@ jobs:
           curl --fail --location --silent --show-error --max-time 30 \
             https://downloads.piqae.com/releases/stable/appcast-macos.xml \
             --output "$appcast"
-          enclosure=$(xmllint --xpath \
-            'string(/*[local-name()="rss"]/*[local-name()="channel"]/*[local-name()="item"][1]/*[local-name()="enclosure"]/@url)' \
-            "$appcast")
+          enclosure=$(python3 - "$appcast" <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+
+          root = ET.parse(sys.argv[1]).getroot()
+          enclosure = root.find('./channel/item/enclosure')
+          if enclosure is None or not enclosure.get('url'):
+              raise SystemExit('The public macOS appcast has no enclosure URL.')
+          print(enclosure.get('url'))
+          PY
+          )
           expected="https://downloads.piqae.com/releases/stable/piqae-macos-${RELEASE_VERSION}-${RELEASE_BUILD}-update.zip"
           if [[ "$enclosure" != "$expected" ]]; then
             echo "The public macOS appcast does not reference the promoted archive." >&2
