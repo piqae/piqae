@@ -2093,6 +2093,16 @@ struct MemoryDeviceAuthorization {
     installation_id: String,
 }
 
+/// Workspace, environment, installation identifier, expiry, and the node whose
+/// device key the token rebinds, when it is a rotation rather than a new node.
+type MemoryEnrolment = (
+    WorkspaceId,
+    EnvironmentId,
+    String,
+    DateTime<Utc>,
+    Option<AgentId>,
+);
+
 #[derive(Debug, Default)]
 struct MemoryState {
     api_keys: HashMap<String, (WorkspaceId, EnvironmentId, StoredApiKey, String)>,
@@ -2109,17 +2119,7 @@ struct MemoryState {
     agent_public_keys: HashMap<AgentId, Vec<u8>>,
     content_encryption_keys: HashMap<AgentId, StoredContentEncryptionKey>,
     node_connectors: HashMap<(WorkspaceId, EnvironmentId, AgentId, String), StoredNodeConnector>,
-    #[allow(clippy::type_complexity)]
-    enrolments: HashMap<
-        String,
-        (
-            WorkspaceId,
-            EnvironmentId,
-            String,
-            DateTime<Utc>,
-            Option<AgentId>,
-        ),
-    >,
+    enrolments: HashMap<String, MemoryEnrolment>,
     device_authorizations: HashMap<String, MemoryDeviceAuthorization>,
     node_updates: HashMap<AgentId, StoredNodeUpdate>,
     webhooks: HashMap<String, (WorkspaceId, EnvironmentId, StoredWebhook, Vec<u8>)>,

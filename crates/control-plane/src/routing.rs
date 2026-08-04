@@ -482,13 +482,10 @@ pub async fn design_specification(
         let profile = printer
             .profiles
             .iter()
-            .find(
-                #[allow(clippy::suspicious_operation_groupings)]
-                |profile| {
-                    profile.profile_id == binding.profile_id
-                        && profile.revision == binding.profile_revision
-                },
-            )
+            .find(|profile| {
+                (profile.profile_id.as_str(), profile.revision)
+                    == (binding.profile_id.as_str(), binding.profile_revision)
+            })
             .cloned()
             .ok_or(RepositoryError::NotFound)?;
         destinations.push(DesignSpecificationDestination {
