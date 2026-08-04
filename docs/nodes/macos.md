@@ -9,7 +9,7 @@ rollback, and printer evidence.
 **Implemented in source:** CUPS discovery/submission, durable local queue,
 authenticated loopback API, menu-bar status/printers/print presets, native PrintCore
 profile capture, immutable edit/clone revisions, headless PrintCore replay, and
-the Associated Domains verified `https://app.piqae.com/connect` Universal Link
+the verified `https://app.piqae.com/connect` link shape
 invitation/consent flow for adding a tenant connector to an
 existing installation. Connector enrollment requires an explicit printer
 selection and an installation-key proof; the shell passes the capability to the

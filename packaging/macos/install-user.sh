@@ -52,7 +52,8 @@ log_root="$HOME/Library/Logs/Spool"
 agent_plist="$launch_agents/com.piqae.node.agent.plist"
 menu_plist="$launch_agents/com.piqae.node.menu.plist"
 agent_label="com.piqae.node.agent"
-menu_label="com.piqae.node.menu"
+menu_label="com.piqae.node.menu.launcher"
+previous_menu_label="com.piqae.node.menu"
 legacy_agent_plist="$launch_agents/com.c4coffee.spool.agent.plist"
 legacy_menu_plist="$launch_agents/com.c4coffee.spool.menu.plist"
 legacy_agent_label="com.c4coffee.spool.agent"
@@ -133,6 +134,7 @@ fi
 launchctl bootout "$domain/$agent_label" >/dev/null 2>&1 || true
 launchctl bootout "$domain/$legacy_agent_label" >/dev/null 2>&1 || true
 launchctl bootout "$domain/$menu_label" >/dev/null 2>&1 || true
+launchctl bootout "$domain/$previous_menu_label" >/dev/null 2>&1 || true
 launchctl bootout "$domain/$legacy_menu_label" >/dev/null 2>&1 || true
 /usr/bin/osascript \
   -e 'tell application id "com.piqae.node.menu" to quit' \

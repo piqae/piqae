@@ -8,10 +8,11 @@ when the agent is unavailable.
 `PiqaeMenuCore` includes strict parsing for the reserved native connect-link
 shape, HTTPS-only return destinations (with loopback HTTP for development),
 explicit non-empty printer/permission consent, and capability-hash replay
-suppression without retaining the capability. The app claims
-`applinks:app.piqae.com` and handles the verified `/connect` Universal Link.
-The `piqae://` route remains deprecated compatibility for existing Preview
-links and is not emitted for new sessions. The app
+suppression without retaining the capability. The app understands the verified
+`/connect` link shape and the `piqae://` compatibility route. Developer ID
+builds do not currently claim Associated Domains because that restricted
+entitlement requires an embedded provisioning profile; browser handoff remains
+the supported connection path until that profile is provisioned. The app
 uses the headless agent's bounded stdin-only preview and acceptance commands;
 the capability never enters process arguments, environment variables, files,
 or diagnostics. Piqae resolves the requesting workspace before showing local

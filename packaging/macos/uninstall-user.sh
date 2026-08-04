@@ -21,6 +21,7 @@ preview_install_root="$HOME/Library/Application Support/Piqae/bin"
 
 launchctl bootout "$domain/com.piqae.node.agent" >/dev/null 2>&1 || true
 launchctl bootout "$domain/com.piqae.node.menu" >/dev/null 2>&1 || true
+launchctl bootout "$domain/com.piqae.node.menu.launcher" >/dev/null 2>&1 || true
 launchctl bootout "$domain/com.c4coffee.spool.agent" >/dev/null 2>&1 || true
 launchctl bootout "$domain/com.c4coffee.spool.menu" >/dev/null 2>&1 || true
 launchctl bootout "$domain/com.piqae.agent" >/dev/null 2>&1 || true
