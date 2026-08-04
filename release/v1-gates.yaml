@@ -34,7 +34,7 @@ required:
     command: python3 release/tools/audit_platform_service_account_coverage.py
 manual:
   - id: compatibility
-    evidence: PrintNode fixture suite and compatibility endpoint report
+    evidence: the legacy provider fixture suite and compatibility endpoint report
   - id: restart_recovery
     evidence: forced-restart and lease-expiry report
   - id: tenant_isolation

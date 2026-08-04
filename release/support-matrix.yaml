@@ -40,7 +40,7 @@ features:
   signed_automatic_node_updates:
     tier: disabled
     reason: macOS signing and app-only Sparkle checks exist, but atomic full-node activation and rollback evidence do not
-  printnode_compatibility:
+  legacy_compatibility:
     tier: preview
     reason: only the documented compatibility subset is covered by fixtures
   platform_service_accounts:

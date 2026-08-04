@@ -18,4 +18,4 @@ Describe the observable result.
 
 ## Compatibility
 
-Describe API, protocol, database, agent N/N-1, and PrintNode compatibility effects.
+Describe API, protocol, database, agent N/N-1, and legacy compatibility effects.

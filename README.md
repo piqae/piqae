@@ -11,7 +11,7 @@ The repository now contains:
 - a local-first mode that needs no control-plane server;
 - an optional self-hosted control plane for remote and offline printing;
 - an optional multi-tenant SaaS built from the same open-source control plane;
-- a compatibility API that allows existing PrintNode integrations to change
+- a compatibility API that allows existing legacy-provider integrations to change
   their base URL and credentials instead of being rewritten;
 - durable, observable delivery through the control-plane queue, agent queue,
   and operating-system spooler.
@@ -66,7 +66,7 @@ docker compose --env-file deploy/self-host/.env \
 ```
 
 See [self-hosting](docs/operations/self-hosting.md), the
-[PrintNode migration guide](docs/api/printnode-migration.md), and the
+[legacy-provider migration guide](docs/api/legacy-compatibility.md), and the
 [OpenAPI contract](contracts/openapi/piqae-v1.yaml) before connecting real
 printers. Production trace export is covered in the
 [observability guide](docs/operations/observability.md).
@@ -86,7 +86,7 @@ Publishing remains fail-closed until the repository has moved to
 ## Documentation
 
 1. [Vision, principles, and scope](docs/00-vision-and-scope.md)
-2. [PrintNode capability inventory](docs/01-printnode-capability-inventory.md)
+2. [the legacy service capability inventory](docs/01-legacy-compatibility-inventory.md)
 3. [Product requirements and user experience](docs/02-product-requirements.md)
 4. [Proposed architecture and technology choices](docs/03-architecture-and-stack.md)
 5. [Queues, protocol, and job state machines](docs/04-protocol-queues-and-state.md)
@@ -127,8 +127,8 @@ brand, icons, wording, or assets. The native tray/menu shells continue to follow
 their operating-system conventions.
 
 The first release target is the subset that replaces this organisation's
-PrintNode usage. The compatibility surface is not represented as universal
-PrintNode parity: scales, integrator subaccounts, billing, and additional
+The legacy service usage. The compatibility surface is not represented as universal
+The legacy service parity: scales, integrator subaccounts, billing, and additional
 historical response quirks remain later layers and do not weaken the reliable
 print path.
 

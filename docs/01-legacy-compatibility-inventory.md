@@ -1,23 +1,23 @@
-# PrintNode capability inventory
+# the legacy service capability inventory
 
 ## Purpose and research boundary
 
-This is a functional inventory derived from PrintNode's public documentation,
+This is a functional inventory derived from the legacy service's public documentation,
 FAQ, download page, public API reference, and open-source SDKs. It is an
-independent summary, not a copy of PrintNode's documentation. The source
+independently written summary of publicly observable behaviour. The source
 snapshot was reviewed on 29 July 2026; links are in [references.md](references.md).
 
-PrintNode's private client/server wire protocol and proprietary printing
+The legacy provider's private client/server wire protocol and proprietary printing
 backends are outside the research boundary. Compatibility work should remain a
 clean-room implementation based on public behavior.
 
-## How PrintNode works
+## How the legacy service works
 
 The public architecture has four relevant actors:
 
 1. The integrating application calls the hosted JSON API.
-2. The PrintNode server registers and queues the job.
-3. A PrintNode Client maintains a network connection from a computer that can
+2. The legacy provider server registers and queues the job.
+3. A legacy desktop client maintains a network connection from a computer that can
    access the target printer.
 4. The client downloads or receives content and submits it to the
    operating-system print queue using locally installed drivers.
@@ -26,7 +26,7 @@ The API responds to job creation after registering/enqueueing the job; it does
 not wait for the printer. The client automatically synchronises installed
 printers and their driver-reported capabilities to the account.
 
-PrintNode therefore has at least two queues:
+The legacy service therefore has at least two queues:
 
 - a server-side delivery queue, which retains a job until a client receives it
   or `expireAfter` is reached; and
@@ -34,7 +34,7 @@ PrintNode therefore has at least two queues:
   submission.
 
 The documented stable state `done` means the client delivered the job to the
-operating-system queue. PrintNode explicitly says that the job can still fail
+operating-system queue. the legacy service explicitly says that the job can still fail
 after this state. This distinction must be preserved in compatibility mode and
 improved in the native API.
 
@@ -48,7 +48,7 @@ The documented client runs on:
 - Raspberry Pi and other low-power Linux devices;
 - a headless Linux/Chromebook environment with caveats.
 
-PrintNode does not currently advertise Android or iOS clients. Printers must be
+The legacy service does not currently advertise Android or iOS clients. Printers must be
 installed in the host operating system. The client detects installed queues; it
 does not independently discover every printer on the network.
 
@@ -60,12 +60,12 @@ service.
 
 The July 2026 public downloads are large relative to the low-resource goal
 (approximately 104 MB for Windows and 156 MB for the current Apple Silicon
-macOS package). PrintNode's feature page claims roughly 40 MB Windows memory
+macOS package). the legacy service's feature page claims roughly 40 MB Windows memory
 usage. These are reference points, not independently verified measurements.
 
 ## Printer coverage
 
-PrintNode's core compatibility claim is based on using installed operating
+The legacy service's core compatibility claim is based on using installed operating
 system drivers: if the operating system can print to a configured printer, the
 client should normally be able to print to it.
 
@@ -86,8 +86,8 @@ network queues. Special setup guides exist for Zebra and DYMO devices.
 | `raw_base64` | RAW bytes are base64-encoded in the API request. |
 
 URI content may use HTTP Basic or Digest authentication. URI mode can keep
-document bytes away from the PrintNode server if the client fetches directly.
-Base64 mode passes content through PrintNode. PrintNode says document content
+document bytes away from the legacy service server if the client fetches directly.
+Base64 mode passes content through the legacy service. the legacy service says document content
 is deleted after printing.
 
 RAW printing bypasses normal document rendering and sends device-specific
@@ -126,7 +126,7 @@ All documented options are optional and apply to rendered jobs:
 | --- | --- |
 | `bin` | Driver-reported input tray or output bin name. |
 | `collate` | Collate multiple copies when supported. |
-| `color` | Colour or grayscale; PrintNode documents a Windows backend limitation. |
+| `color` | Colour or grayscale; the legacy service documents a Windows backend limitation. |
 | `copies` | Driver-level number of copies, bounded by reported capability. |
 | `dpi` | Driver-reported resolution string such as `300x300`. |
 | `duplex` | `long-edge`, `short-edge`, or `one-sided`. |
@@ -199,7 +199,7 @@ A “set” is a comma-separated set of positive integer IDs.
 - `GET /printjobs/{print-job-set}/states`
 
 Cancellation is only guaranteed before delivery to the client. Completed or
-already delivered jobs cannot be cancelled through the PrintNode API.
+already delivered jobs cannot be cancelled through the legacy API.
 
 ### Pagination and errors
 
@@ -250,7 +250,7 @@ The stable documented states are:
 | `error` | An error occurred while attempting client execution. |
 | `expired` | Client delivery did not happen before expiry. |
 
-PrintNode may record other internal states, but only stable states are promised
+The legacy service may record other internal states, but only stable states are promised
 through webhooks. State records include job ID, state, message, data,
 client version, timestamp, and age relative to the initial state.
 
@@ -278,7 +278,7 @@ Scale subscriptions can filter by computer, device name, and device number.
 
 ## Scales
 
-PrintNode supports:
+The legacy service supports:
 
 - USB HID weighing scales;
 - serial/RS-232 scales;
@@ -316,12 +316,12 @@ The public API and feature pages describe:
 - Make and Zapier integrations plus third-party commerce/ERP plugins;
 - a commercial standalone/private deployment.
 
-These are not needed to stop paying for PrintNode internally. They become
+These are not needed to stop paying for the legacy service internally. They become
 important for drop-in SaaS positioning.
 
 ## Commercial model snapshot
 
-PrintNode counts one API print request as one print regardless of the document's
+The legacy service counts one API print request as one print regardless of the document's
 page count. A “computer” is a device running the connected client, regardless of
 how many printers it exposes. Pricing is mutable; this snapshot is useful only
 for a build-versus-buy model and must be refreshed before a business decision.

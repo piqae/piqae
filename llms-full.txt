@@ -28,7 +28,7 @@ physical test, and stable support certification are different facts.
 
 ## Product model
 
-Piqae accepts print jobs from a native API or a PrintNode-shaped compatibility
+Piqae accepts print jobs from a native API or a legacy-shaped compatibility
 API, stores durable tenant/job state in PostgreSQL, stores content in an
 S3-compatible object store, and routes work to an enrolled node. The node
 persists accepted work in SQLite, uses an isolated executor, and hands output
@@ -204,7 +204,7 @@ Keys are server-side secrets, one per integration/environment, with minimum
 scopes. Bootstrap credentials are rotated after durable keys exist. Nodes use
 their enrolled identity. Hosted OIDC verifies issuer, JWKS, application
 binding, organization, and permission claims; unrestricted OIDC remains off.
-PrintNode compatibility routes use HTTP Basic with the compatibility key as the
+legacy compatibility routes use HTTP Basic with the compatibility key as the
 username and an empty password.
 
 Native job registration is POST /v1/jobs. Clients send an Idempotency-Key of
@@ -226,7 +226,7 @@ Headers are Piqae-Timestamp and Piqae-Signature: v1=<base64>. Consumers verify
 before parsing/side effects, use constant-time comparison and a timestamp
 tolerance, durably deduplicate event IDs, and return 2xx only after acceptance.
 
-The PrintNode-shaped API implements computers, printers, print jobs, states,
+The legacy-shaped API implements computers, printers, print jobs, states,
 cancellation, and compatibility authentication/idempotency with documented V1
 bounds. Collections currently hydrate bounded windows in some routes. Scales,
 integrator/child-account headers, and exact undocumented race behavior are not
@@ -333,7 +333,7 @@ Entry points:
 - docs/api/authentication.md
 - docs/api/idempotency.md
 - docs/api/webhooks.md
-- docs/api/printnode-migration.md
+- docs/api/legacy-compatibility.md
 - docs/operations/configuration.md
 - docs/operations/upgrades.md
 - docs/operations/backups-and-restore.md
@@ -349,7 +349,7 @@ Entry points:
 Authoritative design/reference:
 
 - docs/00-vision-and-scope.md
-- docs/01-printnode-capability-inventory.md
+- docs/01-legacy-compatibility-inventory.md
 - docs/02-product-requirements.md
 - docs/03-architecture-and-stack.md
 - docs/04-protocol-queues-and-state.md

@@ -62,5 +62,5 @@ repository-local state.
 
 Update documentation with behavior. Do not call a platform production-ready
 because it compiles or because a virtual spooler accepted a job. The checked-in
-support matrix is authoritative. Keep PrintNode compatibility claims scoped to
+support matrix is authoritative. Keep legacy compatibility claims scoped to
 tested endpoints and response behavior.

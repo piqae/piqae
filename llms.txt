@@ -25,7 +25,7 @@
 ## Contracts and operations
 
 - [Native API model](docs/11-native-api-and-data-model.md)
-- [PrintNode migration](docs/api/printnode-migration.md)
+- [legacy-provider migration](docs/api/legacy-compatibility.md)
 - [Self-hosting](docs/operations/self-hosting.md)
 - [Support matrix](release/support-matrix.yaml)
 

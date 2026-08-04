@@ -85,7 +85,7 @@ Current limitations are intentional and explicit:
 - session revocation is database-backed, but there is no all-sessions UI yet;
 - the bootstrap endpoint is disabled when its environment token is absent.
 
-PrintNode compatibility routes use HTTP Basic with the compatibility key as
+legacy compatibility routes use HTTP Basic with the compatibility key as
 username and an empty password. That convention applies only to compatibility
 routes.
 

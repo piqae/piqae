@@ -54,7 +54,7 @@ A credible 48-hour result is one narrow vertical slice:
    handoff fails;
 8. restarting the agent does not silently submit a known completed job again.
 
-It is not realistic in two days to deliver PrintNode feature parity,
+It is not realistic in two days to deliver legacy-provider feature parity,
 cross-platform installers, silent auto-update, physical-paper proof, complete
 driver option discovery, robust offline printing, scale support, public
 webhooks, or a supported self-hosted distribution. Calling the narrow slice an
@@ -430,8 +430,8 @@ The enroll response returns the device secret once. The claim response returns
 at most one job in the MVP. The document response should be short-lived and
 authorized; never expose a permanent public PDF URL.
 
-PrintNode-compatible endpoints do not belong in the 48-hour slice. Once the
-native API is reliable, add a compatibility adapter translating PrintNode
+legacy-compatible endpoints do not belong in the 48-hour slice. Once the
+native API is reliable, add a compatibility adapter translating the legacy service
 requests into the same internal command and state model.
 
 ## Forty-eight-hour implementation plan
@@ -439,7 +439,7 @@ requests into the same internal command and state model.
 ### Preparation: two hours
 
 - choose the exact Windows machine, printer, driver version, and PDF;
-- record the current successful PrintNode output for comparison;
+- record the current successful legacy-provider output for comparison;
 - install a pinned SumatraPDF release manually;
 - verify its command-line printing outside our code;
 - create WorkOS staging, a Vercel project, Neon database, and private Blob;
@@ -529,7 +529,7 @@ recording, or the uncertain-handoff behavior. Those are the product.
 - reconcile receipts with the Windows spooler;
 - add RAW printing if required internally;
 - add CUPS printer discovery/printing on one Linux or macOS machine;
-- add API keys and one PrintNode-compatible job endpoint;
+- add API keys and one legacy-compatible job endpoint;
 - add webhook outbox/retry;
 - create an MSI and basic update channel only after signing decisions;
 - add OpenTelemetry traces correlated by job ID;
@@ -538,7 +538,7 @@ recording, or the uncertain-handoff behavior. Those are the product.
 ### Weeks two to four: dependable self-use beta
 
 - complete local offline queue semantics;
-- map the PrintNode options actually used by internal integrations;
+- map the legacy printing options actually used by internal integrations;
 - build differential and physical print fixtures;
 - add printer capability snapshots and changes;
 - isolate native calls that can hang;

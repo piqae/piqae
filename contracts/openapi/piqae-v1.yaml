@@ -7,7 +7,7 @@ info:
     Every response, including framework 404/405 responses, carries `X-Request-Id`.
     A caller value is preserved only when it matches `^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`;
     otherwise Piqae generates `req_<ULID>`. Native `error.request_id` and
-    PrintNode-compatible error `uid` exactly match the response header.
+    legacy-compatible error `uid` exactly match the response header.
     During the V1 migration window, existing `spl_*` credentials and signed
     `X-Spool-*` node headers remain accepted. New clients must use `piq_*`
     credentials and `X-Piqae-*` headers.
@@ -45,13 +45,13 @@ tags:
     description: Consume immutable state changes.
   - name: Webhooks
     description: Deliver signed event notifications.
-  - name: PrintNode Compatibility
-    description: PrintNode-shaped migration surface at the API origin root.
+  - name: the legacy provider Compatibility
+    description: legacy-shaped migration surface at the API origin root.
 paths:
   /whoami:
     get:
-      summary: Inspect the PrintNode-compatible account projection
-      tags: [PrintNode Compatibility]
+      summary: Inspect the legacy-compatible account projection
+      tags: [the legacy provider Compatibility]
       operationId: compatibilityWhoAmI
       security: [{ compatibilityBasic: [] }]
       responses:
@@ -63,8 +63,8 @@ paths:
         "401": { $ref: "#/components/responses/Error" }
   /ping:
     get:
-      summary: Check authenticated PrintNode compatibility access
-      tags: [PrintNode Compatibility]
+      summary: Check authenticated legacy compatibility access
+      tags: [the legacy provider Compatibility]
       operationId: compatibilityPing
       security: [{ compatibilityBasic: [] }]
       responses:
@@ -77,7 +77,7 @@ paths:
   /noop:
     get:
       summary: Perform an authenticated no-op
-      tags: [PrintNode Compatibility]
+      tags: [the legacy provider Compatibility]
       operationId: compatibilityNoop
       security: [{ compatibilityBasic: [] }]
       responses:
@@ -86,8 +86,8 @@ paths:
         "401": { $ref: "#/components/responses/Error" }
   /computers:
     get:
-      summary: List PrintNode-compatible computers
-      tags: [PrintNode Compatibility]
+      summary: List legacy-compatible computers
+      tags: [the legacy provider Compatibility]
       operationId: compatibilityListComputers
       security: [{ compatibilityBasic: [] }]
       parameters:
@@ -107,8 +107,8 @@ paths:
     parameters:
       - $ref: "#/components/parameters/ComputerSet"
     get:
-      summary: Get a set of PrintNode-compatible computers
-      tags: [PrintNode Compatibility]
+      summary: Get a set of legacy-compatible computers
+      tags: [the legacy provider Compatibility]
       operationId: compatibilityGetComputers
       security: [{ compatibilityBasic: [] }]
       responses:
@@ -126,7 +126,7 @@ paths:
       - $ref: "#/components/parameters/ComputerSet"
     get:
       summary: List printers attached to a computer set
-      tags: [PrintNode Compatibility]
+      tags: [the legacy provider Compatibility]
       operationId: compatibilityListComputerPrinters
       security: [{ compatibilityBasic: [] }]
       parameters:
@@ -149,7 +149,7 @@ paths:
       - $ref: "#/components/parameters/PrinterSet"
     get:
       summary: Intersect computer and printer sets
-      tags: [PrintNode Compatibility]
+      tags: [the legacy provider Compatibility]
       operationId: compatibilityGetComputerPrinters
       security: [{ compatibilityBasic: [] }]
       parameters:
@@ -168,8 +168,8 @@ paths:
         "404": { $ref: "#/components/responses/Error" }
   /printers:
     get:
-      summary: List PrintNode-compatible printers
-      tags: [PrintNode Compatibility]
+      summary: List legacy-compatible printers
+      tags: [the legacy provider Compatibility]
       operationId: compatibilityListPrinters
       security: [{ compatibilityBasic: [] }]
       parameters:
@@ -189,8 +189,8 @@ paths:
     parameters:
       - $ref: "#/components/parameters/PrinterSet"
     get:
-      summary: Get a set of PrintNode-compatible printers
-      tags: [PrintNode Compatibility]
+      summary: Get a set of legacy-compatible printers
+      tags: [the legacy provider Compatibility]
       operationId: compatibilityGetPrinters
       security: [{ compatibilityBasic: [] }]
       responses:
@@ -205,8 +205,8 @@ paths:
         "404": { $ref: "#/components/responses/Error" }
   /printjobs:
     post:
-      summary: Create a PrintNode-compatible print job
-      tags: [PrintNode Compatibility]
+      summary: Create a legacy-compatible print job
+      tags: [the legacy provider Compatibility]
       operationId: compatibilityCreatePrintJob
       security: [{ compatibilityBasic: [] }]
       requestBody:
@@ -228,8 +228,8 @@ paths:
         "402": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
     get:
-      summary: List PrintNode-compatible print jobs
-      tags: [PrintNode Compatibility]
+      summary: List legacy-compatible print jobs
+      tags: [the legacy provider Compatibility]
       operationId: compatibilityListPrintJobs
       security: [{ compatibilityBasic: [] }]
       parameters:
@@ -248,7 +248,7 @@ paths:
         "401": { $ref: "#/components/responses/Error" }
     delete:
       summary: Cancel all eligible pre-delivery print jobs
-      tags: [PrintNode Compatibility]
+      tags: [the legacy provider Compatibility]
       operationId: compatibilityCancelPrintJobs
       security: [{ compatibilityBasic: [] }]
       responses:
@@ -259,8 +259,8 @@ paths:
     parameters:
       - $ref: "#/components/parameters/JobSet"
     get:
-      summary: Get a set of PrintNode-compatible print jobs
-      tags: [PrintNode Compatibility]
+      summary: Get a set of legacy-compatible print jobs
+      tags: [the legacy provider Compatibility]
       operationId: compatibilityGetPrintJobs
       security: [{ compatibilityBasic: [] }]
       responses:
@@ -275,7 +275,7 @@ paths:
         "404": { $ref: "#/components/responses/Error" }
     delete:
       summary: Cancel an eligible set of pre-delivery print jobs
-      tags: [PrintNode Compatibility]
+      tags: [the legacy provider Compatibility]
       operationId: compatibilityCancelPrintJobSet
       security: [{ compatibilityBasic: [] }]
       responses:
@@ -285,8 +285,8 @@ paths:
         "404": { $ref: "#/components/responses/Error" }
   /printjobs/states:
     get:
-      summary: List PrintNode-compatible job states
-      tags: [PrintNode Compatibility]
+      summary: List legacy-compatible job states
+      tags: [the legacy provider Compatibility]
       operationId: compatibilityListPrintJobStates
       security: [{ compatibilityBasic: [] }]
       responses:
@@ -302,8 +302,8 @@ paths:
     parameters:
       - $ref: "#/components/parameters/JobSet"
     get:
-      summary: Get PrintNode-compatible states for a job set
-      tags: [PrintNode Compatibility]
+      summary: Get legacy-compatible states for a job set
+      tags: [the legacy provider Compatibility]
       operationId: compatibilityGetPrintJobStates
       security: [{ compatibilityBasic: [] }]
       responses:
@@ -321,7 +321,7 @@ paths:
       - $ref: "#/components/parameters/PrinterSet"
     get:
       summary: List print jobs for a printer set
-      tags: [PrintNode Compatibility]
+      tags: [the legacy provider Compatibility]
       operationId: compatibilityListPrinterPrintJobs
       security: [{ compatibilityBasic: [] }]
       parameters:
@@ -340,7 +340,7 @@ paths:
         "404": { $ref: "#/components/responses/Error" }
     delete:
       summary: Cancel eligible pre-delivery jobs for a printer set
-      tags: [PrintNode Compatibility]
+      tags: [the legacy provider Compatibility]
       operationId: compatibilityCancelPrinterPrintJobs
       security: [{ compatibilityBasic: [] }]
       responses:
@@ -354,7 +354,7 @@ paths:
       - $ref: "#/components/parameters/JobSet"
     get:
       summary: Intersect printer and print-job sets
-      tags: [PrintNode Compatibility]
+      tags: [the legacy provider Compatibility]
       operationId: compatibilityGetPrinterPrintJobs
       security: [{ compatibilityBasic: [] }]
       parameters:
@@ -373,7 +373,7 @@ paths:
         "404": { $ref: "#/components/responses/Error" }
     delete:
       summary: Cancel the eligible intersection of printer and print-job sets
-      tags: [PrintNode Compatibility]
+      tags: [the legacy provider Compatibility]
       operationId: compatibilityCancelPrinterPrintJobSet
       security: [{ compatibilityBasic: [] }]
       responses:

@@ -1,21 +1,21 @@
-# Migrating a PrintNode printing integration
+# Migrating a legacy-provider printing integration
 
 **Status:** substantial V1 compatibility surface implemented; explicitly
 bounded differences below are not exact parity.
 
-Piqae V1 implements the PrintNode printing surface at the API origin root. The
+Piqae V1 implements the legacy-provider printing surface at the API origin root. The
 native Piqae API remains under `/v1`.
 
 ## Minimal migration
 
 1. Create a live Piqae API key.
-2. Enrol an agent on each machine that currently runs the PrintNode client.
+2. Enrol an agent on each machine that currently runs the legacy desktop client.
 3. Confirm the same installed OS queues appear in Piqae.
 4. Change the integration's API base URL to the Piqae origin.
-5. Replace the PrintNode API key with the Piqae compatibility key.
+5. Replace the legacy API key with the Piqae compatibility key.
 6. Run a PDF and RAW canary through each printer class.
 
-Compatibility authentication keeps the PrintNode convention: use the key as
+Compatibility authentication keeps the legacy convention: use the key as
 the HTTP Basic username and an empty password.
 
 ```sh
@@ -50,7 +50,7 @@ typed ID internally.
 
 ## V1 compatibility matrix
 
-| PrintNode-shaped route | Piqae V1 | Notes |
+| legacy-shaped route | Piqae V1 | Notes |
 | --- | --- | --- |
 | `GET /computers` and `/computers/{set}` | Implemented | Comma-separated positive integer mappings are tenant scoped, sorted, and deduplicated. |
 | `GET /printers` and `/printers/{set}` | Implemented, bounded | `limit`, `dir=asc|desc`, and exclusive `after={id}` use stable compatibility IDs inside the newest 500-printer hydration window. Set-qualified reads are exact inside that window. |
@@ -75,9 +75,9 @@ repository. Likewise, unqualified `DELETE /printjobs` and
 `DELETE /printers/{set}/printjobs` do not claim to cancel eligible records
 outside the newest 500-job window.
 
-PrintNode documents that cancellation responses contain only jobs cancelled
+The legacy service documents that cancellation responses contain only jobs cancelled
 before client delivery. Piqae follows that boundary and returns a JSON array of
-cancelled numeric IDs with `200`. Exact undocumented PrintNode behavior for
+cancelled numeric IDs with `200`. Exact undocumented legacy-provider behavior for
 mixed missing, already-delivered, and racing sets has not been verified against
 the hosted service; Piqae returns missing requested mappings as `404`, omits
 ineligible/racing jobs, and never reports them as cancelled.
@@ -85,7 +85,7 @@ ineligible/racing jobs, and never reports them as cancelled.
 ## Status semantics
 
 The stable compatibility states are `new`, `sent_to_client`, `done`, `error`,
-and `expired`. As with PrintNode, `done` means the local client successfully
+and `expired`. As with the legacy service, `done` means the local client successfully
 handed the document to the operating-system print queue. It does not prove
 that paper physically exited the printer.
 
@@ -98,11 +98,11 @@ Piqae's native API exposes more precise events including `queued_local`,
 - Scales are deferred to V1.1.
 - Integrator and child-account headers are deferred to V1.1.
 - Compatibility jobs cannot be cancelled after durable local acceptance,
-  matching PrintNode's documented control boundary.
+  matching the legacy service's documented control boundary.
 - Private-network URI sources require an administrator to enable the
   `allow_private_uri_sources` workspace policy.
 - Webhook signing is stronger in the native API. Compatibility webhooks retain
-  the expected PrintNode body and secret behavior.
+  the expected legacy-provider body and secret behavior.
 
 An unsupported endpoint returns a stable error; it never silently reports
 success.

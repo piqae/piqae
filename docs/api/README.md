@@ -11,7 +11,7 @@
 - [Uploads and design applications](uploads-and-design-apps.md)
 - [Cloud billing and usage](billing-and-usage.md)
 - [Webhooks](webhooks.md)
-- [PrintNode migration](printnode-migration.md)
+- [legacy-provider migration](legacy-compatibility.md)
 
 The OpenAPI document is authoritative for request/response schemas. Narrative
 guides do not loosen validation or security requirements.

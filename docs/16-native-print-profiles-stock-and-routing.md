@@ -564,7 +564,7 @@ the profile:
 Overrides are merged locally, after driver compatibility validation, into a
 temporary job ticket. The stored profile revision remains unchanged.
 
-### PrintNode compatibility
+### legacy compatibility
 
 The compatibility API flattens each published target/profile into a virtual
 printer with a stable integer ID:
@@ -577,7 +577,7 @@ printer with a stable integer ID:
 ```
 
 Its capability response is constrained to the selected profile and safe
-overrides. Generic PrintNode `paper`, `bin`, or `media` options must not be used
+overrides. Generic legacy-provider `paper`, `bin`, or `media` options must not be used
 to bypass an immutable complex profile. The base destination can optionally be
 published as a generic printer for callers that need the original behavior.
 
@@ -871,7 +871,7 @@ The work can proceed in parallel after the domain contract lands.
 - synchronize metadata/readiness;
 - add stock, target, binding, and profile APIs;
 - add target resolution and single-node delivery lease;
-- flatten targets into PrintNode-compatible virtual printers;
+- flatten targets into legacy-compatible virtual printers;
 - simplify the printer page;
 - add stock/operator and profile-history views;
 - update SDK, OpenAPI, migration guide, and examples.
@@ -948,7 +948,7 @@ The slice is complete when:
 6. jobs stop on driver mismatch or missing stock;
 7. one target can move between node-specific bindings without changing its API
    ID;
-8. PrintNode-compatible callers can address published profiles as virtual
+8. legacy-compatible callers can address published profiles as virtual
    printers;
 9. the web UI contains no imitation of vendor-specific settings;
 10. every handoff and readiness decision is visible in job events and traces.

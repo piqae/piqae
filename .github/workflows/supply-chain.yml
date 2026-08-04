@@ -63,6 +63,8 @@ jobs:
           ruby release/tools/test_release_policy.rb
       - name: Validate bounded security exceptions
         run: python3 release/tools/check_security_exceptions.py
+      - name: Enforce competitor terminology boundary
+        run: python3 release/tools/check_competitor_mentions.py
       - name: Reject mutable action references
         run: python3 release/tools/check_workflow_pins.py .github/workflows/*.yml
 

@@ -30,7 +30,7 @@ are the differentiators.
 
 The project should offer:
 
-- PrintNode-compatible REST resources for the common integration path;
+- legacy-compatible REST resources for the common integration path;
 - first-class modern APIs that improve state detail and authentication;
 - local printer discovery through the operating system;
 - PDF and RAW printing;
@@ -55,7 +55,7 @@ top of local printing rather than being a prerequisite for it.
 
 Do not build a printer-driver catalogue. Enumerate the printers and options
 known to Windows or CUPS and submit through those systems. This is the basis of
-PrintNode's broad hardware compatibility and is the only practical route to the
+The legacy service's broad hardware compatibility and is the only practical route to the
 same coverage.
 
 ### Durable before fast, then make durable fast
@@ -100,7 +100,7 @@ microservice fleet are not initial requirements.
 
 The compatibility goal is:
 
-- preserve PrintNode resource shapes, endpoint paths, important response
+- preserve legacy resource shapes, endpoint paths, important response
   headers, authentication style, pagination, option names, idempotency
   behavior, and stable job states;
 - allow an existing integration or official SDK to use a different base URL;
@@ -108,16 +108,16 @@ The compatibility goal is:
   responses;
 - publish a tested compatibility matrix rather than make an unbounded claim.
 
-Some official PrintNode SDKs allow the API base URL to be configured. Others
-hard-code `api.printnode.com` or expose host changes awkwardly. We should
+Some official legacy-provider SDKs allow the API base URL to be configured. Others
+hard-code a hard-coded third-party API origin or expose host changes awkwardly. We should
 provide maintained replacement SDKs and a migration guide; DNS or TLS
-impersonation of PrintNode is not a supported migration technique.
+impersonation of the legacy service is not a supported migration technique.
 
 ## What “feature parity” does not mean
 
 It does not mean:
 
-- copying PrintNode's proprietary client, protocol, branding, or rendering
+- incorporating a third party's proprietary client, protocol, branding, or rendering
   engines;
 - guaranteeing identical raster output for every driver combination;
 - declaring a page printed when the operating system cannot prove that;
@@ -140,7 +140,7 @@ through differential and physical testing.
 - job history, live state, and diagnostic bundles;
 - local and self-hosted remote deployment.
 
-### Layer B: public PrintNode printing parity
+### Layer B: public legacy-compatibility parity
 
 - all documented print options and content modes;
 - compatible computers, printers, jobs, states, cancellation, webhooks,
@@ -172,7 +172,7 @@ through differential and physical testing.
 
 The initial product is successful when:
 
-- it replaces the organisation's PrintNode bill without reducing reliability;
+- it replaces the organisation's legacy-provider bill without reducing reliability;
 - an existing integration changes only base URL and API credentials for the
   supported compatibility subset;
 - an agent can be offline, reconnect, and safely process retained jobs;
@@ -180,7 +180,6 @@ The initial product is successful when:
   status the printer stack can report;
 - a support engineer can diagnose most failures from a redacted bundle without
   remote desktop access;
-- agent idle resource consumption is materially below the current PrintNode
+- agent idle resource consumption is materially below the current legacy-provider
   client;
 - installs and upgrades do not cause duplicate agents or duplicate jobs.
-

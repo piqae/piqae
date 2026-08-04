@@ -15,7 +15,7 @@ print jobs through the same API used by the dashboard.
   printing to its own backend.
 - [Cloud node setup](getting-started/cloud.md) — install, pair, discover a
   printer, capture a native profile, and send a test job.
-- [PrintNode migration](api/printnode-migration.md) — switch the tested
+- [legacy-provider migration](api/legacy-compatibility.md) — switch the tested
   compatibility subset, then adopt native Piqae resources.
 
 ## Build an integration

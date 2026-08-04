@@ -333,14 +333,14 @@ await piqae.accounts.archive(customer.externalId);`,
     ]
   },
   {
-    slug: 'printnode-migration',
+    slug: 'legacy-compatibility',
     group: 'Reference',
-    title: 'Migrate from PrintNode',
+    title: 'Migrate from the legacy provider',
     description: 'Change the API origin for the tested compatibility subset, then adopt native Piqae resources incrementally.',
     blocks: [
       {
         heading: 'Compatibility endpoint',
-        code: `const printNode = new PrintNode({
+        code: `const legacyClient = new LegacyPrintClient({
   apiKey: process.env.PIQAE_API_KEY,
   baseUrl: 'https://compat.piqae.example'
 });`,

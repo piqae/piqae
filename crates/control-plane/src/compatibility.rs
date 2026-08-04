@@ -308,7 +308,7 @@ pub(crate) async fn create_print_job(
                 created_job.id,
                 JobState::WaitingForAgent,
                 None,
-                Some("Waiting for PrintNode-compatible client delivery".into()),
+                Some("Waiting for legacy-compatible client delivery".into()),
                 None,
                 None,
             )

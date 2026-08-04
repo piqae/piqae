@@ -3,7 +3,7 @@
 ## Strategy
 
 Do not start by recreating every account and scale endpoint. First replace the
-real PrintNode workload end to end, then widen compatibility from a stable
+real legacy-provider workload end to end, then widen compatibility from a stable
 print core.
 
 The schedule below assumes three experienced engineers:
@@ -30,7 +30,7 @@ the native profile model described in
 - immutable native tickets and driver fingerprints;
 - stock/tray readiness and operator holds;
 - stable targets across multiple nodes;
-- virtual printer IDs for PrintNode-compatible callers;
+- virtual printer IDs for legacy-compatible callers;
 - a simpler web UI that delegates vendor settings to the native driver.
 
 The current option-only named profiles migrate into this model as unverified
@@ -43,7 +43,7 @@ Deliver:
 - inventory of actual printers, OS versions, drivers, formats, options, volume,
   latency, offline duration, and failure history;
 - redacted sample PDFs/RAW jobs;
-- current PrintNode API calls and SDK versions;
+- current legacy API calls and SDK versions;
 - monthly cost and job count;
 - selection of 3–5 critical physical print scenarios;
 - agreed “accepted”, “printed”, and “uncertain” semantics;
@@ -107,7 +107,7 @@ Deliver:
 
 Exit:
 
-- internal application can print locally without PrintNode;
+- internal application can print locally without the legacy service;
 - offline/restart/duplicate tests pass;
 - resource measurements meet provisional targets.
 
@@ -131,13 +131,13 @@ Exit:
 - no loss across server/agent restart matrix;
 - the organisation can run production shadow tests.
 
-## Phase 4: PrintNode printing compatibility (6–10 weeks)
+## Phase 4: the legacy service printing compatibility (6–10 weeks)
 
 Deliver:
 
 - compatibility computers/printers/jobs/states endpoints;
 - Basic API-key authentication;
-- PrintNode content modes and all documented options;
+- the legacy service content modes and all documented options;
 - pagination, filters, response headers, error shapes;
 - idempotency and cancellation behavior;
 - compatible webhooks;
@@ -151,7 +151,7 @@ Exit:
 - internal integration changes base URL/key only;
 - supported official SDK versions pass the matrix;
 - cutover and rollback rehearsed;
-- PrintNode can be removed from the internal production path.
+- the legacy service can be removed from the internal production path.
 
 ## Phase 5: production hardening and public 1.0 (6–10 weeks)
 
@@ -222,15 +222,15 @@ Can be split based on demand.
 
 ## First internal cutover
 
-1. Run clone agents alongside PrintNode clients, but never send the same
+1. Run clone agents alongside legacy desktop clients, but never send the same
    production print job to both.
 2. Compare inventory and capability reporting.
 3. Print a controlled fixture matrix to both systems and compare output.
 4. Route low-risk test/staging jobs to the clone.
 5. Route one production printer/workflow with immediate rollback.
 6. Expand by printer/workflow after an observation window.
-7. Keep PrintNode credentials available but inactive for rollback.
-8. Remove PrintNode client only after queued jobs are empty and audit confirms
+7. Keep the legacy service credentials available but inactive for rollback.
+8. Remove legacy desktop client only after queued jobs are empty and audit confirms
    no integration still uses it.
 
 ## Work breakdown by epic
@@ -263,7 +263,7 @@ engineering and support cost. Keep it economically sensible by:
 - limiting officially supported OS/printer combinations while leaving the
   design extensible;
 - publishing community support tiers separately from tested/certified tiers;
-- measuring the break-even point against current PrintNode spend and business
+- measuring the break-even point against current legacy-provider spend and business
   risk.
 
 ## Immediate next actions
@@ -272,6 +272,6 @@ engineering and support cost. Keep it economically sensible by:
 2. Obtain representative printers and generated/redacted job fixtures.
 3. Create the Rust workspace and domain state crate.
 4. Time-box Windows PDF/RAW and CUPS spikes before building the full server.
-5. Turn the documented PrintNode subset into OpenAPI/JSON fixtures and
+5. Turn the documented legacy-provider subset into OpenAPI/JSON fixtures and
    differential tests.
 6. Decide licence and project name before publishing.

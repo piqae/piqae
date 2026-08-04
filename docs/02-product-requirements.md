@@ -6,7 +6,7 @@
 
 Wants a short, stable API contract and should not need printing expertise.
 Needs idempotency, test printers, SDKs, webhooks, predictable errors, and a
-clear migration path from PrintNode.
+clear migration path from the legacy service.
 
 ### Site installer
 
@@ -54,7 +54,7 @@ later be enrolled without reinstalling.
 4. The agent generates its own device key, enrols, and opens an outbound TLS
    connection.
 5. Printers appear in the API and optional UI.
-6. Submit jobs using either the native API or PrintNode compatibility API.
+6. Submit jobs using either the native API or legacy compatibility API.
 
 The customer's firewall should need outbound TCP 443 from the agent only.
 
@@ -105,7 +105,7 @@ The agent shall:
 - obtain capabilities without blocking the main event loop;
 - tolerate slow, offline, or broken network drivers;
 - preserve native option names for exact driver selection;
-- project capabilities into the PrintNode compatibility shape;
+- project capabilities into the legacy compatibility shape;
 - maintain a richer native schema for vendor-specific or future features;
 - distinguish queue state from physical-device state;
 - not scan the LAN unless an administrator enables an optional discovery
@@ -123,7 +123,7 @@ The system shall accept:
 - PDF URIs;
 - RAW bytes;
 - RAW URIs;
-- PrintNode-compatible base64 request bodies;
+- legacy-compatible base64 request bodies;
 - native streaming uploads without base64 overhead.
 
 It shall support:
@@ -131,7 +131,7 @@ It shall support:
 - title and source metadata;
 - expiry;
 - driver copies and repeated submissions (`qty`);
-- the documented PrintNode options;
+- the documented legacy printing options;
 - SHA-256 content integrity;
 - idempotency keys;
 - configurable maximum size, page count, and render time;
@@ -186,7 +186,7 @@ Consumers may use:
 
 Webhooks need HMAC signatures, unique event IDs, ordered sequence numbers within
 a job or aggregate, exponential retry, dead-letter visibility, and a replay
-operation. Compatibility mode also emits PrintNode's documented event shapes.
+operation. Compatibility mode also emits the legacy service's documented event shapes.
 
 ### Logs and diagnostic bundles
 
@@ -218,7 +218,7 @@ When implemented, the scale module shall:
 - normalise mass and resolution without losing raw readings;
 - identify devices by stable hardware path where the OS permits it;
 - stream readings over the same agent channel;
-- expose PrintNode-compatible HTTP and WebSocket projections;
+- expose legacy-compatible HTTP and WebSocket projections;
 - include a virtual test scale;
 - allow the whole module to be disabled.
 
@@ -306,6 +306,5 @@ These are proposed release gates, not current measurements.
 - print accounting and secure-release badge workflows;
 - full printer fleet consumables management;
 - automatic internet exposure of a local agent;
-- direct replacement of every third-party PrintNode integration;
+- direct replacement of every third-party legacy-provider integration;
 - physical proof of paper output where hardware does not report it.
-

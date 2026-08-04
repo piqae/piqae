@@ -1,6 +1,6 @@
 # API quickstart
 
-**Status:** native V1 job API and PrintNode-shaped compatibility API
+**Status:** native V1 job API and legacy-shaped compatibility API
 implemented.
 
 Set a server-side API origin/key and list printers:
