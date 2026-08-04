@@ -50,13 +50,16 @@ export async function verifyWebhookSignature(
     false,
     ['verify']
   );
-  let bytes: Uint8Array;
+  let signature: ArrayBuffer;
   try {
-    bytes = Uint8Array.from(atob(supplied), (character) => character.charCodeAt(0));
+    signature = Uint8Array.from(
+      atob(supplied),
+      (character) => character.charCodeAt(0)
+    ).buffer;
   } catch {
     return false;
   }
-  return crypto.subtle.verify('HMAC', key, bytes, signed);
+  return crypto.subtle.verify('HMAC', key, signature, signed);
 }
 
 function header(headers: Headers | PiqaeWebhookHeaders, name: keyof PiqaeWebhookHeaders) {
