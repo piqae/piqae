@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { consumeNodeConnectFragment } from './node-connect-fragment';
+import { consumeNodeConnectFragment, nativeNodeConnectUrl } from './node-connect-fragment';
 
 describe('consumeNodeConnectFragment', () => {
   it('scrubs a valid one-time token from the address bar and keeps it in memory', () => {
@@ -35,5 +35,16 @@ describe('consumeNodeConnectFragment', () => {
       )
     ).toBeNull();
     expect(replaceState).not.toHaveBeenCalled();
+  });
+});
+
+describe('nativeNodeConnectUrl', () => {
+  it('keeps a validated invitation in the fragment of the registered app scheme', () => {
+    const token = `piq_enr_${'a'.repeat(32)}`;
+    expect(nativeNodeConnectUrl(token)).toBe(`piqae://connect#enrolment_token=${token}`);
+  });
+
+  it('refuses malformed capabilities', () => {
+    expect(nativeNodeConnectUrl('not-a-capability')).toBeNull();
   });
 });

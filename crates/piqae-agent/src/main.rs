@@ -277,8 +277,71 @@ struct ConnectorWorker {
     allowed_printer_ids: std::collections::BTreeSet<String>,
     sync_stop: StopSignal,
     scheduler_stop: StopSignal,
+    connection_stop: StopSignal,
     sync: tokio::task::JoinHandle<()>,
     scheduler: tokio::task::JoinHandle<()>,
+    connection_watch: tokio::task::JoinHandle<()>,
+}
+
+#[derive(Clone)]
+struct ConnectorConnectionTracker {
+    states: Arc<Mutex<std::collections::BTreeMap<String, ConnectionState>>>,
+    aggregate: Arc<RwLock<ConnectionState>>,
+}
+
+impl ConnectorConnectionTracker {
+    fn new(aggregate: Arc<RwLock<ConnectionState>>) -> Self {
+        Self {
+            states: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            aggregate,
+        }
+    }
+
+    async fn update(&self, connector_id: &str, state: ConnectionState) {
+        self.states
+            .lock()
+            .await
+            .insert(connector_id.to_owned(), state);
+        self.refresh().await;
+    }
+
+    async fn remove(&self, connector_id: &str) {
+        self.states.lock().await.remove(connector_id);
+        self.refresh().await;
+    }
+
+    async fn refresh(&self) {
+        let state = {
+            let states = self.states.lock().await;
+            aggregate_connector_connection(states.values().copied())
+        };
+        *self.aggregate.write().await = state;
+    }
+}
+
+fn aggregate_connector_connection(
+    states: impl Iterator<Item = ConnectionState>,
+) -> ConnectionState {
+    let states = states.collect::<Vec<_>>();
+    if states.is_empty() {
+        return ConnectionState::LocalOnly;
+    }
+    if states.contains(&ConnectionState::Connected) {
+        ConnectionState::Connected
+    } else if states.contains(&ConnectionState::Connecting) {
+        ConnectionState::Connecting
+    } else if states
+        .iter()
+        .all(|state| *state == ConnectionState::Unauthorized)
+    {
+        ConnectionState::Unauthorized
+    } else if states.contains(&ConnectionState::Degraded)
+        || states.contains(&ConnectionState::Unauthorized)
+    {
+        ConnectionState::Degraded
+    } else {
+        ConnectionState::Offline
+    }
 }
 
 struct LegacyCloudWorker {
@@ -564,21 +627,20 @@ async fn main() -> Result<()> {
         None
     };
 
-    if connector_workers_enabled(arguments.mode) {
-        tokio::spawn(connector_supervisor_loop(
-            arguments.data_dir.clone(),
-            connector_supervisor_rx,
-            executor,
-            cloud_uri_fetcher,
-            printer_discovery,
-            legacy_cloud_worker,
-        ));
-    } else {
-        // Local-only operation must never activate credentials left in a
-        // connector registry. Dropping the receiver also makes connector
-        // control requests fail closed instead of pretending they reloaded.
-        drop(connector_supervisor_rx);
-    }
+    // A locally installed node starts without a remote principal, but a
+    // connector accepted through the native consent flow is an explicit,
+    // printer-scoped authorization. Keep the supervisor available in every
+    // mode so that approval can activate that isolated connector immediately.
+    let connector_connections = ConnectorConnectionTracker::new(Arc::clone(&connection));
+    tokio::spawn(connector_supervisor_loop(
+        arguments.data_dir.clone(),
+        connector_supervisor_rx,
+        executor,
+        cloud_uri_fetcher,
+        printer_discovery,
+        legacy_cloud_worker,
+        connector_connections,
+    ));
 
     info!(
         mode = ?arguments.mode,
@@ -811,10 +873,6 @@ async fn signal_connector_reload(arguments: &Arguments) -> Result<()> {
         anyhow::bail!("running node rejected connector reload");
     }
     Ok(())
-}
-
-fn connector_workers_enabled(mode: AgentMode) -> bool {
-    mode != AgentMode::Local
 }
 
 async fn enrol_installation(arguments: &Arguments, token: &str) -> Result<()> {
@@ -1367,6 +1425,7 @@ async fn connector_supervisor_loop(
     uri_fetcher: UriFetcher,
     printer_discovery: PrinterDiscovery,
     mut legacy_cloud_worker: Option<LegacyCloudWorker>,
+    connections: ConnectorConnectionTracker,
 ) {
     let mut workers = std::collections::BTreeMap::<String, ConnectorWorker>::new();
     if let Err(error) =
@@ -1380,6 +1439,7 @@ async fn connector_supervisor_loop(
         &executor,
         &uri_fetcher,
         &printer_discovery,
+        &connections,
     )
     .await
     {
@@ -1395,7 +1455,14 @@ async fn connector_supervisor_loop(
                     warn!(%error, "periodic legacy cloud worker retirement deferred");
                     continue;
                 }
-                if let Err(error) = reload_connector_workers(&data_dir, &mut workers, &executor, &uri_fetcher, &printer_discovery).await {
+                if let Err(error) = reload_connector_workers(
+                    &data_dir,
+                    &mut workers,
+                    &executor,
+                    &uri_fetcher,
+                    &printer_discovery,
+                    &connections,
+                ).await {
                     warn!(%error, "periodic connector recovery deferred");
                 }
                 continue;
@@ -1417,6 +1484,7 @@ async fn connector_supervisor_loop(
                                 &executor,
                                 &uri_fetcher,
                                 &printer_discovery,
+                                &connections,
                             )
                             .await
                         }
@@ -1436,7 +1504,7 @@ async fn connector_supervisor_loop(
                     if !registry.revoke(&connector_id)? {
                         anyhow::bail!("connector was not active");
                     }
-                    stop_connector_worker(&mut workers, &connector_id).await?;
+                    stop_connector_worker(&mut workers, &connector_id, &connections).await?;
                     Ok(())
                 }
                 .await
@@ -1451,7 +1519,7 @@ async fn connector_supervisor_loop(
         stop_legacy_cloud_worker(worker).await;
     }
     for id in workers.keys().cloned().collect::<Vec<_>>() {
-        if let Err(error) = stop_connector_worker(&mut workers, &id).await {
+        if let Err(error) = stop_connector_worker(&mut workers, &id, &connections).await {
             warn!(connector_id = %id, %error, "connector worker shutdown was forced");
         }
     }
@@ -1499,6 +1567,7 @@ async fn reload_connector_workers(
     executor: &SharedRuntimeExecutor,
     uri_fetcher: &UriFetcher,
     printer_discovery: &PrinterDiscovery,
+    connections: &ConnectorConnectionTracker,
 ) -> Result<()> {
     let registry = connector_runtime::ConnectorRegistry::load(data_dir)?;
     let enabled = registry
@@ -1512,7 +1581,7 @@ async fn reload_connector_workers(
         .cloned()
         .collect::<Vec<_>>()
     {
-        if let Err(error) = stop_connector_worker(workers, &id).await {
+        if let Err(error) = stop_connector_worker(workers, &id, connections).await {
             warn!(connector_id = %id, %error, "removed connector worker shutdown was forced");
             failures.push(format!("{id}: {error}"));
         }
@@ -1526,7 +1595,7 @@ async fn reload_connector_workers(
             continue;
         }
         if workers.contains_key(&id) {
-            if let Err(error) = stop_connector_worker(workers, &id).await {
+            if let Err(error) = stop_connector_worker(workers, &id, connections).await {
                 warn!(connector_id = %id, %error, "changed connector worker shutdown was forced");
                 failures.push(format!("{id}: {error}"));
                 continue;
@@ -1546,6 +1615,7 @@ async fn reload_connector_workers(
             executor.clone(),
             uri_fetcher.clone(),
             printer_discovery.clone(),
+            connections.clone(),
         )
         .await
         {
@@ -1571,6 +1641,7 @@ async fn start_connector_worker(
     executor: SharedRuntimeExecutor,
     uri_fetcher: UriFetcher,
     printer_discovery: PrinterDiscovery,
+    connections: ConnectorConnectionTracker,
 ) -> Result<ConnectorWorker> {
     let parent = paths
         .database
@@ -1598,41 +1669,81 @@ async fn start_connector_worker(
         wakeup.clone(),
         scheduler_stop.clone(),
     ));
+    let connector_connection = Arc::new(RwLock::new(ConnectionState::Connecting));
+    connections
+        .update(&record.connector_id, ConnectionState::Connecting)
+        .await;
     let sync = tokio::spawn(cloud_sync_loop(
         cloud,
         paths.database,
         content,
         uri_fetcher,
         printer_discovery,
-        Arc::new(RwLock::new(ConnectionState::Connecting)),
+        Arc::clone(&connector_connection),
         paused,
         wakeup,
         Arc::new(AtomicBool::new(true)),
         sync_stop.clone(),
     ));
+    let connection_stop = StopSignal::default();
+    let connection_watch = tokio::spawn(watch_connector_connection(
+        record.connector_id.clone(),
+        connector_connection,
+        connections,
+        connection_stop.clone(),
+    ));
     Ok(ConnectorWorker {
         allowed_printer_ids: record.allowed_printer_ids.iter().cloned().collect(),
         sync_stop,
         scheduler_stop,
+        connection_stop,
         sync,
         scheduler,
+        connection_watch,
     })
+}
+
+async fn watch_connector_connection(
+    connector_id: String,
+    connection: Arc<RwLock<ConnectionState>>,
+    connections: ConnectorConnectionTracker,
+    stop: StopSignal,
+) {
+    let mut previous = ConnectionState::Connecting;
+    let mut interval = tokio::time::interval(Duration::from_millis(250));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            _ = interval.tick() => {
+                let current = *connection.read().await;
+                if current != previous {
+                    connections.update(&connector_id, current).await;
+                    previous = current;
+                }
+            }
+            () = stop.cancelled() => break,
+        }
+    }
 }
 
 async fn stop_connector_worker(
     workers: &mut std::collections::BTreeMap<String, ConnectorWorker>,
     connector_id: &str,
+    connections: &ConnectorConnectionTracker,
 ) -> Result<()> {
     let Some(worker) = workers.remove(connector_id) else {
         return Ok(());
     };
     worker.sync_stop.stop();
     worker.scheduler_stop.stop();
+    worker.connection_stop.stop();
     let mut sync = worker.sync;
     let mut scheduler = worker.scheduler;
+    let mut connection_watch = worker.connection_watch;
     if tokio::time::timeout(Duration::from_secs(10), async {
         let _ = (&mut sync).await;
         let _ = (&mut scheduler).await;
+        let _ = (&mut connection_watch).await;
     })
     .await
     .is_err()
@@ -1640,10 +1751,14 @@ async fn stop_connector_worker(
         warn!(%connector_id, "connector workers exceeded the shutdown deadline; aborting them");
         sync.abort();
         scheduler.abort();
+        connection_watch.abort();
         let _ = sync.await;
         let _ = scheduler.await;
+        let _ = connection_watch.await;
+        connections.remove(connector_id).await;
         anyhow::bail!("connector workers exceeded the shutdown deadline and were aborted");
     }
+    connections.remove(connector_id).await;
     Ok(())
 }
 
@@ -4236,6 +4351,7 @@ mod tests {
 
         let sync_stop = StopSignal::default();
         let scheduler_stop = StopSignal::default();
+        let connection_stop = StopSignal::default();
         let sync = {
             let stop = sync_stop.clone();
             tokio::spawn(async move { stop.cancelled().await })
@@ -4244,14 +4360,22 @@ mod tests {
             let stop = scheduler_stop.clone();
             tokio::spawn(async move { stop.cancelled().await })
         };
+        let connection_watch = {
+            let stop = connection_stop.clone();
+            tokio::spawn(async move { stop.cancelled().await })
+        };
+        let connections =
+            ConnectorConnectionTracker::new(Arc::new(RwLock::new(ConnectionState::LocalOnly)));
         let mut workers = std::collections::BTreeMap::from([(
             "ncon_good".to_owned(),
             ConnectorWorker {
                 allowed_printer_ids: std::iter::once("prn_test".to_owned()).collect(),
                 sync_stop,
                 scheduler_stop,
+                connection_stop,
                 sync,
                 scheduler,
+                connection_watch,
             },
         )]);
         let executor = SharedRuntimeExecutor(Arc::new(Mutex::new(RuntimeExecutor::Disabled)));
@@ -4261,12 +4385,13 @@ mod tests {
             &executor,
             &UriFetcher::new(false),
             &PrinterDiscovery::Disabled,
+            &connections,
         )
         .await
         .expect_err("missing bad connector key must fail the aggregate");
         assert!(error.to_string().contains("ncon_bad"));
         assert!(workers.contains_key("ncon_good"));
-        stop_connector_worker(&mut workers, "ncon_good")
+        stop_connector_worker(&mut workers, "ncon_good", &connections)
             .await
             .expect("stop preserved worker");
     }
@@ -4275,6 +4400,7 @@ mod tests {
     async fn connector_shutdown_signals_sync_and_scheduler_before_waiting() {
         let sync_stop = StopSignal::default();
         let scheduler_stop = StopSignal::default();
+        let connection_stop = StopSignal::default();
         let scheduler_observed = Arc::new(AtomicBool::new(false));
         let sync = {
             let stop = sync_stop.clone();
@@ -4291,19 +4417,27 @@ mod tests {
                 observed.store(true, Ordering::SeqCst);
             })
         };
+        let connection_watch = {
+            let stop = connection_stop.clone();
+            tokio::spawn(async move { stop.cancelled().await })
+        };
         let mut workers = std::collections::BTreeMap::from([(
             "ncon_test".to_owned(),
             ConnectorWorker {
                 allowed_printer_ids: std::collections::BTreeSet::new(),
                 sync_stop,
                 scheduler_stop,
+                connection_stop,
                 sync,
                 scheduler,
+                connection_watch,
             },
         )]);
 
+        let connections =
+            ConnectorConnectionTracker::new(Arc::new(RwLock::new(ConnectionState::LocalOnly)));
         let shutdown = tokio::spawn(async move {
-            let _ = stop_connector_worker(&mut workers, "ncon_test").await;
+            let _ = stop_connector_worker(&mut workers, "ncon_test", &connections).await;
         });
         tokio::time::sleep(Duration::from_millis(20)).await;
         assert!(scheduler_observed.load(Ordering::SeqCst));
@@ -4324,10 +4458,27 @@ mod tests {
     }
 
     #[test]
-    fn local_mode_never_activates_connector_workers() {
-        assert!(!connector_workers_enabled(AgentMode::Local));
-        assert!(connector_workers_enabled(AgentMode::Hosted));
-        assert!(connector_workers_enabled(AgentMode::SelfHosted));
+    fn connector_connection_aggregate_preserves_useful_health() {
+        assert_eq!(
+            aggregate_connector_connection(std::iter::empty()),
+            ConnectionState::LocalOnly
+        );
+        assert_eq!(
+            aggregate_connector_connection(
+                [ConnectionState::Offline, ConnectionState::Connected].into_iter()
+            ),
+            ConnectionState::Connected
+        );
+        assert_eq!(
+            aggregate_connector_connection(
+                [ConnectionState::Unauthorized, ConnectionState::Offline].into_iter()
+            ),
+            ConnectionState::Degraded
+        );
+        assert_eq!(
+            aggregate_connector_connection(std::iter::once(ConnectionState::Unauthorized)),
+            ConnectionState::Unauthorized
+        );
     }
 
     #[test]

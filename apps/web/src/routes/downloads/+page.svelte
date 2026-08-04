@@ -5,12 +5,10 @@
   import MarketingShell from '$lib/components/marketing/MarketingShell.svelte';
   import Seo from '$lib/components/marketing/Seo.svelte';
   import type { PageData } from './$types';
-  import { consumeNodeConnectFragment } from '$lib/node-connect-fragment';
+  import { consumeNodeConnectFragment, nativeNodeConnectUrl } from '$lib/node-connect-fragment';
 
   let { data }: { data: PageData } = $props();
   let enrolmentToken = $state<string | null>(null);
-  let copied = $state(false);
-  let copyFailed = $state(false);
 
   onMount(() => {
     enrolmentToken =
@@ -19,16 +17,10 @@
       null;
   });
 
-  async function copyEnrolmentToken() {
+  function openPiqae() {
     if (!enrolmentToken) return;
-    copyFailed = false;
-    try {
-      await navigator.clipboard.writeText(enrolmentToken);
-      copied = true;
-    } catch {
-      copied = false;
-      copyFailed = true;
-    }
+    const url = nativeNodeConnectUrl(enrolmentToken);
+    if (url) window.location.assign(url);
   }
 
   type Artifact = PageData['manifest']['artifacts'][number];
@@ -89,24 +81,16 @@
       <div class="m-container connect-session-inner">
         <div>
           <span class="m-eyebrow">Printer computer setup</span>
-          <h2 id="connect-session-title">Your one-time connection code is ready.</h2>
+          <h2 id="connect-session-title">Connect the Piqae app on this computer.</h2>
           <p>
-            Download and open Piqae on this computer. If the installer asks for an enrolment
-            token, paste this code. It expires shortly and works once.
+            Install Piqae if needed, then open it to review the requesting service and choose
+            which local printers it may use. You do not need a separate Piqae account.
           </p>
           <p class="connect-warning">
-            Piqae’s current desktop apps do not yet accept this code directly from the browser.
-            Keep this page open, do not send the code to anyone, and clear it from your clipboard
-            after setup.
+            Keep this page open while installing. The invitation expires shortly and works once.
           </p>
         </div>
-        <button class="m-button dark" type="button" onclick={copyEnrolmentToken}>
-          {copied
-            ? 'Connection code copied'
-            : copyFailed
-              ? 'Copy failed — try again'
-              : 'Copy one-time connection code'}
-        </button>
+        <button class="m-button dark" type="button" onclick={openPiqae}>Open Piqae to connect</button>
       </div>
     </section>
   {/if}

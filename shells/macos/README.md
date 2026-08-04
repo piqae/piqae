@@ -21,6 +21,13 @@ persists the isolated connector before restarting the agent, and follows only
 a server-validated return URL after success. Windows and Linux application-link
 registration remain gated on equivalent signed-shell consent flows.
 
+An unconnected install remains fully local and offers **Connect Piqae
+Account…**. Integrators do not use that account action: their backend creates a
+short-lived node-connect session through the SDK and opens its `connect_url` in
+their own UI. The browser keeps the capability in a fragment and hands it to
+the registered app scheme; the end user needs no Piqae account. Each accepted
+service receives separate credentials, storage and explicit printer grants.
+
 Configuration:
 
 - `PIQAE_LOCAL_API_URL` defaults to `http://127.0.0.1:39100` and must remain an

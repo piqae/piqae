@@ -343,7 +343,9 @@ final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         let statusTitle: String
         if let status {
-            let connection = status.connection.replacingOccurrences(of: "_", with: " ").capitalized
+            let connection = status.connection == "local_only"
+                ? "Local printing only"
+                : status.connection.replacingOccurrences(of: "_", with: " ").capitalized
             statusTitle = status.paused ? "Piqae — Paused" : "Piqae — \(connection)"
         } else if isRefreshing {
             statusTitle = "Piqae — Connecting…"
@@ -364,6 +366,17 @@ final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         menu.addItem(.separator())
+        if status?.connection == "local_only" {
+            let connect = menu.addItem(
+                withTitle: "Connect Piqae Account…",
+                action: #selector(connectPiqaeAccount),
+                keyEquivalent: ""
+            )
+            connect.target = self
+            connect.image = symbol("link", description: "Connect Piqae account")
+            menu.addItem(informational("Other service? Start in that service's app"))
+            menu.addItem(.separator())
+        }
         addPrinterSection()
         addRecentJobsSection()
 
@@ -882,6 +895,24 @@ final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         NSWorkspace.shared.open(url)
     }
 
+    @objc private func connectPiqaeAccount() {
+        guard var components = dashboardURL().flatMap({
+            URLComponents(url: $0, resolvingAgainstBaseURL: false)
+        }) else {
+            showAlert(
+                title: "Piqae account connection unavailable",
+                message: "Start the connection from the Piqae dashboard in your browser."
+            )
+            return
+        }
+        var queryItems = components.queryItems ?? []
+        queryItems.removeAll { $0.name == "connect-node" }
+        queryItems.append(URLQueryItem(name: "connect-node", value: "1"))
+        components.queryItems = queryItems
+        guard let url = components.url else { return }
+        NSWorkspace.shared.open(url)
+    }
+
     @objc private func checkForUpdates(_ sender: NSMenuItem) {
         updateCoordinator?.checkForUpdates(sender)
     }
@@ -983,8 +1014,10 @@ final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func dashboardURL() -> URL? {
+        let value = ProcessInfo.processInfo.environment["PIQAE_DASHBOARD_URL"]
+            ?? Bundle.main.object(forInfoDictionaryKey: "PiqaeDashboardURL") as? String
         guard
-            let value = ProcessInfo.processInfo.environment["PIQAE_DASHBOARD_URL"],
+            let value,
             let url = URL(string: value),
             ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
             url.host != nil,
