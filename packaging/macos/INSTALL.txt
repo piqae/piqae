@@ -1,7 +1,7 @@
 Install Piqae
 =============
 
-Double-click “Install Piqae” to install the menu app and local printing node
+Double-click “Install Piqae.pkg” to install the menu app and local printing node
 for your macOS user.
 
 Piqae installs without administrator access. Before an update it verifies that

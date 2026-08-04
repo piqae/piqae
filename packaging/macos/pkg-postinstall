@@ -1,0 +1,42 @@
+#!/bin/bash
+set -euo pipefail
+
+# Installer runs package scripts as root. Piqae remains a per-user node, so
+# resolve the active desktop user and execute the existing fail-closed handoff
+# in that user's launchd domain. Never install into root's home directory.
+console_user=$(/usr/bin/stat -f '%Su' /dev/console)
+case "$console_user" in
+  ""|root|loginwindow|_mbsetupuser)
+    echo "Piqae requires an active macOS desktop user." >&2
+    exit 1
+    ;;
+esac
+if [[ ! "$console_user" =~ ^[A-Za-z0-9._-]+$ ]]; then
+  echo "The active macOS user name is unsafe." >&2
+  exit 1
+fi
+
+console_uid=$(/usr/bin/id -u "$console_user")
+if [[ ! "$console_uid" =~ ^[0-9]+$ || "$console_uid" -lt 501 ]]; then
+  echo "Piqae cannot be installed for a system account." >&2
+  exit 1
+fi
+
+console_home=$(/usr/bin/dscl . -read "/Users/$console_user" NFSHomeDirectory |
+  /usr/bin/awk '{print $2}')
+if [[ -z "$console_home" || ! -d "$console_home" ]]; then
+  echo "The active macOS user's home directory is unavailable." >&2
+  exit 1
+fi
+
+script_root=$(cd "$(dirname "$0")" && pwd)
+user_installer="$script_root/PiqaePackage/install-user.sh"
+if [[ ! -x "$user_installer" ]]; then
+  echo "The Piqae installer payload is incomplete." >&2
+  exit 1
+fi
+
+/bin/launchctl asuser "$console_uid" \
+  /usr/bin/sudo -H -u "$console_user" \
+  /usr/bin/env HOME="$console_home" USER="$console_user" LOGNAME="$console_user" \
+  /bin/bash "$user_installer"
