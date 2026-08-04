@@ -1063,6 +1063,31 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/targets/{target_id}/design-specification": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                target_id: components["parameters"]["TargetId"];
+            };
+            cookie?: never;
+        };
+        /**
+         * Get a consolidated, design-facing print specification
+         * @description Returns the stock geometry, current target readiness, and the exact
+         *     immutable printer/profile revisions behind each binding. Opaque native
+         *     driver blobs are intentionally never returned. Clients should retain
+         *     the returned revisions with saved designs and re-fetch before printing.
+         */
+        get: operations["getTargetDesignSpecification"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/agents": {
         parameters: {
             query?: never;
@@ -2257,6 +2282,19 @@ export interface components {
             status: "ready" | "target_has_no_ready_binding";
             selected_binding_id: string | null;
             bindings: components["schemas"]["BindingReadiness"][];
+        };
+        DesignSpecificationDestination: {
+            binding: components["schemas"]["TargetBinding"];
+            printer: components["schemas"]["Printer"];
+            profile: components["schemas"]["PrinterProfileSnapshot"];
+        };
+        DesignSpecification: {
+            target: components["schemas"]["Target"];
+            stock: components["schemas"]["Stock"] | null;
+            readiness: components["schemas"]["TargetReadiness"];
+            destinations: components["schemas"]["DesignSpecificationDestination"][];
+            /** @description Stable digest-like revision derived from target, stock, capability, profile and binding revisions. */
+            specification_revision: string;
         };
         Printer: {
             id: string;
@@ -3683,6 +3721,14 @@ export interface operations {
             query?: {
                 limit?: components["parameters"]["Limit"];
                 after?: components["parameters"]["After"];
+                /** @description Exact native lifecycle state. */
+                state?: components["schemas"]["JobState"];
+                printer_id?: string;
+                target_id?: string;
+                /** @description Metadata key to match; metadata_value may refine it. */
+                metadata_key?: string;
+                /** @description Exact metadata value; requires metadata_key. */
+                metadata_value?: string;
             };
             header?: never;
             path?: never;
@@ -4137,6 +4183,30 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["TargetReadiness"];
+                };
+            };
+            401: components["responses"]["Error"];
+            403: components["responses"]["Error"];
+        };
+    };
+    getTargetDesignSpecification: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                target_id: components["parameters"]["TargetId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Consolidated design and production constraints. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DesignSpecification"];
                 };
             };
             401: components["responses"]["Error"];
