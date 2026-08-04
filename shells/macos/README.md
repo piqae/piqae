@@ -38,16 +38,17 @@ Application identity and the feed must use HTTPS. Partial update configuration
 fails closed. Release builds embed Sparkle 2.9.2 and sign its nested code before
 signing the app with the hardened runtime.
 
-The dedicated `macos-release.yml` workflow builds arm64/x86_64 binaries, runs
-the Swift suite, creates an SPDX SBOM and checksums, and records provenance.
-With no credentials, a manually dispatched run produces only artifacts whose
-names and evidence say `unsigned-preview`; update checks remain disabled. A tag
-fails unless the complete Developer ID, Apple notarisation, and Sparkle Ed25519
-secret set is present. Credentialed runs Developer ID-sign the app, node,
-executor, and installer; notarise and staple both the app and installer disk
-image; generate an appcast; and verify the update archive's Ed25519 signature
-with the public key. A publication run uploads immutable artifacts to the
-release bucket before promoting the appcast and shared manifest.
+The reusable `macos-release.yml` stage builds arm64/x86_64 binaries, runs the
+Swift suite, creates an SPDX SBOM and checksums, and records provenance. The
+single **Piqae release** orchestrator can request a non-publishing manual
+candidate. When credentials are absent, its names and evidence say
+`unsigned-preview` and update checks remain disabled. A tag fails unless the
+complete Developer ID, Apple notarisation, and Sparkle
+Ed25519 secret set is present. Credentialed runs Developer ID-sign the app,
+node, executor, and installer; notarise and staple both the app and installer
+disk image; generate an appcast; and verify the update archive's Ed25519
+signature with the public key. A publication run uploads immutable artifacts
+to the release bucket before promoting the appcast and shared manifest.
 
 ## Per-user package
 

@@ -32,7 +32,7 @@ export interface BillingSummary {
   usage: {
     periodStart: string;
     periodEnd: string;
-    acceptedLiveJobs: number;
+    reportedCompleteLiveJobs: number;
     activeNodes: number;
   };
   overageLiveJobs: number;
@@ -132,11 +132,10 @@ export function stripeOveragePriceMatchesCatalog(
   const expectedInterval = interval === 'monthly' ? 'month' : 'year';
   const expectedIncludedJobs =
     interval === 'annual'
-      ? catalogPlan.annualIncludedAcceptedJobs
-      : catalogPlan.includedAcceptedJobs;
+      ? catalogPlan.annualIncludedReportedCompleteJobs
+      : catalogPlan.includedReportedCompleteJobs;
   if (expectedIncludedJobs === null) return false;
-  const metadata = (key: string) =>
-    price.metadata[`piqae_${key}`] ?? price.metadata[`spool_${key}`];
+  const metadata = (key: string) => price.metadata[`piqae_${key}`];
   return (
     price.active &&
     price.type === 'recurring' &&
@@ -149,7 +148,7 @@ export function stripeOveragePriceMatchesCatalog(
     typeof price.recurring.meter === 'string' &&
     price.recurring.meter.length > 0 &&
     metadata('plan') === plan &&
-    metadata('metric') === 'accepted_live_jobs_overage' &&
+    metadata('metric') === 'reported_complete_live_jobs_overage' &&
     metadata('included_jobs') === String(expectedIncludedJobs) &&
     metadata('overage_unit') === String(catalogPlan.jobOverageUnit)
   );
@@ -174,14 +173,11 @@ export function checkoutIdempotencyKey(
       })
     )
     .digest('hex');
-  // This namespace is part of Stripe's deduplication identity. Keep it stable
-  // across the visible product rename so cross-version retries cannot create a
-  // second Checkout Session.
-  return `spool-checkout-${digest}`;
+  return `piqae-checkout-${digest}`;
 }
 
 export function stripeCustomerIdempotencyKey(workspaceId: string): string {
-  return `spool-customer-${createHash('sha256').update(workspaceId).digest('hex')}`;
+  return `piqae-customer-${createHash('sha256').update(workspaceId).digest('hex')}`;
 }
 
 export function parseBillingSummary(value: unknown): BillingSummary {
@@ -205,10 +201,11 @@ export function parseBillingSummary(value: unknown): BillingSummary {
   const subscriptionStatus = statuses.includes(String(value.subscription_status))
     ? (value.subscription_status as BillingSummary['subscriptionStatus'])
     : null;
+  const reportedCompleteLiveJobs = value.usage.reported_complete_live_jobs;
   const requiredUsage = [
     value.usage.period_start,
     value.usage.period_end,
-    value.usage.accepted_live_jobs,
+    reportedCompleteLiveJobs,
     value.usage.active_nodes
   ];
   if (
@@ -246,10 +243,11 @@ export function parseBillingSummary(value: unknown): BillingSummary {
 
 export function parseUsageSummary(value: unknown): UsageSummary {
   if (!isRecord(value)) throw new Error('Piqae usage response was invalid.');
+  const reportedCompleteLiveJobs = value.reported_complete_live_jobs;
   return {
     periodStart: stringValue(value.period_start),
     periodEnd: stringValue(value.period_end),
-    acceptedLiveJobs: integer(value.accepted_live_jobs),
+    reportedCompleteLiveJobs: integer(reportedCompleteLiveJobs),
     activeNodes: integer(value.active_nodes)
   };
 }

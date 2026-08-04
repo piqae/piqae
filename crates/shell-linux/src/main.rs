@@ -101,6 +101,8 @@ mod linux {
             "Local only"
         } else if body.contains("\"connection\":\"degraded\"") {
             "Degraded"
+        } else if body.contains("\"connection\":\"unauthorized\"") {
+            "Revoked — pair this node again"
         } else {
             "Offline"
         }

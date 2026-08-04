@@ -205,6 +205,13 @@ Initial scale:
 Use weight and tone before increasing size. Avoid oversized SaaS-dashboard
 headings and excessively bold labels.
 
+These sizes are published as tokens in `apps/web/src/app.css`
+(`--text-title`, `--text-section`, `--text-body`, `--text-compact`,
+`--text-meta`, `--text-code`). **12 px is a hard floor**: no dashboard component
+may set a smaller size, because functional text below it fails the WCAG AA gate
+listed under Visual release gates. Prefer a token over a literal `px` value so a
+future scale change stays global.
+
 ## Geometry and density
 
 Use a 4 px base spacing grid with deliberate 2 px optical corrections.
@@ -295,12 +302,38 @@ Use ease-out for entry and ease-in for exit. Movement distances stay below
 Live job events should update without flashing the entire row. Animate only the
 changed marker or newly inserted event, then settle immediately.
 
+## Dashboard information architecture
+
+The hosted dashboard is deliberately small. It has two destinations:
+
+1. `/dashboard` — the operational surface. Jobs, printers, nodes (and customers
+   where the accounts feature is enabled) are **views of one page**, selected
+   with `?view=`. Detail opens in a right-hand drawer addressed by
+   `?job=`/`?printer=`/`?node=`/`?customer=`, so a link to a failing job stays
+   shareable without a route of its own.
+2. `/dashboard/settings` — every configuration surface as anchored sections:
+   API keys, webhooks, team, billing, printing policy, retention, deployment.
+
+`/dashboard/local` remains separate: it is the loopback profile-capture view and
+is only meaningful on a local install.
+
+Routes that previously existed for each list, each detail view, and each
+settings sub-page are kept as 308 redirects into the above. Do not reintroduce a
+page whose only job is to link to other pages.
+
+### Recorded deviation: top bar instead of sidebar
+
+This document originally required a "quiet sidebar destination and section"
+primitive. With two destinations a 218 px sidebar is mostly empty chrome, so the
+dashboard uses a 48 px top bar and reclaims the horizontal space for dense
+tables. The sidebar primitive is therefore **not** part of the required set
+below. Everything else in this document still applies.
+
 ## Required component set
 
 No production screen invents local CSS before these primitives exist:
 
 - application frame;
-- quiet sidebar destination and section;
 - location/view header;
 - button and icon button;
 - text field, select, combobox, checkbox, and switch;
@@ -423,6 +456,7 @@ Native conventions take priority over visual imitation.
 ## Visual release gates
 
 - all production screens use semantic tokens and approved primitives;
+- no dashboard component sets a font size below 12 px;
 - approved dark/light screenshots have no unexplained regression;
 - visual hierarchy remains intact with realistic dense data;
 - no one-off hard-coded color in a feature component;

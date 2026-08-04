@@ -1,4 +1,6 @@
 mod uri_fetch;
+#[cfg(windows)]
+mod windows_acl;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -124,6 +126,11 @@ struct Arguments {
     /// Pair this installation through a browser approval flow, then exit.
     #[arg(long, conflicts_with = "enrolment_token")]
     pair: bool,
+
+    /// Replace this node's device key through a browser approval flow, keeping
+    /// its node ID, printers, and routing. Requires an already-paired node.
+    #[arg(long, conflicts_with_all = ["enrolment_token", "pair"])]
+    rotate_key: bool,
 
     /// Human-readable installation name used with --enrolment-token or --pair.
     #[arg(long)]
@@ -265,7 +272,10 @@ async fn main() -> Result<()> {
         return enrol_installation(&arguments, token).await;
     }
     if arguments.pair {
-        return pair_installation(&arguments).await;
+        return pair_installation(&arguments, PairingIntent::FirstPairing).await;
+    }
+    if arguments.rotate_key {
+        return pair_installation(&arguments, PairingIntent::KeyRotation).await;
     }
 
     tracing_subscriber::fmt()
@@ -447,11 +457,27 @@ async fn enrol_installation(arguments: &Arguments, token: &str) -> Result<()> {
     Ok(())
 }
 
+/// Why a node is running the browser-pairing flow.
+///
+/// Both cases exchange an operator approval for a device key, but they differ
+/// in what already exists locally and what must survive the exchange.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PairingIntent {
+    /// No identity exists yet. Refuse to run if one does, so an accidental
+    /// re-pair cannot silently discard a working node.
+    FirstPairing,
+    /// An identity exists and its key is being replaced. The stored
+    /// installation ID is reused so the control plane rebinds the existing
+    /// node rather than admitting a second one, keeping the node ID, its
+    /// printers, and any routing that points at them.
+    KeyRotation,
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "keeps the secret-bearing browser-pairing lifecycle in one auditable flow"
 )]
-async fn pair_installation(arguments: &Arguments) -> Result<()> {
+async fn pair_installation(arguments: &Arguments, intent: PairingIntent) -> Result<()> {
     let base_url = arguments
         .control_plane_url
         .clone()
@@ -463,11 +489,18 @@ async fn pair_installation(arguments: &Arguments) -> Result<()> {
         .clone()
         .unwrap_or_else(|| arguments.data_dir.join("device.key"));
     let config_path = arguments.data_dir.join("agent-config.json");
-    if key_path.exists() || config_path.exists() {
-        anyhow::bail!(
-            "this installation already has a device identity; revoke or migrate it explicitly"
-        );
-    }
+    let existing = match intent {
+        PairingIntent::FirstPairing => {
+            if key_path.exists() || config_path.exists() {
+                anyhow::bail!(
+                    "this installation already has a device identity; run --rotate-key to \
+                     replace its key, or revoke and migrate it explicitly"
+                );
+            }
+            None
+        }
+        PairingIntent::KeyRotation => Some(existing_installation(&config_path)?),
+    };
     let hostname = installation_hostname();
     let name = arguments
         .enrolment_name
@@ -475,12 +508,17 @@ async fn pair_installation(arguments: &Arguments) -> Result<()> {
         .map(str::trim)
         .filter(|name| !name.is_empty())
         .unwrap_or(hostname.as_str());
+    let installation_id = existing.as_ref().map_or_else(
+        || uuid::Uuid::now_v7().to_string(),
+        |existing| existing.installation_id.clone(),
+    );
     let identity = DeviceIdentity::generate(AgentId::new());
     let client = AgentClient::new(base_url.clone())?;
+    let installation_id_for_config = installation_id.clone();
     let authorization = client
         .create_device_authorization(&CreateDeviceAuthorizationRequest {
             public_key: identity.public_key_base64(),
-            installation_id: uuid::Uuid::now_v7().to_string(),
+            installation_id,
             proposed_name: name.to_owned(),
             hostname,
             platform: std::env::consts::OS.to_owned(),
@@ -526,7 +564,21 @@ async fn pair_installation(arguments: &Arguments) -> Result<()> {
             _ => anyhow::bail!("control plane returned an unknown pairing state"),
         }
     };
-    write_new_device_key(&key_path, &identity.secret_bytes())?;
+    if let Some(existing) = &existing {
+        // The approving operator chose a workspace. If that is not the
+        // workspace this node already belongs to, the exchange admitted a new
+        // node instead of rebinding this one, and overwriting the local key
+        // would strand the original. Stop before touching anything on disk.
+        if exchange.node_id.to_string() != existing.agent_id {
+            anyhow::bail!(
+                "rotation was approved into a different node ({}) than this installation ({}); \
+                 the existing device key is unchanged. Approve the rotation from the workspace \
+                 that owns this node.",
+                exchange.node_id,
+                existing.agent_id
+            );
+        }
+    }
     let mode = match arguments.mode {
         AgentMode::Hosted => "hosted",
         AgentMode::SelfHosted | AgentMode::Local => "self-hosted",
@@ -537,13 +589,27 @@ async fn pair_installation(arguments: &Arguments) -> Result<()> {
         "agent_id": exchange.node_id,
         "workspace_id": exchange.workspace_id,
         "environment_id": exchange.environment_id,
+        "installation_id": installation_id_for_config,
         "device_key_file": key_path,
         "data_dir": arguments.data_dir,
         "local_bind": arguments.local_bind,
     });
-    if let Err(error) = write_new_json(&config_path, &config) {
-        let _ = std::fs::remove_file(&key_path);
-        return Err(error).context("persist paired node configuration");
+    match intent {
+        PairingIntent::FirstPairing => {
+            write_new_device_key(&key_path, &identity.secret_bytes())?;
+            if let Err(error) = write_new_json(&config_path, &config) {
+                let _ = std::fs::remove_file(&key_path);
+                return Err(error).context("persist paired node configuration");
+            }
+        }
+        PairingIntent::KeyRotation => {
+            // The control plane already trusts the new key, so the old one is
+            // dead either way. Replace it atomically: a crash between these
+            // steps must leave a complete key file, never a truncated one.
+            replace_device_key(&key_path, &identity.secret_bytes())
+                .context("replace this node's device key")?;
+            replace_json(&config_path, &config).context("persist rotated node configuration")?;
+        }
     }
     println!(
         "{}",
@@ -552,9 +618,52 @@ async fn pair_installation(arguments: &Arguments) -> Result<()> {
             "workspace_id": exchange.workspace_id,
             "environment_id": exchange.environment_id,
             "config_file": config_path,
+            "rotated": intent == PairingIntent::KeyRotation,
         }))?
     );
     Ok(())
+}
+
+/// One installation's durable identity, as recorded at pairing time.
+#[derive(Debug)]
+struct ExistingInstallation {
+    agent_id: String,
+    installation_id: String,
+}
+
+/// Reads the identity a rotation must preserve.
+///
+/// Nodes paired before installation IDs were recorded cannot be rotated in
+/// place: without one the control plane would admit a second node and leave
+/// the original stranded. Say so plainly instead of silently doing that.
+fn existing_installation(config_path: &Path) -> Result<ExistingInstallation> {
+    let body = std::fs::read_to_string(config_path).with_context(|| {
+        format!(
+            "read {}; --rotate-key requires an already-paired node",
+            config_path.display()
+        )
+    })?;
+    let config: serde_json::Value =
+        serde_json::from_str(&body).with_context(|| format!("parse {}", config_path.display()))?;
+    let text = |key: &str| {
+        config
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+    };
+    Ok(ExistingInstallation {
+        agent_id: text("agent_id")
+            .with_context(|| format!("{} does not record this node's ID", config_path.display()))?,
+        installation_id: text("installation_id").with_context(|| {
+            format!(
+                "{} predates in-place key rotation and does not record an installation ID. \
+                 Revoke this node in the control plane and pair it again with --pair.",
+                config_path.display()
+            )
+        })?,
+    })
 }
 
 fn open_verification_url(url: &Url) {
@@ -586,8 +695,29 @@ fn write_new_device_key(path: &Path, secret: &[u8; 32]) -> Result<()> {
         .parent()
         .context("device key path has no parent directory")?;
     std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    write_device_key_file(path, secret, true)
+}
+
+/// Replaces an existing device key without ever leaving a partial key on disk.
+///
+/// The key is written to a sibling temporary file with the same restricted
+/// permissions, flushed, and then renamed over the original. A crash at any
+/// point leaves either the old key or the new one, and both are complete.
+fn replace_device_key(path: &Path, secret: &[u8; 32]) -> Result<()> {
+    let parent = path
+        .parent()
+        .context("device key path has no parent directory")?;
+    std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    let staged = path.with_extension("key.rotating");
+    let _ = std::fs::remove_file(&staged);
+    write_device_key_file(&staged, secret, true)?;
+    std::fs::rename(&staged, path)
+        .with_context(|| format!("replace {} with {}", path.display(), staged.display()))
+}
+
+fn write_device_key_file(path: &Path, secret: &[u8; 32], create_new: bool) -> Result<()> {
     let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
+    options.write(true).create_new(create_new);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt as _;
@@ -599,7 +729,29 @@ fn write_new_device_key(path: &Path, secret: &[u8; 32]) -> Result<()> {
     file.write_all(hex::encode(secret).as_bytes())
         .with_context(|| format!("write {}", path.display()))?;
     file.sync_all()
-        .with_context(|| format!("sync {}", path.display()))
+        .with_context(|| format!("sync {}", path.display()))?;
+    drop(file);
+    restrict_secret_to_owner(path)
+}
+
+/// Restricts a secret file to its owner on platforms without POSIX modes.
+///
+/// On Unix the mode is applied at creation. On Windows a newly created file
+/// inherits the directory's ACL, which for a machine-mode install under
+/// `ProgramData` grants every authenticated user read access — so the device
+/// key must be given an explicit owner-only ACL after it is written.
+#[cfg(not(windows))]
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "matches the fallible Windows implementation of the same operation"
+)]
+const fn restrict_secret_to_owner(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(windows)]
+fn restrict_secret_to_owner(path: &Path) -> Result<()> {
+    windows_acl::restrict_to_owner(path)
 }
 
 fn write_new_json(path: &Path, value: &serde_json::Value) -> Result<()> {
@@ -613,6 +765,25 @@ fn write_new_json(path: &Path, value: &serde_json::Value) -> Result<()> {
         .with_context(|| format!("write {}", path.display()))?;
     file.sync_all()
         .with_context(|| format!("sync {}", path.display()))
+}
+
+/// Rewrites a configuration file atomically, preserving the previous contents
+/// if any step fails.
+fn replace_json(path: &Path, value: &serde_json::Value) -> Result<()> {
+    let body = serde_json::to_vec_pretty(value)?;
+    let staged = path.with_extension("json.replacing");
+    let _ = std::fs::remove_file(&staged);
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&staged)
+        .with_context(|| format!("create {}", staged.display()))?;
+    file.write_all(&body)
+        .with_context(|| format!("write {}", staged.display()))?;
+    file.sync_all()
+        .with_context(|| format!("sync {}", staged.display()))?;
+    drop(file);
+    std::fs::rename(&staged, path).with_context(|| format!("replace {}", path.display()))
 }
 
 #[allow(
@@ -2462,13 +2633,56 @@ async fn materialize_descriptor(
     }
 }
 
+/// How long a node waits between attempts after its identity was rejected.
+///
+/// Revocation is not fixed by retrying, so hammering the control plane serves
+/// nobody. The node still retries slowly because the two recoverable causes —
+/// a corrected clock, or an operator restoring the node — resolve without a
+/// restart, and the next attempt is what discovers that.
+const UNAUTHORIZED_RETRY_SECONDS: u64 = 60;
+
+/// Classifies one sync failure into the connection state an operator should see.
+///
+/// A rejected signature and an unreachable network are the same event to a
+/// retry loop but entirely different problems to the person holding the
+/// printer, so they must not share a status.
+fn failure_state(error: &ClientError) -> ConnectionState {
+    match error.unauthorized_code() {
+        // The node's clock is outside the signing window. The client corrects
+        // its offset from the rejection itself, so the next attempt should
+        // succeed; report a transient fault rather than a revoked identity.
+        Some("stale_agent_request") => ConnectionState::Degraded,
+        Some(_) => ConnectionState::Unauthorized,
+        None => ConnectionState::Offline,
+    }
+}
+
 async fn sync_failed(
     error: &ClientError,
     failures: &mut u32,
     connection: &RwLock<ConnectionState>,
 ) -> Duration {
     *failures = failures.saturating_add(1);
-    *connection.write().await = ConnectionState::Offline;
+    let state = failure_state(error);
+    *connection.write().await = state;
+    if state == ConnectionState::Unauthorized {
+        error!(
+            code = error.unauthorized_code().unwrap_or("unauthorized"),
+            retry_seconds = UNAUTHORIZED_RETRY_SECONDS,
+            "the control plane rejected this node's identity; it has been \
+             revoked or its device key no longer matches. Pair this node again \
+             to restore cloud printing."
+        );
+        return Duration::from_secs(UNAUTHORIZED_RETRY_SECONDS);
+    }
+    if let Some(code) = error.unauthorized_code() {
+        warn!(
+            code,
+            "this node's clock is outside the control-plane signing window; \
+             the offset has been corrected and the next attempt will use it. \
+             Enable time synchronization to avoid repeating this."
+        );
+    }
     let exponent = (*failures).min(5);
     let delay = 1_u64.checked_shl(exponent).unwrap_or(30).min(30);
     warn!(%error, retry_seconds = delay, "agent sync failed");
@@ -2771,6 +2985,125 @@ mod tests {
                 0o600
             );
         }
+    }
+
+    #[test]
+    fn rotation_replaces_the_key_in_place_and_keeps_it_owner_only() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let key_path = directory.path().join("device.key");
+        write_new_device_key(&key_path, &[0x5a; 32]).expect("write key");
+        replace_device_key(&key_path, &[0x11; 32]).expect("rotate key");
+        assert_eq!(
+            std::fs::read_to_string(&key_path).expect("read key"),
+            hex::encode([0x11; 32])
+        );
+        // The staging file must never survive a successful rotation: it holds
+        // a usable device key.
+        assert!(!key_path.with_extension("key.rotating").exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(
+                std::fs::metadata(&key_path)
+                    .expect("metadata")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[test]
+    fn rotation_reuses_the_recorded_installation_so_the_node_survives() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let config_path = directory.path().join("agent-config.json");
+        write_new_json(
+            &config_path,
+            &serde_json::json!({
+                "agent_id": "agt_01J0",
+                "installation_id": "018f-abcd",
+            }),
+        )
+        .expect("write config");
+        let existing = existing_installation(&config_path).expect("read installation");
+        assert_eq!(existing.agent_id, "agt_01J0");
+        assert_eq!(existing.installation_id, "018f-abcd");
+    }
+
+    #[test]
+    fn rotation_refuses_a_configuration_without_an_installation_id() {
+        // Rotating without one would pair a second node and strand the first.
+        let directory = tempfile::tempdir().expect("tempdir");
+        let config_path = directory.path().join("agent-config.json");
+        write_new_json(&config_path, &serde_json::json!({ "agent_id": "agt_01J0" }))
+            .expect("write config");
+        let error = existing_installation(&config_path).expect_err("must refuse");
+        assert!(
+            format!("{error}").contains("installation ID"),
+            "unhelpful error: {error}"
+        );
+        assert!(existing_installation(&directory.path().join("missing.json")).is_err());
+    }
+
+    #[test]
+    fn configuration_replacement_survives_a_failed_write() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let config_path = directory.path().join("agent-config.json");
+        write_new_json(&config_path, &serde_json::json!({ "agent_id": "old" })).expect("write");
+        replace_json(&config_path, &serde_json::json!({ "agent_id": "new" })).expect("replace");
+        let body = std::fs::read_to_string(&config_path).expect("read");
+        assert!(body.contains("new"), "{body}");
+        assert!(!config_path.with_extension("json.replacing").exists());
+    }
+
+    #[test]
+    fn a_revoked_node_is_reported_differently_from_an_unreachable_one() {
+        use piqae_agent_client::ClientError;
+        assert_eq!(
+            failure_state(&ClientError::Unauthorized {
+                code: "unknown_agent".into()
+            }),
+            ConnectionState::Unauthorized
+        );
+        // Clock skew is self-correcting, so it must not be reported as a
+        // revoked identity that an operator has to act on.
+        assert_eq!(
+            failure_state(&ClientError::Unauthorized {
+                code: "stale_agent_request".into()
+            }),
+            ConnectionState::Degraded
+        );
+        assert_eq!(
+            failure_state(&ClientError::Status {
+                status: 503,
+                body: String::new()
+            }),
+            ConnectionState::Offline
+        );
+    }
+
+    #[test]
+    fn rotation_and_first_pairing_are_mutually_exclusive() {
+        assert!(
+            Arguments::try_parse_from([
+                "piqae-agent",
+                "--control-plane-url",
+                "http://127.0.0.1:8080",
+                "--pair",
+                "--rotate-key",
+            ])
+            .is_err()
+        );
+        let rotate = Arguments::try_parse_from([
+            "piqae-agent",
+            "--control-plane-url",
+            "http://127.0.0.1:8080",
+            "--rotate-key",
+        ])
+        .expect("rotate arguments");
+        assert!(rotate.rotate_key);
+        assert!(!rotate.pair);
     }
 
     #[test]

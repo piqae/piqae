@@ -14,6 +14,13 @@ use opentelemetry::propagation::TextMapPropagator;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 pub const HEADER_NAME: HeaderName = HeaderName::from_static("x-request-id");
+/// Authoritative server clock, in Unix milliseconds, echoed on every response.
+///
+/// Nodes sign requests with a timestamp the control plane checks against a
+/// bounded window. Publishing the server clock on every response—including the
+/// rejection a skewed node receives—lets a node with a drifting clock correct
+/// its own offset and recover without operator involvement.
+pub const SERVER_TIME_HEADER: HeaderName = HeaderName::from_static("x-piqae-server-time");
 const MAX_REQUEST_ID_BYTES: usize = 128;
 
 tokio::task_local! {
@@ -84,6 +91,13 @@ pub async fn middleware(mut request: Request, next: Next) -> Response {
             "http request completed"
         );
         response.headers_mut().insert(HEADER_NAME, header_value);
+        if let Ok(server_time) =
+            HeaderValue::from_str(&chrono::Utc::now().timestamp_millis().to_string())
+        {
+            response
+                .headers_mut()
+                .insert(SERVER_TIME_HEADER, server_time);
+        }
         response
     }
     .instrument(span)

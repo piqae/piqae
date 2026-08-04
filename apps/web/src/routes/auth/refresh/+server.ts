@@ -20,6 +20,6 @@ export const POST: RequestHandler = async (event) => {
     error(403, 'Your workspace access has been removed');
   }
   const response = await authKit.switchOrganization(event, { organizationId });
-  response.headers.set('Location', '/dashboard/settings/team');
+  response.headers.set('Location', '/dashboard/settings#team');
   return response;
 };

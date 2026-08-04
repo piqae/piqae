@@ -1,7 +1,10 @@
 # macOS node
 
 **Release tier:** Preview on macOS 13+ Apple silicon and macOS 15 Intel.
-Artifacts are unsigned and not notarised.
+Local development artifacts are unsigned. Credentialed tagged Preview
+artifacts are Developer ID signed, Apple notarised, and stapled; this does not
+promote the platform to Supported without the remaining installation, update,
+rollback, and printer evidence.
 
 **Implemented in source:** CUPS discovery/submission, durable local queue,
 authenticated loopback API, menu-bar status/printers/profiles, native PrintCore

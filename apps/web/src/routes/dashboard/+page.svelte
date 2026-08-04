@@ -1,183 +1,976 @@
 <script lang="ts">
+  import { enhance } from '$app/forms';
+  import { goto } from '$app/navigation';
+  import { page } from '$app/state';
   import Icon from '$lib/components/Icon.svelte';
   import DataError from '$lib/components/DataError.svelte';
   import PageHeader from '$lib/components/PageHeader.svelte';
   import RelativeTime from '$lib/components/RelativeTime.svelte';
   import Status from '$lib/components/Status.svelte';
+  import JobTimeline from '$lib/components/dashboard/JobTimeline.svelte';
+  import { operationalViews } from '$lib/dashboard-navigation';
+  import {
+    DataPanel,
+    DefinitionList,
+    Dialog,
+    Drawer,
+    EmptyState,
+    Field,
+    Metric,
+    SearchField,
+    SegmentedControl,
+    Toolbar
+  } from '$lib/components/ui';
 
-  let { data } = $props();
+  let { data, form } = $props();
+
   const overview = $derived(data.overview);
-  const recentJobs = $derived(data.jobs);
-  const printers = $derived(data.printers);
-  const attentionPrinters = $derived(printers.filter((printer) => printer.state !== 'online'));
+  const detail = $derived(data.detail);
+  const views = $derived(operationalViews(data.meta));
+
+  let query = $state('');
+  let stateFilter = $state('all');
+
+  // The checklist is scaffolding, not chrome: once a first job exists it stops
+  // occupying the top of the operational surface for good.
   const setupStep = $derived(
-    overview.agents.total === 0 ? 1 : overview.printers.total === 0 ? 2 : overview.jobs.recent === 0 ? 3 : 4
+    data.agents.length === 0 ? 1 : data.printers.length === 0 ? 2 : overview.jobs.recent === 0 ? 3 : 4
   );
+  const setupComplete = $derived(setupStep === 4);
+
+  const matches = (...fields: (string | null | undefined)[]) =>
+    query === '' ||
+    fields.some((field) => field?.toLowerCase().includes(query.toLowerCase()));
+
+  const visibleJobs = $derived(
+    data.jobs.filter((job) => {
+      const matchesState =
+        stateFilter === 'all' ||
+        (stateFilter === 'active' &&
+          !['completed_reported', 'cancelled', 'expired', 'failed_terminal'].includes(job.state)) ||
+        (stateFilter === 'failed' && ['failed_terminal', 'failed_retryable'].includes(job.state)) ||
+        job.state === stateFilter;
+      return matches(job.title, job.id) && matchesState;
+    })
+  );
+
+  const visiblePrinters = $derived(
+    data.printers.filter(
+      (printer) =>
+        matches(printer.name, printer.location, printer.description) &&
+        (stateFilter === 'all' || printer.state === stateFilter)
+    )
+  );
+
+  const visibleNodes = $derived(
+    data.agents.filter(
+      (node) =>
+        (matches(node.name, node.id) || node.labels.some((label) => matches(label))) &&
+        (stateFilter === 'all' || node.state === stateFilter)
+    )
+  );
+
+  const visibleAccounts = $derived(
+    data.accounts.filter((account) => matches(account.name, account.externalId))
+  );
+
+  const resultCount = $derived(
+    data.view === 'jobs'
+      ? visibleJobs.length
+      : data.view === 'printers'
+        ? visiblePrinters.length
+        : data.view === 'nodes'
+          ? visibleNodes.length
+          : visibleAccounts.length
+  );
+
+  const stateOptions = $derived(
+    data.view === 'jobs'
+      ? [
+          { value: 'all', label: 'All states' },
+          { value: 'active', label: 'Active' },
+          { value: 'failed', label: 'Failed' },
+          { value: 'delivery_uncertain', label: 'Uncertain' }
+        ]
+      : [
+          { value: 'all', label: 'All states' },
+          { value: 'online', label: 'Online' },
+          { value: 'degraded', label: 'Degraded' },
+          { value: 'offline', label: 'Offline' },
+          { value: 'paused', label: 'Paused' }
+        ]
+  );
+
+  const DETAIL_KEYS = ['job', 'printer', 'node', 'customer'];
+
+  function buildHref(overrides: Record<string, string | null>): string {
+    const params = new URLSearchParams(page.url.searchParams);
+    for (const [key, value] of Object.entries(overrides)) {
+      if (value === null) params.delete(key);
+      else params.set(key, value);
+    }
+    const search = params.toString();
+    return search ? `/dashboard?${search}` : '/dashboard';
+  }
+
+  const detailHref = (kind: string, id: string) =>
+    buildHref({ ...Object.fromEntries(DETAIL_KEYS.map((key) => [key, null])), [kind]: id });
+
+  const listHref = $derived(
+    buildHref(Object.fromEntries(DETAIL_KEYS.map((key) => [key, null])))
+  );
+
+  function switchView(next: string) {
+    stateFilter = 'all';
+    void goto(buildHref({ ...Object.fromEntries(DETAIL_KEYS.map((k) => [k, null])), view: next }), {
+      keepFocus: true,
+      noScroll: true
+    });
+  }
+
+  function closeDrawer() {
+    void goto(listHref, { keepFocus: true, noScroll: true });
+  }
+
+  const nodeName = (agentId: string) =>
+    data.agents.find((agent) => agent.id === agentId)?.name ?? 'Unknown';
+  const printerName = (printerId: string) =>
+    data.printers.find((printer) => printer.id === printerId)?.name ?? 'Unknown';
+  const readyProfiles = (printer: (typeof data.printers)[number]) =>
+    printer.profiles.filter((profile) => profile.status === 'ready').length;
+
+  // Enrolment dialog.
+  let enrolmentOpen = $state(false);
+  let enrolmentPending = $state(false);
+  let enrolmentAttempted = $state(false);
+  let copied = $state(false);
+  const enrolmentResult = $derived(
+    enrolmentAttempted && !enrolmentPending && form?.mutation === 'createEnrolment' ? form : null
+  );
+
+  // Cancellation dialog.
+  let cancelOpen = $state(false);
+  let cancelPending = $state(false);
+  let cancelAttempted = $state(false);
+
+  const cancellable = $derived(
+    detail?.kind === 'job' &&
+      !['completed_reported', 'cancelled', 'expired', 'failed_terminal'].includes(detail.job.state)
+  );
+
+  async function copyToken(token: string) {
+    await navigator.clipboard.writeText(token);
+    copied = true;
+  }
 </script>
 
 <svelte:head>
-  <title>Overview · Piqae</title>
-  <meta name="description" content="Current print nodes, printers, jobs, and actionable conditions." />
+  <title>Operations · Piqae</title>
+  <meta name="description" content="Live print jobs, printers, and nodes in one operational view." />
 </svelte:head>
 
 {#snippet actions()}
-  <a class="button" href="/docs/quickstart"><Icon name="docs" size={13} /> API quickstart</a>
-  <a class="button primary" href="/dashboard/nodes"><Icon name="plus" size={13} /> Add node</a>
+  {#if data.view === 'nodes'}
+    <!-- Loopback diagnostics are only reachable from here now that the Nodes
+         page is a view; the native shells still deep-link to /dashboard/local. -->
+    <a class="button" href="/dashboard/local"><Icon name="printers" size={14} /> This device</a>
+  {/if}
+  <a class="button" href="/docs/quickstart"><Icon name="docs" size={14} /> Quickstart</a>
+  <button
+    class="button primary"
+    onclick={() => {
+      copied = false;
+      enrolmentAttempted = false;
+      enrolmentOpen = true;
+    }}
+  >
+    <Icon name="plus" size={14} /> Add node
+  </button>
 {/snippet}
 
 <PageHeader
-  title="Overview"
-  description="Current operational state across your nodes, printers, and durable queues."
+  title="Operations"
+  description="Live jobs, printers, and nodes across your workspace."
   {actions}
 />
 
 {#if data.dataError}<DataError error={data.dataError} />{/if}
 
-<section class="metrics" aria-label="Printing overview">
-  <a class="metric" href="/dashboard/nodes">
-    <div class="metric-label">Nodes online</div>
-    <div class="metric-value numeric">{overview.agents.online}<span>/{overview.agents.total}</span></div>
-    <div class="metric-detail">
-      {overview.agents.total - overview.agents.online} unavailable
+{#if !setupComplete}
+  <section class="setup" aria-label="Setup progress">
+    <div class="setup-intro">
+      <strong>Send your first print</strong>
+      <span>One node, one printer, then one API request.</span>
     </div>
-  </a>
-  <a class="metric" href="/dashboard/printers">
-    <div class="metric-label">Printers available</div>
-    <div class="metric-value numeric">{overview.printers.online}<span>/{overview.printers.total}</span></div>
-    <div class="metric-detail">{overview.printers.attention} need attention</div>
-  </a>
-  <a class="metric" href="/dashboard/jobs">
-    <div class="metric-label">Recent jobs</div>
-    <div class="metric-value numeric">{overview.jobs.recent.toLocaleString()}</div>
-    <div class="metric-detail">{overview.jobs.active} active in queues</div>
-  </a>
-  <a class="metric" href="/dashboard/jobs?state=failed">
-    <div class="metric-label">Needs review</div>
-    <div class="metric-value numeric">{overview.jobs.failed + overview.jobs.uncertain}</div>
-    <div class="metric-detail">{overview.jobs.uncertain} uncertain handoff</div>
-  </a>
-</section>
-
-<section class="overview-grid">
-  <div class="panel onboarding">
-    <header class="section-header">
-      <div>
-        <h2>{setupStep === 4 ? 'First print complete' : 'Send your first print'}</h2>
-        <p>One native node, one discovered printer, then one API request.</p>
-      </div>
-      <span class="progress">{Math.min(setupStep - 1, 3)}/3</span>
-    </header>
     <ol>
       <li class:complete={setupStep > 1} class:current={setupStep === 1}>
-        <span>{setupStep > 1 ? '✓' : '1'}</span>
-        <div><strong>Add a node</strong><small>Install Piqae on the computer connected to your printer.</small></div>
-        <a href="/dashboard/nodes">Open nodes <Icon name="arrow-right" size={11} /></a>
+        <span class="step">{setupStep > 1 ? '✓' : '1'}</span>
+        <a href="/downloads">Install a node</a>
       </li>
       <li class:complete={setupStep > 2} class:current={setupStep === 2}>
-        <span>{setupStep > 2 ? '✓' : '2'}</span>
-        <div><strong>Confirm a printer</strong><small>Piqae discovers installed queues and their native profiles.</small></div>
-        <a href="/dashboard/printers">View printers <Icon name="arrow-right" size={11} /></a>
+        <span class="step">{setupStep > 2 ? '✓' : '2'}</span>
+        <a href="/dashboard?view=printers">Confirm a printer</a>
       </li>
       <li class:complete={setupStep > 3} class:current={setupStep === 3}>
-        <span>{setupStep > 3 ? '✓' : '3'}</span>
-        <div><strong>Submit a PDF</strong><small>Create an API key and send a durable print job.</small></div>
-        <a href="/docs/quickstart">Quickstart <Icon name="arrow-right" size={11} /></a>
+        <span class="step">{setupStep > 3 ? '✓' : '3'}</span>
+        <a href="/docs/quickstart">Submit a PDF</a>
       </li>
     </ol>
-  </div>
+  </section>
+{/if}
 
-  <div class="panel attention-panel">
-    <header class="section-header">
-      <div><h2>Needs attention</h2><p>Printer conditions reported now.</p></div>
-      <span class="count">{attentionPrinters.length}</span>
-    </header>
-    <div class="attention-list">
-      {#each attentionPrinters as printer}
-        <a href={`/dashboard/printers/${printer.id}`}>
-          <span class="attention-icon"><Icon name="warning" size={14} /></span>
-          <span class="attention-copy">
-            <strong>{printer.name}</strong>
-            <small>{printer.stateReasons[0]?.replaceAll('_', ' ') ?? printer.state}</small>
-          </span>
-          <Icon name="arrow-right" size={13} />
-        </a>
-      {:else}
-        <div class="empty-attention">No printer conditions require attention.</div>
-      {/each}
-    </div>
-  </div>
+<section class="metrics" aria-label="Printing overview">
+  <Metric
+    label="Nodes online"
+    value={overview.agents.online}
+    total={overview.agents.total}
+    detail={`${overview.agents.total - overview.agents.online} unavailable`}
+    href="/dashboard?view=nodes"
+  />
+  <Metric
+    label="Printers available"
+    value={overview.printers.online}
+    total={overview.printers.total}
+    detail={`${overview.printers.attention} need attention`}
+    href="/dashboard?view=printers"
+  />
+  <Metric
+    label="Recent jobs"
+    value={overview.jobs.recent.toLocaleString()}
+    detail={`${overview.jobs.active} active in queues`}
+    href="/dashboard?view=jobs"
+  />
+  <Metric
+    label="Needs review"
+    value={overview.jobs.failed + overview.jobs.uncertain}
+    detail={`${overview.jobs.uncertain} uncertain handoff`}
+    href="/dashboard?view=jobs"
+  />
 </section>
 
-<section class="panel jobs">
-  <header class="section-header">
-    <div><h2>Recent jobs</h2><p>Newest recorded state across all printers.</p></div>
-    <a class="button small ghost" href="/dashboard/jobs">View all <Icon name="arrow-right" size={12} /></a>
-  </header>
-  <div class="table-wrap">
-    <table>
-      <thead><tr><th>Job</th><th>Status</th><th>Printer</th><th>Source</th><th class="right">Updated</th></tr></thead>
+<Toolbar meta={`${resultCount} ${data.view}`}>
+  <SegmentedControl
+    value={data.view}
+    label="Switch operational view"
+    options={views}
+    onchange={switchView}
+  />
+  <SearchField bind:value={query} label={`Search ${data.view}`} placeholder={`Search ${data.view}…`} />
+  {#if data.view !== 'customers'}
+    <select class="ui-select" bind:value={stateFilter} aria-label="Filter by state">
+      {#each stateOptions as option}
+        <option value={option.value}>{option.label}</option>
+      {/each}
+    </select>
+  {/if}
+</Toolbar>
+
+<DataPanel minWidth={data.view === 'jobs' ? '860px' : '760px'}>
+  {#if data.view === 'jobs'}
+    <table class="ui-data-table">
+      <thead>
+        <tr>
+          <th>Job</th>
+          <th>Status</th>
+          <th>Printer</th>
+          <th>Node</th>
+          <th class="right">Updated</th>
+        </tr>
+      </thead>
       <tbody>
-        {#each recentJobs as job}
+        {#each visibleJobs as job}
           <tr>
-            <td><a class="job-link" href={`/dashboard/jobs/${job.id}`}><strong>{job.title}</strong><span class="mono">{job.id}</span></a></td>
+            <td>
+              <a class="cell-stack" href={detailHref('job', job.id)}>
+                <strong>{job.title}</strong>
+                <small class="mono">{job.id} · {job.contentFormat.toUpperCase()}</small>
+              </a>
+            </td>
             <td><Status value={job.state} /></td>
-            <td>{printers.find((printer) => printer.id === job.printerId)?.name ?? 'Unknown'}</td>
-            <td class="muted">{job.source ?? '—'}</td>
+            <td>
+              <span class="cell-inline">
+                <Icon name="printers" size={14} />
+                {printerName(job.printerId)}
+              </span>
+            </td>
+            <td class="muted">{nodeName(job.agentId)}</td>
             <td class="right muted numeric"><RelativeTime value={job.updatedAt} /></td>
           </tr>
         {:else}
-          <tr><td colspan="5"><div class="empty-state compact">No recent jobs.</div></td></tr>
+          <tr><td colspan="5"><EmptyState message="No jobs match this view." compact /></td></tr>
         {/each}
       </tbody>
     </table>
+  {:else if data.view === 'printers'}
+    <table class="ui-data-table">
+      <thead>
+        <tr>
+          <th>Printer</th>
+          <th>Status</th>
+          <th>Node</th>
+          <th>Profiles</th>
+          <th>Queue</th>
+          <th class="right">Last seen</th>
+        </tr>
+      </thead>
+      <tbody>
+        {#each visiblePrinters as printer}
+          <tr>
+            <td>
+              <a class="cell-stack" href={detailHref('printer', printer.id)}>
+                <strong>{printer.name}</strong>
+                <small>{printer.location ?? printer.description ?? 'No location'}</small>
+              </a>
+            </td>
+            <td><Status value={printer.state} /></td>
+            <td class="muted">{nodeName(printer.agentId)}</td>
+            <td class="numeric">
+              {readyProfiles(printer)}/{printer.profiles.length} ready
+            </td>
+            <td class="numeric">{printer.queueDepth}</td>
+            <td class="right muted numeric"><RelativeTime value={printer.lastSeenAt} /></td>
+          </tr>
+        {:else}
+          <tr><td colspan="6"><EmptyState message="No printers match this view." compact /></td></tr>
+        {/each}
+      </tbody>
+    </table>
+  {:else if data.view === 'nodes'}
+    <table class="ui-data-table">
+      <thead>
+        <tr>
+          <th>Node</th>
+          <th>Status</th>
+          <th>Platform</th>
+          <th>Printers</th>
+          <th>Queue</th>
+          <th class="right">Last seen</th>
+        </tr>
+      </thead>
+      <tbody>
+        {#each visibleNodes as node}
+          <tr>
+            <td>
+              <a class="cell-stack" href={detailHref('node', node.id)}>
+                <strong>{node.name}</strong>
+                <small class="mono">{node.id}</small>
+              </a>
+            </td>
+            <td><Status value={node.state} /></td>
+            <td class="muted">{node.os} · {node.architecture}</td>
+            <td class="numeric">{node.printerCount}</td>
+            <td class="numeric">{node.queueDepth}</td>
+            <td class="right muted numeric"><RelativeTime value={node.lastSeenAt} /></td>
+          </tr>
+        {:else}
+          <tr><td colspan="6"><EmptyState message="No nodes match this view." compact /></td></tr>
+        {/each}
+      </tbody>
+    </table>
+  {:else}
+    <table class="ui-data-table">
+      <thead>
+        <tr>
+          <th>Customer</th>
+          <th>Status</th>
+          <th>External ID</th>
+          <th class="right">Created</th>
+        </tr>
+      </thead>
+      <tbody>
+        {#each visibleAccounts as account}
+          <tr>
+            <td>
+              <a class="cell-stack" href={detailHref('customer', account.externalId)}>
+                <strong>{account.name}</strong>
+                <small class="mono">{account.id}</small>
+              </a>
+            </td>
+            <td><Status value={account.status === 'active' ? 'online' : 'paused'} label={account.status} /></td>
+            <td class="mono muted">{account.externalId}</td>
+            <td class="right muted numeric"><RelativeTime value={account.createdAt} /></td>
+          </tr>
+        {:else}
+          <tr><td colspan="4"><EmptyState message="No customers match this view." compact /></td></tr>
+        {/each}
+      </tbody>
+    </table>
+  {/if}
+</DataPanel>
+
+<!-- Detail drawer. The selected entity is addressed by query string so links stay shareable. -->
+<Drawer
+  open={detail !== null}
+  labelledBy="detail-title"
+  eyebrow={detail?.kind === 'job'
+    ? 'Print job'
+    : detail?.kind === 'printer'
+      ? 'Destination'
+      : detail?.kind === 'node'
+        ? 'Node'
+        : detail?.kind === 'customer'
+          ? 'Customer'
+          : 'Detail'}
+  title={detail?.kind === 'job'
+    ? detail.job.title
+    : detail?.kind === 'printer'
+      ? detail.printer.name
+      : detail?.kind === 'node'
+        ? detail.node.name
+        : detail?.kind === 'customer'
+          ? detail.account.name
+          : 'Not found'}
+  onclose={closeDrawer}
+>
+  {#snippet actions()}
+    {#if detail?.kind === 'job'}
+      <button
+        class="button compact"
+        disabled={!cancellable}
+        title={cancellable ? 'Request job cancellation' : 'This job is already terminal'}
+        onclick={() => {
+          cancelAttempted = false;
+          cancelOpen = true;
+        }}
+      >
+        Cancel
+      </button>
+    {:else if detail?.kind === 'printer'}
+      <a class="button compact" href={detailHref('node', detail.printer.agentId)}>Open node</a>
+    {/if}
+  {/snippet}
+
+  {#if detail?.kind === 'job'}
+    <div class="drawer-status">
+      <Status value={detail.job.state} />
+      <span class="muted">{detail.job.message}</span>
+    </div>
+
+    {#if detail.job.state === 'delivery_uncertain'}
+      <p class="ui-note error">
+        Piqae cannot safely determine whether this job printed. The node restarted between the OS
+        handoff and recording its native job ID, so automatic retry is disabled to prevent a
+        duplicate.
+      </p>
+    {/if}
+
+    <DefinitionList
+      items={[
+        { term: 'Printer', value: detail.printer?.name ?? 'Unknown' },
+        { term: 'Node', value: detail.agent?.name ?? 'Unknown' },
+        { term: 'Format', value: detail.job.contentFormat.toUpperCase() },
+        { term: 'Source', value: detail.job.source },
+        { term: 'Authority', value: detail.job.authority.replaceAll('_', ' ') },
+        { term: 'Native job', value: detail.job.nativeJobId, mono: true },
+        { term: 'Content', value: detail.job.contentRetained ? 'Retained' : 'Deleted' },
+        { term: 'Job ID', value: detail.job.id, mono: true }
+      ]}
+    />
+
+    <div class="drawer-section">
+      <h3>Event timeline<span>{detail.events.length} events</span></h3>
+      <JobTimeline events={detail.events} />
+    </div>
+  {:else if detail?.kind === 'printer'}
+    <div class="drawer-status">
+      <Status value={detail.printer.state} />
+      <span class="muted">Seen <RelativeTime value={detail.printer.lastSeenAt} /></span>
+    </div>
+
+    <DefinitionList
+      items={[
+        { term: 'Node', value: detail.agent?.name ?? 'Unknown' },
+        { term: 'Location', value: detail.printer.location },
+        { term: 'Queue depth', value: detail.printer.queueDepth },
+        { term: 'Colour', value: detail.printer.capabilities.color ? 'Supported' : 'Mono only' },
+        { term: 'Duplex', value: detail.printer.capabilities.duplex ? 'Supported' : 'Single sided' },
+        { term: 'Printer ID', value: detail.printer.id, mono: true }
+      ]}
+    />
+
+    <div class="drawer-section">
+      <h3>Native print profiles<span>{detail.printer.profiles.length}</span></h3>
+      {#each detail.printer.profiles as profile}
+        <div class="profile">
+          <div>
+            <strong>{profile.name}{profile.isDefault ? ' — Default' : ''}</strong>
+            <small>
+              Revision {profile.revision} · {profile.nativeKind.replaceAll('_', ' ')}
+              {profile.published ? ' · Published' : ' · Local only'}
+            </small>
+          </div>
+          <Status value={profile.status} />
+        </div>
+      {:else}
+        <p class="muted empty-line">
+          No print profiles. Open the Piqae tray application on this node and choose Add profile.
+        </p>
+      {/each}
+    </div>
+
+    <div class="drawer-section">
+      <h3>Recent jobs<span>{detail.jobs.length}</span></h3>
+      {#each detail.jobs.slice(0, 8) as job}
+        <a class="mini-row" href={detailHref('job', job.id)}>
+          <span>{job.title}</span>
+          <Status value={job.state} />
+        </a>
+      {:else}
+        <p class="muted empty-line">No jobs recorded for this printer.</p>
+      {/each}
+    </div>
+  {:else if detail?.kind === 'node'}
+    <div class="drawer-status">
+      <Status value={detail.node.state} />
+      <span class="muted">Seen <RelativeTime value={detail.node.lastSeenAt} /></span>
+    </div>
+
+    <DefinitionList
+      items={[
+        { term: 'Platform', value: `${detail.node.os} · ${detail.node.architecture}` },
+        { term: 'Node version', value: `v${detail.node.version}`, mono: true },
+        { term: 'Protocol', value: detail.node.protocolVersion, mono: true },
+        { term: 'Local queue', value: `${detail.node.queueDepth} jobs` },
+        { term: 'Labels', value: detail.node.labels.join(', ') || null },
+        { term: 'Node ID', value: detail.node.id, mono: true }
+      ]}
+    />
+
+    <div class="drawer-section">
+      <h3>Printers<span>{detail.printers.length}</span></h3>
+      {#each detail.printers as printer}
+        <a class="mini-row" href={detailHref('printer', printer.id)}>
+          <span>{printer.name}</span>
+          <Status value={printer.state} />
+        </a>
+      {:else}
+        <p class="muted empty-line">This node has not reported any printers.</p>
+      {/each}
+    </div>
+  {:else if detail?.kind === 'customer'}
+    <DefinitionList
+      items={[
+        { term: 'Status', value: detail.account.status },
+        { term: 'External ID', value: detail.account.externalId, mono: true },
+        { term: 'Test environment', value: detail.account.environments.testId, mono: true },
+        { term: 'Live environment', value: detail.account.environments.liveId, mono: true }
+      ]}
+    />
+  {:else if detail?.kind === 'missing'}
+    <EmptyState message={`That ${detail.label} no longer exists.`} compact />
+  {/if}
+</Drawer>
+
+<!-- Node enrolment -->
+<Dialog
+  bind:open={enrolmentOpen}
+  labelledBy="enrolment-title"
+  title="Add a node"
+  description="Install the native app, then approve its short-lived browser pairing request."
+>
+  <div class="ui-dialog__body">
+    {#if data.dashboardMode === 'demo'}
+      <p class="ui-note warning">Demo mode: preview only. No enrolment will be created.</p>
+    {/if}
+
+    <ol class="steps" aria-label="Add node steps">
+      <li><span>1</span><div><strong>Install</strong><small><a href="/downloads">Download the native node</a> on the printer computer.</small></div></li>
+      <li><span>2</span><div><strong>Connect node</strong><small>Choose Connect node in the native tray or menu app.</small></div></li>
+      <li><span>3</span><div><strong>Approve</strong><small>Match the computer and one-time code in the browser, then approve it.</small></div></li>
+    </ol>
+
+    <p class="ui-note success">
+      Browser pairing is recommended — the device key stays on the printer computer and the browser
+      approves only its public identity. <a href="/pair">Pairing instructions</a>
+    </p>
+
+    <form
+      id="enrolment-form"
+      method="POST"
+      action="?/createEnrolment"
+      use:enhance={() => {
+        enrolmentPending = true;
+        enrolmentAttempted = true;
+        copied = false;
+        return async ({ update }) => {
+          await update({ reset: false });
+          enrolmentPending = false;
+        };
+      }}
+    >
+      <div class="manual">
+        <strong>Manual token fallback</strong>
+        <span>Use only when the native app cannot open the browser pairing flow.</span>
+      </div>
+      <Field label="Node name">
+        <input class="input" name="name" minlength="2" maxlength="120" required placeholder="Warehouse Mac mini" />
+      </Field>
+      <Field label="Token expiry">
+        <select class="input" name="expires_in_seconds">
+          <option value="600">10 minutes</option>
+          <option value="1800">30 minutes</option>
+          <option value="3600">1 hour</option>
+        </select>
+      </Field>
+    </form>
+
+    {#if enrolmentResult?.error}
+      <p class="ui-note error" role="alert">{enrolmentResult.error.message}</p>
+    {/if}
+
+    {#if enrolmentResult?.enrolment}
+      <section class="secret" aria-live="polite">
+        <div>
+          <strong>Node token · shown once</strong>
+          <span>Expires {new Date(enrolmentResult.enrolment.expiresAt).toLocaleString()}</span>
+        </div>
+        <code>{enrolmentResult.enrolment.token}</code>
+        <button class="button compact" type="button" onclick={() => copyToken(enrolmentResult.enrolment.token)}>
+          <Icon name="copy" size={13} /> {copied ? 'Copied' : 'Copy token'}
+        </button>
+      </section>
+    {/if}
   </div>
-</section>
+
+  {#snippet footer()}
+    <button class="button" type="button" onclick={() => (enrolmentOpen = false)}>Close</button>
+    <button
+      class="button"
+      type="submit"
+      form="enrolment-form"
+      disabled={enrolmentPending || data.dashboardMode !== 'live'}
+    >
+      {enrolmentPending ? 'Creating…' : 'Create manual token'}
+    </button>
+  {/snippet}
+</Dialog>
+
+<!-- Job cancellation -->
+{#if detail?.kind === 'job'}
+  <Dialog
+    bind:open={cancelOpen}
+    labelledBy="cancel-job-title"
+    title="Cancel this print job?"
+    description="Piqae will send a cancellation request to the node’s durable local queue."
+  >
+    <div class="ui-dialog__body">
+      <form
+        id="cancel-form"
+        method="POST"
+        action="?/cancelJob"
+        use:enhance={() => {
+          cancelPending = true;
+          cancelAttempted = true;
+          return async ({ result, update }) => {
+            await update();
+            cancelPending = false;
+            if (result.type === 'success') cancelOpen = false;
+          };
+        }}
+      >
+        <input type="hidden" name="job_id" value={detail.job.id} />
+        <p class="ui-note neutral">
+          Cancel <strong>{detail.job.title}</strong>? If the operating system has already handed the
+          document to the printer, cancellation may not stop physical output. Piqae will not create
+          an automatic duplicate.
+        </p>
+      </form>
+      {#if data.dashboardMode === 'demo'}
+        <p class="ui-note warning">Demo mode: no cancellation request will be sent.</p>
+      {/if}
+      {#if cancelAttempted && !cancelPending && form?.mutation === 'cancelJob' && form?.error}
+        <p class="ui-note error" role="alert">{form.error.message}</p>
+      {/if}
+    </div>
+
+    {#snippet footer()}
+      <button class="button" type="button" onclick={() => (cancelOpen = false)}>Keep printing</button>
+      <button
+        class="button danger-solid"
+        type="submit"
+        form="cancel-form"
+        disabled={cancelPending || data.dashboardMode !== 'live'}
+      >
+        {cancelPending ? 'Cancelling…' : 'Confirm cancellation'}
+      </button>
+    {/snippet}
+  </Dialog>
+{/if}
 
 <style>
-  .metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border-bottom: 1px solid var(--border-subtle); }
-  .metric { min-height: 108px; display: grid; align-content: center; padding: 16px 20px; border-right: 1px solid var(--border-subtle); }
-  .metric:first-child { padding-left: 0; }
-  .metric:last-child { border-right: 0; }
-  .metric:hover { background: color-mix(in oklch, var(--surface-hover), transparent 45%); }
-  .metric-label { margin-bottom: 5px; color: var(--text-secondary); font-size: 11px; font-weight: 500; }
-  .metric-value { font-size: 25px; line-height: 30px; font-weight: 550; letter-spacing: -0.04em; }
-  .metric-value span { margin-left: 2px; color: var(--text-tertiary); font-size: 14px; font-weight: 450; }
-  .metric-detail { margin-top: 7px; color: var(--text-tertiary); font-size: 10px; }
-  .overview-grid { display: grid; grid-template-columns: minmax(0, 1.45fr) minmax(280px, .75fr); gap: 12px; margin-top: 18px; }
-  .section-header { min-height: 58px; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 14px; border-bottom: 1px solid var(--border-subtle); }
-  h2 { margin: 0; font-size: 12px; line-height: 18px; font-weight: 560; }
-  .section-header p { margin: 1px 0 0; color: var(--text-tertiary); font-size: 10px; line-height: 15px; }
-  .progress, .count { min-width: 25px; height: 22px; display: grid; place-items: center; color: var(--text-secondary); background: var(--surface-raised); border: 1px solid var(--border-subtle); border-radius: 6px; font-size: 9px; }
-  ol { margin: 0; padding: 5px 0; list-style: none; }
-  li { min-height: 62px; display: grid; grid-template-columns: 25px minmax(0, 1fr) auto; align-items: center; gap: 10px; padding: 8px 13px; border-bottom: 1px solid var(--border-subtle); }
-  li:last-child { border-bottom: 0; }
-  li > span { width: 22px; height: 22px; display: grid; place-items: center; color: var(--text-tertiary); background: var(--surface-raised); border: 1px solid var(--border-default); border-radius: 50%; font-size: 9px; }
-  li.complete > span { color: var(--success); background: var(--success-soft); border-color: transparent; }
-  li.current > span { color: white; background: var(--accent); border-color: var(--accent); }
-  li div { display: grid; gap: 2px; }
-  li strong { font-size: 10px; font-weight: 530; }
-  li small { color: var(--text-tertiary); font-size: 9px; }
-  li a { display: flex; align-items: center; gap: 6px; color: var(--text-secondary); font-size: 9px; }
-  li a:hover { color: var(--text-primary); }
-  .attention-list a { min-height: 55px; display: grid; grid-template-columns: 28px 1fr 14px; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--border-subtle); }
-  .attention-list a:hover { background: var(--surface-hover); }
-  .attention-icon { width: 27px; height: 27px; display: grid; place-items: center; color: var(--warning); background: var(--warning-soft); border-radius: 7px; }
-  .attention-copy { min-width: 0; display: grid; line-height: 16px; }
-  .attention-copy strong { overflow: hidden; font-size: 11px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
-  .attention-copy small { color: var(--text-tertiary); font-size: 10px; text-transform: capitalize; }
-  .empty-attention { min-height: 170px; display: grid; place-items: center; padding: 20px; color: var(--text-tertiary); font-size: 10px; text-align: center; }
-  .jobs { margin-top: 12px; }
-  .table-wrap { overflow-x: auto; }
-  table { width: 100%; border-collapse: collapse; font-size: 11px; }
-  th { height: 30px; padding: 0 13px; color: var(--text-tertiary); font-size: 9px; font-weight: 500; text-align: left; text-transform: uppercase; letter-spacing: .035em; border-bottom: 1px solid var(--border-subtle); }
-  td { height: 47px; padding: 0 13px; border-bottom: 1px solid var(--border-subtle); white-space: nowrap; }
-  tr:last-child td { border-bottom: 0; }
-  tbody tr:hover { background: color-mix(in oklch, var(--surface-hover), transparent 34%); }
-  .right { text-align: right; }
-  .job-link { min-width: 220px; display: grid; line-height: 15px; }
-  .job-link strong { font-weight: 500; }
-  .job-link span { color: var(--text-tertiary); font-size: 9px; }
-  .empty-state.compact { min-height: 100px; }
-  @media (max-width: 900px) { .metrics { grid-template-columns: repeat(2, 1fr); } .metric:nth-child(2) { border-right: 0; } .metric:nth-child(-n + 2) { border-bottom: 1px solid var(--border-subtle); } .overview-grid { grid-template-columns: 1fr; } }
-  @media (max-width: 620px) { .metric { min-height: 92px; padding: 12px; } .metric:nth-child(odd) { padding-left: 0; } li { grid-template-columns: 25px 1fr; } li a { grid-column: 2; } }
+  .setup {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 16px;
+    margin-top: 16px;
+    padding: 14px 16px;
+    background: var(--surface);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-lg);
+  }
+
+  .setup-intro {
+    display: grid;
+    gap: 2px;
+  }
+
+  .setup-intro strong {
+    font-size: var(--text-section);
+    font-weight: 560;
+  }
+
+  .setup-intro span {
+    color: var(--text-secondary);
+    font-size: var(--text-meta);
+  }
+
+  .setup ol {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 18px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .setup li {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: var(--text-compact);
+  }
+
+  .step {
+    width: 20px;
+    height: 20px;
+    display: grid;
+    place-items: center;
+    flex: 0 0 auto;
+    color: var(--text-tertiary);
+    background: var(--surface-raised);
+    border: 1px solid var(--border-default);
+    border-radius: 50%;
+    font-size: var(--text-meta);
+  }
+
+  li.complete .step {
+    color: var(--success);
+    background: var(--success-soft);
+    border-color: transparent;
+  }
+
+  li.current .step {
+    color: white;
+    background: var(--accent);
+    border-color: var(--accent);
+  }
+
+  .setup a {
+    color: var(--text-secondary);
+  }
+
+  .setup li.current a {
+    color: var(--text-primary);
+    font-weight: 500;
+  }
+
+  .setup a:hover {
+    color: var(--text-primary);
+  }
+
+  .metrics {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 8px;
+    margin-top: 8px;
+    border-bottom: 1px solid var(--border-subtle);
+  }
+
+  /* Drawer content */
+  .drawer-status {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: var(--text-compact);
+  }
+
+  .drawer-section h3 {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin: 0 0 12px;
+    color: var(--text-secondary);
+    font-size: var(--text-compact);
+    font-weight: 550;
+  }
+
+  .drawer-section h3 span {
+    color: var(--text-tertiary);
+    font-weight: 450;
+  }
+
+  .profile,
+  .mini-row {
+    min-height: var(--row-normal);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 14px;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--border-subtle);
+    font-size: var(--text-compact);
+  }
+
+  .profile > div {
+    display: grid;
+    line-height: var(--text-compact-line);
+  }
+
+  .profile strong {
+    font-weight: 500;
+  }
+
+  .profile small {
+    color: var(--text-tertiary);
+    font-size: var(--text-meta);
+    text-transform: capitalize;
+  }
+
+  .mini-row span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .mini-row:hover {
+    color: var(--accent);
+  }
+
+  .empty-line {
+    margin: 0;
+    font-size: var(--text-compact);
+  }
+
+  /* Dialog content */
+  .steps {
+    display: grid;
+    gap: 12px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .steps li {
+    display: grid;
+    grid-template-columns: 22px minmax(0, 1fr);
+    align-items: start;
+    gap: 10px;
+  }
+
+  .steps li > span {
+    width: 20px;
+    height: 20px;
+    display: grid;
+    place-items: center;
+    color: var(--text-tertiary);
+    background: var(--surface-raised);
+    border: 1px solid var(--border-default);
+    border-radius: 50%;
+    font-size: var(--text-meta);
+  }
+
+  .steps div {
+    display: grid;
+    gap: 1px;
+  }
+
+  .steps strong {
+    font-size: var(--text-compact);
+    font-weight: 530;
+  }
+
+  .steps small,
+  .manual span {
+    color: var(--text-tertiary);
+    font-size: var(--text-meta);
+    line-height: var(--text-meta-line);
+  }
+
+  .steps a,
+  .ui-note a {
+    color: var(--accent);
+  }
+
+  form {
+    display: grid;
+    gap: 12px;
+  }
+
+  .manual {
+    display: grid;
+    gap: 1px;
+  }
+
+  .manual strong {
+    font-size: var(--text-compact);
+    font-weight: 530;
+  }
+
+  .secret {
+    display: grid;
+    gap: 8px;
+    padding: 12px;
+    background: var(--success-soft);
+    border: 1px solid color-mix(in oklch, var(--success), transparent 72%);
+    border-radius: var(--radius-md);
+  }
+
+  .secret > div {
+    display: flex;
+    justify-content: space-between;
+    gap: 10px;
+  }
+
+  .secret strong {
+    color: var(--success);
+    font-size: var(--text-compact);
+    font-weight: 550;
+  }
+
+  .secret span {
+    color: var(--text-tertiary);
+    font-size: var(--text-meta);
+  }
+
+  .secret code {
+    overflow-wrap: anywhere;
+    color: var(--text-secondary);
+    font: var(--text-code) / var(--text-code-line) var(--font-mono);
+  }
+
+  .secret .button {
+    justify-self: start;
+  }
+
+  @media (max-width: 900px) {
+    .metrics {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+  }
+
+  @media (max-width: 620px) {
+    .setup {
+      align-items: flex-start;
+      flex-direction: column;
+    }
+
+    .setup ol {
+      gap: 12px;
+      flex-direction: column;
+      align-items: flex-start;
+    }
+  }
 </style>

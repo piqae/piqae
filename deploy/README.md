@@ -46,6 +46,13 @@ Production operators must provide:
 - the runtime Secret or a working External Secrets Operator store;
 - DNS, TLS, WAF/rate limiting, alerting, and an incident-tested failover plan.
 
+The control plane applies its own fixed-window limits to the unauthenticated
+node-onboarding endpoints (pairing creation, pairing polling, and enrolment) so
+its tables stay bounded without an edge WAF. Those limits bound table growth,
+not bandwidth: an operator-provided WAF is still required for volumetric
+defence. Per-client limiting keys on `x-forwarded-for`, so terminate that header
+at a trusted proxy.
+
 Run all deployment checks with:
 
 ```sh

@@ -127,7 +127,7 @@ function piqaeCostFor(
   if (nodes > plan.includedNodes) return null;
   if (customerAccounts > 0 && plan.customerAccounts === 'not_included') return null;
   if (plan.plan === 'free') {
-    return jobs <= plan.includedAcceptedJobs &&
+    return jobs <= plan.includedReportedCompleteJobs &&
       nodes <= plan.includedNodes &&
       customerAccounts === 0
       ? { monthlyCents: 0, annualCents: 0 }
@@ -137,8 +137,8 @@ function piqaeCostFor(
   const annual = interval === 'annual';
   const measuredJobs = annual ? jobs * 12 : jobs;
   const includedJobs = annual
-    ? (plan.annualIncludedAcceptedJobs ?? plan.includedAcceptedJobs * 12)
-    : plan.includedAcceptedJobs;
+    ? (plan.annualIncludedReportedCompleteJobs ?? plan.includedReportedCompleteJobs * 12)
+    : plan.includedReportedCompleteJobs;
   let cents = annual ? plan.annualCents : plan.monthlyCents;
   if (plan.jobOverageUnit && plan.jobOverageCents) {
     cents +=

@@ -63,6 +63,21 @@ small: owner, administrator, operator, developer, viewer.
 - bind printer ownership to the enrolled installation;
 - detect concurrent cloned identity sessions.
 
+Implemented shape. A node holds an Ed25519 key it generated itself; the control
+plane stores only the public half. Each request is signed over its method,
+path, timestamp, nonce, and body digest, so there is no bearer token to steal
+in transit and no session to expire. Replay is bounded by a per-node nonce
+reservation retained for longer than any signature stays acceptable. Access
+ends by revoking the node, which takes effect on its next request. Pairing
+secrets travel in request bodies so they are not captured by proxy access logs,
+and `--rotate-key` replaces a node's key in place without disturbing its ID,
+printers, or routing. See `docs/nodes/pairing.md`.
+
+A node's signing timestamp is checked against a bounded window. Every response
+carries the server clock so a node with a drifting clock corrects itself rather
+than failing until an operator intervenes; the window is not a substitute for
+running time synchronization on node machines.
+
 ### Local agent API
 
 - loopback-only by default;

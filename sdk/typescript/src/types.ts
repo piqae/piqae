@@ -51,8 +51,8 @@ export interface UsageSummary {
   period_start: string;
   /** Exclusive end of the requested UTC or Stripe subscription period. */
   period_end: string;
-  /** Live jobs counted exactly once at operating-system spooler acceptance. */
-  accepted_live_jobs: number;
+  /** Live jobs counted exactly once when the node reports completion. */
+  reported_complete_live_jobs: number;
   active_nodes: number;
 }
 
@@ -295,6 +295,12 @@ export interface DeviceAuthorizationReview {
   architecture: string;
   state: 'pending' | 'approved' | 'denied' | 'consumed' | 'expired';
   expires_at: string;
+  /**
+   * The node whose device key this approval would replace, when the request
+   * comes from an installation already paired to this workspace. Null when
+   * approving admits a new node.
+   */
+  replaces_node_id?: PiqaeId | null;
 }
 
 export interface DeviceAuthorizationExchange {
@@ -565,6 +571,31 @@ export interface TargetReadiness {
   status: 'ready' | 'target_has_no_ready_binding';
   selected_binding_id: PiqaeId | null;
   bindings: BindingReadiness[];
+}
+
+export interface DesignSpecificationDestination {
+  binding: TargetBinding;
+  printer: Printer;
+  /** Exact immutable profile revision selected by the binding. */
+  profile: PrinterProfileSnapshot;
+}
+
+/** One read model for sizing an editor canvas and checking production readiness. */
+export interface DesignSpecification {
+  target: Target;
+  stock: Stock | null;
+  readiness: TargetReadiness;
+  destinations: DesignSpecificationDestination[];
+  /** Changes when any design or production constraint in this projection changes. */
+  specification_revision: string;
+}
+
+export interface JobListOptions extends ListOptions {
+  state?: JobState;
+  printer_id?: PiqaeId;
+  target_id?: string;
+  metadata_key?: string;
+  metadata_value?: string;
 }
 
 export interface JobOptions {

@@ -84,7 +84,10 @@ environment. Resource IDs from another tenant return the same not-found
 response as unknown IDs. Do not add workspace-selection headers to print API
 calls.
 
-A SaaS integrator should create a separate environment-scoped key for each
-customer workspace. Cross-workspace provisioning requires a future explicit
-platform/service-account grant; ordinary print keys must never become
-cross-tenant administration credentials.
+A single-workspace integrator should create a separate environment-scoped key
+for each customer workspace. A multi-tenant SaaS backend can instead use the
+implemented-preview platform service-account grant and account-scoped SDK
+facade described in [the web design platform guide](web-design-platform-integration.md).
+That feature remains Disabled as a production support claim until its release
+evidence passes. Ordinary print keys must never become cross-tenant
+administration credentials.

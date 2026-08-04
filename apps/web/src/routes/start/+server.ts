@@ -20,6 +20,6 @@ export const GET: RequestHandler = ({ url, cookies, request }) => {
     secure: url.protocol === 'https:',
     maxAge: 60 * 60 * 24 * 30
   });
-  const returnTo = attribution.plan === 'free' ? '/dashboard' : '/dashboard/settings/billing';
+  const returnTo = attribution.plan === 'free' ? '/dashboard' : '/dashboard/settings#billing';
   redirect(303, `/auth/login?return_to=${encodeURIComponent(returnTo)}`);
 };

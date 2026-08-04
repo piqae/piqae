@@ -1,8 +1,7 @@
 # Native release publishing
 
-**Status:** protected hosting and fail-closed package workflows are being
-connected. No Piqae native release is currently Supported or published as a
-stable signed download.
+**Status:** protected hosting and fail-closed package workflows are connected
+for Preview candidates. No Piqae native platform is currently Supported.
 
 This runbook separates four states:
 
@@ -81,6 +80,11 @@ For each platform:
 13. Confirm `/downloads` and both public appcast routes from outside Railway.
 14. Roll out to canary nodes and observe before widening.
 
+The weekly **Published update feed** check dereferences every published appcast
+enclosure. Windows returning 404 is accepted while that platform has no public
+feed; once present, the enclosure is required to remain below the stable Piqae
+origin and return downloadable bytes.
+
 Do not put signing keys, bucket credentials, notarisation credentials, or
 release tokens in appcasts, workflow artifacts, command arguments, or logs.
 The web service uses its release-origin credentials only for reads. Enforce
@@ -132,6 +136,18 @@ Stable promotion then enters `native-release`, verifies each immutable S3
 object's SHA-256 and length, promotes the installer before its appcast, and
 promotes the combined manifest last.
 
+`.github/workflows/release.yml` is the only tag entry point. It calls the
+macOS and Windows workflows as reusable stages, builds Linux and container
+artifacts once, waits for both public update-feed checks, then changes the
+draft GitHub release into a prerelease. The release bucket and signed appcasts
+remain the updater authority; GitHub Releases is the human-facing mirror and
+must never become a second independently built channel.
+
+The `native-signing` environment may be used only from `main` and `v*` refs.
+The `native-release` environment permits only `v*` refs and requires a reviewer.
+Repository Actions default to read-only permissions; individual jobs request
+write access only for attestations, packages, or release publication.
+
 ## Failure and rollback
 
 If verification fails, stop before publication. If a preview fails, remove its
@@ -159,6 +175,12 @@ and queue reconciliation have been observed.
   executor, and installer; Apple notarisation/stapling for the app and DMG;
   Sparkle Ed25519 signing; immutable publication; and public checksum
   verification in GitHub Actions run `30507639987`.
+- The currently published macOS `0.1.0 (8)` appcast omits `/stable/` from its
+  enclosure URL and the shared stable manifest is absent. The archive exists at
+  the correct stable path, but desktop discovery remains broken until a
+  protected release repairs both channel pointers.
+- No Windows appcast is published; its stable route correctly remains absent
+  while Windows release evidence is incomplete.
 - macOS Sparkle replaces the app bundle, not the separately installed Rust
   node and executor.
 - Windows WinSparkle source integration still needs a Windows CI run,

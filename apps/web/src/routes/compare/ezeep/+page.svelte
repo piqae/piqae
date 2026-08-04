@@ -27,7 +27,7 @@
           <tbody>
             <tr><td>Primary buyer</td><td>Software teams and integrators</td><td>Workplace and user print management</td></tr>
             <tr><td>Deployment control</td><td>Cloud, self-hosted, local-only</td><td>Vendor cloud service and connector model</td></tr>
-            <tr><td>Commercial unit</td><td>Accepted jobs, active agents, active tenants</td><td>User/page and API plan constructs</td></tr>
+            <tr><td>Commercial unit</td><td>Reported-complete jobs and node allowance</td><td>User/page and API plan constructs</td></tr>
             <tr><td>Choose it when</td><td>You are embedding printing into software</td><td>You are managing user access to workplace printers</td></tr>
           </tbody>
         </table>

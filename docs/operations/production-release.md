@@ -176,7 +176,7 @@ identifier. Apply this Price metadata:
 
 ```text
 piqae_plan=pro
-piqae_metric=accepted_live_jobs_overage
+piqae_metric=reported_complete_live_jobs_overage
 piqae_included_jobs=25000       # monthly; use 300000 for annual
 piqae_overage_unit=1000
 ```

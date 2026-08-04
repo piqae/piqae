@@ -21,7 +21,7 @@ permissions:
 jobs:
   evidence:
     name: SBOM, checksums, provenance, and audit
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.PIQAE_RELEASE_LINUX_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 15
     steps:
       - name: Check out source

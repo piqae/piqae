@@ -332,6 +332,12 @@ pub trait Repository: Send + Sync + 'static {
         secret_hash: &str,
         expires_at: DateTime<Utc>,
     ) -> Result<(), RepositoryError>;
+    async fn enrolment_status(
+        &self,
+        id: &str,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+    ) -> Result<(DateTime<Utc>, Option<AgentId>), RepositoryError>;
     async fn create_device_authorization(
         &self,
         authorization: &NewDeviceAuthorization<'_>,
@@ -344,6 +350,18 @@ pub trait Repository: Send + Sync + 'static {
         &self,
         id: &str,
     ) -> Result<StoredDeviceAuthorization, RepositoryError>;
+    /// The node this pairing request would rebind, if it would rebind one.
+    ///
+    /// A pairing request reusing an installation ID replaces an existing node's
+    /// device key rather than admitting a new node — that is how in-place key
+    /// rotation works. An approver must be able to see which of the two they
+    /// are being asked to authorize.
+    async fn node_replaced_by_device_authorization(
+        &self,
+        id: &str,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+    ) -> Result<Option<AgentId>, RepositoryError>;
     async fn approve_device_authorization(
         &self,
         id: &str,
@@ -1144,6 +1162,17 @@ impl Repository for PostgresStore {
         .map_err(Into::into)
     }
 
+    async fn enrolment_status(
+        &self,
+        id: &str,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+    ) -> Result<(DateTime<Utc>, Option<AgentId>), RepositoryError> {
+        Self::enrolment_status(self, id, workspace_id, environment_id)
+            .await
+            .map_err(Into::into)
+    }
+
     async fn create_device_authorization(
         &self,
         authorization: &NewDeviceAuthorization<'_>,
@@ -1167,6 +1196,17 @@ impl Repository for PostgresStore {
         id: &str,
     ) -> Result<StoredDeviceAuthorization, RepositoryError> {
         Self::device_authorization_by_id(self, id)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn node_replaced_by_device_authorization(
+        &self,
+        id: &str,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+    ) -> Result<Option<AgentId>, RepositoryError> {
+        Self::node_replaced_by_device_authorization(self, id, workspace_id, environment_id)
             .await
             .map_err(Into::into)
     }
@@ -1809,6 +1849,7 @@ struct MemoryDeviceAuthorization {
     user_code_hash: String,
     public_key: Vec<u8>,
     agent_version: String,
+    installation_id: String,
 }
 
 #[derive(Debug, Default)]
@@ -1820,8 +1861,12 @@ struct MemoryState {
     targets: HashMap<String, (WorkspaceId, EnvironmentId, StoredTarget)>,
     target_bindings: HashMap<String, (WorkspaceId, EnvironmentId, StoredTargetBinding)>,
     agents: HashMap<AgentId, (WorkspaceId, EnvironmentId, StoredAgent)>,
+    /// Which node owns each installation, so pairing rebinds an existing node
+    /// instead of admitting a duplicate — matching the `PostgreSQL` behaviour
+    /// that in-place key rotation depends on.
+    agent_installations: HashMap<(WorkspaceId, EnvironmentId, String), AgentId>,
     agent_public_keys: HashMap<AgentId, Vec<u8>>,
-    enrolments: HashMap<String, (WorkspaceId, EnvironmentId, String, DateTime<Utc>)>,
+    enrolments: HashMap<String, (WorkspaceId, EnvironmentId, String, DateTime<Utc>, Option<AgentId>)>,
     device_authorizations: HashMap<String, MemoryDeviceAuthorization>,
     node_updates: HashMap<AgentId, StoredNodeUpdate>,
     webhooks: HashMap<String, (WorkspaceId, EnvironmentId, StoredWebhook, Vec<u8>)>,
@@ -2658,9 +2703,28 @@ impl Repository for MemoryRepository {
                 environment_id,
                 secret_hash.to_owned(),
                 expires_at,
+                None,
             ),
         );
         Ok(())
+    }
+
+    async fn enrolment_status(
+        &self,
+        id: &str,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+    ) -> Result<(DateTime<Utc>, Option<AgentId>), RepositoryError> {
+        self.state
+            .read()
+            .await
+            .enrolments
+            .get(id)
+            .filter(|(workspace, environment, ..)| {
+                *workspace == workspace_id && *environment == environment_id
+            })
+            .map(|(_, _, _, expires_at, agent_id)| (*expires_at, *agent_id))
+            .ok_or(RepositoryError::NotFound)
     }
 
     async fn create_device_authorization(
@@ -2687,6 +2751,7 @@ impl Repository for MemoryRepository {
                 user_code_hash: authorization.user_code_hash.to_owned(),
                 public_key: authorization.device_public_key.to_vec(),
                 agent_version: authorization.agent_version.to_owned(),
+                installation_id: authorization.installation_id.to_owned(),
             },
         );
         Ok(record)
@@ -2791,26 +2856,62 @@ impl Repository for MemoryRepository {
             .record
             .environment_id
             .ok_or(RepositoryError::NotFound)?;
-        let agent_id = AgentId::new();
-        let agent = StoredAgent {
-            id: agent_id,
-            name: authorization.record.proposed_name.clone(),
-            platform: authorization.record.platform.clone(),
-            state: "disconnected".into(),
-            version: authorization.agent_version.clone(),
-            last_seen_at: Utc::now(),
-        };
+        let installation = (
+            workspace_id,
+            environment_id,
+            authorization.installation_id.clone(),
+        );
+        let proposed_name = authorization.record.proposed_name.clone();
+        let platform = authorization.record.platform.clone();
+        let version = authorization.agent_version.clone();
         let public_key = authorization.public_key.clone();
         authorization.record.state = "consumed".into();
+        // Reusing an installation rebinds its existing node — this is what lets
+        // a node rotate its device key without losing its ID or printers.
+        let agent_id = state
+            .agent_installations
+            .get(&installation)
+            .copied()
+            .unwrap_or_else(AgentId::new);
+        let agent = StoredAgent {
+            id: agent_id,
+            name: proposed_name,
+            platform,
+            state: "disconnected".into(),
+            version,
+            last_seen_at: Utc::now(),
+        };
         state
             .agents
             .insert(agent_id, (workspace_id, environment_id, agent));
+        state.agent_installations.insert(installation, agent_id);
         state.agent_public_keys.insert(agent_id, public_key);
         Ok(EnrolledAgent {
             agent_id,
             workspace_id,
             environment_id,
         })
+    }
+
+    async fn node_replaced_by_device_authorization(
+        &self,
+        id: &str,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+    ) -> Result<Option<AgentId>, RepositoryError> {
+        let state = self.state.read().await;
+        let authorization = state
+            .device_authorizations
+            .get(id)
+            .ok_or(RepositoryError::NotFound)?;
+        Ok(state
+            .agent_installations
+            .get(&(
+                workspace_id,
+                environment_id,
+                authorization.installation_id.clone(),
+            ))
+            .copied())
     }
 
     async fn enrol_agent(
@@ -2825,16 +2926,18 @@ impl Repository for MemoryRepository {
         _protocol_version: u16,
     ) -> Result<EnrolledAgent, RepositoryError> {
         let mut state = self.state.write().await;
-        let (token_id, (workspace_id, environment_id, _, _)) = state
+        let (token_id, (workspace_id, environment_id, _, _, _)) = state
             .enrolments
             .iter()
-            .find(|(_, (_, _, stored_hash, expires))| {
+            .find(|(_, (_, _, stored_hash, expires, _))| {
                 stored_hash == secret_hash && *expires > Utc::now()
             })
             .map(|(id, value)| (id.clone(), value.clone()))
             .ok_or(RepositoryError::NotFound)?;
-        state.enrolments.remove(&token_id);
         let agent_id = AgentId::new();
+        if let Some(enrolment) = state.enrolments.get_mut(&token_id) {
+            enrolment.4 = Some(agent_id);
+        }
         state.agents.insert(
             agent_id,
             (

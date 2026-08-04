@@ -41,7 +41,7 @@
     gap: 6px;
     min-height: 20px;
     color: var(--text-secondary);
-    font-size: 11px;
+    font-size: var(--text-compact);
     font-weight: 480;
     white-space: nowrap;
   }

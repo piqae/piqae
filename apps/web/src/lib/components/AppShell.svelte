@@ -12,36 +12,15 @@
     meta,
     children
   }: { mode: 'live' | 'demo'; meta: DashboardMeta; children: Snippet } = $props();
-  let sidebarOpen = $state(false);
   let interactive = $state(false);
   let theme = $state<'dark' | 'light'>('dark');
 
   const nav = $derived(dashboardNavigation(meta));
 
-  const utility = [
-    { href: '/dashboard/settings', label: 'Settings', icon: 'settings' }
-  ] as const;
-
   function isActive(href: string): boolean {
-    if (
-      href === '/dashboard/nodes' &&
-      ['/dashboard/local', '/dashboard/agents'].some((route) =>
-        page.url.pathname.startsWith(route)
-      )
-    ) {
-      return true;
-    }
-    if (
-      href === '/dashboard/developers' &&
-      ['/dashboard/api-keys', '/dashboard/webhooks'].some((route) =>
-        page.url.pathname.startsWith(route)
-      )
-    ) {
-      return true;
-    }
     return href === '/dashboard'
-      ? page.url.pathname === href
-      : page.url.pathname.startsWith(`${href}/`) || page.url.pathname === href;
+      ? page.url.pathname === href || page.url.pathname.startsWith('/dashboard/local')
+      : page.url.pathname === href || page.url.pathname.startsWith(`${href}/`);
   }
 
   function toggleTheme() {
@@ -49,10 +28,6 @@
     document.documentElement.dataset.theme = theme;
     document.documentElement.style.colorScheme = theme;
     localStorage.setItem('piqae-theme', theme);
-  }
-
-  function closeSidebar() {
-    sidebarOpen = false;
   }
 
   onMount(() => {
@@ -102,230 +77,127 @@
 </svelte:head>
 
 <div class="shell">
-  <aside id="primary-sidebar" class:open={sidebarOpen}>
-    <div class="workspace">
-      <a
-        class="workspace-switch"
-        href="/dashboard"
-        onclick={closeSidebar}
-        aria-label="Piqae overview"
-        title={meta.auth.workspaceSwitching
-          ? 'Piqae workspace'
-          : 'This deployment has one workspace'}
-      >
-        <span class="logo"><Icon name="printers" size={14} strokeWidth={1.9} /></span>
-        <span class="workspace-name">
-          <strong>Piqae</strong>
-          <small>Printing workspace</small>
-        </span>
-        <span class="deployment">{meta.deployment.replace('_', ' ')}</span>
-      </a>
-    </div>
+  <header class="topbar">
+    <a class="brand" href="/dashboard" aria-label="Piqae operations">
+      <span class="logo"><Icon name="printers" size={14} strokeWidth={1.9} /></span>
+      <strong>Piqae</strong>
+    </a>
 
     <nav aria-label="Main navigation">
-      <div class="nav-group">
-        <span class="nav-label">Workspace</span>
-        {#each nav as item}
-          <a
-            href={item.href}
-            class:active={isActive(item.href)}
-            aria-current={isActive(item.href) ? 'page' : undefined}
-            onclick={closeSidebar}
-          >
-            <Icon name={item.icon} size={14} />
-            <span>{item.label}</span>
-          </a>
-        {/each}
-      </div>
-
-      <div class="nav-group utility">
-        {#each utility as item}
-          <a
-            href={item.href}
-            class:active={isActive(item.href)}
-            aria-current={isActive(item.href) ? 'page' : undefined}
-            onclick={closeSidebar}
-          >
-            <Icon name={item.icon} size={14} />
-            <span>{item.label}</span>
-          </a>
-        {/each}
-      </div>
+      {#each nav as item}
+        <a
+          href={item.href}
+          class:active={isActive(item.href)}
+          aria-current={isActive(item.href) ? 'page' : undefined}
+        >
+          <Icon name={item.icon} size={14} />
+          <span>{item.label}</span>
+        </a>
+      {/each}
     </nav>
 
-    <div class="sidebar-footer">
-      <div class="service">
+    <div class="utility">
+      <span class="service" title={`Piqae ${meta.deployment.replace('_', ' ')} · v${meta.version}`}>
         <span class="service-dot" aria-hidden="true"></span>
-        <div>
-          <strong>{meta.deployment.replace('_', ' ')}</strong>
-          <small>v{meta.version}</small>
-        </div>
-      </div>
-      <button class="theme-button" onclick={toggleTheme} aria-label="Toggle color theme">
+        <span class="deployment">{meta.deployment.replace('_', ' ')}</span>
+        <small class="mono">v{meta.version}</small>
+      </span>
+      <button
+        class="icon-button"
+        onclick={toggleTheme}
+        aria-label="Toggle color theme"
+        disabled={!interactive}
+      >
         <Icon name={theme === 'dark' ? 'sun' : 'moon'} size={14} />
       </button>
     </div>
-  </aside>
+  </header>
 
-  {#if sidebarOpen}
-    <button class="scrim" onclick={closeSidebar} aria-label="Close navigation"></button>
+  {#if mode === 'demo'}
+    <div class="demo-banner" role="status">
+      <Icon name="warning" size={13} />
+      Demo data — no control-plane requests are being made.
+    </div>
   {/if}
 
-  <section class="main">
-    <div class="mobile-bar">
-      <button
-        onclick={() => (sidebarOpen = true)}
-        aria-label="Open navigation"
-        aria-expanded={sidebarOpen}
-        aria-controls="primary-sidebar"
-        disabled={!interactive}
-      >
-        <Icon name="menu" size={17} />
-      </button>
-      <a class="mobile-brand" href="/dashboard">
-        <span class="logo"><Icon name="printers" size={13} strokeWidth={2} /></span>
-        Piqae
-      </a>
-      <span></span>
-    </div>
-    {#if mode === 'demo'}
-      <div class="demo-banner" role="status">
-        <Icon name="warning" size={12} />
-        Demo data — no control-plane requests are being made.
-      </div>
-    {/if}
-    <main>{@render children()}</main>
-  </section>
+  <main>{@render children()}</main>
 </div>
 
 <style>
   .shell {
     min-height: 100vh;
-    display: grid;
-    grid-template-columns: 218px minmax(0, 1fr);
+    display: flex;
+    flex-direction: column;
   }
 
-  aside {
-    position: fixed;
-    inset: 0 auto 0 0;
+  .topbar {
+    position: sticky;
+    top: 0;
     z-index: 30;
-    width: 218px;
+    height: var(--topbar-height);
     display: flex;
-    flex-direction: column;
-    background: var(--sidebar);
-    border-right: 1px solid var(--border-subtle);
-  }
-
-  .workspace {
-    padding: 9px 8px 7px;
-  }
-
-  .logo {
-    width: 26px;
-    height: 26px;
-    display: inline-grid;
-    flex: 0 0 auto;
-    place-items: center;
-    color: white;
-    background: var(--accent);
-    border-radius: 7px;
-    box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.12);
-  }
-
-  .workspace-switch {
-    width: 100%;
-    min-height: 42px;
-    display: grid;
-    grid-template-columns: 26px minmax(0, 1fr) auto;
     align-items: center;
-    gap: 8px;
-    padding: 4px 7px;
-    color: var(--text-secondary);
-    text-align: left;
-    background: transparent;
-    border: 0;
-    border-radius: var(--radius-md);
-    cursor: pointer;
+    gap: 20px;
+    padding: 0 20px;
+    background: var(--sidebar);
+    border-bottom: 1px solid var(--border-subtle);
   }
 
-  .workspace-switch:hover {
-    color: var(--text-primary);
-    background: var(--surface-hover);
-  }
-
-  .workspace-name {
-    display: grid;
-    min-width: 0;
-    line-height: 15px;
-  }
-
-  .workspace-name strong {
-    overflow: hidden;
-    color: var(--text-primary);
-    font-family: var(--font-display);
-    font-size: 13px;
-    font-weight: 560;
-    letter-spacing: -0.018em;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .workspace-name small {
-    color: var(--text-tertiary);
-    font-size: 9px;
-  }
-
-  .deployment {
-    padding: 2px 5px;
-    color: var(--text-tertiary);
-    background: var(--surface-raised);
-    border: 1px solid var(--border-subtle);
-    border-radius: 4px;
-    font-size: 8px;
-    line-height: 13px;
-    text-transform: capitalize;
-  }
-
-  nav {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    padding: 6px 8px;
-  }
-
-  .nav-group {
-    display: grid;
-    gap: 1px;
-  }
-
-  .nav-group.utility {
-    margin-top: auto;
-  }
-
-  nav a {
-    height: 30px;
+  .brand {
     display: flex;
     align-items: center;
     gap: 9px;
-    padding: 0 8px;
-    color: var(--text-tertiary);
+    flex: 0 0 auto;
+  }
+
+  .logo {
+    width: 24px;
+    height: 24px;
+    display: inline-grid;
+    place-items: center;
+    color: white;
+    background: var(--accent);
+    border-radius: 6px;
+    box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.12);
+  }
+
+  .brand strong {
+    font-family: var(--font-display);
+    font-size: var(--text-section);
+    font-weight: 560;
+    letter-spacing: -0.018em;
+  }
+
+  nav {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    min-width: 0;
+  }
+
+  nav a {
+    height: var(--control-compact);
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding: 0 10px;
+    color: var(--text-secondary);
     border-radius: var(--radius-md);
-    font-size: 12px;
-    font-weight: 470;
+    font-size: var(--text-compact);
+    font-weight: 500;
     transition:
       color 90ms ease,
       background-color 90ms ease;
   }
 
   nav a:hover {
-    color: var(--text-secondary);
+    color: var(--text-primary);
     background: var(--surface-hover);
   }
 
   nav a.active {
     color: var(--text-primary);
     background: var(--surface-selected);
-    box-shadow: inset 0 0 0 1px var(--border-subtle);
   }
 
   nav a :global(svg) {
@@ -336,33 +208,19 @@
     color: var(--text-secondary);
   }
 
-  .nav-label {
-    height: 25px;
-    display: flex;
-    align-items: end;
-    padding: 0 8px 5px;
-    color: var(--text-tertiary);
-    font-size: 9px;
-    font-weight: 520;
-    letter-spacing: 0.035em;
-    text-transform: uppercase;
-  }
-
-  .sidebar-footer {
-    min-height: 55px;
+  .utility {
+    margin-left: auto;
     display: flex;
     align-items: center;
-    gap: 6px;
-    padding: 8px 10px;
-    border-top: 1px solid var(--border-subtle);
+    gap: 10px;
   }
 
   .service {
-    min-width: 0;
-    flex: 1;
     display: flex;
     align-items: center;
     gap: 7px;
+    color: var(--text-tertiary);
+    font-size: var(--text-meta);
   }
 
   .service-dot {
@@ -374,141 +232,58 @@
     box-shadow: 0 0 0 2px var(--success-soft);
   }
 
-  .service div {
-    min-width: 0;
-    display: grid;
-  }
-
-  .service strong {
-    overflow: hidden;
-    color: var(--text-secondary);
-    font-size: 10px;
-    font-weight: 500;
-    line-height: 14px;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+  .deployment {
+    text-transform: capitalize;
   }
 
   .service small {
     color: var(--text-tertiary);
-    font-size: 9px;
-    line-height: 13px;
-  }
-
-  .theme-button,
-  .mobile-bar button {
-    width: 28px;
-    height: 28px;
-    display: grid;
-    place-items: center;
-    flex: 0 0 auto;
-    color: var(--text-tertiary);
-    background: transparent;
-    border: 0;
-    border-radius: var(--radius-md);
-    cursor: pointer;
-  }
-
-  .theme-button:hover,
-  .mobile-bar button:hover {
-    color: var(--text-primary);
-    background: var(--surface-hover);
-  }
-
-  .main {
-    min-width: 0;
-    width: 100%;
-    max-width: 100vw;
-    grid-column: 2;
-    overflow-x: clip;
-  }
-
-  main {
-    width: min(100%, 1500px);
-    max-width: 100%;
-    min-width: 0;
-    min-height: 100vh;
-    margin: 0 auto;
-    padding: 22px 28px 56px;
-  }
-
-  .mobile-bar {
-    display: none;
+    font-size: var(--text-meta);
   }
 
   .demo-banner {
-    min-height: 28px;
     display: flex;
     align-items: center;
     justify-content: center;
-    gap: 6px;
-    padding: 5px 12px;
+    gap: 7px;
+    padding: 7px 14px;
     color: var(--warning);
     background: var(--warning-soft);
     border-bottom: 1px solid color-mix(in oklch, var(--warning), transparent 78%);
-    font-size: 9px;
+    font-size: var(--text-meta);
     font-weight: 500;
   }
 
-  .scrim {
-    display: none;
+  main {
+    width: min(100%, 1400px);
+    max-width: 100%;
+    min-width: 0;
+    flex: 1;
+    margin: 0 auto;
+    padding: 20px 24px 56px;
   }
 
-  @media (max-width: 760px) {
-    .shell {
-      display: block;
+  @media (max-width: 720px) {
+    .topbar {
+      gap: 12px;
+      padding: 0 12px;
     }
 
-    aside {
-      width: 228px;
-      transform: translateX(-100%);
-      transition: transform 140ms ease;
-      box-shadow: var(--shadow-overlay);
+    .brand strong,
+    .service {
+      display: none;
     }
 
-    aside.open {
-      transform: translateX(0);
+    nav a span {
+      display: none;
     }
 
-    .scrim {
-      position: fixed;
-      inset: 0;
-      z-index: 20;
-      display: block;
-      background: rgb(0 0 0 / 0.45);
-      border: 0;
-    }
-
-    .main {
-      min-height: 100vh;
-    }
-
-    .mobile-bar {
-      height: 45px;
-      display: grid;
-      grid-template-columns: 32px 1fr 32px;
-      align-items: center;
-      padding: 0 10px;
-      background: var(--sidebar);
-      border-bottom: 1px solid var(--border-subtle);
-    }
-
-    .mobile-brand {
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      gap: 7px;
-      font-weight: 560;
-    }
-
-    .mobile-brand .logo {
-      width: 21px;
-      height: 21px;
+    nav a {
+      padding: 0 9px;
     }
 
     main {
-      min-height: calc(100vh - 45px);
-      padding: 18px 14px 40px;
+      padding: 16px 14px 40px;
     }
   }
 </style>

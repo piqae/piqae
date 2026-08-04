@@ -1,24 +1,72 @@
 import { expect, test } from '@playwright/test';
 
-test('dashboard exposes operational state with semantic navigation', async ({ page }) => {
+test('operations surface exposes state with semantic navigation', async ({ page }) => {
   await page.goto('/dashboard');
-  await expect(page).toHaveTitle('Overview · Piqae');
-  await expect(page.getByRole('heading', { name: 'Overview' })).toBeVisible();
+  await expect(page).toHaveTitle('Operations · Piqae');
+  await expect(page.getByRole('heading', { name: 'Operations' })).toBeVisible();
   await expect(page.getByText('Demo data — no control-plane requests are being made.')).toBeVisible();
   await expect(page.getByRole('navigation', { name: 'Main navigation' })).toBeVisible();
   await expect(page.getByText('1 uncertain handoff')).toBeVisible();
-  await page.goto('/dashboard/jobs');
-  await expect(page.getByRole('heading', { name: 'Jobs' })).toBeVisible();
   await expect(page.getByRole('table')).toBeVisible();
+
+  // Views are query-string state on the one page, not separate routes.
+  await page
+    .getByRole('group', { name: 'Switch operational view' })
+    .getByRole('button', { name: 'Printers' })
+    .click();
+  await expect(page).toHaveURL(/\/dashboard\?view=printers$/);
+  await expect(page.getByRole('columnheader', { name: 'Printer' })).toBeVisible();
+});
+
+test('legacy dashboard routes redirect into the collapsed structure', async ({ request }) => {
+  const redirects = [
+    ['/dashboard/jobs', '/dashboard?view=jobs'],
+    ['/dashboard/printers', '/dashboard?view=printers'],
+    ['/dashboard/nodes', '/dashboard?view=nodes'],
+    ['/dashboard/agents', '/dashboard?view=nodes'],
+    ['/dashboard/jobs/job_01K0VY5YJ', '/dashboard?job=job_01K0VY5YJ'],
+    ['/dashboard/printers/prt_01', '/dashboard?printer=prt_01'],
+    ['/dashboard/nodes/agt_01', '/dashboard?node=agt_01'],
+    ['/dashboard/agents/agt_01', '/dashboard?node=agt_01'],
+    ['/dashboard/accounts', '/dashboard?view=customers'],
+    ['/dashboard/api-keys', '/dashboard/settings#api-keys'],
+    ['/dashboard/webhooks', '/dashboard/settings#webhooks'],
+    ['/dashboard/developers', '/dashboard/settings#api-keys'],
+    ['/dashboard/settings/team', '/dashboard/settings#team'],
+    ['/dashboard/settings/billing', '/dashboard/settings#billing']
+  ] as const;
+
+  for (const [from, to] of redirects) {
+    const response = await request.get(from, { maxRedirects: 0 });
+    expect(response.status(), `${from} should redirect`).toBe(308);
+    expect(response.headers()['location'], `${from} target`).toBe(to);
+  }
+});
+
+test('redirects preserve callback state carried in the query string', async ({ request }) => {
+  // Stripe returns to the billing URL with ?checkout=success; dropping it would
+  // silently swallow the post-checkout confirmation.
+  const response = await request.get('/dashboard/settings/billing?checkout=success', {
+    maxRedirects: 0
+  });
+  expect(response.status()).toBe(308);
+  expect(response.headers()['location']).toBe('/dashboard/settings?checkout=success#billing');
+});
+
+test('job detail is a deep-linkable drawer', async ({ page }) => {
+  await page.goto('/dashboard/jobs/job_01K0VY5YJ');
+  await expect(page).toHaveURL(/\/dashboard\?job=job_01K0VY5YJ$/);
+  const drawer = page.locator('dialog[aria-labelledby="detail-title"]');
+  await expect(drawer).toBeVisible();
+  await expect(drawer.getByText('Event timeline')).toBeVisible();
+  await expect(drawer.getByRole('heading', { level: 2 })).toBeVisible();
 });
 
 test('responsive dashboard remains inside the viewport', async ({ page }, testInfo) => {
   test.skip(!testInfo.project.name.startsWith('mobile'), 'Mobile-only layout assertion');
-  await page.goto('/dashboard');
-  await page.getByRole('button', { name: 'Open navigation' }).click();
+  await page.goto('/dashboard?view=printers');
   await expect(page.getByRole('navigation', { name: 'Main navigation' })).toBeVisible();
-  await page.getByRole('link', { name: 'Printers', exact: true }).click();
-  await expect(page.getByRole('heading', { name: 'Printers' })).toBeVisible();
+  await expect(page.getByRole('columnheader', { name: 'Printer' })).toBeVisible();
   const layout = await page.evaluate(() => {
     const panel = document.querySelector<HTMLElement>('.table-panel');
     return {
@@ -49,38 +97,43 @@ test('documentation and hosted authentication boundaries are reachable', async (
 test('credential and cancellation dialogs are accessible and non-mutating in demo mode', async ({
   page
 }) => {
-  await page.goto('/dashboard/agents');
-  await expect(page).toHaveURL(/\/dashboard\/nodes$/);
+  await page.goto('/dashboard');
   await page.getByRole('button', { name: 'Add node' }).click();
   const enrolment = page.getByRole('dialog', { name: 'Add a node' });
   await expect(enrolment).toBeVisible();
-  await expect(enrolment.getByText('Demo mode: preview only.')).toBeVisible();
+  await expect(
+    enrolment.getByText('Demo mode: preview only. No enrolment will be created.')
+  ).toBeVisible();
   await expect(enrolment.getByText('Browser pairing is recommended')).toBeVisible();
   await expect(enrolment.getByRole('button', { name: 'Create manual token' })).toBeDisabled();
 
-  await page.goto('/dashboard/api-keys');
-  await page.getByRole('button', { name: 'Create secret key' }).click();
+  // Each settings dialog is opened from a fresh load: the mobile project uses
+  // touch emulation, where dismissing one modal before opening the next is
+  // needlessly flaky. Dismissal itself is covered by the component test.
+  await page.goto('/dashboard/settings');
+  await expect(page.getByRole('button', { name: 'Save retention' })).toBeDisabled();
+  await page.getByRole('button', { name: 'Create secret key', exact: true }).first().click();
   const apiKey = page.getByRole('dialog', { name: 'Create secret key' });
   await expect(apiKey).toBeVisible();
   await expect(apiKey.getByRole('checkbox', { name: 'Read jobs' })).toBeChecked();
-  await expect(apiKey.getByRole('button', { name: 'Create secret key' })).toBeDisabled();
+  await expect(
+    apiKey.getByRole('button', { name: 'Create secret key', exact: true })
+  ).toBeDisabled();
+  await expect(
+    apiKey.getByRole('button', { name: 'Close secret key dialog', exact: true })
+  ).toBeVisible();
 
-  await page.goto('/dashboard/webhooks');
+  await page.goto('/dashboard/settings');
   await page.getByRole('button', { name: 'Add endpoint' }).click();
   const webhook = page.getByRole('dialog', { name: 'Add webhook endpoint' });
   await expect(webhook).toBeVisible();
-  await expect(webhook.getByRole('button', { name: 'Create endpoint' })).toBeDisabled();
-  await expect(page.getByRole('region', { name: 'Demo webhook delivery examples' })).toContainText(
-    'Demo only'
-  );
+  await expect(
+    webhook.getByRole('button', { name: 'Create endpoint', exact: true })
+  ).toBeDisabled();
 
-  await page.goto('/dashboard/jobs/job_01K0VY5YJ');
+  await page.goto('/dashboard?job=job_01K0VY5YJ');
   await page.getByRole('button', { name: 'Cancel', exact: true }).click();
   const cancellation = page.getByRole('dialog', { name: 'Cancel this print job?' });
   await expect(cancellation).toBeVisible();
   await expect(cancellation.getByRole('button', { name: 'Confirm cancellation' })).toBeDisabled();
-
-  await page.goto('/dashboard/settings');
-  await expect(page.getByRole('button', { name: 'Save changes' })).toBeDisabled();
-  await expect(page.getByRole('button', { name: 'Save retention' })).toBeDisabled();
 });

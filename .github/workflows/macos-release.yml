@@ -1,32 +1,27 @@
 name: macOS release candidate
 
 on:
-  workflow_dispatch:
+  workflow_call:
     inputs:
       version:
         description: Bundle and Cargo version (without a leading v)
         required: true
-        default: "0.1.0"
+        type: string
       build_number:
         description: Monotonic CFBundleVersion
         required: true
-        default: "1"
+        type: string
       publish:
-        description: Promote a fully signed and notarised build to the stable Railway release feed
-        type: boolean
+        description: Promote after the native-release environment gate
         required: true
-        default: false
-  push:
-    tags:
-      - "v*"
-
+        type: boolean
 permissions:
   contents: read
 
 jobs:
   candidate:
     name: Universal macOS candidate
-    runs-on: macos-15
+    runs-on: ${{ vars.PIQAE_RELEASE_MACOS_RUNNER || 'macos-15' }}
     environment: native-signing
     outputs:
       artifact_name: ${{ steps.gate.outputs.artifact_name }}
@@ -65,17 +60,21 @@ jobs:
         id: gate
         shell: bash
         env:
+          REF_PROTECTED: ${{ github.ref_protected }}
           REQUESTED_VERSION: ${{ inputs.version }}
           REQUESTED_BUILD: ${{ inputs.build_number }}
           REQUESTED_PUBLISH: ${{ inputs.publish }}
         run: |
+          version=$REQUESTED_VERSION
+          build_number=$REQUESTED_BUILD
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            version=${GITHUB_REF_NAME#v}
-            build_number=${GITHUB_RUN_NUMBER}
+            tag_version=${GITHUB_REF_NAME#v}
+            if [[ "$tag_version" != "$version" ]]; then
+              echo "Tag version $tag_version does not match requested version $version." >&2
+              exit 1
+            fi
             tagged=true
           else
-            version=$REQUESTED_VERSION
-            build_number=$REQUESTED_BUILD
             tagged=false
           fi
           if [[ ! "$version" =~ ^[0-9]+([.][0-9]+){2}([.-][0-9A-Za-z.-]+)?$ ]]; then
@@ -116,9 +115,10 @@ jobs:
             echo "Tagged macOS candidates require signing, notarisation, and Sparkle credentials." >&2
             exit 1
           fi
-          publish=false
-          if [[ "$tagged" == true || "$REQUESTED_PUBLISH" == true ]]; then
-            publish=true
+          publish=$REQUESTED_PUBLISH
+          if [[ "$publish" == true && ("$tagged" != true || "$REF_PROTECTED" != true) ]]; then
+            echo "Stable publication requires a protected v* tag ref." >&2
+            exit 1
           fi
           if [[ "$publish" == true && "$release_mode" != signed ]]; then
             echo "Stable publication requires a signed and notarised candidate." >&2
@@ -461,6 +461,7 @@ jobs:
           name: ${{ steps.gate.outputs.artifact_name }}
           path: artifacts/
           if-no-files-found: error
+          retention-days: 14
 
       - name: Remove credential and scratch state
         if: always()
@@ -471,11 +472,24 @@ jobs:
           fi
           rm -rf -- "$GITHUB_WORKSPACE/.piqae-test-fixtures/native-release"
 
+  evidence:
+    name: Audit macOS release evidence
+    needs: candidate
+    permissions:
+      actions: read
+      attestations: write
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/release-evidence.yml
+    with:
+      artifact_name: ${{ needs.candidate.outputs.artifact_name }}
+      release_name: macos-${{ needs.candidate.outputs.version }}-${{ needs.candidate.outputs.build_number }}
+
   publish:
     name: Promote signed macOS release
-    needs: candidate
+    needs: [candidate, evidence]
     if: needs.candidate.outputs.publish == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ${{ vars.PIQAE_RELEASE_LINUX_RUNNER || 'ubuntu-latest' }}
     environment: native-release
     permissions:
       contents: write
@@ -483,6 +497,7 @@ jobs:
       group: piqae-native-stable-promotion
       cancel-in-progress: false
     env:
+      CANONICAL_REPOSITORY: ${{ vars.PIQAE_CANONICAL_REPOSITORY || 'C4CoffeeCo/piqae' }}
       RELEASE_BUILD: ${{ needs.candidate.outputs.build_number }}
       RELEASE_VERSION: ${{ needs.candidate.outputs.version }}
     steps:
@@ -553,19 +568,22 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
-          if [[ "$GITHUB_REPOSITORY" != "piqae/piqae" ]]; then
-            echo "GitHub release publishing is enabled only in piqae/piqae." >&2
+          if [[ "$GITHUB_REPOSITORY" != "$CANONICAL_REPOSITORY" ]]; then
+            echo "GitHub release publishing is enabled only in $CANONICAL_REPOSITORY." >&2
             exit 1
           fi
           tag="v${RELEASE_VERSION}"
-          if ! gh release view "$tag" >/dev/null 2>&1; then
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release view "$tag" --json isDraft --jq '.isDraft' | grep -Fx true
+          else
             gh release create "$tag" --draft --verify-tag \
               --title "Piqae $tag" \
               --notes "Preview candidate. Review checksums, provenance, signatures, notarisation evidence, and the support matrix before publishing."
           fi
           gh release upload "$tag" \
             promotion/piqae-macos-* \
-            promotion/appcast-macos.xml
+            promotion/appcast-macos.xml \
+            --clobber
 
       - name: Upload and verify immutable macOS release
         shell: bash
@@ -652,7 +670,9 @@ jobs:
             if [[ "$code" -ne 3 ]]; then
               exit "$code"
             fi
-            jq -n '{
+            jq -n \
+              --arg repository_url "https://github.com/$CANONICAL_REPOSITORY" \
+              '{
               schemaVersion: 1,
               channel: "stable",
               currentVersion: "0.0.0",
@@ -660,16 +680,18 @@ jobs:
               artifacts: [],
               olderReleases: [],
               releasesUrl: "https://piqae.com/downloads",
-              repositoryUrl: "https://github.com/C4CoffeeCo/piqae"
+              repositoryUrl: $repository_url
             }' > promotion/current-manifest.json
           fi
           jq \
             --slurpfile platform promotion/macos.json \
+            --arg repository_url "https://github.com/$CANONICAL_REPOSITORY" \
             --arg version "$RELEASE_VERSION" \
             --arg now "$(jq -r '.publishedAt' promotion/macos.json)" \
             '.channel = "stable"
              | .currentVersion = $version
              | .updatedAt = $now
+             | .repositoryUrl = $repository_url
              | .artifacts = ([.artifacts[] | select(.id != $platform[0].artifact.id)] + [$platform[0].artifact])' \
             promotion/current-manifest.json > promotion/manifest.json
           jq -e \
@@ -694,3 +716,32 @@ jobs:
           # The shared manifest is the final stable-channel commit point.
           packaging/release/publish-s3-object.sh promote \
             "$immutable_manifest" native/stable/manifest.json application/json
+
+      - name: Verify public macOS update feed and manifest
+        shell: bash
+        run: |
+          appcast=$(mktemp)
+          curl --fail --location --silent --show-error --max-time 30 \
+            https://downloads.piqae.com/releases/stable/appcast-macos.xml \
+            --output "$appcast"
+          enclosure=$(xmllint --xpath \
+            'string(/*[local-name()="rss"]/*[local-name()="channel"]/*[local-name()="item"][1]/*[local-name()="enclosure"]/@url)' \
+            "$appcast")
+          expected="https://downloads.piqae.com/releases/stable/piqae-macos-${RELEASE_VERSION}-${RELEASE_BUILD}-update.zip"
+          if [[ "$enclosure" != "$expected" ]]; then
+            echo "The public macOS appcast does not reference the promoted archive." >&2
+            exit 1
+          fi
+          curl --fail --location --silent --show-error --max-time 30 \
+            --range 0-0 "$enclosure" --output /dev/null
+          curl --fail --location --silent --show-error --max-time 30 \
+            https://downloads.piqae.com/releases/stable/manifest.json \
+            | jq -e \
+              --arg version "$RELEASE_VERSION" \
+              --arg download "https://downloads.piqae.com/releases/stable/piqae-macos-${RELEASE_VERSION}-${RELEASE_BUILD}-universal.dmg" \
+              '.currentVersion == $version
+               and any(.artifacts[];
+                 .id == "macos-universal"
+                 and .version == $version
+                 and .downloadUrl == $download)' \
+              >/dev/null

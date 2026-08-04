@@ -17,12 +17,14 @@ import type {
   DeviceAuthorizationExchange,
   DeviceAuthorizationReview,
   DeviceAuthorizationStatus,
+  DesignSpecification,
   CreatedApiKey,
   CurrentIdentity,
   ErrorEnvelope,
   Health,
   Job,
   JobEvent,
+  JobListOptions,
   ListOptions,
   LocalOwnerSession,
   NodeUpdate,
@@ -187,11 +189,13 @@ export class PiqaeClient {
       this.request<CreatedDeviceAuthorization>('POST', '/v1/device-authorizations', {
         body: input
       }),
+    // The device code is a bearer secret for the pairing exchange, so it is
+    // sent in the request body. In a URL it would be recorded by every proxy
+    // and CDN access log between the caller and the control plane.
     status: (deviceCode: string) =>
-      this.request<DeviceAuthorizationStatus>(
-        'GET',
-        `/v1/device-authorizations/${encodeURIComponent(deviceCode)}`
-      ),
+      this.request<DeviceAuthorizationStatus>('POST', '/v1/device-authorizations/status', {
+        body: { device_code: deviceCode }
+      }),
     review: (authorizationId: string) =>
       this.request<DeviceAuthorizationReview>(
         'GET',
@@ -210,10 +214,9 @@ export class PiqaeClient {
         { body: { user_code: userCode } }
       ),
     exchange: (deviceCode: string) =>
-      this.request<DeviceAuthorizationExchange>(
-        'POST',
-        `/v1/device-authorizations/${encodeURIComponent(deviceCode)}/exchange`
-      )
+      this.request<DeviceAuthorizationExchange>('POST', '/v1/device-authorizations/exchange', {
+        body: { device_code: deviceCode }
+      })
   };
 
   readonly nodes = {
@@ -292,6 +295,11 @@ export class PiqaeClient {
       this.request<TargetReadiness>(
         'GET',
         `/v1/targets/${encodeURIComponent(id)}/readiness`
+      ),
+    designSpecification: (id: string) =>
+      this.request<DesignSpecification>(
+        'GET',
+        `/v1/targets/${encodeURIComponent(id)}/design-specification`
       )
   };
 
@@ -316,7 +324,7 @@ export class PiqaeClient {
   };
 
   readonly jobs = {
-    list: (options?: ListOptions) =>
+    list: (options?: JobListOptions) =>
       this.request<Page<Job>>('GET', '/v1/jobs', options ? { query: options } : {}),
     retrieve: (id: string) => this.request<Job>('GET', `/v1/jobs/${encodeURIComponent(id)}`),
     events: (id: string) =>

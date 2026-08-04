@@ -1,21 +1,16 @@
 name: Windows release
 
 on:
-  workflow_dispatch:
+  workflow_call:
     inputs:
       version:
         description: SemVer release version without a leading v
         required: true
-        default: 0.1.0
+        type: string
       publish:
-        description: Promote a fully signed build to the stable Railway release feed
-        type: boolean
+        description: Promote after the native-release environment gate
         required: true
-        default: false
-  push:
-    tags:
-      - "v*"
-
+        type: boolean
 permissions:
   contents: read
 
@@ -26,7 +21,7 @@ concurrency:
 jobs:
   package:
     name: Package x86_64 Windows
-    runs-on: windows-latest
+    runs-on: ${{ vars.PIQAE_RELEASE_WINDOWS_RUNNER || 'windows-latest' }}
     environment: native-signing
     outputs:
       artifact_name: ${{ steps.release.outputs.artifact_name }}
@@ -65,6 +60,12 @@ jobs:
           }
           if ($version -notmatch "^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$") {
             throw "Version must be SemVer-like and must not include a leading v."
+          }
+          if (
+            "${{ github.ref_type }}" -eq "tag" -and
+            $version -cne "${{ inputs.version }}"
+          ) {
+            throw "Tag version '$version' does not match requested version '${{ inputs.version }}'."
           }
           "version=$version" >> $env:GITHUB_OUTPUT
 
@@ -105,7 +106,16 @@ jobs:
             throw "Signing configuration is partial. Missing: $($missing -join ', ')"
           }
           $signed = $present -eq $requirements.Count
-          $publish = "${{ github.ref_type }}" -eq "tag" -or "${{ inputs.publish }}" -eq "true"
+          $publish = "${{ inputs.publish }}" -eq "true"
+          if (
+            $publish -and (
+              "${{ github.ref_type }}" -ne "tag" -or
+              "${{ github.ref_name }}" -notmatch "^v[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$" -or
+              "${{ github.ref_protected }}" -ne "true"
+            )
+          ) {
+            throw "Stable publication requires a protected v* tag ref."
+          }
           if ($publish -and -not $signed) {
             throw "Stable publication requires Authenticode and WinSparkle signing."
           }
@@ -390,6 +400,7 @@ jobs:
           name: ${{ steps.release.outputs.artifact_name }}
           path: artifacts/release/*
           if-no-files-found: error
+          retention-days: 14
 
       - name: Remove temporary signing material
         if: always() && steps.release.outputs.signed == 'true'
@@ -401,11 +412,24 @@ jobs:
             -Force `
             -ErrorAction SilentlyContinue
 
+  evidence:
+    name: Audit Windows release evidence
+    needs: package
+    permissions:
+      actions: read
+      attestations: write
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/release-evidence.yml
+    with:
+      artifact_name: ${{ needs.package.outputs.artifact_name }}
+      release_name: windows-${{ needs.package.outputs.version }}
+
   publish:
     name: Promote signed Windows release
-    needs: package
+    needs: [package, evidence]
     if: needs.package.outputs.publish == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ${{ vars.PIQAE_RELEASE_LINUX_RUNNER || 'ubuntu-latest' }}
     environment: native-release
     permissions:
       contents: write
@@ -413,6 +437,7 @@ jobs:
       group: piqae-native-stable-promotion
       cancel-in-progress: false
     env:
+      CANONICAL_REPOSITORY: ${{ vars.PIQAE_CANONICAL_REPOSITORY || 'C4CoffeeCo/piqae' }}
       RELEASE_VERSION: ${{ needs.package.outputs.version }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -480,19 +505,22 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
-          if [[ "$GITHUB_REPOSITORY" != "piqae/piqae" ]]; then
-            echo "GitHub release publishing is enabled only in piqae/piqae." >&2
+          if [[ "$GITHUB_REPOSITORY" != "$CANONICAL_REPOSITORY" ]]; then
+            echo "GitHub release publishing is enabled only in $CANONICAL_REPOSITORY." >&2
             exit 1
           fi
           tag="v${RELEASE_VERSION}"
-          if ! gh release view "$tag" >/dev/null 2>&1; then
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release view "$tag" --json isDraft --jq '.isDraft' | grep -Fx true
+          else
             gh release create "$tag" --draft --verify-tag \
               --title "Piqae $tag" \
               --notes "Preview candidate. Review checksums, provenance, signatures, notarisation evidence, and the support matrix before publishing."
           fi
           gh release upload "$tag" \
             promotion/piqae-windows-* \
-            promotion/appcast-windows.xml
+            promotion/appcast-windows.xml \
+            --clobber
 
       - name: Upload and verify immutable Windows release
         shell: bash
@@ -574,7 +602,9 @@ jobs:
             if [[ "$code" -ne 3 ]]; then
               exit "$code"
             fi
-            jq -n '{
+            jq -n \
+              --arg repository_url "https://github.com/$CANONICAL_REPOSITORY" \
+              '{
               schemaVersion: 1,
               channel: "stable",
               currentVersion: "0.0.0",
@@ -582,16 +612,18 @@ jobs:
               artifacts: [],
               olderReleases: [],
               releasesUrl: "https://piqae.com/downloads",
-              repositoryUrl: "https://github.com/C4CoffeeCo/piqae"
+              repositoryUrl: $repository_url
             }' > promotion/current-manifest.json
           fi
           jq \
             --slurpfile platform promotion/windows.json \
+            --arg repository_url "https://github.com/$CANONICAL_REPOSITORY" \
             --arg version "$RELEASE_VERSION" \
             --arg now "$(jq -r '.publishedAt' promotion/windows.json)" \
             '.channel = "stable"
              | .currentVersion = $version
              | .updatedAt = $now
+             | .repositoryUrl = $repository_url
              | .artifacts = ([.artifacts[] | select(.id != $platform[0].artifact.id)] + [$platform[0].artifact])' \
             promotion/current-manifest.json > promotion/manifest.json
           jq -e \
@@ -616,3 +648,32 @@ jobs:
           # The shared manifest is the final stable-channel commit point.
           packaging/release/publish-s3-object.sh promote \
             "$immutable_manifest" native/stable/manifest.json application/json
+
+      - name: Verify public Windows update feed and manifest
+        shell: bash
+        run: |
+          appcast=$(mktemp)
+          curl --fail --location --silent --show-error --max-time 30 \
+            https://downloads.piqae.com/releases/stable/appcast-windows.xml \
+            --output "$appcast"
+          enclosure=$(xmllint --xpath \
+            'string(/*[local-name()="rss"]/*[local-name()="channel"]/*[local-name()="item"][1]/*[local-name()="enclosure"]/@url)' \
+            "$appcast")
+          expected="https://downloads.piqae.com/releases/stable/piqae-windows-${RELEASE_VERSION}-x86_64-setup.exe"
+          if [[ "$enclosure" != "$expected" ]]; then
+            echo "The public Windows appcast does not reference the promoted installer." >&2
+            exit 1
+          fi
+          curl --fail --location --silent --show-error --max-time 30 \
+            --range 0-0 "$enclosure" --output /dev/null
+          curl --fail --location --silent --show-error --max-time 30 \
+            https://downloads.piqae.com/releases/stable/manifest.json \
+            | jq -e \
+              --arg version "$RELEASE_VERSION" \
+              --arg download "$expected" \
+              '.currentVersion == $version
+               and any(.artifacts[];
+                 .id == "windows-x86_64"
+                 and .version == $version
+                 and .downloadUrl == $download)' \
+              >/dev/null

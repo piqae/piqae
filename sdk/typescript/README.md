@@ -67,7 +67,7 @@ without duplicating billing rules in your application:
 const billing = await piqae.billing.summary();
 const july = await piqae.usage.retrieve('2026-07');
 
-console.log(billing.plan, billing.usage.accepted_live_jobs);
+console.log(billing.plan, billing.usage.reported_complete_live_jobs);
 console.log(july.period_start, july.period_end);
 ```
 

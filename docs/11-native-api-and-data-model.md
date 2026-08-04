@@ -418,14 +418,16 @@ them.
 
 Piqae Cloud has one published billable event:
 
-- `print_job_accepted`, recorded when a Live job first reaches
-  `accepted_by_spooler`.
+- `print_job_reported_complete`, recorded when a Live job first reaches
+  `completed_reported`.
 
 The event is append-only, linked to the tenant and job, and unique per job.
-Test jobs, registration retries, lease retries, and later spooler states do not
-add usage. Invoices and quota decisions are derived from this ledger, never
-from the mutable current job table. Spooler acceptance remains distinct from
-proof that ink reached paper.
+Test jobs, registration retries, lease retries, failures, blocked or jammed
+jobs, cancellations, expirations, and uncertain delivery do not add usage.
+Invoices and quota decisions are derived from this ledger, never from the
+mutable current job table. Legacy `print_job_accepted` rows remain immutable
+and countable for cutover continuity. A reported completion remains distinct
+from independent proof that ink reached paper.
 
 ## Configuration
 

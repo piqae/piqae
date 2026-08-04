@@ -189,7 +189,7 @@ pub struct UpsertedPlatformAccount {
 pub struct StoredUsageSummary {
     pub period_start: DateTime<Utc>,
     pub period_end: DateTime<Utc>,
-    pub accepted_live_jobs: i64,
+    pub reported_complete_live_jobs: i64,
     pub active_nodes: i64,
 }
 
@@ -337,6 +337,13 @@ pub struct StoredAgent {
     pub state: String,
     pub version: String,
     pub last_seen_at: DateTime<Utc>,
+}
+
+/// Rows removed by one authentication-state sweep.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PurgedAuthState {
+    pub nonces: u64,
+    pub device_authorizations: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1664,9 +1671,12 @@ impl PostgresStore {
                     SELECT sum(ledger.units)
                     FROM usage_ledger ledger
                     WHERE ledger.workspace_id = $1
-                      AND ledger.kind = 'print_job_accepted'
+                      AND ledger.kind IN (
+                          'print_job_accepted',
+                          'print_job_reported_complete'
+                      )
                       AND ledger.occurred_at >= $2 AND ledger.occurred_at < $3
-                ), 0)::bigint AS accepted_live_jobs,
+                ), 0)::bigint AS billable_live_jobs,
                 (
                     SELECT count(*)
                     FROM agents agent
@@ -1680,10 +1690,11 @@ impl PostgresStore {
         .bind(period_end)
         .fetch_one(&self.pool)
         .await?;
+        let billable_live_jobs = row.try_get("billable_live_jobs")?;
         Ok(StoredUsageSummary {
             period_start,
             period_end,
-            accepted_live_jobs: row.try_get("accepted_live_jobs")?,
+            reported_complete_live_jobs: billable_live_jobs,
             active_nodes: row.try_get("active_nodes")?,
         })
     }
@@ -1745,7 +1756,7 @@ impl PostgresStore {
             0
         } else {
             usage
-                .accepted_live_jobs
+                .reported_complete_live_jobs
                 .saturating_sub(entitlement.included_live_jobs)
         };
         Ok(StoredBillingSummary {
@@ -2024,7 +2035,10 @@ impl PostgresStore {
                   ON billed.owner_workspace_id = due.workspace_id
                 LEFT JOIN usage_ledger ledger
                   ON ledger.workspace_id = billed.billed_workspace_id
-                 AND ledger.kind = 'print_job_accepted'
+                 AND ledger.kind IN (
+                     'print_job_accepted',
+                     'print_job_reported_complete'
+                 )
                  AND ledger.occurred_at >= due.period_start
                  AND ledger.occurred_at < due.period_end
                 GROUP BY
@@ -2574,24 +2588,57 @@ impl PostgresStore {
         nonce: &str,
         expires_at: DateTime<Utc>,
     ) -> Result<(), StorageError> {
-        let mut transaction = self.pool.begin().await?;
-        sqlx::query("DELETE FROM agent_nonces WHERE expires_at <= now()")
-            .execute(&mut *transaction)
-            .await?;
+        // Expired rows are swept by `purge_expired_authentication_state` rather
+        // than here: this runs on every authenticated node request, and a
+        // table-wide delete on that path serializes unrelated nodes against one
+        // another as the fleet grows.
         let result = sqlx::query(
             "INSERT INTO agent_nonces (agent_id, nonce, expires_at)
-             VALUES ($1,$2,$3) ON CONFLICT DO NOTHING",
+             VALUES ($1,$2,$3)
+             ON CONFLICT (agent_id, nonce) DO UPDATE
+                SET expires_at = excluded.expires_at
+              WHERE agent_nonces.expires_at <= now()",
         )
         .bind(agent_id.to_string())
         .bind(nonce)
         .bind(expires_at)
-        .execute(&mut *transaction)
+        .execute(&self.pool)
         .await?;
         if result.rows_affected() == 0 {
             return Err(StorageError::ConcurrentStateChange);
         }
-        transaction.commit().await?;
         Ok(())
+    }
+
+    /// Removes authentication state that can no longer authorize anything.
+    ///
+    /// Expired nonces and finished pairing rows are retained only until they
+    /// stop being decisions the control plane must honour. Sweeping them here
+    /// keeps the per-request authentication path free of table-wide deletes.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error when either delete fails.
+    pub async fn purge_expired_authentication_state(
+        &self,
+    ) -> Result<PurgedAuthState, StorageError> {
+        let nonces = sqlx::query("DELETE FROM agent_nonces WHERE expires_at <= now()")
+            .execute(&self.pool)
+            .await?
+            .rows_affected();
+        // Consumed rows stay addressable for the code's ten-minute lifetime so
+        // a node that retries an interrupted exchange still gets its identity.
+        let device_authorizations = sqlx::query(
+            "DELETE FROM device_authorizations
+             WHERE expires_at <= now() - interval '1 hour'",
+        )
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        Ok(PurgedAuthState {
+            nonces,
+            device_authorizations,
+        })
     }
 
     pub async fn sync_agent_presence(
@@ -3441,6 +3488,30 @@ impl PostgresStore {
         Ok(())
     }
 
+    pub async fn enrolment_status(
+        &self,
+        id: &str,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+    ) -> Result<(DateTime<Utc>, Option<AgentId>), StorageError> {
+        let row = sqlx::query(
+            "SELECT expires_at, agent_id FROM enrolment_tokens
+             WHERE id = $1 AND workspace_id = $2 AND environment_id = $3",
+        )
+        .bind(id)
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(StorageError::NotFound)?;
+        let agent_id = row
+            .try_get::<Option<String>, _>("agent_id")?
+            .map(|value| value.parse())
+            .transpose()
+            .map_err(|error| StorageError::InvalidData(format!("agent id: {error}")))?;
+        Ok((row.try_get("expires_at")?, agent_id))
+    }
+
     pub async fn create_device_authorization(
         &self,
         authorization: &NewDeviceAuthorization<'_>,
@@ -3525,6 +3596,47 @@ impl PostgresStore {
         .await?
         .ok_or(StorageError::NotFound)?;
         parse_device_authorization(&row)
+    }
+
+    /// Finds the node a pairing request would rebind rather than replace.
+    ///
+    /// Matching on installation ID is what makes in-place key rotation
+    /// possible, and it is also what an approver needs to be told about: an
+    /// approval that rebinds an existing node retires that node's current
+    /// device key.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error when the lookup fails or the stored node ID
+    /// cannot be parsed.
+    pub async fn node_replaced_by_device_authorization(
+        &self,
+        id: &str,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+    ) -> Result<Option<AgentId>, StorageError> {
+        let existing = sqlx::query_scalar::<_, String>(
+            "SELECT agent.id
+             FROM device_authorizations authorization
+             JOIN agents agent
+               ON agent.installation_id = authorization.installation_id
+              AND agent.workspace_id = $2
+              AND agent.environment_id = $3
+              AND agent.revoked_at IS NULL
+             WHERE authorization.id = $1",
+        )
+        .bind(id)
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .fetch_optional(&self.pool)
+        .await?;
+        existing
+            .map(|value| {
+                value.parse().map_err(|error| {
+                    StorageError::InvalidData(format!("agent id `{value}`: {error}"))
+                })
+            })
+            .transpose()
     }
 
     pub async fn approve_device_authorization(
@@ -3819,9 +3931,10 @@ impl PostgresStore {
             .await?;
             sqlx::query(
                 "UPDATE enrolment_tokens
-                 SET consumed_at = COALESCE(consumed_at, now()) WHERE id = $1",
+                 SET consumed_at = COALESCE(consumed_at, now()), agent_id = $2 WHERE id = $1",
             )
             .bind(token_id)
+            .bind(&existing)
             .execute(&mut *transaction)
             .await?;
             transaction.commit().await?;
@@ -3861,8 +3974,9 @@ impl PostgresStore {
         .bind(i32::from(protocol_version))
         .execute(&mut *transaction)
         .await?;
-        sqlx::query("UPDATE enrolment_tokens SET consumed_at = now() WHERE id = $1")
+        sqlx::query("UPDATE enrolment_tokens SET consumed_at = now(), agent_id = $2 WHERE id = $1")
             .bind(token_id)
+            .bind(agent_id.to_string())
             .execute(&mut *transaction)
             .await?;
         transaction.commit().await?;
@@ -4908,26 +5022,14 @@ impl PostgresStore {
         .execute(&mut *transaction)
         .await?;
 
-        if event.state == JobState::AcceptedBySpooler {
-            lock_billing_period(&mut transaction, workspace_id).await?;
-            sqlx::query(
-                "INSERT INTO usage_ledger (
-                    id, workspace_id, environment_id, job_id, kind, units, occurred_at
-                 )
-                 SELECT $1,$2,$3,$4,'print_job_accepted',1,$5
-                 WHERE EXISTS (
-                   SELECT 1 FROM environments
-                   WHERE id = $3 AND workspace_id = $2 AND kind = 'live'
-                 )
-                 ON CONFLICT (job_id) WHERE kind = 'print_job_accepted' AND job_id IS NOT NULL
-                 DO NOTHING",
+        if event.state == JobState::CompletedReported {
+            record_reported_complete_usage(
+                &mut transaction,
+                workspace_id,
+                environment_id,
+                event.job_id,
+                event.occurred_at,
             )
-            .bind(EventId::new().to_string())
-            .bind(workspace_id.to_string())
-            .bind(environment_id.to_string())
-            .bind(event.job_id.to_string())
-            .bind(event.occurred_at)
-            .execute(&mut *transaction)
             .await?;
         }
 
@@ -5241,6 +5343,16 @@ impl PostgresStore {
         .bind(event.occurred_at)
         .execute(&mut *transaction)
         .await?;
+        if event.state == JobState::CompletedReported {
+            record_reported_complete_usage(
+                &mut transaction,
+                workspace_id,
+                environment_id,
+                event.job_id,
+                event.occurred_at,
+            )
+            .await?;
+        }
         transaction.commit().await?;
         Ok(Some(job))
     }
@@ -5603,6 +5715,38 @@ async fn lock_billing_period(
         .map_err(|error| StorageError::InvalidData(format!("workspace id `{owner}`: {error}")))
 }
 
+async fn record_reported_complete_usage(
+    transaction: &mut Transaction<'_, Postgres>,
+    workspace_id: WorkspaceId,
+    environment_id: EnvironmentId,
+    job_id: JobId,
+    occurred_at: DateTime<Utc>,
+) -> Result<(), StorageError> {
+    lock_billing_period(transaction, workspace_id).await?;
+    sqlx::query(
+        "INSERT INTO usage_ledger (
+            id, workspace_id, environment_id, job_id, kind, units, occurred_at
+         )
+         SELECT $1,$2,$3,$4,'print_job_reported_complete',1,$5
+         WHERE EXISTS (
+           SELECT 1 FROM environments
+           WHERE id = $3 AND workspace_id = $2 AND kind = 'live'
+         )
+         ON CONFLICT (job_id)
+         WHERE kind IN ('print_job_accepted', 'print_job_reported_complete')
+           AND job_id IS NOT NULL
+         DO NOTHING",
+    )
+    .bind(EventId::new().to_string())
+    .bind(workspace_id.to_string())
+    .bind(environment_id.to_string())
+    .bind(job_id.to_string())
+    .bind(occurred_at)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
 async fn enforce_cloud_job_admission(
     transaction: &mut Transaction<'_, Postgres>,
     workspace_id: WorkspaceId,
@@ -5683,7 +5827,10 @@ async fn enforce_cloud_job_admission(
          SELECT COALESCE(sum(ledger.units), 0)::bigint
          FROM usage_ledger ledger
          JOIN billed_workspaces billed ON billed.workspace_id = ledger.workspace_id
-         WHERE ledger.kind = 'print_job_accepted'
+         WHERE ledger.kind IN (
+             'print_job_accepted',
+             'print_job_reported_complete'
+         )
            AND ledger.occurred_at >= date_trunc('month', now())
            AND ledger.occurred_at < date_trunc('month', now()) + interval '1 month'",
     )
@@ -5851,7 +5998,10 @@ async fn materialize_usage_export(
             JOIN billed_workspaces billed ON true
             LEFT JOIN usage_ledger ledger
               ON ledger.workspace_id = billed.workspace_id
-             AND ledger.kind = 'print_job_accepted'
+             AND ledger.kind IN (
+                 'print_job_accepted',
+                 'print_job_reported_complete'
+             )
              AND ledger.occurred_at >= $2
              AND ledger.occurred_at < $3
             WHERE entitlement.workspace_id = $1
@@ -5980,9 +6130,12 @@ async fn billing_owner_usage(
                 SELECT sum(ledger.units)
                 FROM usage_ledger ledger
                 JOIN billed_workspaces billed ON billed.workspace_id = ledger.workspace_id
-                WHERE ledger.kind = 'print_job_accepted'
+                WHERE ledger.kind IN (
+                    'print_job_accepted',
+                    'print_job_reported_complete'
+                )
                   AND ledger.occurred_at >= $2 AND ledger.occurred_at < $3
-            ), 0)::bigint AS accepted_live_jobs,
+            ), 0)::bigint AS billable_live_jobs,
             (
                 SELECT count(*)
                 FROM agents agent
@@ -5996,10 +6149,11 @@ async fn billing_owner_usage(
     .bind(period_end)
     .fetch_one(pool)
     .await?;
+    let billable_live_jobs = row.try_get("billable_live_jobs")?;
     Ok(StoredUsageSummary {
         period_start,
         period_end,
-        accepted_live_jobs: row.try_get("accepted_live_jobs")?,
+        reported_complete_live_jobs: billable_live_jobs,
         active_nodes: row.try_get("active_nodes")?,
     })
 }

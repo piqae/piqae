@@ -693,7 +693,7 @@ mod windows_shell {
 
     fn connection_label(connection: piqae_local_ipc::ConnectionState) -> &'static str {
         use piqae_local_ipc::ConnectionState::{
-            Connected, Connecting, Degraded, LocalOnly, Offline,
+            Connected, Connecting, Degraded, LocalOnly, Offline, Unauthorized,
         };
         match connection {
             Connected => "Connected",
@@ -701,6 +701,7 @@ mod windows_shell {
             Connecting => "Connecting",
             Offline => "Offline",
             Degraded => "Degraded",
+            Unauthorized => "Revoked — pair this node again",
         }
     }
 

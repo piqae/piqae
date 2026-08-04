@@ -87,9 +87,10 @@ be retained, then manually remove `%LOCALAPPDATA%\Spool`.
 ## Building
 
 GitHub Actions builds the binaries with the MSVC Rust target and compiles
-`Piqae.iss` with Inno Setup. Run the **Release** workflow manually for a
-versioned dry-run artifact, or download the `piqae-windows-installer` artifact
-from a CI run. With GitHub CLI authenticated on a development computer:
+`Piqae.iss` with Inno Setup. Run the **Piqae release** workflow manually with
+`publish=false` for a versioned dry-run artifact, or download the
+`piqae-windows-installer` artifact from a CI run. With GitHub CLI authenticated
+on a development computer:
 
 ```console
 gh run list --workflow CI
@@ -108,7 +109,8 @@ installer.
 
 ## Signing and updates
 
-The dedicated `windows-release.yml` workflow has two explicit modes:
+The reusable `windows-release.yml` stage has two explicit modes and is invoked
+by the single release orchestrator:
 
 - **Signed release** requires an Authenticode PFX/password, RFC 3161 timestamp
   URL, the exact expected certificate subject and SHA-1 certificate

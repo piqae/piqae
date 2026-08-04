@@ -7,9 +7,9 @@ const plans: PricingDisplay[] = [
     currency: 'USD',
     monthlyCents: 0,
     annualCents: 0,
-    headline: 'Prove the complete print path before paying.',
-    includedAcceptedJobs: 100,
-    annualIncludedAcceptedJobs: null,
+    headline: 'Start with the complete print path, no card required.',
+    includedReportedCompleteJobs: 100,
+    annualIncludedReportedCompleteJobs: null,
     includedNodes: 1,
     workspaceMembers: 'unlimited',
     customerAccounts: 'not_included',
@@ -37,9 +37,9 @@ const plans: PricingDisplay[] = [
     currency: 'USD',
     monthlyCents: 900,
     annualCents: 9_000,
-    headline: 'Run production printing without complicated tiers.',
-    includedAcceptedJobs: 25_000,
-    annualIncludedAcceptedJobs: 300_000,
+    headline: 'Pay only for jobs your printer path reports complete.',
+    includedReportedCompleteJobs: 25_000,
+    annualIncludedReportedCompleteJobs: 300_000,
     includedNodes: 25,
     workspaceMembers: 'unlimited',
     customerAccounts: 'included',
@@ -57,7 +57,7 @@ const plans: PricingDisplay[] = [
     features: [
       'Platform customer accounts',
       'Configurable document retention policy (preview)',
-      'Private-beta email support'
+      'Private-beta priority support'
     ],
     badge: 'Production',
     cta: 'Choose Pro'
@@ -65,9 +65,9 @@ const plans: PricingDisplay[] = [
 ];
 
 export const cloudPricingCatalog: CloudPricingCatalog = {
-  version: '2026-07-29',
+  version: '2026-07-30',
   currency: 'USD',
-  billableEvent: 'accepted_by_spooler',
+  billableEvent: 'completed_reported',
   plans
 };
 

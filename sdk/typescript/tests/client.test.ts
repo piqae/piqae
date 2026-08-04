@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { PiqaeClient } from '../src/index.js';
+import { PiqaeClient, verifyWebhookSignature } from '../src/index.js';
 import type { Printer } from '../src/index.js';
 
 describe('PiqaeClient', () => {
@@ -75,6 +75,55 @@ describe('PiqaeClient', () => {
     const url = new URL(String(fetcher.mock.calls[0]?.[0]));
     expect(url.origin + url.pathname).toBe('http://localhost:39100/v1/jobs');
     expect(Object.fromEntries(url.searchParams)).toEqual({ after: 'job_9', limit: '25' });
+  });
+
+  it('adds exact job reconciliation filters', async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(JSON.stringify({ data: [], next_cursor: null, has_more: false }), { status: 200 })
+    );
+    const client = new PiqaeClient({ fetch: fetcher });
+    await client.jobs.list({
+      state: 'failed_retryable',
+      printer_id: 'printer_1',
+      target_id: 'target_1',
+      metadata_key: 'order_id',
+      metadata_value: 'order_42'
+    });
+    const url = new URL(String(fetcher.mock.calls[0]?.[0]));
+    expect(Object.fromEntries(url.searchParams)).toMatchObject({
+      state: 'failed_retryable', printer_id: 'printer_1', target_id: 'target_1',
+      metadata_key: 'order_id', metadata_value: 'order_42'
+    });
+  });
+
+  it('retrieves a consolidated design specification', async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(JSON.stringify({ specification_revision: 'spec_1' }), { status: 200 })
+    );
+    const client = new PiqaeClient({ fetch: fetcher });
+    await client.targets.designSpecification('target / one');
+    expect(String(fetcher.mock.calls[0]?.[0])).toBe(
+      'https://api.piqae.com/v1/targets/target%20%2F%20one/design-specification'
+    );
+  });
+
+  it('verifies signed webhooks and rejects stale or changed bodies', async () => {
+    const timestamp = 1_700_000_000;
+    const body = '{"id":"evt_1"}';
+    const key = await crypto.subtle.importKey(
+      'raw', new TextEncoder().encode('whsec_test'), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']
+    );
+    const digest = new Uint8Array(await crypto.subtle.sign(
+      'HMAC', key, new TextEncoder().encode(`${timestamp}.${body}`)
+    ));
+    const signature = btoa(String.fromCharCode(...digest));
+    const headers = { 'piqae-timestamp': String(timestamp), 'piqae-signature': `v1=${signature}` };
+    await expect(verifyWebhookSignature('whsec_test', body, headers, { now: timestamp * 1000 }))
+      .resolves.toBe(true);
+    await expect(verifyWebhookSignature('whsec_test', `${body} `, headers, { now: timestamp * 1000 }))
+      .resolves.toBe(false);
+    await expect(verifyWebhookSignature('whsec_test', body, headers, { now: (timestamp + 301) * 1000 }))
+      .resolves.toBe(false);
   });
 
   it('returns complete synced printer capability and profile snapshots', async () => {
@@ -196,7 +245,7 @@ describe('PiqaeClient', () => {
     const usage = {
       period_start: '2026-07-01T00:00:00Z',
       period_end: '2026-08-01T00:00:00Z',
-      accepted_live_jobs: 42,
+      reported_complete_live_jobs: 42,
       active_nodes: 2
     };
     const fetcher = vi
@@ -233,7 +282,7 @@ describe('PiqaeClient', () => {
     const july = await client.usage.retrieve('2026-07');
 
     expect(summary.entitlement?.included_live_jobs).toBe(25_000);
-    expect(july.accepted_live_jobs).toBe(42);
+    expect(july.reported_complete_live_jobs).toBe(42);
     expect(String(fetcher.mock.calls[0]?.[0])).toBe(
       'https://print.example.test/v1/billing/summary'
     );
@@ -482,5 +531,32 @@ describe('PiqaeClient', () => {
     expect(headers.get('authorization')).toBe('Bearer piq_platform_service_account');
     expect(headers.get('x-piqae-workspace-id')).toBe('wrk_customer_01');
     expect(headers.get('x-piqae-environment-id')).toBe('env_customer_live');
+  });
+
+  // A device code in a URL is recorded by every proxy, CDN, and gateway access
+  // log between the caller and the control plane, none of which Piqae controls.
+  it('never places a pairing device code in a request URL', async () => {
+    const deviceCode = 'piq_dev_secret_pairing_capability';
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockImplementation(async () =>
+        Response.json({ id: 'dva_1', state: 'pending', expires_at: null })
+      );
+    const client = new PiqaeClient({ baseUrl: 'https://print.example.test/', fetch: fetcher });
+
+    await client.pairing.status(deviceCode);
+    await client.pairing.exchange(deviceCode);
+
+    for (const [url, init] of fetcher.mock.calls) {
+      expect(String(url)).not.toContain(deviceCode);
+      expect(init?.method).toBe('POST');
+      expect(JSON.parse(String(init?.body))).toEqual({ device_code: deviceCode });
+    }
+    expect(String(fetcher.mock.calls[0]?.[0])).toBe(
+      'https://print.example.test/v1/device-authorizations/status'
+    );
+    expect(String(fetcher.mock.calls[1]?.[0])).toBe(
+      'https://print.example.test/v1/device-authorizations/exchange'
+    );
   });
 });

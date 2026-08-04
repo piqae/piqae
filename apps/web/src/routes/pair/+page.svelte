@@ -36,12 +36,23 @@
           : 'No node identity was issued. You can close this window.'}
       </p>
       {#if form?.state === 'approved'}
-        <a class="button primary" href="/dashboard/nodes">View nodes</a>
+        <a class="button primary" href="/dashboard?view=nodes">View nodes</a>
       {/if}
     {:else if data.authorization}
       <div class="eyebrow">Browser pairing</div>
-      <h1>Connect this node?</h1>
+      <h1>{data.authorization.replaces_node_id ? 'Replace this node’s key?' : 'Connect this node?'}</h1>
       <p>Only approve if the details match the computer where you started Piqae.</p>
+
+      <!-- Approving a rotation retires the existing node's device key. That is a
+           materially different decision from admitting a new node, so it is
+           stated before approval rather than discovered afterwards. -->
+      {#if data.authorization.replaces_node_id}
+        <p class="notice" role="status">
+          This replaces the device key of an existing node,
+          <code>{data.authorization.replaces_node_id}</code>. Its current key stops working
+          immediately. The node keeps its ID, printers, and routing.
+        </p>
+      {/if}
 
       <dl>
         <div><dt>Name</dt><dd>{data.authorization.proposed_name}</dd></div>
@@ -69,7 +80,7 @@
         <div class="actions">
           <button class="button" type="submit" formaction="?/deny">Deny</button>
           <button class="button primary" type="submit" formaction="?/approve" disabled={code.length !== 9}>
-            Approve node
+            {data.authorization.replaces_node_id ? 'Replace key' : 'Approve node'}
           </button>
         </div>
       </form>
@@ -85,7 +96,7 @@
     {/if}
   </section>
 
-  <footer>Device codes expire after ten minutes and can be used only once.</footer>
+  <footer>Device codes expire after ten minutes and approve a single node.</footer>
 </main>
 
 <style>
@@ -136,6 +147,8 @@
   .actions { display: grid; grid-template-columns: 1fr 1.7fr; gap: 8px; margin-top: 16px; }
   .button { min-height: 35px; }
   .error { color: var(--danger); }
+  .notice { margin-top: 14px; padding: 10px 12px; color: var(--text-primary); background: var(--warning-soft); border: 1px solid color-mix(in oklch, var(--warning), transparent 60%); border-radius: 8px; }
+  .notice code { font: 550 9px/1.5 var(--font-mono); }
   .result-icon { width: 40px; height: 40px; display: grid; place-items: center; margin-bottom: 18px; color: var(--success); background: color-mix(in oklch, var(--success), transparent 88%); border-radius: 50%; }
   .result-icon.denied { color: var(--danger); background: color-mix(in oklch, var(--danger), transparent 88%); }
   .result-icon + h1 + p { margin-bottom: 20px; }

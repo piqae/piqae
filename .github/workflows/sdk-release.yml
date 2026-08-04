@@ -17,7 +17,8 @@ concurrency:
 jobs:
   package:
     name: Verify and package @piqae/sdk
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.PIQAE_CI_LINUX_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
@@ -56,12 +57,15 @@ jobs:
           name: piqae-sdk-${{ github.ref_name }}
           path: artifacts/piqae-sdk-*.tgz
           if-no-files-found: error
+          retention-days: 14
       - name: Publish to npm with trusted provenance
         if: startsWith(github.ref, 'refs/tags/')
         working-directory: sdk/typescript
+        env:
+          CANONICAL_REPOSITORY: ${{ vars.PIQAE_CANONICAL_REPOSITORY || 'C4CoffeeCo/piqae' }}
         run: |
-          if [ "${GITHUB_REPOSITORY}" != "piqae/piqae" ]; then
-            echo "npm publishing is enabled only after the repository is piqae/piqae." >&2
+          if [ "$GITHUB_REPOSITORY" != "$CANONICAL_REPOSITORY" ]; then
+            echo "npm publishing is enabled only in $CANONICAL_REPOSITORY." >&2
             exit 1
           fi
           npm install --global npm@11.19.0

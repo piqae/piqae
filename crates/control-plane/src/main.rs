@@ -8,6 +8,7 @@ use base64::{
 use piqae_control_plane::{
     AppState, AuthCapabilities, BillingCapabilities, DeploymentCapabilities, PlatformCapabilities,
     UpdateCapabilities,
+    auth_maintenance_worker::AuthMaintenanceWorker,
     authentication::{
         CombinedAuthenticator, LocalSessionAuthenticator, OidcAuthenticator, OidcConfiguration,
         PostgresAuthenticator, StaticAuthenticator, TenantContext,
@@ -150,7 +151,7 @@ async fn run() -> Result<()> {
     let billing_usage_worker = if capabilities.billing.enabled && service_role.runs_workers() {
         Some(
             BillingUsageWorker::new(
-                store,
+                store.clone(),
                 env::var("STRIPE_SECRET_KEY")
                     .or_else(|_| product_env("PIQAE_STRIPE_SECRET_KEY"))
                     .context("STRIPE_SECRET_KEY is required by the Cloud billing worker")?,
@@ -184,6 +185,9 @@ async fn run() -> Result<()> {
         None
     };
     let _billing_usage_worker = billing_usage_worker.map(spawn_billing_usage_worker);
+    let _auth_maintenance_worker = service_role
+        .runs_workers()
+        .then(|| spawn_auth_maintenance_worker(AuthMaintenanceWorker::new(store)));
     let address: SocketAddr = listen
         .parse()
         .context("invalid PIQAE_BIND or PIQAE_LISTEN")?;
@@ -195,6 +199,27 @@ async fn run() -> Result<()> {
         .with_graceful_shutdown(shutdown_signal())
         .await
         .context("serve HTTP")
+}
+
+fn spawn_auth_maintenance_worker(worker: AuthMaintenanceWorker) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            match worker.run_once().await {
+                Ok(purged) if purged == piqae_storage_postgres::PurgedAuthState::default() => {}
+                Ok(purged) => tracing::info!(
+                    nonces = purged.nonces,
+                    device_authorizations = purged.device_authorizations,
+                    "purged expired node authentication state"
+                ),
+                Err(error) => {
+                    tracing::error!(error.type = "auth_state_purge", %error);
+                }
+            }
+        }
+    })
 }
 
 fn spawn_billing_usage_worker(worker: BillingUsageWorker) -> tokio::task::JoinHandle<()> {

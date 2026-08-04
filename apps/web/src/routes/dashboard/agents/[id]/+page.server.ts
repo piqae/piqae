@@ -1,6 +1,7 @@
 import { redirect } from '@sveltejs/kit';
 import type { PageServerLoad } from './$types';
 
-export const load: PageServerLoad = ({ params, url }) => {
-  redirect(308, `/dashboard/nodes/${encodeURIComponent(params.id)}${url.search}`);
+// Legacy compatibility route. Agents were renamed to nodes.
+export const load: PageServerLoad = ({ params }) => {
+  redirect(308, `/dashboard?node=${encodeURIComponent(params.id)}`);
 };

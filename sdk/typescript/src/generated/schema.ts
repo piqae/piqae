@@ -533,9 +533,9 @@ export interface paths {
         /**
          * Inspect the workspace billing projection and current-period usage
          * @description Returns the canonical Free or Pro entitlement for Piqae Cloud. For a
-         *     platform owner workspace, accepted-job usage includes its owned customer
-         *     workspaces. Self-hosted deployments return `enabled: false` and never
-         *     enforce Cloud limits.
+         *     platform owner workspace, reported-complete usage includes its owned
+         *     customer workspaces. Self-hosted deployments return `enabled: false`
+         *     and never enforce Cloud limits.
          */
         get: operations["getBillingSummary"];
         put?: never;
@@ -554,11 +554,13 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * Inspect immutable accepted-job usage for the authenticated workspace
-         * @description Counts each Live-environment job exactly once when an agent reports
-         *     `accepted_by_spooler`. Test jobs, retries, and later delivery states do
-         *     not add usage. This tenant-scoped endpoint never exposes sibling
-         *     platform-customer usage.
+         * Inspect immutable reported-complete usage for the authenticated workspace
+         * @description Counts each Live-environment job exactly once when a node reports
+         *     `completed_reported`. Failed, blocked or jammed, cancelled, expired,
+         *     delivery-uncertain, Test-environment, and virtual jobs do not add
+         *     usage. A reported completion is the strongest available node or
+         *     operating-system signal; it is not proof that ink reached paper. This
+         *     tenant-scoped endpoint never exposes sibling platform-customer usage.
          */
         get: operations["getUsage"];
         put?: never;
@@ -631,6 +633,46 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/device-authorizations/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Poll browser-pairing state
+         * @description The device code is a bearer secret and is carried in the request body so that it is not recorded by proxy, CDN, or gateway access logs.
+         */
+        post: operations["getDeviceAuthorizationStatus"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/device-authorizations/exchange": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Exchange one approved device code for node identity
+         * @description The device code is carried in the request body. Repeating an exchange with the same code returns the same node identity, so a node that is interrupted mid-pairing can safely retry.
+         */
+        post: operations["exchangeDeviceAuthorizationByBody"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/device-authorizations/{device_code}": {
         parameters: {
             query?: never;
@@ -640,7 +682,11 @@ export interface paths {
             };
             cookie?: never;
         };
-        /** Poll browser-pairing state */
+        /**
+         * Poll browser-pairing state (deprecated)
+         * @deprecated
+         * @description Deprecated. Placing the device code in the request path exposes it to every proxy and CDN access log between the node and the control plane. Retained for nodes released before the code moved into the request body; use POST /v1/device-authorizations/status instead.
+         */
         get: operations["getDeviceAuthorization"];
         put?: never;
         post?: never;
@@ -718,7 +764,11 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Exchange one approved device code for node identity */
+        /**
+         * Exchange one approved device code for node identity (deprecated)
+         * @deprecated
+         * @description Deprecated. Placing the device code in the request path exposes it to every proxy and CDN access log between the node and the control plane. Retained for nodes released before the code moved into the request body; use POST /v1/device-authorizations/exchange instead.
+         */
         post: operations["exchangeDeviceAuthorization"];
         delete?: never;
         options?: never;
@@ -1576,8 +1626,13 @@ export interface components {
             period_start: string;
             /** Format: date-time */
             period_end: string;
-            /** Format: int64 */
-            accepted_live_jobs: number;
+            /**
+             * Format: int64
+             * @description Billable Live-environment jobs first reported `completed_reported`
+             *     during the period, plus legacy pre-cutover accepted-job ledger
+             *     records retained for audit continuity.
+             */
+            reported_complete_live_jobs: number;
             active_nodes: number;
         };
         BillingEntitlement: {
@@ -1739,6 +1794,10 @@ export interface components {
         DecideDeviceAuthorization: {
             user_code: string;
         };
+        DeviceCodeRequest: {
+            /** @description Piqae device code. Carried in the request body rather than the path because it is a bearer secret for the pairing exchange. */
+            device_code: string;
+        };
         DeviceAuthorizationStatus: {
             id: string;
             /** @enum {string} */
@@ -1756,6 +1815,8 @@ export interface components {
             state: "pending" | "approved" | "denied" | "consumed" | "expired";
             /** Format: date-time */
             expires_at: string;
+            /** @description The node whose device key this approval would replace, when the request comes from an installation already paired to this workspace. Null when approving admits a new node. */
+            replaces_node_id?: string | null;
         };
         DeviceAuthorizationExchange: {
             node_id: string;
@@ -2069,8 +2130,10 @@ export interface components {
             job_id: string;
             sequence: number;
             state: components["schemas"]["JobState"];
-            reason?: string | null;
-            message?: string | null;
+            reason: string | null;
+            message: string | null;
+            agent_id: string | null;
+            native_job_id: string | null;
             /** Format: date-time */
             occurred_at: string;
         };
@@ -3254,7 +3317,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Tenant-scoped accepted-job usage. */
+            /** @description Tenant-scoped reported-complete usage. */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -3343,7 +3406,7 @@ export interface operations {
             };
         };
         responses: {
-            /** @description Ten-minute, single-use device and human codes. */
+            /** @description Ten-minute device and human codes for one pairing attempt. */
             201: {
                 headers: {
                     [name: string]: unknown;
@@ -3353,6 +3416,59 @@ export interface operations {
                 };
             };
             400: components["responses"]["Error"];
+            429: components["responses"]["Error"];
+        };
+    };
+    getDeviceAuthorizationStatus: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DeviceCodeRequest"];
+            };
+        };
+        responses: {
+            /** @description Current authorization state without workspace details. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DeviceAuthorizationStatus"];
+                };
+            };
+            404: components["responses"]["Error"];
+            429: components["responses"]["Error"];
+        };
+    };
+    exchangeDeviceAuthorizationByBody: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DeviceCodeRequest"];
+            };
+        };
+        responses: {
+            /** @description Node identity assignment. The private device key never leaves the node. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DeviceAuthorizationExchange"];
+                };
+            };
+            404: components["responses"]["Error"];
+            429: components["responses"]["Error"];
         };
     };
     getDeviceAuthorization: {
@@ -3376,6 +3492,7 @@ export interface operations {
                 };
             };
             404: components["responses"]["Error"];
+            429: components["responses"]["Error"];
         };
     };
     approveDeviceAuthorization: {
@@ -3483,6 +3600,7 @@ export interface operations {
             };
             402: components["responses"]["Error"];
             404: components["responses"]["Error"];
+            429: components["responses"]["Error"];
         };
     };
     listApiKeys: {

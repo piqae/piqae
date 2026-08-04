@@ -6,7 +6,13 @@ export interface LocalAgentStatus {
   agent_id: string | null;
   workspace_name: string | null;
   version: string;
-  connection: 'local_only' | 'connected' | 'connecting' | 'offline' | 'degraded';
+  connection:
+    | 'local_only'
+    | 'connected'
+    | 'connecting'
+    | 'offline'
+    | 'degraded'
+    | 'unauthorized';
   queued_jobs: number;
   active_jobs: number;
   printer_warnings: number;

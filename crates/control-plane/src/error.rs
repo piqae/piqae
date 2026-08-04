@@ -79,6 +79,17 @@ impl AppError {
     }
 
     #[must_use]
+    pub fn too_many_requests() -> Self {
+        Self {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            code: "too_many_requests",
+            message: "Too many requests. Retry shortly.".into(),
+            retryable: true,
+            compatibility: false,
+        }
+    }
+
+    #[must_use]
     pub fn unauthorized() -> Self {
         Self {
             status: StatusCode::UNAUTHORIZED,
@@ -164,7 +175,7 @@ impl From<RepositoryError> for AppError {
             RepositoryError::QuotaExceeded => Self {
                 status: StatusCode::PAYMENT_REQUIRED,
                 code: "quota_exceeded",
-                message: "The Free plan accepted-job quota has been reached.".into(),
+                message: "The Free plan reported-complete job quota has been reached.".into(),
                 retryable: false,
                 compatibility: false,
             },

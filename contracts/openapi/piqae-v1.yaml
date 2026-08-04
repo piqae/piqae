@@ -28,7 +28,7 @@ tags:
   - name: Platform
     description: Manage customer workspaces from a trusted platform backend or owner dashboard.
   - name: Billing
-    description: Inspect canonical Cloud entitlements, accepted-job usage, and Stripe projections.
+    description: Inspect canonical Cloud entitlements, reported-complete usage, and Stripe projections.
   - name: Jobs
     description: Register and observe durable print jobs.
   - name: Printers
@@ -624,9 +624,9 @@ paths:
       summary: Inspect the workspace billing projection and current-period usage
       description: |
         Returns the canonical Free or Pro entitlement for Piqae Cloud. For a
-        platform owner workspace, accepted-job usage includes its owned customer
-        workspaces. Self-hosted deployments return `enabled: false` and never
-        enforce Cloud limits.
+        platform owner workspace, reported-complete usage includes its owned
+        customer workspaces. Self-hosted deployments return `enabled: false`
+        and never enforce Cloud limits.
       tags: [Billing]
       operationId: getBillingSummary
       responses:
@@ -640,12 +640,14 @@ paths:
         "404": { $ref: "#/components/responses/Error" }
   /v1/usage:
     get:
-      summary: Inspect immutable accepted-job usage for the authenticated workspace
+      summary: Inspect immutable reported-complete usage for the authenticated workspace
       description: |
-        Counts each Live-environment job exactly once when an agent reports
-        `accepted_by_spooler`. Test jobs, retries, and later delivery states do
-        not add usage. This tenant-scoped endpoint never exposes sibling
-        platform-customer usage.
+        Counts each Live-environment job exactly once when a node reports
+        `completed_reported`. Failed, blocked or jammed, cancelled, expired,
+        delivery-uncertain, Test-environment, and virtual jobs do not add
+        usage. A reported completion is the strongest available node or
+        operating-system signal; it is not proof that ink reached paper. This
+        tenant-scoped endpoint never exposes sibling platform-customer usage.
       tags: [Billing]
       operationId: getUsage
       parameters:
@@ -658,7 +660,7 @@ paths:
             pattern: '^[0-9]{4}-(0[1-9]|1[0-2])$'
       responses:
         "200":
-          description: Tenant-scoped accepted-job usage.
+          description: Tenant-scoped reported-complete usage.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/UsageSummary" }
@@ -737,11 +739,57 @@ paths:
             schema: { $ref: "#/components/schemas/CreateDeviceAuthorization" }
       responses:
         "201":
-          description: Ten-minute, single-use device and human codes.
+          description: Ten-minute device and human codes for one pairing attempt.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/CreatedDeviceAuthorization" }
         "400": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
+  /v1/device-authorizations/status:
+    post:
+      summary: Poll browser-pairing state
+      description: >-
+        The device code is a bearer secret and is carried in the request body so
+        that it is not recorded by proxy, CDN, or gateway access logs.
+      tags: [Nodes]
+      operationId: getDeviceAuthorizationStatus
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DeviceCodeRequest" }
+      responses:
+        "200":
+          description: Current authorization state without workspace details.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DeviceAuthorizationStatus" }
+        "404": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
+  /v1/device-authorizations/exchange:
+    post:
+      summary: Exchange one approved device code for node identity
+      description: >-
+        The device code is carried in the request body. Repeating an exchange
+        with the same code returns the same node identity, so a node that is
+        interrupted mid-pairing can safely retry.
+      tags: [Nodes]
+      operationId: exchangeDeviceAuthorizationByBody
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DeviceCodeRequest" }
+      responses:
+        "200":
+          description: Node identity assignment. The private device key never leaves the node.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DeviceAuthorizationExchange" }
+        "404": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
   /v1/device-authorizations/{device_code}:
     parameters:
       - name: device_code
@@ -752,7 +800,13 @@ paths:
           pattern: '^piq_dev_'
           description: Piqae device code.
     get:
-      summary: Poll browser-pairing state
+      summary: Poll browser-pairing state (deprecated)
+      description: >-
+        Deprecated. Placing the device code in the request path exposes it to
+        every proxy and CDN access log between the node and the control plane.
+        Retained for nodes released before the code moved into the request body;
+        use POST /v1/device-authorizations/status instead.
+      deprecated: true
       tags: [Nodes]
       operationId: getDeviceAuthorization
       security: []
@@ -763,6 +817,7 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/DeviceAuthorizationStatus" }
         "404": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
   /v1/device-authorizations/{authorization_id}/approve:
     parameters:
       - $ref: "#/components/parameters/DeviceAuthorizationId"
@@ -831,7 +886,13 @@ paths:
           pattern: '^piq_dev_'
           description: Piqae device code.
     post:
-      summary: Exchange one approved device code for node identity
+      summary: Exchange one approved device code for node identity (deprecated)
+      description: >-
+        Deprecated. Placing the device code in the request path exposes it to
+        every proxy and CDN access log between the node and the control plane.
+        Retained for nodes released before the code moved into the request body;
+        use POST /v1/device-authorizations/exchange instead.
+      deprecated: true
       tags: [Nodes]
       operationId: exchangeDeviceAuthorization
       security: []
@@ -843,6 +904,7 @@ paths:
               schema: { $ref: "#/components/schemas/DeviceAuthorizationExchange" }
         "402": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
   /v1/api-keys:
     get:
       summary: List API key metadata for the current environment
@@ -960,6 +1022,29 @@ paths:
       parameters:
         - $ref: "#/components/parameters/Limit"
         - $ref: "#/components/parameters/After"
+        - name: state
+          in: query
+          required: false
+          description: Exact native lifecycle state.
+          schema: { $ref: "#/components/schemas/JobState" }
+        - name: printer_id
+          in: query
+          required: false
+          schema: { type: string }
+        - name: target_id
+          in: query
+          required: false
+          schema: { type: string }
+        - name: metadata_key
+          in: query
+          required: false
+          description: Metadata key to match; metadata_value may refine it.
+          schema: { type: string, minLength: 1, maxLength: 120 }
+        - name: metadata_value
+          in: query
+          required: false
+          description: Exact metadata value; requires metadata_key.
+          schema: { type: string, maxLength: 500 }
       responses:
         "200":
           description: Cursor-paginated jobs.
@@ -1263,6 +1348,27 @@ paths:
               schema: { $ref: "#/components/schemas/TargetReadiness" }
         "401": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
+  /v1/targets/{target_id}/design-specification:
+    parameters:
+      - $ref: "#/components/parameters/TargetId"
+    get:
+      summary: Get a consolidated, design-facing print specification
+      description: |
+        Returns the stock geometry, current target readiness, and the exact
+        immutable printer/profile revisions behind each binding. Opaque native
+        driver blobs are intentionally never returned. Clients should retain
+        the returned revisions with saved designs and re-fetch before printing.
+      tags: [Routing, Printers]
+      operationId: getTargetDesignSpecification
+      responses:
+        "200":
+          description: Consolidated design and production constraints.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DesignSpecification" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
   /v1/agents:
     get:
@@ -2291,11 +2397,23 @@ components:
       type: object
       additionalProperties: false
       required:
-        [period_start, period_end, accepted_live_jobs, active_nodes]
+        [
+          period_start,
+          period_end,
+          reported_complete_live_jobs,
+          active_nodes,
+        ]
       properties:
         period_start: { type: string, format: date-time }
         period_end: { type: string, format: date-time }
-        accepted_live_jobs: { type: integer, format: int64, minimum: 0 }
+        reported_complete_live_jobs:
+          type: integer
+          format: int64
+          minimum: 0
+          description: |
+            Billable Live-environment jobs first reported `completed_reported`
+            during the period, plus legacy pre-cutover accepted-job ledger
+            records retained for audit continuity.
         active_nodes: { type: integer, minimum: 0 }
     BillingEntitlement:
       type: object
@@ -2518,6 +2636,17 @@ components:
       required: [user_code]
       properties:
         user_code: { type: string, pattern: '^[2-9A-HJ-NP-Z]{4}-?[2-9A-HJ-NP-Z]{4}$' }
+    DeviceCodeRequest:
+      type: object
+      additionalProperties: false
+      required: [device_code]
+      properties:
+        device_code:
+          type: string
+          pattern: '^piq_dev_'
+          description: >-
+            Piqae device code. Carried in the request body rather than the path
+            because it is a bearer secret for the pairing exchange.
     DeviceAuthorizationStatus:
       type: object
       additionalProperties: false
@@ -2538,6 +2667,13 @@ components:
         architecture: { type: string }
         state: { type: string, enum: [pending, approved, denied, consumed, expired] }
         expires_at: { type: string, format: date-time }
+        replaces_node_id:
+          type: string
+          nullable: true
+          description: >-
+            The node whose device key this approval would replace, when the
+            request comes from an installation already paired to this workspace.
+            Null when approving admits a new node.
     DeviceAuthorizationExchange:
       type: object
       additionalProperties: false
@@ -3169,7 +3305,8 @@ components:
         - failed_terminal
     JobEvent:
       type: object
-      required: [id, job_id, sequence, state, occurred_at]
+      required:
+        [id, job_id, sequence, state, reason, message, agent_id, native_job_id, occurred_at]
       properties:
         id:
           type: string
@@ -3183,6 +3320,10 @@ components:
         reason:
           type: [string, "null"]
         message:
+          type: [string, "null"]
+        agent_id:
+          type: [string, "null"]
+        native_job_id:
           type: [string, "null"]
         occurred_at:
           type: string
@@ -3329,6 +3470,31 @@ components:
         bindings:
           type: array
           items: { $ref: "#/components/schemas/BindingReadiness" }
+    DesignSpecificationDestination:
+      type: object
+      additionalProperties: false
+      required: [binding, printer, profile]
+      properties:
+        binding: { $ref: "#/components/schemas/TargetBinding" }
+        printer: { $ref: "#/components/schemas/Printer" }
+        profile: { $ref: "#/components/schemas/PrinterProfileSnapshot" }
+    DesignSpecification:
+      type: object
+      additionalProperties: false
+      required: [target, stock, readiness, destinations, specification_revision]
+      properties:
+        target: { $ref: "#/components/schemas/Target" }
+        stock:
+          oneOf:
+            - { $ref: "#/components/schemas/Stock" }
+            - { type: "null" }
+        readiness: { $ref: "#/components/schemas/TargetReadiness" }
+        destinations:
+          type: array
+          items: { $ref: "#/components/schemas/DesignSpecificationDestination" }
+        specification_revision:
+          type: string
+          description: Stable digest-like revision derived from target, stock, capability, profile and binding revisions.
     Printer:
       type: object
       required:

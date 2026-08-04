@@ -8,6 +8,9 @@ print jobs through the same API used by the dashboard.
 
 - [Hosted headless quickstart](api/platform-headless-quickstart.md) — a SaaS,
   marketplace, fulfilment, or design application serving many customers.
+- [Web design platform integration](api/web-design-platform-integration.md) —
+  templates, node onboarding, print attempts, live status, and recovery as one
+  evidence-gated integration.
 - [Single-workspace quickstart](api/quickstart.md) — one organisation adding
   printing to its own backend.
 - [Cloud node setup](getting-started/cloud.md) — install, pair, discover a
@@ -20,6 +23,7 @@ print jobs through the same API used by the dashboard.
 - [Platform accounts](api/platform-service-accounts.md)
 - [Authentication](api/authentication.md)
 - [Uploads and design applications](api/uploads-and-design-apps.md)
+- [End-to-end web design platform integration](api/web-design-platform-integration.md)
 - [Cloud billing and usage](api/billing-and-usage.md)
 - [Jobs, offline nodes, and delivery truth](printing/jobs-and-statuses.md)
 - [Idempotency](api/idempotency.md)

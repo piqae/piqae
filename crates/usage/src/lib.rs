@@ -9,7 +9,9 @@ use uuid::Uuid;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UsageKind {
+    /// Immutable pre-cutover records retained for billing audit continuity.
     PrintJobAccepted,
+    PrintJobReportedComplete,
     Adjustment,
 }
 
@@ -28,7 +30,7 @@ pub struct UsageEntry {
 #[derive(Debug, Default)]
 pub struct UsageLedger {
     entries: Vec<UsageEntry>,
-    accepted_jobs: BTreeSet<Uuid>,
+    billed_jobs: BTreeSet<Uuid>,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -40,9 +42,9 @@ pub enum UsageError {
 }
 
 impl UsageLedger {
-    /// Records one unit the first time a live job reaches OS-spooler acceptance.
-    /// Returns `None` for test jobs and duplicate acceptance events.
-    pub fn record_print_acceptance(
+    /// Records one unit the first time a live job is reported complete.
+    /// Returns `None` for test jobs and duplicate completion events.
+    pub fn record_reported_completion(
         &mut self,
         workspace_id: Uuid,
         environment_id: Uuid,
@@ -50,7 +52,7 @@ impl UsageLedger {
         is_live: bool,
         occurred_at: OffsetDateTime,
     ) -> Option<&UsageEntry> {
-        if !is_live || !self.accepted_jobs.insert(job_id) {
+        if !is_live || !self.billed_jobs.insert(job_id) {
             return None;
         }
         self.entries.push(UsageEntry {
@@ -58,7 +60,7 @@ impl UsageLedger {
             workspace_id,
             environment_id,
             job_id: Some(job_id),
-            kind: UsageKind::PrintJobAccepted,
+            kind: UsageKind::PrintJobReportedComplete,
             units: 1,
             occurred_at,
             reason: None,
@@ -123,7 +125,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn acceptance_is_live_only_and_idempotent() {
+    fn reported_completion_is_live_only_and_idempotent() {
         let mut ledger = UsageLedger::default();
         let workspace = Uuid::now_v7();
         let environment = Uuid::now_v7();
@@ -131,17 +133,17 @@ mod tests {
         let now = OffsetDateTime::now_utc();
         assert!(
             ledger
-                .record_print_acceptance(workspace, environment, job, false, now)
+                .record_reported_completion(workspace, environment, job, false, now)
                 .is_none()
         );
         assert!(
             ledger
-                .record_print_acceptance(workspace, environment, job, true, now)
+                .record_reported_completion(workspace, environment, job, true, now)
                 .is_some()
         );
         assert!(
             ledger
-                .record_print_acceptance(workspace, environment, job, true, now)
+                .record_reported_completion(workspace, environment, job, true, now)
                 .is_none()
         );
         assert_eq!(ledger.total_units(), 1);

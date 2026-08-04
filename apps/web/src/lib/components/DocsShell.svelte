@@ -136,7 +136,7 @@
     background: transparent;
     border: 0;
     outline: 0;
-    font-size: 10px;
+    font-size: var(--text-compact);
   }
 
   kbd {
@@ -145,7 +145,7 @@
     background: var(--surface-raised);
     border: 1px solid var(--border-default);
     border-radius: var(--radius-sm);
-    font: 8px var(--font-mono);
+    font: var(--text-meta) var(--font-mono);
   }
 
   .topbar nav {
@@ -159,7 +159,7 @@
     align-items: center;
     gap: 4px;
     color: var(--text-secondary);
-    font-size: 10px;
+    font-size: var(--text-compact);
   }
 
   .topbar nav a:hover {
@@ -191,7 +191,7 @@
     margin: 0 0 5px;
     padding: 0 8px;
     color: var(--text-tertiary);
-    font-size: 8px;
+    font-size: var(--text-meta);
     line-height: 18px;
     font-weight: 550;
     letter-spacing: 0.045em;
@@ -205,7 +205,7 @@
     padding: 0 8px;
     color: var(--text-tertiary);
     border-radius: var(--radius-md);
-    font-size: 10px;
+    font-size: var(--text-compact);
   }
 
   aside a:hover {
@@ -235,13 +235,13 @@
     color: var(--text-tertiary);
     background: var(--sidebar);
     border-top: 1px solid var(--border-subtle);
-    font-size: 8px;
+    font-size: var(--text-meta);
   }
 
   aside footer a {
     gap: 6px;
     padding: 0;
-    font-size: 8px;
+    font-size: var(--text-meta);
   }
 
   .dot {
