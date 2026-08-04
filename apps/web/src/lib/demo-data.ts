@@ -326,7 +326,7 @@ export const jobs: DashboardJob[] = [
     id: 'job_01K0VXP8M',
     printerId: 'prt_01K0C',
     agentId: 'agt_01K0B',
-    title: 'Wholesale invoice C4-9012',
+    title: 'Wholesale invoice EX-9012',
     source: 'xero',
     contentFormat: 'pdf',
     state: 'failed_terminal',
@@ -420,7 +420,7 @@ export const jobEvents: DashboardJobEvent[] = [
 export const webhooks: DashboardWebhook[] = [
   {
     id: 'whk_01K0A',
-    url: 'https://orders.c4coffee.co.nz/hooks/piqae',
+    url: 'https://orders.example.com/hooks/piqae',
     description: 'Order status updates',
     events: ['job.*'],
     enabled: true,

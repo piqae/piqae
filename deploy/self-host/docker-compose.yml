@@ -49,7 +49,7 @@ services:
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD}
 
   server:
-    image: ${PIQAE_IMAGE:-ghcr.io/c4coffeeco/piqae/server:latest}
+    image: ${PIQAE_IMAGE:-ghcr.io/piqae/piqae/server:latest}
     build:
       context: ../..
       dockerfile: deploy/docker/Dockerfile.server
@@ -111,7 +111,7 @@ services:
 
   web:
     profiles: ["dashboard"]
-    image: ${PIQAE_WEB_IMAGE:-ghcr.io/c4coffeeco/piqae/web:latest}
+    image: ${PIQAE_WEB_IMAGE:-ghcr.io/piqae/piqae/web:latest}
     build:
       context: ../..
       dockerfile: deploy/docker/Dockerfile.web

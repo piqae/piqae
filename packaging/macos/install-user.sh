@@ -41,23 +41,28 @@ elif [[ "$channel" != "unsigned-preview" ]]; then
   exit 1
 fi
 
-# These shipped paths and service identifiers are intentionally stable through
-# the V1 rebrand so an upgrade retains node identity, profiles, and queue state.
+# These shipped data paths remain stable so an upgrade retains node identity,
+# profiles, and queue state. Legacy service identifiers are removed below.
 support_root="$HOME/Library/Application Support/Spool"
 install_root="$support_root/bin"
 app_root="$HOME/Applications/Piqae.app"
 legacy_app_root="$HOME/Applications/Spool.app"
 launch_agents="$HOME/Library/LaunchAgents"
 log_root="$HOME/Library/Logs/Spool"
-agent_plist="$launch_agents/com.c4coffee.spool.agent.plist"
-menu_plist="$launch_agents/com.c4coffee.spool.menu.plist"
-agent_label="com.c4coffee.spool.agent"
-menu_label="com.c4coffee.spool.menu"
+agent_plist="$launch_agents/com.piqae.node.agent.plist"
+menu_plist="$launch_agents/com.piqae.node.menu.plist"
+agent_label="com.piqae.node.agent"
+menu_label="com.piqae.node.menu"
+legacy_agent_plist="$launch_agents/com.c4coffee.spool.agent.plist"
+legacy_menu_plist="$launch_agents/com.c4coffee.spool.menu.plist"
+legacy_agent_label="com.c4coffee.spool.agent"
+legacy_menu_label="com.c4coffee.spool.menu"
 domain="gui/$UID"
 local_port=39100
 
 launch_agent_pid() {
-  launchctl print "$domain/$agent_label" 2>/dev/null |
+  local label=$1
+  launchctl print "$domain/$label" 2>/dev/null |
     awk '$1 == "pid" && $2 == "=" && $3 ~ /^[0-9]+$/ { print $3; exit }'
 }
 
@@ -68,12 +73,17 @@ listener_pid() {
 }
 
 is_loaded=false
+loaded_agent_label=""
 if launchctl print "$domain/$agent_label" >/dev/null 2>&1; then
   is_loaded=true
+  loaded_agent_label="$agent_label"
+elif launchctl print "$domain/$legacy_agent_label" >/dev/null 2>&1; then
+  is_loaded=true
+  loaded_agent_label="$legacy_agent_label"
 fi
 
 if [[ "$is_loaded" == true ]]; then
-  managed_pid=$(launch_agent_pid)
+  managed_pid=$(launch_agent_pid "$loaded_agent_label")
   bound_pid=$(listener_pid)
   if [[ -z "$managed_pid" || -z "$bound_pid" || "$managed_pid" != "$bound_pid" ]]; then
     echo "The Piqae local port is not owned by the installed LaunchAgent. Stop any development node before installing." >&2
@@ -118,9 +128,15 @@ elif [[ -n "$(listener_pid)" ]]; then
 fi
 
 if [[ "$is_loaded" == true ]]; then
-  launchctl bootout "$domain/$agent_label"
+  launchctl bootout "$domain/$loaded_agent_label"
 fi
+launchctl bootout "$domain/$agent_label" >/dev/null 2>&1 || true
+launchctl bootout "$domain/$legacy_agent_label" >/dev/null 2>&1 || true
 launchctl bootout "$domain/$menu_label" >/dev/null 2>&1 || true
+launchctl bootout "$domain/$legacy_menu_label" >/dev/null 2>&1 || true
+/usr/bin/osascript \
+  -e 'tell application id "com.piqae.node.menu" to quit' \
+  >/dev/null 2>&1 || true
 /usr/bin/osascript \
   -e 'tell application id "com.c4coffee.spool.menu" to quit' \
   >/dev/null 2>&1 || true
@@ -174,6 +190,7 @@ agent_plist_stage=$(mktemp "$launch_agents/.piqae-agent.XXXXXX")
 menu_plist_stage=$(mktemp "$launch_agents/.piqae-menu.XXXXXX")
 render_plist "$agent_template" "$agent_plist_stage"
 render_plist "$menu_template" "$menu_plist_stage"
+rm -f -- "$legacy_agent_plist" "$legacy_menu_plist"
 mv "$agent_plist_stage" "$agent_plist"
 mv "$menu_plist_stage" "$menu_plist"
 

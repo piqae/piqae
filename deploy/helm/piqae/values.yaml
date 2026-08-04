@@ -2,7 +2,7 @@ nameOverride: ""
 fullnameOverride: ""
 
 image:
-  repository: ghcr.io/c4coffeeco/piqae/server
+  repository: ghcr.io/piqae/piqae/server
   tag: "0.1.0"
   digest: ""
   pullPolicy: IfNotPresent
@@ -142,7 +142,7 @@ tolerations: []
 migration:
   enabled: true
   image:
-    repository: ghcr.io/c4coffeeco/piqae/migrate
+    repository: ghcr.io/piqae/piqae/migrate
     tag: "0.1.0"
     digest: ""
     pullPolicy: IfNotPresent
@@ -156,7 +156,7 @@ dashboard:
   enabled: false
   replicas: 2
   image:
-    repository: ghcr.io/c4coffeeco/piqae/web
+    repository: ghcr.io/piqae/piqae/web
     tag: "0.1.0"
     digest: ""
     pullPolicy: IfNotPresent

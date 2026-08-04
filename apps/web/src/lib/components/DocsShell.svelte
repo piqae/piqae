@@ -24,7 +24,7 @@
     </label>
     <nav>
       <a href="/dashboard">Dashboard</a>
-      <a href="https://github.com/C4CoffeeCo/piqae">GitHub <Icon name="external" size={11} /></a>
+      <a href="https://github.com/piqae/piqae">GitHub <Icon name="external" size={11} /></a>
     </nav>
     <button class="menu" onclick={() => (open = !open)} aria-label="Toggle documentation menu">
       <Icon name="menu" size={16} />

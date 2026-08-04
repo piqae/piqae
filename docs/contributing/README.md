@@ -4,7 +4,7 @@ Piqae accepts Apache-2.0 contributions with DCO sign-off. Start a deterministic
 virtual node and fake printers from a fresh checkout:
 
 ```console
-git clone https://github.com/C4CoffeeCo/piqae.git
+git clone https://github.com/piqae/piqae.git
 cd piqae
 cargo xtask doctor
 cargo xtask dev

@@ -11,7 +11,7 @@ version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
 authors = ["Piqae contributors"]
-repository = "https://github.com/C4CoffeeCo/piqae"
+repository = "https://github.com/piqae/piqae"
 rust-version = "1.88"
 
 [workspace.dependencies]

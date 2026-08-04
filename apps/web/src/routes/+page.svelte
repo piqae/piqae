@@ -18,7 +18,7 @@
       '@type': 'Organization',
       name: 'Piqae',
       url: 'https://piqae.com',
-      sameAs: ['https://github.com/C4CoffeeCo/piqae']
+      sameAs: ['https://github.com/piqae/piqae']
     },
     {
       '@context': 'https://schema.org',

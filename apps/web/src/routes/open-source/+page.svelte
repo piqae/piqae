@@ -19,7 +19,7 @@
         Choose managed Cloud for convenience or run the complete platform in your own environment.
       </p>
       <div class="m-actions">
-        <a class="m-button primary" href="https://github.com/C4CoffeeCo/piqae">View on GitHub</a>
+        <a class="m-button primary" href="https://github.com/piqae/piqae">View on GitHub</a>
         <a class="m-button" href="/docs/self-hosting">Self-hosting guide</a>
       </div>
     </div>
@@ -62,7 +62,7 @@
         <h2>Use it commercially. Modify it. Operate it yourself.</h2>
         <p>The licence file in the repository is authoritative; this page is not legal advice.</p>
       </div>
-      <a class="m-button primary" href="https://github.com/C4CoffeeCo/piqae/blob/main/LICENSE">Read the licence</a>
+      <a class="m-button primary" href="https://github.com/piqae/piqae/blob/main/LICENSE">Read the licence</a>
     </div>
   </section>
 </MarketingShell>
