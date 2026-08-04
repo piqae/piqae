@@ -14,7 +14,7 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 piqae-domain.workspace = true
-piqae-executor-protocol = { path = "../executor-protocol", version = "0.1.1" }
+piqae-executor-protocol = { path = "../executor-protocol", version = "0.1.2" }
 piqae-protocol.workspace = true
 
 [target.'cfg(windows)'.dependencies]

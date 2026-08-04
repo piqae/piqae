@@ -56,11 +56,11 @@ url.workspace = true
 uuid.workspace = true
 
 piqae-domain.workspace = true
-piqae-object-store = { path = "../object-store", version = "0.1.1" }
+piqae-object-store = { path = "../object-store", version = "0.1.2" }
 piqae-protocol.workspace = true
-piqae-auth = { path = "../auth", version = "0.1.1" }
-piqae-storage-postgres = { path = "../storage-postgres", version = "0.1.1" }
-piqae-webhooks = { path = "../webhooks", version = "0.1.1" }
+piqae-auth = { path = "../auth", version = "0.1.2" }
+piqae-storage-postgres = { path = "../storage-postgres", version = "0.1.2" }
+piqae-webhooks = { path = "../webhooks", version = "0.1.2" }
 
 [dev-dependencies]
 http-body-util = "0.1"
