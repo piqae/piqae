@@ -64,6 +64,7 @@ export const load: PageServerLoad = async (event) => {
 
   return {
     sections: {
+      platform: meta.platform.accounts,
       team: meta.auth.invitations && authMode === 'workos',
       billing: meta.billing.enabled
     },
@@ -80,11 +81,23 @@ export const load: PageServerLoad = async (event) => {
       portalAvailable: stripePortalAvailable()
     },
     apiKeys: loadApiKeys(event),
+    platform: meta.platform.accounts ? loadPlatform(event) : null,
     webhooks: loadWebhooks(event),
     team: meta.auth.invitations && authMode === 'workos' ? loadTeam(event) : null,
     billing: meta.billing.enabled ? loadBilling(event) : null
   };
 };
+
+async function loadPlatform(event: RequestEvent) {
+  try {
+    return {
+      enabled: await dashboardSource(event).api.platformEnabled(),
+      dataError: null
+    };
+  } catch (error) {
+    return { enabled: false, dataError: presentDashboardError(error) };
+  }
+}
 
 function preferredInterval(event: RequestEvent): 'monthly' | 'annual' {
   const stored = event.cookies.get('piqae_attribution');
@@ -174,6 +187,35 @@ async function loadBilling(event: RequestEvent) {
 }
 
 export const actions: Actions = {
+  enablePlatform: async (event) => {
+    preventSecretCaching(event);
+    if (dashboardMode() !== 'live') {
+      return fail(400, {
+        mutation: 'enablePlatform',
+        error: { message: 'Platform-mode mutations are disabled while demo data is active.' }
+      });
+    }
+    const current = actor(event);
+    if (authMode === 'workos' && (!current || !canManage(current.role))) {
+      return fail(403, {
+        mutation: 'enablePlatform',
+        error: { message: 'Only workspace owners and admins can enable platform mode.' }
+      });
+    }
+    try {
+      const result = await dashboardSource(event).api.enablePlatform();
+      return {
+        mutation: 'enablePlatform',
+        platform: result
+      };
+    } catch (error) {
+      return fail(502, {
+        mutation: 'enablePlatform',
+        error: { message: presentDashboardError(error).message }
+      });
+    }
+  },
+
   createApiKey: async (event) => {
     preventSecretCaching(event);
     if (dashboardMode() !== 'live') {

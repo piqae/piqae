@@ -145,6 +145,12 @@ pub trait Authenticator: Send + Sync + 'static {
     ) -> Result<PlatformManagerContext, AuthenticationError> {
         Err(AuthenticationError)
     }
+    async fn authenticate_human(
+        &self,
+        authorization: &str,
+    ) -> Result<TenantContext, AuthenticationError> {
+        self.authenticate_bearer(authorization).await
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -516,6 +522,28 @@ impl Authenticator for CombinedAuthenticator {
             service_account_id,
             owner_workspace_id: human.workspace_id,
         })
+    }
+
+    async fn authenticate_human(
+        &self,
+        authorization: &str,
+    ) -> Result<TenantContext, AuthenticationError> {
+        let token = authorization
+            .strip_prefix("Bearer ")
+            .filter(|value| !value.is_empty())
+            .ok_or(AuthenticationError)?;
+        if let Some(local_session) = &self.local_session
+            && let Ok(tenant) = local_session.authenticate_bearer(authorization).await
+        {
+            return Ok(tenant);
+        }
+        if token.starts_with("piq_") || token.starts_with("spl_") {
+            return Err(AuthenticationError);
+        }
+        if let Some(oidc) = &self.oidc {
+            return oidc.authenticate_bearer(authorization).await;
+        }
+        Err(AuthenticationError)
     }
 }
 

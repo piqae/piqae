@@ -4,9 +4,10 @@ use crate::{AppState, authentication::PlatformManagerContext, error::AppError};
 use axum::{
     Json,
     extract::{Path, State},
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
 };
+use piqae_auth::{Scope, generate_platform_service_account_key};
 use piqae_storage_postgres::StoredPlatformAccount;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -22,6 +23,74 @@ pub struct UpsertPlatformAccountRequest {
 #[derive(Debug, Serialize)]
 pub struct PlatformStatusResponse {
     enabled: bool,
+}
+
+#[derive(Serialize)]
+pub struct PlatformEnableResponse {
+    enabled: bool,
+    secret: String,
+}
+
+impl std::fmt::Debug for PlatformEnableResponse {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PlatformEnableResponse")
+            .field("enabled", &self.enabled)
+            .field("secret", &"[REDACTED]")
+            .finish()
+    }
+}
+
+pub async fn enable(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    if headers.contains_key("x-piqae-workspace-id")
+        || headers.contains_key("x-piqae-environment-id")
+        || headers.contains_key("x-spool-workspace-id")
+        || headers.contains_key("x-spool-environment-id")
+    {
+        return Err(AppError::unauthorized());
+    }
+    let authorization = headers
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(AppError::unauthorized)?;
+    let tenant = state
+        .authenticator
+        .authenticate_human(authorization)
+        .await
+        .map_err(|_| AppError::unauthorized())?;
+    if !tenant.allows(Scope::ApiKeysWrite) {
+        return Err(AppError::forbidden());
+    }
+    let credential = generate_platform_service_account_key()
+        .map_err(|_| AppError::service_unavailable("credential_generation_failed"))?;
+    state
+        .repository
+        .enable_platform_manager(
+            &credential.id.to_string(),
+            "Piqae platform integration",
+            &credential.password_hash,
+            tenant.workspace_id,
+            &crate::request_id::current(),
+        )
+        .await?;
+    let mut response = (
+        StatusCode::CREATED,
+        Json(PlatformEnableResponse {
+            enabled: true,
+            secret: credential.plaintext,
+        }),
+    )
+        .into_response();
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
+        .headers_mut()
+        .insert(header::PRAGMA, HeaderValue::from_static("no-cache"));
+    Ok(response)
 }
 
 pub async fn status(

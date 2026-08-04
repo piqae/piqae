@@ -193,6 +193,13 @@ impl From<RepositoryError> for AppError {
                 retryable: false,
                 compatibility: false,
             },
+            RepositoryError::PlatformAlreadyEnabled => Self {
+                status: StatusCode::CONFLICT,
+                code: "platform_already_enabled",
+                message: "Platform mode is already enabled for this workspace.".into(),
+                retryable: false,
+                compatibility: false,
+            },
             RepositoryError::Persistence(message) => {
                 tracing::error!(
                     database.error = %message,

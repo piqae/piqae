@@ -514,6 +514,31 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/platform/enable": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Enable platform account management for the current workspace
+         * @description Creates one platform service account and exact Test and Live grants for
+         *     the authenticated owner workspace. This operation accepts only an
+         *     authorised human dashboard bearer; API keys and platform credentials
+         *     are rejected. The secret is returned once and cannot be retrieved
+         *     later. Repeating the operation returns a conflict without rotating or
+         *     revealing the existing credential.
+         */
+        post: operations["enablePlatform"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/platform/accounts/{external_id}": {
         parameters: {
             query?: never;
@@ -1818,6 +1843,12 @@ export interface components {
         PlatformStatus: {
             /** @description Whether this workspace owns an active platform integration. */
             enabled: boolean;
+        };
+        PlatformEnableResult: {
+            /** @constant */
+            enabled: true;
+            /** @description One-time platform credential for server-side storage. */
+            secret: string;
         };
         PlatformAccountEnvironment: {
             id: string;
@@ -3650,6 +3681,32 @@ export interface operations {
                 };
             };
             401: components["responses"]["Error"];
+        };
+    };
+    enablePlatform: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Platform mode enabled and one-time credential issued. */
+            201: {
+                headers: {
+                    "Cache-Control"?: string;
+                    Pragma?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PlatformEnableResult"];
+                };
+            };
+            401: components["responses"]["Error"];
+            403: components["responses"]["Error"];
+            404: components["responses"]["Error"];
+            409: components["responses"]["Error"];
         };
     };
     getPlatformAccount: {
