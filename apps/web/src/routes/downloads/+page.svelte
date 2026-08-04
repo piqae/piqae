@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { replaceState } from '$app/navigation';
   import Icon from '$lib/components/Icon.svelte';
   import MarketingShell from '$lib/components/marketing/MarketingShell.svelte';
   import Seo from '$lib/components/marketing/Seo.svelte';
@@ -13,7 +14,7 @@
 
   onMount(() => {
     enrolmentToken =
-      consumeNodeConnectFragment(window.location, (url) => window.history.replaceState(null, '', url))
+      consumeNodeConnectFragment(window.location, (url) => replaceState(url, {}))
         ?.enrolmentToken ??
       null;
   });

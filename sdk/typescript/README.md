@@ -3,6 +3,16 @@
 Typed, dependency-free TypeScript client for Piqae's native API. It works in
 Node.js, browsers, serverless runtimes, and against a local-only agent.
 
+Install the public package from npm:
+
+```console
+pnpm add @piqae/sdk
+```
+
+Release tarballs and checksums are also attached to `sdk-vX.Y.Z` GitHub
+Releases, and the package is mirrored to GitHub Packages for authenticated
+GitHub consumers.
+
 ## SaaS platforms
 
 Use one server-only platform key and one immutable external ID for each

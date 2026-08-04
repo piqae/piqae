@@ -44,6 +44,23 @@ The SDK tag must equal `sdk-v` followed by the version in
 `sdk/typescript/package.json`. Native/container versions use the `vX.Y.Z` tag
 and remain governed by the release gates and support matrix.
 
+SDK versions follow SemVer independently of the node/server release. Public API
+additions normally increment the minor version, compatible fixes increment the
+patch version, and breaking changes require a major version plus the API
+deprecation process. Prepare a release on a branch with:
+
+```console
+cd sdk/typescript
+npm version patch --no-git-tag-version # or minor / major
+cd ../..
+pnpm install --lockfile-only
+git add sdk/typescript/package.json pnpm-lock.yaml
+git commit --signoff -m "chore(sdk): prepare version X.Y.Z"
+```
+
+Merge that version PR before creating the annotated `sdk-vX.Y.Z` tag. Never tag
+an unmerged feature commit or reuse a published version.
+
 Before creating either tag, run:
 
 ```console
@@ -55,6 +72,27 @@ pnpm --filter @piqae/sdk build
 pnpm --filter @piqae/sdk lint
 pnpm --filter @piqae/sdk smoke:package
 ```
+
+Pushing the tag publishes the same package to npm and GitHub Packages, attaches
+the tarball and SHA-256 checksum to a GitHub Release, and retains the workflow
+artifact for 14 days. npm is the primary public installation source:
+
+```console
+pnpm add @piqae/sdk
+```
+
+GitHub Packages is a mirror for GitHub-authenticated consumers. Configure the
+consumer's `.npmrc` without committing a token:
+
+```ini
+@piqae:registry=https://npm.pkg.github.com
+//npm.pkg.github.com/:_authToken=${GITHUB_PACKAGES_TOKEN}
+```
+
+The release requires npm trusted publishing for `piqae/piqae`, workflow
+`sdk-release.yml`, and the `@piqae/sdk` package. GitHub Packages uses the
+workflow-scoped `GITHUB_TOKEN`; no long-lived GitHub package token is stored in
+the repository.
 
 ## Namespace cutover
 

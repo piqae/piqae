@@ -1,6 +1,12 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { loadReleaseManifest } from '$lib/server/release-manifest';
+
+vi.mock('$app/navigation', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('$app/navigation')>()),
+  replaceState: (url: string | URL) => window.history.replaceState({}, '', url)
+}));
+
 import Page from './+page.svelte';
 
 describe('downloads', () => {
