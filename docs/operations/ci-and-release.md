@@ -6,6 +6,9 @@ Blacksmith is an optional speed/capacity switch, not the default cost-saving
 measure. Local machines provide preflight only and never provide published
 release bytes.
 
+Credential custody and signing-provider decisions are documented in
+[Secrets, signing, and low-cost builds](secrets-and-signing.md).
+
 ## Pull-request CI
 
 `release/tools/ci_changed_paths.py` assigns each change to a bounded test

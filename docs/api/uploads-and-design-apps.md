@@ -65,6 +65,12 @@ A target binds that stock to one or more exact printer/profile revisions.
 `GET /v1/targets/{target_id}/readiness` reports the currently selected primary
 or standby binding and why other bindings are unavailable.
 
+`GET /v1/targets/{target_id}/design-specification` performs these joins in one
+tenant-scoped read and returns a `specification_revision` that changes with the
+target, stock, binding, capability, or immutable profile inputs. Save that
+revision with artwork and re-fetch before printing to detect production setup
+changes.
+
 Before presenting a printable template, a design application should:
 
 1. load the target and stock;

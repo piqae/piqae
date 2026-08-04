@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 import PiqaeMenuCore
 import PiqaeProfileHost
 
@@ -13,6 +14,21 @@ private enum QueueLoadResult: Sendable {
     case loaded([LocalQueueJob])
     case unsupported
     case unavailable
+}
+
+private func restartInstalledAgent() throws {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+    process.arguments = [
+        "kickstart", "-k", "gui/\(getuid())/com.c4coffee.spool.agent",
+    ]
+    process.standardOutput = Pipe()
+    process.standardError = Pipe()
+    try process.run()
+    process.waitUntilExit()
+    guard process.terminationStatus == 0 else {
+        throw NodeConnectAgentBridgeError.failed
+    }
 }
 
 private final class ProfileActionContext: NSObject {
@@ -51,6 +67,7 @@ final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var actionTask: Task<Void, Never>?
     private var refreshTimer: Timer?
     private var updateCoordinator: PiqaeUpdateCoordinator?
+    private let connectReplayGuard = NodeConnectReplayGuard()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         do {
@@ -91,6 +108,134 @@ final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         refreshTask?.cancel()
         actionTask?.cancel()
         refreshTimer?.invalidate()
+    }
+
+    func application(_ application: NSApplication, open urls: [URL]) {
+        for url in urls.prefix(4) {
+            Task { await handleConnectApplicationLink(url) }
+        }
+    }
+
+    func application(
+        _ application: NSApplication,
+        continue userActivity: NSUserActivity,
+        restorationHandler: @escaping ([any NSUserActivityRestoring]) -> Void
+    ) -> Bool {
+        guard userActivity.activityType == NSUserActivityTypeBrowsingWeb,
+              let url = userActivity.webpageURL else { return false }
+        Task { await handleConnectApplicationLink(url) }
+        return true
+    }
+
+    private func handleConnectApplicationLink(_ url: URL) async {
+        let link: NodeConnectApplicationLink
+        do {
+            link = try NodeConnectApplicationLink(url: url)
+        } catch {
+            showAlert(title: "Invalid Piqae connection", message: "This connection link is invalid or unsafe.")
+            return
+        }
+        guard await connectReplayGuard.begin(link) else { return }
+        var consumed = false
+        defer { Task { await connectReplayGuard.finish(link, consumed: consumed) } }
+        do {
+            guard let client else { throw NodeConnectAgentBridgeError.unavailable }
+            async let currentStatusRequest = client.status()
+            async let currentPrintersRequest = client.printers()
+            let (currentStatus, currentPrinters) = try await (
+                currentStatusRequest,
+                currentPrintersRequest
+            )
+            guard currentStatus.queuedJobs == 0, currentStatus.activeJobs == 0 else {
+                showAlert(
+                    title: "Finish current print jobs first",
+                    message: "Piqae will not change connected services while jobs are queued or active."
+                )
+                return
+            }
+            guard !currentPrinters.isEmpty else {
+                showAlert(
+                    title: "No printers available",
+                    message: "Add a local printer before connecting this service."
+                )
+                return
+            }
+            let bridge = try NodeConnectAgentBridge()
+            let preview = try await Task.detached {
+                try bridge.preview(capability: link.enrolmentCapability)
+            }.value
+            let selected = presentConnectorConsent(preview: preview, printers: currentPrinters)
+            guard !selected.isEmpty else { return }
+            let statusBeforeAccept = try await client.status()
+            guard statusBeforeAccept.queuedJobs == 0, statusBeforeAccept.activeJobs == 0 else {
+                showAlert(
+                    title: "Print activity started",
+                    message: "The connection was not changed because a print job started while approval was open. Try again when the queue is idle."
+                )
+                return
+            }
+            try await Task.detached {
+                try bridge.accept(capability: link.enrolmentCapability, printerIDs: selected)
+            }.value
+            consumed = true
+            do {
+                try await Task.detached {
+                    try restartInstalledAgent()
+                }.value
+            } catch {
+                showAlert(
+                    title: "Connected — restart Piqae",
+                    message: "The connector was saved securely, but Piqae could not restart automatically. Restart Piqae to activate it."
+                )
+                return
+            }
+            showAlert(
+                title: "Connected with Piqae",
+                message: "\(preview.requestingServiceName ?? preview.workspaceName) can now print only to the printers you selected.",
+                style: .informational
+            )
+            if let returnURL = preview.returnURL { NSWorkspace.shared.open(returnURL) }
+        } catch {
+            showAlert(
+                title: "Connection not completed",
+                message: error.localizedDescription
+            )
+        }
+    }
+
+    private func presentConnectorConsent(
+        preview: NodeConnectPreview,
+        printers availablePrinters: [LocalPrinter]
+    ) -> [String] {
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        let requester = preview.requestingServiceName.map { "Piqae integration \($0)" }
+            ?? "Piqae workspace \(preview.workspaceName)"
+        alert.messageText = "Connect \(requester)?"
+        alert.informativeText = "Customer workspace \(preview.workspaceName) (\(preview.workspaceID)) requests: \(preview.requestedScopes.joined(separator: ", ")). Select the local printers it may use. You can disconnect it later."
+        alert.addButton(withTitle: "Connect selected printers")
+        alert.addButton(withTitle: "Cancel")
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 6
+        let choices = availablePrinters.map { printer -> NSButton in
+            let button = NSButton(checkboxWithTitle: printer.name, target: nil, action: nil)
+            button.state = .off
+            button.identifier = NSUserInterfaceItemIdentifier(printer.printerID)
+            stack.addArrangedSubview(button)
+            return button
+        }
+        alert.accessoryView = stack
+        NSApplication.shared.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn else { return [] }
+        let selected = choices.compactMap { button in
+            button.state == .on ? button.identifier?.rawValue : nil
+        }
+        if selected.isEmpty {
+            showAlert(title: "Select a printer", message: "No printer access was granted.")
+        }
+        return selected
     }
 
     func menuWillOpen(_ menu: NSMenu) {

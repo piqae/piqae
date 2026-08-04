@@ -1,10 +1,34 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import Icon from '$lib/components/Icon.svelte';
   import MarketingShell from '$lib/components/marketing/MarketingShell.svelte';
   import Seo from '$lib/components/marketing/Seo.svelte';
   import type { PageData } from './$types';
+  import { consumeNodeConnectFragment } from '$lib/node-connect-fragment';
 
   let { data }: { data: PageData } = $props();
+  let enrolmentToken = $state<string | null>(null);
+  let copied = $state(false);
+  let copyFailed = $state(false);
+
+  onMount(() => {
+    enrolmentToken =
+      consumeNodeConnectFragment(window.location, (url) => window.history.replaceState(null, '', url))
+        ?.enrolmentToken ??
+      null;
+  });
+
+  async function copyEnrolmentToken() {
+    if (!enrolmentToken) return;
+    copyFailed = false;
+    try {
+      await navigator.clipboard.writeText(enrolmentToken);
+      copied = true;
+    } catch {
+      copied = false;
+      copyFailed = true;
+    }
+  }
 
   type Artifact = PageData['manifest']['artifacts'][number];
 
@@ -59,6 +83,32 @@
 />
 
 <MarketingShell>
+  {#if enrolmentToken}
+    <section class="connect-session" aria-labelledby="connect-session-title">
+      <div class="m-container connect-session-inner">
+        <div>
+          <span class="m-eyebrow">Printer computer setup</span>
+          <h2 id="connect-session-title">Your one-time connection code is ready.</h2>
+          <p>
+            Download and open Piqae on this computer. If the installer asks for an enrolment
+            token, paste this code. It expires shortly and works once.
+          </p>
+          <p class="connect-warning">
+            Piqae’s current desktop apps do not yet accept this code directly from the browser.
+            Keep this page open, do not send the code to anyone, and clear it from your clipboard
+            after setup.
+          </p>
+        </div>
+        <button class="m-button dark" type="button" onclick={copyEnrolmentToken}>
+          {copied
+            ? 'Connection code copied'
+            : copyFailed
+              ? 'Copy failed — try again'
+              : 'Copy one-time connection code'}
+        </button>
+      </div>
+    </section>
+  {/if}
   <section class="download-hero">
     <div class="hero-inner m-container">
       <div class="hero-copy-panel">
@@ -301,6 +351,24 @@
 </MarketingShell>
 
 <style>
+  .connect-session {
+    border-bottom: 1px solid var(--m-border);
+    background: var(--m-surface-soft, #f6f5f1);
+  }
+  .connect-session-inner {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 32px;
+    align-items: center;
+    padding-block: 28px;
+  }
+  .connect-session h2 { margin: 7px 0 8px; font-size: clamp(24px, 3vw, 34px); }
+  .connect-session p { max-width: 760px; margin: 0; color: var(--m-muted); line-height: 1.55; }
+  .connect-session .connect-warning { margin-top: 8px; font-size: 13px; }
+  @media (max-width: 720px) {
+    .connect-session-inner { grid-template-columns: 1fr; }
+    .connect-session button { width: 100%; }
+  }
   .download-hero {
     position: relative;
     border-bottom: 1px solid var(--m-border);

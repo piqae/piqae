@@ -23,6 +23,7 @@ pub struct TenantContext {
     pub workspace_id: WorkspaceId,
     pub environment_id: EnvironmentId,
     permissions: Permissions,
+    pub platform_service_account_id: Option<uuid::Uuid>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -85,6 +86,7 @@ impl TenantContext {
             workspace_id,
             environment_id,
             permissions: Permissions::ALL,
+            platform_service_account_id: None,
         }
     }
 
@@ -108,6 +110,7 @@ impl TenantContext {
                     .map(|scope| scope.as_str().to_owned())
                     .collect::<Vec<_>>(),
             ),
+            platform_service_account_id: None,
         }
     }
 }
@@ -277,6 +280,7 @@ impl PostgresAuthenticator {
             workspace_id: record.workspace_id,
             environment_id: record.environment_id,
             permissions: Permissions::from_names(&record.scopes),
+            platform_service_account_id: None,
         })
     }
 }
@@ -352,6 +356,7 @@ impl Authenticator for PostgresAuthenticator {
             workspace_id,
             environment_id,
             permissions,
+            platform_service_account_id: Some(id),
         })
     }
 
@@ -669,6 +674,7 @@ impl OidcAuthenticator {
             workspace_id,
             environment_id,
             permissions,
+            platform_service_account_id: None,
         })
     }
 
@@ -733,6 +739,7 @@ mod tests {
             workspace_id: WorkspaceId::new(),
             environment_id: EnvironmentId::new(),
             permissions: Permissions::from_names(&["jobs_read".into()]),
+            platform_service_account_id: None,
         };
         assert!(tenant.allows(Scope::JobsRead));
         assert!(!tenant.allows(Scope::JobsWrite));

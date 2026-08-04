@@ -17,7 +17,7 @@ https://downloads.piqae.com/releases/stable/<signed-artifact>
 
 Preview candidates use the same layout below `/releases/preview/`. The web
 service validates the requested channel and filename, then redirects to a
-short-lived URL for the separate Railway release bucket. Print documents never
+short-lived URL for the separate Cloudflare R2 release bucket. Print documents never
 use this bucket.
 
 A reserved URL is not evidence that a release exists. Until the bucket

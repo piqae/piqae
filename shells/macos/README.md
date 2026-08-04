@@ -5,6 +5,21 @@ contains no print driver, queue, database, device credential, or cloud client.
 Operational actions use the authenticated loopback API and time out quickly
 when the agent is unavailable.
 
+`PiqaeMenuCore` includes strict parsing for the reserved native connect-link
+shape, HTTPS-only return destinations (with loopback HTTP for development),
+explicit non-empty printer/permission consent, and capability-hash replay
+suppression without retaining the capability. The app claims
+`applinks:app.piqae.com` and handles the verified `/connect` Universal Link.
+The `piqae://` route remains deprecated compatibility for existing Preview
+links and is not emitted for new sessions. The app
+uses the headless agent's bounded stdin-only preview and acceptance commands;
+the capability never enters process arguments, environment variables, files,
+or diagnostics. Piqae resolves the requesting workspace before showing local
+consent, requires the queue to be idle, starts with every printer unchecked,
+persists the isolated connector before restarting the agent, and follows only
+a server-validated return URL after success. Windows and Linux application-link
+registration remain gated on equivalent signed-shell consent flows.
+
 Configuration:
 
 - `PIQAE_LOCAL_API_URL` defaults to `http://127.0.0.1:39100` and must remain an

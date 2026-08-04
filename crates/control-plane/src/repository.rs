@@ -15,12 +15,14 @@ use piqae_storage_postgres::{
     AgentAuthenticationRecord, CreateJobResult as PgCreateJobResult, EnrolledAgent, JobLease,
     NewDeviceAuthorization, NodeUpdatePolicy, NodeUpdateState, PostgresStore, StorageError,
     StoredAgent, StoredAgentCommandBatch, StoredApiKey, StoredBillingSummary,
-    StoredDeviceAuthorization, StoredNodeUpdate, StoredPlatformAccount, StoredPrinter, StoredStock,
+    StoredConnectSessionPreview, StoredContentEncryptionKey, StoredDeviceAuthorization,
+    StoredNodeConnector, StoredNodeUpdate, StoredPlatformAccount, StoredPrinter, StoredStock,
     StoredTarget, StoredTargetBinding, StoredTenantEvent, StoredUpload, StoredUsageSummary,
     StoredWebhook, StoredWebhookDelivery, StripeBillingEvent, StripeProjectionResult,
     SyncedPrinter, UpsertedPlatformAccount, WebhookDeliveryWork, WorkOsIdentityEvent,
     WorkOsProjectionResult,
 };
+use sha2::Digest as _;
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
@@ -223,6 +225,19 @@ pub trait Repository: Send + Sync + 'static {
         environment_id: EnvironmentId,
         agent_id: AgentId,
     ) -> Result<(), RepositoryError>;
+    async fn list_node_connectors(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+    ) -> Result<Vec<StoredNodeConnector>, RepositoryError>;
+    async fn revoke_node_connector(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        connector_id: &str,
+    ) -> Result<(), RepositoryError>;
     async fn get_node_update(
         &self,
         workspace_id: WorkspaceId,
@@ -332,12 +347,36 @@ pub trait Repository: Send + Sync + 'static {
         secret_hash: &str,
         expires_at: DateTime<Utc>,
     ) -> Result<(), RepositoryError>;
+    async fn create_connect_enrolment(
+        &self,
+        id: &str,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        secret_hash: &str,
+        expires_at: DateTime<Utc>,
+        return_url: Option<&str>,
+        requesting_service_account_id: Option<&str>,
+    ) -> Result<(), RepositoryError> {
+        let _ = (return_url, requesting_service_account_id);
+        self.create_enrolment(id, workspace_id, environment_id, secret_hash, expires_at)
+            .await
+    }
     async fn enrolment_status(
         &self,
         id: &str,
         workspace_id: WorkspaceId,
         environment_id: EnvironmentId,
     ) -> Result<(DateTime<Utc>, Option<AgentId>), RepositoryError>;
+    async fn connect_session_preview(
+        &self,
+        secret_hash: &str,
+    ) -> Result<StoredConnectSessionPreview, RepositoryError>;
+    async fn node_installation_public_key(
+        &self,
+        _installation_key: &str,
+    ) -> Result<Vec<u8>, RepositoryError> {
+        Err(RepositoryError::NotFound)
+    }
     async fn create_device_authorization(
         &self,
         authorization: &NewDeviceAuthorization<'_>,
@@ -419,6 +458,34 @@ pub trait Repository: Send + Sync + 'static {
             architecture,
             version,
             protocol_version,
+        )
+        .await
+    }
+    #[allow(clippy::too_many_arguments)]
+    async fn enrol_agent_connector_with_billing(
+        &self,
+        secret_hash: &str,
+        public_key: &[u8],
+        name: &str,
+        hostname: &str,
+        platform: &str,
+        architecture: &str,
+        version: &str,
+        protocol_version: u16,
+        enforce_cloud_billing: bool,
+        _installation_id: &str,
+        _allowed_printer_ids: &[String],
+    ) -> Result<EnrolledAgent, RepositoryError> {
+        self.enrol_agent_with_billing(
+            secret_hash,
+            public_key,
+            name,
+            hostname,
+            platform,
+            architecture,
+            version,
+            protocol_version,
+            enforce_cloud_billing,
         )
         .await
     }
@@ -512,6 +579,28 @@ pub trait Repository: Send + Sync + 'static {
         environment_id: EnvironmentId,
         printer_id: PrinterId,
     ) -> Result<AgentId, RepositoryError>;
+    async fn rotate_content_encryption_key(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        key_id: &str,
+        algorithm: &str,
+        public_key_spki: &str,
+    ) -> Result<StoredContentEncryptionKey, RepositoryError>;
+    async fn content_encryption_key_for_printer(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        printer_id: PrinterId,
+    ) -> Result<StoredContentEncryptionKey, RepositoryError>;
+    async fn revoke_content_encryption_key(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        key_id: &str,
+    ) -> Result<(), RepositoryError>;
     async fn create_job(
         &self,
         job: &Job,
@@ -530,6 +619,7 @@ pub trait Repository: Send + Sync + 'static {
         self.create_job(job, agent_id, idempotency_key, request_bytes)
             .await
     }
+
     #[allow(
         clippy::too_many_lines,
         reason = "atomic in-memory parity keeps every reroute fence under one write lock"
@@ -947,6 +1037,29 @@ impl Repository for PostgresStore {
             .map_err(Into::into)
     }
 
+    async fn list_node_connectors(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+    ) -> Result<Vec<StoredNodeConnector>, RepositoryError> {
+        Self::list_node_connectors(self, workspace_id, environment_id, agent_id)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn revoke_node_connector(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        connector_id: &str,
+    ) -> Result<(), RepositoryError> {
+        Self::revoke_node_connector(self, workspace_id, environment_id, agent_id, connector_id)
+            .await
+            .map_err(Into::into)
+    }
+
     async fn get_node_update(
         &self,
         workspace_id: WorkspaceId,
@@ -1162,6 +1275,30 @@ impl Repository for PostgresStore {
         .map_err(Into::into)
     }
 
+    async fn create_connect_enrolment(
+        &self,
+        id: &str,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        secret_hash: &str,
+        expires_at: DateTime<Utc>,
+        return_url: Option<&str>,
+        requesting_service_account_id: Option<&str>,
+    ) -> Result<(), RepositoryError> {
+        Self::create_connect_enrolment(
+            self,
+            id,
+            workspace_id,
+            environment_id,
+            secret_hash,
+            expires_at,
+            return_url,
+            requesting_service_account_id,
+        )
+        .await
+        .map_err(Into::into)
+    }
+
     async fn enrolment_status(
         &self,
         id: &str,
@@ -1169,6 +1306,24 @@ impl Repository for PostgresStore {
         environment_id: EnvironmentId,
     ) -> Result<(DateTime<Utc>, Option<AgentId>), RepositoryError> {
         Self::enrolment_status(self, id, workspace_id, environment_id)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn connect_session_preview(
+        &self,
+        secret_hash: &str,
+    ) -> Result<StoredConnectSessionPreview, RepositoryError> {
+        Self::connect_session_preview(self, secret_hash)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn node_installation_public_key(
+        &self,
+        installation_key: &str,
+    ) -> Result<Vec<u8>, RepositoryError> {
+        Self::node_installation_public_key(self, installation_key)
             .await
             .map_err(Into::into)
     }
@@ -1275,6 +1430,60 @@ impl Repository for PostgresStore {
             .map_err(Into::into)
     }
 
+    async fn rotate_content_encryption_key(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        key_id: &str,
+        algorithm: &str,
+        public_key_spki: &str,
+    ) -> Result<StoredContentEncryptionKey, RepositoryError> {
+        PostgresStore::rotate_content_encryption_key(
+            self,
+            workspace_id,
+            environment_id,
+            agent_id,
+            key_id,
+            algorithm,
+            public_key_spki,
+        )
+        .await
+        .map_err(Into::into)
+    }
+    async fn content_encryption_key_for_printer(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        printer_id: PrinterId,
+    ) -> Result<StoredContentEncryptionKey, RepositoryError> {
+        PostgresStore::content_encryption_key_for_printer(
+            self,
+            workspace_id,
+            environment_id,
+            printer_id,
+        )
+        .await
+        .map_err(Into::into)
+    }
+    async fn revoke_content_encryption_key(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        key_id: &str,
+    ) -> Result<(), RepositoryError> {
+        PostgresStore::revoke_content_encryption_key(
+            self,
+            workspace_id,
+            environment_id,
+            agent_id,
+            key_id,
+        )
+        .await
+        .map_err(Into::into)
+    }
+
     async fn enrol_agent(
         &self,
         secret_hash: &str,
@@ -1324,6 +1533,38 @@ impl Repository for PostgresStore {
             version,
             protocol_version,
             enforce_cloud_billing,
+        )
+        .await
+        .map_err(Into::into)
+    }
+
+    async fn enrol_agent_connector_with_billing(
+        &self,
+        secret_hash: &str,
+        public_key: &[u8],
+        name: &str,
+        hostname: &str,
+        platform: &str,
+        architecture: &str,
+        version: &str,
+        protocol_version: u16,
+        enforce_cloud_billing: bool,
+        installation_id: &str,
+        allowed_printer_ids: &[String],
+    ) -> Result<EnrolledAgent, RepositoryError> {
+        Self::enrol_agent_connector_with_billing(
+            self,
+            secret_hash,
+            public_key,
+            name,
+            hostname,
+            platform,
+            architecture,
+            version,
+            protocol_version,
+            enforce_cloud_billing,
+            Some(installation_id),
+            allowed_printer_ids,
         )
         .await
         .map_err(Into::into)
@@ -1866,7 +2107,19 @@ struct MemoryState {
     /// that in-place key rotation depends on.
     agent_installations: HashMap<(WorkspaceId, EnvironmentId, String), AgentId>,
     agent_public_keys: HashMap<AgentId, Vec<u8>>,
-    enrolments: HashMap<String, (WorkspaceId, EnvironmentId, String, DateTime<Utc>, Option<AgentId>)>,
+    content_encryption_keys: HashMap<AgentId, StoredContentEncryptionKey>,
+    node_connectors: HashMap<(WorkspaceId, EnvironmentId, AgentId, String), StoredNodeConnector>,
+    #[allow(clippy::type_complexity)]
+    enrolments: HashMap<
+        String,
+        (
+            WorkspaceId,
+            EnvironmentId,
+            String,
+            DateTime<Utc>,
+            Option<AgentId>,
+        ),
+    >,
     device_authorizations: HashMap<String, MemoryDeviceAuthorization>,
     node_updates: HashMap<AgentId, StoredNodeUpdate>,
     webhooks: HashMap<String, (WorkspaceId, EnvironmentId, StoredWebhook, Vec<u8>)>,
@@ -1882,6 +2135,7 @@ struct MemoryState {
     job_acceptances: HashMap<JobId, MemoryJobAcceptance>,
     routing_attempts: Vec<(JobId, String, String)>,
     idempotency: HashMap<(WorkspaceId, EnvironmentId, String), (Vec<u8>, JobId)>,
+    consumed_envelopes: HashMap<(WorkspaceId, EnvironmentId, String), (String, JobId)>,
     compatibility: HashMap<(WorkspaceId, EnvironmentId, String, String), i64>,
     reverse_compatibility: HashMap<(WorkspaceId, EnvironmentId, String, i64), String>,
     next_compatibility_id: i64,
@@ -2071,6 +2325,50 @@ impl Repository for MemoryRepository {
                     .cloned()
                     .unwrap_or_default(),
             })
+            .ok_or(RepositoryError::NotFound)
+    }
+
+    async fn node_installation_public_key(
+        &self,
+        installation_key: &str,
+    ) -> Result<Vec<u8>, RepositoryError> {
+        let state = self.state.read().await;
+        let agent_id = state
+            .agent_installations
+            .iter()
+            .find(|((_, _, key), _)| key == installation_key)
+            .map(|(_, agent_id)| *agent_id)
+            .ok_or(RepositoryError::NotFound)?;
+        state
+            .agent_public_keys
+            .get(&agent_id)
+            .cloned()
+            .ok_or(RepositoryError::NotFound)
+    }
+
+    async fn connect_session_preview(
+        &self,
+        secret_hash: &str,
+    ) -> Result<StoredConnectSessionPreview, RepositoryError> {
+        self.state
+            .read()
+            .await
+            .enrolments
+            .values()
+            .find(|(_, _, hash, expires_at, agent_id)| {
+                hash == secret_hash && *expires_at > Utc::now() && agent_id.is_none()
+            })
+            .map(
+                |(workspace_id, environment_id, _, expires_at, _)| StoredConnectSessionPreview {
+                    workspace_id: *workspace_id,
+                    workspace_name: format!("Piqae workspace {workspace_id}"),
+                    environment_id: *environment_id,
+                    expires_at: *expires_at,
+                    requesting_service_account_id: None,
+                    requesting_service_name: None,
+                    return_url: None,
+                },
+            )
             .ok_or(RepositoryError::NotFound)
     }
 
@@ -2287,6 +2585,73 @@ impl Repository for MemoryRepository {
             return Err(RepositoryError::NotFound);
         }
         state.agents.remove(&agent_id);
+        Ok(())
+    }
+
+    async fn list_node_connectors(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+    ) -> Result<Vec<StoredNodeConnector>, RepositoryError> {
+        let mut state = self.state.write().await;
+        let (_, _, agent) = state
+            .agents
+            .get(&agent_id)
+            .filter(|(workspace, environment, _)| {
+                *workspace == workspace_id && *environment == environment_id
+            })
+            .ok_or(RepositoryError::NotFound)?;
+        let connector_id = format!("ncon_{agent_id}");
+        let key = (workspace_id, environment_id, agent_id, connector_id.clone());
+        let created_at = agent.last_seen_at;
+        Ok(
+            vec![state.node_connectors.entry(key).or_insert_with(|| StoredNodeConnector {
+            id: connector_id,
+            node_id: agent_id,
+            permissions: serde_json::json!({"printers":"all","print_jobs":"create_and_monitor"}),
+            revoked_at: None,
+            created_at,
+        }).clone()],
+        )
+    }
+
+    async fn revoke_node_connector(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        connector_id: &str,
+    ) -> Result<(), RepositoryError> {
+        let mut state = self.state.write().await;
+        let created_at = state
+            .agents
+            .get(&agent_id)
+            .filter(|(workspace, environment, _)| {
+                *workspace == workspace_id && *environment == environment_id
+            })
+            .map(|(_, _, agent)| agent.last_seen_at)
+            .ok_or(RepositoryError::NotFound)?;
+        if connector_id != format!("ncon_{agent_id}") {
+            return Err(RepositoryError::NotFound);
+        }
+        let key = (
+            workspace_id,
+            environment_id,
+            agent_id,
+            connector_id.to_owned(),
+        );
+        let connector = state.node_connectors.entry(key).or_insert_with(|| StoredNodeConnector {
+            id: connector_id.to_owned(),
+            node_id: agent_id,
+            permissions: serde_json::json!({"printers":"all","print_jobs":"create_and_monitor"}),
+            revoked_at: None,
+            created_at,
+        });
+        if connector.revoked_at.is_some() {
+            return Err(RepositoryError::NotFound);
+        }
+        connector.revoked_at = Some(Utc::now());
         Ok(())
     }
 
@@ -2890,6 +3255,7 @@ impl Repository for MemoryRepository {
             agent_id,
             workspace_id,
             environment_id,
+            connector_id: None,
         })
     }
 
@@ -2929,8 +3295,8 @@ impl Repository for MemoryRepository {
         let (token_id, (workspace_id, environment_id, _, _, _)) = state
             .enrolments
             .iter()
-            .find(|(_, (_, _, stored_hash, expires, _))| {
-                stored_hash == secret_hash && *expires > Utc::now()
+            .find(|(_, (_, _, stored_hash, expires, agent_id))| {
+                stored_hash == secret_hash && *expires > Utc::now() && agent_id.is_none()
             })
             .map(|(id, value)| (id.clone(), value.clone()))
             .ok_or(RepositoryError::NotFound)?;
@@ -2960,6 +3326,7 @@ impl Repository for MemoryRepository {
             agent_id,
             workspace_id,
             environment_id,
+            connector_id: Some(format!("ncon_{agent_id}")),
         })
     }
 
@@ -3272,6 +3639,80 @@ impl Repository for MemoryRepository {
             .ok_or(RepositoryError::NotFound)
     }
 
+    async fn rotate_content_encryption_key(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        key_id: &str,
+        algorithm: &str,
+        public_key_spki: &str,
+    ) -> Result<StoredContentEncryptionKey, RepositoryError> {
+        if algorithm != "ECDH-P256-HKDF-SHA256" {
+            return Err(RepositoryError::Persistence(
+                "unsupported content encryption key algorithm".into(),
+            ));
+        }
+        let mut state = self.state.write().await;
+        if !state
+            .agents
+            .get(&agent_id)
+            .is_some_and(|(w, e, _)| *w == workspace_id && *e == environment_id)
+        {
+            return Err(RepositoryError::NotFound);
+        }
+        let key = StoredContentEncryptionKey {
+            agent_id,
+            key_id: key_id.into(),
+            algorithm: algorithm.into(),
+            public_key_spki: public_key_spki.into(),
+            created_at: Utc::now(),
+        };
+        state.content_encryption_keys.insert(agent_id, key.clone());
+        Ok(key)
+    }
+    async fn content_encryption_key_for_printer(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        printer_id: PrinterId,
+    ) -> Result<StoredContentEncryptionKey, RepositoryError> {
+        let state = self.state.read().await;
+        let agent_id = state
+            .printers
+            .get(&printer_id)
+            .filter(|(w, e, _)| *w == workspace_id && *e == environment_id)
+            .map(|(_, _, p)| p.agent_id)
+            .ok_or(RepositoryError::NotFound)?;
+        state
+            .content_encryption_keys
+            .get(&agent_id)
+            .cloned()
+            .ok_or(RepositoryError::NotFound)
+    }
+    async fn revoke_content_encryption_key(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        key_id: &str,
+    ) -> Result<(), RepositoryError> {
+        let mut state = self.state.write().await;
+        if state
+            .agents
+            .get(&agent_id)
+            .is_none_or(|(w, e, _)| *w != workspace_id || *e != environment_id)
+            || state
+                .content_encryption_keys
+                .get(&agent_id)
+                .is_none_or(|key| key.key_id != key_id)
+        {
+            return Err(RepositoryError::NotFound);
+        }
+        state.content_encryption_keys.remove(&agent_id);
+        Ok(())
+    }
+
     async fn create_job(
         &self,
         job: &Job,
@@ -3295,6 +3736,36 @@ impl Repository for MemoryRepository {
             state
                 .idempotency
                 .insert(index, (request_bytes.to_vec(), job.id));
+        }
+        if let piqae_domain::ContentSource::EncryptedUpload { manifest, .. } = &job.content {
+            let encoded = serde_json::to_vec(manifest)
+                .map_err(|error| RepositoryError::Persistence(error.to_string()))?;
+            let digest = format!("{:x}", sha2::Sha256::digest(encoded));
+            let index = (
+                job.workspace_id,
+                job.environment_id,
+                manifest.binding.envelope_id.clone(),
+            );
+            if let Some((existing_digest, existing_job_id)) = state.consumed_envelopes.get(&index) {
+                let existing_digest = existing_digest.clone();
+                let existing_job_id = *existing_job_id;
+                if let Some(key) = idempotency_key {
+                    state.idempotency.remove(&(
+                        job.workspace_id,
+                        job.environment_id,
+                        key.to_owned(),
+                    ));
+                }
+                if existing_digest != digest {
+                    return Err(RepositoryError::IdempotencyConflict);
+                }
+                return state
+                    .jobs
+                    .get(&existing_job_id)
+                    .map(|record| CreateResult::Existing(record.job.clone()))
+                    .ok_or(RepositoryError::NotFound);
+            }
+            state.consumed_envelopes.insert(index, (digest, job.id));
         }
         state.jobs.insert(
             job.id,
@@ -3971,6 +4442,213 @@ mod routing_repository_tests {
     use super::*;
     use piqae_domain::JobOptions;
     use piqae_storage_postgres::PrinterProfileSnapshot;
+
+    #[tokio::test]
+    async fn encrypted_envelope_replay_returns_original_and_substitution_is_rejected() {
+        let repository = MemoryRepository::default();
+        let workspace = WorkspaceId::new();
+        let environment = EnvironmentId::new();
+        let printer = PrinterId::new();
+        let agent = AgentId::new();
+        let manifest = piqae_domain::EncryptedContentManifest {
+            version: "piqae-encrypted-job-v3".into(),
+            suite: "ECDH-P256+HKDF-SHA256+A256GCMKW+A256GCM".into(),
+            binding: piqae_domain::EncryptedContentBinding {
+                envelope_id: "env_012345678901234567890123".into(),
+                workspace_id: workspace.to_string(),
+                environment_id: environment.to_string(),
+                content_type: piqae_domain::ContentKind::Pdf,
+                printer_id: printer.to_string(),
+                target_id: "tgt_test".into(),
+                profile_revision: "prf_test:1".into(),
+                options: JobOptions::default(),
+                deliveries: 1,
+                expires_at: "2099-01-01T00:00:00Z".into(),
+                raw_authorized: false,
+            },
+            ciphertext_sha256: "A".repeat(43),
+            iv: "A".repeat(16),
+            recipients: vec![piqae_domain::EncryptedContentRecipient {
+                key_id: "cek_test".into(),
+                algorithm: "ECDH-P256-HKDF-SHA256".into(),
+                ephemeral_public_key: format!("B{}", "A".repeat(86)),
+                hkdf_salt: "A".repeat(43),
+                key_wrap_iv: "A".repeat(16),
+                encrypted_content_key: "A".repeat(64),
+            }],
+        };
+        let make_job = |manifest: piqae_domain::EncryptedContentManifest| Job {
+            id: JobId::new(),
+            workspace_id: workspace,
+            environment_id: environment,
+            printer_id: printer,
+            title: "private".into(),
+            source: None,
+            content_kind: piqae_domain::ContentKind::Pdf,
+            content: piqae_domain::ContentSource::EncryptedUpload {
+                upload_id: "upl_cipher".into(),
+                manifest: Box::new(manifest),
+            },
+            options: JobOptions::default(),
+            metadata: std::collections::BTreeMap::new(),
+            deliveries: 1,
+            state: JobState::Registered,
+            created_at: Utc::now(),
+            expires_at: Utc::now() + chrono::Duration::hours(1),
+        };
+        let original = make_job(manifest.clone());
+        assert!(matches!(
+            repository
+                .create_job(&original, agent, None, b"one")
+                .await
+                .expect("create"),
+            CreateResult::Created(_)
+        ));
+        let replay = make_job(manifest.clone());
+        match repository
+            .create_job(&replay, agent, None, b"two")
+            .await
+            .expect("replay")
+        {
+            CreateResult::Existing(job) => assert_eq!(job.id, original.id),
+            CreateResult::Created(_) => panic!("envelope replay created a duplicate"),
+        }
+        let mut changed = manifest;
+        changed.binding.profile_revision = "prf_test:2".into();
+        assert!(matches!(
+            repository
+                .create_job(&make_job(changed), agent, None, b"three")
+                .await,
+            Err(RepositoryError::IdempotencyConflict)
+        ));
+    }
+
+    #[tokio::test]
+    async fn connector_lookup_and_revocation_are_tenant_scoped() {
+        let repository = MemoryRepository::default();
+        let workspace = WorkspaceId::new();
+        let environment = EnvironmentId::new();
+        let other_workspace = WorkspaceId::new();
+        let node = AgentId::new();
+        repository.state.write().await.agents.insert(
+            node,
+            (
+                workspace,
+                environment,
+                StoredAgent {
+                    id: node,
+                    name: "Shared PC".into(),
+                    platform: "test".into(),
+                    state: "connected".into(),
+                    version: "1".into(),
+                    last_seen_at: Utc::now(),
+                },
+            ),
+        );
+
+        assert_eq!(
+            repository
+                .list_node_connectors(workspace, environment, node)
+                .await
+                .expect("own connector")
+                .len(),
+            1
+        );
+        assert!(matches!(
+            repository
+                .list_node_connectors(other_workspace, environment, node)
+                .await,
+            Err(RepositoryError::NotFound)
+        ));
+        assert!(matches!(
+            repository
+                .revoke_node_connector(other_workspace, environment, node, &format!("ncon_{node}"))
+                .await,
+            Err(RepositoryError::NotFound)
+        ));
+        repository
+            .revoke_node_connector(workspace, environment, node, &format!("ncon_{node}"))
+            .await
+            .expect("revoke own connector");
+        assert!(
+            repository
+                .get_agent(workspace, environment, node)
+                .await
+                .is_ok()
+        );
+        let connectors = repository
+            .list_node_connectors(workspace, environment, node)
+            .await
+            .expect("revoked connector remains visible");
+        assert_eq!(connectors.len(), 1);
+        assert!(connectors[0].revoked_at.is_some());
+        assert!(matches!(
+            repository
+                .revoke_node_connector(workspace, environment, node, &format!("ncon_{node}"))
+                .await,
+            Err(RepositoryError::NotFound)
+        ));
+    }
+
+    #[tokio::test]
+    async fn memory_content_key_rotation_preserves_the_validated_algorithm() {
+        let repository = MemoryRepository::default();
+        let workspace = WorkspaceId::new();
+        let environment = EnvironmentId::new();
+        let node = AgentId::new();
+        repository.state.write().await.agents.insert(
+            node,
+            (
+                workspace,
+                environment,
+                StoredAgent {
+                    id: node,
+                    name: "Encryption node".into(),
+                    platform: "test".into(),
+                    state: "connected".into(),
+                    version: "1".into(),
+                    last_seen_at: Utc::now(),
+                },
+            ),
+        );
+
+        let stored = repository
+            .rotate_content_encryption_key(
+                workspace,
+                environment,
+                node,
+                "cek_test",
+                "ECDH-P256-HKDF-SHA256",
+                "test-spki",
+            )
+            .await
+            .expect("supported algorithm");
+        assert_eq!(stored.algorithm, "ECDH-P256-HKDF-SHA256");
+        assert!(matches!(
+            repository
+                .rotate_content_encryption_key(
+                    workspace,
+                    environment,
+                    node,
+                    "cek_legacy",
+                    "RSA-OAEP-256",
+                    "test-spki",
+                )
+                .await,
+            Err(RepositoryError::Persistence(_))
+        ));
+        assert_eq!(
+            repository
+                .state
+                .read()
+                .await
+                .content_encryption_keys
+                .get(&node)
+                .expect("original key remains")
+                .key_id,
+            "cek_test"
+        );
+    }
 
     struct RecoveryFixture {
         repository: MemoryRepository,

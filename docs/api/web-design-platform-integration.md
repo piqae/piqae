@@ -61,8 +61,8 @@ the complete Piqae API. A useful minimum is:
 
 | Product operation | Backend Piqae work |
 | --- | --- |
-| List print templates | join stocks, targets, bindings, readiness, printers, and profile summaries |
-| Get template specification | return portable geometry plus a platform-owned specification fingerprint |
+| List print templates | list targets/stocks and apply product roles and location visibility |
+| Get template specification | retrieve the consolidated portable design specification and its revision |
 | Get connection state | list nodes and eligible printers; return a product onboarding action when absent |
 | Submit print | authorize the design, render/preflight PDF, upload, and create one idempotent job |
 | List/retrieve print attempts | list or retrieve jobs and map the full Piqae state without erasing detail |
@@ -79,17 +79,19 @@ Use logical targets as the customer-facing printing choice. A target associates
 a stable business stock with exact printer/profile revisions and can select an
 eligible primary or standby binding before native acceptance.
 
-For each template selection:
+For each template selection, call
+`targets.designSpecification(target.id)`. The consolidated projection contains
+the target, stock, readiness, exact binding/printer/profile destinations, and a
+`specification_revision`. It prevents each integrator from implementing a
+different multi-request join. Use its fields as follows:
 
-1. list or retrieve its stock and target;
-2. load `targets.bindings(target.id)` and `targets.readiness(target.id)`;
-3. retrieve the selected binding's printer;
-4. select the binding's exact immutable profile revision;
-5. derive the canvas from stock width, height, orientation, bleed, safe area,
+1. identify the readiness-selected binding and its destination;
+2. retain the binding's exact immutable profile revision;
+3. derive the canvas from stock width, height, orientation, bleed, safe area,
    gap, and marks that are actually present;
-6. compare stock geometry with `profile.summary.dimensions_mm` and block when
+4. compare stock geometry with `profile.summary.dimensions_mm` and block when
    it is absent or materially incompatible; and
-7. expose only portable profile facts such as media, source, colour, duplex,
+5. expose only portable profile facts such as media, source, colour, duplex,
    and resolution.
 
 Do not expose or reproduce opaque PrintCore, DEVMODE, PrintTicket, PostScript,
@@ -100,16 +102,14 @@ loaded the expected physical roll, sheet, tray, ink, or finishing hardware.
 ### Specification revision and saved designs
 
 Printer profile revisions are immutable, but stocks and targets can be updated.
-The current API does not provide one immutable, typed "design specification
-revision" resource. Until it does, the design platform should create its own
-canonical specification snapshot and fingerprint when a design is saved:
+Store the returned `specification_revision` and the portable specification
+snapshot when a design is saved:
 
 ```json
 {
   "stock_id": "stk_...",
-  "stock_updated_at": "...",
   "target_id": "tgt_...",
-  "target_updated_at": "...",
+  "specification_revision": "...",
   "binding_id": "tbd_...",
   "printer_id": "prn_...",
   "profile_id": "prf_...",
@@ -118,30 +118,73 @@ canonical specification snapshot and fingerprint when a design is saved:
 }
 ```
 
-Canonicalize the selected portable fields and hash them in the platform. Store
-both snapshot and hash with the design. Before printing, reconstruct the current
-specification and compare it. If it changed, require preflight and an explicit
-user decision; never silently scale an existing design or silently fall back
-from its pinned native profile. This is an integrator-owned safeguard, not a
-Piqae-provided revision guarantee.
+Before printing, retrieve the specification again and compare its revision. If
+it changed, compare the saved and current snapshots, require preflight, and ask
+for an explicit user decision when production or design constraints changed.
+Never silently scale an existing design or silently fall back from its pinned
+native profile. The revision is a change detector for the current projection,
+not proof that the correct physical stock is loaded.
 
 ## No-node onboarding
 
 When `nodes.list()` has no usable Live node, show a single product action such
-as **Connect a printer computer**. The public downloads page detects the
-visitor's OS and exposes only verified artifacts, and browser pairing uses a
-short-lived human approval flow. Keep Piqae visible where the installer,
-operating-system permissions, code confirmation, or security identity requires
-it; surrounding product copy can remain partner-oriented.
+as **Connect a printer computer**. From the trusted backend, create an
+account-scoped connect session:
 
-The current contract does **not** provide a partner-scoped onboarding-session
-API, an SDK method for OS-specific download metadata, partner return URLs, or a
-pairing-complete webhook. Therefore do not promise a fully embedded or
-white-labelled install. Link to the canonical downloads/pairing experience,
-then poll the account-scoped node/printer lists with a bounded interval after
-the user returns. Browser pairing approval must execute in the intended
-customer workspace; do not approve pairing using a platform credential in
-browser code.
+```ts
+const session = await account.connectSessions.create({
+  name: 'Packing room',
+  return_url: 'https://design.example.com/settings/printing',
+  expires_in_seconds: 600
+});
+```
+
+The implemented-preview session lasts 60–900 seconds and returns a one-time
+`connect_url` plus macOS, Windows, and Linux download choices. New sessions use
+the Associated Domains verified `https://app.piqae.com/connect` Universal Link;
+the old `piqae://connect` transport is deprecated compatibility for existing
+Preview builds and is no longer emitted. Send only the connect URL to the
+intended authenticated user. Its URL fragment contains a
+short-lived enrolment capability; never log, persist in analytics, place in a
+referrer-bearing query string, or reveal it to another customer. Return URLs
+must use HTTPS, except localhost HTTP during development, and cannot contain
+credentials or fragments.
+
+The public downloads page selects the visitor's OS and consumes the fragment
+in browser memory. It immediately removes the fragment from the address bar,
+does not put the capability in web storage or page text, and exposes it only
+through an explicit **Copy one-time connection code** fallback. Clear the
+clipboard after manual setup.
+
+The macOS source handles the verified HTTPS Universal Link, previews the invitation before
+consumption, distinguishes the authenticated platform service account from the
+customer workspace, requires an idle node and explicit initially-unchecked
+printer selection, proves possession of the existing installation key, and
+passes secrets to the agent only through bounded standard input. The native UI
+ignores any fragment-supplied return URL and follows only the HTTPS return URL
+bound in server-side invitation state after successful connector persistence.
+The web origin publishes `/.well-known/apple-app-site-association` only when
+`APPLE_TEAM_ID` is a valid ten-character signing Team ID; it fails closed with
+503 when Universal Links are not configured. A browser fallback preserves the fragment only
+across the same-origin `/connect` to `/downloads` navigation.
+
+Windows and Linux do **not** currently have this application-link/consent UI.
+They expose only the shared headless stdin transaction for controlled
+development; use the copy/manual or normal pairing path and do not describe it
+as seamless onboarding. A created session or downloaded binary never proves
+connection completed. macOS itself remains Preview until signed-package,
+clean-install, restart/recovery and physical-printer evidence is recorded.
+Poll `account.connectSessions.retrieve(session.id)` with a bounded interval
+until it reports `connected` with a node ID or `expired`, then refresh nodes and
+printers. There is no pairing-complete webhook in this contract.
+
+Connect sessions improve partner handoff, but do not make this a fully
+white-labelled install and do not override the support matrix. Each returned
+binary may still be Preview or Disabled. Keep Piqae visible where the
+installer, operating-system permissions, code confirmation, or security
+identity requires it; surrounding product copy can remain partner-oriented.
+Browser approval and enrolment must execute in the intended customer account;
+never expose the platform credential to accomplish it.
 
 After a node appears, guide the customer to:
 
@@ -168,7 +211,7 @@ visual design against those editorial rules.
 For each user print action:
 
 1. authorize the account, target, design revision, quantity, and environment;
-2. re-check target readiness and the saved specification fingerprint;
+2. re-check target readiness and the saved `specification_revision`;
 3. render and preflight the exact PDF;
 4. compute its byte length and SHA-256 digest;
 5. create and PUT a tenant-scoped upload; and
@@ -182,7 +225,7 @@ reprint is a new attempt and a new key; randomizing a key to escape a conflict
 can duplicate physical output.
 
 Store at least the platform print-attempt ID, Piqae job ID, idempotency key,
-account/environment, design and specification fingerprints, target, requested
+account/environment, design revision and specification revision, target, requested
 quantity, initiating actor, and timestamps. Do not put secrets or sensitive
 document content in Piqae metadata.
 
@@ -204,6 +247,7 @@ group states while retaining the original state and event history:
 | Printing | `spool_intent`, `accepted_by_spooler`, `spooling`, `printing` | Native handoff is in progress; output is not proven |
 | Reported complete | `completed_reported` | Strongest driver/spooler report, not independent physical proof |
 | Needs attention | `blocked`, `failed_retryable`, `delivery_uncertain` | Operator or bounded policy action is required |
+| Cancelling | `cancel_requested` | Cancellation was requested but output prevention is not yet confirmed |
 | Ended | `failed_terminal`, `cancelled`, `expired` | This attempt will not progress |
 
 Use the job event stream for the detailed timeline. Cancellation is a request:
@@ -278,4 +322,3 @@ Preview. The authoritative current result is always the checked-in
 - [Pairing and enrolment](../nodes/pairing.md)
 - [Reliability and lifecycle](../operations/reliability-and-job-lifecycle.md)
 - [Production release](../operations/production-release.md)
-

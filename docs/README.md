@@ -24,6 +24,8 @@ print jobs through the same API used by the dashboard.
 - [Authentication](api/authentication.md)
 - [Uploads and design applications](api/uploads-and-design-apps.md)
 - [End-to-end web design platform integration](api/web-design-platform-integration.md)
+- [Multi-integrator node connectors](api/multi-integrator-node-connectors.md)
+- [Content-confidential printing](api/content-confidential-printing.md)
 - [Cloud billing and usage](api/billing-and-usage.md)
 - [Jobs, offline nodes, and delivery truth](printing/jobs-and-statuses.md)
 - [Idempotency](api/idempotency.md)

@@ -5,10 +5,10 @@ platforms:
     reason: physical PDF and RAW release gates have not run
   macos_13_plus_aarch64:
     tier: preview
-    reason: signed and notarised DMG is published, but clean-install and physical printing gates have not run
+    reason: native onboarding and packaging workflows are tested in source, but no signed/notarised release evidence or physical printing gate is recorded
   macos_15_x86_64:
     tier: preview
-    reason: signed and notarised DMG is published, but clean-install and physical printing gates have not run
+    reason: native onboarding and packaging workflows are tested in source, but no signed/notarised release evidence or physical printing gate is recorded
   ubuntu_22_04_24_04_x86_64:
     tier: preview
     reason: packaging and physical printing gates have not run
@@ -46,3 +46,15 @@ features:
   platform_service_accounts:
     tier: disabled
     reason: cross-resource/concurrency isolation, operator attribution, selector rejection, and full redaction evidence are incomplete
+  multi_integrator_node_runtime:
+    tier: preview
+    reason: isolated connector runtime and macOS consent flow are implemented, but Windows/Linux native consent, signed packages, fleet concurrency and revocation soak evidence are incomplete
+  content_confidential_printing:
+    tier: disabled
+    reason: encrypted transport and local decryption are implemented for evaluation but lack independent cryptographic review, hardware-backed keys and physical release evidence
+  macos_embedded_node_onboarding:
+    tier: preview
+    reason: Piqae-branded application-link consent and proof-of-possession are tested in source and unsigned packaging only
+  windows_linux_embedded_node_onboarding:
+    tier: disabled
+    reason: only the shared headless stdin transaction exists; native application-link registration and local consent shells are not implemented

@@ -257,6 +257,10 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/printers", get(api::list_printers))
         .route("/v1/printers/{printer_id}", get(api::get_printer))
         .route(
+            "/v1/printers/{printer_id}/content-encryption-key",
+            get(api::printer_content_encryption_key),
+        )
+        .route(
             "/v1/stocks",
             get(routing::list_stocks).post(routing::create_stock),
         )
@@ -289,8 +293,32 @@ pub fn router(state: AppState) -> Router {
             get(routing::design_specification),
         )
         .route("/v1/agent-enrolments", post(api::create_agent_enrolment))
+        .route(
+            "/v1/node-connect-sessions",
+            post(api::create_node_connect_session),
+        )
+        .route(
+            "/v1/node-connect-sessions/{session_id}",
+            get(api::get_node_connect_session),
+        )
+        .route(
+            "/v1/nodes/{node_id}/connectors",
+            get(api::list_node_connectors),
+        )
+        .route(
+            "/v1/nodes/{node_id}/connectors/{connector_id}",
+            axum::routing::delete(api::revoke_node_connector),
+        )
         .merge(enrolment_router())
         .route("/v1/uploads", post(api::create_upload))
+        .route(
+            "/v1/agent/content-encryption-key",
+            axum::routing::put(api::register_agent_content_encryption_key),
+        )
+        .route(
+            "/v1/agent/content-encryption-key/{key_id}",
+            axum::routing::delete(api::revoke_agent_content_encryption_key),
+        )
         .route("/v1/uploads/{upload_id}", get(api::get_upload))
         .route(
             "/v1/uploads/{upload_id}/content",
@@ -402,6 +430,10 @@ fn enrolment_router() -> Router<AppState> {
     let limiter = rate_limit::RateLimiter::new(20, 120, 60);
     Router::new()
         .route("/v1/agents/enrol", post(api::enrol_agent))
+        .route(
+            "/v1/node-connect-sessions/preview",
+            post(api::preview_node_connect_session),
+        )
         .layer(middleware::from_fn_with_state(
             limiter,
             rate_limit::middleware,

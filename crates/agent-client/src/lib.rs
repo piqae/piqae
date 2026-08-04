@@ -7,8 +7,9 @@ use piqae_domain::{AgentId, JobId};
 use piqae_protocol::agent::{
     AgentAcceptJobRequest, AgentAcceptJobResponse, AgentReleaseLeaseRequest,
     AgentRenewLeaseRequest, AgentRenewLeaseResponse, AgentSyncRequest, AgentSyncResponse,
-    CreateDeviceAuthorizationRequest, CreatedDeviceAuthorization, DeviceAuthorizationExchange,
-    DeviceAuthorizationStatus, EnrolRequest, EnrolResponse,
+    ConnectSessionPreview, ConnectSessionPreviewRequest, CreateDeviceAuthorizationRequest,
+    CreatedDeviceAuthorization, DeviceAuthorizationExchange, DeviceAuthorizationStatus,
+    EnrolRequest, EnrolResponse,
 };
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde::Serialize;
@@ -172,6 +173,11 @@ impl DeviceIdentity {
     }
 
     #[must_use]
+    pub fn sign_base64(&self, message: &[u8]) -> String {
+        STANDARD_NO_PAD.encode(self.signing_key.sign(message).to_bytes())
+    }
+
+    #[must_use]
     pub fn secret_bytes(&self) -> [u8; 32] {
         self.signing_key.to_bytes()
     }
@@ -268,6 +274,27 @@ impl AgentClient {
         self.post_json("v1/agents/enrol", request, None).await
     }
 
+    /// Inspects a one-time connect invitation without consuming it. Errors are
+    /// redacted so the capability is never copied into diagnostics.
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted authorization error when transport, validation, or decoding fails.
+    pub async fn preview_connect_session(
+        &self,
+        token: &str,
+    ) -> Result<ConnectSessionPreview, ClientError> {
+        self.post_json(
+            "v1/node-connect-sessions/preview",
+            &ConnectSessionPreviewRequest {
+                token: token.to_owned(),
+            },
+            None,
+        )
+        .await
+        .map_err(|_| ClientError::DeviceAuthorization)
+    }
+
     /// Starts a ten-minute browser authorization without sending the private key.
     ///
     /// # Errors
@@ -334,6 +361,43 @@ impl AgentClient {
     ) -> Result<AgentSyncResponse, ClientError> {
         self.post_json("v1/agent/sync", request, Some(identity))
             .await
+    }
+
+    /// Registers this node's public content-encryption key using device authentication.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for signing, serialization, transport, status, or decoding failure.
+    pub async fn register_content_encryption_key(
+        &self,
+        identity: &DeviceIdentity,
+        key_id: &str,
+        public_key_spki: &str,
+    ) -> Result<serde_json::Value, ClientError> {
+        let body = serde_json::to_vec(&serde_json::json!({
+            "key_id": key_id, "algorithm": "ECDH-P256-HKDF-SHA256", "public_key_spki": public_key_spki
+        }))?;
+        let path = "/v1/agent/content-encryption-key";
+        let mut builder = self
+            .client
+            .put(self.base_url.join(path.trim_start_matches('/'))?)
+            .header("content-type", "application/json")
+            .body(body.clone());
+        builder = builder.headers(identity.signed_headers(
+            "PUT",
+            path,
+            &body,
+            self.clock.signing_timestamp_ms(),
+            Uuid::new_v4(),
+        )?);
+        let mut response = builder.send().await?;
+        self.clock.observe(response.headers());
+        let status = response.status();
+        let bytes = bounded_response_bytes(&mut response).await?;
+        if !status.is_success() {
+            return Err(status_error(status.as_u16(), &bytes));
+        }
+        Ok(serde_json::from_slice(&bytes)?)
     }
 
     /// Confirms a lease only after the job is durable in local `SQLite`.
@@ -461,18 +525,32 @@ impl AgentClient {
                 Uuid::new_v4(),
             )?);
         }
-        let response = builder.send().await?;
+        let mut response = builder.send().await?;
         self.clock.observe(response.headers());
         let status = response.status();
-        let bytes = response.bytes().await?;
-        if bytes.len() > MAX_RESPONSE_BYTES {
-            return Err(ClientError::ResponseTooLarge);
-        }
+        let bytes = bounded_response_bytes(&mut response).await?;
         if !status.is_success() {
             return Err(status_error(status.as_u16(), &bytes));
         }
         Ok(serde_json::from_slice(&bytes)?)
     }
+}
+
+async fn bounded_response_bytes(response: &mut reqwest::Response) -> Result<Vec<u8>, ClientError> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
+    {
+        return Err(ClientError::ResponseTooLarge);
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        if bytes.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES {
+            return Err(ClientError::ResponseTooLarge);
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
 }
 
 #[cfg(test)]
@@ -631,6 +709,40 @@ mod tests {
             .verifying_key()
             .verify(canonical.as_bytes(), &signature)
             .expect("valid content request signature");
+    }
+
+    #[tokio::test]
+    async fn content_key_registration_is_signed_on_exact_path_and_response_bounded() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = vec![0_u8; 16 * 1024];
+            let read = stream.read(&mut request).await.unwrap();
+            request.truncate(read);
+            stream
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        MAX_RESPONSE_BYTES + 1
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            String::from_utf8(request).unwrap()
+        });
+        let identity = DeviceIdentity::from_secret_bytes(AgentId::new(), &[3_u8; 32]);
+        let client = AgentClient::new(Url::parse(&format!("http://{address}/")).unwrap()).unwrap();
+        let error = client
+            .register_content_encryption_key(&identity, "cek_test", "spki")
+            .await
+            .expect_err("oversized response must fail before buffering");
+        assert!(matches!(error, ClientError::ResponseTooLarge));
+        let request = server.await.unwrap();
+        assert!(request.starts_with("PUT /v1/agent/content-encryption-key HTTP/1.1\r\n"));
+        let headers = parse_http_headers(&request);
+        assert!(headers.contains_key("x-piqae-signature"));
     }
 
     fn parse_http_headers(request: &str) -> std::collections::HashMap<String, String> {

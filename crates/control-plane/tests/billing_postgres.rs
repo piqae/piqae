@@ -725,6 +725,53 @@ async fn cloud_billing_is_tenant_scoped_idempotent_and_stripe_projected() {
         .await
         .expect("existing installation remains idempotent");
     assert_eq!(replay.agent_id, tenant_b.live_agent_id);
+    let changed_key_replay = store
+        .enrol_agent_with_billing(
+            "existing-secret",
+            &[12_u8; 32],
+            "Attacker rename",
+            replay_host,
+            "test",
+            "test",
+            "9.9.9",
+            1,
+            true,
+        )
+        .await;
+    assert!(
+        matches!(
+            changed_key_replay,
+            Err(piqae_storage_postgres::StorageError::NotFound)
+        ),
+        "a consumed capability must not rotate an existing public key"
+    );
+    sqlx::query(
+        "UPDATE enrolment_tokens SET expires_at = now() - interval '11 minutes'
+         WHERE id = 'enrolment-existing'",
+    )
+    .execute(&pool)
+    .await
+    .expect("expire replay recovery window");
+    let stale_replay = store
+        .enrol_agent_with_billing(
+            "existing-secret",
+            &replay_key,
+            "Existing node",
+            replay_host,
+            "test",
+            "test",
+            "0.1.0",
+            1,
+            true,
+        )
+        .await;
+    assert!(
+        matches!(
+            stale_replay,
+            Err(piqae_storage_postgres::StorageError::NotFound)
+        ),
+        "recovery retries must expire"
+    );
 
     sqlx::query(
         "INSERT INTO device_authorizations (

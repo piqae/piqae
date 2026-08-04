@@ -894,6 +894,129 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/node-connect-sessions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Create a tenant-scoped embedded node connection session
+         * @description Server-only operation for a trusted application backend. The returned
+         *     connect URL is an Associated Domains verified HTTPS Universal Link and
+         *     carries its one-time enrollment capability in the URL fragment so it is
+         *     not sent in HTTP requests or access logs. The legacy piqae custom scheme
+         *     is accepted only by existing macOS Preview clients and is deprecated.
+         *     Return URLs
+         *     are bound to server-side invitation state, must be HTTPS except HTTP
+         *     localhost, and cannot contain credentials or fragments. They are never
+         *     trusted from the application-link fragment. Native application-link
+         *     handoff is currently implemented only by the macOS Preview shell;
+         *     Windows and Linux clients require the documented manual fallback.
+         */
+        post: operations["createNodeConnectSession"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/node-connect-sessions/{session_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                session_id: string;
+            };
+            cookie?: never;
+        };
+        /**
+         * Inspect a tenant-scoped node connection session
+         * @description Server-only polling projection; enrollment capabilities are never returned.
+         */
+        get: operations["getNodeConnectSession"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/node-connect-sessions/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Preview a native node connection invitation without consuming it
+         * @description Called by the Piqae node after receiving a capability through the
+         *     application-link fragment. The capability is carried in the bounded
+         *     request body and errors are intentionally indistinguishable. The
+         *     returned workspace identity is resolved from server-owned tenant data.
+         *     When platform authentication created the session, requesting-service
+         *     identity is also a server-authenticated snapshot; it is null for direct
+         *     workspace credentials.
+         */
+        post: operations["previewNodeConnectSession"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/nodes/{node_id}/connectors": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                node_id: string;
+            };
+            cookie?: never;
+        };
+        /**
+         * List this tenant's connector grants for a node
+         * @description Never reveals the installation identity or grants belonging to other tenants.
+         */
+        get: operations["listNodeConnectors"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/nodes/{node_id}/connectors/{connector_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                node_id: string;
+                connector_id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Revoke this tenant's connector grant
+         * @description Revokes only the addressed tenant projection; it does not disconnect other services from the physical installation.
+         */
+        delete: operations["revokeNodeConnector"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/printers": {
         parameters: {
             query?: never;
@@ -922,6 +1045,25 @@ export interface paths {
         };
         /** Retrieve a printer with capability and profile snapshots */
         get: operations["getPrinter"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/printers/{printer_id}/content-encryption-key": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                printer_id: string;
+            };
+            cookie?: never;
+        };
+        /** Retrieve the active dedicated content-encryption key for a printer's node */
+        get: operations["getPrinterContentEncryptionKey"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1055,6 +1197,31 @@ export interface paths {
         };
         /** Resolve target readiness from synchronized node facts */
         get: operations["getTargetReadiness"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/targets/{target_id}/design-specification": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                target_id: components["parameters"]["TargetId"];
+            };
+            cookie?: never;
+        };
+        /**
+         * Get a consolidated, design-facing print specification
+         * @description Returns the stock geometry, current target readiness, and the exact
+         *     immutable printer/profile revisions behind each binding. Opaque native
+         *     driver blobs are intentionally never returned. Clients should retain
+         *     the returned revisions with saved designs and re-fetch before printing.
+         */
+        get: operations["getTargetDesignSpecification"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1453,6 +1620,42 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/agent/content-encryption-key": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Register or rotate the node's dedicated content-encryption key */
+        put: operations["registerAgentContentEncryptionKey"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/agent/content-encryption-key/{key_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                key_id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Revoke a dedicated node content-encryption key */
+        delete: operations["revokeAgentContentEncryptionKey"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/agent/jobs/{job_id}/accept": {
         parameters: {
             query?: never;
@@ -1782,6 +1985,53 @@ export interface components {
             agent_version: string;
             protocol_version: number;
         };
+        CreateNodeConnectSession: {
+            name: string;
+            /** Format: uri */
+            return_url?: string;
+            /** @default 600 */
+            expires_in_seconds?: number;
+        };
+        NodeConnectDownload: {
+            /** @enum {string} */
+            platform: "macos" | "windows" | "linux";
+            /**
+             * Format: uri-reference
+             * @description Navigation choice for that OS; it does not assert that a signed or Supported artifact is published.
+             */
+            url: string;
+        };
+        NodeConnectSession: {
+            id: string;
+            /** @enum {string} */
+            state: "pending" | "connected" | "expired";
+            /** Format: date-time */
+            expires_at: string;
+            node_id: string | null;
+            /**
+             * Format: uri
+             * @description Associated Domains verified HTTPS Universal Link returned only at creation.
+             */
+            connect_url?: string | null;
+            /**
+             * Format: uri
+             * @description Returned only at creation.
+             */
+            return_url?: string | null;
+            downloads: components["schemas"]["NodeConnectDownload"][];
+        };
+        NodeConnector: {
+            id: string;
+            node_id: string;
+            /** @description Versioned connector capabilities; unknown keys must be ignored. */
+            permissions: {
+                [key: string]: unknown;
+            };
+            /** Format: date-time */
+            revoked_at: string | null;
+            /** Format: date-time */
+            created_at: string;
+        };
         CreatedDeviceAuthorization: {
             id: string;
             device_code: string;
@@ -1928,6 +2178,12 @@ export interface components {
             agent_version: string;
             /** @enum {integer} */
             protocol_version: 1;
+            /** @description Stable physical installation ID when adding an isolated connector. */
+            installation_id?: string;
+            /** @description Exact printer IDs approved by the local operator; empty never means all. */
+            allowed_printer_ids?: string[];
+            /** @description Ed25519 signature by the immutable physical installation key over the versioned invitation, connector key, and printer grant. */
+            installation_proof?: string;
         };
         EnrolResponse: {
             agent_id: string;
@@ -1936,6 +2192,31 @@ export interface components {
             server_time: string;
             /** Format: int64 */
             sync_after_ms: number;
+            connector_id?: string;
+        };
+        ConnectSessionPreviewRequest: {
+            token: string;
+        };
+        ConnectSessionPreview: {
+            /** @description Server-resolved customer workspace identifier. */
+            workspace_id: string;
+            /** @description Server-resolved customer workspace display name; not the requesting integrator identity. */
+            workspace_name: string;
+            /** @description Server-authenticated platform service account snapshot, or null for a direct workspace credential. */
+            requesting_service_account_id: string | null;
+            /** @description Server-authenticated platform display name snapshot, or null for a direct workspace credential. */
+            requesting_service_name: string | null;
+            environment_id: string;
+            requested_scopes: ("discover_printers" | "print" | "monitor_jobs")[];
+            /** @enum {string} */
+            printer_grant: "select";
+            /** Format: date-time */
+            expires_at: string;
+            /**
+             * Format: uri
+             * @description Server-bound completion destination; never accepted from an application-link fragment.
+             */
+            return_url: string | null;
         };
         QueueSnapshot: {
             queued_jobs: number;
@@ -2004,6 +2285,14 @@ export interface components {
             bytes: number;
         } | {
             /** @constant */
+            type: "encrypted_download";
+            url: string;
+            sha256: components["schemas"]["Sha256"];
+            /** Format: int64 */
+            bytes: number;
+            manifest: components["schemas"]["EncryptedJobManifest"];
+        } | {
+            /** @constant */
             type: "inline_base64";
             data: string;
             sha256: components["schemas"]["Sha256"] | null;
@@ -2067,6 +2356,11 @@ export interface components {
                 upload_id: string;
             } | {
                 /** @constant */
+                type: "encrypted_upload";
+                upload_id: string;
+                manifest: components["schemas"]["EncryptedJobManifest"];
+            } | {
+                /** @constant */
                 type: "base64";
                 data: string;
             } | {
@@ -2084,6 +2378,111 @@ export interface components {
                 [key: string]: string;
             };
         } & (unknown | unknown);
+        /** @description A dedicated node content-encryption public key. This is not, and must never be substituted with, the node's Ed25519 authentication/signing key. Recipient discovery and encrypted-job submission are Preview contracts; the plaintext job endpoint does not accept this object. */
+        EncryptedJobRecipientKey: {
+            key_id: string;
+            /** @constant */
+            algorithm: "ECDH-P256-HKDF-SHA256";
+            /** @description DER SubjectPublicKeyInfo encoded as unpadded base64url. */
+            public_key_spki: string;
+        };
+        /** @description Production constraints authenticated as AES-GCM additional data. */
+        EncryptedJobBinding: {
+            envelope_id: string;
+            workspace_id: string;
+            environment_id: string;
+            /** @enum {unknown} */
+            content_type: "pdf" | "raw";
+            printer_id: string;
+            target_id: string;
+            profile_revision: string;
+            options: components["schemas"]["EncryptedJobOptions"];
+            deliveries: number;
+            /** Format: date-time */
+            expires_at: string;
+            raw_authorized: boolean;
+        };
+        /** @description Preview, versioned client-encrypted content envelope. AES-256-GCM authenticates the canonical binding and each fresh content key is wrapped independently using ephemeral P-256 ECDH, HKDF-SHA256, and authenticated AES-256-GCM key wrap to dedicated node keys. The ciphertext digest is checked before transport/decryption. This foundation does not make the existing plaintext PDF/RAW job API content-confidential and is not a zero-knowledge claim. */
+        EncryptedJobEnvelope: {
+            /** @constant */
+            version: "piqae-encrypted-job-v3";
+            /** @constant */
+            suite: "ECDH-ES-P256+HKDF-SHA256+A256GCMKW+A256GCM";
+            binding: components["schemas"]["EncryptedJobBinding"];
+            /** @description SHA-256 of ciphertext and authentication tag, as unpadded base64url. */
+            ciphertext_sha256: string;
+            /** @description Fresh 96-bit AES-GCM IV, as unpadded base64url. */
+            iv: string;
+            /** @description AES-GCM ciphertext with its 128-bit authentication tag, as unpadded base64url. */
+            ciphertext: string;
+            recipients: {
+                key_id: string;
+                /** @constant */
+                algorithm: "ECDH-ES-P256+HKDF-SHA256+A256GCMKW";
+                /** @description Ephemeral P-256 public key as a 65-byte uncompressed SEC1 point, encoded as unpadded base64url. */
+                ephemeral_public_key: string;
+                /** @description Fresh 256-bit HKDF salt, encoded as unpadded base64url. */
+                hkdf_salt: string;
+                /** @description Fresh 96-bit AES-GCM key-wrap IV, encoded as unpadded base64url. */
+                key_wrap_iv: string;
+                /** @description 32-byte content key ciphertext and 16-byte AES-GCM tag, encoded as unpadded base64url. */
+                encrypted_content_key: string;
+            }[];
+        };
+        EncryptedJobManifest: {
+            /** @constant */
+            version: "piqae-encrypted-job-v3";
+            /** @constant */
+            suite: "ECDH-ES-P256+HKDF-SHA256+A256GCMKW+A256GCM";
+            binding: components["schemas"]["EncryptedJobBinding"];
+            ciphertext_sha256: string;
+            iv: string;
+            recipients: {
+                key_id: string;
+                /** @constant */
+                algorithm: "ECDH-ES-P256+HKDF-SHA256+A256GCMKW";
+                ephemeral_public_key: string;
+                hkdf_salt: string;
+                key_wrap_iv: string;
+                encrypted_content_key: string;
+            }[];
+        };
+        RegisterNodeContentEncryptionKey: {
+            key_id: string;
+            /** @constant */
+            algorithm: "ECDH-P256-HKDF-SHA256";
+            public_key_spki: string;
+        };
+        /** @description The active dedicated content-encryption recipient key for a node. */
+        NodeContentEncryptionKey: {
+            key_id: string;
+            /** @constant */
+            algorithm: "ECDH-P256-HKDF-SHA256";
+            /** @description DER SubjectPublicKeyInfo encoded as unpadded base64url. */
+            public_key_spki: string;
+            node_id: string;
+            /** Format: date-time */
+            created_at: string;
+        };
+        EncryptedJobOptions: {
+            bin: string | null;
+            collate: boolean | null;
+            color: boolean | null;
+            copies: number | null;
+            dpi: string | null;
+            /** @enum {string|null} */
+            duplex: "one-sided" | "long-edge" | "short-edge" | null;
+            fit_to_page: boolean | null;
+            media: string | null;
+            nup: number | null;
+            pages: string | null;
+            paper: string | null;
+            /** @enum {integer|null} */
+            rotate: 0 | 90 | 180 | 270 | null;
+            native_options: {
+                [key: string]: string;
+            };
+        };
         JobOptions: {
             bin?: string;
             collate?: boolean;
@@ -2257,6 +2656,19 @@ export interface components {
             status: "ready" | "target_has_no_ready_binding";
             selected_binding_id: string | null;
             bindings: components["schemas"]["BindingReadiness"][];
+        };
+        DesignSpecificationDestination: {
+            binding: components["schemas"]["TargetBinding"];
+            printer: components["schemas"]["Printer"];
+            profile: components["schemas"]["PrinterProfileSnapshot"];
+        };
+        DesignSpecification: {
+            target: components["schemas"]["Target"];
+            stock: components["schemas"]["Stock"] | null;
+            readiness: components["schemas"]["TargetReadiness"];
+            destinations: components["schemas"]["DesignSpecificationDestination"][];
+            /** @description Stable digest-like revision derived from target, stock, capability, profile and binding revisions. */
+            specification_revision: string;
         };
         Printer: {
             id: string;
@@ -3683,6 +4095,14 @@ export interface operations {
             query?: {
                 limit?: components["parameters"]["Limit"];
                 after?: components["parameters"]["After"];
+                /** @description Exact native lifecycle state. */
+                state?: components["schemas"]["JobState"];
+                printer_id?: string;
+                target_id?: string;
+                /** @description Metadata key to match; metadata_value may refine it. */
+                metadata_key?: string;
+                /** @description Exact metadata value; requires metadata_key. */
+                metadata_value?: string;
             };
             header?: never;
             path?: never;
@@ -3824,6 +4244,134 @@ export interface operations {
             409: components["responses"]["Error"];
         };
     };
+    createNodeConnectSession: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateNodeConnectSession"];
+            };
+        };
+        responses: {
+            /** @description Short-lived node connection session. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NodeConnectSession"];
+                };
+            };
+            400: components["responses"]["Error"];
+            401: components["responses"]["Error"];
+            403: components["responses"]["Error"];
+        };
+    };
+    getNodeConnectSession: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                session_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Current connection state. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NodeConnectSession"];
+                };
+            };
+            401: components["responses"]["Error"];
+            403: components["responses"]["Error"];
+            404: components["responses"]["Error"];
+        };
+    };
+    previewNodeConnectSession: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ConnectSessionPreviewRequest"];
+            };
+        };
+        responses: {
+            /** @description Verified invitation claims for local consent. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConnectSessionPreview"];
+                };
+            };
+            400: components["responses"]["Error"];
+            401: components["responses"]["Error"];
+            429: components["responses"]["Error"];
+        };
+    };
+    listNodeConnectors: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                node_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Tenant-scoped connector grants. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NodeConnector"][];
+                };
+            };
+            401: components["responses"]["Error"];
+            403: components["responses"]["Error"];
+            404: components["responses"]["Error"];
+        };
+    };
+    revokeNodeConnector: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                node_id: string;
+                connector_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Connector revoked. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Error"];
+            403: components["responses"]["Error"];
+            404: components["responses"]["Error"];
+        };
+    };
     listPrinters: {
         parameters: {
             query?: {
@@ -3875,6 +4423,31 @@ export interface operations {
                 };
             };
             400: components["responses"]["Error"];
+            401: components["responses"]["Error"];
+            403: components["responses"]["Error"];
+            404: components["responses"]["Error"];
+        };
+    };
+    getPrinterContentEncryptionKey: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                printer_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Tenant-scoped encryption recipient. This key cannot authenticate a node. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NodeContentEncryptionKey"];
+                };
+            };
             401: components["responses"]["Error"];
             403: components["responses"]["Error"];
             404: components["responses"]["Error"];
@@ -4137,6 +4710,30 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["TargetReadiness"];
+                };
+            };
+            401: components["responses"]["Error"];
+            403: components["responses"]["Error"];
+        };
+    };
+    getTargetDesignSpecification: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                target_id: components["parameters"]["TargetId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Consolidated design and production constraints. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DesignSpecification"];
                 };
             };
             401: components["responses"]["Error"];
@@ -4799,6 +5396,54 @@ export interface operations {
             };
             400: components["responses"]["Error"];
             401: components["responses"]["Error"];
+        };
+    };
+    registerAgentContentEncryptionKey: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RegisterNodeContentEncryptionKey"];
+            };
+        };
+        responses: {
+            /** @description Active key. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NodeContentEncryptionKey"];
+                };
+            };
+            400: components["responses"]["Error"];
+            401: components["responses"]["Error"];
+        };
+    };
+    revokeAgentContentEncryptionKey: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                key_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Key revoked. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Error"];
+            404: components["responses"]["Error"];
         };
     };
     acceptAgentJob: {

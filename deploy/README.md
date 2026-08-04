@@ -7,8 +7,9 @@ Piqae supports two self-hosting shapes:
   and S3-compatible storage.
 
 The current low-cost hosted launch shape uses public web and API services plus
-one private worker on Railway, with Railway PostgreSQL, a print-document bucket,
-and a separate native-release bucket. Staging and production are isolated
+one private worker on Railway, with Railway PostgreSQL and a print-document
+bucket. Native releases use a separate private Cloudflare R2 bucket with
+independent reader and publisher identities. Staging and production are isolated
 Railway environments. A reviewed commit deploys to staging before an operator
 promotes that exact commit to production.
 

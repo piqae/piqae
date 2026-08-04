@@ -16,6 +16,7 @@ rust-version = "1.88"
 
 [workspace.dependencies]
 anyhow = "1.0.98"
+aes-gcm = "0.10.3"
 async-trait = "0.1.88"
 axum = { version = "0.8.4", features = ["http2", "macros", "multipart"] }
 base64 = "0.22.1"
@@ -27,6 +28,8 @@ futures = "0.3.31"
 hex = "0.4.3"
 http = "1.3.1"
 rand = "0.8.5"
+p256 = { version = "0.13.2", features = ["ecdh", "pkcs8"] }
+hkdf = "0.12.4"
 reqwest = { version = "0.12.20", default-features = false, features = ["json", "rustls-tls", "stream"] }
 rusqlite = { version = "0.32.1", features = ["bundled", "chrono", "uuid"] }
 secrecy = { version = "0.10.3", features = ["serde"] }

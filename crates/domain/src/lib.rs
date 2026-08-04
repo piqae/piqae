@@ -11,8 +11,9 @@ pub use id::{
     TargetId, WorkspaceId,
 };
 pub use job::{
-    ContentKind, ContentSource, Duplex, Job, JobEvent, JobFailureReason, JobOptions, JobState,
-    Rotation, StateTransitionError, UriAuthentication, validate_transition,
+    ContentKind, ContentSource, Duplex, EncryptedContentBinding, EncryptedContentManifest,
+    EncryptedContentRecipient, Job, JobEvent, JobFailureReason, JobOptions, JobState, Rotation,
+    StateTransitionError, UriAuthentication, validate_transition,
 };
 pub use printer::{
     NativePrinterChoice, NativePrinterOption, PRINTER_PROFILE_SCHEMA_VERSION, PrinterCapabilities,

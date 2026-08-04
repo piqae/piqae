@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { PiqaeClient, verifyWebhookSignature } from '../src/index.js';
-import type { Printer } from '../src/index.js';
+import type { EncryptedJobEnvelope, Printer } from '../src/index.js';
 
 describe('PiqaeClient', () => {
   it('defaults hosted clients to the canonical Piqae API origin', () => {
@@ -317,6 +317,29 @@ describe('PiqaeClient', () => {
     expect(String(fetcher.mock.calls[1]?.[0])).not.toContain('ABCD-EFGH');
   });
 
+  it('lists and revokes only explicitly addressed node connectors', async () => {
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(Response.json([]))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }));
+    const client = new PiqaeClient({
+      apiKey: 'piq_live_manager',
+      fetch: fetcher,
+      baseUrl: 'https://print.example.test'
+    });
+
+    await client.nodes.connectors('node/one');
+    await client.nodes.revokeConnector('node/one', 'ncon/one');
+
+    expect(String(fetcher.mock.calls[0]?.[0])).toBe(
+      'https://print.example.test/v1/nodes/node%2Fone/connectors'
+    );
+    expect(String(fetcher.mock.calls[1]?.[0])).toBe(
+      'https://print.example.test/v1/nodes/node%2Fone/connectors/ncon%2Fone'
+    );
+    expect(fetcher.mock.calls[1]?.[1]?.method).toBe('DELETE');
+  });
+
   it('keeps local-owner bootstrap tokens in headers and credentials in JSON bodies', async () => {
     const fetcher = vi
       .fn<typeof fetch>()
@@ -558,5 +581,21 @@ describe('PiqaeClient', () => {
     expect(String(fetcher.mock.calls[1]?.[0])).toBe(
       'https://print.example.test/v1/device-authorizations/exchange'
     );
+  });
+
+  it('requires and forwards idempotency for encrypted job registration', async () => {
+    const upload = { id: 'upl_cipher', media_type: 'application/octet-stream', expected_sha256: '00'.repeat(32), expected_bytes: 17, state: 'complete', expires_at: '2099-01-01T00:00:00Z' };
+    const fetcher = vi.fn<typeof fetch>().mockImplementation(async (url, init) => {
+      if (String(url).endsWith('/v1/uploads') && init?.method === 'POST') return Response.json({ ...upload, upload_url: '/v1/uploads/upl_cipher/content', upload_method: 'PUT', upload_headers: {}, requires_completion: false }, { status: 201 });
+      if (String(url).includes('/content')) return Response.json(upload);
+      return Response.json({ id: 'job_cipher', printer_id: 'prt_1', state: 'registered' }, { status: 201 });
+    });
+    const client = new PiqaeClient({ baseUrl: 'https://print.example.test/', fetch: fetcher });
+    const envelope: EncryptedJobEnvelope = { version: 'piqae-encrypted-job-v3', suite: 'ECDH-ES-P256+HKDF-SHA256+A256GCMKW+A256GCM', binding: { envelope_id: 'env_012345678901234567890123', workspace_id: 'wsp_1', environment_id: 'env_1', content_type: 'pdf', printer_id: 'prt_1', target_id: 'tgt_1', profile_revision: 'prf_1:1', options: { bin: null, collate: null, color: null, copies: null, dpi: null, duplex: null, fit_to_page: null, media: null, nup: null, pages: null, paper: null, rotate: null, native_options: {} }, deliveries: 1, expires_at: '2099-01-01T00:00:00Z', raw_authorized: false }, ciphertext_sha256: 'A'.repeat(43), iv: 'A'.repeat(16), ciphertext: 'AQ', recipients: [{ key_id: 'cek_1', algorithm: 'ECDH-ES-P256+HKDF-SHA256+A256GCMKW', ephemeral_public_key: `B${'A'.repeat(86)}`, hkdf_salt: 'A'.repeat(43), key_wrap_iv: 'A'.repeat(16), encrypted_content_key: 'A'.repeat(64) }] };
+    await client.jobs.createEncrypted({ target_id: 'tgt_1', title: 'Private', content_type: 'pdf' }, envelope, 'encrypted-retry-1');
+    const jobCall = fetcher.mock.calls.find(([url]) => String(url).endsWith('/v1/jobs'));
+    expect(new Headers(jobCall?.[1]?.headers).get('idempotency-key')).toBe('encrypted-retry-1');
+    await expect(client.jobs.createEncrypted({ target_id: 'tgt_1', title: 'Private', content_type: 'pdf' }, envelope, 'short')).rejects.toThrow(/Idempotency-Key/);
+    await expect(client.jobs.createEncrypted({ target_id: 'tgt_1', title: 'Private', content_type: 'pdf' }, envelope, '🔐'.repeat(64))).rejects.toThrow(/Idempotency-Key/);
   });
 });

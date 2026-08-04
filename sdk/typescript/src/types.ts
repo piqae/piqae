@@ -1,5 +1,13 @@
 export type PiqaeId = string;
 
+export interface NodeConnector {
+  id: string;
+  node_id: string;
+  permissions: Record<string, unknown>;
+  revoked_at: string | null;
+  created_at: string;
+}
+
 export type JobState =
   | 'registered'
   | 'content_pending'
@@ -336,6 +344,22 @@ export interface NodeUpdate {
   status: NodeUpdateState;
 }
 
+export interface CreateNodeConnectSession {
+  name: string;
+  return_url?: string;
+  expires_in_seconds?: number;
+}
+
+export interface NodeConnectSession {
+  id: string;
+  state: 'pending' | 'connected' | 'expired';
+  expires_at: string;
+  node_id: PiqaeId | null;
+  connect_url?: string | null;
+  return_url?: string | null;
+  downloads: Array<{ platform: 'macos' | 'windows' | 'linux'; url: string }>;
+}
+
 export interface Printer {
   id: PiqaeId;
   agent_id: PiqaeId;
@@ -349,6 +373,14 @@ export interface Printer {
   /** Named printer option snapshots synced from the agent. */
   profiles: PrinterProfileSnapshot[];
   updated_at: string;
+}
+
+export interface NodeContentEncryptionKey {
+  key_id: string;
+  algorithm: 'ECDH-P256-HKDF-SHA256';
+  public_key_spki: string;
+  node_id: PiqaeId;
+  created_at: string;
 }
 
 export type PrintRateUnit = 'ppm' | 'ipm' | 'lmp' | 'cpm';
@@ -617,6 +649,11 @@ export interface JobOptions {
 
 export type JobContent =
   | { type: 'upload'; upload_id: PiqaeId }
+  | {
+      type: 'encrypted_upload';
+      upload_id: PiqaeId;
+      manifest: import('./encrypted-jobs.js').EncryptedJobManifest;
+    }
   | { type: 'base64'; data: string }
   | { type: 'uri'; uri: string };
 

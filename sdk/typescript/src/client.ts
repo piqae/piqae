@@ -7,6 +7,7 @@ import type {
   CreateApiKey,
   CreateDeviceAuthorization,
   CreateJob,
+  CreateNodeConnectSession,
   CreateStock,
   CreateTarget,
   CreateTargetBinding,
@@ -27,7 +28,10 @@ import type {
   JobListOptions,
   ListOptions,
   LocalOwnerSession,
+  NodeConnector,
+  NodeContentEncryptionKey,
   NodeUpdate,
+  NodeConnectSession,
   NodeUpdatePolicy,
   PatchStock,
   PatchTarget,
@@ -45,6 +49,7 @@ import type {
   Workspace,
   WorkspaceMember
 } from './types.js';
+import { canonicalJobOptions, encryptedJobCiphertext, encryptedJobManifest, type EncryptedJobEnvelope } from './encrypted-jobs.js';
 
 interface CommonPiqaeClientOptions {
   baseUrl?: string;
@@ -251,14 +256,33 @@ export class PiqaeClient {
     rollback: (id: string, metadataUrl: string) =>
       this.request<NodeUpdate>('POST', `/v1/nodes/${encodeURIComponent(id)}/rollback`, {
         body: { metadata_url: metadataUrl }
-      })
+      }),
+    connectors: (id: string) =>
+      this.request<NodeConnector[]>(
+        'GET',
+        `/v1/nodes/${encodeURIComponent(id)}/connectors`
+      ),
+    revokeConnector: (nodeId: string, connectorId: string) =>
+      this.request<void>(
+        'DELETE',
+        `/v1/nodes/${encodeURIComponent(nodeId)}/connectors/${encodeURIComponent(connectorId)}`
+      )
+  };
+
+  readonly connectSessions = {
+    create: (input: CreateNodeConnectSession) =>
+      this.request<NodeConnectSession>('POST', '/v1/node-connect-sessions', { body: input }),
+    retrieve: (id: string) =>
+      this.request<NodeConnectSession>('GET', `/v1/node-connect-sessions/${encodeURIComponent(id)}`)
   };
 
   readonly printers = {
     list: (options?: ListOptions) =>
       this.request<Page<Printer>>('GET', '/v1/printers', options ? { query: options } : {}),
     retrieve: (id: string) =>
-      this.request<Printer>('GET', `/v1/printers/${encodeURIComponent(id)}`)
+      this.request<Printer>('GET', `/v1/printers/${encodeURIComponent(id)}`),
+    contentEncryptionKey: (id: string) =>
+      this.request<NodeContentEncryptionKey>('GET', `/v1/printers/${encodeURIComponent(id)}/content-encryption-key`)
   };
 
   readonly stocks = {
@@ -324,6 +348,16 @@ export class PiqaeClient {
   };
 
   readonly jobs = {
+    createEncrypted: async (input: Omit<CreateJob, 'content'> & { target_id: string; printer_id?: never }, envelope: EncryptedJobEnvelope, idempotencyKey: string) => {
+      const idempotencyKeyBytes = new TextEncoder().encode(idempotencyKey).byteLength;
+      if (idempotencyKeyBytes < 8 || idempotencyKeyBytes > 255) throw new TypeError('Encrypted jobs require an Idempotency-Key between 8 and 255 bytes');
+      if (envelope.binding.target_id !== input.target_id || envelope.binding.content_type !== input.content_type || envelope.binding.deliveries !== (input.deliveries ?? 1) || JSON.stringify(envelope.binding.options) !== JSON.stringify(canonicalJobOptions(input.options))) throw new TypeError('Encrypted envelope does not match the job request');
+      const ciphertext = encryptedJobCiphertext(envelope);
+      const digest = await globalThis.crypto.subtle.digest('SHA-256', ciphertext);
+      const sha256 = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
+      const upload = await this.uploads.createAndPut({ media_type: 'application/octet-stream', byte_length: ciphertext.byteLength, sha256 }, ciphertext);
+      return this.request<Job>('POST', '/v1/jobs', { body: { ...input, content: { type: 'encrypted_upload', upload_id: upload.id, manifest: encryptedJobManifest(envelope) } }, idempotencyKey });
+    },
     list: (options?: JobListOptions) =>
       this.request<Page<Job>>('GET', '/v1/jobs', options ? { query: options } : {}),
     retrieve: (id: string) => this.request<Job>('GET', `/v1/jobs/${encodeURIComponent(id)}`),

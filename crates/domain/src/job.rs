@@ -24,6 +24,48 @@ pub enum ContentSource {
         uri: String,
         authentication: Option<UriAuthentication>,
     },
+    EncryptedUpload {
+        upload_id: String,
+        manifest: Box<EncryptedContentManifest>,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct EncryptedContentManifest {
+    pub version: String,
+    pub suite: String,
+    pub binding: EncryptedContentBinding,
+    pub ciphertext_sha256: String,
+    pub iv: String,
+    pub recipients: Vec<EncryptedContentRecipient>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct EncryptedContentBinding {
+    pub envelope_id: String,
+    pub workspace_id: String,
+    pub environment_id: String,
+    pub content_type: ContentKind,
+    pub printer_id: String,
+    pub target_id: String,
+    pub profile_revision: String,
+    pub options: JobOptions,
+    pub deliveries: u16,
+    pub expires_at: String,
+    pub raw_authorized: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct EncryptedContentRecipient {
+    pub key_id: String,
+    pub algorithm: String,
+    pub ephemeral_public_key: String,
+    pub hkdf_salt: String,
+    pub key_wrap_iv: String,
+    pub encrypted_content_key: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -61,16 +103,37 @@ pub enum Duplex {
     ShortEdge,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Rotation {
-    #[serde(rename = "0")]
     Deg0,
-    #[serde(rename = "90")]
     Deg90,
-    #[serde(rename = "180")]
     Deg180,
-    #[serde(rename = "270")]
     Deg270,
+}
+
+impl Serialize for Rotation {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_u16(match self {
+            Self::Deg0 => 0,
+            Self::Deg90 => 90,
+            Self::Deg180 => 180,
+            Self::Deg270 => 270,
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for Rotation {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        match u16::deserialize(deserializer)? {
+            0 => Ok(Self::Deg0),
+            90 => Ok(Self::Deg90),
+            180 => Ok(Self::Deg180),
+            270 => Ok(Self::Deg270),
+            value => Err(serde::de::Error::custom(format!(
+                "unsupported rotation {value}"
+            ))),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]

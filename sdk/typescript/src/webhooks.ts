@@ -56,7 +56,7 @@ export async function verifyWebhookSignature(
   } catch {
     return false;
   }
-  return crypto.subtle.verify('HMAC', key, bytes, signed);
+  return crypto.subtle.verify('HMAC', key, Uint8Array.from(bytes), Uint8Array.from(signed));
 }
 
 function header(headers: Headers | PiqaeWebhookHeaders, name: keyof PiqaeWebhookHeaders) {

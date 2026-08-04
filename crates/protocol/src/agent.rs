@@ -8,6 +8,12 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use uuid::Uuid;
 
+fn append_proof_field(message: &mut Vec<u8>, value: &[u8]) {
+    let length = u64::try_from(value.len()).unwrap_or(u64::MAX);
+    message.extend_from_slice(&length.to_be_bytes());
+    message.extend_from_slice(value);
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct EnrolRequest {
     pub token: String,
@@ -19,6 +25,135 @@ pub struct EnrolRequest {
     pub installation_mode: InstallationMode,
     pub agent_version: String,
     pub protocol_version: u16,
+    /// Stable, non-secret physical installation identifier. Supplying this
+    /// adds an isolated connector; it never replaces another tenant's key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installation_id: Option<String>,
+    /// Locally approved printer identifiers. Empty never means all printers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_printer_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installation_proof: Option<String>,
+}
+
+#[must_use]
+pub fn connector_proof_message(
+    token: &str,
+    installation_id: &str,
+    connector_public_key: &str,
+    printer_ids: &[String],
+) -> Vec<u8> {
+    use sha2::{Digest as _, Sha256};
+    let mut printers = printer_ids.to_vec();
+    printers.sort();
+    printers.dedup();
+
+    let mut message = b"piqae-connect-proof-v2".to_vec();
+    append_proof_field(&mut message, &Sha256::digest(token.as_bytes()));
+    append_proof_field(&mut message, installation_id.as_bytes());
+    append_proof_field(&mut message, connector_public_key.as_bytes());
+    message.extend_from_slice(
+        &u64::try_from(printers.len())
+            .unwrap_or(u64::MAX)
+            .to_be_bytes(),
+    );
+    for printer in printers {
+        append_proof_field(&mut message, printer.as_bytes());
+    }
+    message
+}
+
+#[cfg(test)]
+mod connector_proof_tests {
+    use super::connector_proof_message;
+    use sha2::{Digest as _, Sha256};
+
+    #[test]
+    fn proof_is_order_stable_and_binds_every_security_input() {
+        let first = connector_proof_message(
+            "piq_enr_secret",
+            "installation_1",
+            "connector-key",
+            &["b".into(), "a".into()],
+        );
+        assert_eq!(
+            first,
+            connector_proof_message(
+                "piq_enr_secret",
+                "installation_1",
+                "connector-key",
+                &["a".into(), "b".into()],
+            )
+        );
+        assert_ne!(
+            first,
+            connector_proof_message(
+                "piq_enr_other",
+                "installation_1",
+                "connector-key",
+                &["a".into(), "b".into()],
+            )
+        );
+        assert_ne!(
+            first,
+            connector_proof_message(
+                "piq_enr_secret",
+                "installation_2",
+                "connector-key",
+                &["a".into(), "b".into()],
+            )
+        );
+        assert_ne!(
+            first,
+            connector_proof_message(
+                "piq_enr_secret",
+                "installation_1",
+                "attacker-key",
+                &["a".into(), "b".into()],
+            )
+        );
+        assert_ne!(
+            first,
+            connector_proof_message(
+                "piq_enr_secret",
+                "installation_1",
+                "connector-key",
+                &["a".into(), "c".into()],
+            )
+        );
+    }
+
+    #[test]
+    fn proof_encoding_has_no_printer_separator_collisions() {
+        assert_ne!(
+            connector_proof_message(
+                "piq_enr_secret",
+                "installation_1",
+                "connector-key",
+                &["printer-a,printer-b".into()],
+            ),
+            connector_proof_message(
+                "piq_enr_secret",
+                "installation_1",
+                "connector-key",
+                &["printer-a".into(), "printer-b".into()],
+            )
+        );
+    }
+
+    #[test]
+    fn proof_encoding_matches_the_v2_golden_vector() {
+        let message = connector_proof_message(
+            "piq_enr_secret",
+            "installation_1",
+            "connector-key",
+            &["printer-b".into(), "printer-a".into()],
+        );
+        assert_eq!(
+            format!("{:x}", Sha256::digest(message)),
+            "0707161834e0f3efdccdb35e9804ea409dcbe9cb5152614cd0f0b4c9fb0cb863"
+        );
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -35,6 +170,26 @@ pub struct EnrolResponse {
     pub environment: String,
     pub server_time: DateTime<Utc>,
     pub sync_after_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connector_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ConnectSessionPreviewRequest {
+    pub token: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ConnectSessionPreview {
+    pub workspace_id: String,
+    pub workspace_name: String,
+    pub requesting_service_account_id: Option<String>,
+    pub requesting_service_name: Option<String>,
+    pub environment_id: String,
+    pub requested_scopes: Vec<String>,
+    pub printer_grant: String,
+    pub expires_at: DateTime<Utc>,
+    pub return_url: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -117,6 +272,12 @@ pub enum ContentDescriptor {
         url: String,
         sha256: String,
         bytes: u64,
+    },
+    EncryptedDownload {
+        url: String,
+        sha256: String,
+        bytes: u64,
+        manifest: Box<piqae_domain::EncryptedContentManifest>,
     },
     InlineBase64 {
         data: String,

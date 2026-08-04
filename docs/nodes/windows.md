@@ -16,6 +16,14 @@ lifecycle, clean-login startup, physical PDF/RAW matrices, OKI production
 stock, spooler restart, and long-duration reliability. Therefore implementation
 does not equal Supported Windows printing.
 
+Cloud document-decryption keys are stored for the current user in Windows
+Credential Manager, whose credential data is protected by Windows. P-256 key
+material is read back and verified before a legacy plaintext file is removed.
+The agent fails closed if the credential store or migration fails;
+it does not generate a replacement that would make queued encrypted jobs
+unreadable. This is OS-backed at-rest protection, not evidence of a
+non-exportable TPM-backed P-256 key.
+
 The tray and profile host must run in the interactive user session. The local
 agent API remains loopback-only; a Windows node does not connect directly to a
 Mac's `127.0.0.1` service. Both nodes enrol with the same hosted/self-hosted

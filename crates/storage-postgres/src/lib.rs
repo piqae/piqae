@@ -78,6 +78,15 @@ pub struct AgentAuthenticationRecord {
     pub public_key: Vec<u8>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct StoredContentEncryptionKey {
+    pub agent_id: AgentId,
+    pub key_id: String,
+    pub algorithm: String,
+    pub public_key_spki: String,
+    pub created_at: DateTime<Utc>,
+}
+
 #[derive(Clone, Debug)]
 pub struct PlatformGrantAuthenticationRecord {
     pub secret_hash: String,
@@ -95,6 +104,18 @@ pub struct EnrolledAgent {
     pub agent_id: AgentId,
     pub workspace_id: WorkspaceId,
     pub environment_id: EnvironmentId,
+    pub connector_id: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct StoredConnectSessionPreview {
+    pub workspace_id: WorkspaceId,
+    pub workspace_name: String,
+    pub environment_id: EnvironmentId,
+    pub expires_at: DateTime<Utc>,
+    pub requesting_service_account_id: Option<String>,
+    pub requesting_service_name: Option<String>,
+    pub return_url: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -337,6 +358,18 @@ pub struct StoredAgent {
     pub state: String,
     pub version: String,
     pub last_seen_at: DateTime<Utc>,
+}
+
+/// A tenant-scoped authorization from one physical node installation.
+/// Installation identifiers and other tenants' connectors are intentionally
+/// excluded from this public projection.
+#[derive(Clone, Debug, Serialize)]
+pub struct StoredNodeConnector {
+    pub id: String,
+    pub node_id: AgentId,
+    pub permissions: serde_json::Value,
+    pub revoked_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
 }
 
 /// Rows removed by one authentication-state sweep.
@@ -2894,6 +2927,16 @@ impl PostgresStore {
         agent_id: AgentId,
     ) -> Result<(), StorageError> {
         let mut transaction = self.pool.begin().await?;
+        sqlx::query(
+            "UPDATE node_connectors SET revoked_at = now(), updated_at = now()
+             WHERE agent_id = $1 AND workspace_id = $2 AND environment_id = $3
+               AND revoked_at IS NULL",
+        )
+        .bind(agent_id.to_string())
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .execute(&mut *transaction)
+        .await?;
         let affected = sqlx::query(
             "UPDATE agents
              SET revoked_at = now(), state = 'offline'
@@ -2922,6 +2965,53 @@ impl PostgresStore {
         .bind(environment_id.to_string())
         .execute(&mut *transaction)
         .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    pub async fn list_node_connectors(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+    ) -> Result<Vec<StoredNodeConnector>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT id, agent_id, permissions, revoked_at, created_at
+             FROM node_connectors
+             WHERE workspace_id = $1 AND environment_id = $2 AND agent_id = $3
+             ORDER BY created_at, id",
+        )
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(agent_id.to_string())
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(node_connector_from_row).collect()
+    }
+
+    pub async fn revoke_node_connector(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        connector_id: &str,
+    ) -> Result<(), StorageError> {
+        let mut transaction = self.pool.begin().await?;
+        let affected = sqlx::query(
+            "UPDATE node_connectors SET revoked_at = now(), updated_at = now()
+             WHERE id = $1 AND agent_id = $2 AND workspace_id = $3
+               AND environment_id = $4 AND revoked_at IS NULL",
+        )
+        .bind(connector_id)
+        .bind(agent_id.to_string())
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .execute(&mut *transaction)
+        .await?
+        .rows_affected();
+        if affected != 1 {
+            return Err(StorageError::NotFound);
+        }
         transaction.commit().await?;
         Ok(())
     }
@@ -3473,7 +3563,7 @@ impl PostgresStore {
         secret_hash: &str,
         expires_at: DateTime<Utc>,
     ) -> Result<(), StorageError> {
-        sqlx::query(
+        let inserted = sqlx::query(
             "INSERT INTO enrolment_tokens (
                 id, workspace_id, environment_id, secret_hash, expires_at
              ) VALUES ($1,$2,$3,$4,$5)",
@@ -3485,6 +3575,45 @@ impl PostgresStore {
         .bind(expires_at)
         .execute(&self.pool)
         .await?;
+        if inserted.rows_affected() != 1 {
+            return Err(StorageError::NotFound);
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_connect_enrolment(
+        &self,
+        id: &str,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        secret_hash: &str,
+        expires_at: DateTime<Utc>,
+        return_url: Option<&str>,
+        requesting_service_account_id: Option<&str>,
+    ) -> Result<(), StorageError> {
+        let inserted = sqlx::query(
+            "INSERT INTO enrolment_tokens (
+                id, workspace_id, environment_id, secret_hash, expires_at,
+                return_url, requesting_service_account_id, requesting_service_name
+             ) SELECT $1,$2,$3,$4,$5,$6, account.id, account.name
+               FROM workspaces workspace
+               LEFT JOIN platform_service_accounts account
+                 ON account.id = $7 AND account.revoked_at IS NULL
+              WHERE workspace.id = $2",
+        )
+        .bind(id)
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(secret_hash)
+        .bind(expires_at)
+        .bind(return_url)
+        .bind(requesting_service_account_id)
+        .execute(&self.pool)
+        .await?;
+        if inserted.rows_affected() != 1 {
+            return Err(StorageError::NotFound);
+        }
         Ok(())
     }
 
@@ -3510,6 +3639,51 @@ impl PostgresStore {
             .transpose()
             .map_err(|error| StorageError::InvalidData(format!("agent id: {error}")))?;
         Ok((row.try_get("expires_at")?, agent_id))
+    }
+
+    pub async fn connect_session_preview(
+        &self,
+        secret_hash: &str,
+    ) -> Result<StoredConnectSessionPreview, StorageError> {
+        let row = sqlx::query(
+            "SELECT token.workspace_id, workspace.name AS workspace_name,
+                    token.environment_id, token.expires_at, token.return_url,
+                    token.requesting_service_account_id, token.requesting_service_name
+             FROM enrolment_tokens token
+             JOIN workspaces workspace ON workspace.id = token.workspace_id
+             WHERE token.secret_hash = $1 AND token.consumed_at IS NULL
+               AND token.expires_at > now()",
+        )
+        .bind(secret_hash)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(StorageError::NotFound)?;
+        let workspace: String = row.try_get("workspace_id")?;
+        let environment: String = row.try_get("environment_id")?;
+        Ok(StoredConnectSessionPreview {
+            workspace_id: workspace
+                .parse()
+                .map_err(|error| StorageError::InvalidData(format!("workspace id: {error}")))?,
+            workspace_name: row.try_get("workspace_name")?,
+            environment_id: environment
+                .parse()
+                .map_err(|error| StorageError::InvalidData(format!("environment id: {error}")))?,
+            expires_at: row.try_get("expires_at")?,
+            requesting_service_account_id: row.try_get("requesting_service_account_id")?,
+            requesting_service_name: row.try_get("requesting_service_name")?,
+            return_url: row.try_get("return_url")?,
+        })
+    }
+
+    pub async fn node_installation_public_key(
+        &self,
+        installation_key: &str,
+    ) -> Result<Vec<u8>, StorageError> {
+        sqlx::query_scalar("SELECT public_key FROM node_installations WHERE installation_key = $1")
+            .bind(installation_key)
+            .fetch_optional(&self.pool)
+            .await?
+            .ok_or(StorageError::NotFound)
     }
 
     pub async fn create_device_authorization(
@@ -3742,6 +3916,7 @@ impl PostgresStore {
                 })?,
                 workspace_id,
                 environment_id,
+                connector_id: None,
             });
         }
         let installation_id: String = row.try_get("installation_id")?;
@@ -3795,6 +3970,7 @@ impl PostgresStore {
                 })?,
                 workspace_id,
                 environment_id,
+                connector_id: None,
             });
         }
         if enforce_cloud_billing {
@@ -3815,7 +3991,7 @@ impl PostgresStore {
         .bind(workspace_id.to_string())
         .bind(environment_id.to_string())
         .bind(row.try_get::<String, _>("proposed_name")?)
-        .bind(installation_id)
+        .bind(&installation_id)
         .bind(row.try_get::<Vec<u8>, _>("device_public_key")?)
         .bind(row.try_get::<String, _>("platform")?)
         .bind(row.try_get::<String, _>("architecture")?)
@@ -3838,6 +4014,7 @@ impl PostgresStore {
             agent_id,
             workspace_id,
             environment_id,
+            connector_id: None,
         })
     }
 
@@ -3878,12 +4055,45 @@ impl PostgresStore {
         protocol_version: u16,
         enforce_cloud_billing: bool,
     ) -> Result<EnrolledAgent, StorageError> {
+        self.enrol_agent_connector_with_billing(
+            secret_hash,
+            public_key,
+            name,
+            hostname,
+            platform,
+            architecture,
+            version,
+            protocol_version,
+            enforce_cloud_billing,
+            None,
+            &[],
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn enrol_agent_connector_with_billing(
+        &self,
+        secret_hash: &str,
+        public_key: &[u8],
+        name: &str,
+        hostname: &str,
+        platform: &str,
+        architecture: &str,
+        version: &str,
+        protocol_version: u16,
+        enforce_cloud_billing: bool,
+        physical_installation_id: Option<&str>,
+        allowed_printer_ids: &[String],
+    ) -> Result<EnrolledAgent, StorageError> {
         let mut transaction = self.pool.begin().await?;
         let row = sqlx::query(
-            "SELECT id, workspace_id, environment_id, consumed_at
+            "SELECT id, workspace_id, environment_id, consumed_at, agent_id
              FROM enrolment_tokens
              WHERE secret_hash = $1
-               AND (expires_at > now() OR consumed_at IS NOT NULL)
+               AND (expires_at > now()
+                    OR (consumed_at IS NOT NULL
+                        AND expires_at > now() - interval '10 minutes'))
              FOR UPDATE",
         )
         .bind(secret_hash)
@@ -3899,7 +4109,59 @@ impl PostgresStore {
         let environment_id: EnvironmentId = environment_text.parse().map_err(|error| {
             StorageError::InvalidData(format!("environment id `{environment_text}`: {error}"))
         })?;
-        let installation_id = format!("{}:{:x}", hostname, Sha256::digest(public_key));
+        let installation_id = match physical_installation_id {
+            Some(value) if valid_external_installation_id(value) => value.to_owned(),
+            Some(_) => {
+                return Err(StorageError::InvalidData(
+                    "physical installation id is invalid".into(),
+                ));
+            }
+            None => format!("{}:{:x}", hostname, Sha256::digest(public_key)),
+        };
+        if row
+            .try_get::<Option<DateTime<Utc>>, _>("consumed_at")?
+            .is_some()
+        {
+            let enrolled_agent_id = row
+                .try_get::<Option<String>, _>("agent_id")?
+                .ok_or(StorageError::NotFound)?;
+            let connector_id = sqlx::query_scalar::<_, String>(
+                "SELECT connector.id
+                 FROM agents agent
+                 JOIN node_connectors connector
+                   ON connector.agent_id = agent.id
+                  AND connector.workspace_id = agent.workspace_id
+                  AND connector.environment_id = agent.environment_id
+                 WHERE agent.id = $1 AND agent.workspace_id = $2
+                   AND agent.environment_id = $3 AND agent.installation_id = $4
+                   AND agent.public_key = $5 AND agent.revoked_at IS NULL
+                   AND connector.revoked_at IS NULL
+                   AND (($6::boolean = true
+                         AND connector.permissions->'printers' = to_jsonb($7::text[]))
+                        OR ($6::boolean = false
+                            AND connector.permissions->>'printers' = 'all'))
+                 FOR UPDATE OF agent, connector",
+            )
+            .bind(&enrolled_agent_id)
+            .bind(workspace_id.to_string())
+            .bind(environment_id.to_string())
+            .bind(&installation_id)
+            .bind(public_key)
+            .bind(physical_installation_id.is_some())
+            .bind(allowed_printer_ids)
+            .fetch_optional(&mut *transaction)
+            .await?
+            .ok_or(StorageError::NotFound)?;
+            transaction.commit().await?;
+            return Ok(EnrolledAgent {
+                agent_id: enrolled_agent_id.parse().map_err(|error| {
+                    StorageError::InvalidData(format!("agent id `{enrolled_agent_id}`: {error}"))
+                })?,
+                workspace_id,
+                environment_id,
+                connector_id: Some(connector_id),
+            });
+        }
         if let Some(existing) = sqlx::query_scalar::<_, String>(
             "SELECT id FROM agents
              WHERE workspace_id = $1 AND environment_id = $2
@@ -3937,6 +4199,19 @@ impl PostgresStore {
             .bind(&existing)
             .execute(&mut *transaction)
             .await?;
+            let connector_id = upsert_node_connector(
+                &mut transaction,
+                &installation_id,
+                public_key,
+                workspace_id,
+                environment_id,
+                &existing,
+            )
+            .await?;
+            if physical_installation_id.is_some() {
+                restrict_connector_printers(&mut transaction, &connector_id, allowed_printer_ids)
+                    .await?;
+            }
             transaction.commit().await?;
             return Ok(EnrolledAgent {
                 agent_id: existing.parse().map_err(|error| {
@@ -3944,13 +4219,8 @@ impl PostgresStore {
                 })?,
                 workspace_id,
                 environment_id,
+                connector_id: Some(connector_id),
             });
-        }
-        if row
-            .try_get::<Option<DateTime<Utc>>, _>("consumed_at")?
-            .is_some()
-        {
-            return Err(StorageError::NotFound);
         }
         if enforce_cloud_billing {
             enforce_node_admission(&mut transaction, workspace_id).await?;
@@ -3966,7 +4236,7 @@ impl PostgresStore {
         .bind(workspace_id.to_string())
         .bind(environment_id.to_string())
         .bind(name)
-        .bind(installation_id)
+        .bind(&installation_id)
         .bind(public_key)
         .bind(platform)
         .bind(architecture)
@@ -3979,11 +4249,25 @@ impl PostgresStore {
             .bind(agent_id.to_string())
             .execute(&mut *transaction)
             .await?;
+        let connector_id = upsert_node_connector(
+            &mut transaction,
+            &installation_id,
+            public_key,
+            workspace_id,
+            environment_id,
+            &agent_id.to_string(),
+        )
+        .await?;
+        if physical_installation_id.is_some() {
+            restrict_connector_printers(&mut transaction, &connector_id, allowed_printer_ids)
+                .await?;
+        }
         transaction.commit().await?;
         Ok(EnrolledAgent {
             agent_id,
             workspace_id,
             environment_id,
+            connector_id: Some(connector_id),
         })
     }
 
@@ -4431,6 +4715,46 @@ impl PostgresStore {
             transaction.commit().await?;
             return Ok(CreateJobResult::Existing(existing));
         }
+        if let piqae_domain::ContentSource::EncryptedUpload { manifest, .. } = &job.content {
+            let manifest_bytes = serde_json::to_vec(manifest)?;
+            let manifest_sha256 = format!("{:x}", Sha256::digest(&manifest_bytes));
+            let inserted = sqlx::query(
+                "INSERT INTO consumed_encrypted_envelopes
+                    (workspace_id, environment_id, envelope_id, manifest_sha256, job_id)
+                 VALUES ($1,$2,$3,$4,$5)
+                 ON CONFLICT (workspace_id, environment_id, envelope_id) DO NOTHING",
+            )
+            .bind(job.workspace_id.to_string())
+            .bind(job.environment_id.to_string())
+            .bind(&manifest.binding.envelope_id)
+            .bind(&manifest_sha256)
+            .bind(job.id.to_string())
+            .execute(&mut *transaction)
+            .await?;
+            if inserted.rows_affected() == 0 {
+                let row = sqlx::query(
+                    "SELECT envelope.manifest_sha256, jobs.payload, jobs.state
+                     FROM consumed_encrypted_envelopes AS envelope
+                     JOIN jobs ON jobs.id = envelope.job_id
+                     WHERE envelope.workspace_id = $1 AND envelope.environment_id = $2
+                       AND envelope.envelope_id = $3",
+                )
+                .bind(job.workspace_id.to_string())
+                .bind(job.environment_id.to_string())
+                .bind(&manifest.binding.envelope_id)
+                .fetch_optional(&mut *transaction)
+                .await?
+                .ok_or(StorageError::IdempotencyConflict)?;
+                let existing_hash: String = row.try_get("manifest_sha256")?;
+                if existing_hash != manifest_sha256 {
+                    return Err(StorageError::IdempotencyConflict);
+                }
+                let state: String = row.try_get("state")?;
+                let existing = job_from_row(row.try_get("payload")?, &state)?;
+                transaction.commit().await?;
+                return Ok(CreateJobResult::Existing(existing));
+            }
+        }
         if enforce_cloud_billing {
             enforce_cloud_job_admission(&mut transaction, job.workspace_id, job.environment_id)
                 .await?;
@@ -4848,6 +5172,114 @@ impl PostgresStore {
         .ok_or(StorageError::NotFound)?;
         u64::try_from(sequence)
             .map_err(|error| StorageError::InvalidData(format!("negative sequence: {error}")))
+    }
+
+    pub async fn rotate_content_encryption_key(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        key_id: &str,
+        algorithm: &str,
+        public_key_spki: &str,
+    ) -> Result<StoredContentEncryptionKey, StorageError> {
+        if algorithm != "ECDH-P256-HKDF-SHA256" {
+            return Err(StorageError::InvalidData(
+                "unsupported content encryption key algorithm".into(),
+            ));
+        }
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query(
+            "UPDATE node_content_encryption_keys SET revoked_at = now()
+             WHERE workspace_id = $1 AND environment_id = $2 AND agent_id = $3
+               AND revoked_at IS NULL AND key_id <> $4",
+        )
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(agent_id.to_string())
+        .bind(key_id)
+        .execute(&mut *transaction)
+        .await?;
+        let row = sqlx::query(
+            "INSERT INTO node_content_encryption_keys
+                 (workspace_id, environment_id, agent_id, key_id, algorithm, public_key_spki)
+             VALUES ($1,$2,$3,$4,$5,$6)
+             ON CONFLICT (workspace_id, environment_id, agent_id, key_id)
+             DO UPDATE SET algorithm = EXCLUDED.algorithm,
+                           public_key_spki = EXCLUDED.public_key_spki, revoked_at = NULL
+             RETURNING created_at",
+        )
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(agent_id.to_string())
+        .bind(key_id)
+        .bind(algorithm)
+        .bind(public_key_spki)
+        .fetch_one(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(StoredContentEncryptionKey {
+            agent_id,
+            key_id: key_id.to_owned(),
+            algorithm: algorithm.to_owned(),
+            public_key_spki: public_key_spki.to_owned(),
+            created_at: row.try_get("created_at")?,
+        })
+    }
+
+    pub async fn content_encryption_key_for_printer(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        printer_id: PrinterId,
+    ) -> Result<StoredContentEncryptionKey, StorageError> {
+        let row = sqlx::query(
+            "SELECT key.agent_id, key.key_id, key.algorithm, key.public_key_spki, key.created_at
+             FROM printers AS printer
+             JOIN node_content_encryption_keys AS key
+               ON key.agent_id = printer.agent_id
+              AND key.workspace_id = printer.workspace_id
+              AND key.environment_id = printer.environment_id
+              AND key.revoked_at IS NULL
+             WHERE printer.id = $1 AND printer.workspace_id = $2 AND printer.environment_id = $3",
+        )
+        .bind(printer_id.to_string())
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(StorageError::NotFound)?;
+        Ok(StoredContentEncryptionKey {
+            agent_id: serde_json::from_value(serde_json::Value::String(row.try_get("agent_id")?))?,
+            key_id: row.try_get("key_id")?,
+            algorithm: row.try_get("algorithm")?,
+            public_key_spki: row.try_get("public_key_spki")?,
+            created_at: row.try_get("created_at")?,
+        })
+    }
+
+    pub async fn revoke_content_encryption_key(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        key_id: &str,
+    ) -> Result<(), StorageError> {
+        let result = sqlx::query(
+            "UPDATE node_content_encryption_keys SET revoked_at = now()
+             WHERE workspace_id = $1 AND environment_id = $2 AND agent_id = $3
+               AND key_id = $4 AND revoked_at IS NULL",
+        )
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(agent_id.to_string())
+        .bind(key_id)
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() != 1 {
+            return Err(StorageError::NotFound);
+        }
+        Ok(())
     }
 
     pub async fn resolve_printer_agent(
@@ -5442,7 +5874,8 @@ impl PostgresStore {
         let current_state: String = row.try_get("state")?;
         let mut job = job_from_row(row.try_get("payload")?, &current_state)?;
         let expected_sha256 = match &job.content {
-            piqae_domain::ContentSource::Upload { upload_id } => Some(
+            piqae_domain::ContentSource::Upload { upload_id }
+            | piqae_domain::ContentSource::EncryptedUpload { upload_id, .. } => Some(
                 sqlx::query_scalar::<_, String>(
                     "SELECT expected_sha256 FROM uploads
                          WHERE id = $1 AND workspace_id = $2 AND environment_id = $3
@@ -5542,6 +5975,41 @@ impl PostgresStore {
             .await?;
         Ok(())
     }
+}
+
+fn valid_external_installation_id(value: &str) -> bool {
+    (8..=128).contains(&value.len())
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+}
+
+async fn restrict_connector_printers(
+    transaction: &mut Transaction<'_, Postgres>,
+    connector_id: &str,
+    printer_ids: &[String],
+) -> Result<(), StorageError> {
+    let unique = printer_ids.iter().collect::<std::collections::HashSet<_>>();
+    if printer_ids.is_empty()
+        || printer_ids.len() > 128
+        || unique.len() != printer_ids.len()
+        || printer_ids.iter().any(|id| id.len() > 128 || id.is_empty())
+    {
+        return Err(StorageError::InvalidData(
+            "connector enrolment requires one to 128 valid printer identifiers".into(),
+        ));
+    }
+    sqlx::query(
+        "UPDATE node_connectors SET permissions = jsonb_build_object(
+            'printers', to_jsonb($2::text[]),
+            'print_jobs', 'create_and_monitor'::text
+         ), updated_at = now() WHERE id = $1",
+    )
+    .bind(connector_id)
+    .bind(printer_ids)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
 }
 
 async fn platform_grant_tenants(
@@ -6575,6 +7043,46 @@ fn normalize_agent_state(value: &str) -> String {
     .to_owned()
 }
 
+async fn upsert_node_connector(
+    transaction: &mut Transaction<'_, Postgres>,
+    installation_key: &str,
+    public_key: &[u8],
+    workspace_id: WorkspaceId,
+    environment_id: EnvironmentId,
+    agent_id: &str,
+) -> Result<String, StorageError> {
+    let installation_id = format!("ninst_{}", ulid::Ulid::new());
+    let stored_installation_id: String = sqlx::query_scalar(
+        "INSERT INTO node_installations (id, installation_key, public_key)
+         VALUES ($1,$2,$3)
+         ON CONFLICT (installation_key) DO UPDATE
+         SET updated_at = node_installations.updated_at
+         RETURNING id",
+    )
+    .bind(installation_id)
+    .bind(installation_key)
+    .bind(public_key)
+    .fetch_one(&mut **transaction)
+    .await?;
+    let connector_id = format!("ncon_{}", ulid::Ulid::new());
+    let stored_connector_id: String = sqlx::query_scalar(
+        "INSERT INTO node_connectors
+             (id, installation_id, workspace_id, environment_id, agent_id)
+         VALUES ($1,$2,$3,$4,$5)
+         ON CONFLICT (workspace_id, environment_id, agent_id) DO UPDATE
+         SET installation_id = EXCLUDED.installation_id, revoked_at = NULL, updated_at = now()
+         RETURNING id",
+    )
+    .bind(connector_id)
+    .bind(stored_installation_id)
+    .bind(workspace_id.to_string())
+    .bind(environment_id.to_string())
+    .bind(agent_id)
+    .fetch_one(&mut **transaction)
+    .await?;
+    Ok(stored_connector_id)
+}
+
 fn agent_from_row(row: &PgRow) -> Result<StoredAgent, StorageError> {
     let id: String = row.try_get("id")?;
     Ok(StoredAgent {
@@ -6586,6 +7094,19 @@ fn agent_from_row(row: &PgRow) -> Result<StoredAgent, StorageError> {
         state: normalize_agent_state(&row.try_get::<String, _>("state")?),
         version: row.try_get("version")?,
         last_seen_at: row.try_get("last_seen_at")?,
+    })
+}
+
+fn node_connector_from_row(row: &PgRow) -> Result<StoredNodeConnector, StorageError> {
+    let node_id: String = row.try_get("agent_id")?;
+    Ok(StoredNodeConnector {
+        id: row.try_get("id")?,
+        node_id: node_id.parse().map_err(|error| {
+            StorageError::InvalidData(format!("node connector agent id `{node_id}`: {error}"))
+        })?,
+        permissions: row.try_get("permissions")?,
+        revoked_at: row.try_get("revoked_at")?,
+        created_at: row.try_get("created_at")?,
     })
 }
 
@@ -6836,5 +7357,13 @@ mod tests {
         let slug = workos_workspace_slug(&"organization-".repeat(20), "workspace_123456");
         assert_eq!(slug.len(), 120);
         assert!(slug.ends_with("-123456"));
+    }
+
+    #[test]
+    fn externally_supplied_installation_ids_are_bounded_and_portable() {
+        assert!(valid_external_installation_id("install_01J0ABCD"));
+        assert!(!valid_external_installation_id("short"));
+        assert!(!valid_external_installation_id("install/../../other"));
+        assert!(!valid_external_installation_id(&"x".repeat(129)));
     }
 }

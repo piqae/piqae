@@ -6,10 +6,10 @@ present; otherwise they emit explicitly named unsigned Preview artifacts.
 
 | Platform | Agent/executor | Shell | Service template | Signed installer |
 | --- | --- | --- | --- | --- |
-| Linux | Preview | Preview; loopback status | Preview systemd template | No |
-| macOS aarch64 | Preview | Preview; authenticated status and native profile capture | Per-user LaunchAgents | Workflow implemented; no signed artifact published |
-| macOS x86_64 | Preview | Preview; authenticated status and native profile capture | Per-user LaunchAgents | Workflow implemented; no signed artifact published |
-| Windows | Development only | Development; status and native profile capture | Per-user login launcher; no SCM service | Workflow implemented; no signed artifact published |
+| Linux | Preview | Preview; loopback status; no native connect-link consent | Preview systemd template | No |
+| macOS aarch64 | Preview | Preview; authenticated status, native profiles, and connect-link consent | Per-user LaunchAgents | Workflow implemented; no signed artifact published |
+| macOS x86_64 | Preview | Preview; authenticated status, native profiles, and connect-link consent | Per-user LaunchAgents | Workflow implemented; no signed artifact published |
+| Windows | Disabled for production; preview-only evaluation | Disabled for production; development tray status and native profiles; no native connect-link consent | Per-user login launcher; no SCM service | Workflow implemented; no signed artifact published |
 
 Every archive includes its platform template/readme, the detailed installation
 notes, support matrix, SPDX JSON SBOM, and a SHA-256 sidecar. The checksum
