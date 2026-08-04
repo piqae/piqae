@@ -359,7 +359,7 @@ async fn compute_target_readiness(
 ) -> Result<StoredTargetReadiness, AppError> {
     let target = state
         .repository
-        .get_target(tenant.workspace_id, tenant.environment_id, &target_id)
+        .get_target(tenant.workspace_id, tenant.environment_id, target_id)
         .await?;
     let target_stock_available = if let Some(stock_id) = target.stock_id.as_deref() {
         !state
@@ -372,7 +372,7 @@ async fn compute_target_readiness(
     };
     let bindings = state
         .repository
-        .list_target_bindings(tenant.workspace_id, tenant.environment_id, &target_id)
+        .list_target_bindings(tenant.workspace_id, tenant.environment_id, target_id)
         .await?;
     let agents = state
         .repository
@@ -433,7 +433,7 @@ async fn compute_target_readiness(
 pub struct DesignSpecificationDestination {
     binding: StoredTargetBinding,
     printer: piqae_storage_postgres::StoredPrinter,
-    profile: piqae_protocol::agent::PrinterProfileSnapshot,
+    profile: piqae_storage_postgres::PrinterProfileSnapshot,
 }
 
 #[derive(Debug, Serialize)]
@@ -483,8 +483,8 @@ pub async fn design_specification(
             .profiles
             .iter()
             .find(|profile| {
-                profile.profile_id == binding.profile_id
-                    && profile.revision == binding.profile_revision
+                (profile.profile_id.as_str(), profile.revision)
+                    == (binding.profile_id.as_str(), binding.profile_revision)
             })
             .cloned()
             .ok_or(RepositoryError::NotFound)?;

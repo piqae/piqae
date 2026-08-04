@@ -1852,6 +1852,16 @@ struct MemoryDeviceAuthorization {
     installation_id: String,
 }
 
+/// Workspace, environment, installation identifier, expiry, and the node whose
+/// device key the token rebinds, when it is a rotation rather than a new node.
+type MemoryEnrolment = (
+    WorkspaceId,
+    EnvironmentId,
+    String,
+    DateTime<Utc>,
+    Option<AgentId>,
+);
+
 #[derive(Debug, Default)]
 struct MemoryState {
     api_keys: HashMap<String, (WorkspaceId, EnvironmentId, StoredApiKey, String)>,
@@ -1866,16 +1876,7 @@ struct MemoryState {
     /// that in-place key rotation depends on.
     agent_installations: HashMap<(WorkspaceId, EnvironmentId, String), AgentId>,
     agent_public_keys: HashMap<AgentId, Vec<u8>>,
-    enrolments: HashMap<
-        String,
-        (
-            WorkspaceId,
-            EnvironmentId,
-            String,
-            DateTime<Utc>,
-            Option<AgentId>,
-        ),
-    >,
+    enrolments: HashMap<String, MemoryEnrolment>,
     device_authorizations: HashMap<String, MemoryDeviceAuthorization>,
     node_updates: HashMap<AgentId, StoredNodeUpdate>,
     webhooks: HashMap<String, (WorkspaceId, EnvironmentId, StoredWebhook, Vec<u8>)>,
