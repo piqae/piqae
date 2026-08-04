@@ -19,7 +19,7 @@ export interface ReleaseOriginConfig {
 }
 
 const releaseAssetPattern =
-  /^(?:appcast-(?:macos|windows)\.xml|piqae-[A-Za-z0-9][A-Za-z0-9._-]{0,160}\.(?:dmg|exe|zip|json|txt|sha256))$/;
+  /^(?:appcast-(?:macos|windows)\.xml|piqae-[A-Za-z0-9][A-Za-z0-9._-]{0,160}\.(?:dmg|pkg|exe|zip|json|txt|sha256))$/;
 const maximumManifestBytes = 128 * 1024;
 const manifestReadTimeoutMilliseconds = 2_000;
 const assetLookupTimeoutMilliseconds = 2_000;
@@ -147,6 +147,7 @@ function contentType(asset: string): string {
   if (asset.endsWith('.json')) return 'application/json';
   if (asset.endsWith('.txt') || asset.endsWith('.sha256')) return 'text/plain; charset=utf-8';
   if (asset.endsWith('.zip')) return 'application/zip';
+  if (asset.endsWith('.pkg')) return 'application/vnd.apple.installer+xml';
   return 'application/octet-stream';
 }
 

@@ -37,6 +37,9 @@ jobs:
       MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
       MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
       MACOS_APPLICATION_IDENTITY: ${{ secrets.MACOS_APPLICATION_IDENTITY }}
+      MACOS_INSTALLER_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_INSTALLER_CERTIFICATE_P12_BASE64 }}
+      MACOS_INSTALLER_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_INSTALLER_CERTIFICATE_PASSWORD }}
+      MACOS_INSTALLER_IDENTITY: ${{ secrets.MACOS_INSTALLER_IDENTITY }}
       APPLE_ID: ${{ secrets.APPLE_ID }}
       APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
       APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
@@ -90,6 +93,9 @@ jobs:
             MACOS_CERTIFICATE_P12_BASE64
             MACOS_CERTIFICATE_PASSWORD
             MACOS_APPLICATION_IDENTITY
+            MACOS_INSTALLER_CERTIFICATE_P12_BASE64
+            MACOS_INSTALLER_CERTIFICATE_PASSWORD
+            MACOS_INSTALLER_IDENTITY
             APPLE_ID
             APPLE_TEAM_ID
             APPLE_APP_PASSWORD
@@ -158,6 +164,7 @@ jobs:
             packaging/macos/build-user-package.sh \
             packaging/macos/generate-appcast.sh \
             packaging/macos/install-user.sh \
+            packaging/macos/pkg-postinstall \
             packaging/macos/sign-app.sh \
             packaging/macos/sign-components.sh \
             packaging/macos/uninstall-user.sh \
@@ -200,10 +207,13 @@ jobs:
           fixture="$GITHUB_WORKSPACE/.piqae-test-fixtures/native-release"
           keychain="$fixture/release.keychain-db"
           certificate="$fixture/developer-id.p12"
+          installer_certificate="$fixture/developer-id-installer.p12"
           keychain_password=$(openssl rand -hex 24)
           echo "::add-mask::$keychain_password"
           printf '%s' "$MACOS_CERTIFICATE_P12_BASE64" | base64 -D > "$certificate"
+          printf '%s' "$MACOS_INSTALLER_CERTIFICATE_P12_BASE64" | base64 -D > "$installer_certificate"
           chmod 0600 "$certificate"
+          chmod 0600 "$installer_certificate"
           security create-keychain -p "$keychain_password" "$keychain"
           security set-keychain-settings -lut 21600 "$keychain"
           security unlock-keychain -p "$keychain_password" "$keychain"
@@ -211,6 +221,14 @@ jobs:
             -k "$keychain" \
             -P "$MACOS_CERTIFICATE_PASSWORD" \
             -T /usr/bin/codesign \
+            -T /usr/bin/pkgbuild \
+            -T /usr/bin/productsign \
+            -T /usr/bin/security
+          security import "$installer_certificate" \
+            -k "$keychain" \
+            -P "$MACOS_INSTALLER_CERTIFICATE_PASSWORD" \
+            -T /usr/bin/pkgbuild \
+            -T /usr/bin/productsign \
             -T /usr/bin/security
           security set-key-partition-list \
             -S apple-tool:,apple:,codesign: \
@@ -220,6 +238,8 @@ jobs:
           security list-keychains -d user -s "$keychain"
           security find-identity -v -p codesigning "$keychain" |
             grep -F "$MACOS_APPLICATION_IDENTITY"
+          security find-identity -v -p basic "$keychain" |
+            grep -F "$MACOS_INSTALLER_IDENTITY"
           echo "PIQAE_RELEASE_KEYCHAIN=$keychain" >> "$GITHUB_ENV"
 
       - name: Build app bundle
@@ -260,7 +280,7 @@ jobs:
             cat "$fixture/menu-launch-smoke.err" >&2
             exit 1
           fi
-          kill -TERM "$menu_pid"
+          kill -TERM "$menu_pid" 2>/dev/null || true
           wait "$menu_pid" || true
 
       - name: Sign standalone node components
@@ -344,16 +364,37 @@ jobs:
         run: |
           fixture="$GITHUB_WORKSPACE/.piqae-test-fixtures/native-release"
           PIQAE_CODE_SIGN_IDENTITY="${MACOS_APPLICATION_IDENTITY:-}" \
+          PIQAE_INSTALLER_SIGN_IDENTITY="${MACOS_INSTALLER_IDENTITY:-}" \
             packaging/macos/build-user-package.sh \
               "$fixture/Piqae.app" \
               "$fixture/bin/piqae-agent" \
               "$fixture/bin/piqae-executor-cups" \
               artifacts
 
-      - name: Notarise and staple installer disk image
+      - name: Notarise and staple installer package and disk image
         if: steps.gate.outputs.release_mode == 'signed'
         shell: bash
         run: |
+          installer_packages=(artifacts/Piqae-*-macos-installer.pkg)
+          if [[ "${#installer_packages[@]}" -ne 1 || ! -f "${installer_packages[0]}" ]]; then
+            echo "Expected exactly one installer package." >&2
+            exit 1
+          fi
+          installer_package=${installer_packages[0]}
+          xcrun notarytool submit "$installer_package" \
+            --apple-id "$APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_PASSWORD" \
+            --wait \
+            --output-format json \
+            > artifacts/installer-package-notarisation-evidence.json
+          jq -e '.status == "Accepted"' artifacts/installer-package-notarisation-evidence.json
+          xcrun stapler staple "$installer_package"
+          xcrun stapler validate "$installer_package" \
+            > artifacts/installer-package-stapler-evidence.txt
+          spctl --assess --type install --verbose=4 "$installer_package" \
+            2> artifacts/installer-package-gatekeeper-evidence.txt
+
           installer_images=(artifacts/Piqae-*-macos-installer.dmg)
           if [[ "${#installer_images[@]}" -ne 1 || ! -f "${installer_images[0]}" ]]; then
             echo "Expected exactly one installer disk image." >&2
@@ -437,8 +478,8 @@ jobs:
               echo "sparkle_updates=disabled"
             else
               echo "signature=app, node, and executor evidence in codesign-evidence.txt"
-              echo "notarisation=app and installer evidence in app-notarisation-evidence.json and installer-notarisation-evidence.json"
-              echo "installer=Developer ID signed, Apple notarised, and stapled DMG"
+              echo "notarisation=app, installer package, and disk image evidence recorded in the notarisation evidence files"
+              echo "installer=Developer ID Installer signed package in a Developer ID signed, Apple notarised, and stapled DMG"
               echo "sparkle_updates=Ed25519 archive signature verified with public key"
             fi
           } > artifacts/RELEASE-EVIDENCE.txt
@@ -515,9 +556,9 @@ jobs:
             echo "Stable publication refuses a non-signed candidate." >&2
             exit 1
           fi
-          source_user="artifacts/Piqae-${RELEASE_VERSION}-${RELEASE_BUILD}-macos-installer.dmg"
+          source_user="artifacts/Piqae-${RELEASE_VERSION}-${RELEASE_BUILD}-macos-installer.pkg"
           source_update="artifacts/Piqae-${RELEASE_VERSION}-${RELEASE_BUILD}-macos-update.zip"
-          user_name="piqae-macos-${RELEASE_VERSION}-${RELEASE_BUILD}-universal.dmg"
+          user_name="piqae-macos-${RELEASE_VERSION}-${RELEASE_BUILD}-universal.pkg"
           update_name="piqae-macos-${RELEASE_VERSION}-${RELEASE_BUILD}-update.zip"
           sbom_name="piqae-macos-${RELEASE_VERSION}-${RELEASE_BUILD}-SBOM.spdx.json"
           mkdir -p promotion
@@ -555,7 +596,7 @@ jobs:
                   label: "Developer ID signed, Apple notarised and stapled"
                 },
                 notes: [
-                  "Double-click installer for Apple silicon and Intel Macs; no administrator access required.",
+                  "Open the standard macOS Installer package for Apple silicon and Intel Macs.",
                   "The menu app, local node, and CUPS executor are Developer ID signed.",
                   "The current Sparkle archive updates the menu application; full node-component rollback remains a separate certification gate."
                 ]
@@ -596,11 +637,11 @@ jobs:
           PIQAE_RELEASES_S3_REGION: ${{ secrets.PIQAE_RELEASES_S3_REGION }}
         run: |
           prefix="native/releases/$RELEASE_VERSION/macos-${RELEASE_BUILD}-${GITHUB_RUN_ATTEMPT}"
-          user_name="piqae-macos-${RELEASE_VERSION}-${RELEASE_BUILD}-universal.dmg"
+          user_name="piqae-macos-${RELEASE_VERSION}-${RELEASE_BUILD}-universal.pkg"
           update_name="piqae-macos-${RELEASE_VERSION}-${RELEASE_BUILD}-update.zip"
           sbom_name="piqae-macos-${RELEASE_VERSION}-${RELEASE_BUILD}-SBOM.spdx.json"
           packaging/release/publish-s3-object.sh immutable \
-            "promotion/$user_name" "$prefix/$user_name" application/x-apple-diskimage
+            "promotion/$user_name" "$prefix/$user_name" application/vnd.apple.installer+xml
           packaging/release/publish-s3-object.sh immutable \
             "promotion/$user_name.sha256" "$prefix/$user_name.sha256" text/plain
           packaging/release/publish-s3-object.sh immutable \
@@ -623,15 +664,15 @@ jobs:
           PIQAE_RELEASES_S3_REGION: ${{ secrets.PIQAE_RELEASES_S3_REGION }}
         run: |
           prefix="native/releases/$RELEASE_VERSION/macos-${RELEASE_BUILD}-${GITHUB_RUN_ATTEMPT}"
-          user_name="piqae-macos-${RELEASE_VERSION}-${RELEASE_BUILD}-universal.dmg"
+          user_name="piqae-macos-${RELEASE_VERSION}-${RELEASE_BUILD}-universal.pkg"
           update_name="piqae-macos-${RELEASE_VERSION}-${RELEASE_BUILD}-update.zip"
           sbom_name="piqae-macos-${RELEASE_VERSION}-${RELEASE_BUILD}-SBOM.spdx.json"
           packaging/release/publish-s3-object.sh promote \
-            "$prefix/$user_name" "native/stable/$user_name" application/x-apple-diskimage
+            "$prefix/$user_name" "native/stable/$user_name" application/vnd.apple.installer+xml
           packaging/release/publish-s3-object.sh promote \
             "$prefix/$user_name.sha256" "native/stable/$user_name.sha256" text/plain
           packaging/release/publish-s3-object.sh promote \
-            "$prefix/$user_name" native/stable/piqae-macos-universal.dmg application/x-apple-diskimage
+            "$prefix/$user_name" native/stable/piqae-macos-universal.pkg application/vnd.apple.installer+xml
           packaging/release/publish-s3-object.sh promote \
             "$prefix/$update_name" "native/stable/$update_name" application/zip
           packaging/release/publish-s3-object.sh promote \
@@ -738,7 +779,7 @@ jobs:
             https://downloads.piqae.com/releases/stable/manifest.json \
             | jq -e \
               --arg version "$RELEASE_VERSION" \
-              --arg download "https://downloads.piqae.com/releases/stable/piqae-macos-${RELEASE_VERSION}-${RELEASE_BUILD}-universal.dmg" \
+              --arg download "https://downloads.piqae.com/releases/stable/piqae-macos-${RELEASE_VERSION}-${RELEASE_BUILD}-universal.pkg" \
               '.currentVersion == $version
                and any(.artifacts[];
                  .id == "macos-universal"

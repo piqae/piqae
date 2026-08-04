@@ -40,6 +40,9 @@ describe('native release origin', () => {
     expect(releaseObjectKey('stable', 'piqae-macos-universal.dmg')).toBe(
       'native/stable/piqae-macos-universal.dmg'
     );
+    expect(releaseObjectKey('stable', 'piqae-macos-universal.pkg')).toBe(
+      'native/stable/piqae-macos-universal.pkg'
+    );
     expect(releaseObjectKey('preview', 'appcast-windows.xml')).toBe(
       'native/preview/appcast-windows.xml'
     );
