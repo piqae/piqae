@@ -165,7 +165,7 @@ jobs:
           $source = (Resolve-Path "artifacts\piqae-windows-x86_64").Path
           $output = (Resolve-Path "artifacts").Path
           $compiler = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
-          & $compiler "/DSourceDir=$source" "/DOutputDir=$output" "/DAppVersion=0.1.0-ci.$env:GITHUB_RUN_NUMBER" "packaging\windows\Piqae.iss"
+          & $compiler "/DSourceDir=$source" "/DOutputDir=$output" "/DAppVersion=0.1.1-ci.$env:GITHUB_RUN_NUMBER" "packaging\windows\Piqae.iss"
           if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed with exit code $LASTEXITCODE" }
           $installer = "artifacts\piqae-windows-x86_64-setup.exe"
           $hash = (Get-FileHash -Algorithm SHA256 $installer).Hash.ToLowerInvariant()

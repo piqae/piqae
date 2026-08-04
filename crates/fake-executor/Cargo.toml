@@ -9,12 +9,12 @@ publish = false
 
 [dependencies]
 piqae-domain.workspace = true
-piqae-executor-protocol = { path = "../executor-protocol", version = "0.1.0" }
+piqae-executor-protocol = { path = "../executor-protocol", version = "0.1.1" }
 piqae-protocol.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
-piqae-executor-supervisor = { path = "../executor-supervisor", version = "0.1.0" }
+piqae-executor-supervisor = { path = "../executor-supervisor", version = "0.1.1" }
 tokio.workspace = true
 
 [lints]

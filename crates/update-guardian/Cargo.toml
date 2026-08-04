@@ -14,7 +14,7 @@ semver = { version = "1.0.26", features = ["serde"] }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-piqae-update-metadata = { path = "../update-metadata", version = "0.1.0" }
+piqae-update-metadata = { path = "../update-metadata", version = "0.1.1" }
 thiserror.workspace = true
 
 [dev-dependencies]

@@ -14,8 +14,8 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 piqae-domain.workspace = true
-piqae-executor-windows = { path = "../executor-windows", version = "0.1.0" }
-piqae-local-ipc = { path = "../local-ipc", version = "0.1.0" }
+piqae-executor-windows = { path = "../executor-windows", version = "0.1.1" }
+piqae-local-ipc = { path = "../local-ipc", version = "0.1.1" }
 thiserror.workspace = true
 url.workspace = true
 uuid.workspace = true

@@ -18,7 +18,7 @@ ulid.workspace = true
 piqae-domain.workspace = true
 
 [dev-dependencies]
-piqae-auth = { path = "../auth", version = "0.1.0" }
+piqae-auth = { path = "../auth", version = "0.1.1" }
 tokio.workspace = true
 
 [lints]
