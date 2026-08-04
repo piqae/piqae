@@ -3,12 +3,11 @@
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.piqae.node.menu</string>
+    <string>com.piqae.node.menu.launcher</string>
     <key>ProgramArguments</key>
     <array>
         <string>/usr/bin/open</string>
         <string>-g</string>
-        <string>-a</string>
         <string>@APP_ROOT@</string>
     </array>
     <key>RunAtLoad</key>

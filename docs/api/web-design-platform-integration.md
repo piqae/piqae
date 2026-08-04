@@ -141,7 +141,7 @@ const session = await account.connectSessions.create({
 
 The implemented-preview session lasts 60–900 seconds and returns a one-time
 `connect_url` plus macOS, Windows, and Linux download choices. New sessions use
-the Associated Domains verified `https://app.piqae.com/connect` Universal Link;
+the verified `https://app.piqae.com/connect` link shape;
 the old `piqae://connect` transport is deprecated compatibility for existing
 Preview builds and is no longer emitted. Send only the connect URL to the
 intended authenticated user. Its URL fragment contains a

@@ -273,11 +273,24 @@ jobs:
           lipo -archs "$app/Contents/MacOS/PiqaePrintCoreReplay" | grep -F arm64 | grep -F x86_64
           otool -l "$app/Contents/MacOS/PiqaeMenu" |
             grep -F "@executable_path/../Frameworks"
-          # GitHub's hosted macOS runner has no interactive Aqua session, so
-          # launching a menu-bar app here is nondeterministic and can be killed
-          # by launchservices. Swift tests exercise startup behavior; release
-          # CI validates the built executable and universal bundle directly.
-          test -x "$app/Contents/MacOS/PiqaeMenu"
+          if codesign -d --entitlements :- "$app" 2>/dev/null |
+            grep -F 'com.apple.developer.associated-domains'
+          then
+            echo 'Developer ID release must not ship a restricted entitlement without an embedded provisioning profile.' >&2
+            exit 1
+          fi
+          "$app/Contents/MacOS/PiqaeMenu" \
+            > "$fixture/menu-launch-smoke.out" \
+            2> "$fixture/menu-launch-smoke.err" &
+          menu_pid=$!
+          sleep 2
+          if ! kill -0 "$menu_pid" 2>/dev/null; then
+            cat "$fixture/menu-launch-smoke.err" >&2
+            wait "$menu_pid" || true
+            exit 1
+          fi
+          kill -TERM "$menu_pid" 2>/dev/null || true
+          wait "$menu_pid" || true
 
       - name: Sign standalone node components
         if: steps.gate.outputs.release_mode == 'signed'
