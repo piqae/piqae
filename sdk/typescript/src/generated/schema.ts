@@ -11,7 +11,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Inspect the PrintNode-compatible account projection */
+        /** Inspect the legacy-compatible account projection */
         get: operations["compatibilityWhoAmI"];
         put?: never;
         post?: never;
@@ -28,7 +28,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Check authenticated PrintNode compatibility access */
+        /** Check authenticated legacy compatibility access */
         get: operations["compatibilityPing"];
         put?: never;
         post?: never;
@@ -62,7 +62,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List PrintNode-compatible computers */
+        /** List legacy-compatible computers */
         get: operations["compatibilityListComputers"];
         put?: never;
         post?: never;
@@ -82,7 +82,7 @@ export interface paths {
             };
             cookie?: never;
         };
-        /** Get a set of PrintNode-compatible computers */
+        /** Get a set of legacy-compatible computers */
         get: operations["compatibilityGetComputers"];
         put?: never;
         post?: never;
@@ -141,7 +141,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List PrintNode-compatible printers */
+        /** List legacy-compatible printers */
         get: operations["compatibilityListPrinters"];
         put?: never;
         post?: never;
@@ -161,7 +161,7 @@ export interface paths {
             };
             cookie?: never;
         };
-        /** Get a set of PrintNode-compatible printers */
+        /** Get a set of legacy-compatible printers */
         get: operations["compatibilityGetPrinters"];
         put?: never;
         post?: never;
@@ -178,10 +178,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List PrintNode-compatible print jobs */
+        /** List legacy-compatible print jobs */
         get: operations["compatibilityListPrintJobs"];
         put?: never;
-        /** Create a PrintNode-compatible print job */
+        /** Create a legacy-compatible print job */
         post: operations["compatibilityCreatePrintJob"];
         /** Cancel all eligible pre-delivery print jobs */
         delete: operations["compatibilityCancelPrintJobs"];
@@ -200,7 +200,7 @@ export interface paths {
             };
             cookie?: never;
         };
-        /** Get a set of PrintNode-compatible print jobs */
+        /** Get a set of legacy-compatible print jobs */
         get: operations["compatibilityGetPrintJobs"];
         put?: never;
         post?: never;
@@ -218,7 +218,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List PrintNode-compatible job states */
+        /** List legacy-compatible job states */
         get: operations["compatibilityListPrintJobStates"];
         put?: never;
         post?: never;
@@ -238,7 +238,7 @@ export interface paths {
             };
             cookie?: never;
         };
-        /** Get PrintNode-compatible states for a job set */
+        /** Get legacy-compatible states for a job set */
         get: operations["compatibilityGetPrintJobStates"];
         put?: never;
         post?: never;

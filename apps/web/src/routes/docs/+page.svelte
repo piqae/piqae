@@ -31,7 +31,7 @@ await customer.printPdf({
     </p>
     <div>
       <a class="button primary" href="/docs/quickstart">Start printing <Icon name="arrow-right" size={13} /></a>
-      <a class="button" href="/docs/printnode-migration">Migrate from PrintNode</a>
+      <a class="button" href="/docs/legacy-compatibility">Legacy compatibility</a>
     </div>
   </header>
 

@@ -37,7 +37,7 @@ implementation. See
 Severity: critical.
 
 Local drivers accept different spool formats and expose options inconsistently.
-PDFium rendering plus GDI may differ from PrintNode's proprietary engines in
+PDFium rendering plus GDI may differ from the legacy service's proprietary engines in
 rotation, scaling, fonts, colour, and label dimensions.
 
 Mitigation:
@@ -140,7 +140,7 @@ Mitigation:
 Severity: medium/high.
 
 Engineering, code signing, hardware QA, and on-call cost may exceed the current
-PrintNode bill if the goal remains internal savings only.
+legacy-provider bill if the goal remains internal savings only.
 
 Mitigation:
 
@@ -155,7 +155,7 @@ Complete before Phase 1:
 
 ### Current use
 
-- Monthly PrintNode bill:
+- Monthly legacy-provider bill:
 - Jobs per day/month and peak per minute:
 - Average/p95/max document size:
 - PDF versus RAW percentage:
@@ -186,7 +186,7 @@ Complete before Phase 1:
 - Required trays/papers/media:
 - Required DPI/duplex/colour/copies/collation:
 - Label/receipt cutters or cash drawers:
-- Known current PrintNode engine setting/workaround:
+- Known current legacy printing engine setting/workaround:
 
 ### Reliability
 
@@ -245,7 +245,7 @@ Complete before Phase 1:
 
 - Select a non-infringing name and branding.
 - Obtain counsel on API compatibility in intended jurisdictions.
-- Do not use PrintNode binaries, private protocol captures, trademarks, or
+- Do not use third-party binaries, private protocol captures, trademarks, or
   copied documentation/code.
 - Review PDFium and every bundled native dependency licence.
 - Use Developer Certificate of Origin sign-off; no CLA.

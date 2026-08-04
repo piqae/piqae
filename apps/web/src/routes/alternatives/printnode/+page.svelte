@@ -90,7 +90,7 @@
       </p>
       <div class="m-actions">
         <a class="m-button primary" href="/migrate/printnode">Open the migration plan</a>
-        <a class="m-button secondary" href="/docs/printnode-migration">Technical compatibility</a>
+        <a class="m-button secondary" href="/docs/legacy-compatibility">Technical compatibility</a>
       </div>
     </div>
   </section>

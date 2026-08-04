@@ -2,7 +2,7 @@
 
 ## Purpose
 
-The PrintNode-compatible API exists for migration. The native API should be
+The legacy-compatible API exists for migration. The native API should be
 cleaner, stream documents efficiently, expose honest states, and remain the
 contract used by the Svelte interfaces.
 
@@ -19,7 +19,7 @@ This document is a proposed starting contract, not a frozen 1.0 schema.
 - Every response carries `X-Request-Id`. A caller value is preserved only when
   it is 1–128 ASCII bytes matching
   `^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`; otherwise the server generates
-  `req_<ULID>`. Native `error.request_id` and PrintNode-compatible error `uid`
+  `req_<ULID>`. Native `error.request_id` and legacy-compatible error `uid`
   exactly equal that response header.
 - Cursor pagination, with stable `nextCursor`.
 - Optimistic concurrency through `ETag`/`If-Match` on mutable configuration.
@@ -64,7 +64,7 @@ Logical installed service. Important fields:
 This resource represents an installed operating-system destination. The
 expanded native-profile design adds optional physical-device grouping,
 immutable profiles, stock, and stable routing targets without changing the
-PrintNode-compatible meaning of a printer. See
+legacy-compatible meaning of a printer. See
 [native print profiles, stock, and routing](16-native-print-profiles-stock-and-routing.md).
 
 ### Print profile

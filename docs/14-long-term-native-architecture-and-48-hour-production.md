@@ -30,7 +30,7 @@ This decision optimizes for the next five to ten years:
 
 The first release is a **production-operated v0.1 at hour 48**. Production means
 durable, secure, observable, recoverable, deployable, and supported inside an
-explicit matrix. It does not mean that every PrintNode feature and every printer
+explicit matrix. It does not mean that every legacy-provider feature and every printer
 driver has been certified by hour 48.
 
 ## Is Go worse or less performant?
@@ -624,7 +624,7 @@ can actually prove it.
 
 The architecture does not change. The supported envelope expands:
 
-- differential PrintNode API compatibility;
+- differential legacy API compatibility;
 - more driver options and printer certification;
 - PDFium renderer helper;
 - more OS/architecture installers and signing;

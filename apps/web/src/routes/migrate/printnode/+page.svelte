@@ -33,7 +33,7 @@
         traffic to Piqae’s managed durable queue.
       </p>
       <div class="m-actions">
-        <a class="m-button primary" href="/docs/printnode-migration">Open technical documentation</a>
+        <a class="m-button primary" href="/docs/legacy-compatibility">Open technical documentation</a>
         <a class="m-button" href="/compare/printnode">Compare products first</a>
       </div>
     </div>

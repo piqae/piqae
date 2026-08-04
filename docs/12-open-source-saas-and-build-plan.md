@@ -54,7 +54,7 @@ Position around:
 - open source and self-hostable;
 - local drivers and broad printer compatibility;
 - headless, low-resource agents;
-- PrintNode migration compatibility;
+- legacy-provider migration compatibility;
 - truthful, real-time states;
 - durable offline queues;
 - developer-first onboarding;
@@ -253,7 +253,7 @@ effects.
 - errors link directly to a stable explanation;
 - webhook tester and replay UI;
 - API explorer using test mode;
-- migration guide for each tested PrintNode SDK;
+- migration guide for each tested legacy-provider SDK;
 - changelog with before/after examples;
 - status and incident history.
 
@@ -273,7 +273,7 @@ part of design review.
 - minimum 12-month migration window for a retired version;
 - SDKs are thin wrappers, not alternate sources of truth.
 
-PrintNode compatibility is a named compatibility version, separate from the
+legacy compatibility is a named compatibility version, separate from the
 native API. It can improve internally without silently changing observed
 legacy behavior.
 
@@ -626,12 +626,12 @@ Gate:
 - restore rehearsal succeeds;
 - job timeline explains every tested failure.
 
-### Programme 4: PrintNode replacement release (weeks 23–32)
+### Programme 4: legacy-provider migration release (weeks 23–32)
 
 Build:
 
 - compatibility API subset required internally;
-- differential tests against PrintNode;
+- differential tests against the legacy service;
 - all documented print options used by target integrations;
 - compatibility webhooks;
 - signed Windows/macOS/Linux installers;
@@ -644,7 +644,7 @@ Gate:
 
 - existing application changes only base URL/key in the supported path;
 - no lost or silent duplicate job during soak;
-- PrintNode can be disabled with rehearsed rollback.
+- the legacy service can be disabled with rehearsed rollback.
 
 ### Programme 5: cloud developer preview (weeks 28–36, partly parallel)
 
@@ -763,7 +763,7 @@ Review monthly:
 - unbounded support claims for all printers;
 - unsigned opaque auto-updates;
 - premature enterprise checklists that delay the five-minute print;
-- copying PrintNode code, private protocols, branding, or documentation.
+- copying third-party code, private protocols, branding, or documentation.
 
 ## Definition of success
 

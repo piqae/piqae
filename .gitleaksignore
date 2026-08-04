@@ -18,7 +18,7 @@ e0c9a0a1aa1b0fe309f8eb343ced104c69a06d45:deploy/cloud/test-promote.sh:generic-ap
 # The release auditor scans for this PEM marker; it is not key material.
 0a2d76280ba47792d2c4b584de67e93fd44b74c2:release/tools/release_bundle.py:private-key:28
 
-# PrintNode migration documentation uses shell-variable and placeholder values.
+# Historical migration documentation used shell-variable and placeholder values.
 14e912892c49199f94e107f0d08e0de4d562ce52:docs/api/printnode-migration.md:curl-auth-header:25
 14e912892c49199f94e107f0d08e0de4d562ce52:docs/api/printnode-migration.md:curl-auth-user:19
 14e912892c49199f94e107f0d08e0de4d562ce52:docs/api/printnode-migration.md:curl-auth-user:25

@@ -5,7 +5,7 @@
 Expose two contracts:
 
 - `/` or a dedicated compatibility hostname implements the documented
-  PrintNode API behavior needed by existing SDKs.
+  legacy API behavior needed by existing SDKs.
 - `/v1/...` is the native API with modern authentication, streaming uploads,
   richer states, and administrative functions.
 
@@ -28,7 +28,7 @@ Compatibility is versioned by a published matrix:
 ### Compatibility
 
 Support an API key as the HTTP Basic username with an empty password, as the
-PrintNode examples do. Return compatible `401` behavior and relevant
+legacy-provider examples do. Return compatible `401` behavior and relevant
 authentication/account headers.
 
 Store only a versioned password hash of each API key. A key has scopes even
@@ -54,7 +54,7 @@ Support:
 
 ## Resource identifiers
 
-PrintNode identifiers are positive integers. The native model should use
+legacy identifiers are positive integers. The native model should use
 sortable globally unique IDs internally, with a per-deployment integer mapping
 for compatibility resources.
 
@@ -133,7 +133,7 @@ Validation sequence:
    stores commit.
 
 An identical idempotency key and request should return the recorded result in
-the native API. Compatibility mode should reproduce PrintNode's documented 409
+the native API. Compatibility mode should reproduce the legacy service's documented 409
 on reuse.
 
 ## Option schema
@@ -239,7 +239,7 @@ Compatibility mode:
 
 - accepts URL, secret, and message selection;
 - emits arrays of documented computer/job events;
-- expects the PrintNode acknowledgement response;
+- expects the legacy acknowledgement response;
 - reproduces the stable event types and state projection.
 
 Native mode:
@@ -267,20 +267,20 @@ Do not expose the agent socket to browser clients. Browser connections use
 short-lived tokens, per-workspace authorization, subscription limits, and
 backpressure.
 
-The PrintNode-compatible browser socket can be added when scale parity is
+The legacy-compatible browser socket can be added when scale parity is
 implemented. Before claiming compatibility, test the public JavaScript SDK's
 authentication, hierarchical subscription filters, initial snapshot, live
 measurements, unsubscription, and connection tracking against both services.
 
 ## Official SDK migration findings
 
-Public PrintNode SDK inspection found:
+Public legacy-provider SDK inspection found:
 
 - Python accepts a configurable gateway URL.
 - Ruby accepts an API URL constructor argument.
 - Java has an API URL setter.
 - JavaScript has a configurable server option, though fallback logic contains
-  PrintNode host assumptions.
+  legacy API host assumptions.
 - PHP contains an overridable endpoint/host, but migration ergonomics require
   testing by version.
 
@@ -294,7 +294,7 @@ canonical contract.
 For each endpoint:
 
 1. Generate valid and invalid fixture requests.
-2. Send them to a dedicated PrintNode test account and the clone.
+2. Send them to a dedicated legacy-provider test account and the clone.
 3. Normalise nondeterministic IDs, timestamps, and request IDs.
 4. Compare status, headers, JSON shape, ordering, and durable side effects.
 5. Record intentional differences in the matrix.
@@ -306,8 +306,8 @@ generated PDFs, virtual/file printers, and RAW fixtures.
 
 Publish:
 
-- a base-URL change example for each supported PrintNode SDK;
-- a PrintNode key/resource import tool that imports metadata only where lawful
+- a base-URL change example for each supported legacy-provider SDK;
+- a legacy API key/resource import tool that imports metadata only where lawful
   and available;
 - an agent installation and printer remapping workflow;
 - a dry-run endpoint that validates printer/options without output;

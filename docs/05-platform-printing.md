@@ -104,7 +104,7 @@ Potential later backends:
 - a compatibility backend selected for known driver classes.
 
 Backend selection must be observable and overrideable per printer, similar in
-spirit to PrintNode exposing multiple engines. There should be one safe
+spirit to the legacy service exposing multiple engines. There should be one safe
 default, not a user-facing collection of unexplained engine numbers.
 
 ### Job and printer status
@@ -219,7 +219,7 @@ display name and dimensions.
 
 ### Page selection
 
-Parse PrintNode-compatible page expressions into a canonical ordered page set.
+Parse legacy-compatible page expressions into a canonical ordered page set.
 Reject invalid or out-of-range input before native handoff. Decide and document
 whether repeated pages are allowed in the native API; compatibility behavior
 must match the reference service.

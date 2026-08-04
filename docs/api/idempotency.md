@@ -15,7 +15,7 @@ Reusing it with a different request returns `409 idempotency_conflict`. Do not
 work around a conflict by appending random text; decide whether the intended
 operation is a retry, a replacement, or an additional physical copy.
 
-The PrintNode compatibility route uses `X-Idempotency-Key`. Native and
+The legacy compatibility route uses `X-Idempotency-Key`. Native and
 compatibility payloads have different shapes, so keep integration namespaces
 distinct.
 

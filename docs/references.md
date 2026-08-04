@@ -3,33 +3,6 @@
 Reviewed 29 July 2026. Product behavior can change; compatibility tests should
 record the actual date and version observed.
 
-## PrintNode primary sources
-
-- [How PrintNode works](https://www.printnode.com/en/docs)
-- [API reference](https://www.printnode.com/en/docs/api/curl)
-- [Features](https://www.printnode.com/en/features)
-- [Pricing](https://www.printnode.com/en/pricing)
-- [Downloads and supported client environments](https://www.printnode.com/en/download)
-- [FAQ](https://www.printnode.com/en/faq)
-- [Webhooks](https://www.printnode.com/en/docs/webhooks)
-- [RAW printing overview](https://www.printnode.com/en/docs/what-is-raw-printing)
-- [RAW printing on Windows](https://www.printnode.com/en/docs/raw-printing-for-windows)
-- [RAW printing on macOS](https://www.printnode.com/en/docs/raw-printing-for-osx)
-- [Supported printers](https://www.printnode.com/en/docs/supported-printers)
-- [Scale setup and behavior](https://www.printnode.com/en/docs/reading-usb-scales-over-the-internet)
-- [Supported scales](https://www.printnode.com/en/docs/supported-scales)
-- [Scale API test](https://www.printnode.com/en/docs/test-scales-api)
-- [Raspberry Pi/headless guide](https://www.printnode.com/en/docs/remote-printing-with-raspberry-pi)
-- [Troubleshooting](https://www.printnode.com/en/docs/troubleshooting)
-- [Custom branding](https://www.printnode.com/en/docs/branding-guidelines)
-- [Libraries and integrations](https://www.printnode.com/en/docs/plugins-and-libraries)
-- [PrintNode GitHub organisation](https://github.com/PrintNode)
-- [PrintNode JavaScript WebSocket/HTTP client](https://github.com/PrintNode/PrintNode-JS)
-- [PrintNode Python client](https://github.com/PrintNode/PrintNode-Python)
-- [PrintNode PHP client](https://github.com/PrintNode/PrintNode-PHP)
-- [PrintNode Ruby client](https://github.com/PrintNode/PrintNode-Ruby)
-- [PrintNode Java client](https://github.com/PrintNode/PrintNode-Java)
-
 ## Printing-platform primary sources
 
 - [OpenPrinting CUPS](https://openprinting.github.io/cups/)
@@ -106,7 +79,7 @@ implementation code merely because the repository is public.
 
 ## Notes on evidence
 
-- PrintNode's statements about server latency, memory use, document deletion,
+- the legacy service's statements about server latency, memory use, document deletion,
   and broad printer compatibility are vendor claims unless independently
   measured.
 - The public API documents `done` as OS-queue delivery, not physical print

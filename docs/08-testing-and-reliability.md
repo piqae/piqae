@@ -24,7 +24,7 @@ Pure tests for:
 
 - job-state transition legality;
 - event ordering and projection;
-- PrintNode-compatible state projection;
+- legacy-compatible state projection;
 - retry classification;
 - cancellation races;
 - expiry;
@@ -108,14 +108,14 @@ Compare rendered rasters with perceptual tolerances and inspect barcode
 readability. Golden changes require review, renderer-version annotation, and
 physical smoke tests.
 
-## PrintNode differential compatibility suite
+## the legacy service differential compatibility suite
 
-Use a dedicated PrintNode test account and non-physical/file-controlled queues.
+Use a dedicated legacy-provider test account and non-physical/file-controlled queues.
 For each public contract under implementation:
 
 - generate requests from a fixture table;
 - capture status, selected headers, JSON, ordering, and job states;
-- run the clone with equivalent fixture resources;
+- run Piqae's compatibility adapter with equivalent fixture resources;
 - normalise IDs/timestamps;
 - compare;
 - store the observed reference version/date;
@@ -134,7 +134,7 @@ Focus on edge cases:
 - offline client and expiry;
 - webhook success/failure acknowledgement.
 
-Do not automate high-volume physical printing against PrintNode. Use explicit
+Do not automate high-volume physical printing against the legacy service. Use explicit
 quotas and fixture printers.
 
 ## Virtual and file printer environments
@@ -317,4 +317,3 @@ Validate:
 - public compatibility matrix;
 - incident and release procedures;
 - clear known limitations for physical completion.
-

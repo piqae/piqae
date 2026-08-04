@@ -39,7 +39,7 @@ Build:
 ```text
 Application / SDK
         |
-        | REST (PrintNode-compatible or native)
+        | REST (legacy-compatible or native)
         v
 +--------------------------- optional ----------------------------+
 | Control plane                                                   |
@@ -209,7 +209,7 @@ For uploaded content:
 
 For URI mode, policy decides whether:
 
-- the agent downloads directly, preserving PrintNode-style data locality; or
+- the agent downloads directly, preserving legacy-style data locality; or
 - the control plane fetches and scans content, then serves it to the agent.
 
 Direct fetch is the compatibility default but should have an administrator

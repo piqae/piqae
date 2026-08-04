@@ -13,7 +13,7 @@ A local queue is necessary but not sufficient for remote printing.
 - Some printers have internal buffers that behave as a fourth, usually opaque,
   queue.
 
-PrintNode's public behavior confirms a hosted queue: it registers a job, retains
+The legacy service's public behavior confirms a hosted queue: it registers a job, retains
 it up to `expireAfter`, sends it to the client later, and only then hands it to
 the OS queue.
 
@@ -93,7 +93,7 @@ unless the native API supplies an explicit ordering key.
 
 ## Native job state model
 
-The internal model is richer than PrintNode's stable states.
+The internal model is richer than the legacy service's stable states.
 
 | State | Owner | Meaning |
 | --- | --- | --- |
@@ -136,7 +136,7 @@ Every observed state records:
 
 ## Compatibility state projection
 
-| Native event | PrintNode-compatible state |
+| Native event | legacy-compatible state |
 | --- | --- |
 | `registered` | `new` |
 | first job metadata delivery to a connected agent | `sent_to_client` |
@@ -144,7 +144,7 @@ Every observed state records:
 | terminal pre-handoff `failed` | `error` |
 | `expired` before client delivery | `expired` |
 
-Do not project `completed_reported` as a second `done`; PrintNode's `done`
+Do not project `completed_reported` as a second `done`; the legacy service's `done`
 semantics end at OS-queue acceptance. Richer states are available only through
 the native API and extension events.
 
@@ -162,7 +162,7 @@ Cancellation is a race and its result must identify the boundary:
 - after device transmission: cancellation is best effort only.
 
 Compatibility `DELETE /printjobs` returns only jobs cancelled before client
-delivery, matching documented PrintNode behavior.
+delivery, matching documented legacy-provider behavior.
 
 ## Retry classification
 
@@ -317,7 +317,7 @@ explicitly requests a streaming backpressure mode.
 The loopback native API reuses the same domain commands and state events:
 
 - streamed multipart/binary upload;
-- optional PrintNode compatibility routes;
+- optional legacy compatibility routes;
 - SSE/WebSocket event feed;
 - bearer token or OS-user access controls;
 - Unix domain socket/named pipe option for local privileged integrations.
