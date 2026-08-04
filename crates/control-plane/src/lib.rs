@@ -1454,6 +1454,38 @@ mod tests {
         assert_eq!(readiness["status"], "ready");
         assert_eq!(readiness["bindings"][0]["status"], "ready");
 
+        let specification_response = application
+            .router
+            .clone()
+            .oneshot(api_request(
+                "GET",
+                &format!("/v1/targets/{target_id}/design-specification"),
+                "piq_test_integration",
+                None,
+            ))
+            .await
+            .expect("design specification response");
+        assert_eq!(specification_response.status(), StatusCode::OK);
+        let specification: serde_json::Value = serde_json::from_slice(
+            &specification_response
+                .into_body()
+                .collect()
+                .await
+                .expect("design specification body")
+                .to_bytes(),
+        )
+        .expect("design specification JSON");
+        assert_eq!(
+            specification["destinations"][0]["profile"]["profile_id"],
+            "profile_shipping"
+        );
+        assert_eq!(specification["destinations"][0]["profile"]["revision"], 4);
+        assert!(
+            specification["specification_revision"]
+                .as_str()
+                .is_some_and(|revision| revision.starts_with("spec_"))
+        );
+
         application
             .repository
             .set_agent_offline(application.agent_id)
