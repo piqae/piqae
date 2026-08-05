@@ -257,29 +257,6 @@ jobs:
       - name: Install the packed SDK in a clean consumer
         run: pnpm --filter @piqae/sdk smoke:package
 
-  web-sdk-compatibility:
-    name: Web and SDK
-    needs: [changes, sdk, web]
-    if: always()
-    runs-on: ${{ vars.PIQAE_CI_LIGHT_RUNNER || 'ubuntu-latest' }}
-    timeout-minutes: 5
-    steps:
-      - name: Preserve the existing required-check contract
-        env:
-          SDK_REQUIRED: ${{ needs.changes.outputs.sdk }}
-          SDK_RESULT: ${{ needs.sdk.result }}
-          WEB_REQUIRED: ${{ needs.changes.outputs.web }}
-          WEB_RESULT: ${{ needs.web.result }}
-        run: |
-          if [[ "$SDK_REQUIRED" == true && "$SDK_RESULT" != success ]]; then
-            echo "SDK validation did not succeed." >&2
-            exit 1
-          fi
-          if [[ "$WEB_REQUIRED" == true && "$WEB_RESULT" != success ]]; then
-            echo "Web validation did not succeed." >&2
-            exit 1
-          fi
-
   supply-chain:
     name: Supply chain
     needs: changes
@@ -331,46 +308,10 @@ jobs:
       - run: terraform init -backend=false -input=false
       - run: terraform validate -no-color
 
-  macos-shell-compatibility:
-    name: macOS menu shell
-    needs: [changes, rust-macos, macos-shell]
-    if: always()
-    runs-on: ${{ vars.PIQAE_CI_LIGHT_RUNNER || 'ubuntu-latest' }}
-    timeout-minutes: 5
-    steps:
-      - name: Preserve the existing required-check contract
-        env:
-          RUST_REQUIRED: ${{ needs.changes.outputs.macos_rust }}
-          RUST_RESULT: ${{ needs.rust-macos.result }}
-          SHELL_REQUIRED: ${{ needs.changes.outputs.macos_shell }}
-          SHELL_RESULT: ${{ needs.macos-shell.result }}
-        run: |
-          [[ "$RUST_REQUIRED" != true || "$RUST_RESULT" == success ]]
-          [[ "$SHELL_REQUIRED" != true || "$SHELL_RESULT" == success ]]
-
-  windows-installer-compatibility:
-    name: Windows development installer
-    needs: [changes, rust-windows]
-    if: always()
-    runs-on: ${{ vars.PIQAE_CI_LIGHT_RUNNER || 'ubuntu-latest' }}
-    timeout-minutes: 5
-    steps:
-      - name: Preserve the existing required-check contract
-        env:
-          REQUIRED: ${{ needs.changes.outputs.windows_rust }}
-          INSTALLER_REQUIRED: ${{ needs.changes.outputs.windows_installer }}
-          RESULT: ${{ needs.rust-windows.result }}
-        run: |
-          if [[ ("$REQUIRED" == true || "$INSTALLER_REQUIRED" == true) && "$RESULT" != success ]]; then
-            echo "Combined Windows Rust and installer validation did not succeed." >&2
-            exit 1
-          fi
-
   result:
     name: CI result
     needs:
       - changes
-      - macos-shell-compatibility
       - macos-shell
       - openapi
       - rust-linux
@@ -380,8 +321,6 @@ jobs:
       - supply-chain
       - terraform
       - web
-      - web-sdk-compatibility
-      - windows-installer-compatibility
     if: always()
     runs-on: ${{ vars.PIQAE_CI_LIGHT_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 5
@@ -389,7 +328,7 @@ jobs:
       - name: Require every selected job to succeed
         env:
           CHANGES: ${{ needs.changes.result }}
-          MACOS_COMPATIBILITY: ${{ needs.macos-shell-compatibility.result }}
+          MACOS_SHELL: ${{ needs.macos-shell.result }}
           OPENAPI: ${{ needs.openapi.result }}
           RUST_LINUX: ${{ needs.rust-linux.result }}
           RUST_MACOS: ${{ needs.rust-macos.result }}
@@ -398,12 +337,10 @@ jobs:
           SUPPLY_CHAIN: ${{ needs.supply-chain.result }}
           TERRAFORM: ${{ needs.terraform.result }}
           WEB: ${{ needs.web.result }}
-          WEB_SDK_COMPATIBILITY: ${{ needs.web-sdk-compatibility.result }}
-          WINDOWS_COMPATIBILITY: ${{ needs.windows-installer-compatibility.result }}
         run: |
           for result in \
             "$CHANGES" \
-            "$MACOS_COMPATIBILITY" \
+            "$MACOS_SHELL" \
             "$OPENAPI" \
             "$RUST_LINUX" \
             "$RUST_MACOS" \
@@ -411,9 +348,7 @@ jobs:
             "$SDK" \
             "$SUPPLY_CHAIN" \
             "$TERRAFORM" \
-            "$WEB" \
-            "$WEB_SDK_COMPATIBILITY" \
-            "$WINDOWS_COMPATIBILITY"
+            "$WEB"
           do
             if [[ "$result" != success && "$result" != skipped ]]; then
               echo "A selected CI job ended with '$result'." >&2
