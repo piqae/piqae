@@ -12,6 +12,7 @@ class CiChangedPathsTests(unittest.TestCase):
     def test_web_change_is_scoped_to_web(self) -> None:
         selected = classify(["apps/web/src/routes/+page.svelte"])
         self.assertTrue(selected["web"])
+        self.assertFalse(selected["sdk"])
         self.assertFalse(selected["rust"])
         self.assertFalse(selected["macos"])
         self.assertFalse(selected["windows"])
@@ -21,6 +22,11 @@ class CiChangedPathsTests(unittest.TestCase):
         self.assertTrue(selected["rust"])
         self.assertTrue(selected["macos"])
         self.assertTrue(selected["windows"])
+
+    def test_sdk_change_does_not_build_the_web_application(self) -> None:
+        selected = classify(["sdk/typescript/src/index.ts"])
+        self.assertTrue(selected["sdk"])
+        self.assertFalse(selected["web"])
 
     def test_platform_packaging_change_is_platform_specific(self) -> None:
         macos = classify(["packaging/macos/install-user.sh"])
@@ -34,6 +40,7 @@ class CiChangedPathsTests(unittest.TestCase):
         selected = classify(["contracts/openapi/piqae-v1.yaml"])
         self.assertTrue(selected["openapi"])
         self.assertTrue(selected["web"])
+        self.assertTrue(selected["sdk"])
 
     def test_workflow_change_selects_every_group(self) -> None:
         self.assertEqual(

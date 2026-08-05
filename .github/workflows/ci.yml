@@ -23,6 +23,7 @@ jobs:
       macos: ${{ steps.scope.outputs.macos }}
       openapi: ${{ steps.scope.outputs.openapi }}
       rust: ${{ steps.scope.outputs.rust }}
+      sdk: ${{ steps.scope.outputs.sdk }}
       terraform: ${{ steps.scope.outputs.terraform }}
       web: ${{ steps.scope.outputs.web }}
       windows: ${{ steps.scope.outputs.windows }}
@@ -181,7 +182,7 @@ jobs:
           retention-days: 3
 
   web:
-    name: Web and SDK
+    name: Web
     needs: changes
     if: needs.changes.outputs.web == 'true'
     runs-on: ${{ vars.PIQAE_CI_LINUX_RUNNER || 'ubuntu-latest' }}
@@ -196,16 +197,8 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: pnpm check
-      - run: pnpm test
-      - name: Verify generated SDK types
-        run: pnpm --filter @piqae/sdk generate:check
-      - name: Build and lint the SDK package
-        run: |
-          pnpm --filter @piqae/sdk build
-          pnpm --filter @piqae/sdk lint
-      - name: Install the packed SDK in a clean consumer
-        run: pnpm --filter @piqae/sdk smoke:package
+      - run: pnpm --filter @piqae/web check
+      - run: pnpm --filter @piqae/web test
       - name: Build the Node web artifact
         run: pnpm --filter @piqae/web build
       - name: Validate Piqae edge routing
@@ -213,6 +206,55 @@ jobs:
           node --test deploy/cloudflare/domain-router/router.test.mjs
           pnpm dlx wrangler@4.115.0 deploy --dry-run \
             --config deploy/cloudflare/domain-router/wrangler.jsonc
+
+  sdk:
+    name: SDK
+    needs: changes
+    if: needs.changes.outputs.sdk == 'true'
+    runs-on: ${{ vars.PIQAE_CI_LINUX_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
+        with:
+          version: 11.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @piqae/sdk generate:check
+      - run: pnpm --filter @piqae/sdk check
+      - run: pnpm --filter @piqae/sdk test
+      - name: Build and lint the SDK package
+        run: |
+          pnpm --filter @piqae/sdk build
+          pnpm --filter @piqae/sdk lint
+      - name: Install the packed SDK in a clean consumer
+        run: pnpm --filter @piqae/sdk smoke:package
+
+  web-sdk-compatibility:
+    name: Web and SDK
+    needs: [changes, sdk, web]
+    if: always()
+    runs-on: ${{ vars.PIQAE_CI_LIGHT_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 5
+    steps:
+      - name: Preserve the existing required-check contract
+        env:
+          SDK_REQUIRED: ${{ needs.changes.outputs.sdk }}
+          SDK_RESULT: ${{ needs.sdk.result }}
+          WEB_REQUIRED: ${{ needs.changes.outputs.web }}
+          WEB_RESULT: ${{ needs.web.result }}
+        run: |
+          if [[ "$SDK_REQUIRED" == true && "$SDK_RESULT" != success ]]; then
+            echo "SDK validation did not succeed." >&2
+            exit 1
+          fi
+          if [[ "$WEB_REQUIRED" == true && "$WEB_RESULT" != success ]]; then
+            echo "Web validation did not succeed." >&2
+            exit 1
+          fi
 
   supply-chain:
     name: Supply chain
@@ -308,9 +350,11 @@ jobs:
       - rust-linux
       - rust-macos
       - rust-windows
+      - sdk
       - supply-chain
       - terraform
       - web
+      - web-sdk-compatibility
       - windows-installer-compatibility
     if: always()
     runs-on: ${{ vars.PIQAE_CI_LIGHT_RUNNER || 'ubuntu-latest' }}
@@ -324,9 +368,11 @@ jobs:
           RUST_LINUX: ${{ needs.rust-linux.result }}
           RUST_MACOS: ${{ needs.rust-macos.result }}
           RUST_WINDOWS: ${{ needs.rust-windows.result }}
+          SDK: ${{ needs.sdk.result }}
           SUPPLY_CHAIN: ${{ needs.supply-chain.result }}
           TERRAFORM: ${{ needs.terraform.result }}
           WEB: ${{ needs.web.result }}
+          WEB_SDK_COMPATIBILITY: ${{ needs.web-sdk-compatibility.result }}
           WINDOWS_COMPATIBILITY: ${{ needs.windows-installer-compatibility.result }}
         run: |
           for result in \
@@ -336,9 +382,11 @@ jobs:
             "$RUST_LINUX" \
             "$RUST_MACOS" \
             "$RUST_WINDOWS" \
+            "$SDK" \
             "$SUPPLY_CHAIN" \
             "$TERRAFORM" \
             "$WEB" \
+            "$WEB_SDK_COMPATIBILITY" \
             "$WINDOWS_COMPATIBILITY"
           do
             if [[ "$result" != success && "$result" != skipped ]]; then
