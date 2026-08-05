@@ -280,70 +280,28 @@ final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         alert.addButton(withTitle: "Cancel")
         let allPrinters = NSButton(radioButtonWithTitle: "All printers on this computer", target: nil, action: nil)
         allPrinters.state = presentation.defaultGrant == .allLocalPrinters ? .on : .off
-        let permissions = NSTextField(labelWithString: presentation.permissionsText)
-        permissions.textColor = .secondaryLabelColor
-        permissions.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-        let divider = NSBox()
-        divider.boxType = .separator
-        let accessLabel = NSTextField(labelWithString: "Printer access")
-        accessLabel.font = .systemFont(ofSize: NSFont.systemFontSize, weight: .semibold)
-        let allDetail = NSTextField(labelWithString: "Includes printers added later — recommended")
+        let permissions = wrappingLabel(presentation.permissionsText, color: .secondaryLabelColor)
+        let allDetail = wrappingLabel("Includes printers added later. Recommended for most services.", color: .secondaryLabelColor)
         allDetail.textColor = .secondaryLabelColor
         allDetail.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         let selectedPrinters = NSButton(radioButtonWithTitle: "Only selected printers", target: nil, action: nil)
         selectedPrinters.state = presentation.defaultGrant == .selectedPrinters ? .on : .off
-        let choices = availablePrinters.map { printer -> NSButton in
-            let button = NSButton(checkboxWithTitle: printer.name, target: nil, action: nil)
-            button.state = .off
-            button.identifier = NSUserInterfaceItemIdentifier(printer.printerID)
-            return button
-        }
         let selectionController = PrinterConsentSelectionController(
-            choices: choices,
+            choices: [],
             allPrinters: allPrinters,
             selectedPrinters: selectedPrinters
         )
         selectionController.confirmButton = confirmButton
-        for choice in choices {
-            choice.target = selectionController
-            choice.action = #selector(PrinterConsentSelectionController.selectionChanged)
-        }
         allPrinters.target = selectionController
         allPrinters.action = #selector(PrinterConsentSelectionController.grantChanged(_:))
         selectedPrinters.target = selectionController
         selectedPrinters.action = #selector(PrinterConsentSelectionController.grantChanged(_:))
-
-        let label = NSTextField(labelWithString: "Printers on this computer")
-        label.font = .systemFont(ofSize: NSFont.systemFontSize, weight: .semibold)
-        let listHeight = CGFloat(choices.count) * 28
-        let document = NSView(frame: NSRect(x: 0, y: 0, width: 408, height: listHeight))
-        for (index, choice) in choices.enumerated() {
-            choice.frame = NSRect(
-                x: 8,
-                y: listHeight - CGFloat(index + 1) * 28,
-                width: 392,
-                height: 24
-            )
-            choice.autoresizingMask = [.width]
-            document.addSubview(choice)
-        }
-        let scroll = NSScrollView()
-        scroll.documentView = document
-        scroll.drawsBackground = false
-        scroll.borderType = .bezelBorder
-        scroll.hasVerticalScroller = choices.count > 6
-        scroll.widthAnchor.constraint(equalToConstant: 420).isActive = true
-        scroll.heightAnchor.constraint(equalToConstant: min(max(listHeight, 32), 168)).isActive = true
-
-        let accessory = NSStackView(views: [permissions, divider, accessLabel, allPrinters, allDetail, selectedPrinters, label, scroll])
+        let accessory = NSStackView(views: [permissions, allPrinters, allDetail, selectedPrinters])
         accessory.orientation = .vertical
         accessory.alignment = .leading
-        accessory.setCustomSpacing(12, after: permissions)
-        accessory.setCustomSpacing(12, after: divider)
-        accessory.spacing = 6
-        accessory.widthAnchor.constraint(equalToConstant: 420).isActive = true
-        divider.widthAnchor.constraint(equalTo: accessory.widthAnchor).isActive = true
-        selectionController.selectedPrinterViews = [label, scroll]
+        accessory.spacing = 7
+        accessory.setCustomSpacing(14, after: permissions)
+        sizeAccessory(accessory)
         selectionController.selectionChanged()
         alert.accessoryView = accessory
         NSApplication.shared.activate(ignoringOtherApps: true)
@@ -351,10 +309,70 @@ final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if allPrinters.state == .on {
             return NodePrinterAuthorization(grant: .allLocalPrinters)
         }
+        return presentSelectedPrinterConsent(availablePrinters)
+    }
+
+    private func presentSelectedPrinterConsent(
+        _ availablePrinters: [LocalPrinter]
+    ) -> NodePrinterAuthorization? {
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.messageText = "Choose printers"
+        alert.informativeText = "This service will be limited to the printers selected below."
+        let confirmButton = alert.addButton(withTitle: "Allow selected printers")
+        alert.addButton(withTitle: "Back")
+        confirmButton.isEnabled = false
+        let choices = availablePrinters.map { printer -> NSButton in
+            let button = NSButton(checkboxWithTitle: printer.name, target: nil, action: nil)
+            button.state = .off
+            button.identifier = NSUserInterfaceItemIdentifier(printer.printerID)
+            return button
+        }
+        let selectedMode = NSButton(radioButtonWithTitle: "", target: nil, action: nil)
+        selectedMode.state = .on
+        let selectionController = PrinterConsentSelectionController(
+            choices: choices,
+            allPrinters: NSButton(),
+            selectedPrinters: selectedMode
+        )
+        selectionController.confirmButton = confirmButton
+        for choice in choices {
+            choice.target = selectionController
+            choice.action = #selector(PrinterConsentSelectionController.selectionChanged)
+        }
+        let listHeight = CGFloat(choices.count) * 28
+        let document = NSView(frame: NSRect(x: 0, y: 0, width: 344, height: listHeight))
+        for (index, choice) in choices.enumerated() {
+            choice.frame = NSRect(x: 8, y: listHeight - CGFloat(index + 1) * 28, width: 328, height: 24)
+            document.addSubview(choice)
+        }
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 360, height: min(max(listHeight, 56), 168)))
+        scroll.documentView = document
+        scroll.drawsBackground = false
+        scroll.borderType = .bezelBorder
+        scroll.hasVerticalScroller = choices.count > 6
+        alert.accessoryView = scroll
+        NSApplication.shared.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn else { return nil }
         let printerIDs = choices.compactMap { button in
             button.state == .on ? button.identifier?.rawValue : nil
         }
         return NodePrinterAuthorization(grant: .selectedPrinters, printerIDs: printerIDs)
+    }
+
+    private func wrappingLabel(_ text: String, color: NSColor) -> NSTextField {
+        let label = NSTextField(wrappingLabelWithString: text)
+        label.textColor = color
+        label.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        label.maximumNumberOfLines = 3
+        label.preferredMaxLayoutWidth = 360
+        return label
+    }
+
+    private func sizeAccessory(_ accessory: NSStackView) {
+        accessory.frame = NSRect(x: 0, y: 0, width: 360, height: 1)
+        accessory.layoutSubtreeIfNeeded()
+        accessory.frame.size = NSSize(width: 360, height: ceil(accessory.fittingSize.height))
     }
 
     func menuWillOpen(_ menu: NSMenu) {

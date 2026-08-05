@@ -17,7 +17,10 @@ use axum::{
         sse::{Event, KeepAlive},
     },
 };
-use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+use base64::{
+    Engine,
+    engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE_NO_PAD},
+};
 use chrono::{Duration, Utc};
 use ed25519_dalek::{Signature, Verifier as _, VerifyingKey};
 use futures::StreamExt;
@@ -788,10 +791,7 @@ pub async fn enrol_agent(
             "The agent protocol version is not supported.",
         ));
     }
-    let public_key = URL_SAFE_NO_PAD
-        .decode(&request.public_key)
-        .or_else(|_| base64::engine::general_purpose::STANDARD.decode(&request.public_key))
-        .map_err(|_| AppError::invalid("invalid_agent_public_key", "Public key is invalid."))?;
+    let public_key = decode_agent_public_key(&request.public_key)?;
     if public_key.len() != 32 {
         return Err(AppError::invalid(
             "invalid_agent_public_key",
@@ -865,6 +865,39 @@ pub async fn enrol_agent(
         }),
     )
         .into_response())
+}
+
+fn decode_agent_public_key(encoded: &str) -> Result<Vec<u8>, AppError> {
+    URL_SAFE_NO_PAD
+        .decode(encoded)
+        .or_else(|_| STANDARD_NO_PAD.decode(encoded))
+        .or_else(|_| STANDARD.decode(encoded))
+        .map_err(|_| AppError::invalid("invalid_agent_public_key", "Public key is invalid."))
+}
+
+#[cfg(test)]
+mod enrol_public_key_tests {
+    use super::decode_agent_public_key;
+    use base64::{
+        Engine as _,
+        engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE_NO_PAD},
+    };
+
+    #[test]
+    fn accepts_canonical_and_legacy_ed25519_public_key_encodings() {
+        let key = [0xfb_u8; 32];
+        for encoded in [
+            URL_SAFE_NO_PAD.encode(key),
+            STANDARD_NO_PAD.encode(key),
+            STANDARD.encode(key),
+        ] {
+            assert!(matches!(
+                decode_agent_public_key(&encoded),
+                Ok(decoded) if decoded == key
+            ));
+        }
+        assert!(decode_agent_public_key("not a public key").is_err());
+    }
 }
 
 fn validate_connector_printer_grant(request: &EnrolRequest) -> Result<(), AppError> {

@@ -214,7 +214,9 @@ public struct NodeConnectAgentBridge: Sendable {
     private static func classifiedFailure(_ diagnostic: Data) -> NodeConnectAgentBridgeError {
         let message = String(decoding: diagnostic, as: UTF8.self).lowercased()
         if message.contains("expired") { return .expired }
-        if message.contains("401") || message.contains("unauthorized") {
+        if message.contains("401") || message.contains("unauthorized")
+            || message.contains("invalid_agent_public_key")
+        {
             return .identityRejected
         }
         if message.contains("404") || message.contains("409")
