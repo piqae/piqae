@@ -611,7 +611,7 @@ jobs:
                 architectures: ["arm64", "x86_64"],
                 minimumOs: "macOS 13 or newer",
                 status: "preview",
-                statusReason: "Signed and notarised installer; physical-printer and atomic complete-node update certification remain release gates.",
+                statusReason: "Signed and notarised coordinated updater; destructive rollback fault injection and physical-printer certification remain release gates.",
                 downloadUrl: ("https://downloads.piqae.com/releases/stable/" + $file),
                 releaseUrl: "https://piqae.com/downloads",
                 sha256: $sha,
@@ -623,7 +623,8 @@ jobs:
                 notes: [
                   "Open the standard macOS Installer package for Apple silicon and Intel Macs.",
                   "The menu app, local node, and CUPS executor are Developer ID signed.",
-                  "The current Sparkle archive updates the menu application; full node-component rollback remains a separate certification gate."
+                  "Sparkle replaces the menu application, which then verifies and activates its matching durable agent and CUPS executor together while the queue is idle.",
+                  "The native component pair rolls back together if activation or health verification fails; application rollback remains Sparkle's boundary."
                 ]
               }
             }' > promotion/macos.json
