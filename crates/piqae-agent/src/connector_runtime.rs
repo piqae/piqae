@@ -7,6 +7,7 @@
 //! reached only after the connector-specific store has admitted a job.
 
 use anyhow::{Context, Result, bail};
+use piqae_protocol::agent::PrinterGrant;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -29,7 +30,11 @@ pub struct ConnectorRecord {
     /// or parent-traversing path from a downloaded enrolment response.
     pub device_key_file: PathBuf,
     pub enabled: bool,
-    /// Explicit local printer grants. Empty is fail-closed.
+    /// Durable authorization policy. Older registry documents safely decode as
+    /// selected-printer grants rather than widening access.
+    #[serde(default)]
+    pub printer_grant: PrinterGrant,
+    /// Explicit local printer grants. Empty is valid only for all-printer access.
     #[serde(default)]
     pub allowed_printer_ids: Vec<String>,
 }
@@ -151,6 +156,7 @@ impl ConnectorRegistry {
     pub(crate) fn update_allowed_printers(
         &mut self,
         connector_id: &str,
+        printer_grant: PrinterGrant,
         mut allowed_printer_ids: Vec<String>,
     ) -> Result<bool> {
         allowed_printer_ids.sort();
@@ -158,8 +164,10 @@ impl ConnectorRegistry {
             return Ok(false);
         };
         let mut candidate = record.clone();
+        candidate.printer_grant = printer_grant;
         candidate.allowed_printer_ids = allowed_printer_ids;
         validate_record(&candidate)?;
+        record.printer_grant = candidate.printer_grant;
         record.allowed_printer_ids = candidate.allowed_printer_ids;
         self.persist()?;
         Ok(true)
@@ -232,7 +240,11 @@ fn validate_record(record: &ConnectorRecord) -> Result<()> {
     {
         bail!("device key path must remain inside the installation data directory");
     }
-    if record.allowed_printer_ids.len() > 128
+    if (record.printer_grant == PrinterGrant::SelectedPrinters
+        && record.allowed_printer_ids.is_empty())
+        || (record.printer_grant == PrinterGrant::AllLocalPrinters
+            && !record.allowed_printer_ids.is_empty())
+        || record.allowed_printer_ids.len() > 128
         || record
             .allowed_printer_ids
             .iter()
@@ -302,6 +314,7 @@ mod tests {
             control_plane_url: Url::parse("https://api.piqae.example/").unwrap(),
             device_key_file: format!("connectors/{id}/device.key").into(),
             enabled: true,
+            printer_grant: PrinterGrant::SelectedPrinters,
             allowed_printer_ids: vec!["prn_allowed".into()],
         }
     }
@@ -337,6 +350,30 @@ mod tests {
                 0o600
             );
         }
+    }
+
+    #[test]
+    fn legacy_registry_defaults_to_selected_without_widening_access() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("connectors.json"),
+            r#"{
+              "version": 1,
+              "connectors": [{
+                "connector_id": "ncon_legacy",
+                "agent_id": "agt_legacy",
+                "control_plane_url": "https://api.piqae.example/",
+                "device_key_file": "connectors/ncon_legacy/device.key",
+                "enabled": true,
+                "allowed_printer_ids": ["prn_allowed"]
+              }]
+            }"#,
+        )
+        .unwrap();
+        let registry = ConnectorRegistry::load(dir.path()).unwrap();
+        let record = registry.enabled().next().unwrap();
+        assert_eq!(record.printer_grant, PrinterGrant::SelectedPrinters);
+        assert_eq!(record.allowed_printer_ids, ["prn_allowed"]);
     }
 
     #[test]
@@ -389,6 +426,7 @@ mod tests {
             registry
                 .update_allowed_printers(
                     "ncon_existing",
+                    PrinterGrant::SelectedPrinters,
                     vec!["prn_new_z".into(), "prn_new_a".into()],
                 )
                 .unwrap()

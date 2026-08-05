@@ -19,14 +19,26 @@ private enum QueueLoadResult: Sendable {
 @MainActor
 private final class PrinterConsentSelectionController: NSObject {
     private let choices: [NSButton]
+    private let allPrinters: NSButton
+    private let selectedPrinters: NSButton
     weak var confirmButton: NSButton?
 
-    init(choices: [NSButton]) {
+    init(choices: [NSButton], allPrinters: NSButton, selectedPrinters: NSButton) {
         self.choices = choices
+        self.allPrinters = allPrinters
+        self.selectedPrinters = selectedPrinters
     }
 
     @objc func selectionChanged() {
-        confirmButton?.isEnabled = choices.contains { $0.state == .on }
+        let selectingSpecificPrinters = selectedPrinters.state == .on
+        choices.forEach { $0.isEnabled = selectingSpecificPrinters }
+        confirmButton?.isEnabled = !selectingSpecificPrinters || choices.contains { $0.state == .on }
+    }
+
+    @objc func grantChanged(_ sender: NSButton) {
+        allPrinters.state = sender === allPrinters ? .on : .off
+        selectedPrinters.state = sender === selectedPrinters ? .on : .off
+        selectionChanged()
     }
 }
 
@@ -199,8 +211,10 @@ final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let preview = try await Task.detached {
                 try bridge.preview(capability: link.enrolmentCapability, controlPlaneURL: link.controlPlaneURL)
             }.value
-            let selected = presentConnectorConsent(preview: preview, printers: currentPrinters)
-            guard !selected.isEmpty else { return }
+            guard let authorization = presentConnectorConsent(
+                preview: preview,
+                printers: currentPrinters
+            ) else { return }
             let statusBeforeAccept = try await client.status()
             guard statusBeforeAccept.queuedJobs == 0, statusBeforeAccept.activeJobs == 0 else {
                 showAlert(
@@ -210,7 +224,11 @@ final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 return
             }
             try await Task.detached {
-                try bridge.accept(capability: link.enrolmentCapability, controlPlaneURL: link.controlPlaneURL, printerIDs: selected)
+                try bridge.accept(
+                    capability: link.enrolmentCapability,
+                    controlPlaneURL: link.controlPlaneURL,
+                    authorization: authorization
+                )
             }.value
             consumed = true
             do {
@@ -226,7 +244,9 @@ final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
             showAlert(
                 title: "Connected with Piqae",
-                message: "\(preview.requestingServiceName ?? preview.workspaceName) can now print only to the printers you selected.",
+                message: authorization.grant == .allLocalPrinters
+                    ? "\(preview.requestingServiceName ?? preview.workspaceName) can now use printers on this computer, including printers added later."
+                    : "\(preview.requestingServiceName ?? preview.workspaceName) can now use only the printers you selected.",
                 style: .informational
             )
             if let returnURL = preview.returnURL { NSWorkspace.shared.open(returnURL) }
@@ -241,7 +261,7 @@ final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func presentConnectorConsent(
         preview: NodeConnectPreview,
         printers availablePrinters: [LocalPrinter]
-    ) -> [String] {
+    ) -> NodePrinterAuthorization? {
         let presentation = NodeConnectConsentPresentation(preview: preview)
         let alert = NSAlert()
         alert.alertStyle = .informational
@@ -249,18 +269,32 @@ final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         alert.informativeText = presentation.detailText
         let confirmButton = alert.addButton(withTitle: "Allow printer access")
         alert.addButton(withTitle: "Cancel")
+        let allPrinters = NSButton(radioButtonWithTitle: "All printers on this computer", target: nil, action: nil)
+        allPrinters.state = presentation.defaultGrant == .allLocalPrinters ? .on : .off
+        let allDetail = NSTextField(labelWithString: "Includes printers connected or added later. Recommended for design and print platforms.")
+        allDetail.textColor = .secondaryLabelColor
+        let selectedPrinters = NSButton(radioButtonWithTitle: "Only selected printers", target: nil, action: nil)
+        selectedPrinters.state = presentation.defaultGrant == .selectedPrinters ? .on : .off
         let choices = availablePrinters.map { printer -> NSButton in
             let button = NSButton(checkboxWithTitle: printer.name, target: nil, action: nil)
-            button.state = presentation.preselectCurrentPrinters ? .on : .off
+            button.state = .off
             button.identifier = NSUserInterfaceItemIdentifier(printer.printerID)
             return button
         }
-        let selectionController = PrinterConsentSelectionController(choices: choices)
+        let selectionController = PrinterConsentSelectionController(
+            choices: choices,
+            allPrinters: allPrinters,
+            selectedPrinters: selectedPrinters
+        )
         selectionController.confirmButton = confirmButton
         for choice in choices {
             choice.target = selectionController
             choice.action = #selector(PrinterConsentSelectionController.selectionChanged)
         }
+        allPrinters.target = selectionController
+        allPrinters.action = #selector(PrinterConsentSelectionController.grantChanged(_:))
+        selectedPrinters.target = selectionController
+        selectedPrinters.action = #selector(PrinterConsentSelectionController.grantChanged(_:))
         selectionController.selectionChanged()
 
         let label = NSTextField(labelWithString: "Printers on this computer")
@@ -285,17 +319,21 @@ final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         scroll.widthAnchor.constraint(equalToConstant: 420).isActive = true
         scroll.heightAnchor.constraint(equalToConstant: min(max(listHeight, 32), 168)).isActive = true
 
-        let accessory = NSStackView(views: [label, scroll])
+        let accessory = NSStackView(views: [allPrinters, allDetail, selectedPrinters, label, scroll])
         accessory.orientation = .vertical
         accessory.alignment = .leading
         accessory.spacing = 8
         accessory.widthAnchor.constraint(equalToConstant: 420).isActive = true
         alert.accessoryView = accessory
         NSApplication.shared.activate(ignoringOtherApps: true)
-        guard alert.runModal() == .alertFirstButtonReturn else { return [] }
-        return choices.compactMap { button in
+        guard alert.runModal() == .alertFirstButtonReturn else { return nil }
+        if allPrinters.state == .on {
+            return NodePrinterAuthorization(grant: .allLocalPrinters)
+        }
+        let printerIDs = choices.compactMap { button in
             button.state == .on ? button.identifier?.rawValue : nil
         }
+        return NodePrinterAuthorization(grant: .selectedPrinters, printerIDs: printerIDs)
     }
 
     func menuWillOpen(_ menu: NSMenu) {

@@ -3179,7 +3179,12 @@ components:
           maxItems: 128
           uniqueItems: true
           items: { type: string, minLength: 1, maxLength: 128 }
-          description: Exact printer IDs approved by the local operator; empty never means all.
+          description: Exact printer IDs approved by the local operator when printer_grant is selected_printers; empty never means all.
+        printer_grant:
+          type: string
+          enum: [selected_printers, all_local_printers]
+          default: selected_printers
+          description: Durable local authorization policy. all_local_printers includes printers discovered after connection.
         installation_proof:
           type: string
           description: Ed25519 signature by the immutable physical installation key over the versioned invitation, connector key, and printer grant.
@@ -3231,7 +3236,7 @@ components:
         requested_scopes:
           type: array
           items: { type: string, enum: [discover_printers, print, monitor_jobs] }
-        printer_grant: { type: string, enum: [select] }
+        printer_grant: { type: string, enum: [all_or_selected] }
         expires_at: { type: string, format: date-time }
         return_url: { type: [string, "null"], format: uri, description: Server-bound completion destination; never accepted from an application-link fragment. }
     QueueSnapshot:

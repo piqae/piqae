@@ -3,7 +3,7 @@ import Foundation
 public struct NodeConnectConsentPresentation: Equatable, Sendable {
     public let title: String
     public let detailText: String
-    public let preselectCurrentPrinters: Bool
+    public let defaultGrant: NodePrinterGrant
 
     public init(preview: NodeConnectPreview) {
         let workspace = preview.workspaceName.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -11,12 +11,12 @@ public struct NodeConnectConsentPresentation: Equatable, Sendable {
             !service.isEmpty
         {
             title = "Allow \(service) to print?"
-            detailText = "\(service) is requesting printer access for \(workspace).\n\n\(Self.permissionSummary(preview.requestedScopes))\n\nChoose the printers it may use. You can change or remove this access later."
-            preselectCurrentPrinters = false
+            detailText = "\(service) is requesting printer access for \(workspace).\n\n\(Self.permissionSummary(preview.requestedScopes))\n\nChoose whether it can use every printer on this computer or only printers you select. You can change or remove access later."
+            defaultGrant = .allLocalPrinters
         } else {
             title = "Connect \(workspace) to this computer?"
-            detailText = "This lets your \(workspace) workspace use printers connected to this computer.\n\n\(Self.permissionSummary(preview.requestedScopes))\n\nConfirm the printers it may use. You can change or remove this access later."
-            preselectCurrentPrinters = true
+            detailText = "This lets your \(workspace) workspace use printers connected to this computer.\n\n\(Self.permissionSummary(preview.requestedScopes))\n\nChoose whether it can use every printer on this computer or only printers you select. You can change or remove access later."
+            defaultGrant = .allLocalPrinters
         }
     }
 

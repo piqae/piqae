@@ -57,6 +57,21 @@ public enum NodeConnectAgentBridgeError: Error, LocalizedError {
     }
 }
 
+public enum NodePrinterGrant: String, Codable, Equatable, Sendable {
+    case allLocalPrinters = "all_local_printers"
+    case selectedPrinters = "selected_printers"
+}
+
+public struct NodePrinterAuthorization: Equatable, Sendable {
+    public let grant: NodePrinterGrant
+    public let printerIDs: [String]
+
+    public init(grant: NodePrinterGrant, printerIDs: [String] = []) {
+        self.grant = grant
+        self.printerIDs = printerIDs
+    }
+}
+
 public struct NodeConnectAgentBridge: Sendable {
     private static let maximumOutputBytes = 1024 * 1024
     public let executableURL: URL
@@ -106,10 +121,15 @@ public struct NodeConnectAgentBridge: Sendable {
         return preview
     }
 
-    public func accept(capability: String, controlPlaneURL: URL, printerIDs: [String]) throws {
+    public func accept(
+        capability: String,
+        controlPlaneURL: URL,
+        authorization: NodePrinterAuthorization
+    ) throws {
         let input = try JSONSerialization.data(withJSONObject: [
             "token": capability,
-            "printer_ids": printerIDs,
+            "printer_grant": authorization.grant.rawValue,
+            "printer_ids": authorization.printerIDs,
         ])
         _ = try run(flag: "--add-connector-json-stdin", controlPlaneURL: controlPlaneURL, input: input)
     }
