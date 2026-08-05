@@ -498,6 +498,7 @@ pub async fn create_node_connect_session(
         .as_deref()
         .map(validate_return_url)
         .transpose()?;
+    let control_plane_url = state.public_control_plane_url.as_ref();
     let mut secret = [0_u8; 24];
     OsRng.fill_bytes(&mut secret);
     let token = format!("piq_enr_{}", URL_SAFE_NO_PAD.encode(secret));
@@ -517,7 +518,11 @@ pub async fn create_node_connect_session(
             requesting_service_account_id.as_deref(),
         )
         .await?;
-    let fragment = format!("enrolment_token={}", percent_encode(&token));
+    let fragment = format!(
+        "enrolment_token={}&control_plane_url={}",
+        percent_encode(&token),
+        percent_encode(control_plane_url)
+    );
     let response = NodeConnectSessionResponse {
         id: id.clone(),
         state: "pending",
@@ -581,11 +586,17 @@ pub async fn preview_node_connect_session(
         .connect_session_preview(&secret_hash)
         .await
         .map_err(|_| AppError::unauthorized())?;
+    let authorization_type = if preview.requesting_service_account_id.is_some() {
+        "platform_customer"
+    } else {
+        "workspace"
+    };
     Ok(Json(ConnectSessionPreview {
         workspace_id: preview.workspace_id.to_string(),
         workspace_name: preview.workspace_name,
         requesting_service_account_id: preview.requesting_service_account_id,
         requesting_service_name: preview.requesting_service_name,
+        authorization_type: authorization_type.into(),
         environment_id: preview.environment_id.to_string(),
         requested_scopes: vec![
             "discover_printers".into(),
@@ -622,6 +633,28 @@ fn validate_return_url(value: &str) -> Result<String, AppError> {
     Ok(parsed.to_string())
 }
 
+pub fn validated_control_plane_url(value: &str) -> anyhow::Result<String> {
+    let mut parsed = url::Url::parse(value)
+        .map_err(|_| anyhow::anyhow!("control-plane URL must be absolute"))?;
+    let local_http = parsed.scheme() == "http"
+        && matches!(parsed.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"));
+    if parsed.scheme() != "https" && !local_http {
+        anyhow::bail!(
+            "control-plane URL must use HTTPS (localhost HTTP is allowed for development)"
+        );
+    }
+    if parsed.username() != ""
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        anyhow::bail!("control-plane URL cannot contain credentials, a query, or a fragment");
+    }
+    let normalized_path = parsed.path().trim_end_matches('/').to_owned();
+    parsed.set_path(&normalized_path);
+    Ok(parsed.to_string().trim_end_matches('/').to_owned())
+}
+
 fn percent_encode(value: &str) -> String {
     url::form_urlencoded::byte_serialize(value.as_bytes()).collect()
 }
@@ -645,7 +678,7 @@ fn connect_downloads() -> Vec<NodeConnectDownload> {
 
 #[cfg(test)]
 mod connect_session_tests {
-    use super::{validate_return_url, verify_connector_proof};
+    use super::{validate_return_url, validated_control_plane_url, verify_connector_proof};
     use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
     use ed25519_dalek::{Signer as _, SigningKey};
 
@@ -657,6 +690,18 @@ mod connect_session_tests {
         assert!(validate_return_url("https://user:secret@partner.example/complete").is_err());
         assert!(validate_return_url("https://partner.example/complete#token").is_err());
         assert!(validate_return_url("/relative").is_err());
+    }
+
+    #[test]
+    fn control_plane_origins_are_explicit_and_fail_closed() {
+        assert!(matches!(
+            validated_control_plane_url("https://print.example/api/"),
+            Ok(value) if value == "https://print.example/api"
+        ));
+        assert!(validated_control_plane_url("http://127.0.0.1:8080").is_ok());
+        assert!(validated_control_plane_url("http://print.example").is_err());
+        assert!(validated_control_plane_url("https://user:secret@print.example").is_err());
+        assert!(validated_control_plane_url("https://print.example?tenant=other").is_err());
     }
 
     #[test]
@@ -759,11 +804,15 @@ pub async fn enrol_agent(
         ));
     }
     if let Some(installation_id) = request.installation_id.as_deref() {
-        let existing_key = state
+        let existing_key = match state
             .repository
             .node_installation_public_key(installation_id)
             .await
-            .map_err(|_| AppError::unauthorized())?;
+        {
+            Ok(key) => key,
+            Err(RepositoryError::NotFound) => public_key.clone(),
+            Err(_) => return Err(AppError::unauthorized()),
+        };
         let proof = request
             .installation_proof
             .as_deref()

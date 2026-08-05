@@ -185,6 +185,7 @@ pub struct ConnectSessionPreview {
     pub workspace_name: String,
     pub requesting_service_account_id: Option<String>,
     pub requesting_service_name: Option<String>,
+    pub authorization_type: String,
     pub environment_id: String,
     pub requested_scopes: Vec<String>,
     pub printer_grant: String,

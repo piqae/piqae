@@ -5,13 +5,14 @@ describe('consumeNodeConnectFragment', () => {
   it('scrubs a valid one-time token from the address bar and keeps it in memory', () => {
     const replaceState = vi.fn();
     const token = `piq_enr_${'a'.repeat(32)}`;
+    const origin = 'https://api.example.com';
 
     expect(
       consumeNodeConnectFragment(
-        { hash: `#enrolment_token=${token}`, pathname: '/downloads', search: '?platform=macos' },
+        { hash: `#enrolment_token=${token}&control_plane_url=${encodeURIComponent(origin)}`, pathname: '/downloads', search: '?platform=macos' },
         (url) => replaceState(null, '', url)
       )
-    ).toEqual({ enrolmentToken: token });
+    ).toEqual({ enrolmentToken: token, controlPlaneUrl: origin });
     expect(replaceState).toHaveBeenCalledWith(null, '', '/downloads?platform=macos');
   });
 
@@ -41,10 +42,10 @@ describe('consumeNodeConnectFragment', () => {
 describe('nativeNodeConnectUrl', () => {
   it('keeps a validated invitation in the fragment of the registered app scheme', () => {
     const token = `piq_enr_${'a'.repeat(32)}`;
-    expect(nativeNodeConnectUrl(token)).toBe(`piqae://connect#enrolment_token=${token}`);
+    expect(nativeNodeConnectUrl(token, 'https://api.example.com')).toBe(`piqae://connect#enrolment_token=${token}&control_plane_url=https%3A%2F%2Fapi.example.com`);
   });
 
   it('refuses malformed capabilities', () => {
-    expect(nativeNodeConnectUrl('not-a-capability')).toBeNull();
+    expect(nativeNodeConnectUrl('not-a-capability', 'https://api.example.com')).toBeNull();
   });
 });

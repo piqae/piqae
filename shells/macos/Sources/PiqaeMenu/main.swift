@@ -162,7 +162,7 @@ final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
             let bridge = try NodeConnectAgentBridge()
             let preview = try await Task.detached {
-                try bridge.preview(capability: link.enrolmentCapability)
+                try bridge.preview(capability: link.enrolmentCapability, controlPlaneURL: link.controlPlaneURL)
             }.value
             let selected = presentConnectorConsent(preview: preview, printers: currentPrinters)
             guard !selected.isEmpty else { return }
@@ -175,7 +175,7 @@ final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 return
             }
             try await Task.detached {
-                try bridge.accept(capability: link.enrolmentCapability, printerIDs: selected)
+                try bridge.accept(capability: link.enrolmentCapability, controlPlaneURL: link.controlPlaneURL, printerIDs: selected)
             }.value
             consumed = true
             do {

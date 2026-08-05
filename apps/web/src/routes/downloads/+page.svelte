@@ -8,18 +8,15 @@
   import { consumeNodeConnectFragment, nativeNodeConnectUrl } from '$lib/node-connect-fragment';
 
   let { data }: { data: PageData } = $props();
-  let enrolmentToken = $state<string | null>(null);
+  let invitation = $state<ReturnType<typeof consumeNodeConnectFragment>>(null);
 
   onMount(() => {
-    enrolmentToken =
-      consumeNodeConnectFragment(window.location, (url) => replaceState(url, {}))
-        ?.enrolmentToken ??
-      null;
+    invitation = consumeNodeConnectFragment(window.location, (url) => replaceState(url, {}));
   });
 
   function openPiqae() {
-    if (!enrolmentToken) return;
-    const url = nativeNodeConnectUrl(enrolmentToken);
+    if (!invitation) return;
+    const url = nativeNodeConnectUrl(invitation.enrolmentToken, invitation.controlPlaneUrl);
     if (url) window.location.assign(url);
   }
 
@@ -76,7 +73,7 @@
 />
 
 <MarketingShell>
-  {#if enrolmentToken}
+  {#if invitation}
     <section class="connect-session" aria-labelledby="connect-session-title">
       <div class="m-container connect-session-inner">
         <div>

@@ -127,13 +127,26 @@ async fn run() -> Result<()> {
         oidc,
     );
     let capabilities = deployment_capabilities();
+    let public_control_plane_url = product_env("PIQAE_PUBLIC_API_URL").or_else(|_| {
+        if capabilities.deployment == "cloud" {
+            Ok("https://api.piqae.com".to_owned())
+        } else {
+            Err(anyhow::anyhow!(
+                "PIQAE_PUBLIC_API_URL is required for self-hosted node connections"
+            ))
+        }
+    })?;
+    let public_control_plane_url =
+        piqae_control_plane::api::validated_control_plane_url(&public_control_plane_url)
+            .context("PIQAE_PUBLIC_API_URL is invalid")?;
     let mut application = AppState::new_with_resources(
         repository,
         Arc::new(authenticator),
         webhook_key,
         object_store,
     )
-    .with_capabilities(capabilities.clone());
+    .with_capabilities(capabilities.clone())
+    .with_public_control_plane_url(public_control_plane_url);
     if capabilities.auth.provider == "workos" && service_role.accepts_identity_webhooks() {
         application = application.with_workos_webhook_secret(
             env::var("WORKOS_WEBHOOK_SECRET")

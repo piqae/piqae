@@ -721,13 +721,40 @@ fn read_connector_consent(reader: impl std::io::Read) -> Result<ConnectorConsent
 
 fn installed_control_plane(arguments: &Arguments) -> Result<(Url, ExistingInstallation, PathBuf)> {
     let config_path = arguments.data_dir.join("agent-config.json");
+    let base_url = arguments
+        .control_plane_url
+        .clone()
+        .or_else(|| {
+            std::fs::read(&config_path)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                .and_then(|body| {
+                    body.get("control_plane_url")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned)
+                })
+                .and_then(|value| value.parse().ok())
+        })
+        .context("connection invitation has no control-plane URL")?;
+    if !config_path.exists() {
+        let agent_id = std::fs::read_to_string(arguments.data_dir.join("agent-id"))?
+            .trim()
+            .to_owned();
+        anyhow::ensure!(
+            !agent_id.is_empty(),
+            "local installation has no durable identity"
+        );
+        return Ok((
+            base_url,
+            ExistingInstallation {
+                agent_id: agent_id.clone(),
+                installation_id: agent_id,
+            },
+            arguments.data_dir.join("device.key"),
+        ));
+    }
     let installation = existing_installation(&config_path)?;
     let body: serde_json::Value = serde_json::from_slice(&std::fs::read(&config_path)?)?;
-    let base_url = body
-        .get("control_plane_url")
-        .and_then(serde_json::Value::as_str)
-        .context("installed configuration has no control-plane URL")?
-        .parse()?;
     let key_path = body
         .get("device_key_file")
         .and_then(serde_json::Value::as_str)
@@ -753,7 +780,10 @@ fn installed_local_bind(arguments: &Arguments) -> Result<SocketAddr> {
 }
 
 async fn preview_connector(arguments: &Arguments, token: &str) -> Result<()> {
-    let (base_url, _, _) = installed_control_plane(arguments)?;
+    let base_url = arguments
+        .control_plane_url
+        .clone()
+        .context("connection invitation has no control-plane URL")?;
     let preview = AgentClient::new(base_url)?
         .preview_connect_session(token)
         .await
@@ -768,9 +798,14 @@ async fn add_connector(arguments: &Arguments, consent: ConnectorConsentInput) ->
     allowed_printer_ids.sort();
     let (base_url, installation, installation_key_path) = installed_control_plane(arguments)?;
     let fingerprint = hex::encode(Sha256::digest(token.as_bytes()));
-    let relative_key = PathBuf::from("connectors")
-        .join("keys")
-        .join(format!("{fingerprint}.key"));
+    let local_first_connection = no_enabled_connectors(&arguments.data_dir)?;
+    let relative_key = if local_first_connection {
+        PathBuf::from("device.key")
+    } else {
+        PathBuf::from("connectors")
+            .join("keys")
+            .join(format!("{fingerprint}.key"))
+    };
     let key_path = arguments.data_dir.join(&relative_key);
     let identity = if key_path.exists() {
         let encoded = std::fs::read_to_string(&key_path)?;
@@ -854,6 +889,13 @@ async fn add_connector(arguments: &Arguments, consent: ConnectorConsentInput) ->
         serde_json::json!({"state":"connected","agent_id":enrolled.agent_id})
     );
     Ok(())
+}
+
+fn no_enabled_connectors(data_dir: &Path) -> Result<bool> {
+    Ok(connector_runtime::ConnectorRegistry::load(data_dir)?
+        .enabled()
+        .next()
+        .is_none())
 }
 
 async fn signal_connector_reload(arguments: &Arguments) -> Result<()> {
@@ -4710,6 +4752,26 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    #[test]
+    fn local_first_connection_reuses_the_durable_installation_identity() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        std::fs::write(directory.path().join("agent-id"), "agt_local_identity\n")
+            .expect("agent id");
+        std::fs::write(directory.path().join("device.key"), "00".repeat(32)).expect("device key");
+        let arguments = Arguments::try_parse_from([
+            "piqae-agent",
+            "--data-dir",
+            directory.path().to_str().expect("path"),
+            "--control-plane-url",
+            "https://self-hosted.example/api",
+        ])
+        .expect("arguments");
+        let (origin, installation, key) = installed_control_plane(&arguments).expect("identity");
+        assert_eq!(origin.as_str(), "https://self-hosted.example/api");
+        assert_eq!(installation.installation_id, "agt_local_identity");
+        assert_eq!(key, directory.path().join("device.key"));
     }
 
     #[test]
