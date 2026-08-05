@@ -10,6 +10,7 @@
   import Status from '$lib/components/Status.svelte';
   import JobTimeline from '$lib/components/dashboard/JobTimeline.svelte';
   import { operationalViews } from '$lib/dashboard-navigation';
+  import { nativeNodeConnectUrlFromHandoff } from '$lib/node-connect-fragment';
   import {
     DataPanel,
     DefinitionList,
@@ -150,6 +151,13 @@
     enrolmentAttempted && !enrolmentPending && form?.mutation === 'createEnrolment' ? form : null
   );
 
+  function openNativeNodeConnect(connectUrl: string): boolean {
+    const nativeUrl = nativeNodeConnectUrlFromHandoff(connectUrl, window.location.origin);
+    if (!nativeUrl) return false;
+    window.location.assign(nativeUrl);
+    return true;
+  }
+
   onMount(() => {
     if (page.url.searchParams.get('connect-node') !== '1') return;
     enrolmentOpen = true;
@@ -176,7 +184,7 @@
 </svelte:head>
 
 {#snippet actions()}
-  {#if data.view === 'nodes'}
+  {#if data.view === 'nodes' && data.meta.deployment === 'local'}
     <!-- Loopback diagnostics are only reachable from here now that the Nodes
          page is a view; the native shells still deep-link to /dashboard/local. -->
     <a class="button" href="/dashboard/local"><Icon name="printers" size={14} /> This device</a>
@@ -578,10 +586,11 @@
       <p class="ui-note warning">Demo mode: preview only. No enrolment will be created.</p>
     {/if}
 
-    <p class="muted">
-      Do this on the computer connected to your printers. Piqae will open and ask which printers
-      this workspace may use.
-    </p>
+    <ol class="connect-steps">
+      <li><span>1</span><div><strong>Install Piqae</strong><small><a href="/downloads">Download the native node</a> on the printer computer if needed.</small></div></li>
+      <li><span>2</span><div><strong>Open the app</strong><small>Continue below to hand the short-lived invitation directly to Piqae.</small></div></li>
+      <li><span>3</span><div><strong>Choose printers</strong><small>Approve only the local printers this workspace may use.</small></div></li>
+    </ol>
 
     <form
       id="enrolment-form"
@@ -590,15 +599,25 @@
       use:enhance={() => {
         enrolmentPending = true;
         enrolmentAttempted = true;
-        return async ({ update }) => {
+        return async ({ result, update }) => {
           await update({ reset: false });
           enrolmentPending = false;
+          const actionData = result.type === 'success'
+            ? result.data as { enrolment?: { connectUrl?: unknown } } | undefined
+            : undefined;
+          if (typeof actionData?.enrolment?.connectUrl === 'string') {
+            openNativeNodeConnect(actionData.enrolment.connectUrl);
+          }
         };
       }}
     >
-      <Field label="Node name">
-        <input class="input" name="name" minlength="2" maxlength="120" required placeholder="Warehouse Mac mini" />
-      </Field>
+      <details class="advanced-options">
+        <summary>Advanced options</summary>
+        <Field label="Custom node name (optional)">
+          <input class="input" name="name" minlength="2" maxlength="120" placeholder="Warehouse Mac mini" />
+        </Field>
+        <small>Leave blank to use this computer’s name.</small>
+      </details>
       <input type="hidden" name="expires_in_seconds" value="600" />
     </form>
 
@@ -609,12 +628,15 @@
     {#if enrolmentResult?.enrolment}
       <section class="secret" aria-live="polite">
         <div>
-          <strong>Ready to connect</strong>
-          <span>This secure invitation expires in 10 minutes.</span>
+          <strong>Did Piqae not open?</strong>
+          <span>Retry the app, or use connection help if it is not installed.</span>
         </div>
-        <a class="button compact" href={enrolmentResult.enrolment.connectUrl}>
-          <Icon name="external" size={13} /> Open Piqae
-        </a>
+        <div class="connection-actions">
+          <button class="button compact" type="button" onclick={() => openNativeNodeConnect(enrolmentResult.enrolment.connectUrl)}>
+            Open Piqae again
+          </button>
+          <a class="button compact" href={enrolmentResult.enrolment.connectUrl}>Install or troubleshoot</a>
+        </div>
       </section>
     {/if}
   </div>
@@ -627,7 +649,7 @@
       form="enrolment-form"
       disabled={enrolmentPending || data.dashboardMode !== 'live'}
     >
-      {enrolmentPending ? 'Preparing…' : 'Continue'}
+      {enrolmentPending ? 'Opening Piqae…' : 'Continue in Piqae'}
     </button>
   {/snippet}
 </Dialog>
@@ -844,6 +866,74 @@
   form {
     display: grid;
     gap: 12px;
+  }
+
+  .connect-steps {
+    display: grid;
+    gap: 12px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .connect-steps li {
+    display: grid;
+    grid-template-columns: 24px minmax(0, 1fr);
+    align-items: start;
+    gap: 10px;
+  }
+
+  .connect-steps li > span {
+    width: 24px;
+    height: 24px;
+    display: grid;
+    place-items: center;
+    color: var(--text-secondary);
+    background: var(--surface-raised);
+    border: 1px solid var(--border-default);
+    border-radius: 50%;
+    font-size: var(--text-meta);
+  }
+
+  .connect-steps div {
+    display: grid;
+    gap: 2px;
+  }
+
+  .connect-steps strong {
+    font-size: var(--text-compact);
+    font-weight: 550;
+  }
+
+  .connect-steps small,
+  .advanced-options small {
+    color: var(--text-tertiary);
+    font-size: var(--text-meta);
+    line-height: var(--text-compact-line);
+  }
+
+  .connect-steps a {
+    color: var(--accent);
+  }
+
+  .advanced-options {
+    padding-top: 2px;
+  }
+
+  .advanced-options summary {
+    color: var(--text-secondary);
+    cursor: pointer;
+    font-size: var(--text-compact);
+  }
+
+  .advanced-options :global(.field) {
+    margin-top: 12px;
+  }
+
+  .connection-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
   }
 
   .secret {

@@ -2867,9 +2867,12 @@ components:
     CreateNodeConnectSession:
       type: object
       additionalProperties: false
-      required: [name]
       properties:
-        name: { type: string, minLength: 1, maxLength: 120 }
+        name:
+          type: string
+          minLength: 1
+          maxLength: 120
+          description: Optional operator label. When omitted, the native node supplies its local computer name during acceptance.
         return_url: { type: string, format: uri }
         expires_in_seconds: { type: integer, minimum: 60, maximum: 900, default: 600 }
     NodeConnectDownload:

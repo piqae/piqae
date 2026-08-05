@@ -4,12 +4,14 @@ set -euo pipefail
 shell_root=$(cd "$(dirname "$0")" && pwd)
 configuration=${CONFIGURATION:-release}
 bundle=${PIQAE_APP_BUNDLE:-"$shell_root/build/Piqae.app"}
-version=${PIQAE_VERSION:-0.1.5}
+version=${PIQAE_VERSION:-0.1.6}
 build_number=${PIQAE_BUILD_NUMBER:-1}
 feed_url=${PIQAE_SPARKLE_FEED_URL:-}
 public_key=${PIQAE_SPARKLE_PUBLIC_ED_KEY:-}
 signing_identity=${PIQAE_CODE_SIGN_IDENTITY:-}
 swift_archs=${PIQAE_SWIFT_ARCHS:-}
+agent_binary=${PIQAE_AGENT_BINARY:-}
+executor_binary=${PIQAE_EXECUTOR_BINARY:-}
 swift_arch_args=()
 
 if [[ -n "$swift_archs" ]]; then
@@ -69,6 +71,12 @@ if [[ -n "$feed_url" || -n "$public_key" || -n "$signing_identity" ]]; then
     exit 2
   fi
 fi
+if [[ -n "$agent_binary" || -n "$executor_binary" ]]; then
+  [[ -x "$agent_binary" && -x "$executor_binary" ]] || {
+    echo "PIQAE_AGENT_BINARY and PIQAE_EXECUTOR_BINARY must both be executable" >&2
+    exit 2
+  }
+fi
 
 swift_build --product PiqaeMenu
 swift_build --product PiqaePrintCoreReplay
@@ -99,10 +107,20 @@ ditto \
   "$binary_directory/Sparkle.framework" \
   "$bundle/Contents/Frameworks/Sparkle.framework"
 install -m 0644 "$shell_root/Resources/Info.plist" "$bundle/Contents/Info.plist"
+if [[ -n "$agent_binary" ]]; then
+  mkdir -p "$bundle/Contents/Resources/Node"
+  install -m 0755 "$agent_binary" "$bundle/Contents/Resources/Node/piqae-agent"
+  install -m 0755 "$executor_binary" "$bundle/Contents/Resources/Node/piqae-executor-cups"
+  install -m 0755 "$shell_root/../../packaging/macos/update-native-components.sh" \
+    "$bundle/Contents/Resources/Node/update-native-components.sh"
+fi
 
 plist_buddy=/usr/libexec/PlistBuddy
 "$plist_buddy" -c "Set :CFBundleShortVersionString $version" "$bundle/Contents/Info.plist"
 "$plist_buddy" -c "Set :CFBundleVersion $build_number" "$bundle/Contents/Info.plist"
+if [[ -n "$agent_binary" ]]; then
+  "$plist_buddy" -c "Add :PiqaeNativeComponentsBundled bool true" "$bundle/Contents/Info.plist"
+fi
 
 if [[ -n "$feed_url" ]]; then
   "$plist_buddy" -c "Set :PiqaeBuildChannel signed-release" "$bundle/Contents/Info.plist"

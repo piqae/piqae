@@ -2044,7 +2044,8 @@ export interface components {
             protocol_version: number;
         };
         CreateNodeConnectSession: {
-            name: string;
+            /** @description Optional operator label. When omitted, the native node supplies its local computer name during acceptance. */
+            name?: string;
             /** Format: uri */
             return_url?: string;
             /** @default 600 */

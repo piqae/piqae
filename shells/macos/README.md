@@ -95,16 +95,21 @@ retain valid Developer ID signatures. It retains the previous app and
 preserves data on uninstall. Unsigned packages are labelled Preview and do not
 remove quarantine or apply a Gatekeeper workaround.
 
-Sparkle currently replaces only `Piqae.app`, including the menu and
-`PiqaePrintCoreReplay`. It does not replace or restart the separately installed
-Rust agent/executor. A full-node update therefore still uses the per-user
-package's idle-checked installer. Do not represent the Sparkle foundation as an
-atomic full-node updater.
+Sparkle replaces the signed `Piqae.app`. Release app bundles also carry the
+matching signed Rust agent and executor. On relaunch, the menu verifies their
+version and Developer ID signatures, requires authenticated idle queue status,
+stages both on the destination filesystem, switches them together, restarts the
+LaunchAgent, and restores both previous binaries if health validation fails.
+Identity, connector credentials, profiles, content, and queue data are never
+part of the replacement set. App-bundle rollback remains Sparkle's boundary;
+the separately activated node-component transaction is deliberately
+backwards-compatible across adjacent releases.
 
 Credentialed builds check the signed Sparkle feed in the background and add
-**Check for Piqae App Update…**. Sparkle still requires the operator to accept
+**Check for Piqae Update…**. Sparkle still requires the operator to accept
 the download and installation; silent installation is disabled. When a release
-is found, the menu names its version and truthfully labels it as an app update.
+is found, the menu names its version and waits for authenticated idle status
+before the coordinated app and node-component handoff.
 If installation reaches the relaunch boundary while the local API reports
 queued/active jobs or a profile panel is open, the menu shows that the app
 update is waiting for idle and polls authenticated local status until the node

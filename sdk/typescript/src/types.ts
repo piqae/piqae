@@ -345,7 +345,8 @@ export interface NodeUpdate {
 }
 
 export interface CreateNodeConnectSession {
-  name: string;
+  /** Optional operator label; the node uses its computer name when omitted. */
+  name?: string;
   return_url?: string;
   expires_in_seconds?: number;
 }

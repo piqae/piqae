@@ -67,9 +67,26 @@ final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var actionTask: Task<Void, Never>?
     private var refreshTimer: Timer?
     private var updateCoordinator: PiqaeUpdateCoordinator?
+    private var nativeComponentUpdateTask: Task<String?, Never>?
     private let connectReplayGuard = NodeConnectReplayGuard()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        if let updater = NativeComponentUpdater() {
+            nativeComponentUpdateTask = Task { [weak self] in
+                let updateError = await Task.detached { () -> String? in
+                    do {
+                        try updater.run()
+                        return nil
+                    } catch {
+                        return error.localizedDescription
+                    }
+                }.value
+                if let updateError {
+                    self?.lastError = updateError
+                }
+                return updateError
+            }
+        }
         do {
             let configuration = try LocalAPIConfiguration()
             self.configuration = configuration
@@ -128,6 +145,10 @@ final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func handleConnectApplicationLink(_ url: URL) async {
+        if let updateError = await nativeComponentUpdateTask?.value {
+            showAlert(title: "Piqae update not completed", message: updateError)
+            return
+        }
         let link: NodeConnectApplicationLink
         do {
             link = try NodeConnectApplicationLink(url: url)

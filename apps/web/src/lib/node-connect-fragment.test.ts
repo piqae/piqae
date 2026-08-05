@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
-import { consumeNodeConnectFragment, nativeNodeConnectUrl } from './node-connect-fragment';
+import {
+  consumeNodeConnectFragment,
+  nativeNodeConnectUrl,
+  nativeNodeConnectUrlFromHandoff
+} from './node-connect-fragment';
 
 describe('consumeNodeConnectFragment', () => {
   it('scrubs a valid one-time token from the address bar and keeps it in memory', () => {
@@ -47,5 +51,19 @@ describe('nativeNodeConnectUrl', () => {
 
   it('refuses malformed capabilities', () => {
     expect(nativeNodeConnectUrl('not-a-capability', 'https://api.example.com')).toBeNull();
+  });
+});
+
+describe('nativeNodeConnectUrlFromHandoff', () => {
+  it('turns the secure web handoff into a direct native app launch', () => {
+    const token = `piq_enr_${'a'.repeat(32)}`;
+    const handoff = `https://app.piqae.com/connect#enrolment_token=${token}&control_plane_url=${encodeURIComponent('https://api.example.com')}`;
+    expect(nativeNodeConnectUrlFromHandoff(handoff, 'https://app.piqae.com')).toBe(
+      `piqae://connect#enrolment_token=${token}&control_plane_url=https%3A%2F%2Fapi.example.com`
+    );
+  });
+
+  it('rejects a malformed handoff', () => {
+    expect(nativeNodeConnectUrlFromHandoff('not a URL#enrolment_token=bad', 'https://app.piqae.com')).toBeNull();
   });
 });

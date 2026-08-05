@@ -2,6 +2,10 @@ use piqae_executor_protocol::{read_frame, write_frame};
 use piqae_protocol::executor::{ExecutorRequest, ExecutorResponse};
 
 fn main() {
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--version")) {
+        println!("piqae-executor-cups {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
     if let Err(error) = run() {
         eprintln!("CUPS executor failed: {error}");
         std::process::exit(1);

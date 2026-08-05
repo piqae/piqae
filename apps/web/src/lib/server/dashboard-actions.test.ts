@@ -98,6 +98,28 @@ describe('dashboard mutation actions', () => {
     expect(JSON.stringify(result)).not.toContain(accessToken);
   });
 
+  it('lets the native node supply its computer name', async () => {
+    fetcher.mockResolvedValueOnce(
+      Response.json({
+        id: 'enr_02',
+        state: 'pending',
+        expires_at: '2026-07-29T12:10:00.000Z',
+        node_id: null,
+        connect_url: `https://app.piqae.com/connect#enrolment_token=piq_enr_${'b'.repeat(32)}`,
+        downloads: []
+      })
+    );
+
+    await agentActions.createEnrolment!(
+      actionEvent({ expires_in_seconds: '600' }) as never
+    );
+
+    expect(requestDetails().body).toEqual({
+      expires_in_seconds: 600,
+      return_url: 'https://dashboard.piqae.test/dashboard?view=nodes'
+    });
+  });
+
   it('creates and deletes webhooks without exposing dashboard credentials', async () => {
     fetcher
       .mockResolvedValueOnce(

@@ -180,10 +180,10 @@ export const actions: Actions = {
     const data = await event.request.formData();
     const name = String(data.get('name') ?? '').trim();
     const expiresInSeconds = Number(data.get('expires_in_seconds') ?? 600);
-    if (name.length < 2 || name.length > 120) {
+    if (name && (name.length < 2 || name.length > 120)) {
       return fail(400, {
         mutation: 'createEnrolment',
-        error: { message: 'Node name must be between 2 and 120 characters.' }
+        error: { message: 'A custom node name must be between 2 and 120 characters.' }
       });
     }
     if (!Number.isInteger(expiresInSeconds) || expiresInSeconds < 60 || expiresInSeconds > 900) {
@@ -194,7 +194,7 @@ export const actions: Actions = {
     }
     try {
       const enrolment = await dashboardSdk(event).connectSessions.create({
-        name,
+        ...(name ? { name } : {}),
         expires_in_seconds: expiresInSeconds,
         return_url: new URL('/dashboard?view=nodes', event.url.origin).toString()
       });
