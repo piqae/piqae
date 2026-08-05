@@ -107,6 +107,27 @@ ditto \
   "$binary_directory/Sparkle.framework" \
   "$bundle/Contents/Frameworks/Sparkle.framework"
 install -m 0644 "$shell_root/Resources/Info.plist" "$bundle/Contents/Info.plist"
+icon_source="$shell_root/Resources/AppIcon.svg"
+iconset="$bundle/Contents/Resources/Piqae.iconset"
+mkdir -p "$iconset"
+sips -s format png "$icon_source" --out "$iconset/icon_512x512@2x.png" >/dev/null
+for specification in \
+  "16 icon_16x16.png" \
+  "32 icon_16x16@2x.png" \
+  "32 icon_32x32.png" \
+  "64 icon_32x32@2x.png" \
+  "128 icon_128x128.png" \
+  "256 icon_128x128@2x.png" \
+  "256 icon_256x256.png" \
+  "512 icon_256x256@2x.png" \
+  "512 icon_512x512.png"
+do
+  read -r pixels filename <<< "$specification"
+  sips --resampleHeightWidth "$pixels" "$pixels" \
+    "$iconset/icon_512x512@2x.png" --out "$iconset/$filename" >/dev/null
+done
+iconutil --convert icns "$iconset" --output "$bundle/Contents/Resources/Piqae.icns"
+rm -rf -- "$iconset"
 if [[ -n "$agent_binary" ]]; then
   mkdir -p "$bundle/Contents/Resources/Node"
   install -m 0755 "$agent_binary" "$bundle/Contents/Resources/Node/piqae-agent"

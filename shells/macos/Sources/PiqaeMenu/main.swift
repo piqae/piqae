@@ -21,6 +21,7 @@ private final class PrinterConsentSelectionController: NSObject {
     private let choices: [NSButton]
     private let allPrinters: NSButton
     private let selectedPrinters: NSButton
+    var selectedPrinterViews: [NSView] = []
     weak var confirmButton: NSButton?
 
     init(choices: [NSButton], allPrinters: NSButton, selectedPrinters: NSButton) {
@@ -32,6 +33,7 @@ private final class PrinterConsentSelectionController: NSObject {
     @objc func selectionChanged() {
         let selectingSpecificPrinters = selectedPrinters.state == .on
         choices.forEach { $0.isEnabled = selectingSpecificPrinters }
+        selectedPrinterViews.forEach { $0.isHidden = !selectingSpecificPrinters }
         confirmButton?.isEnabled = !selectingSpecificPrinters || choices.contains { $0.state == .on }
     }
 
@@ -223,6 +225,13 @@ final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 )
                 return
             }
+            guard preview.expiresAt > Date() else {
+                showAlert(
+                    title: "Connection expired",
+                    message: "Return to the service and create a new connection, then approve it within the displayed time."
+                )
+                return
+            }
             try await Task.detached {
                 try bridge.accept(
                     capability: link.enrolmentCapability,
@@ -271,8 +280,16 @@ final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         alert.addButton(withTitle: "Cancel")
         let allPrinters = NSButton(radioButtonWithTitle: "All printers on this computer", target: nil, action: nil)
         allPrinters.state = presentation.defaultGrant == .allLocalPrinters ? .on : .off
-        let allDetail = NSTextField(labelWithString: "Includes printers connected or added later. Recommended for design and print platforms.")
+        let permissions = NSTextField(labelWithString: presentation.permissionsText)
+        permissions.textColor = .secondaryLabelColor
+        permissions.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        let divider = NSBox()
+        divider.boxType = .separator
+        let accessLabel = NSTextField(labelWithString: "Printer access")
+        accessLabel.font = .systemFont(ofSize: NSFont.systemFontSize, weight: .semibold)
+        let allDetail = NSTextField(labelWithString: "Includes printers added later — recommended")
         allDetail.textColor = .secondaryLabelColor
+        allDetail.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         let selectedPrinters = NSButton(radioButtonWithTitle: "Only selected printers", target: nil, action: nil)
         selectedPrinters.state = presentation.defaultGrant == .selectedPrinters ? .on : .off
         let choices = availablePrinters.map { printer -> NSButton in
@@ -295,7 +312,6 @@ final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         allPrinters.action = #selector(PrinterConsentSelectionController.grantChanged(_:))
         selectedPrinters.target = selectionController
         selectedPrinters.action = #selector(PrinterConsentSelectionController.grantChanged(_:))
-        selectionController.selectionChanged()
 
         let label = NSTextField(labelWithString: "Printers on this computer")
         label.font = .systemFont(ofSize: NSFont.systemFontSize, weight: .semibold)
@@ -319,11 +335,16 @@ final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         scroll.widthAnchor.constraint(equalToConstant: 420).isActive = true
         scroll.heightAnchor.constraint(equalToConstant: min(max(listHeight, 32), 168)).isActive = true
 
-        let accessory = NSStackView(views: [allPrinters, allDetail, selectedPrinters, label, scroll])
+        let accessory = NSStackView(views: [permissions, divider, accessLabel, allPrinters, allDetail, selectedPrinters, label, scroll])
         accessory.orientation = .vertical
         accessory.alignment = .leading
-        accessory.spacing = 8
+        accessory.setCustomSpacing(12, after: permissions)
+        accessory.setCustomSpacing(12, after: divider)
+        accessory.spacing = 6
         accessory.widthAnchor.constraint(equalToConstant: 420).isActive = true
+        divider.widthAnchor.constraint(equalTo: accessory.widthAnchor).isActive = true
+        selectionController.selectedPrinterViews = [label, scroll]
+        selectionController.selectionChanged()
         alert.accessoryView = accessory
         NSApplication.shared.activate(ignoringOtherApps: true)
         guard alert.runModal() == .alertFirstButtonReturn else { return nil }

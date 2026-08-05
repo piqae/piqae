@@ -8,10 +8,10 @@ final class NodeConnectConsentPresentationTests: XCTestCase {
         )
         let presentation = NodeConnectConsentPresentation(preview: preview)
 
-        XCTAssertEqual(presentation.title, "Connect C4 Coffee Co. to this computer?")
+        XCTAssertEqual(presentation.title, "Allow C4 Coffee Co. to print?")
         XCTAssertEqual(presentation.defaultGrant, .allLocalPrinters)
-        XCTAssertTrue(presentation.detailText.contains("Send print jobs"))
-        XCTAssertTrue(presentation.detailText.contains("View print status"))
+        XCTAssertTrue(presentation.permissionsText.contains("Send print jobs"))
+        XCTAssertTrue(presentation.permissionsText.contains("View print status"))
         XCTAssertFalse(presentation.detailText.contains("wsp_internal"))
         XCTAssertFalse(presentation.detailText.contains("monitor_jobs"))
     }
@@ -24,7 +24,7 @@ final class NodeConnectConsentPresentationTests: XCTestCase {
 
         XCTAssertEqual(presentation.title, "Allow Design Cloud to print?")
         XCTAssertEqual(presentation.defaultGrant, .allLocalPrinters)
-        XCTAssertTrue(presentation.detailText.contains("for Customer"))
+        XCTAssertTrue(presentation.detailText.contains("Customer workspace"))
     }
 
     private func decodePreview(_ json: String) throws -> NodeConnectPreview {
