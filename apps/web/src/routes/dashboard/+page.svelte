@@ -571,22 +571,16 @@
   bind:open={enrolmentOpen}
   labelledBy="enrolment-title"
   title="Add a node"
-  description="Install the native app, then approve a short-lived, printer-scoped connection."
+  description="Connect this workspace to a printer computer."
 >
   <div class="ui-dialog__body">
     {#if data.dashboardMode === 'demo'}
       <p class="ui-note warning">Demo mode: preview only. No enrolment will be created.</p>
     {/if}
 
-    <ol class="steps" aria-label="Add node steps">
-      <li><span>1</span><div><strong>Install</strong><small><a href="/downloads">Download the native node</a> on the printer computer.</small></div></li>
-      <li><span>2</span><div><strong>Create invitation</strong><small>Name this computer and create a short-lived connection.</small></div></li>
-      <li><span>3</span><div><strong>Choose printers</strong><small>Open Piqae and approve only the printers this workspace may use.</small></div></li>
-    </ol>
-
-    <p class="ui-note success">
-      The one-time invitation is handed directly to the installed app. Device keys stay on the
-      printer computer and the invitation is never placed in a server request URL.
+    <p class="muted">
+      Do this on the computer connected to your printers. Piqae will open and ask which printers
+      this workspace may use.
     </p>
 
     <form
@@ -605,12 +599,7 @@
       <Field label="Node name">
         <input class="input" name="name" minlength="2" maxlength="120" required placeholder="Warehouse Mac mini" />
       </Field>
-      <Field label="Token expiry">
-        <select class="input" name="expires_in_seconds">
-          <option value="600">10 minutes</option>
-          <option value="900">15 minutes</option>
-        </select>
-      </Field>
+      <input type="hidden" name="expires_in_seconds" value="600" />
     </form>
 
     {#if enrolmentResult?.error}
@@ -620,11 +609,11 @@
     {#if enrolmentResult?.enrolment}
       <section class="secret" aria-live="polite">
         <div>
-          <strong>Connection invitation · shown once</strong>
-          <span>Expires {new Date(enrolmentResult.enrolment.expiresAt).toLocaleString()}</span>
+          <strong>Ready to connect</strong>
+          <span>This secure invitation expires in 10 minutes.</span>
         </div>
         <a class="button compact" href={enrolmentResult.enrolment.connectUrl}>
-          <Icon name="external" size={13} /> Open Piqae to connect
+          <Icon name="external" size={13} /> Open Piqae
         </a>
       </section>
     {/if}
@@ -638,7 +627,7 @@
       form="enrolment-form"
       disabled={enrolmentPending || data.dashboardMode !== 'live'}
     >
-      {enrolmentPending ? 'Creating…' : 'Create connection'}
+      {enrolmentPending ? 'Preparing…' : 'Continue'}
     </button>
   {/snippet}
 </Dialog>
@@ -850,54 +839,6 @@
   .empty-line {
     margin: 0;
     font-size: var(--text-compact);
-  }
-
-  /* Dialog content */
-  .steps {
-    display: grid;
-    gap: 12px;
-    margin: 0;
-    padding: 0;
-    list-style: none;
-  }
-
-  .steps li {
-    display: grid;
-    grid-template-columns: 22px minmax(0, 1fr);
-    align-items: start;
-    gap: 10px;
-  }
-
-  .steps li > span {
-    width: 20px;
-    height: 20px;
-    display: grid;
-    place-items: center;
-    color: var(--text-tertiary);
-    background: var(--surface-raised);
-    border: 1px solid var(--border-default);
-    border-radius: 50%;
-    font-size: var(--text-meta);
-  }
-
-  .steps div {
-    display: grid;
-    gap: 1px;
-  }
-
-  .steps strong {
-    font-size: var(--text-compact);
-    font-weight: 530;
-  }
-
-  .steps small {
-    color: var(--text-tertiary);
-    font-size: var(--text-meta);
-    line-height: var(--text-meta-line);
-  }
-
-  .steps a {
-    color: var(--accent);
   }
 
   form {
