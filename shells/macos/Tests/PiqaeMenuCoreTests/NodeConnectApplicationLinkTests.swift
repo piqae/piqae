@@ -3,10 +3,11 @@ import XCTest
 @testable import PiqaeMenuCore
 
 final class NodeConnectApplicationLinkTests: XCTestCase {
+    private let origin = "control_plane_url=https%3A%2F%2Fapi.example.com"
     func testAcceptsVerifiedUniversalLinkAsPrimaryTransport() throws {
         let token = "piq_enr_0123456789abcdef0123456789abcdef"
         let link = try NodeConnectApplicationLink(
-            url: XCTUnwrap(URL(string: "https://app.piqae.com/connect#enrolment_token=\(token)"))
+            url: XCTUnwrap(URL(string: "https://app.piqae.com/connect#enrolment_token=\(token)&\(origin)"))
         )
         XCTAssertEqual(link.enrolmentCapability, token)
         XCTAssertEqual(link.transport, .universalLink)
@@ -17,7 +18,7 @@ final class NodeConnectApplicationLinkTests: XCTestCase {
     func testLegacyCustomSchemeIsExplicitlyClassifiedAsDeprecated() throws {
         let token = "piq_enr_0123456789abcdef0123456789abcdef"
         let link = try NodeConnectApplicationLink(
-            url: XCTUnwrap(URL(string: "piqae://connect#enrolment_token=\(token)"))
+            url: XCTUnwrap(URL(string: "piqae://connect#enrolment_token=\(token)&\(origin)"))
         )
         XCTAssertEqual(link.transport, .deprecatedCustomScheme)
     }
@@ -26,7 +27,7 @@ final class NodeConnectApplicationLinkTests: XCTestCase {
         let token = "piq_enr_0123456789abcdef0123456789abcdef"
         let encoded = "https%3A%2F%2Fdesigner.example%2Fprinting%2Fcomplete%3Fsession%3D42"
         let link = try NodeConnectApplicationLink(url: XCTUnwrap(URL(
-            string: "piqae://connect#enrolment_token=\(token)&return_url=\(encoded)"
+            string: "piqae://connect#enrolment_token=\(token)&\(origin)&return_url=\(encoded)"
         )))
         XCTAssertEqual(link.returnURL?.absoluteString, "https://designer.example/printing/complete?session=42")
 
@@ -37,7 +38,7 @@ final class NodeConnectApplicationLinkTests: XCTestCase {
             "%2Frelative",
         ] {
             XCTAssertThrowsError(try NodeConnectApplicationLink(url: XCTUnwrap(URL(
-                string: "piqae://connect#enrolment_token=\(token)&return_url=\(value)"
+                string: "piqae://connect#enrolment_token=\(token)&\(origin)&return_url=\(value)"
             ))), value)
         }
     }
@@ -78,7 +79,7 @@ final class NodeConnectApplicationLinkTests: XCTestCase {
     func testReplayGuardRejectsConcurrentAndConsumedLinks() async throws {
         let token = "piq_enr_0123456789abcdef0123456789abcdef"
         let link = try NodeConnectApplicationLink(
-            url: XCTUnwrap(URL(string: "piqae://connect#enrolment_token=\(token)"))
+            url: XCTUnwrap(URL(string: "piqae://connect#enrolment_token=\(token)&\(origin)"))
         )
         let guardrail = NodeConnectReplayGuard()
         let first = await guardrail.begin(link)

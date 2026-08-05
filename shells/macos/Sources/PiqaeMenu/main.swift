@@ -162,7 +162,7 @@ final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
             let bridge = try NodeConnectAgentBridge()
             let preview = try await Task.detached {
-                try bridge.preview(capability: link.enrolmentCapability)
+                try bridge.preview(capability: link.enrolmentCapability, controlPlaneURL: link.controlPlaneURL)
             }.value
             let selected = presentConnectorConsent(preview: preview, printers: currentPrinters)
             guard !selected.isEmpty else { return }
@@ -175,7 +175,7 @@ final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 return
             }
             try await Task.detached {
-                try bridge.accept(capability: link.enrolmentCapability, printerIDs: selected)
+                try bridge.accept(capability: link.enrolmentCapability, controlPlaneURL: link.controlPlaneURL, printerIDs: selected)
             }.value
             consumed = true
             do {
@@ -366,17 +366,6 @@ final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         menu.addItem(.separator())
-        if status?.connection == "local_only" {
-            let connect = menu.addItem(
-                withTitle: "Connect Piqae Account…",
-                action: #selector(connectPiqaeAccount),
-                keyEquivalent: ""
-            )
-            connect.target = self
-            connect.image = symbol("link", description: "Connect Piqae account")
-            menu.addItem(informational("Other service? Start in that service's app"))
-            menu.addItem(.separator())
-        }
         addPrinterSection()
         addRecentJobsSection()
 
@@ -892,24 +881,6 @@ final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func openDashboard() {
         guard let url = dashboardURL() else { return }
-        NSWorkspace.shared.open(url)
-    }
-
-    @objc private func connectPiqaeAccount() {
-        guard var components = dashboardURL().flatMap({
-            URLComponents(url: $0, resolvingAgainstBaseURL: false)
-        }) else {
-            showAlert(
-                title: "Piqae account connection unavailable",
-                message: "Start the connection from the Piqae dashboard in your browser."
-            )
-            return
-        }
-        var queryItems = components.queryItems ?? []
-        queryItems.removeAll { $0.name == "connect-node" }
-        queryItems.append(URLQueryItem(name: "connect-node", value: "1"))
-        components.queryItems = queryItems
-        guard let url = components.url else { return }
         NSWorkspace.shared.open(url)
     }
 

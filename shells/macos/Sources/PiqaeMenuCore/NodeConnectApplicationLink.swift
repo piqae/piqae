@@ -20,6 +20,7 @@ public enum NodeConnectLinkTransport: Equatable, Sendable {
 /// out of `CustomStringConvertible` and all diagnostic values.
 public struct NodeConnectApplicationLink: Equatable, @unchecked Sendable {
     public let enrolmentCapability: String
+    public let controlPlaneURL: URL
     public let returnURL: URL?
     public let transport: NodeConnectLinkTransport
 
@@ -45,7 +46,7 @@ public struct NodeConnectApplicationLink: Equatable, @unchecked Sendable {
         let items = URLComponents(string: "x://x/?\(fragment)")?.queryItems ?? []
         guard items.count == Set(items.map(\.name)).count,
             let tokenItem = items.first(where: { $0.name == "enrolment_token" }),
-            items.allSatisfy({ ["enrolment_token", "return_url"].contains($0.name) }),
+            items.allSatisfy({ ["enrolment_token", "control_plane_url", "return_url"].contains($0.name) }),
             let capability = tokenItem.value,
             capability.range(
                 of: #"^piq_enr_[A-Za-z0-9_-]{32}$"#,
@@ -54,6 +55,10 @@ public struct NodeConnectApplicationLink: Equatable, @unchecked Sendable {
         else {
             throw NodeConnectApplicationLinkError.invalidCapability
         }
+        guard let rawControlPlaneURL = items.first(where: { $0.name == "control_plane_url" })?.value,
+            let parsedControlPlaneURL = URL(string: rawControlPlaneURL),
+            Self.isSafeControlPlaneURL(parsedControlPlaneURL)
+        else { throw NodeConnectApplicationLinkError.invalidURL }
         if let rawReturnURL = items.first(where: { $0.name == "return_url" })?.value {
             guard let parsed = URL(string: rawReturnURL), Self.isSafeReturnURL(parsed) else {
                 throw NodeConnectApplicationLinkError.invalidReturnURL
@@ -63,6 +68,7 @@ public struct NodeConnectApplicationLink: Equatable, @unchecked Sendable {
             returnURL = nil
         }
         enrolmentCapability = capability
+        controlPlaneURL = parsedControlPlaneURL
     }
 
     /// A non-secret, stable identifier suitable for replay suppression and UI
@@ -79,6 +85,16 @@ public struct NodeConnectApplicationLink: Equatable, @unchecked Sendable {
             components.password == nil,
             components.fragment == nil,
             components.host != nil
+        else { return false }
+        if components.scheme?.lowercased() == "https" { return true }
+        return components.scheme?.lowercased() == "http"
+            && ["localhost", "127.0.0.1", "::1"].contains(components.host?.lowercased())
+    }
+
+    private static func isSafeControlPlaneURL(_ url: URL) -> Bool {
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+            components.user == nil, components.password == nil,
+            components.query == nil, components.fragment == nil, components.host != nil
         else { return false }
         if components.scheme?.lowercased() == "https" { return true }
         return components.scheme?.lowercased() == "http"

@@ -5,6 +5,7 @@ public struct NodeConnectPreview: Codable, Equatable, Sendable {
     public let workspaceName: String
     public let requestingServiceAccountID: String?
     public let requestingServiceName: String?
+    public let authorizationType: String
     public let environmentID: String
     public let requestedScopes: [String]
     public let printerGrant: String
@@ -16,6 +17,7 @@ public struct NodeConnectPreview: Codable, Equatable, Sendable {
         case workspaceName = "workspace_name"
         case requestingServiceAccountID = "requesting_service_account_id"
         case requestingServiceName = "requesting_service_name"
+        case authorizationType = "authorization_type"
         case environmentID = "environment_id"
         case requestedScopes = "requested_scopes"
         case printerGrant = "printer_grant"
@@ -63,8 +65,8 @@ public struct NodeConnectAgentBridge: Sendable {
         self.dataDirectory = dataDirectory
     }
 
-    public func preview(capability: String, now: Date = Date()) throws -> NodeConnectPreview {
-        let output = try run(flag: "--preview-connect-token-stdin", input: Data(capability.utf8))
+    public func preview(capability: String, controlPlaneURL: URL, now: Date = Date()) throws -> NodeConnectPreview {
+        let output = try run(flag: "--preview-connect-token-stdin", controlPlaneURL: controlPlaneURL, input: Data(capability.utf8))
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         let preview = try decoder.decode(NodeConnectPreview.self, from: output)
@@ -84,18 +86,18 @@ public struct NodeConnectAgentBridge: Sendable {
         return preview
     }
 
-    public func accept(capability: String, printerIDs: [String]) throws {
+    public func accept(capability: String, controlPlaneURL: URL, printerIDs: [String]) throws {
         let input = try JSONSerialization.data(withJSONObject: [
             "token": capability,
             "printer_ids": printerIDs,
         ])
-        _ = try run(flag: "--add-connector-json-stdin", input: input)
+        _ = try run(flag: "--add-connector-json-stdin", controlPlaneURL: controlPlaneURL, input: input)
     }
 
-    private func run(flag: String, input: Data) throws -> Data {
+    private func run(flag: String, controlPlaneURL: URL, input: Data) throws -> Data {
         let process = Process()
         process.executableURL = executableURL
-        process.arguments = [flag, "--data-dir", dataDirectory.path]
+        process.arguments = [flag, "--data-dir", dataDirectory.path, "--control-plane-url", controlPlaneURL.absoluteString]
         let stdin = Pipe()
         let stdout = Pipe()
         process.standardInput = stdin

@@ -8,7 +8,9 @@
     const invitation = consumeNodeConnectFragment(window.location, (url) =>
       window.history.replaceState({}, '', url)
     );
-    nativeUrl = invitation ? nativeNodeConnectUrl(invitation.enrolmentToken) : null;
+    nativeUrl = invitation
+      ? nativeNodeConnectUrl(invitation.enrolmentToken, invitation.controlPlaneUrl)
+      : null;
   });
 
   function openPiqae() {

@@ -53,6 +53,7 @@ pub struct AppState {
     pub local_identity: Option<identity::LocalIdentityState>,
     pub stripe_webhook_secret: Option<Arc<str>>,
     pub workos_webhook_secret: Option<Arc<str>>,
+    pub public_control_plane_url: Arc<str>,
 }
 
 impl fmt::Debug for AppState {
@@ -107,6 +108,7 @@ impl AppState {
             local_identity: None,
             stripe_webhook_secret: None,
             workos_webhook_secret: None,
+            public_control_plane_url: Arc::from("http://127.0.0.1:8080"),
         }
     }
 
@@ -131,6 +133,12 @@ impl AppState {
     #[must_use]
     pub fn with_workos_webhook_secret(mut self, secret: impl Into<Arc<str>>) -> Self {
         self.workos_webhook_secret = Some(secret.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_public_control_plane_url(mut self, url: impl Into<Arc<str>>) -> Self {
+        self.public_control_plane_url = url.into();
         self
     }
 

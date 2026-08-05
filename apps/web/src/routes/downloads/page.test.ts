@@ -14,7 +14,11 @@ describe('downloads', () => {
 
   it('removes a connect capability from the URL before offering an app handoff', async () => {
     const token = `piq_enr_${'a'.repeat(32)}`;
-    window.history.replaceState({}, '', `/downloads#enrolment_token=${token}`);
+    window.history.replaceState(
+      {},
+      '',
+      `/downloads#enrolment_token=${token}&control_plane_url=${encodeURIComponent('https://api.piqae.test')}`
+    );
 
     render(Page, {
       data: {

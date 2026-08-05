@@ -3212,6 +3212,7 @@ components:
         - workspace_name
         - requesting_service_account_id
         - requesting_service_name
+        - authorization_type
         - environment_id
         - requested_scopes
         - printer_grant
@@ -3222,6 +3223,7 @@ components:
         workspace_name: { type: string, description: Server-resolved customer workspace display name; not the requesting integrator identity. }
         requesting_service_account_id: { type: [string, "null"], description: "Server-authenticated platform service account snapshot, or null for a direct workspace credential." }
         requesting_service_name: { type: [string, "null"], description: "Server-authenticated platform display name snapshot, or null for a direct workspace credential." }
+        authorization_type: { type: string, enum: [workspace, platform_customer], description: Server-authenticated relationship being authorized; never trusted from the application link. }
         environment_id: { type: string }
         requested_scopes:
           type: array

@@ -2264,6 +2264,11 @@ export interface components {
             requesting_service_account_id: string | null;
             /** @description Server-authenticated platform display name snapshot, or null for a direct workspace credential. */
             requesting_service_name: string | null;
+            /**
+             * @description Server-authenticated relationship being authorized; never trusted from the application link.
+             * @enum {string}
+             */
+            authorization_type: "workspace" | "platform_customer";
             environment_id: string;
             requested_scopes: ("discover_printers" | "print" | "monitor_jobs")[];
             /** @enum {string} */
