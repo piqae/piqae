@@ -589,7 +589,7 @@
     <ol class="connect-steps">
       <li><span>1</span><div><strong>Install Piqae</strong><small><a href="/downloads">Download the native node</a> on the printer computer if needed.</small></div></li>
       <li><span>2</span><div><strong>Open the app</strong><small>Continue below to hand the short-lived invitation directly to Piqae.</small></div></li>
-      <li><span>3</span><div><strong>Choose printers</strong><small>Approve only the local printers this workspace may use.</small></div></li>
+      <li><span>3</span><div><strong>Choose printer access</strong><small>Allow every printer on this computer, including ones added later, or select specific printers.</small></div></li>
     </ol>
 
     <form

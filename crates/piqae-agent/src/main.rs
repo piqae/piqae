@@ -48,7 +48,7 @@ use piqae_protocol::{
     agent::{
         AgentAcceptJobRequest, AgentCommand, AgentHealth, AgentReleaseLeaseRequest,
         AgentRenewLeaseRequest, AgentSyncRequest, AgentSyncResponse, ContentDescriptor,
-        CreateDeviceAuthorizationRequest, EnrolRequest, InstallationMode, JobOffer,
+        CreateDeviceAuthorizationRequest, EnrolRequest, InstallationMode, JobOffer, PrinterGrant,
         PrinterProfileSnapshot, PrinterSnapshot, QueueSnapshot,
     },
     executor::{DiscoveredPrinter, ExecutorOperation, ExecutorResult, NativeJobObservation},
@@ -274,7 +274,7 @@ fn reject_connector_supervisor_command(
 }
 
 struct ConnectorWorker {
-    allowed_printer_ids: std::collections::BTreeSet<String>,
+    allowed_printer_ids: Option<std::collections::BTreeSet<String>>,
     sync_stop: StopSignal,
     scheduler_stop: StopSignal,
     connection_stop: StopSignal,
@@ -664,6 +664,8 @@ const MAX_CONNECTOR_CONSENT_BYTES: u64 = 32 * 1024;
 #[serde(deny_unknown_fields)]
 struct ConnectorConsentInput {
     token: String,
+    #[serde(default)]
+    printer_grant: PrinterGrant,
     printer_ids: Vec<String>,
 }
 
@@ -701,7 +703,10 @@ fn read_connector_consent(reader: impl std::io::Read) -> Result<ConnectorConsent
         serde_json::from_slice(&bytes).context("connector consent input is invalid")?;
     if !consent.token.starts_with("piq_enr_")
         || consent.token.len() > 128
-        || consent.printer_ids.is_empty()
+        || (consent.printer_grant == PrinterGrant::SelectedPrinters
+            && consent.printer_ids.is_empty())
+        || (consent.printer_grant == PrinterGrant::AllLocalPrinters
+            && !consent.printer_ids.is_empty())
         || consent.printer_ids.len() > 128
         || consent
             .printer_ids
@@ -793,7 +798,11 @@ async fn preview_connector(arguments: &Arguments, token: &str) -> Result<()> {
 }
 
 async fn add_connector(arguments: &Arguments, consent: ConnectorConsentInput) -> Result<()> {
-    let ConnectorConsentInput { token, printer_ids } = consent;
+    let ConnectorConsentInput {
+        token,
+        printer_grant,
+        printer_ids,
+    } = consent;
     let mut allowed_printer_ids = printer_ids;
     allowed_printer_ids.sort();
     let (base_url, installation, installation_key_path) = installed_control_plane(arguments)?;
@@ -831,10 +840,11 @@ async fn add_connector(arguments: &Arguments, consent: ConnectorConsentInput) ->
             .context("installed agent id is invalid")?,
         &installation_secret,
     );
-    let proof_message = piqae_protocol::agent::connector_proof_message(
+    let proof_message = connector_installation_proof_message(
         &token,
         &installation.installation_id,
         &connector_public_key,
+        printer_grant,
         &allowed_printer_ids,
     );
     let installation_proof = installation_identity.sign_base64(&proof_message);
@@ -850,6 +860,7 @@ async fn add_connector(arguments: &Arguments, consent: ConnectorConsentInput) ->
             agent_version: env!("CARGO_PKG_VERSION").to_owned(),
             protocol_version: CURRENT_PROTOCOL_VERSION,
             installation_id: Some(installation.installation_id),
+            printer_grant,
             allowed_printer_ids: allowed_printer_ids.clone(),
             installation_proof: Some(installation_proof),
         })
@@ -863,14 +874,11 @@ async fn add_connector(arguments: &Arguments, consent: ConnectorConsentInput) ->
         .enabled()
         .any(|record| record.connector_id == connector_id)
     {
-        registry.update_allowed_printers(&connector_id, allowed_printer_ids)?;
+        registry.update_allowed_printers(&connector_id, printer_grant, allowed_printer_ids)?;
         if let Err(error) = signal_connector_reload(arguments).await {
             warn!(%error, "existing connector is durable but immediate reload was deferred");
         }
-        println!(
-            "{}",
-            serde_json::json!({"state":"connected","agent_id":enrolled.agent_id})
-        );
+        print_connector_connected(&enrolled.agent_id);
         return Ok(());
     }
     registry.add(connector_runtime::ConnectorRecord {
@@ -879,16 +887,45 @@ async fn add_connector(arguments: &Arguments, consent: ConnectorConsentInput) ->
         control_plane_url: base_url,
         device_key_file: relative_key,
         enabled: true,
+        printer_grant,
         allowed_printer_ids,
     })?;
     if let Err(error) = signal_connector_reload(arguments).await {
         warn!(%error, "connector is durable but the running node could not be notified; periodic recovery will retry");
     }
+    print_connector_connected(&enrolled.agent_id);
+    Ok(())
+}
+
+fn print_connector_connected(agent_id: &AgentId) {
     println!(
         "{}",
-        serde_json::json!({"state":"connected","agent_id":enrolled.agent_id})
+        serde_json::json!({"state":"connected","agent_id":agent_id})
     );
-    Ok(())
+}
+
+fn connector_installation_proof_message(
+    token: &str,
+    installation_id: &str,
+    connector_public_key: &str,
+    printer_grant: PrinterGrant,
+    allowed_printer_ids: &[String],
+) -> Vec<u8> {
+    match printer_grant {
+        PrinterGrant::SelectedPrinters => piqae_protocol::agent::connector_proof_message(
+            token,
+            installation_id,
+            connector_public_key,
+            allowed_printer_ids,
+        ),
+        PrinterGrant::AllLocalPrinters => piqae_protocol::agent::connector_grant_proof_message(
+            token,
+            installation_id,
+            connector_public_key,
+            printer_grant,
+            allowed_printer_ids,
+        ),
+    }
 }
 
 fn no_enabled_connectors(data_dir: &Path) -> Result<bool> {
@@ -968,6 +1005,7 @@ async fn enrol_installation(arguments: &Arguments, token: &str) -> Result<()> {
             agent_version: env!("CARGO_PKG_VERSION").to_owned(),
             protocol_version: CURRENT_PROTOCOL_VERSION,
             installation_id: None,
+            printer_grant: PrinterGrant::SelectedPrinters,
             allowed_printer_ids: Vec::new(),
             installation_proof: None,
         })
@@ -1629,7 +1667,7 @@ async fn reload_connector_workers(
         }
     }
     for (id, record) in enabled {
-        let grants = record.allowed_printer_ids.iter().cloned().collect();
+        let grants = connector_allowed_printers(&record);
         if workers
             .get(&id)
             .is_some_and(|worker| worker.allowed_printer_ids == grants)
@@ -1735,7 +1773,7 @@ async fn start_connector_worker(
         connection_stop.clone(),
     ));
     Ok(ConnectorWorker {
-        allowed_printer_ids: record.allowed_printer_ids.iter().cloned().collect(),
+        allowed_printer_ids: connector_allowed_printers(&record),
         sync_stop,
         scheduler_stop,
         connection_stop,
@@ -2983,8 +3021,19 @@ fn cloud_configuration_from_connector(
         agent_id,
         content_encryption_key: Arc::new(content_encryption_key),
         content_encryption_key_id,
-        allowed_printer_ids: Some(record.allowed_printer_ids.iter().cloned().collect()),
+        allowed_printer_ids: connector_allowed_printers(record),
     })
+}
+
+fn connector_allowed_printers(
+    record: &connector_runtime::ConnectorRecord,
+) -> Option<std::collections::BTreeSet<String>> {
+    match record.printer_grant {
+        PrinterGrant::SelectedPrinters => {
+            Some(record.allowed_printer_ids.iter().cloned().collect())
+        }
+        PrinterGrant::AllLocalPrinters => None,
+    }
 }
 
 #[allow(
@@ -4286,6 +4335,7 @@ mod tests {
             control_plane_url: Url::parse("https://api.piqae.example/").expect("url"),
             device_key_file: format!("connectors/{id}/device.key").into(),
             enabled: true,
+            printer_grant: PrinterGrant::SelectedPrinters,
             allowed_printer_ids: vec!["prn_test".to_owned()],
         }
     }
@@ -4411,7 +4461,7 @@ mod tests {
         let mut workers = std::collections::BTreeMap::from([(
             "ncon_good".to_owned(),
             ConnectorWorker {
-                allowed_printer_ids: std::iter::once("prn_test".to_owned()).collect(),
+                allowed_printer_ids: Some(std::iter::once("prn_test".to_owned()).collect()),
                 sync_stop,
                 scheduler_stop,
                 connection_stop,
@@ -4466,7 +4516,7 @@ mod tests {
         let mut workers = std::collections::BTreeMap::from([(
             "ncon_test".to_owned(),
             ConnectorWorker {
-                allowed_printer_ids: std::collections::BTreeSet::new(),
+                allowed_printer_ids: Some(std::collections::BTreeSet::new()),
                 sync_stop,
                 scheduler_stop,
                 connection_stop,
@@ -4497,6 +4547,16 @@ mod tests {
         assert!(!printer_is_allowed(Some(&second), "prn_first"));
         assert!(!printer_is_allowed(Some(&empty), "prn_first"));
         assert!(printer_is_allowed(None, "prn_legacy"));
+    }
+
+    #[test]
+    fn all_printer_grant_includes_printers_discovered_later() {
+        let mut record = test_connector_record("ncon_all");
+        record.printer_grant = PrinterGrant::AllLocalPrinters;
+        record.allowed_printer_ids.clear();
+        let grant = connector_allowed_printers(&record);
+        assert!(printer_is_allowed(grant.as_ref(), "prn_present"));
+        assert!(printer_is_allowed(grant.as_ref(), "prn_added_later"));
     }
 
     #[test]
@@ -4731,6 +4791,15 @@ mod tests {
             br#"{"token":"piq_enr_0123456789abcdef0123456789abcdef","printer_ids":["prn_1"]}"#;
         let consent = read_connector_consent(input.as_slice()).expect("consent");
         assert_eq!(consent.printer_ids, ["prn_1"]);
+        let test_token = format!("piq_enr_{}", "0123456789abcdef".repeat(2));
+        let all_input = serde_json::json!({
+            "token": test_token,
+            "printer_grant": "all_local_printers",
+            "printer_ids": [],
+        });
+        let all =
+            read_connector_consent(all_input.to_string().as_bytes()).expect("all-printer consent");
+        assert_eq!(all.printer_grant, PrinterGrant::AllLocalPrinters);
         assert!(
             read_connector_consent(
                 br#"{"token":"piq_enr_0123456789abcdef0123456789abcdef","printer_ids":[]}"#
@@ -4741,6 +4810,12 @@ mod tests {
         assert!(read_connector_consent(
             br#"{"token":"piq_enr_0123456789abcdef0123456789abcdef","printer_ids":["prn_1","prn_1"]}"#.as_slice()
         ).is_err());
+        let invalid_all_input = serde_json::json!({
+            "token": test_token,
+            "printer_grant": "all_local_printers",
+            "printer_ids": ["prn_1"],
+        });
+        assert!(read_connector_consent(invalid_all_input.to_string().as_bytes()).is_err());
         let arguments = Arguments::try_parse_from(["piqae-agent", "--add-connector-json-stdin"])
             .expect("connector stdin arguments");
         assert!(arguments.add_connector_json_stdin);

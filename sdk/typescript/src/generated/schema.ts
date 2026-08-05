@@ -2239,8 +2239,14 @@ export interface components {
             protocol_version: 1;
             /** @description Stable physical installation ID when adding an isolated connector. */
             installation_id?: string;
-            /** @description Exact printer IDs approved by the local operator; empty never means all. */
+            /** @description Exact printer IDs approved by the local operator when printer_grant is selected_printers; empty never means all. */
             allowed_printer_ids?: string[];
+            /**
+             * @description Durable local authorization policy. all_local_printers includes printers discovered after connection.
+             * @default selected_printers
+             * @enum {string}
+             */
+            printer_grant?: "selected_printers" | "all_local_printers";
             /** @description Ed25519 signature by the immutable physical installation key over the versioned invitation, connector key, and printer grant. */
             installation_proof?: string;
         };
@@ -2273,7 +2279,7 @@ export interface components {
             environment_id: string;
             requested_scopes: ("discover_printers" | "print" | "monitor_jobs")[];
             /** @enum {string} */
-            printer_grant: "select";
+            printer_grant: "all_or_selected";
             /** Format: date-time */
             expires_at: string;
             /**

@@ -4172,6 +4172,7 @@ impl PostgresStore {
             protocol_version,
             enforce_cloud_billing,
             None,
+            "selected_printers",
             &[],
         )
         .await
@@ -4190,6 +4191,7 @@ impl PostgresStore {
         protocol_version: u16,
         enforce_cloud_billing: bool,
         physical_installation_id: Option<&str>,
+        printer_grant: &str,
         allowed_printer_ids: &[String],
     ) -> Result<EnrolledAgent, StorageError> {
         let mut transaction = self.pool.begin().await?;
@@ -4243,7 +4245,10 @@ impl PostgresStore {
                    AND agent.public_key = $5 AND agent.revoked_at IS NULL
                    AND connector.revoked_at IS NULL
                    AND (($6::boolean = true
-                         AND connector.permissions->'printers' = to_jsonb($7::text[]))
+                         AND (($8 = 'selected_printers'
+                               AND connector.permissions->'printers' = to_jsonb($7::text[]))
+                              OR ($8 = 'all_local_printers'
+                                  AND connector.permissions->>'printers' = 'all')))
                         OR ($6::boolean = false
                             AND connector.permissions->>'printers' = 'all'))
                  FOR UPDATE OF agent, connector",
@@ -4255,6 +4260,7 @@ impl PostgresStore {
             .bind(public_key)
             .bind(physical_installation_id.is_some())
             .bind(allowed_printer_ids)
+            .bind(printer_grant)
             .fetch_optional(&mut *transaction)
             .await?
             .ok_or(StorageError::NotFound)?;
@@ -4315,8 +4321,13 @@ impl PostgresStore {
             )
             .await?;
             if physical_installation_id.is_some() {
-                restrict_connector_printers(&mut transaction, &connector_id, allowed_printer_ids)
-                    .await?;
+                set_connector_printer_grant(
+                    &mut transaction,
+                    &connector_id,
+                    printer_grant,
+                    allowed_printer_ids,
+                )
+                .await?;
             }
             transaction.commit().await?;
             return Ok(EnrolledAgent {
@@ -4365,8 +4376,13 @@ impl PostgresStore {
         )
         .await?;
         if physical_installation_id.is_some() {
-            restrict_connector_printers(&mut transaction, &connector_id, allowed_printer_ids)
-                .await?;
+            set_connector_printer_grant(
+                &mut transaction,
+                &connector_id,
+                printer_grant,
+                allowed_printer_ids,
+            )
+            .await?;
         }
         transaction.commit().await?;
         Ok(EnrolledAgent {
@@ -6090,11 +6106,33 @@ fn valid_external_installation_id(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
 }
 
-async fn restrict_connector_printers(
+async fn set_connector_printer_grant(
     transaction: &mut Transaction<'_, Postgres>,
     connector_id: &str,
+    printer_grant: &str,
     printer_ids: &[String],
 ) -> Result<(), StorageError> {
+    if printer_grant == "all_local_printers" {
+        if !printer_ids.is_empty() {
+            return Err(StorageError::InvalidData(
+                "all-printer connector grants cannot contain printer identifiers".into(),
+            ));
+        }
+        sqlx::query(
+            "UPDATE node_connectors SET permissions = jsonb_build_object(
+                'printers', 'all'::text, 'print_jobs', 'create_and_monitor'::text
+             ), updated_at = now() WHERE id = $1",
+        )
+        .bind(connector_id)
+        .execute(&mut **transaction)
+        .await?;
+        return Ok(());
+    }
+    if printer_grant != "selected_printers" {
+        return Err(StorageError::InvalidData(
+            "unknown connector printer grant".into(),
+        ));
+    }
     let unique = printer_ids.iter().collect::<std::collections::HashSet<_>>();
     if printer_ids.is_empty()
         || printer_ids.len() > 128

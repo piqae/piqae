@@ -75,6 +75,16 @@ such as which store, team, or user may use a particular target.
 
 ## Discovering design specifications
 
+During node connection, the operator can allow all printers on the computer or
+limit the integration to selected printers. For a managed design editor,
+`all_local_printers` is usually the cleanest choice: newly installed printers
+appear automatically without reconnecting the node. Use
+`selected_printers` when a site requires printer-by-printer separation.
+
+Discovery remains authorization-scoped. The editor receives only the printers,
+stocks, capabilities, and captured driver profiles available to its connector,
+even when the same physical node is connected to other platforms.
+
 Use logical targets as the customer-facing printing choice. A target associates
 a stable business stock with exact printer/profile revisions and can select an
 eligible primary or standby binding before native acceptance.

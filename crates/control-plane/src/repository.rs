@@ -493,6 +493,7 @@ pub trait Repository: Send + Sync + 'static {
         protocol_version: u16,
         enforce_cloud_billing: bool,
         _installation_id: &str,
+        _printer_grant: &str,
         _allowed_printer_ids: &[String],
     ) -> Result<EnrolledAgent, RepositoryError> {
         self.enrol_agent_with_billing(
@@ -1591,6 +1592,7 @@ impl Repository for PostgresStore {
         protocol_version: u16,
         enforce_cloud_billing: bool,
         installation_id: &str,
+        printer_grant: &str,
         allowed_printer_ids: &[String],
     ) -> Result<EnrolledAgent, RepositoryError> {
         Self::enrol_agent_connector_with_billing(
@@ -1605,6 +1607,7 @@ impl Repository for PostgresStore {
             protocol_version,
             enforce_cloud_billing,
             Some(installation_id),
+            printer_grant,
             allowed_printer_ids,
         )
         .await

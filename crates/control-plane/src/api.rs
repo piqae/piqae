@@ -605,7 +605,7 @@ pub async fn preview_node_connect_session(
             "print".into(),
             "monitor_jobs".into(),
         ],
-        printer_grant: "select".into(),
+        printer_grant: "all_or_selected".into(),
         expires_at: preview.expires_at,
         return_url: preview.return_url,
     }))
@@ -799,12 +799,7 @@ pub async fn enrol_agent(
         ));
     }
     let secret_hash = format!("{:x}", Sha256::digest(request.token.as_bytes()));
-    if request.installation_id.is_some() && request.allowed_printer_ids.is_empty() {
-        return Err(AppError::invalid(
-            "printer_consent_required",
-            "At least one locally approved printer is required for a connector.",
-        ));
-    }
+    validate_connector_printer_grant(&request)?;
     if let Some(installation_id) = request.installation_id.as_deref() {
         let existing_key = match state
             .repository
@@ -819,12 +814,7 @@ pub async fn enrol_agent(
             .installation_proof
             .as_deref()
             .ok_or_else(AppError::unauthorized)?;
-        let message = piqae_protocol::agent::connector_proof_message(
-            &request.token,
-            installation_id,
-            &request.public_key,
-            &request.allowed_printer_ids,
-        );
+        let message = connector_proof_for_request(&request, installation_id);
         verify_connector_proof(&existing_key, proof, &message)?;
     }
     let enrolled = if let Some(installation_id) = request.installation_id.as_deref() {
@@ -841,6 +831,10 @@ pub async fn enrol_agent(
                 request.protocol_version,
                 state.capabilities.billing.enabled,
                 installation_id,
+                match request.printer_grant {
+                    piqae_protocol::agent::PrinterGrant::SelectedPrinters => "selected_printers",
+                    piqae_protocol::agent::PrinterGrant::AllLocalPrinters => "all_local_printers",
+                },
                 &request.allowed_printer_ids,
             )
             .await?
@@ -871,6 +865,53 @@ pub async fn enrol_agent(
         }),
     )
         .into_response())
+}
+
+fn validate_connector_printer_grant(request: &EnrolRequest) -> Result<(), AppError> {
+    if request.installation_id.is_none() {
+        return Ok(());
+    }
+    match request.printer_grant {
+        piqae_protocol::agent::PrinterGrant::SelectedPrinters
+            if request.allowed_printer_ids.is_empty() =>
+        {
+            Err(AppError::invalid(
+                "printer_consent_required",
+                "At least one locally approved printer is required for a connector.",
+            ))
+        }
+        piqae_protocol::agent::PrinterGrant::AllLocalPrinters
+            if !request.allowed_printer_ids.is_empty() =>
+        {
+            Err(AppError::invalid(
+                "invalid_printer_grant",
+                "All-printer access must not include selected printer identifiers.",
+            ))
+        }
+        _ => Ok(()),
+    }
+}
+
+fn connector_proof_for_request(request: &EnrolRequest, installation_id: &str) -> Vec<u8> {
+    match request.printer_grant {
+        piqae_protocol::agent::PrinterGrant::SelectedPrinters => {
+            piqae_protocol::agent::connector_proof_message(
+                &request.token,
+                installation_id,
+                &request.public_key,
+                &request.allowed_printer_ids,
+            )
+        }
+        piqae_protocol::agent::PrinterGrant::AllLocalPrinters => {
+            piqae_protocol::agent::connector_grant_proof_message(
+                &request.token,
+                installation_id,
+                &request.public_key,
+                request.printer_grant,
+                &request.allowed_printer_ids,
+            )
+        }
+    }
 }
 
 fn verify_connector_proof(

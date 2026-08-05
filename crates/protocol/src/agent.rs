@@ -32,6 +32,8 @@ pub struct EnrolRequest {
     /// Locally approved printer identifiers. Empty never means all printers.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_printer_ids: Vec<String>,
+    #[serde(default)]
+    pub printer_grant: PrinterGrant,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub installation_proof: Option<String>,
 }
@@ -47,7 +49,6 @@ pub fn connector_proof_message(
     let mut printers = printer_ids.to_vec();
     printers.sort();
     printers.dedup();
-
     let mut message = b"piqae-connect-proof-v2".to_vec();
     append_proof_field(&mut message, &Sha256::digest(token.as_bytes()));
     append_proof_field(&mut message, installation_id.as_bytes());
@@ -63,9 +64,52 @@ pub fn connector_proof_message(
     message
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrinterGrant {
+    #[default]
+    SelectedPrinters,
+    AllLocalPrinters,
+}
+
+#[must_use]
+pub fn connector_grant_proof_message(
+    token: &str,
+    installation_id: &str,
+    connector_public_key: &str,
+    grant: PrinterGrant,
+    printer_ids: &[String],
+) -> Vec<u8> {
+    use sha2::{Digest as _, Sha256};
+    let mut printers = printer_ids.to_vec();
+    printers.sort();
+    printers.dedup();
+
+    let mut message = b"piqae-connect-proof-v3".to_vec();
+    append_proof_field(&mut message, &Sha256::digest(token.as_bytes()));
+    append_proof_field(&mut message, installation_id.as_bytes());
+    append_proof_field(&mut message, connector_public_key.as_bytes());
+    append_proof_field(
+        &mut message,
+        match grant {
+            PrinterGrant::SelectedPrinters => b"selected_printers",
+            PrinterGrant::AllLocalPrinters => b"all_local_printers",
+        },
+    );
+    message.extend_from_slice(
+        &u64::try_from(printers.len())
+            .unwrap_or(u64::MAX)
+            .to_be_bytes(),
+    );
+    for printer in printers {
+        append_proof_field(&mut message, printer.as_bytes());
+    }
+    message
+}
+
 #[cfg(test)]
 mod connector_proof_tests {
-    use super::connector_proof_message;
+    use super::{PrinterGrant, connector_grant_proof_message, connector_proof_message};
     use sha2::{Digest as _, Sha256};
 
     #[test]
@@ -121,6 +165,25 @@ mod connector_proof_tests {
                 &["a".into(), "c".into()],
             )
         );
+    }
+
+    #[test]
+    fn durable_grant_proof_binds_all_vs_selected_policy() {
+        let all = connector_grant_proof_message(
+            "piq_enr_secret",
+            "installation_1",
+            "connector-key",
+            PrinterGrant::AllLocalPrinters,
+            &[],
+        );
+        let selected = connector_grant_proof_message(
+            "piq_enr_secret",
+            "installation_1",
+            "connector-key",
+            PrinterGrant::SelectedPrinters,
+            &[],
+        );
+        assert_ne!(all, selected);
     }
 
     #[test]

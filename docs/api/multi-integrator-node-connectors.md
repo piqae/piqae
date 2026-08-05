@@ -22,8 +22,10 @@ merge installations across tenants.
 The agent has a durable connector registry, separate signing and content keys,
 SQLite/content roots, synchronization cursors and outboxes per connector, plus
 bounded fair scheduling across enabled connectors. Connector enrolment requires
-proof by the immutable physical-installation key and persists the exact local
-printer selection; an empty selection never means all printers. A local-first
+proof by the immutable physical-installation key and persists a durable local
+printer policy. The operator can authorize every printer on the computer,
+including printers added later, or only explicitly selected printer IDs. An
+empty selected-printer list never means all printers. A local-first
 installation activates only connectors accepted through the native consent
 flow. Its menu aggregates their live health without disclosing one connector
 to another.
@@ -36,7 +38,9 @@ or provide an equivalent native consent shell. No platform yet has the
 clean-install physical-printer, concurrent-fleet and revocation-soak evidence
 required for Supported promotion.
 
-Each connector's discovery projection and queue are tenant-scoped. The local
-operator grants concrete printer IDs; another connector cannot infer that a
-printer or service exists. Revocation, key loss and partial restart recovery
+Each connector's discovery projection and queue are tenant-scoped. For design
+editors that need the complete printer, stock, and captured-profile inventory,
+`all_local_printers` is the recommended policy. Sites requiring strict device
+separation can choose `selected_printers`. Another connector cannot infer that
+a printer or service exists. Revocation, key loss and partial restart recovery
 still require release evidence across every advertised operating system.
