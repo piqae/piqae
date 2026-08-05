@@ -624,7 +624,7 @@ jobs:
                   "Open the standard macOS Installer package for Apple silicon and Intel Macs.",
                   "The menu app, local node, and CUPS executor are Developer ID signed.",
                   "Sparkle replaces the menu application, which then verifies and activates its matching durable agent and CUPS executor together while the queue is idle.",
-                  "The native component pair rolls back together if activation or health verification fails; application rollback remains Sparkle's boundary."
+                  "The native component pair rolls back together if activation or health verification fails; application rollback remains within the Sparkle boundary."
                 ]
               }
             }' > promotion/macos.json
