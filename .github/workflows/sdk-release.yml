@@ -101,7 +101,7 @@ jobs:
           registry-url: https://registry.npmjs.org
       - run: npm install --global npm@11.19.0
       - name: Publish the already-tested tarball
-        run: npm publish artifacts/piqae-sdk-*.tgz --access public --provenance
+        run: npm publish ./artifacts/piqae-sdk-*.tgz --access public --provenance
 
   publish-github-packages:
     name: Mirror SDK to GitHub Packages
@@ -124,7 +124,7 @@ jobs:
           scope: '@piqae'
       - env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: npm publish artifacts/piqae-sdk-*.tgz --registry https://npm.pkg.github.com --access public
+        run: npm publish ./artifacts/piqae-sdk-*.tgz --registry https://npm.pkg.github.com --access public
 
   github-release:
     name: Attach SDK package to GitHub release
@@ -141,6 +141,7 @@ jobs:
           path: artifacts
       - env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
         run: |
           gh release create "$GITHUB_REF_NAME" artifacts/* --verify-tag \
             --title "Piqae TypeScript SDK ${GITHUB_REF_NAME#sdk-v}" --generate-notes
