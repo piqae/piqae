@@ -1,6 +1,6 @@
 {
   "name": "@piqae/sdk",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Typed TypeScript SDK for the Piqae printing API",
   "license": "Apache-2.0",
   "type": "module",
