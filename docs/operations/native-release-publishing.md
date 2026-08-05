@@ -211,11 +211,12 @@ and queue reconciliation have been observed.
   protected release repairs both channel pointers.
 - No Windows appcast is published; its stable route correctly remains absent
   while Windows release evidence is incomplete.
-- macOS Sparkle replaces the app bundle, not the separately installed Rust
-  node and executor.
+- macOS Sparkle replaces the app bundle; the relaunched app transactionally
+  activates its embedded, matching Rust agent and executor after an idle gate.
 - Windows WinSparkle source integration still needs a Windows CI run,
   clean-install evidence, busy-node deferral evidence, and rollback evidence.
-- Atomic full-node update restoration has no release evidence.
+- Coordinated update restoration still needs destructive fault-injection
+  evidence before it can move beyond Preview.
 - Signed clean-install and physical-printer matrices remain open.
 - The published macOS DMG is labelled Preview. No platform or automatic-update
   feature should be advertised as Supported until

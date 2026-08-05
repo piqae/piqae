@@ -2,27 +2,27 @@ import XCTest
 @testable import PiqaeMenuCore
 
 final class UpdateReadinessTests: XCTestCase {
-    func testUpdateMenuTruthfullyDescribesAppOnlyUpdateChannel() {
+    func testUpdateMenuDescribesTheCoordinatedNodeUpdate() {
         XCTAssertEqual(
             UpdateMenuPresentation.unavailable.title,
-            "App updates unavailable in this build"
+            "Updates unavailable in this build"
         )
         XCTAssertFalse(UpdateMenuPresentation.unavailable.canOpenUpdater)
         XCTAssertEqual(
             UpdateMenuPresentation.readyToCheck.title,
-            "Check for Piqae App Update…"
+            "Check for Piqae Update…"
         )
         XCTAssertTrue(UpdateMenuPresentation.readyToCheck.canOpenUpdater)
         XCTAssertEqual(
             UpdateMenuPresentation.available(version: "1.2.3").title,
-            "Piqae App 1.2.3 Available…"
+            "Piqae 1.2.3 Available…"
         )
         XCTAssertTrue(
             UpdateMenuPresentation.available(version: "1.2.3").canOpenUpdater
         )
         XCTAssertEqual(
             UpdateMenuPresentation.waitingForIdle(version: "1.2.3").title,
-            "Piqae App 1.2.3 Waiting for Idle"
+            "Piqae 1.2.3 Waiting for Idle"
         )
         XCTAssertFalse(
             UpdateMenuPresentation.waitingForIdle(version: "1.2.3").canOpenUpdater
@@ -31,7 +31,7 @@ final class UpdateReadinessTests: XCTestCase {
             UpdateMenuPresentation.available(
                 version: " \n1234567890123456789012345678901234567890\r"
             ).title,
-            "Piqae App 12345678901234567890123456789012 Available…"
+            "Piqae 12345678901234567890123456789012 Available…"
         )
     }
 

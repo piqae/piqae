@@ -170,6 +170,7 @@ jobs:
             packaging/macos/sign-app.sh \
             packaging/macos/sign-components.sh \
             packaging/macos/uninstall-user.sh \
+            packaging/macos/update-native-components.sh \
             packaging/macos/verify-update-signature.sh
           plutil -lint \
             shells/macos/Resources/Info.plist \
@@ -258,6 +259,8 @@ jobs:
             PIQAE_VERSION="$RELEASE_VERSION" \
             PIQAE_BUILD_NUMBER="$RELEASE_BUILD" \
             PIQAE_SWIFT_ARCHS="arm64,x86_64" \
+            PIQAE_AGENT_BINARY="$fixture/bin/piqae-agent" \
+            PIQAE_EXECUTOR_BINARY="$fixture/bin/piqae-executor-cups" \
             PIQAE_CODE_SIGN_IDENTITY="$MACOS_APPLICATION_IDENTITY" \
             PIQAE_SPARKLE_FEED_URL="$SPARKLE_FEED_URL" \
             PIQAE_SPARKLE_PUBLIC_ED_KEY="$SPARKLE_PUBLIC_ED_KEY" \
@@ -267,10 +270,19 @@ jobs:
             PIQAE_VERSION="$RELEASE_VERSION" \
             PIQAE_BUILD_NUMBER="$RELEASE_BUILD" \
             PIQAE_SWIFT_ARCHS="arm64,x86_64" \
+            PIQAE_AGENT_BINARY="$fixture/bin/piqae-agent" \
+            PIQAE_EXECUTOR_BINARY="$fixture/bin/piqae-executor-cups" \
               shells/macos/build-app.sh
           fi
           lipo -archs "$app/Contents/MacOS/PiqaeMenu" | grep -F arm64 | grep -F x86_64
           lipo -archs "$app/Contents/MacOS/PiqaePrintCoreReplay" | grep -F arm64 | grep -F x86_64
+          for component in piqae-agent piqae-executor-cups; do
+            embedded="$app/Contents/Resources/Node/$component"
+            test -x "$embedded"
+            lipo -archs "$embedded" | grep -F arm64 | grep -F x86_64
+            "$embedded" --version | grep -F "$RELEASE_VERSION"
+          done
+          test -x "$app/Contents/Resources/Node/update-native-components.sh"
           otool -l "$app/Contents/MacOS/PiqaeMenu" |
             grep -F "@executable_path/../Frameworks"
           if codesign -d --entitlements :- "$app" 2>/dev/null |
@@ -278,6 +290,10 @@ jobs:
           then
             echo 'Developer ID release must not ship a restricted entitlement without an embedded provisioning profile.' >&2
             exit 1
+          fi
+          if [[ "$RELEASE_MODE" == signed ]]; then
+            codesign --verify --strict "$app/Contents/Resources/Node/piqae-agent"
+            codesign --verify --strict "$app/Contents/Resources/Node/piqae-executor-cups"
           fi
           "$app/Contents/MacOS/PiqaeMenu" \
             > "$fixture/menu-launch-smoke.out" \

@@ -39,7 +39,7 @@ features:
     reason: Helm policy renders and validates locally but Kind disruption and rollback evidence is incomplete
   signed_automatic_node_updates:
     tier: disabled
-    reason: macOS signing and app-only Sparkle checks exist, but atomic full-node activation and rollback evidence do not
+    reason: signed coordinated app/node updates and component rollback are implemented, but destructive fault-injection and physical-printer certification remain release gates
   legacy_compatibility:
     tier: preview
     reason: only the documented compatibility subset is covered by fixtures

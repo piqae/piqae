@@ -20,6 +20,14 @@ if ! security find-identity -v -p codesigning | grep -F -- "$identity" >/dev/nul
 fi
 
 framework="$app/Contents/Frameworks/Sparkle.framework"
+for component in \
+  "$app/Contents/Resources/Node/piqae-agent" \
+  "$app/Contents/Resources/Node/piqae-executor-cups"
+do
+  if [[ -e "$component" ]]; then
+    codesign --force --timestamp --options runtime --sign "$identity" "$component"
+  fi
+done
 for nested in \
   "$framework/Versions/B/Autoupdate" \
   "$framework/Versions/B/XPCServices/Downloader.xpc" \

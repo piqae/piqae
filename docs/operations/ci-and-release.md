@@ -97,9 +97,9 @@ The `Piqae release` workflow is the sole `v*` tag trigger:
 Desktop nodes discover updates from the signed platform appcasts below
 `https://downloads.piqae.com/releases/stable/`. GitHub Releases improves human
 discovery but is not an updater feed. macOS currently offers a Sparkle-guided
-app update; Windows remains preview/disabled pending its documented release
-evidence. Neither path may claim that the full durable node was atomically
-updated until the guardian integration and rollback gates pass.
+coordinated app and native-component update. Windows remains preview/disabled
+pending its documented release evidence. Neither path may claim Supported
+automatic updates until its rollback and certification gates pass.
 
 ## Local workflow
 

@@ -9,13 +9,13 @@ public enum UpdateMenuPresentation: Equatable, Sendable {
     public var title: String {
         switch self {
         case .unavailable:
-            "App updates unavailable in this build"
+            "Updates unavailable in this build"
         case .readyToCheck:
-            "Check for Piqae App Update…"
+            "Check for Piqae Update…"
         case let .available(version):
-            "Piqae App \(Self.displayVersion(version)) Available…"
+            "Piqae \(Self.displayVersion(version)) Available…"
         case let .waitingForIdle(version):
-            "Piqae App \(Self.displayVersion(version)) Waiting for Idle"
+            "Piqae \(Self.displayVersion(version)) Waiting for Idle"
         }
     }
 
