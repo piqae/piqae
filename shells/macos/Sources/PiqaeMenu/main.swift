@@ -16,6 +16,20 @@ private enum QueueLoadResult: Sendable {
     case unavailable
 }
 
+@MainActor
+private final class PrinterConsentSelectionController: NSObject {
+    private let choices: [NSButton]
+    weak var confirmButton: NSButton?
+
+    init(choices: [NSButton]) {
+        self.choices = choices
+    }
+
+    @objc func selectionChanged() {
+        confirmButton?.isEnabled = choices.contains { $0.state == .on }
+    }
+}
+
 private func restartInstalledAgent() throws {
     let process = Process()
     process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
@@ -228,35 +242,60 @@ final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         preview: NodeConnectPreview,
         printers availablePrinters: [LocalPrinter]
     ) -> [String] {
+        let presentation = NodeConnectConsentPresentation(preview: preview)
         let alert = NSAlert()
         alert.alertStyle = .informational
-        let requester = preview.requestingServiceName.map { "Piqae integration \($0)" }
-            ?? "Piqae workspace \(preview.workspaceName)"
-        alert.messageText = "Connect \(requester)?"
-        alert.informativeText = "Customer workspace \(preview.workspaceName) (\(preview.workspaceID)) requests: \(preview.requestedScopes.joined(separator: ", ")). Select the local printers it may use. You can disconnect it later."
-        alert.addButton(withTitle: "Connect selected printers")
+        alert.messageText = presentation.title
+        alert.informativeText = presentation.detailText
+        let confirmButton = alert.addButton(withTitle: "Allow printer access")
         alert.addButton(withTitle: "Cancel")
-        let stack = NSStackView()
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 6
         let choices = availablePrinters.map { printer -> NSButton in
             let button = NSButton(checkboxWithTitle: printer.name, target: nil, action: nil)
-            button.state = .off
+            button.state = presentation.preselectCurrentPrinters ? .on : .off
             button.identifier = NSUserInterfaceItemIdentifier(printer.printerID)
-            stack.addArrangedSubview(button)
             return button
         }
-        alert.accessoryView = stack
+        let selectionController = PrinterConsentSelectionController(choices: choices)
+        selectionController.confirmButton = confirmButton
+        for choice in choices {
+            choice.target = selectionController
+            choice.action = #selector(PrinterConsentSelectionController.selectionChanged)
+        }
+        selectionController.selectionChanged()
+
+        let label = NSTextField(labelWithString: "Printers on this computer")
+        label.font = .systemFont(ofSize: NSFont.systemFontSize, weight: .semibold)
+        let listHeight = CGFloat(choices.count) * 28
+        let document = NSView(frame: NSRect(x: 0, y: 0, width: 408, height: listHeight))
+        for (index, choice) in choices.enumerated() {
+            choice.frame = NSRect(
+                x: 8,
+                y: listHeight - CGFloat(index + 1) * 28,
+                width: 392,
+                height: 24
+            )
+            choice.autoresizingMask = [.width]
+            document.addSubview(choice)
+        }
+        let scroll = NSScrollView()
+        scroll.documentView = document
+        scroll.drawsBackground = false
+        scroll.borderType = .bezelBorder
+        scroll.hasVerticalScroller = choices.count > 6
+        scroll.widthAnchor.constraint(equalToConstant: 420).isActive = true
+        scroll.heightAnchor.constraint(equalToConstant: min(max(listHeight, 32), 168)).isActive = true
+
+        let accessory = NSStackView(views: [label, scroll])
+        accessory.orientation = .vertical
+        accessory.alignment = .leading
+        accessory.spacing = 8
+        accessory.widthAnchor.constraint(equalToConstant: 420).isActive = true
+        alert.accessoryView = accessory
         NSApplication.shared.activate(ignoringOtherApps: true)
         guard alert.runModal() == .alertFirstButtonReturn else { return [] }
-        let selected = choices.compactMap { button in
+        return choices.compactMap { button in
             button.state == .on ? button.identifier?.rawValue : nil
         }
-        if selected.isEmpty {
-            showAlert(title: "Select a printer", message: "No printer access was granted.")
-        }
-        return selected
     }
 
     func menuWillOpen(_ menu: NSMenu) {
