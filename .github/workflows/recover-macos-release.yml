@@ -1,0 +1,68 @@
+name: Recover macOS promotion
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_run_id:
+        description: Run containing the successful signed candidate and audit
+        required: true
+        default: '30970006425'
+      source_sha:
+        description: Immutable tagged source commit
+        required: true
+        default: a528e74330b0a4a2c927b089a0a4585f2ee40c10
+      tag:
+        description: Existing protected release tag
+        required: true
+        default: v0.1.7
+      version:
+        description: Release version without leading v
+        required: true
+        default: 0.1.7
+      build_number:
+        description: Existing signed macOS build number
+        required: true
+        default: '10'
+      artifact_name:
+        description: Signed candidate artifact
+        required: true
+        default: piqae-macos-signed-0.1.7-10
+      evidence_artifact_name:
+        description: Audited evidence artifact
+        required: true
+        default: piqae-macos-0.1.7-10-evidence
+      confirm:
+        description: Type PROMOTE-VERIFIED-CANDIDATE
+        required: true
+
+permissions:
+  actions: read
+  attestations: read
+  contents: read
+
+jobs:
+  confirm:
+    runs-on: ${{ vars.PIQAE_CI_LIGHT_RUNNER || 'ubuntu-latest' }}
+    steps:
+      - name: Require explicit recovery confirmation
+        env:
+          CONFIRM: ${{ inputs.confirm }}
+        run: test "$CONFIRM" = PROMOTE-VERIFIED-CANDIDATE
+
+  promote:
+    needs: confirm
+    permissions:
+      actions: read
+      attestations: read
+      contents: write
+    uses: ./.github/workflows/macos-promotion.yml
+    with:
+      source_run_id: ${{ inputs.source_run_id }}
+      source_sha: ${{ inputs.source_sha }}
+      tag: ${{ inputs.tag }}
+      version: ${{ inputs.version }}
+      build_number: ${{ inputs.build_number }}
+      artifact_name: ${{ inputs.artifact_name }}
+      evidence_artifact_name: ${{ inputs.evidence_artifact_name }}
+      recovery_mode: true
+    secrets: inherit

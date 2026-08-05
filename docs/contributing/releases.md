@@ -62,6 +62,16 @@ Then:
 5. Confirm the public-feed smoke checks, then canary the release before widening
    availability.
 
+If a signed candidate and its evidence audit succeed but promotion fails, do
+not move the tag or upload locally rebuilt bytes. Use **Recover macOS
+promotion** with the original run, tag, commit, version, build, candidate, and
+evidence identities. The recovery workflow verifies all identities and
+provenance before it reaches the protected `native-release` environment, then
+uses the same reusable publisher as an ordinary release. Recovery inputs are
+not an override: every mismatch fails closed. Dispatch also requires `confirm`
+to equal `PROMOTE-VERIFIED-CANDIDATE`; an absent or incorrect value stops
+before candidate validation.
+
 The release check never sends a print job. Hardware certification must be
 explicitly scheduled with a named printer and controlled fixture.
 

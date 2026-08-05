@@ -21,7 +21,7 @@ jobs:
     runs-on: ${{ vars.PIQAE_CI_LIGHT_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 5
     outputs:
-      dependencies: ${{ steps.scope.outputs.dependencies }}
+      dependency_policy: ${{ steps.scope.outputs.dependency_policy }}
     steps:
       - name: Check out source history
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -71,7 +71,7 @@ jobs:
   rust-dependencies:
     name: Rust dependency policy
     needs: changes
-    if: needs.changes.outputs.dependencies == 'true'
+    if: needs.changes.outputs.dependency_policy == 'true'
     runs-on: ${{ vars.PIQAE_CI_LINUX_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 10
     steps:
