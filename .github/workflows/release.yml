@@ -37,6 +37,7 @@ jobs:
       publish: ${{ steps.release.outputs.publish }}
       tag: ${{ steps.release.outputs.tag }}
       version: ${{ steps.release.outputs.version }}
+      windows_enabled: ${{ steps.release.outputs.windows_enabled }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -106,6 +107,12 @@ jobs:
             echo "build_number=$build_number"
             echo "publish=$publish"
             echo "tag=$tag"
+            windows_tier=$(ruby -e 'require "yaml"; puts YAML.load_file("release/support-matrix.yaml").fetch("platforms").fetch("windows_10_11_x86_64").fetch("tier")')
+            if [[ "$windows_tier" == disabled ]]; then
+              echo "windows_enabled=false"
+            else
+              echo "windows_enabled=true"
+            fi
           } >> "$GITHUB_OUTPUT"
 
   macos:
@@ -126,6 +133,7 @@ jobs:
   windows:
     name: Windows signed candidate and promotion
     needs: prepare
+    if: needs.prepare.outputs.windows_enabled == 'true'
     permissions:
       actions: read
       attestations: write
@@ -270,7 +278,13 @@ jobs:
   finalize:
     name: Publish GitHub prerelease
     needs: [prepare, macos, windows, linux, server]
-    if: needs.prepare.outputs.publish == 'true'
+    if: >-
+      always() && needs.prepare.outputs.publish == 'true'
+      && needs.prepare.result == 'success'
+      && needs.macos.result == 'success'
+      && (needs.windows.result == 'success' || needs.windows.result == 'skipped')
+      && needs.linux.result == 'success'
+      && needs.server.result == 'success'
     runs-on: ${{ vars.PIQAE_RELEASE_LINUX_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 10
     permissions:

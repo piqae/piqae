@@ -1,0 +1,190 @@
+name: Promote verified macOS candidate
+
+on:
+  workflow_call:
+    inputs:
+      source_run_id:
+        required: true
+        type: string
+      source_sha:
+        required: true
+        type: string
+      tag:
+        required: true
+        type: string
+      version:
+        required: true
+        type: string
+      build_number:
+        required: true
+        type: string
+      artifact_name:
+        required: true
+        type: string
+      evidence_artifact_name:
+        required: true
+        type: string
+      recovery_mode:
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  actions: read
+  attestations: read
+  contents: read
+
+jobs:
+  validate:
+    name: Validate candidate identity and evidence
+    runs-on: ${{ vars.PIQAE_RELEASE_LINUX_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      attestations: read
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+      - name: Validate immutable release identity
+        shell: bash
+        env:
+          ARTIFACT_NAME: ${{ inputs.artifact_name }}
+          BUILD: ${{ inputs.build_number }}
+          EVIDENCE_NAME: ${{ inputs.evidence_artifact_name }}
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          TAG: ${{ inputs.tag }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REPOSITORY" == piqae/piqae ]]
+          [[ "$SOURCE_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$SOURCE_SHA" =~ ^[a-f0-9]{40}$ ]]
+          [[ "$VERSION" =~ ^[0-9]+([.][0-9]+){2}$ && "$BUILD" =~ ^[1-9][0-9]*$ ]]
+          [[ "$TAG" == "v$VERSION" ]]
+          [[ "$ARTIFACT_NAME" == "piqae-macos-signed-$VERSION-$BUILD" ]]
+          [[ "$EVIDENCE_NAME" == "piqae-macos-$VERSION-$BUILD-evidence" ]]
+          gh_version=$(gh --version | awk 'NR == 1 { print $3 }')
+          [[ "$(printf '%s\n' 2.68.0 "$gh_version" | sort -V | head -n 1)" == 2.68.0 ]]
+          git fetch --force origin "refs/tags/$TAG:refs/tags/$TAG" +refs/heads/main:refs/remotes/origin/main
+          [[ "$(git rev-parse "refs/tags/$TAG^{commit}")" == "$SOURCE_SHA" ]]
+          git merge-base --is-ancestor "$SOURCE_SHA" origin/main
+          run=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID")
+          jq -e --arg sha "$SOURCE_SHA" --arg tag "$TAG" \
+            '.repository.full_name == "piqae/piqae" and .repository.private == false
+             and (.event == "push" or .event == "workflow_dispatch")
+             and .head_sha == $sha and .head_branch == $tag' <<<"$run" >/dev/null
+          jobs=$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID/jobs?per_page=100" --slurp | jq '{jobs: map(.jobs[]) }')
+          jq -e \
+            'any(.jobs[]; (.name | endswith("Universal macOS candidate")) and .conclusion == "success")
+             and any(.jobs[]; (.name | contains("Audit macOS release evidence")) and .conclusion == "success")' \
+            <<<"$jobs" >/dev/null
+          artifacts=$(gh api --paginate --slurp \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID/artifacts?per_page=100")
+          jq -e --arg candidate "$ARTIFACT_NAME" --arg evidence "$EVIDENCE_NAME" \
+            'any(.[] | .artifacts[]; .name == $candidate and .expired == false)
+             and any(.[] | .artifacts[]; .name == $evidence and .expired == false)' \
+            <<<"$artifacts" >/dev/null
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ inputs.artifact_name }}
+          path: candidate
+          repository: piqae/piqae
+          run-id: ${{ inputs.source_run_id }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ inputs.evidence_artifact_name }}
+          path: evidence
+          repository: piqae/piqae
+          run-id: ${{ inputs.source_run_id }}
+          github-token: ${{ github.token }}
+      - name: Verify checksums, evidence, appcast, and provenance
+        shell: bash
+        env:
+          BUILD: ${{ inputs.build_number }}
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          grep -Fx "version=$VERSION" candidate/RELEASE-EVIDENCE.txt
+          grep -Fx "build=$BUILD" candidate/RELEASE-EVIDENCE.txt
+          grep -Fx 'mode=signed' candidate/RELEASE-EVIDENCE.txt
+          expected=(
+            "Piqae-$VERSION-$BUILD-macos-installer.pkg"
+            "Piqae-$VERSION-$BUILD-macos-update.zip"
+            SBOM.spdx.json appcast.xml RELEASE-EVIDENCE.txt SHA256SUMS
+          )
+          for file in "${expected[@]}"; do [[ -s "candidate/$file" ]]; done
+          [[ "$(find candidate -maxdepth 1 -name "Piqae-*-macos-installer.pkg" -type f | wc -l | tr -d ' ')" == 1 ]]
+          [[ "$(find candidate -maxdepth 1 -name "Piqae-*-macos-update.zip" -type f | wc -l | tr -d ' ')" == 1 ]]
+          (cd candidate && shasum -a 256 -c SHA256SUMS)
+          python3 release/tools/macos_release_metadata.py validate-appcast \
+            --version "$VERSION" --build "$BUILD" --appcast candidate/appcast.xml >/dev/null
+          python3 release/tools/release_bundle.py audit evidence \
+            --github-repository "$GITHUB_REPOSITORY"
+          for file in candidate/*; do
+            [[ -f "$file" ]] || continue
+            gh attestation verify "$file" --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow piqae/piqae/.github/workflows/macos-release.yml \
+              --source-digest "$SOURCE_SHA" >/dev/null
+          done
+      - name: Record validation result
+        run: |
+          {
+            echo '### macOS candidate validation passed'
+            echo '- Identity, tag ancestry, successful build/audit jobs, checksums, provenance, and appcast metadata verified.'
+            echo '- Release credentials have not been accessed.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  promote:
+    name: Promote candidate after protected approval
+    needs: validate
+    runs-on: ${{ vars.PIQAE_RELEASE_LINUX_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 30
+    environment: native-release
+    concurrency:
+      group: piqae-native-stable-promotion
+      cancel-in-progress: false
+    permissions:
+      actions: read
+      contents: write
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.PIQAE_RELEASES_S3_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.PIQAE_RELEASES_S3_SECRET_ACCESS_KEY }}
+      AWS_EC2_METADATA_DISABLED: 'true'
+      GH_TOKEN: ${{ github.token }}
+      PIQAE_RELEASES_S3_BUCKET: ${{ secrets.PIQAE_RELEASES_S3_BUCKET }}
+      PIQAE_RELEASES_S3_ENDPOINT: ${{ secrets.PIQAE_RELEASES_S3_ENDPOINT }}
+      PIQAE_RELEASES_S3_REGION: ${{ secrets.PIQAE_RELEASES_S3_REGION }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ inputs.artifact_name }}
+          path: candidate
+          repository: piqae/piqae
+          run-id: ${{ inputs.source_run_id }}
+          github-token: ${{ github.token }}
+      - name: Promote verified candidate and commit public metadata
+        shell: bash
+        env:
+          BUILD: ${{ inputs.build_number }}
+          RECOVERY_MODE: ${{ inputs.recovery_mode }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          suffix="run-${SOURCE_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          if [[ "$RECOVERY_MODE" == true ]]; then
+            suffix="recovery-${SOURCE_RUN_ID}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          fi
+          packaging/release/promote-macos-release.sh \
+            candidate "$VERSION" "$BUILD" "$SOURCE_SHA" "$suffix"

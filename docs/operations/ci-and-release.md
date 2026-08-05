@@ -17,12 +17,14 @@ group. Workflow and shared build changes deliberately select every group.
 | Change | Expensive validation |
 | --- | --- |
 | Documentation only | policy checks; no Rust, web, macOS, or Windows build |
-| Web or TypeScript | web/SDK only |
+| Web | web only |
+| TypeScript SDK | SDK only |
 | OpenAPI contract | API contract and web/SDK |
 | Terraform | Terraform only |
-| macOS shell/packaging | combined macOS Rust and Swift job |
-| Windows shell/packaging | combined Windows Rust and installer job |
-| Shared Rust/workspace | Linux, macOS, and Windows Rust jobs |
+| macOS shell/packaging | macOS Swift or packaging validation only |
+| Windows shell/packaging | Windows tray or installer validation only |
+| Shared native Rust | Linux plus affected macOS and Windows Rust jobs |
+| Server/database Rust | Linux/server Rust only |
 | Dependency manifests | applicable build plus dependency policy |
 
 New pushes cancel superseded PR work. Rust caches are restored on PRs but saved
@@ -37,12 +39,16 @@ SBOM, complete secret-history scan, and public updater-feed smoke test. PRs scan
 only their changed Git history and run dependency policy only when dependency
 or workflow files changed.
 
-The existing required-check names remain as compatibility jobs for the first
-rollout. After these workflows have one green `main` run, replace the individual
-branch-protection contexts with `CI result` and `Supply-chain result`, then
-remove the `macOS menu shell` and `Windows development installer` compatibility
-jobs. Do not change branch protection before those aggregate contexts exist on
-`main`, or every pull request will be blocked.
+Only `CI result` and `Supply-chain result` should be required after the first
+green `main` run containing the aggregate jobs. Individual platform jobs are
+selected by the dependency-aware classifier and must not be required contexts,
+because an intentionally unselected job reports `skipped`.
+
+Changes to `.github/workflows/ci.yml` or the classifier and its tests exercise
+every scope. Other workflow changes select release tooling plus the affected
+platform or package, not unrelated application builds. A weekly Monday run
+forces the full matrix so a path-classification mistake cannot hide platform
+drift indefinitely.
 
 ## Runner provider switch
 
@@ -85,7 +91,8 @@ The `Piqae release` workflow is the sole `v*` tag trigger:
 
 1. Resolve and validate the version, build number, tag, and membership of the
    source commit in `main`.
-2. Build and audit macOS, Windows, Linux, and container candidates once.
+2. Build and audit platforms enabled by `release/support-matrix.yaml`; a
+   Disabled platform is skipped and cannot block an enabled platform.
 3. Require complete signing credentials for tagged native candidates.
 4. Pause at the protected `native-release` environment.
 5. Publish immutable packages before signed appcasts and promote the shared

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Classify changed repository paths for the bounded CI job set."""
+"""Classify changed paths into dependency-aware CI scopes."""
 
 from __future__ import annotations
 
@@ -7,16 +7,46 @@ import argparse
 import sys
 from collections.abc import Iterable
 
-
 GROUPS = (
-    "rust",
-    "sdk",
+    "rust_server",
+    "rust_shared",
+    "macos_rust",
+    "macos_shell",
+    "macos_packaging",
+    "windows_rust",
+    "windows_shell",
+    "windows_installer",
     "web",
+    "sdk",
     "openapi",
     "terraform",
-    "macos",
-    "windows",
-    "dependencies",
+    "release_tooling",
+    "dependency_policy",
+)
+
+NATIVE_SHARED = (
+    "crates/agent-client/",
+    "crates/agent-core/",
+    "crates/agent-storage/",
+    "crates/domain/",
+    "crates/executor-protocol/",
+    "crates/executor-supervisor/",
+    "crates/local-api/",
+    "crates/local-ipc/",
+    "crates/piqae-agent/",
+    "crates/protocol/",
+    "crates/update-guardian/",
+    "crates/update-metadata/",
+)
+SERVER_ONLY = (
+    "crates/auth/",
+    "crates/control-plane/",
+    "crates/object-store/",
+    "crates/platform-adapters/",
+    "crates/storage-postgres/",
+    "crates/usage/",
+    "crates/webhooks/",
+    "migrations/",
 )
 
 
@@ -29,41 +59,55 @@ def classify(paths: Iterable[str], *, run_all: bool = False) -> dict[str, bool]:
         path = raw_path.strip()
         if not path:
             continue
+        if path in {
+            ".github/workflows/ci.yml",
+            "release/tools/ci_changed_paths.py",
+            "release/tools/test_ci_changed_paths.py",
+        }:
+            for group in GROUPS:
+                selected[group] = True
+            continue
+        root_rust = path in {"Cargo.toml", "Cargo.lock"} or path.startswith(".cargo/")
+        shared = root_rust or path.startswith(NATIVE_SHARED)
+        server = shared or path.startswith(SERVER_ONLY) or path.startswith(("bins/", "xtask/"))
+        js_workspace = path in {"package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml"}
+        openapi = path.startswith("contracts/openapi/")
 
-        workflow_change = path.startswith(".github/workflows/")
-        rust_change = (
-            path in {"Cargo.toml", "Cargo.lock"}
-            or path.startswith((".cargo/", "bins/", "crates/", "migrations/", "xtask/"))
+        selected["rust_shared"] |= shared
+        selected["rust_server"] |= server
+        selected["macos_rust"] |= shared or path.startswith("crates/executor-cups/")
+        selected["windows_rust"] |= shared or path.startswith(
+            ("crates/executor-windows/", "crates/shell-windows/")
         )
-        javascript_workspace_change = path in {
-            "package.json",
-            "pnpm-lock.yaml",
-            "pnpm-workspace.yaml",
-        }
-        web_change = javascript_workspace_change or path.startswith(
+        selected["macos_shell"] |= path.startswith("shells/macos/")
+        selected["macos_packaging"] |= path.startswith("packaging/macos/")
+        selected["windows_shell"] |= path.startswith("crates/shell-windows/")
+        selected["windows_installer"] |= path.startswith("packaging/windows/")
+        selected["web"] |= js_workspace or openapi or path.startswith(
             ("apps/web/", "contracts/", "deploy/cloudflare/")
         )
-        sdk_change = javascript_workspace_change or path.startswith(("contracts/", "sdk/"))
-
-        selected["rust"] |= workflow_change or rust_change
-        selected["sdk"] |= workflow_change or sdk_change
-        selected["web"] |= workflow_change or web_change
-        selected["openapi"] |= workflow_change or path.startswith("contracts/openapi/")
-        selected["terraform"] |= workflow_change or path.startswith("deploy/terraform/")
-        selected["macos"] |= workflow_change or rust_change or path.startswith(
-            ("packaging/macos/", "shells/macos/")
-        )
-        selected["windows"] |= workflow_change or rust_change or path.startswith(
-            ("packaging/windows/", "shells/windows/")
-        )
-        selected["dependencies"] |= workflow_change or path in {
-            "Cargo.lock",
-            "Cargo.toml",
+        selected["sdk"] |= js_workspace or openapi or path.startswith("sdk/")
+        selected["openapi"] |= openapi
+        selected["terraform"] |= path.startswith("deploy/terraform/")
+        selected["dependency_policy"] |= root_rust or path in {
             "deny.toml",
             "release/security-exceptions.json",
-        } or path.startswith((".cargo/", "bins/", "crates/", "xtask/")) and path.endswith(
-            "Cargo.toml"
-        )
+        } or (path.endswith("Cargo.toml") and path.startswith(("bins/", "crates/", "xtask/")))
+
+        if path.startswith(".github/workflows/"):
+            selected["release_tooling"] = True
+            name = path.removeprefix(".github/workflows/")
+            selected["sdk"] |= name == "sdk-release.yml"
+            selected["dependency_policy"] |= name == "supply-chain.yml"
+            selected["macos_packaging"] |= name in {
+                "macos-release.yml",
+                "macos-promotion.yml",
+                "recover-macos-release.yml",
+                "release.yml",
+            }
+            selected["windows_installer"] |= name in {"windows-release.yml", "release.yml"}
+        if path.startswith(("packaging/release/", "release/tools/")):
+            selected["release_tooling"] = True
 
     return selected
 
@@ -76,16 +120,13 @@ def input_paths(*, nul_delimited: bool) -> list[str]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--all", action="store_true", help="select every CI group")
-    parser.add_argument(
-        "--nul",
-        action="store_true",
-        help="read NUL-delimited paths from standard input",
-    )
+    parser.add_argument("--all", action="store_true")
+    parser.add_argument("--nul", action="store_true")
     args = parser.parse_args()
-    selected = classify(input_paths(nul_delimited=args.nul), run_all=args.all)
-    for group in GROUPS:
-        print(f"{group}={'true' if selected[group] else 'false'}")
+    for group, enabled in classify(
+        input_paths(nul_delimited=args.nul), run_all=args.all
+    ).items():
+        print(f"{group}={'true' if enabled else 'false'}")
     return 0
 
 
