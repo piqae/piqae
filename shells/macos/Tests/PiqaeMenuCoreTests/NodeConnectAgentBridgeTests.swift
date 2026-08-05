@@ -116,4 +116,32 @@ final class NodeConnectAgentBridgeTests: XCTestCase {
             XCTAssertFalse(error.localizedDescription.contains("sensitive detail"))
         }
     }
+
+    func testAcceptClassifiesInvalidPublicKeyWithoutExposingServerOutput() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let script = directory.appendingPathComponent("fake-agent")
+        try """
+        #!/bin/sh
+        cat >/dev/null
+        echo 'invalid_agent_public_key: sensitive server detail' >&2
+        exit 1
+        """.write(to: script, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: script.path)
+
+        XCTAssertThrowsError(try NodeConnectAgentBridge(
+            executableURL: script, dataDirectory: directory
+        ).accept(
+            capability: "piq_enr_0123456789abcdef0123456789abcdef",
+            controlPlaneURL: XCTUnwrap(URL(string: "https://api.example.com")),
+            authorization: NodePrinterAuthorization(grant: .allLocalPrinters)
+        )) { error in
+            guard case NodeConnectAgentBridgeError.identityRejected = error else {
+                return XCTFail("expected a safe identity-rejected error")
+            }
+            XCTAssertFalse(error.localizedDescription.contains("sensitive server detail"))
+        }
+    }
 }

@@ -1,6 +1,9 @@
 //! Authenticated outbound HTTPS transport for Piqae agents.
 
-use base64::{Engine as _, engine::general_purpose::STANDARD_NO_PAD};
+use base64::{
+    Engine as _,
+    engine::general_purpose::{STANDARD_NO_PAD, URL_SAFE_NO_PAD},
+};
 use chrono::Utc;
 use ed25519_dalek::{Signer, SigningKey};
 use piqae_domain::{AgentId, JobId};
@@ -169,7 +172,7 @@ impl DeviceIdentity {
 
     #[must_use]
     pub fn public_key_base64(&self) -> String {
-        STANDARD_NO_PAD.encode(self.signing_key.verifying_key().as_bytes())
+        URL_SAFE_NO_PAD.encode(self.signing_key.verifying_key().as_bytes())
     }
 
     #[must_use]
@@ -640,7 +643,7 @@ mod tests {
     fn public_key_and_secret_round_trip() {
         let identity = DeviceIdentity::generate(AgentId::new());
         assert_eq!(
-            STANDARD_NO_PAD
+            URL_SAFE_NO_PAD
                 .decode(identity.public_key_base64())
                 .expect("base64"),
             identity.signing_key.verifying_key().as_bytes()
