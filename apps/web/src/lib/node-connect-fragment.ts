@@ -23,6 +23,19 @@ export function nativeNodeConnectUrl(enrolmentToken: string, controlPlaneUrl: st
   return `piqae://connect#enrolment_token=${encodeURIComponent(enrolmentToken)}&control_plane_url=${encodeURIComponent(origin)}`;
 }
 
+export function nativeNodeConnectUrlFromHandoff(connectUrl: string, baseUrl: string): string | null {
+  try {
+    const handoff = new URL(connectUrl, baseUrl);
+    if (!handoff.hash.startsWith('#')) return null;
+    const parameters = new URLSearchParams(handoff.hash.slice(1));
+    const token = parameters.get('enrolment_token');
+    const controlPlaneUrl = parameters.get('control_plane_url');
+    return token && controlPlaneUrl ? nativeNodeConnectUrl(token, controlPlaneUrl) : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Takes the one-time node capability out of the address bar without ever
  * sending it to the server or persisting it in web storage.

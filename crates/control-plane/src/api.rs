@@ -453,7 +453,7 @@ pub struct EnrolmentResponse {
 
 #[derive(Debug, Deserialize)]
 pub struct CreateNodeConnectSessionRequest {
-    name: String,
+    name: Option<String>,
     return_url: Option<String>,
     #[serde(default = "default_enrolment_expiry")]
     expires_in_seconds: i64,
@@ -484,13 +484,15 @@ pub async fn create_node_connect_session(
     Json(request): Json<CreateNodeConnectSessionRequest>,
 ) -> Result<Response, AppError> {
     let tenant = authenticate_native(&state, &headers, Scope::AgentsWrite).await?;
-    if request.name.trim().is_empty()
-        || request.name.chars().count() > 120
+    if request
+        .name
+        .as_deref()
+        .is_some_and(|name| name.trim().is_empty() || name.chars().count() > 120)
         || !(60..=900).contains(&request.expires_in_seconds)
     {
         return Err(AppError::invalid(
             "invalid_connect_session",
-            "Name and expiry are outside the supported limits.",
+            "Optional name or expiry is outside the supported limits.",
         ));
     }
     let return_url = request

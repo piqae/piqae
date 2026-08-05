@@ -24,6 +24,21 @@ public struct NodeConnectPreview: Codable, Equatable, Sendable {
         case expiresAt = "expires_at"
         case returnURL = "return_url"
     }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        workspaceID = try values.decode(String.self, forKey: .workspaceID)
+        workspaceName = try values.decode(String.self, forKey: .workspaceName)
+        requestingServiceAccountID = try values.decodeIfPresent(String.self, forKey: .requestingServiceAccountID)
+        requestingServiceName = try values.decodeIfPresent(String.self, forKey: .requestingServiceName)
+        authorizationType = try values.decodeIfPresent(String.self, forKey: .authorizationType)
+            ?? (requestingServiceAccountID == nil ? "workspace" : "platform_customer")
+        environmentID = try values.decode(String.self, forKey: .environmentID)
+        requestedScopes = try values.decode([String].self, forKey: .requestedScopes)
+        printerGrant = try values.decode(String.self, forKey: .printerGrant)
+        expiresAt = try values.decode(Date.self, forKey: .expiresAt)
+        returnURL = try values.decodeIfPresent(URL.self, forKey: .returnURL)
+    }
 }
 
 public enum NodeConnectAgentBridgeError: Error, LocalizedError {
@@ -74,6 +89,11 @@ public struct NodeConnectAgentBridge: Sendable {
         guard (preview.requestingServiceAccountID == nil)
             == (preview.requestingServiceName == nil)
         else { throw NodeConnectAgentBridgeError.failed }
+        let expectedAuthorizationType = preview.requestingServiceAccountID == nil
+            ? "workspace" : "platform_customer"
+        guard preview.authorizationType == expectedAuthorizationType else {
+            throw NodeConnectAgentBridgeError.failed
+        }
         if let returnURL = preview.returnURL {
             let components = URLComponents(url: returnURL, resolvingAgainstBaseURL: false)
             let localHTTP = components?.scheme?.lowercased() == "http"
