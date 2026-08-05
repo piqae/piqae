@@ -46,13 +46,17 @@ public enum NodeConnectAgentBridgeError: Error, LocalizedError {
     case failed
     case oversizedResponse
     case expired
+    case invitationRejected
+    case identityRejected
 
     public var errorDescription: String? {
         switch self {
         case .unavailable: "The installed Piqae node could not be found."
         case .failed: "Piqae could not verify or accept this connection invitation."
         case .oversizedResponse: "The Piqae node returned an oversized response."
-        case .expired: "This connection invitation has expired."
+        case .expired: "This connection invitation has expired. Return to the service and create a new one."
+        case .invitationRejected: "This invitation is no longer valid. Return to the service and create a new connection."
+        case .identityRejected: "This installation could not prove its identity. Open Piqae Diagnostics and retry the connection."
         }
     }
 }
@@ -150,6 +154,7 @@ public struct NodeConnectAgentBridge: Sendable {
         let group = DispatchGroup()
         let lock = NSLock()
         var output = Data()
+        var diagnostic = Data()
         var oversized = false
         var timedOut = false
         group.enter()
@@ -172,7 +177,13 @@ public struct NodeConnectAgentBridge: Sendable {
         DispatchQueue.global(qos: .utility).async {
             defer { group.leave() }
             while let chunk = try? stderr.fileHandleForReading.read(upToCount: 64 * 1024),
-                  !chunk.isEmpty {}
+                  !chunk.isEmpty {
+                lock.lock()
+                if diagnostic.count < 32 * 1024 {
+                    diagnostic.append(chunk.prefix(32 * 1024 - diagnostic.count))
+                }
+                lock.unlock()
+            }
         }
         DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 15) {
             if process.isRunning {
@@ -186,6 +197,7 @@ public struct NodeConnectAgentBridge: Sendable {
         group.wait()
         lock.lock()
         let result = output
+        let failureDiagnostic = diagnostic
         let wasOversized = oversized
         let didTimeOut = timedOut
         lock.unlock()
@@ -193,7 +205,23 @@ public struct NodeConnectAgentBridge: Sendable {
             throw NodeConnectAgentBridgeError.oversizedResponse
         }
         guard !didTimeOut else { throw NodeConnectAgentBridgeError.failed }
-        guard process.terminationStatus == 0 else { throw NodeConnectAgentBridgeError.failed }
+        guard process.terminationStatus == 0 else {
+            throw Self.classifiedFailure(failureDiagnostic)
+        }
         return result
+    }
+
+    private static func classifiedFailure(_ diagnostic: Data) -> NodeConnectAgentBridgeError {
+        let message = String(decoding: diagnostic, as: UTF8.self).lowercased()
+        if message.contains("expired") { return .expired }
+        if message.contains("401") || message.contains("unauthorized") {
+            return .identityRejected
+        }
+        if message.contains("404") || message.contains("409")
+            || message.contains("already used") || message.contains("invalid invitation")
+        {
+            return .invitationRejected
+        }
+        return .failed
     }
 }

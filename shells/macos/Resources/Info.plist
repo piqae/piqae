@@ -8,6 +8,8 @@
     <string>Piqae</string>
     <key>CFBundleExecutable</key>
     <string>PiqaeMenu</string>
+    <key>CFBundleIconFile</key>
+    <string>Piqae.icns</string>
     <key>CFBundleIdentifier</key>
     <string>com.piqae.node.menu</string>
     <key>CFBundleInfoDictionaryVersion</key>

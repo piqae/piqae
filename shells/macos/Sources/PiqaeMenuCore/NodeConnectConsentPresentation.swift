@@ -3,6 +3,7 @@ import Foundation
 public struct NodeConnectConsentPresentation: Equatable, Sendable {
     public let title: String
     public let detailText: String
+    public let permissionsText: String
     public let defaultGrant: NodePrinterGrant
 
     public init(preview: NodeConnectPreview) {
@@ -11,11 +12,13 @@ public struct NodeConnectConsentPresentation: Equatable, Sendable {
             !service.isEmpty
         {
             title = "Allow \(service) to print?"
-            detailText = "\(service) is requesting printer access for \(workspace).\n\n\(Self.permissionSummary(preview.requestedScopes))\n\nChoose whether it can use every printer on this computer or only printers you select. You can change or remove access later."
+            detailText = "For the \(workspace) workspace. Choose which printers \(service) may use. You can change or remove access later."
+            permissionsText = Self.permissionSummary(preview.requestedScopes)
             defaultGrant = .allLocalPrinters
         } else {
-            title = "Connect \(workspace) to this computer?"
-            detailText = "This lets your \(workspace) workspace use printers connected to this computer.\n\n\(Self.permissionSummary(preview.requestedScopes))\n\nChoose whether it can use every printer on this computer or only printers you select. You can change or remove access later."
+            title = "Allow \(workspace) to print?"
+            detailText = "Choose which printers this workspace may use. You can change or remove access later."
+            permissionsText = Self.permissionSummary(preview.requestedScopes)
             defaultGrant = .allLocalPrinters
         }
     }
@@ -26,6 +29,6 @@ public struct NodeConnectConsentPresentation: Equatable, Sendable {
         if scopes.contains("print") { lines.append("• Send print jobs") }
         if scopes.contains("monitor_jobs") { lines.append("• View print status") }
         if lines.isEmpty { lines.append("• Use approved printing features") }
-        return "This connection can:\n" + lines.joined(separator: "\n")
+        return lines.joined(separator: "   ")
     }
 }
