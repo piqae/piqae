@@ -24,13 +24,13 @@
 
   const sections = $derived(
     [
-      ...(data.sections.platform ? [{ id: 'platform', label: 'Platform' }] : []),
       { id: 'api-keys', label: 'API keys' },
       { id: 'webhooks', label: 'Webhooks' },
       ...(data.sections.team ? [{ id: 'team', label: 'Team' }] : []),
       ...(data.sections.billing ? [{ id: 'billing', label: 'Billing' }] : []),
       { id: 'printing', label: 'Printing policy' },
       { id: 'retention', label: 'Data retention' },
+      ...(data.sections.platform ? [{ id: 'platform', label: 'Platform integration' }] : []),
       { id: 'deployment', label: 'Deployment' }
     ]
   );
@@ -182,50 +182,6 @@
   </nav>
 
   <div class="sections">
-    {#if data.sections.platform && data.platform}
-      <section class="panel" id="platform">
-        <SectionHeader
-          title="Platform integration"
-          description="Manage isolated customer accounts and connect their nodes from your own product. The integration credential belongs only on your server."
-        >
-          {#snippet actions()}
-            {#await data.platform}
-              <button class="button primary" disabled>Checking…</button>
-            {:then platform}
-              {#if !platform?.enabled}
-                <button
-                  class="button primary"
-                  onclick={() => {
-                    copied = null;
-                    platformDialog = true;
-                  }}
-                >
-                  Enable platform mode
-                </button>
-              {/if}
-            {/await}
-          {/snippet}
-        </SectionHeader>
-        {#await data.platform}
-          <div class="loading">Checking platform mode…</div>
-        {:then platform}
-          {#if platform?.dataError}<DataError error={platform.dataError} />{/if}
-          <div class="inset">
-            <DefinitionList
-              columns={2}
-              items={[
-                { term: 'Status', value: platform?.enabled ? 'Enabled' : 'Not enabled' },
-                {
-                  term: 'Customer isolation',
-                  value: platform?.enabled ? 'Test and Live per customer' : 'Available after enabling'
-                }
-              ]}
-            />
-          </div>
-        {/await}
-      </section>
-    {/if}
-
     <!-- API keys -->
     <section class="panel" id="api-keys">
       <SectionHeader
@@ -655,6 +611,51 @@
       </div>
     </section>
 
+    <!-- Advanced platform integration -->
+    {#if data.sections.platform && data.platform}
+      <section class="panel" id="platform">
+        <SectionHeader
+          title="Platform integration"
+          description="Manage isolated customer accounts and connect their nodes from your own product. The integration credential belongs only on your server."
+        >
+          {#snippet actions()}
+            {#await data.platform}
+              <button class="button primary" disabled>Checking…</button>
+            {:then platform}
+              {#if !platform?.enabled}
+                <button
+                  class="button primary"
+                  onclick={() => {
+                    copied = null;
+                    platformDialog = true;
+                  }}
+                >
+                  Enable platform mode
+                </button>
+              {/if}
+            {/await}
+          {/snippet}
+        </SectionHeader>
+        {#await data.platform}
+          <div class="loading">Checking platform mode…</div>
+        {:then platform}
+          {#if platform?.dataError}<DataError error={platform.dataError} />{/if}
+          <div class="inset">
+            <DefinitionList
+              columns={2}
+              items={[
+                { term: 'Status', value: platform?.enabled ? 'Enabled' : 'Not enabled' },
+                {
+                  term: 'Customer isolation',
+                  value: platform?.enabled ? 'Test and Live per customer' : 'Available after enabling'
+                }
+              ]}
+            />
+          </div>
+        {/await}
+      </section>
+    {/if}
+
     <!-- Deployment -->
     <section class="panel" id="deployment">
       <SectionHeader
@@ -989,6 +990,8 @@
     grid-template-columns: 168px minmax(0, 1fr);
     align-items: start;
     gap: 28px;
+    width: min(100%, 1016px);
+    margin-inline: auto;
     padding-top: 20px;
   }
 
@@ -1017,7 +1020,7 @@
   .sections {
     display: grid;
     gap: 14px;
-    max-width: 820px;
+    min-width: 0;
   }
 
   section {
