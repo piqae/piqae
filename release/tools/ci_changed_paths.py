@@ -10,6 +10,7 @@ from collections.abc import Iterable
 
 GROUPS = (
     "rust",
+    "sdk",
     "web",
     "openapi",
     "terraform",
@@ -34,13 +35,18 @@ def classify(paths: Iterable[str], *, run_all: bool = False) -> dict[str, bool]:
             path in {"Cargo.toml", "Cargo.lock"}
             or path.startswith((".cargo/", "bins/", "crates/", "migrations/", "xtask/"))
         )
-        web_change = path in {
+        javascript_workspace_change = path in {
             "package.json",
             "pnpm-lock.yaml",
             "pnpm-workspace.yaml",
-        } or path.startswith(("apps/", "contracts/", "deploy/cloudflare/", "sdk/"))
+        }
+        web_change = javascript_workspace_change or path.startswith(
+            ("apps/web/", "contracts/", "deploy/cloudflare/")
+        )
+        sdk_change = javascript_workspace_change or path.startswith(("contracts/", "sdk/"))
 
         selected["rust"] |= workflow_change or rust_change
+        selected["sdk"] |= workflow_change or sdk_change
         selected["web"] |= workflow_change or web_change
         selected["openapi"] |= workflow_change or path.startswith("contracts/openapi/")
         selected["terraform"] |= workflow_change or path.startswith("deploy/terraform/")
