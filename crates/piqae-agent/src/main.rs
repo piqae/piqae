@@ -613,6 +613,7 @@ async fn main() -> Result<()> {
         let task = tokio::spawn(cloud_sync_loop(
             cloud,
             database_path.clone(),
+            database_path.clone(),
             cloud_content_store,
             cloud_uri_fetcher.clone(),
             printer_discovery.clone(),
@@ -1692,6 +1693,7 @@ async fn reload_connector_workers(
         match start_connector_worker(
             record,
             paths,
+            data_dir.join("agent.sqlite3"),
             executor.clone(),
             uri_fetcher.clone(),
             printer_discovery.clone(),
@@ -1718,6 +1720,7 @@ async fn reload_connector_workers(
 async fn start_connector_worker(
     record: connector_runtime::ConnectorRecord,
     paths: connector_runtime::ConnectorRuntimePaths,
+    inventory_database: PathBuf,
     executor: SharedRuntimeExecutor,
     uri_fetcher: UriFetcher,
     printer_discovery: PrinterDiscovery,
@@ -1756,6 +1759,7 @@ async fn start_connector_worker(
     let sync = tokio::spawn(cloud_sync_loop(
         cloud,
         paths.database,
+        inventory_database,
         content,
         uri_fetcher,
         printer_discovery,
@@ -3043,6 +3047,7 @@ fn connector_allowed_printers(
 async fn cloud_sync_loop(
     cloud: CloudConfiguration,
     database_path: PathBuf,
+    inventory_database_path: PathBuf,
     content_store: ContentStore,
     uri_fetcher: UriFetcher,
     printer_discovery: PrinterDiscovery,
@@ -3060,10 +3065,24 @@ async fn cloud_sync_loop(
             return;
         }
     };
+    // Connector job queues are deliberately isolated, but printer identity,
+    // exposure and profiles belong to the physical node. Reading inventory
+    // from a fresh connector database would generate unrelated printer IDs
+    // and default every queue to unexposed, causing an approved connector to
+    // publish an empty printer list.
+    let inventory_store = match AgentStore::open(&inventory_database_path) {
+        Ok(store) => store,
+        Err(error) => {
+            error!(%error, "cloud sync cannot open the node printer inventory");
+            *connection.write().await = ConnectionState::Degraded;
+            return;
+        }
+    };
     sweep_confidential_files(&store);
     run_cloud_sync_loop(
         cloud,
         store,
+        inventory_store,
         content_store,
         uri_fetcher,
         printer_discovery,
@@ -3084,6 +3103,7 @@ async fn cloud_sync_loop(
 async fn run_cloud_sync_loop(
     cloud: CloudConfiguration,
     mut store: AgentStore,
+    mut inventory_store: AgentStore,
     content_store: ContentStore,
     uri_fetcher: UriFetcher,
     printer_discovery: PrinterDiscovery,
@@ -3140,6 +3160,7 @@ async fn run_cloud_sync_loop(
                 .is_none_or(|last| last.elapsed() >= Duration::from_secs(15 * 60));
         let request = match prepare_sync_request(
             &mut store,
+            &mut inventory_store,
             &printer_discovery,
             cloud.agent_id,
             started_at,
@@ -3216,8 +3237,13 @@ fn sweep_confidential_files(store: &AgentStore) {
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "queue and node-inventory stores are separate connector security boundaries"
+)]
 async fn prepare_sync_request(
     store: &mut AgentStore,
+    inventory_store: &mut AgentStore,
     printer_discovery: &PrinterDiscovery,
     agent_id: AgentId,
     started_at: chrono::DateTime<Utc>,
@@ -3226,7 +3252,7 @@ async fn prepare_sync_request(
     allowed_printer_ids: Option<&std::collections::BTreeSet<String>>,
 ) -> Result<AgentSyncRequest> {
     let printers = if refresh_printers {
-        match discover_cloud_printers(store, printer_discovery).await {
+        match discover_cloud_printers(inventory_store, printer_discovery).await {
             Ok(mut printers) => {
                 printers.retain(|printer| {
                     printer_is_allowed(allowed_printer_ids, &printer.id.to_string())
@@ -5175,6 +5201,54 @@ mod tests {
             .expect("discovery");
         assert_eq!(snapshots.len(), 1);
         assert!(snapshots[0].profiles.is_empty());
+    }
+
+    #[tokio::test]
+    async fn connector_sync_uses_shared_approved_printer_identity() {
+        let mut node_inventory = AgentStore::in_memory().expect("node inventory");
+        // Initial discovery creates the node-owned stable printer identity.
+        assert!(
+            discover_cloud_printers(&mut node_inventory, &PrinterDiscovery::Fake)
+                .await
+                .expect("initial discovery")
+                .is_empty()
+        );
+        let printer = node_inventory
+            .present_printers()
+            .expect("node printers")
+            .into_iter()
+            .next()
+            .expect("fake printer");
+        node_inventory
+            .set_printer_exposed(&printer.printer_id, true, 20)
+            .expect("approve printer");
+
+        // Each connector retains an isolated queue database. It must not
+        // create a second, unapproved logical printer identity in that store.
+        let mut connector_queue = AgentStore::in_memory().expect("connector queue");
+        let request = prepare_sync_request(
+            &mut connector_queue,
+            &mut node_inventory,
+            &PrinterDiscovery::Fake,
+            AgentId::new(),
+            Utc::now(),
+            false,
+            true,
+            None,
+        )
+        .await
+        .expect("connector sync");
+
+        let snapshots = request.printers.expect("printer inventory");
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0].id.to_string(), printer.printer_id);
+        assert!(
+            connector_queue
+                .present_printers()
+                .expect("connector printers")
+                .is_empty()
+        );
+        assert_eq!(request.printer_revision, 1);
     }
 
     #[test]
