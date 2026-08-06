@@ -63,7 +63,7 @@ async fn postgres_reported_complete_billing_upgrades_from_previous_schema() {
         .fetch_one(&pool)
         .await
         .expect("read latest schema version");
-    assert_eq!(latest, 22);
+    assert_eq!(latest, 24);
     let billable_index: Option<String> =
         sqlx::query_scalar("SELECT to_regclass('usage_one_billable_print_per_job_idx')::text")
             .fetch_one(&pool)
@@ -222,6 +222,11 @@ async fn node_connector_upgrade_backfills_without_cross_tenant_merging() {
         cross_tenant_key.is_err(),
         "composite agent foreign key must reject cross-tenant key registration"
     );
+    sqlx::query("INSERT INTO node_content_encryption_keys (workspace_id,environment_id,agent_id,key_id,algorithm,public_key_spki) VALUES ('wsp_b','env_b','agt_b','cek_ecdh','ECDH-P256-HKDF-SHA256',$1)")
+        .bind("C".repeat(122))
+        .execute(&pool)
+        .await
+        .expect("tenant-scoped P-256 encryption key");
     pool.close().await;
     sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
         .execute(&admin)
