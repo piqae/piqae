@@ -20,6 +20,9 @@ FROM node:22-bookworm-slim
 ENV NODE_ENV=production
 ENV HOST=0.0.0.0
 ENV PORT=3000
+# Allow the documented 50 MiB PDF boundary plus bounded multipart framing.
+# The dashboard action still enforces the exact document limit itself.
+ENV BODY_SIZE_LIMIT=55M
 WORKDIR /app
 COPY --from=builder --chown=node:node /app /app
 USER node

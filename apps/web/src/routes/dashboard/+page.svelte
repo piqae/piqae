@@ -176,6 +176,49 @@
       !['completed_reported', 'cancelled', 'expired', 'failed_terminal'].includes(detail.job.state)
   );
 
+  // Hosted PDF print dialog.
+  let printOpen = $state(false);
+  let printPending = $state(false);
+  let printAttempted = $state(false);
+  let printPrinterId = $state('');
+  let printProfileId = $state('');
+  const printablePrinters = $derived(
+    data.printers.filter(
+      (printer) => printer.state === 'online' && printer.profiles.some((profile) => profile.status === 'ready')
+    )
+  );
+  const selectedPrintPrinter = $derived(
+    printablePrinters.find((printer) => printer.id === printPrinterId) ?? null
+  );
+  const selectedPrintProfiles = $derived(
+    selectedPrintPrinter?.profiles.filter((profile) => profile.status === 'ready') ?? []
+  );
+  const selectedPrintProfile = $derived(
+    selectedPrintProfiles.find((profile) => profile.profileId === printProfileId) ?? null
+  );
+  const printResult = $derived(
+    printAttempted && !printPending && form?.mutation === 'createPrintJob' ? form : null
+  );
+
+  function openPrintDialog(printerId = '') {
+    printAttempted = false;
+    printPrinterId = printerId || printablePrinters[0]?.id || '';
+    const printer = printablePrinters.find((candidate) => candidate.id === printPrinterId);
+    printProfileId =
+      printer?.profiles.find((profile) => profile.status === 'ready' && profile.isDefault)?.profileId ??
+      printer?.profiles.find((profile) => profile.status === 'ready')?.profileId ??
+      '';
+    printOpen = true;
+  }
+
+  function updatePrintProfiles() {
+    const printer = printablePrinters.find((candidate) => candidate.id === printPrinterId);
+    printProfileId =
+      printer?.profiles.find((profile) => profile.status === 'ready' && profile.isDefault)?.profileId ??
+      printer?.profiles.find((profile) => profile.status === 'ready')?.profileId ??
+      '';
+  }
+
 </script>
 
 <svelte:head>
@@ -190,6 +233,14 @@
     <a class="button" href="/dashboard/local"><Icon name="printers" size={14} /> This device</a>
   {/if}
   <a class="button" href="/docs/quickstart"><Icon name="docs" size={14} /> Quickstart</a>
+  <button
+    class="button"
+    disabled={printablePrinters.length === 0}
+    title={printablePrinters.length === 0 ? 'Connect an online printer with a ready profile first' : 'Send a PDF to a printer'}
+    onclick={() => openPrintDialog()}
+  >
+    <Icon name="printers" size={14} /> Print PDF
+  </button>
   <button
     class="button primary"
     onclick={() => {
@@ -449,6 +500,11 @@
         Cancel
       </button>
     {:else if detail?.kind === 'printer'}
+      <button
+        class="button compact"
+        disabled={detail.printer.state !== 'online' || readyProfiles(detail.printer) === 0}
+        onclick={() => openPrintDialog(detail.printer.id)}
+      >Print PDF</button>
       <a class="button compact" href={detailHref('node', detail.printer.agentId)}>Open node</a>
     {/if}
   {/snippet}
@@ -573,6 +629,102 @@
     <EmptyState message={`That ${detail.label} no longer exists.`} compact />
   {/if}
 </Drawer>
+
+<!-- Hosted PDF print -->
+<Dialog
+  bind:open={printOpen}
+  labelledBy="create-print-job-title"
+  title="Print a PDF"
+  description="Choose the destination and driver profile, then add one PDF document."
+>
+  <div class="ui-dialog__body">
+    <form
+      id="create-print-job-form"
+      method="POST"
+      action="?/createPrintJob"
+      enctype="multipart/form-data"
+      use:enhance={() => {
+        printPending = true;
+        printAttempted = true;
+        return async ({ result, update }) => {
+          await update({ reset: false });
+          printPending = false;
+          if (result.type === 'success') {
+            const actionData = result.data as { createdJobId?: unknown } | undefined;
+            if (typeof actionData?.createdJobId === 'string') {
+              printOpen = false;
+              await goto(detailHref('job', actionData.createdJobId));
+            }
+          }
+        };
+      }}
+    >
+      <div class="print-fields">
+        <Field label="Printer">
+          <select class="ui-select" name="printer_id" bind:value={printPrinterId} onchange={updatePrintProfiles} required>
+            {#each printablePrinters as printer}
+              <option value={printer.id}>{printer.name} — {nodeName(printer.agentId)}</option>
+            {/each}
+          </select>
+        </Field>
+
+        <Field label="Print profile">
+          <select class="ui-select" name="profile_id" bind:value={printProfileId} required>
+            {#each selectedPrintProfiles as profile}
+              <option value={profile.profileId}>
+                {profile.name}{profile.isDefault ? ' — Default' : ''}
+              </option>
+            {/each}
+          </select>
+        </Field>
+
+        {#if selectedPrintProfile}
+          <p class="profile-summary">
+            {[selectedPrintProfile.summary.paper, selectedPrintProfile.summary.color, selectedPrintProfile.summary.resolution]
+              .filter(Boolean)
+              .join(' · ') || 'Uses the saved native driver settings.'}
+          </p>
+        {/if}
+
+        <Field label="PDF document">
+          <input class="input file-input" name="document" type="file" accept="application/pdf,.pdf" required />
+        </Field>
+
+        <div class="print-grid">
+          <Field label="Job name (optional)">
+            <input class="input" name="title" maxlength="180" placeholder="Uses the PDF filename" />
+          </Field>
+          <Field label="Copies">
+            <input class="input" name="copies" type="number" min="1" max="100" value="1" required />
+          </Field>
+        </div>
+      </div>
+
+      <p class="ui-note neutral">
+        Creating the job means it was accepted into the queue—not that paper has printed. Live status will appear in Jobs.
+      </p>
+    </form>
+
+    {#if data.dashboardMode === 'demo'}
+      <p class="ui-note warning">Demo mode: no document will be submitted.</p>
+    {/if}
+    {#if printResult?.error}
+      <p class="ui-note error" role="alert">{printResult.error.message}</p>
+    {/if}
+  </div>
+
+  {#snippet footer()}
+    <button class="button" type="button" onclick={() => (printOpen = false)}>Cancel</button>
+    <button
+      class="button primary"
+      type="submit"
+      form="create-print-job-form"
+      disabled={printPending || !printPrinterId || !printProfileId || data.dashboardMode !== 'live'}
+    >
+      {printPending ? 'Creating job…' : 'Add to print queue'}
+    </button>
+  {/snippet}
+</Dialog>
 
 <!-- Node enrolment -->
 <Dialog
@@ -707,6 +859,28 @@
 {/if}
 
 <style>
+  .print-fields {
+    display: grid;
+    gap: 16px;
+  }
+
+  .print-fields :global(.ui-select),
+  .file-input {
+    width: 100%;
+  }
+
+  .print-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 100px;
+    gap: 12px;
+  }
+
+  .profile-summary {
+    margin: -8px 0 0;
+    color: var(--text-secondary);
+    font-size: var(--text-meta);
+  }
+
   .setup {
     display: flex;
     align-items: center;

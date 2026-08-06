@@ -18,6 +18,17 @@ import type {
   DashboardPrinter
 } from '$lib/view-types';
 
+const MAX_DASHBOARD_PDF_BYTES = 50 * 1024 * 1024;
+
+function encodeBase64(bytes: Uint8Array): string {
+  let value = '';
+  const chunkSize = 32_768;
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    value += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+  }
+  return btoa(value);
+}
+
 const emptyOverview: DashboardOverview = {
   agents: { total: 0, online: 0, degraded: 0 },
   printers: { total: 0, online: 0, attention: 0 },
@@ -169,6 +180,108 @@ async function loadDetail(
 }
 
 export const actions: Actions = {
+  createPrintJob: async (event) => {
+    preventSecretCaching(event);
+    if (dashboardMode() !== 'live') {
+      return fail(400, {
+        mutation: 'createPrintJob',
+        error: { message: 'Printing is disabled while demo data is active.' }
+      });
+    }
+
+    const data = await event.request.formData();
+    const printerId = String(data.get('printer_id') ?? '').trim();
+    const profileId = String(data.get('profile_id') ?? '').trim();
+    const title = String(data.get('title') ?? '').trim();
+    const copies = Number(data.get('copies') ?? 1);
+    const document = data.get('document');
+
+    if (!printerId || !profileId) {
+      return fail(400, {
+        mutation: 'createPrintJob',
+        error: { message: 'Choose an available printer and print profile.' }
+      });
+    }
+    if (!(document instanceof File) || document.size === 0) {
+      return fail(400, {
+        mutation: 'createPrintJob',
+        error: { message: 'Choose a PDF document to print.' }
+      });
+    }
+    if (document.size > MAX_DASHBOARD_PDF_BYTES) {
+      return fail(413, {
+        mutation: 'createPrintJob',
+        error: { message: 'PDF documents must be 50 MiB or smaller.' }
+      });
+    }
+    if (!Number.isInteger(copies) || copies < 1 || copies > 100) {
+      return fail(400, {
+        mutation: 'createPrintJob',
+        error: { message: 'Copies must be a whole number between 1 and 100.' }
+      });
+    }
+
+    try {
+      const client = dashboardSdk(event);
+      const printers = await client.printers.list({ limit: 100 });
+      const printer = printers.data.find((candidate) => candidate.id === printerId);
+      const profile = printer?.profiles.find(
+        (candidate) => candidate.profile_id === profileId && candidate.status === 'ready'
+      );
+      if (!printer || printer.state !== 'online') {
+        return fail(409, {
+          mutation: 'createPrintJob',
+          error: { message: 'That printer is no longer online. Refresh and choose another printer.' }
+        });
+      }
+      if (!profile) {
+        return fail(409, {
+          mutation: 'createPrintJob',
+          error: { message: 'That print profile is no longer ready. Refresh and choose another profile.' }
+        });
+      }
+
+      const bytes = new Uint8Array(await document.arrayBuffer());
+      if (
+        bytes.length < 5 ||
+        bytes[0] !== 0x25 ||
+        bytes[1] !== 0x50 ||
+        bytes[2] !== 0x44 ||
+        bytes[3] !== 0x46 ||
+        bytes[4] !== 0x2d
+      ) {
+        return fail(415, {
+          mutation: 'createPrintJob',
+          error: { message: 'The selected file is not a valid PDF document.' }
+        });
+      }
+
+      const job = await client.jobs.create(
+        {
+          printer_id: printerId,
+          title: title || document.name.replace(/\.pdf$/i, '') || 'PDF document',
+          source: 'piqae-dashboard',
+          content_type: 'pdf',
+          content: { type: 'base64', data: encodeBase64(bytes) },
+          options: { ...profile.options, copies },
+          deliveries: 1,
+          expire_after_seconds: 3600,
+          metadata: {
+            profile_id: profile.profile_id,
+            profile_revision: String(profile.revision)
+          }
+        },
+        `dashboard-${crypto.randomUUID()}`
+      );
+      return { mutation: 'createPrintJob', createdJobId: job.id, state: job.state };
+    } catch (error) {
+      return fail(502, {
+        mutation: 'createPrintJob',
+        error: { message: presentDashboardError(error).message }
+      });
+    }
+  },
+
   createEnrolment: async (event) => {
     preventSecretCaching(event);
     if (dashboardMode() !== 'live') {
