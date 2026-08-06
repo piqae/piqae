@@ -3190,6 +3190,7 @@ async fn run_cloud_sync_loop(
                     SyncContext {
                         cloud: &cloud,
                         store: &mut store,
+                        inventory_store: &mut inventory_store,
                         content_store: &content_store,
                         uri_fetcher: &uri_fetcher,
                         paused: &paused,
@@ -3279,6 +3280,7 @@ async fn prepare_sync_request(
 struct SyncContext<'a> {
     cloud: &'a CloudConfiguration,
     store: &'a mut AgentStore,
+    inventory_store: &'a mut AgentStore,
     content_store: &'a ContentStore,
     uri_fetcher: &'a UriFetcher,
     paused: &'a AtomicBool,
@@ -3304,6 +3306,7 @@ async fn sync_succeeded(response: AgentSyncResponse, context: SyncContext<'_>) -
         if let Err(error) = accept_offer(
             context.cloud,
             context.store,
+            context.inventory_store,
             context.content_store,
             context.uri_fetcher,
             offer,
@@ -3379,9 +3382,14 @@ fn apply_command(
     Ok(())
 }
 
+#[allow(
+    clippy::needless_pass_by_ref_mut,
+    reason = "exclusive inventory access keeps the spawned sync future Send across awaits"
+)]
 async fn accept_offer(
     cloud: &CloudConfiguration,
     store: &mut AgentStore,
+    inventory_store: &mut AgentStore,
     content_store: &ContentStore,
     uri_fetcher: &UriFetcher,
     offer: JobOffer,
@@ -3413,7 +3421,14 @@ async fn accept_offer(
       result = maintain_lease(
         offer.lease_expires_at,
         LEASE_RENEWAL_INTERVAL,
-        accept_offer_under_lease(cloud, store, content_store, uri_fetcher, offer),
+        accept_offer_under_lease(
+            cloud,
+            store,
+            inventory_store,
+            content_store,
+            uri_fetcher,
+            offer,
+        ),
         || async {
             tokio::time::timeout(
                 LEASE_RENEWAL_REQUEST_TIMEOUT,
@@ -3478,11 +3493,13 @@ fn printer_is_allowed(
 
 #[allow(
     clippy::too_many_lines,
+    clippy::needless_pass_by_ref_mut,
     reason = "keeps the lease-fenced acceptance and durable-intent boundary auditable in one flow"
 )]
 async fn accept_offer_under_lease(
     cloud: &CloudConfiguration,
     store: &mut AgentStore,
+    inventory_store: &mut AgentStore,
     content_store: &ContentStore,
     uri_fetcher: &UriFetcher,
     offer: JobOffer,
@@ -3499,9 +3516,10 @@ async fn accept_offer_under_lease(
         )
         .into());
     }
-    let printer = store
-        .printer(&logical_printer_id)?
-        .with_context(|| format!("printer_not_found: {logical_printer_id}"))?;
+    // Connector stores intentionally contain only that connector's queue and
+    // cloud cursors. Printer identity, exposure, capabilities, and profiles
+    // are authoritative in the node-owned inventory store.
+    let printer = resolve_cloud_offer_printer(inventory_store, &logical_printer_id)?;
     if !printer.present {
         return Err(OfferRejection::new(
             "printer_not_present",
@@ -3517,7 +3535,7 @@ async fn accept_offer_under_lease(
         .into());
     }
     if let Some(pin) = &profile_pin {
-        let profile = store
+        let profile = inventory_store
             .named_profile_revision(&printer.printer_id, &pin.profile_id, pin.profile_revision)?
             .with_context(|| {
                 format!(
@@ -3626,6 +3644,15 @@ async fn accept_offer_under_lease(
         },
     )
     .await
+}
+
+fn resolve_cloud_offer_printer(
+    inventory_store: &AgentStore,
+    logical_printer_id: &str,
+) -> Result<StoredPrinter> {
+    inventory_store
+        .printer(logical_printer_id)?
+        .with_context(|| format!("printer_not_found: {logical_printer_id}"))
 }
 
 #[derive(Debug)]
@@ -5247,6 +5274,19 @@ mod tests {
                 .present_printers()
                 .expect("connector printers")
                 .is_empty()
+        );
+        assert!(
+            connector_queue
+                .printer(&printer.printer_id)
+                .expect("connector lookup")
+                .is_none(),
+            "connector queue must not duplicate node printer identity"
+        );
+        assert_eq!(
+            resolve_cloud_offer_printer(&node_inventory, &printer.printer_id)
+                .expect("offer resolves against node inventory")
+                .native_id,
+            printer.native_id
         );
         assert_eq!(request.printer_revision, 1);
     }
