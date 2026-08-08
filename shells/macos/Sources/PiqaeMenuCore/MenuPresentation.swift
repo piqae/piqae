@@ -1,7 +1,9 @@
 import Foundation
 
 public enum MenuPresentation {
-    public static let cloudAndAPIAccessTitle = "Cloud & API access"
+    public static let cloudAndAPIAccessTitle = "Available to connected services"
+    public static let connectionsTitle = "Connections"
+    public static let queueTitle = "Queue"
 
     public static func printerActivityTitle(
         state: String,
@@ -21,5 +23,19 @@ public enum MenuPresentation {
 
     public static func printPresetSectionTitle(count: Int) -> String {
         "PRINT PRESETS (\(count))"
+    }
+
+    public static func connectionStatusTitle(connection: String) -> String {
+        switch connection {
+        case "connected": "Connected"
+        case "connecting": "Connecting…"
+        case "degraded": "Connection needs attention"
+        case "local_only": "No cloud connections"
+        default: "Connection status unavailable"
+        }
+    }
+
+    public static func testPresetTitle(_ presetName: String) -> String {
+        "Test “\(presetName)”…"
     }
 }

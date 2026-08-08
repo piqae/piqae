@@ -70,10 +70,33 @@ final class LocalAPITests: XCTestCase {
     }
 
     func testMenuUsesPrintPresetsAsTheUserFacingTerm() {
-        XCTAssertEqual(MenuPresentation.cloudAndAPIAccessTitle, "Cloud & API access")
+        XCTAssertEqual(
+            MenuPresentation.cloudAndAPIAccessTitle,
+            "Available to connected services"
+        )
         XCTAssertEqual(
             MenuPresentation.printPresetSectionTitle(count: 3),
             "PRINT PRESETS (3)"
+        )
+        XCTAssertEqual(
+            MenuPresentation.testPresetTitle("A4 colour"),
+            "Test “A4 colour”…"
+        )
+        XCTAssertEqual(MenuPresentation.queueTitle, "Queue")
+    }
+
+    func testConnectionStatusIsProviderNeutral() {
+        XCTAssertEqual(
+            MenuPresentation.connectionStatusTitle(connection: "connected"),
+            "Connected"
+        )
+        XCTAssertEqual(
+            MenuPresentation.connectionStatusTitle(connection: "degraded"),
+            "Connection needs attention"
+        )
+        XCTAssertEqual(
+            MenuPresentation.connectionStatusTitle(connection: "local_only"),
+            "No cloud connections"
         )
     }
 
