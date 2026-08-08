@@ -10,10 +10,13 @@ small optional status tray where desktop infrastructure exists.
 Cloud document-decryption keys remain in an owner-only local file on headless
 Linux. Piqae deliberately does not depend on a desktop secret-service session
 that may be absent during systemd startup. With the packaged
-`PIQAE_DATA_DIR=/var/lib/piqae`, the legacy single-connector key is exactly
-`/var/lib/piqae/content-encryption.key`. A registry connector whose device key
-is `connectors/<connector-id>/device.key` stores its content key at
-`/var/lib/piqae/connectors/<connector-id>/device.content-encryption.key`.
+`PIQAE_DATA_DIR=/var/lib/piqae`, a private-key-free keyring manifest is stored
+beside owner-only files named for each `cek_…` generation. Existing
+`/var/lib/piqae/content-encryption.key` and connector-local
+`device.content-encryption.key` files are migrated to a generation without
+rotating it. The manifest binds the keyring to the stable node identity; if a
+manifest or any referenced generation is missing or corrupt, startup fails
+closed instead of silently generating a replacement.
 The device and content-encryption keys are private key material, not
 configuration files. They must be regular files owned by `piqae:piqae`, be
 readable by that account, have no group or other permission bits (the agent
@@ -53,19 +56,15 @@ contents:
 
 ```sh
 sudo find /var/lib/piqae \
-  \( -name 'device.key' -o -name 'content-encryption.key' \
-     -o -name '*.content-encryption.key' \) ! -type f -print
+  \( -name 'device.key' -o -name '*content-encryption*.key' \) ! -type f -print
 sudo find /var/lib/piqae -type f \
-  \( -name 'device.key' -o -name 'content-encryption.key' \
-     -o -name '*.content-encryption.key' \) \
+  \( -name 'device.key' -o -name '*content-encryption*.key' \) \
   -exec stat -c '%U:%G %a %n' {} +
 sudo find /var/lib/piqae -type f \
-  \( -name 'device.key' -o -name 'content-encryption.key' \
-     -o -name '*.content-encryption.key' \) \
+  \( -name 'device.key' -o -name '*content-encryption*.key' \) \
   -perm /077 -print
 sudo find /var/lib/piqae -type f \
-  \( -name 'device.key' -o -name 'content-encryption.key' \
-     -o -name '*.content-encryption.key' \) \
+  \( -name 'device.key' -o -name '*content-encryption*.key' \) \
   ! -exec sudo -u piqae test -r {} \; -print
 ```
 

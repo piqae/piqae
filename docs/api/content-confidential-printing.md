@@ -87,8 +87,12 @@ owner-only key files are imported, read back and verified before the plaintext
 file is removed. Migration and startup fail closed if the OS store is
 unavailable or returns different bytes. Linux and other headless Unix nodes
 retain an owner-only file because a desktop secret service cannot be assumed;
-encrypted storage volumes are recommended there. Rotation revokes the previous
-active recipient.
+encrypted storage volumes are recommended there. Rotation makes the previous
+recipient decrypt-only while the node retains bounded older
+generations for decryption. The keyring manifest contains identifiers and
+lifecycle only, is bound to the stable node identity, and fails closed if prior
+key material is missing or corrupt. Rotation refuses to discard an old key when
+the generation cap is reached.
 
 The v3 upgrade does not reinterpret or convert an existing RSA private key.
 RSA envelopes and RSA-sized stored key material fail closed. Before upgrading

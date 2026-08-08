@@ -177,8 +177,7 @@ struct CloudConfiguration {
     client: AgentClient,
     identity: DeviceIdentity,
     agent_id: AgentId,
-    content_encryption_key: Arc<SecretKey>,
-    content_encryption_key_id: String,
+    content_encryption_keys: Arc<content_key_store::ContentKeyring>,
     allowed_printer_ids: Option<std::collections::BTreeSet<String>>,
 }
 
@@ -3094,14 +3093,15 @@ fn cloud_configuration(arguments: &Arguments) -> Result<CloudConfiguration> {
     let secret: [u8; 32] = bytes
         .try_into()
         .map_err(|_| anyhow::anyhow!("device key must contain exactly 32 bytes"))?;
-    let (content_encryption_key, content_encryption_key_id) =
-        content_key_store::load_or_create(&arguments.data_dir.join("content-encryption.key"))?;
+    let content_encryption_keys = content_key_store::load_or_create(
+        &arguments.data_dir.join("content-encryption.key"),
+        &agent_id.to_string(),
+    )?;
     Ok(CloudConfiguration {
         client: AgentClient::new(base_url)?,
         identity: DeviceIdentity::from_secret_bytes(agent_id, &secret),
         agent_id,
-        content_encryption_key: Arc::new(content_encryption_key),
-        content_encryption_key_id,
+        content_encryption_keys: Arc::new(content_encryption_keys),
         allowed_printer_ids: None,
     })
 }
@@ -3128,14 +3128,13 @@ fn cloud_configuration_from_connector(
         )
     })?;
     let encryption_path = key_path.with_extension("content-encryption.key");
-    let (content_encryption_key, content_encryption_key_id) =
-        content_key_store::load_or_create(&encryption_path)?;
+    let content_encryption_keys =
+        content_key_store::load_or_create(&encryption_path, &record.agent_id)?;
     Ok(CloudConfiguration {
         client: AgentClient::new(record.control_plane_url.clone())?,
         identity: DeviceIdentity::from_secret_bytes(agent_id, &secret),
         agent_id,
-        content_encryption_key: Arc::new(content_encryption_key),
-        content_encryption_key_id,
+        content_encryption_keys: Arc::new(content_encryption_keys),
         allowed_printer_ids: connector_allowed_printers(record),
     })
 }
@@ -3224,11 +3223,13 @@ async fn run_cloud_sync_loop(
     printer_inventory_dirty: Arc<AtomicBool>,
     stop: StopSignal,
 ) {
-    let public_key_spki = match cloud
-        .content_encryption_key
-        .public_key()
-        .to_public_key_der()
-    {
+    let Some((active_content_key_id, active_content_key)) = cloud.content_encryption_keys.active()
+    else {
+        error!("content encryption keyring has no active key");
+        *connection.write().await = ConnectionState::Degraded;
+        return;
+    };
+    let public_key_spki = match active_content_key.public_key().to_public_key_der() {
         Ok(der) => URL_SAFE_NO_PAD.encode(der.as_bytes()),
         Err(error) => {
             error!(%error, "content encryption key cannot be encoded");
@@ -3241,7 +3242,7 @@ async fn run_cloud_sync_loop(
             .client
             .register_content_encryption_key(
                 &cloud.identity,
-                &cloud.content_encryption_key_id,
+                active_content_key_id,
                 &public_key_spki,
             )
             .await
@@ -4070,14 +4071,22 @@ async fn materialize_descriptor(
             {
                 anyhow::bail!("encrypted job binding is expired or invalid");
             }
+            let selected_key_id = cloud
+                .content_encryption_keys
+                .select_key_id(manifest.recipients.iter().filter_map(|recipient| {
+                    (recipient.algorithm == piqae_domain::ENCRYPTED_JOB_V3_RECIPIENT_ALGORITHM)
+                        .then_some(recipient.key_id.as_str())
+                }))
+                .context("encrypted job has no recipient for this node key")?;
             let recipient = manifest
                 .recipients
                 .iter()
-                .find(|recipient| {
-                    recipient.key_id == cloud.content_encryption_key_id
-                        && recipient.algorithm == piqae_domain::ENCRYPTED_JOB_V3_RECIPIENT_ALGORITHM
-                })
+                .find(|recipient| recipient.key_id == selected_key_id)
                 .context("encrypted job has no recipient for this node key")?;
+            let recipient_private_key = cloud
+                .content_encryption_keys
+                .key(&recipient.key_id)
+                .context("encrypted job recipient key is unavailable")?;
             let response = cloud
                 .client
                 .download_content(&cloud.identity, job_id, lease_id, lease_token)
@@ -4097,7 +4106,7 @@ async fn materialize_descriptor(
                     .await
                     .context("read verified ciphertext")?;
                 let plaintext = zeroize::Zeroizing::new(decrypt_encrypted_content(
-                    &cloud.content_encryption_key,
+                    recipient_private_key,
                     recipient,
                     &manifest,
                     &ciphertext,
@@ -5324,8 +5333,10 @@ mod tests {
                 .expect("client"),
             identity: DeviceIdentity::generate(agent_id),
             agent_id,
-            content_encryption_key: Arc::new(test_encryption_key),
-            content_encryption_key_id: "cek_test".into(),
+            content_encryption_keys: Arc::new(content_key_store::ContentKeyring::from_active(
+                "cek_test".into(),
+                test_encryption_key,
+            )),
             allowed_printer_ids: None,
         };
         let mut store = AgentStore::in_memory().expect("store");
