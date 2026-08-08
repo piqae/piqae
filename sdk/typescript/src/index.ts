@@ -5,6 +5,9 @@ export type { PrintPdfInput, PiqaePlatformOptions } from './platform.js';
 export { verifyWebhookSignature } from './webhooks.js';
 export type { PiqaeWebhookHeaders, VerifyWebhookOptions } from './webhooks.js';
 export {
+  ENCRYPTED_JOB_V3_RECIPIENT_ALGORITHM,
+  ENCRYPTED_JOB_V3_SUITE,
+  ENCRYPTED_JOB_V3_VERSION,
   encryptJobContent,
   canonicalJobOptions,
   encryptedJobCiphertext,

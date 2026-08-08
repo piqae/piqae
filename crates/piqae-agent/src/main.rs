@@ -3744,8 +3744,8 @@ async fn accept_offer_under_lease(
                 || manifest.binding.options != offer.job.options
                 || manifest.binding.deliveries != offer.job.deliveries
                 || manifest.binding.raw_authorized != (offer.job.content_kind == ContentKind::Raw)
-                || manifest.version != "piqae-encrypted-job-v3"
-                || manifest.suite != "ECDH-P256+HKDF-SHA256+A256GCMKW+A256GCM"
+                || manifest.version != piqae_domain::ENCRYPTED_JOB_V3_VERSION
+                || manifest.suite != piqae_domain::ENCRYPTED_JOB_V3_SUITE
             {
                 return Err(OfferRejection::new(
                     "encrypted_binding_mismatch",
@@ -4075,7 +4075,7 @@ async fn materialize_descriptor(
                 .iter()
                 .find(|recipient| {
                     recipient.key_id == cloud.content_encryption_key_id
-                        && recipient.algorithm == "ECDH-P256-HKDF-SHA256"
+                        && recipient.algorithm == piqae_domain::ENCRYPTED_JOB_V3_RECIPIENT_ALGORITHM
                 })
                 .context("encrypted job has no recipient for this node key")?;
             let response = cloud
@@ -4144,9 +4144,9 @@ fn decrypt_encrypted_content(
     ciphertext: &[u8],
 ) -> Result<Vec<u8>> {
     validate_encrypted_ciphertext_size(ciphertext.len())?;
-    if manifest.version != "piqae-encrypted-job-v3"
-        || manifest.suite != "ECDH-P256+HKDF-SHA256+A256GCMKW+A256GCM"
-        || recipient.algorithm != "ECDH-P256-HKDF-SHA256"
+    if manifest.version != piqae_domain::ENCRYPTED_JOB_V3_VERSION
+        || manifest.suite != piqae_domain::ENCRYPTED_JOB_V3_SUITE
+        || recipient.algorithm != piqae_domain::ENCRYPTED_JOB_V3_RECIPIENT_ALGORITHM
     {
         anyhow::bail!("unsupported encrypted job envelope or recipient algorithm");
     }
@@ -5703,15 +5703,15 @@ mod tests {
             .expect("wrap content key");
         let recipient = piqae_domain::EncryptedContentRecipient {
             key_id: key_id.into(),
-            algorithm: "ECDH-P256-HKDF-SHA256".into(),
+            algorithm: piqae_domain::ENCRYPTED_JOB_V3_RECIPIENT_ALGORITHM.into(),
             ephemeral_public_key: URL_SAFE_NO_PAD.encode(ephemeral_public.to_sec1_bytes().as_ref()),
             hkdf_salt: URL_SAFE_NO_PAD.encode(salt),
             key_wrap_iv: URL_SAFE_NO_PAD.encode(wrap_iv),
             encrypted_content_key: URL_SAFE_NO_PAD.encode(wrapped),
         };
         let manifest = piqae_domain::EncryptedContentManifest {
-            version: "piqae-encrypted-job-v3".into(),
-            suite: "ECDH-P256+HKDF-SHA256+A256GCMKW+A256GCM".into(),
+            version: piqae_domain::ENCRYPTED_JOB_V3_VERSION.into(),
+            suite: piqae_domain::ENCRYPTED_JOB_V3_SUITE.into(),
             binding,
             ciphertext_sha256: URL_SAFE_NO_PAD.encode(Sha256::digest(&ciphertext)),
             iv: URL_SAFE_NO_PAD.encode(iv),

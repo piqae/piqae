@@ -1,8 +1,8 @@
 import type { JobOptions } from './types.js';
 
-const ENVELOPE_VERSION = 'piqae-encrypted-job-v3' as const;
-const SUITE = 'ECDH-ES-P256+HKDF-SHA256+A256GCMKW+A256GCM' as const;
-const RECIPIENT_ALGORITHM = 'ECDH-ES-P256+HKDF-SHA256+A256GCMKW' as const;
+export const ENCRYPTED_JOB_V3_VERSION = 'piqae-encrypted-job-v3' as const;
+export const ENCRYPTED_JOB_V3_SUITE = 'ECDH-ES-P256+HKDF-SHA256+A256GCMKW+A256GCM' as const;
+export const ENCRYPTED_JOB_V3_RECIPIENT_ALGORITHM = 'ECDH-ES-P256+HKDF-SHA256+A256GCMKW' as const;
 
 export interface EncryptedJobRecipient {
   /** Stable identifier for a dedicated encryption key. Never use a node signing key here. */
@@ -35,15 +35,15 @@ export interface CanonicalJobOptions {
 }
 
 export interface EncryptedJobEnvelope {
-  version: typeof ENVELOPE_VERSION;
-  suite: typeof SUITE;
+  version: typeof ENCRYPTED_JOB_V3_VERSION;
+  suite: typeof ENCRYPTED_JOB_V3_SUITE;
   binding: EncryptedJobBinding;
   ciphertext_sha256: string;
   iv: string;
   ciphertext: string;
   recipients: Array<{
     key_id: string;
-    algorithm: typeof RECIPIENT_ALGORITHM;
+    algorithm: typeof ENCRYPTED_JOB_V3_RECIPIENT_ALGORITHM;
     /** Ephemeral P-256 public key as a 65-byte uncompressed SEC1 point. */
     ephemeral_public_key: string;
     /** Fresh 96-bit AES-GCM key-wrap IV. */
@@ -165,7 +165,7 @@ export async function encryptJobContent(
       );
       return {
         key_id: recipient.key_id,
-        algorithm: RECIPIENT_ALGORITHM,
+      algorithm: ENCRYPTED_JOB_V3_RECIPIENT_ALGORITHM,
         ephemeral_public_key: encodeBase64Url(
           await crypto.subtle.exportKey('raw', ephemeral.publicKey)
         ),
@@ -177,8 +177,8 @@ export async function encryptJobContent(
   );
   const digest = await crypto.subtle.digest('SHA-256', ciphertext);
   return {
-    version: ENVELOPE_VERSION,
-    suite: SUITE,
+    version: ENCRYPTED_JOB_V3_VERSION,
+    suite: ENCRYPTED_JOB_V3_SUITE,
     binding,
     ciphertext_sha256: encodeBase64Url(digest),
     iv: encodeBase64Url(iv),
@@ -191,13 +191,13 @@ export async function verifyEncryptedJobEnvelope(
   envelope: EncryptedJobEnvelope,
   crypto: Crypto = globalThis.crypto
 ): Promise<boolean> {
-  if (envelope.version !== ENVELOPE_VERSION || envelope.suite !== SUITE) return false;
+  if (envelope.version !== ENCRYPTED_JOB_V3_VERSION || envelope.suite !== ENCRYPTED_JOB_V3_SUITE) return false;
   validateBinding(envelope.binding);
   if (envelope.recipients.length === 0 || new Set(envelope.recipients.map((r) => r.key_id)).size !== envelope.recipients.length) return false;
   if (!envelope.recipients.every((recipient) => {
     try {
       validateKeyId(recipient.key_id);
-      return recipient.algorithm === RECIPIENT_ALGORITHM
+      return recipient.algorithm === ENCRYPTED_JOB_V3_RECIPIENT_ALGORITHM
         && decodeBase64Url(recipient.ephemeral_public_key).byteLength === 65
         && decodeBase64Url(recipient.ephemeral_public_key)[0] === 4
         && decodeBase64Url(recipient.key_wrap_iv).byteLength === 12

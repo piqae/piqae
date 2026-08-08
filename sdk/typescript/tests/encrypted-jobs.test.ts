@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
+  ENCRYPTED_JOB_V3_RECIPIENT_ALGORITHM,
+  ENCRYPTED_JOB_V3_SUITE,
+  ENCRYPTED_JOB_V3_VERSION,
   canonicalJobOptions,
   encryptJobContent,
   encryptedJobAdditionalData,
@@ -11,6 +14,11 @@ const base64url = (value: ArrayBuffer) =>
   Buffer.from(value).toString('base64url');
 
 describe('encrypted job envelopes', () => {
+  it('uses the exact OpenAPI v3 profile identifiers', () => {
+    expect(ENCRYPTED_JOB_V3_VERSION).toBe('piqae-encrypted-job-v3');
+    expect(ENCRYPTED_JOB_V3_SUITE).toBe('ECDH-ES-P256+HKDF-SHA256+A256GCMKW+A256GCM');
+    expect(ENCRYPTED_JOB_V3_RECIPIENT_ALGORITHM).toBe('ECDH-ES-P256+HKDF-SHA256+A256GCMKW');
+  });
   it('orders native option keys by UTF-8 bytes like Rust BTreeMap', () => {
     expect(Object.keys(canonicalJobOptions({ native_options: { '😀': 'emoji', 'é': 'accent', z: 'latin' } }).native_options)).toEqual(['z', 'é', '😀']);
   });

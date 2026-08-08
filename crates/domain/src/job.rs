@@ -4,6 +4,11 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use thiserror::Error;
 
+/// Exact encrypted-job envelope identifiers defined by the public OpenAPI contract.
+pub const ENCRYPTED_JOB_V3_VERSION: &str = "piqae-encrypted-job-v3";
+pub const ENCRYPTED_JOB_V3_SUITE: &str = "ECDH-ES-P256+HKDF-SHA256+A256GCMKW+A256GCM";
+pub const ENCRYPTED_JOB_V3_RECIPIENT_ALGORITHM: &str = "ECDH-ES-P256+HKDF-SHA256+A256GCMKW";
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ContentKind {
