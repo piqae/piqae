@@ -590,7 +590,7 @@ async fn main() -> Result<()> {
     let printer_inventory_dirty = Arc::new(AtomicBool::new(true));
     let (control_tx, control_rx) = mpsc::channel(32);
     let (connector_supervisor_tx, connector_supervisor_rx) = mpsc::channel(32);
-    tokio::spawn(control_loop(
+    let mut control_task = tokio::spawn(control_loop(
         control_rx,
         engine,
         content_store,
@@ -633,7 +633,7 @@ async fn main() -> Result<()> {
     // printer-scoped authorization. Keep the supervisor available in every
     // mode so that approval can activate that isolated connector immediately.
     let connector_connections = ConnectorConnectionTracker::new(Arc::clone(&connection));
-    tokio::spawn(connector_supervisor_loop(
+    let mut connector_supervisor_task = tokio::spawn(connector_supervisor_loop(
         arguments.data_dir.clone(),
         connector_supervisor_rx,
         executor,
@@ -650,12 +650,34 @@ async fn main() -> Result<()> {
         bind = %arguments.local_bind,
         "Piqae node started"
     );
-    piqae_local_api::serve(
+    let local_api = piqae_local_api::serve(
         arguments.local_bind,
         LocalApiState::new(&challenge, control_tx),
-    )
-    .await
-    .context("serve local API")
+    );
+    tokio::pin!(local_api);
+    let result = tokio::select! {
+        result = &mut local_api => result.context("serve local API"),
+        result = &mut control_task => Err(unexpected_task_exit("local control loop", result)),
+        result = &mut connector_supervisor_task => {
+            Err(unexpected_task_exit("connector supervisor", result))
+        }
+    };
+    control_task.abort();
+    connector_supervisor_task.abort();
+    result
+}
+
+fn unexpected_task_exit(
+    name: &str,
+    result: std::result::Result<(), tokio::task::JoinError>,
+) -> anyhow::Error {
+    match result {
+        Ok(()) => anyhow::anyhow!("critical task `{name}` exited unexpectedly"),
+        Err(error) if error.is_panic() => {
+            anyhow::anyhow!("critical task `{name}` panicked: {error}")
+        }
+        Err(error) => anyhow::anyhow!("critical task `{name}` failed: {error}"),
+    }
 }
 
 const MAX_ENROLMENT_TOKEN_INPUT_BYTES: u64 = 256;
@@ -1497,7 +1519,8 @@ async fn connector_scheduler_loop(
 #[allow(
     clippy::cognitive_complexity,
     clippy::needless_collect,
-    reason = "supervisor snapshots keys before mutating worker ownership"
+    clippy::too_many_lines,
+    reason = "supervisor owns command, recovery, liveness, and shutdown transitions in one audit point"
 )]
 async fn connector_supervisor_loop(
     data_dir: PathBuf,
@@ -1528,9 +1551,33 @@ async fn connector_supervisor_loop(
     }
     let mut recovery = tokio::time::interval(Duration::from_secs(30));
     recovery.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut liveness = tokio::time::interval(Duration::from_secs(1));
+    liveness.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         let command = tokio::select! {
             command = commands.recv() => command,
+            _ = liveness.tick() => {
+                if legacy_cloud_worker
+                    .as_ref()
+                    .is_some_and(|worker| worker.task.is_finished())
+                {
+                    error!("legacy cloud sync task exited unexpectedly; stopping node for supervised restart");
+                    break;
+                }
+                if workers.values().any(connector_worker_has_exited)
+                    && let Err(error) = reload_connector_workers(
+                        &data_dir,
+                        &mut workers,
+                        &executor,
+                        &uri_fetcher,
+                        &printer_discovery,
+                        &connections,
+                    ).await
+                {
+                    warn!(%error, "connector worker liveness recovery deferred");
+                }
+                continue;
+            }
             _ = recovery.tick() => {
                 if let Err(error) = retire_legacy_cloud_worker_if_needed(&data_dir, &mut legacy_cloud_worker).await {
                     warn!(%error, "periodic legacy cloud worker retirement deferred");
@@ -1627,13 +1674,14 @@ async fn retire_legacy_cloud_worker_if_needed(
 async fn stop_legacy_cloud_worker(worker: LegacyCloudWorker) {
     worker.stop.stop();
     let mut task = worker.task;
-    if tokio::time::timeout(Duration::from_secs(10), &mut task)
-        .await
-        .is_err()
-    {
-        warn!("legacy cloud worker exceeded the shutdown deadline; aborting it");
-        task.abort();
-        let _ = task.await;
+    match tokio::time::timeout(Duration::from_secs(10), &mut task).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => error!(%error, "legacy cloud worker task failed"),
+        Err(_) => {
+            warn!("legacy cloud worker exceeded the shutdown deadline; aborting it");
+            task.abort();
+            let _ = task.await;
+        }
     }
 }
 
@@ -1669,10 +1717,14 @@ async fn reload_connector_workers(
     }
     for (id, record) in enabled {
         let grants = connector_allowed_printers(&record);
-        if workers
-            .get(&id)
-            .is_some_and(|worker| worker.allowed_printer_ids == grants)
-        {
+        let worker_exited = workers.get(&id).is_some_and(connector_worker_has_exited);
+        if worker_exited {
+            connections.update(&id, ConnectionState::Degraded).await;
+            error!(connector_id = %id, "connector worker task exited unexpectedly; restarting connector runtime");
+        }
+        if workers.get(&id).is_some_and(|worker| {
+            worker.allowed_printer_ids == grants && !connector_worker_has_exited(worker)
+        }) {
             continue;
         }
         if workers.contains_key(&id) {
@@ -1715,6 +1767,12 @@ async fn reload_connector_workers(
     } else {
         anyhow::bail!("connector reload partially failed: {}", failures.join("; "))
     }
+}
+
+fn connector_worker_has_exited(worker: &ConnectorWorker) -> bool {
+    worker.sync.is_finished()
+        || worker.scheduler.is_finished()
+        || worker.connection_watch.is_finished()
 }
 
 async fn start_connector_worker(
@@ -1825,9 +1883,13 @@ async fn stop_connector_worker(
     let mut scheduler = worker.scheduler;
     let mut connection_watch = worker.connection_watch;
     if tokio::time::timeout(Duration::from_secs(10), async {
-        let _ = (&mut sync).await;
-        let _ = (&mut scheduler).await;
-        let _ = (&mut connection_watch).await;
+        log_connector_task_exit(connector_id, "cloud sync", (&mut sync).await);
+        log_connector_task_exit(connector_id, "print scheduler", (&mut scheduler).await);
+        log_connector_task_exit(
+            connector_id,
+            "connection watcher",
+            (&mut connection_watch).await,
+        );
     })
     .await
     .is_err()
@@ -1844,6 +1906,16 @@ async fn stop_connector_worker(
     }
     connections.remove(connector_id).await;
     Ok(())
+}
+
+fn log_connector_task_exit(
+    connector_id: &str,
+    task: &str,
+    result: std::result::Result<(), tokio::task::JoinError>,
+) {
+    if let Err(error) = result {
+        error!(%connector_id, %task, %error, "connector worker task failed");
+    }
 }
 
 #[allow(
@@ -4471,6 +4543,59 @@ mod tests {
             .await
             .expect("pre-existing stop must not be lost");
         assert!(stop.is_stopped());
+    }
+
+    #[tokio::test]
+    async fn critical_task_completion_and_panic_are_reported_as_failures() {
+        let completed = tokio::spawn(async {});
+        let error = unexpected_task_exit("test control loop", completed.await);
+        assert!(error.to_string().contains("exited unexpectedly"));
+
+        let panicked = tokio::spawn(async { panic!("test task panic") });
+        let error = unexpected_task_exit("test connector supervisor", panicked.await);
+        assert!(error.to_string().contains("panicked"));
+    }
+
+    #[tokio::test]
+    async fn connector_worker_liveness_detects_each_exited_task() {
+        fn worker_with_tasks(
+            sync: tokio::task::JoinHandle<()>,
+            scheduler: tokio::task::JoinHandle<()>,
+            connection_watch: tokio::task::JoinHandle<()>,
+        ) -> ConnectorWorker {
+            ConnectorWorker {
+                allowed_printer_ids: None,
+                sync_stop: StopSignal::default(),
+                scheduler_stop: StopSignal::default(),
+                connection_stop: StopSignal::default(),
+                sync,
+                scheduler,
+                connection_watch,
+            }
+        }
+
+        for exited_task in 0..3 {
+            let stop = StopSignal::default();
+            let mut tasks = Vec::new();
+            for task_index in 0..3 {
+                let stop = stop.clone();
+                tasks.push(tokio::spawn(async move {
+                    if task_index != exited_task {
+                        stop.cancelled().await;
+                    }
+                }));
+            }
+            tokio::task::yield_now().await;
+            let connection_watch = tasks.pop().expect("connection watcher");
+            let scheduler = tasks.pop().expect("scheduler");
+            let sync = tasks.pop().expect("sync");
+            let worker = worker_with_tasks(sync, scheduler, connection_watch);
+            assert!(connector_worker_has_exited(&worker));
+            stop.stop();
+            let _ = worker.sync.await;
+            let _ = worker.scheduler.await;
+            let _ = worker.connection_watch.await;
+        }
     }
 
     #[tokio::test]
