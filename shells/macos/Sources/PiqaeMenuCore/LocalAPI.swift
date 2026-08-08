@@ -222,6 +222,16 @@ private struct TestPageRequest: Encodable {
     }
 }
 
+private struct DashboardSessionResponse: Decodable {
+    let url: String
+    let expiresInSeconds: UInt64
+
+    enum CodingKeys: String, CodingKey {
+        case url
+        case expiresInSeconds = "expires_in_seconds"
+    }
+}
+
 private struct ProfileCaptureSessionRequest: Encodable {
     let operation: LocalProfileCaptureOperation
     let profileID: String?
@@ -281,6 +291,29 @@ public final class LocalAPIClient: @unchecked Sendable {
             return collection.localJobs
         }
         return try decoder.decode([LocalQueueJob].self, from: data)
+    }
+
+    public func createDashboardSession() async throws -> URL {
+        let response: DashboardSessionResponse = try await request(
+            method: "POST",
+            path: "/v1/local/dashboard-sessions"
+        )
+        guard
+            response.expiresInSeconds > 0,
+            response.expiresInSeconds <= 30,
+            let url = URL(string: response.url),
+            url.scheme?.lowercased() == "http",
+            let host = url.host?.lowercased(),
+            ["127.0.0.1", "localhost", "::1"].contains(host),
+            url.user == nil,
+            url.password == nil,
+            url.path == "/local/queue",
+            URLComponents(url: url, resolvingAgainstBaseURL: false)?
+                .queryItems?.contains(where: { $0.name == "handoff" && !($0.value ?? "").isEmpty }) == true
+        else {
+            throw LocalAPIError.invalidResponse
+        }
+        return url
     }
 
     public func setExposure(printerID: String, exposed: Bool) async throws {

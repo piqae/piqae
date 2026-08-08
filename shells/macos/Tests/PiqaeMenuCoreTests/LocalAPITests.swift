@@ -276,6 +276,52 @@ final class LocalAPITests: XCTestCase {
             profileID: "profile_a4"
         )
         XCTAssertEqual(accepted.jobID, "job_test")
+
+        StubURLProtocol.handler = { request in
+            XCTAssertEqual(request.httpMethod, "POST")
+            XCTAssertEqual(request.url?.path, "/v1/local/dashboard-sessions")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer test-secret")
+            return Self.response(
+                for: request,
+                body: #"{"url":"http://127.0.0.1:39100/local/queue?handoff=once","expires_in_seconds":30}"#
+            )
+        }
+        let dashboardURL = try await client.createDashboardSession()
+        XCTAssertEqual(dashboardURL.path, "/local/queue")
+        XCTAssertEqual(
+            URLComponents(url: dashboardURL, resolvingAgainstBaseURL: false)?
+                .queryItems?.first(where: { $0.name == "handoff" })?.value,
+            "once"
+        )
+    }
+
+    func testDashboardSessionRejectsRemoteHandoff() async throws {
+        let tokenFile = FileManager.default.temporaryDirectory
+            .appendingPathComponent("piqae-menu-\(UUID().uuidString).token")
+        try Data("test-secret".utf8).write(to: tokenFile, options: .atomic)
+        defer { try? FileManager.default.removeItem(at: tokenFile) }
+        let sessionConfiguration = URLSessionConfiguration.ephemeral
+        sessionConfiguration.protocolClasses = [StubURLProtocol.self]
+        let client = LocalAPIClient(
+            configuration: try LocalAPIConfiguration(
+                baseURL: XCTUnwrap(URL(string: "http://127.0.0.1:39100")),
+                tokenFile: tokenFile
+            ),
+            session: URLSession(configuration: sessionConfiguration)
+        )
+        StubURLProtocol.handler = { request in
+            Self.response(
+                for: request,
+                body: #"{"url":"https://example.com/local/queue?handoff=leak","expires_in_seconds":30}"#
+            )
+        }
+
+        do {
+            _ = try await client.createDashboardSession()
+            XCTFail("Expected a remote dashboard handoff to be rejected.")
+        } catch let error as LocalAPIError {
+            XCTAssertEqual(error, .invalidResponse)
+        }
     }
 
     func testProfileCaptureSessionRoutesAndCaptureToken() async throws {

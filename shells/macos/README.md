@@ -38,10 +38,14 @@ Configuration:
   `~/Library/Application Support/Spool/local.token`. This internal path remains
   stable across the visible Piqae rename so existing identities and queues are
   not stranded.
-- `PIQAE_DASHBOARD_URL` enables **Queue** below recent jobs.
-- `PIQAE_CONNECTIONS_URL` optionally sends **Connections → Manage Access &
-  Reauthorize…** to a dedicated authenticated node view. It falls back to
-  `PIQAE_DASHBOARD_URL` when unset.
+- **Queue** opens the node's authenticated loopback dashboard. The menu requests
+  a short-lived, single-use browser handoff, so the local API token is never put
+  in a browser URL. `PIQAE_DASHBOARD_URL` is only a compatibility fallback for
+  older agents that do not yet provide that handoff.
+- `PIQAE_CONNECTIONS_URL` may send **Connections → Manage Access &
+  Reauthorize…** to a verified service-neutral management page. Without it,
+  the action opens connector details in the node dashboard through the same
+  authenticated handoff.
 - `PIQAE_AGENT_LOG_FILE` overrides `/var/log/piqae-agent.log`.
 
 Build and test:
