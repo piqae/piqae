@@ -466,6 +466,7 @@ impl<E: Executor, C: Clock> AgentEngine<E, C> {
                 }
             }
             Err(error) => {
+                self.store.record_executor_failure(&error.code)?;
                 let (state, reason) = if error.handoff_may_have_succeeded {
                     (JobState::DeliveryUncertain, "ambiguous_handoff")
                 } else if error.retryable {
@@ -1158,7 +1159,7 @@ mod tests {
     async fn ambiguous_handoff_is_never_automatically_retried() {
         let executor = FakeExecutor {
             result: Some(Err(ExecutorFailure {
-                code: "executor_died".into(),
+                code: "executor_crashed".into(),
                 message: "child exited during native call".into(),
                 retryable: true,
                 handoff_may_have_succeeded: true,
@@ -1180,6 +1181,10 @@ mod tests {
             "delivery_uncertain"
         );
         assert_eq!(engine.run_once().await.expect("second run"), 0);
+        assert_eq!(
+            engine.store().failure_health().expect("durable health"),
+            (1, Some("executor_crashed".into()))
+        );
     }
 
     #[tokio::test]

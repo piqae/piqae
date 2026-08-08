@@ -638,6 +638,11 @@ mod tests {
             state: "connected".into(),
             version: "0.1.0".into(),
             last_seen_at: now - TimeDelta::seconds(89),
+            health_started_at: None,
+            health_observed_at: None,
+            sqlite_integrity_ok: None,
+            executor_crashes: 0,
+            last_error_code: None,
         };
         assert!(agent_is_connected_at(&agent, now));
         agent.last_seen_at = now - TimeDelta::seconds(91);

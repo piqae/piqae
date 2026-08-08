@@ -4126,6 +4126,7 @@ fn sync_request(
         .setting("printer_inventory_revision")?
         .and_then(|revision| revision.parse::<u64>().ok())
         .unwrap_or(0);
+    let (executor_crashes, last_error_code) = store.failure_health()?;
     Ok(AgentSyncRequest {
         agent_id,
         protocol_version: CURRENT_PROTOCOL_VERSION,
@@ -4143,8 +4144,8 @@ fn sync_request(
             started_at,
             observed_at: Utc::now(),
             sqlite_integrity_ok: store.integrity_check()?,
-            executor_crashes: 0,
-            last_error_code: None,
+            executor_crashes,
+            last_error_code,
         },
         printers,
         events,
@@ -4970,9 +4971,20 @@ mod tests {
         store
             .set_setting("printer_inventory_revision", "42")
             .expect("revision");
+        store
+            .record_executor_failure("executor_crashed")
+            .expect("crash health");
+        store
+            .record_executor_failure("executor_timed_out")
+            .expect("timeout health");
         let request = sync_request(&store, AgentId::new(), Utc::now(), false, Some(Vec::new()))
             .expect("sync request");
         assert_eq!(request.printer_revision, 42);
+        assert_eq!(request.health.executor_crashes, 1);
+        assert_eq!(
+            request.health.last_error_code.as_deref(),
+            Some("executor_timed_out")
+        );
     }
 
     #[tokio::test]

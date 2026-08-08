@@ -787,8 +787,8 @@ mod tests {
                 started_at: now,
                 observed_at: now,
                 sqlite_integrity_ok: true,
-                executor_crashes: 0,
-                last_error_code: None,
+                executor_crashes: 3,
+                last_error_code: Some("executor_crashed".into()),
             },
             printers: None,
             events: Vec::new(),
@@ -810,6 +810,20 @@ mod tests {
             .await
             .expect("tolerated skew response");
         assert_eq!(tolerated.status(), StatusCode::OK);
+        let agent = application
+            .repository
+            .get_agent(
+                application.tenant.workspace_id,
+                application.tenant.environment_id,
+                application.agent_id,
+            )
+            .await
+            .expect("persisted agent health");
+        assert_eq!(agent.health_started_at, Some(now));
+        assert_eq!(agent.health_observed_at, Some(now));
+        assert_eq!(agent.sqlite_integrity_ok, Some(true));
+        assert_eq!(agent.executor_crashes, 3);
+        assert_eq!(agent.last_error_code.as_deref(), Some("executor_crashed"));
 
         // Beyond the window the request is refused — but the response still
         // carries the server clock, which is what lets the node self-correct
@@ -1725,6 +1739,13 @@ mod tests {
                 application.tenant.environment_id,
                 standby_agent,
                 "test-standby",
+                &AgentHealth {
+                    started_at: Utc::now(),
+                    observed_at: Utc::now(),
+                    sqlite_integrity_ok: true,
+                    executor_crashes: 0,
+                    last_error_code: None,
+                },
                 Some(std::slice::from_ref(&standby_snapshot)),
             )
             .await

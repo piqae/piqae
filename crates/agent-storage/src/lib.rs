@@ -449,6 +449,61 @@ impl AgentStore {
         Ok(result == "ok")
     }
 
+    /// Returns durable failure counters reported as node health.
+    ///
+    /// Executor crashes are counted from the append-only job event history, so
+    /// restarting the agent cannot make an unhealthy installation appear clean.
+    /// The last error is the newest recorded failure reason, if any.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the durable event history cannot be queried.
+    pub fn failure_health(&self) -> Result<(u64, Option<String>), StorageError> {
+        let crashes = self
+            .setting("executor_crashes")?
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0);
+        Ok((crashes, self.setting("last_runtime_error_code")?))
+    }
+
+    /// Durably records a classified executor failure before job-state mapping
+    /// can intentionally replace it with `ambiguous_handoff`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the health settings cannot be updated atomically.
+    pub fn record_executor_failure(&mut self, code: &str) -> Result<(), StorageError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current: Option<String> = transaction
+            .query_row(
+                "SELECT value_json FROM settings WHERE key = 'executor_crashes'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let crashes = current
+            .and_then(|value| serde_json::from_str::<String>(&value).ok())
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(0)
+            .saturating_add(u64::from(code == "executor_crashed"));
+        for (key, value) in [
+            ("executor_crashes", crashes.to_string()),
+            ("last_runtime_error_code", code.to_owned()),
+        ] {
+            transaction.execute(
+                "INSERT INTO settings(key, value_json, updated_unix_ms)
+                 VALUES (?1, ?2, CAST(unixepoch('subsec') * 1000 AS INTEGER))
+                 ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json,
+                   updated_unix_ms = excluded.updated_unix_ms",
+                params![key, serde_json::to_string(&value)?],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
     /// Reads a durable agent setting.
     ///
     /// # Errors
@@ -3516,6 +3571,22 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].state, "queued_local");
         assert!(store.integrity_check().unwrap());
+    }
+
+    #[test]
+    fn classified_executor_health_survives_restart() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("health.sqlite");
+        {
+            let mut store = AgentStore::open(&database).unwrap();
+            store.record_executor_failure("executor_crashed").unwrap();
+            store.record_executor_failure("executor_timed_out").unwrap();
+        }
+        let store = AgentStore::open(&database).unwrap();
+        assert_eq!(
+            store.failure_health().unwrap(),
+            (1, Some("executor_timed_out".into()))
+        );
     }
 
     #[test]

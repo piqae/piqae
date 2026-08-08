@@ -358,6 +358,11 @@ pub struct StoredAgent {
     pub state: String,
     pub version: String,
     pub last_seen_at: DateTime<Utc>,
+    pub health_started_at: Option<DateTime<Utc>>,
+    pub health_observed_at: Option<DateTime<Utc>>,
+    pub sqlite_integrity_ok: Option<bool>,
+    pub executor_crashes: u64,
+    pub last_error_code: Option<String>,
 }
 
 /// A tenant-scoped authorization from one physical node installation.
@@ -2786,25 +2791,41 @@ impl PostgresStore {
         environment_id: EnvironmentId,
         agent_id: AgentId,
         version: &str,
+        health: &piqae_protocol::agent::AgentHealth,
         printers: Option<&[SyncedPrinter]>,
     ) -> Result<(), StorageError> {
         let mut transaction = self.pool.begin().await?;
         let result = sqlx::query(
-            "UPDATE agents SET state = 'connected', version = $4, last_seen_at = now()
+            "UPDATE agents SET state = 'connected', version = $4, last_seen_at = now(),
+                 health_started_at = $5, health_observed_at = $6,
+                 sqlite_integrity_ok = $7, executor_crashes = $8,
+                 last_error_code = $9
              WHERE id = $1 AND workspace_id = $2 AND environment_id = $3
                AND revoked_at IS NULL
                AND (
                  state IS DISTINCT FROM 'connected'
                  OR version IS DISTINCT FROM $4
+                 OR health_started_at IS DISTINCT FROM $5
+                 OR health_observed_at IS DISTINCT FROM $6
+                 OR sqlite_integrity_ok IS DISTINCT FROM $7
+                 OR executor_crashes IS DISTINCT FROM $8
+                 OR last_error_code IS DISTINCT FROM $9
                  OR last_seen_at IS NULL
                  OR last_seen_at < now() - interval '55 seconds'
-                 OR $5::boolean
+                 OR $10::boolean
                )",
         )
         .bind(agent_id.to_string())
         .bind(workspace_id.to_string())
         .bind(environment_id.to_string())
         .bind(version)
+        .bind(health.started_at)
+        .bind(health.observed_at)
+        .bind(health.sqlite_integrity_ok)
+        .bind(i64::try_from(health.executor_crashes).map_err(|error| {
+            StorageError::InvalidData(format!("executor crash count overflow: {error}"))
+        })?)
+        .bind(&health.last_error_code)
         .bind(printers.is_some())
         .execute(&mut *transaction)
         .await?;
@@ -2968,7 +2989,9 @@ impl PostgresStore {
         environment_id: EnvironmentId,
     ) -> Result<Vec<StoredAgent>, StorageError> {
         let rows = sqlx::query(
-            "SELECT id, name, os, state, version, COALESCE(last_seen_at, created_at) AS last_seen_at
+            "SELECT id, name, os, state, version, COALESCE(last_seen_at, created_at) AS last_seen_at,
+                    health_started_at, health_observed_at, sqlite_integrity_ok,
+                    executor_crashes, last_error_code
              FROM agents
              WHERE workspace_id = $1 AND environment_id = $2 AND revoked_at IS NULL
              ORDER BY created_at DESC, id DESC",
@@ -2987,7 +3010,9 @@ impl PostgresStore {
         agent_id: AgentId,
     ) -> Result<StoredAgent, StorageError> {
         let row = sqlx::query(
-            "SELECT id, name, os, state, version, COALESCE(last_seen_at, created_at) AS last_seen_at
+            "SELECT id, name, os, state, version, COALESCE(last_seen_at, created_at) AS last_seen_at,
+                    health_started_at, health_observed_at, sqlite_integrity_ok,
+                    executor_crashes, last_error_code
              FROM agents
              WHERE id = $1 AND workspace_id = $2 AND environment_id = $3
                AND revoked_at IS NULL",
@@ -7238,6 +7263,12 @@ fn agent_from_row(row: &PgRow) -> Result<StoredAgent, StorageError> {
         state: normalize_agent_state(&row.try_get::<String, _>("state")?),
         version: row.try_get("version")?,
         last_seen_at: row.try_get("last_seen_at")?,
+        health_started_at: row.try_get("health_started_at")?,
+        health_observed_at: row.try_get("health_observed_at")?,
+        sqlite_integrity_ok: row.try_get("sqlite_integrity_ok")?,
+        executor_crashes: u64::try_from(row.try_get::<i64, _>("executor_crashes")?)
+            .map_err(|error| StorageError::InvalidData(format!("executor crash count: {error}")))?,
+        last_error_code: row.try_get("last_error_code")?,
     })
 }
 

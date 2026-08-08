@@ -153,11 +153,7 @@ impl SupervisedExecutor {
                 native_code: None,
             }),
             Err(error) => Err(ExecutorFailure {
-                code: match error {
-                    SupervisorError::TimedOut => "executor_timed_out",
-                    _ => "executor_failed",
-                }
-                .into(),
+                code: classify_supervisor_error(&error).into(),
                 message: error.to_string(),
                 retryable: !matches!(error, SupervisorError::TimedOut),
                 handoff_may_have_succeeded: false,
@@ -241,11 +237,7 @@ impl Executor for SupervisedExecutor {
                 native_code: None,
             }),
             Err(error) => Err(ExecutorFailure {
-                code: match error {
-                    SupervisorError::TimedOut => "executor_timed_out",
-                    _ => "executor_failed",
-                }
-                .into(),
+                code: classify_supervisor_error(&error).into(),
                 message: error.to_string(),
                 retryable: !matches!(error, SupervisorError::TimedOut),
                 // The request was fully written before we awaited a response.
@@ -292,6 +284,14 @@ impl Executor for SupervisedExecutor {
     }
 }
 
+const fn classify_supervisor_error(error: &SupervisorError) -> &'static str {
+    match error {
+        SupervisorError::TimedOut => "executor_timed_out",
+        SupervisorError::Exit(_) => "executor_crashed",
+        _ => "executor_failed",
+    }
+}
+
 fn unexpected_response(operation: &str) -> ExecutorFailure {
     ExecutorFailure {
         code: "unexpected_executor_response".into(),
@@ -309,5 +309,27 @@ fn invalid_local_job_id() -> ExecutorFailure {
         retryable: false,
         handoff_may_have_succeeded: false,
         native_code: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn timeout_is_distinct_from_a_process_crash() {
+        assert_eq!(
+            classify_supervisor_error(&SupervisorError::TimedOut),
+            "executor_timed_out"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::ExitStatusExt;
+            let exit = std::process::ExitStatus::from_raw(256);
+            assert_eq!(
+                classify_supervisor_error(&SupervisorError::Exit(exit)),
+                "executor_crashed"
+            );
+        }
     }
 }

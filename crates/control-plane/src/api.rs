@@ -2243,6 +2243,21 @@ pub async fn agent_sync(
             "The sync protocol or event batch is outside supported limits.",
         ));
     }
+    let now = Utc::now();
+    if request.health.started_at > request.health.observed_at
+        || request.health.observed_at > now + chrono::TimeDelta::minutes(5)
+        || request.health.executor_crashes > i64::MAX as u64
+        || request
+            .health
+            .last_error_code
+            .as_deref()
+            .is_some_and(|code| code.is_empty() || code.len() > 128 || !code.is_ascii())
+    {
+        return Err(AppError::invalid(
+            "invalid_agent_health",
+            "The reported agent health is outside supported limits.",
+        ));
+    }
     if request
         .acknowledged_command_cursor
         .as_deref()
@@ -2318,6 +2333,7 @@ pub async fn agent_sync(
             tenant.environment_id,
             request.agent_id,
             &request.agent_version,
+            &request.health,
             printers.as_deref(),
         )
         .await?;
