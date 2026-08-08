@@ -3848,7 +3848,8 @@ mod tests {
             .enumerate()
         {
             let job_id = format!("encrypted-{index}");
-            let mut encrypted = job(&job_id, "printer", 1_000 + index as i64);
+            let accepted_at = 1_000 + i64::try_from(index).expect("fixture index fits i64");
+            let mut encrypted = job(&job_id, "printer", accepted_at);
             encrypted.cloud_managed = true;
             encrypted.content_sha256 = format!("sha-{index}");
             encrypted.content_path = format!("/content/confidential-{index}");
