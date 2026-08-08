@@ -30,6 +30,14 @@ installation activates only connectors accepted through the native consent
 flow. Its menu aggregates their live health without disclosing one connector
 to another.
 
+Locally discovered printers do not have a second cloud-exposure switch. The
+connector consent grant is the authority: `all_local_printers` includes the
+current inventory and printers discovered later, while `selected_printers`
+remains limited to the durable IDs explicitly approved. Every authorized
+printer publishes its generated **Current printer defaults** preset as the
+initial job default. That live preset follows the installed driver's defaults;
+captured native presets remain immutable, revision-pinned configurations.
+
 This remains a **Preview implementation**, not a Supported fleet claim. macOS
 has the Piqae-branded browser-to-app handoff and local consent flow in signed,
 notarised packaging. Windows and Linux have the shared headless
