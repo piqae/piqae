@@ -2365,6 +2365,33 @@ impl AgentStore {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
+    /// Returns retained local jobs newest first across every printer.
+    ///
+    /// This is used by the loopback node queue. Pagination keeps the agent
+    /// control channel bounded even when the durable history is large.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `SQLite` cannot query or decode the retained jobs.
+    pub fn local_job_history(
+        &self,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<LocalJob>, StorageError> {
+        let bounded_limit = i64::try_from(limit.clamp(1, 200)).unwrap_or(200);
+        let bounded_offset = i64::try_from(offset.min(i32::MAX as usize)).unwrap_or(i64::MAX);
+        let mut statement = self.connection.prepare(
+            "SELECT job_id, submission_id, printer_id, printer_native_id,
+                    printer_sequence, title, content_sha256, content_path,
+                    content_kind, options_json, state, expires_unix_ms,
+                    native_job_id, target_id, binding_id, profile_id,
+                    profile_revision, stock_id, loaded_media_snapshot_json
+             FROM jobs ORDER BY accepted_unix_ms DESC, job_id DESC LIMIT ?1 OFFSET ?2",
+        )?;
+        let rows = statement.query_map(params![bounded_limit, bounded_offset], row_to_job)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
     /// Returns exact local queue counts for one logical printer.
     ///
     /// # Errors
@@ -4819,5 +4846,17 @@ mod tests {
                 assert!(columns.iter().any(|column| column == name));
             }
         }
+    }
+
+    #[test]
+    fn local_history_pages_across_printers_newest_first() {
+        let mut store = AgentStore::in_memory().unwrap();
+        store.accept_job(&job("older", "printer-a", 10)).unwrap();
+        store.accept_job(&job("newer", "printer-b", 20)).unwrap();
+
+        let first = store.local_job_history(0, 1).unwrap();
+        let second = store.local_job_history(1, 1).unwrap();
+        assert_eq!(first[0].job_id, "newer");
+        assert_eq!(second[0].job_id, "older");
     }
 }

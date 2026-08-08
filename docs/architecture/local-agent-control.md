@@ -7,8 +7,9 @@ device private key.
 ## V1 implementation
 
 The current agent exposes `crates/local-api` on loopback HTTP, defaulting to
-`127.0.0.1:39100`. This surface is an API only: there is no embedded local web
-UI at the loopback root.
+`127.0.0.1:39100`. The root remains an API surface. An intentionally small
+node-owned queue view is available only through an authenticated browser
+handoff; navigating to the loopback root does not expose it.
 
 The server refuses non-loopback binds, caps request bodies at 72 MiB, and
 requires the startup-generated bearer token for every operational route.
@@ -21,6 +22,22 @@ Implemented V1 operations include status, printer/profile/queue reads, exposure,
 pause/resume, local job/test submission, native profile capture
 authorization/commit/cancel/validation, and loaded-media confirmation. See
 `crates/local-api` for the exact route contract.
+
+Native shells open the node queue by authenticating `POST
+/v1/local/dashboard-sessions` with `local.token` and opening the returned URL.
+The URL capability expires after 30 seconds, is single-use, and is exchanged
+for a 15-minute `HttpOnly`, `SameSite=Strict` loopback cookie before redirecting
+to a clean URL. The page shows paged retained local history and provider-neutral
+connector state. It never exposes connector credentials. Connector management
+or reauthorization links are shown only when enrolment records an explicit safe
+destination; the agent does not guess provider-specific paths.
+
+Reprint is an explicit, confirmed new attempt using content still retained by
+the node. It is limited to terminal attempts and a currently present printer.
+The original job plus caller idempotency key deterministically identifies the
+new attempt, so replaying a browser request cannot create another job. A
+reported completion remains an observation of the node or OS queue, not proof
+that ink reached paper.
 
 Shell capabilities are intentionally described narrowly:
 
