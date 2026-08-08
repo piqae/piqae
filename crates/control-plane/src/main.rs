@@ -225,7 +225,8 @@ fn spawn_auth_maintenance_worker(worker: AuthMaintenanceWorker) -> tokio::task::
                 Ok(purged) => tracing::info!(
                     nonces = purged.nonces,
                     device_authorizations = purged.device_authorizations,
-                    "purged expired node authentication state"
+                    node_diagnostics = purged.node_diagnostics,
+                    "purged expired node maintenance state"
                 ),
                 Err(error) => {
                     tracing::error!(error.type = "auth_state_purge", %error);

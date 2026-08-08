@@ -119,6 +119,9 @@ try {
     $Mutex = New-UserSupervisorMutex
     while (-not $ownsMutex -and -not (Test-Path -LiteralPath $StopPath)) {
         try { $ownsMutex = $Mutex.WaitOne(1000, $false) } catch [Threading.AbandonedMutexException] { $ownsMutex = $true }
+        # Every interactive session owns its disposable tray lifecycle even
+        # while another session owns the single durable-agent mutex.
+        Ensure-ShellRunning
     }
     if ($ownsMutex -and (Test-Path -LiteralPath $StopPath)) {
         $Mutex.ReleaseMutex()
@@ -131,9 +134,10 @@ try {
     while (-not (Test-Path -LiteralPath $StopPath)) {
         $started = [DateTime]::UtcNow
         Write-SupervisorLog "starting durable agent"
-        $agent = Start-Process -FilePath $AgentPath -WindowStyle Hidden -PassThru `
-            -RedirectStandardOutput (Join-Path $LogDirectory "agent.stdout.log") `
-            -RedirectStandardError (Join-Path $LogDirectory "agent.stderr.log")
+        # The agent writes structured output and panic evidence directly to its
+        # bounded PIQAE_LOG_FILE. Do not retain raw stdout/stderr, which can be
+        # unbounded and may contain sensitive native error context.
+        $agent = Start-Process -FilePath $AgentPath -WindowStyle Hidden -PassThru
         while (-not $agent.HasExited -and -not (Test-Path -LiteralPath $StopPath)) {
             Start-Sleep -Seconds 1
             $agent.Refresh()

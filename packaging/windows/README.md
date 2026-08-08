@@ -7,8 +7,9 @@ agent and shell at login through the current user's `Run` registry key. A
 machine-global supervisor keyed to the current user's Windows SID keeps one
 durable agent alive across that user's concurrent login sessions. Its named
 mutex ACL grants access only to that user, while every interactive session has
-its own disposable tray. Other active sessions wait without starting another
-agent and can take ownership if the supervising session exits. The supervisor
+its own disposable tray and independently restores that tray if it exits.
+Other active sessions wait without starting another agent and can take
+ownership if the supervising session exits. The supervisor
 restarts the agent with exponential delay. Five exits in five minutes trigger a
 five-minute cooldown so a persistent startup fault cannot create a tight crash
 loop. Supervisor decisions are recorded in `logs\supervisor.log`.

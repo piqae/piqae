@@ -336,9 +336,42 @@ async fn agent_health_migrates_empty_and_previous_schemas_with_tenant_fencing() 
     assert_eq!(other_count, 0);
     sqlx::query("INSERT INTO node_diagnostics (request_id, workspace_id, environment_id, agent_id, state) VALUES ('diag_a','wsp_health_a','env_health_a','agt_health_a','requested')")
         .execute(&upgrade_pool).await.expect("tenant diagnostic request");
+    let cross_tenant_insert = sqlx::query("INSERT INTO node_diagnostics (request_id, workspace_id, environment_id, agent_id, state) VALUES ('diag_cross','wsp_health_a','env_health_a','agt_health_b','requested')")
+        .execute(&upgrade_pool).await;
+    assert!(
+        cross_tenant_insert.is_err(),
+        "composite agent foreign key must reject a cross-tenant diagnostic"
+    );
     let cross_tenant_report = sqlx::query("UPDATE node_diagnostics SET state = 'complete', report = '{}'::jsonb WHERE request_id = 'diag_a' AND workspace_id = 'wsp_health_b' AND environment_id = 'env_health_b' AND agent_id = 'agt_health_b'")
         .execute(&upgrade_pool).await.expect("cross-tenant diagnostic probe");
     assert_eq!(cross_tenant_report.rows_affected(), 0);
+    sqlx::query(
+        "INSERT INTO node_diagnostics
+             (request_id, workspace_id, environment_id, agent_id, state, expires_at)
+         SELECT 'diag_expired_' || value, 'wsp_health_a', 'env_health_a',
+                'agt_health_a', 'requested', now() - interval '1 minute'
+         FROM generate_series(1, 1001) value",
+    )
+    .execute(&upgrade_pool)
+    .await
+    .expect("expired diagnostic fixtures");
+    let store = PostgresStore::from_pool(upgrade_pool.clone());
+    let first_purge = store
+        .purge_expired_authentication_state()
+        .await
+        .expect("first bounded diagnostic purge");
+    assert_eq!(first_purge.node_diagnostics, 1000);
+    let expired_remaining: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM node_diagnostics WHERE expires_at <= now()")
+            .fetch_one(&upgrade_pool)
+            .await
+            .expect("count remaining expired diagnostics");
+    assert_eq!(expired_remaining, 1);
+    let second_purge = store
+        .purge_expired_authentication_state()
+        .await
+        .expect("second bounded diagnostic purge");
+    assert_eq!(second_purge.node_diagnostics, 1);
 
     upgrade_pool.close().await;
     sqlx::query(&format!("DROP SCHEMA {upgrade_schema} CASCADE"))

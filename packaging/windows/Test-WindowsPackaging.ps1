@@ -104,6 +104,7 @@ try {
     Assert-True ($supervisorScript.Contains('"Local\PiqaeNodeShellLauncher"')) "Tray launch is not isolated to each interactive session."
     Assert-True ($supervisorScript.Contains('$process.SessionId -eq $SessionId')) "Tray detection can mistake another session's tray for the current one."
     Assert-True ($supervisorScript.Contains('$Mutex.WaitOne(1000, $false)')) "Another active session cannot take over after the owning session exits."
+    Assert-True (([regex]::Matches($supervisorScript, 'Ensure-ShellRunning')).Count -ge 4) "Standby sessions do not independently restore their disposable tray."
     Assert-True (-not $supervisorScript.Contains('Remove-Item -LiteralPath $StopPath')) "A supervisor could erase a stop request before standby sessions observe it."
     Assert-True ($supervisorScript.Contains("crash-loop threshold reached")) "Supervisor has no bounded crash-loop policy."
     Assert-True ($supervisorScript.Contains('$failures.Count -ge 5')) "Supervisor crash-loop threshold changed unexpectedly."

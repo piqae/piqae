@@ -108,11 +108,32 @@ impl ExecutorSupervisor {
         {
             Ok(Ok(response)) => response,
             Ok(Err(source)) => {
-                terminate(&mut child).await;
-                return Err(SupervisorError::Frame {
-                    source,
-                    evidence: stderr_evidence(stderr_task, &stderr_state).await,
-                });
+                let status = timeout(
+                    deadline.saturating_duration_since(tokio::time::Instant::now()),
+                    child.wait(),
+                )
+                .await;
+                match status {
+                    Ok(Ok(status)) if !status.success() => {
+                        return Err(SupervisorError::Exit(
+                            status,
+                            stderr_evidence(stderr_task, &stderr_state).await,
+                        ));
+                    }
+                    Ok(Ok(_)) => {
+                        return Err(SupervisorError::Frame {
+                            source,
+                            evidence: stderr_evidence(stderr_task, &stderr_state).await,
+                        });
+                    }
+                    Ok(Err(error)) => return Err(SupervisorError::Spawn(error)),
+                    Err(_) => {
+                        terminate(&mut child).await;
+                        return Err(SupervisorError::TimedOut(
+                            stderr_evidence(stderr_task, &stderr_state).await,
+                        ));
+                    }
+                }
             }
             Err(_) => {
                 terminate(&mut child).await;
@@ -467,13 +488,35 @@ mod tests {
             use std::os::unix::process::ExitStatusExt;
             let exit = std::process::ExitStatus::from_raw(256);
             assert_eq!(
-                classify_supervisor_error(&SupervisorError::Exit(
-                    exit,
-                    CrashEvidence::empty()
-                )),
+                classify_supervisor_error(&SupervisorError::Exit(exit, CrashEvidence::empty())),
                 "executor_crashed"
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn child_exit_before_response_is_classified_as_a_crash() {
+        let supervisor = super::ExecutorSupervisor::new(
+            std::path::PathBuf::from("/usr/bin/false"),
+            std::time::Duration::from_secs(2),
+        );
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        let request = piqae_protocol::executor::ExecutorRequest {
+            request_id: uuid::Uuid::new_v4(),
+            deadline_unix_ms: i64::try_from(now.as_millis())
+                .unwrap_or(i64::MAX)
+                .saturating_add(2_000),
+            operation: piqae_protocol::executor::ExecutorOperation::DiscoverPrinters,
+        };
+
+        let Err(error) = supervisor.execute(&request).await else {
+            panic!("child exit unexpectedly succeeded");
+        };
+        assert!(matches!(error, SupervisorError::Exit(_, _)));
+        assert_eq!(classify_supervisor_error(&error), "executor_crashed");
     }
 
     #[tokio::test]
