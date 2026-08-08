@@ -243,6 +243,16 @@ export class PiqaeClient {
         'POST',
         `/v1/nodes/${encodeURIComponent(id)}/diagnostics`
       ),
+    listDiagnostics: (id: string) =>
+      this.request<import('./types.js').NodeDiagnostic[]>(
+        'GET',
+        `/v1/nodes/${encodeURIComponent(id)}/diagnostics`
+      ),
+    retrieveDiagnostic: (id: string, requestId: string) =>
+      this.request<import('./types.js').NodeDiagnostic>(
+        'GET',
+        `/v1/nodes/${encodeURIComponent(id)}/diagnostics/${encodeURIComponent(requestId)}`
+      ),
     update: (id: string) =>
       this.request<NodeUpdate>('GET', `/v1/nodes/${encodeURIComponent(id)}/update`),
     updatePolicy: (id: string, policy: NodeUpdatePolicy) =>

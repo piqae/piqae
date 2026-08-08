@@ -273,6 +273,31 @@ export interface Agent {
   last_error_code?: string | null;
 }
 
+export interface DiagnosticReport {
+  request_id: string;
+  observed_at: string;
+  state: 'complete' | 'failed';
+  agent_version: string;
+  platform: string;
+  architecture: string;
+  queued_jobs: number;
+  active_jobs: number;
+  sqlite_integrity_ok: boolean;
+  executor_crashes: number;
+  last_error_code: string | null;
+  collection_error_code: string | null;
+}
+
+export interface NodeDiagnostic {
+  request_id: string;
+  node_id: PiqaeId;
+  state: 'requested' | 'complete' | 'failed';
+  report: DiagnosticReport | null;
+  requested_at: string;
+  received_at: string | null;
+  expires_at: string;
+}
+
 export interface CreateDeviceAuthorization {
   public_key: string;
   installation_id: string;

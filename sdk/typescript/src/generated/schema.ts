@@ -1380,10 +1380,31 @@ export interface paths {
             };
             cookie?: never;
         };
-        get?: never;
+        /** List retained redacted diagnostic reports */
+        get: operations["listNodeDiagnostics"];
         put?: never;
         /** Request redacted local diagnostics */
         post: operations["requestNodeDiagnostics"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/nodes/{node_id}/diagnostics/{request_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                node_id: components["parameters"]["NodeId"];
+                request_id: string;
+            };
+            cookie?: never;
+        };
+        /** Get redacted diagnostic request status and report */
+        get: operations["getNodeDiagnostic"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -2326,6 +2347,8 @@ export interface components {
             health: components["schemas"]["AgentHealth"];
             printers: components["schemas"]["PrinterSnapshot"][] | null;
             events: components["schemas"]["JobEvent"][];
+            /** @default [] */
+            diagnostics?: components["schemas"]["DiagnosticReport"][];
         };
         AgentSyncResponse: {
             /** Format: date-time */
@@ -2336,6 +2359,38 @@ export interface components {
             candidate_jobs: components["schemas"]["JobOffer"][];
             /** Format: int64 */
             next_poll_after_ms: number;
+            /** @default [] */
+            acknowledged_diagnostics?: string[];
+        };
+        DiagnosticReport: {
+            request_id: string;
+            /** Format: date-time */
+            observed_at: string;
+            /** @enum {string} */
+            state: "complete" | "failed";
+            agent_version: string;
+            platform: string;
+            architecture: string;
+            queued_jobs: number;
+            active_jobs: number;
+            sqlite_integrity_ok: boolean;
+            /** Format: int64 */
+            executor_crashes: number;
+            last_error_code: string | null;
+            collection_error_code: string | null;
+        };
+        NodeDiagnostic: {
+            request_id: string;
+            node_id: string;
+            /** @enum {string} */
+            state: "requested" | "complete" | "failed";
+            report: components["schemas"]["DiagnosticReport"] | null;
+            /** Format: date-time */
+            requested_at: string;
+            /** Format: date-time */
+            received_at: string | null;
+            /** Format: date-time */
+            expires_at: string;
         };
         JobOffer: {
             job: components["schemas"]["AgentJob"];
@@ -5029,6 +5084,29 @@ export interface operations {
             404: components["responses"]["Error"];
         };
     };
+    listNodeDiagnostics: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                node_id: components["parameters"]["NodeId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description At most fifty unexpired reports, newest first. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NodeDiagnostic"][];
+                };
+            };
+            404: components["responses"]["Error"];
+        };
+    };
     requestNodeDiagnostics: {
         parameters: {
             query?: never;
@@ -5051,6 +5129,30 @@ export interface operations {
                         /** @constant */
                         state: "requested";
                     };
+                };
+            };
+            404: components["responses"]["Error"];
+        };
+    };
+    getNodeDiagnostic: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                node_id: components["parameters"]["NodeId"];
+                request_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Diagnostic request projection. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NodeDiagnostic"];
                 };
             };
             404: components["responses"]["Error"];

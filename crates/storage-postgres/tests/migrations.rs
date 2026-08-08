@@ -63,7 +63,7 @@ async fn postgres_reported_complete_billing_upgrades_from_previous_schema() {
         .fetch_one(&pool)
         .await
         .expect("read latest schema version");
-    assert_eq!(latest, 25);
+    assert_eq!(latest, 26);
     let billable_index: Option<String> =
         sqlx::query_scalar("SELECT to_regclass('usage_one_billable_print_per_job_idx')::text")
             .fetch_one(&pool)
@@ -235,6 +235,7 @@ async fn node_connector_upgrade_backfills_without_cross_tenant_merging() {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn agent_health_migrates_empty_and_previous_schemas_with_tenant_fencing() {
     let Some(database_url) = env::var("PIQAE_TEST_DATABASE_URL").ok() else {
         eprintln!("skipped: set PIQAE_TEST_DATABASE_URL to run PostgreSQL migration evidence");
@@ -258,7 +259,7 @@ async fn agent_health_migrates_empty_and_previous_schemas_with_tenant_fencing() 
         .fetch_one(&empty_pool)
         .await
         .expect("read empty-database schema version");
-    assert_eq!(latest, 25);
+    assert_eq!(latest, 26);
     empty_pool.close().await;
     sqlx::query(&format!("DROP SCHEMA {empty_schema} CASCADE"))
         .execute(&admin)
@@ -274,7 +275,7 @@ async fn agent_health_migrates_empty_and_previous_schemas_with_tenant_fencing() 
     let previous = Migrator {
         migrations: Cow::Owned(
             all.iter()
-                .filter(|migration| migration.version < 25)
+                .filter(|migration| migration.version < 26)
                 .cloned()
                 .collect(),
         ),
@@ -282,7 +283,7 @@ async fn agent_health_migrates_empty_and_previous_schemas_with_tenant_fencing() 
         locking: true,
         no_tx: false,
     };
-    previous.run(&upgrade_pool).await.expect("apply schema 24");
+    previous.run(&upgrade_pool).await.expect("apply schema 25");
     for suffix in ["a", "b"] {
         sqlx::query("INSERT INTO workspaces (id,name,slug) VALUES ($1,$2,$3)")
             .bind(format!("wsp_health_{suffix}"))
@@ -308,7 +309,7 @@ async fn agent_health_migrates_empty_and_previous_schemas_with_tenant_fencing() 
     }
     all.run(&upgrade_pool)
         .await
-        .expect("upgrade schema 24 to 25");
+        .expect("upgrade schema 25 to 26");
     let own_update = sqlx::query(
         "UPDATE agents SET executor_crashes = 2, last_error_code = 'executor_crashed'
          WHERE id = 'agt_health_a' AND workspace_id = 'wsp_health_a'
@@ -333,6 +334,11 @@ async fn agent_health_migrates_empty_and_previous_schemas_with_tenant_fencing() 
             .await
             .expect("other tenant health");
     assert_eq!(other_count, 0);
+    sqlx::query("INSERT INTO node_diagnostics (request_id, workspace_id, environment_id, agent_id, state) VALUES ('diag_a','wsp_health_a','env_health_a','agt_health_a','requested')")
+        .execute(&upgrade_pool).await.expect("tenant diagnostic request");
+    let cross_tenant_report = sqlx::query("UPDATE node_diagnostics SET state = 'complete', report = '{}'::jsonb WHERE request_id = 'diag_a' AND workspace_id = 'wsp_health_b' AND environment_id = 'env_health_b' AND agent_id = 'agt_health_b'")
+        .execute(&upgrade_pool).await.expect("cross-tenant diagnostic probe");
+    assert_eq!(cross_tenant_report.rows_affected(), 0);
 
     upgrade_pool.close().await;
     sqlx::query(&format!("DROP SCHEMA {upgrade_schema} CASCADE"))

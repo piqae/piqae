@@ -307,6 +307,8 @@ pub struct AgentSyncRequest {
     pub health: AgentHealth,
     pub printers: Option<Vec<PrinterSnapshot>>,
     pub events: Vec<JobEvent>,
+    #[serde(default)]
+    pub diagnostics: Vec<DiagnosticReport>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -317,6 +319,26 @@ pub struct AgentSyncResponse {
     pub commands: Vec<AgentCommand>,
     pub candidate_jobs: Vec<JobOffer>,
     pub next_poll_after_ms: u64,
+    #[serde(default)]
+    pub acknowledged_diagnostics: Vec<String>,
+}
+
+/// A deliberately small, structured support snapshot. It contains no logs,
+/// paths, document data, credentials, native profile data, or signed URLs.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct DiagnosticReport {
+    pub request_id: String,
+    pub observed_at: DateTime<Utc>,
+    pub state: String,
+    pub agent_version: String,
+    pub platform: String,
+    pub architecture: String,
+    pub queued_jobs: u32,
+    pub active_jobs: u32,
+    pub sqlite_integrity_ok: bool,
+    pub executor_crashes: u64,
+    pub last_error_code: Option<String>,
+    pub collection_error_code: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
