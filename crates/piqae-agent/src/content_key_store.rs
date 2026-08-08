@@ -9,6 +9,8 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use p256::{SecretKey, pkcs8::EncodePublicKey as _};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt as _;
 use std::{
     collections::BTreeMap,
     io::Write as _,
@@ -96,6 +98,7 @@ pub fn load_or_create(path: &Path, stable_identity: &str) -> Result<ContentKeyri
         bail!("content-key identity must not be empty");
     }
     let manifest_path = manifest_path(path);
+    #[cfg(windows)]
     recover_manifest_backup(&manifest_path)?;
     if manifest_path.exists() {
         return load_manifest_keyring(path, stable_identity, &manifest_path);
@@ -109,7 +112,7 @@ pub fn load_or_create(path: &Path, stable_identity: &str) -> Result<ContentKeyri
     let manifest = KeyringManifest {
         version: MANIFEST_VERSION,
         identity_hash: identity_hash(stable_identity),
-        active_key_id: key_id.clone(),
+        active_key_id: key_id,
         decrypt_only_key_ids: Vec::new(),
     };
     write_manifest_atomic(&manifest_path, &manifest)?;
@@ -221,8 +224,6 @@ fn write_manifest_atomic(path: &Path, manifest: &KeyringManifest) -> Result<()> 
     options.write(true).create_new(true);
     #[cfg(unix)]
     options.mode(0o600);
-    #[cfg(unix)]
-    use std::os::unix::fs::OpenOptionsExt as _;
     let mut file = options
         .open(&temporary)
         .with_context(|| format!("create {}", temporary.display()))?;
@@ -275,11 +276,6 @@ fn replace_manifest(temporary: &Path, destination: &Path) -> Result<()> {
     if backup.exists() {
         std::fs::remove_file(&backup).context("remove replaced content-key manifest backup")?;
     }
-    Ok(())
-}
-
-#[cfg(not(windows))]
-fn recover_manifest_backup(_manifest: &Path) -> Result<()> {
     Ok(())
 }
 
@@ -444,8 +440,6 @@ fn write_new_secret_file(path: &Path, secret: &[u8]) -> Result<()> {
     options.write(true).create_new(true);
     #[cfg(unix)]
     options.mode(0o600);
-    #[cfg(unix)]
-    use std::os::unix::fs::OpenOptionsExt as _;
     let mut file = options
         .open(path)
         .with_context(|| format!("create {}", path.display()))?;
@@ -487,8 +481,6 @@ fn write_marker(path: &Path) -> Result<()> {
     options.write(true).create_new(true);
     #[cfg(unix)]
     options.mode(0o600);
-    #[cfg(unix)]
-    use std::os::unix::fs::OpenOptionsExt as _;
     let mut file = options.open(&marker)?;
     file.write_all(b"piqae-os-content-key-v1\n")?;
     file.sync_all()?;
