@@ -3327,7 +3327,7 @@ async fn run_cloud_sync_loop(
     reason = "bounded cleanup reports independent filesystem failures"
 )]
 fn sweep_confidential_files(store: &AgentStore) {
-    let files = match store.confidential_files_due(Utc::now().timestamp_millis()) {
+    let files = match store.confidential_files_due() {
         Ok(files) => files,
         Err(error) => {
             warn!(%error, "confidential file sweep query failed");

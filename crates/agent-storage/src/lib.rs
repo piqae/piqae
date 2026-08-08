@@ -357,6 +357,16 @@ impl AgentStore {
                 [],
             )?;
         }
+        // Older releases assigned confidential plaintext an unconditional
+        // deletion deadline. A queued or retryable job may still need that
+        // file after the deadline, so neutralize legacy deadlines unless the
+        // job has reached a truthful terminal state.
+        connection.execute(
+            "UPDATE jobs SET confidential_delete_after_unix_ms = NULL
+             WHERE confidential = 1
+               AND state NOT IN ('completed_reported','delivery_uncertain','failed_terminal','cancelled','expired')",
+            [],
+        )?;
         let has_is_default: bool = connection.query_row(
             "SELECT EXISTS (
                SELECT 1 FROM pragma_table_info('printers') WHERE name = 'is_default'
@@ -2142,11 +2152,6 @@ impl AgentStore {
             .file_name()
             .and_then(|name| name.to_str())
             .is_some_and(|name| name.starts_with("confidential-"));
-        let confidential_delete_after = confidential.then_some(
-            job.expires_unix_ms
-                .unwrap_or(job.accepted_unix_ms + 15 * 60 * 1000)
-                .min(job.accepted_unix_ms + 15 * 60 * 1000),
-        );
         transaction.execute(
             "INSERT INTO jobs
              (job_id, submission_id, printer_id, printer_native_id,
@@ -2155,7 +2160,7 @@ impl AgentStore {
               accepted_unix_ms, updated_unix_ms, cloud_managed,
               confidential, confidential_delete_after_unix_ms)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
-                     'cloud_accept_pending', ?11, ?12, ?12, 1, ?13, ?14)",
+                     'cloud_accept_pending', ?11, ?12, ?12, 1, ?13, NULL)",
             params![
                 job.job_id,
                 job.submission_id,
@@ -2170,7 +2175,6 @@ impl AgentStore {
                 job.expires_unix_ms,
                 job.accepted_unix_ms,
                 i64::from(confidential),
-                confidential_delete_after,
             ],
         )?;
         let local = query_job(&transaction, &job.job_id)?
@@ -2188,23 +2192,19 @@ impl AgentStore {
             .ok_or_else(|| StorageError::JobNotFound(job.job_id.clone()))
     }
 
-    /// Returns durable cloud accept requests that must be retried exactly.
+    /// Returns confidential plaintext files belonging to terminal jobs.
     ///
     /// # Errors
     ///
     /// Returns an error when `SQLite` cannot decode an intent.
-    pub fn confidential_files_due(
-        &self,
-        now_unix_ms: i64,
-    ) -> Result<Vec<ConfidentialFile>, StorageError> {
+    pub fn confidential_files_due(&self) -> Result<Vec<ConfidentialFile>, StorageError> {
         let mut statement = self.connection.prepare(
             "SELECT job_id, content_path FROM jobs
-             WHERE confidential = 1 AND (
-               confidential_delete_after_unix_ms <= ?1 OR
-               state IN ('accepted_by_spooler','completed_reported','delivery_uncertain','failed_terminal','cancelled','expired')
-             ) LIMIT 256",
+             WHERE confidential = 1
+               AND state IN ('completed_reported','delivery_uncertain','failed_terminal','cancelled','expired')
+             LIMIT 256",
         )?;
-        let rows = statement.query_map([now_unix_ms], |row| {
+        let rows = statement.query_map([], |row| {
             Ok(ConfidentialFile {
                 job_id: row.get(0)?,
                 path: row.get(1)?,
@@ -3825,32 +3825,109 @@ mod tests {
     }
 
     #[test]
-    fn confidential_file_association_is_durable_and_retry_retention_is_bounded() {
+    fn confidential_plaintext_is_retained_until_a_truthful_terminal_state() {
         let mut store = AgentStore::in_memory().unwrap();
-        let mut encrypted = job("encrypted", "printer", 1_000);
-        encrypted.cloud_managed = true;
-        encrypted.content_path = "/content/confidential-fixture".into();
-        store
-            .prepare_cloud_job(&encrypted, "lease", "secret", 60_000)
-            .unwrap();
-        assert!(
+        let retained_states = [
+            "cloud_accept_pending",
+            "queued_local",
+            "spool_intent",
+            "printing",
+            "accepted_by_spooler",
+        ];
+        let terminal_states = [
+            "completed_reported",
+            "delivery_uncertain",
+            "failed_terminal",
+            "cancelled",
+            "expired",
+        ];
+
+        for (index, state) in retained_states
+            .iter()
+            .chain(terminal_states.iter())
+            .enumerate()
+        {
+            let job_id = format!("encrypted-{index}");
+            let mut encrypted = job(&job_id, "printer", 1_000 + index as i64);
+            encrypted.cloud_managed = true;
+            encrypted.content_sha256 = format!("sha-{index}");
+            encrypted.content_path = format!("/content/confidential-{index}");
             store
-                .confidential_files_due(1_000 + 15 * 60 * 1000 - 1)
-                .unwrap()
-                .is_empty()
-        );
-        let due = store
-            .confidential_files_due(1_000 + 15 * 60 * 1000)
-            .unwrap();
+                .prepare_cloud_job(&encrypted, "lease", "secret", 60_000)
+                .unwrap();
+            store
+                .connection
+                .execute(
+                    "UPDATE jobs SET state = ?2,
+                     confidential_delete_after_unix_ms = 1 WHERE job_id = ?1",
+                    params![job_id, state],
+                )
+                .unwrap();
+        }
+
+        let mut due = store.confidential_files_due().unwrap();
+        due.sort_by(|left, right| left.job_id.cmp(&right.job_id));
         assert_eq!(
-            due,
-            [ConfidentialFile {
-                job_id: "encrypted".into(),
-                path: "/content/confidential-fixture".into()
-            }]
+            due.iter()
+                .map(|file| file.job_id.as_str())
+                .collect::<Vec<_>>(),
+            (retained_states.len()..retained_states.len() + terminal_states.len())
+                .map(|index| format!("encrypted-{index}"))
+                .collect::<Vec<_>>()
         );
-        store.mark_confidential_file_deleted("encrypted").unwrap();
-        assert!(store.confidential_files_due(i64::MAX).unwrap().is_empty());
+        assert!(!due.iter().any(|file| file.job_id == "encrypted-4"));
+
+        for file in due {
+            store.mark_confidential_file_deleted(&file.job_id).unwrap();
+        }
+        assert!(store.confidential_files_due().unwrap().is_empty());
+    }
+
+    #[test]
+    fn opening_an_existing_store_neutralizes_legacy_nonterminal_deadlines() {
+        let connection = Connection::open_in_memory().unwrap();
+        let mut store = AgentStore::configure(connection).unwrap();
+        for (job_id, state) in [
+            ("queued", "queued_local"),
+            ("handed-off", "accepted_by_spooler"),
+            ("done", "completed_reported"),
+        ] {
+            let mut encrypted = job(job_id, "printer", 1_000);
+            encrypted.cloud_managed = true;
+            encrypted.content_sha256 = format!("sha-{job_id}");
+            encrypted.content_path = format!("/content/confidential-{job_id}");
+            store
+                .prepare_cloud_job(&encrypted, "lease", "secret", 60_000)
+                .unwrap();
+            store.connection.execute(
+                "UPDATE jobs SET state = ?2, confidential_delete_after_unix_ms = 1 WHERE job_id = ?1",
+                params![job_id, state],
+            ).unwrap();
+        }
+
+        let connection = store.connection;
+        let reopened = AgentStore::configure(connection).unwrap();
+        for job_id in ["queued", "handed-off"] {
+            let deadline: Option<i64> = reopened
+                .connection
+                .query_row(
+                    "SELECT confidential_delete_after_unix_ms FROM jobs WHERE job_id = ?1",
+                    [job_id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(deadline, None, "legacy deadline remained for {job_id}");
+        }
+        let terminal_deadline: Option<i64> = reopened
+            .connection
+            .query_row(
+                "SELECT confidential_delete_after_unix_ms FROM jobs WHERE job_id = 'done'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(terminal_deadline, Some(1));
+        assert_eq!(reopened.confidential_files_due().unwrap()[0].job_id, "done");
     }
 
     #[test]
