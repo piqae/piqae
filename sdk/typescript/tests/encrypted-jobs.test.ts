@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
 import {
   ENCRYPTED_JOB_V3_RECIPIENT_ALGORITHM,
   ENCRYPTED_JOB_V3_SUITE,
@@ -13,11 +14,90 @@ import {
 const base64url = (value: ArrayBuffer) =>
   Buffer.from(value).toString('base64url');
 
+const decodeBase64 = (value: string) => Buffer.from(value, 'base64');
+
+async function deterministicConformanceCrypto(): Promise<Crypto> {
+  const ephemeralPrivatePkcs8 = decodeBase64('MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgSgsp3RqsySbAgtzKILKkNNPL+2T5RtBLh7RcGBx99UqhRANCAASrqwXHAT8UqANimfWFVwLEgLaX+cwocIMXcjZPkbMRpblfbgBRoKY5cwnZ7ogMdMyGfLbEGcSxHtR3NpPkvAYa');
+  const ephemeralPublicRaw = decodeBase64('BKurBccBPxSoA2KZ9YVXAsSAtpf5zChwgxdyNk+RsxGluV9uAFGgpjlzCdnuiAx0zIZ8tsQZxLEe1Hc2k+S8Bho=');
+  const contentKey = await crypto.subtle.importKey('raw', Uint8Array.from({ length: 32 }, (_, index) => index + 1), 'AES-GCM', true, ['encrypt']);
+  const ephemeralPrivateKey = await crypto.subtle.importKey('pkcs8', ephemeralPrivatePkcs8, { name: 'ECDH', namedCurve: 'P-256' }, false, ['deriveBits']);
+  const ephemeralPublicKey = await crypto.subtle.importKey('raw', ephemeralPublicRaw, { name: 'ECDH', namedCurve: 'P-256' }, true, []);
+  const entropy = [
+    Uint8Array.from({ length: 18 }, (_, index) => 0x10 + index),
+    Uint8Array.from({ length: 12 }, (_, index) => 0x30 + index),
+    Uint8Array.from({ length: 32 }, (_, index) => 0x40 + index),
+    Uint8Array.from({ length: 12 }, (_, index) => 0x70 + index)
+  ];
+  let entropyIndex = 0;
+  const subtle = new Proxy(crypto.subtle, {
+    get(target, property) {
+      if (property === 'generateKey') {
+        return async (algorithm: AlgorithmIdentifier) =>
+          typeof algorithm === 'object' && algorithm.name === 'AES-GCM'
+            ? contentKey
+            : { privateKey: ephemeralPrivateKey, publicKey: ephemeralPublicKey };
+      }
+      const value = Reflect.get(target, property);
+      return typeof value === 'function' ? value.bind(target) : value;
+    }
+  });
+  return new Proxy(crypto, {
+    get(target, property) {
+      if (property === 'subtle') return subtle;
+      if (property === 'getRandomValues') return <T extends ArrayBufferView>(array: T): T => {
+        const value = entropy[entropyIndex++];
+        if (!value || value.byteLength !== array.byteLength) throw new Error('unexpected entropy request');
+        new Uint8Array(array.buffer, array.byteOffset, array.byteLength).set(value);
+        return array;
+      };
+      const value = Reflect.get(target, property);
+      return typeof value === 'function' ? value.bind(target) : value;
+    }
+  });
+}
+
 describe('encrypted job envelopes', () => {
+  it('matches the TypeScript-to-Rust full-envelope conformance vector', async () => {
+    const fixture = JSON.parse(readFileSync(new URL('../../../contracts/fixtures/encrypted-job-v3.json', import.meta.url), 'utf8'));
+    const envelope = await encryptJobContent(Buffer.from(fixture.plaintext, 'base64url'), {
+      workspace_id: 'wsp_conformance', environment_id: 'env_conformance', content_type: 'pdf',
+      printer_id: 'prt_conformance', target_id: 'tgt_conformance', profile_revision: 'prf_conformance:7',
+      options: { copies: 2, duplex: 'long-edge', native_options: { quality: 'high', tray: '2' } },
+      deliveries: 2, expires_at: '2099-01-01T00:00:00Z', raw_authorized: false,
+      recipients: [{ key_id: 'cek_conformance_1', algorithm: 'ECDH-P256-HKDF-SHA256', public_key_spki: fixture.recipient_public_key_spki }],
+      crypto: await deterministicConformanceCrypto()
+    });
+    expect(envelope).toEqual(fixture.envelope);
+  });
   it('uses the exact OpenAPI v3 profile identifiers', () => {
     expect(ENCRYPTED_JOB_V3_VERSION).toBe('piqae-encrypted-job-v3');
     expect(ENCRYPTED_JOB_V3_SUITE).toBe('ECDH-ES-P256+HKDF-SHA256+A256GCMKW+A256GCM');
     expect(ENCRYPTED_JOB_V3_RECIPIENT_ALGORITHM).toBe('ECDH-ES-P256+HKDF-SHA256+A256GCMKW');
+  });
+  it('isolates concurrent SDK senders targeting the same node key', async () => {
+    const keys = await crypto.subtle.generateKey(
+      { name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits']
+    );
+    const recipient = {
+      key_id: 'cek_shared_node',
+      algorithm: 'ECDH-P256-HKDF-SHA256' as const,
+      public_key_spki: base64url(await crypto.subtle.exportKey('spki', keys.publicKey))
+    };
+    const shared = {
+      workspace_id: 'wsp_concurrent', environment_id: 'env_concurrent', content_type: 'pdf' as const,
+      printer_id: 'prt_concurrent', target_id: 'tgt_concurrent', profile_revision: 'prf_concurrent:1',
+      deliveries: 1, expires_at: '2099-01-01T00:00:00Z', raw_authorized: false,
+      recipients: [recipient]
+    };
+    const [senderA, senderB] = await Promise.all([
+      encryptJobContent(new TextEncoder().encode('sender A'), shared),
+      encryptJobContent(new TextEncoder().encode('sender B'), shared)
+    ]);
+    expect(senderA.binding.envelope_id).not.toBe(senderB.binding.envelope_id);
+    expect(senderA.iv).not.toBe(senderB.iv);
+    expect(senderA.ciphertext).not.toBe(senderB.ciphertext);
+    expect(senderA.recipients[0]!.ephemeral_public_key).not.toBe(senderB.recipients[0]!.ephemeral_public_key);
+    expect(await Promise.all([verifyEncryptedJobEnvelope(senderA), verifyEncryptedJobEnvelope(senderB)])).toEqual([true, true]);
   });
   it('orders native option keys by UTF-8 bytes like Rust BTreeMap', () => {
     expect(Object.keys(canonicalJobOptions({ native_options: { '😀': 'emoji', 'é': 'accent', z: 'latin' } }).native_options)).toEqual(['z', 'é', '😀']);

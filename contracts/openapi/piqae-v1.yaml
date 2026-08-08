@@ -3812,7 +3812,7 @@ components:
       type: object
       additionalProperties: false
       description: The active dedicated content-encryption recipient key for a node.
-      required: [key_id, algorithm, public_key_spki, node_id, created_at]
+      required: [key_id, algorithm, public_key_spki, node_id, lifecycle_state, state_changed_at, created_at]
       properties:
         key_id: { type: string, minLength: 8, maxLength: 255 }
         algorithm: { const: ECDH-P256-HKDF-SHA256 }
@@ -3823,6 +3823,13 @@ components:
           maxLength: 256
           pattern: "^[A-Za-z0-9_-]+$"
         node_id: { type: string }
+        lifecycle_state:
+          type: string
+          enum: [active, decrypt_only, revoked]
+          description: >-
+            Server-managed key lifecycle state. Printer recipient discovery
+            returns only active keys; retired generations remain node-internal.
+        state_changed_at: { type: string, format: date-time }
         created_at: { type: string, format: date-time }
     EncryptedJobOptions:
       type: object

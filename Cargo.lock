@@ -2347,6 +2347,7 @@ dependencies = [
 name = "piqae-control-plane"
 version = "0.1.10"
 dependencies = [
+ "aes-gcm",
  "anyhow",
  "async-stream",
  "async-trait",
@@ -2357,6 +2358,7 @@ dependencies = [
  "ed25519-dalek",
  "futures",
  "hex",
+ "hkdf",
  "hmac",
  "http",
  "http-body-util",
