@@ -38,7 +38,10 @@ Configuration:
   `~/Library/Application Support/Spool/local.token`. This internal path remains
   stable across the visible Piqae rename so existing identities and queues are
   not stranded.
-- `PIQAE_DASHBOARD_URL` enables **Manage Printers** and **Open Dashboard**.
+- `PIQAE_DASHBOARD_URL` enables **Queue** below recent jobs.
+- `PIQAE_CONNECTIONS_URL` optionally sends **Connections → Manage Access &
+  Reauthorize…** to a dedicated authenticated node view. It falls back to
+  `PIQAE_DASHBOARD_URL` when unset.
 - `PIQAE_AGENT_LOG_FILE` overrides `/var/log/piqae-agent.log`.
 
 Build and test:
@@ -115,9 +118,9 @@ queued/active jobs or a profile panel is open, the menu shows that the app
 update is waiting for idle and polls authenticated local status until the node
 is idle. An unavailable agent is not assumed idle.
 
-The **Test Printer…** action requires a present local printer, a profile,
-and explicit confirmation. It does not require cloud/API exposure and never
-falls back to unprofiled job submission.
+Each preset has its own **Test “Preset”…** action and explicit confirmation. It
+does not require a cloud connection and never falls back to unprofiled job
+submission.
 
 ## Print presets (native profiles)
 
@@ -129,6 +132,11 @@ edited or duplicated from its submenu. These actions open the real macOS
 `NSPrintPanel` for that destination with **Save Preset** as the confirmation
 button. The profile host does not create an `NSPrintOperation`, load a customer
 document, or submit anything to the spooler during capture.
+
+Printers are locally available to connected services by default. A service's
+consent screen remains the authority for whether it receives all printers
+(including printers added later) or only selected printers; the menu does not
+present a competing global exposure toggle.
 
 The host stores three complementary representations: the complete
 property-list-safe `NSPrintInfo.printSettings` dictionary, PrintCore's
