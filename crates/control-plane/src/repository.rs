@@ -4063,7 +4063,10 @@ impl Repository for MemoryRepository {
             || state
                 .content_encryption_keys
                 .get(&(agent_id, key_id.into()))
-                .is_none_or(|key| key.key_id != key_id)
+                .is_none_or(|key| {
+                    key.key_id != key_id
+                        || !matches!(key.lifecycle_state.as_str(), "active" | "decrypt_only")
+                })
             || state.encrypted_job_key_references.iter().any(
                 |(_, referenced_agent, referenced_key)| {
                     *referenced_agent == agent_id && referenced_key == key_id
@@ -4139,7 +4142,8 @@ impl Repository for MemoryRepository {
                     .content_encryption_keys
                     .get(&(agent_id, recipient.key_id.clone()))
                     .is_some_and(|key| {
-                        key.algorithm == recipient.algorithm
+                        recipient.algorithm == piqae_domain::ENCRYPTED_JOB_V3_RECIPIENT_ALGORITHM
+                            && key.algorithm == "ECDH-P256-HKDF-SHA256"
                             && (key.lifecycle_state == "active"
                                 || (key.lifecycle_state == "decrypt_only"
                                     && key.state_changed_at > now - chrono::Duration::minutes(15)))
@@ -4904,7 +4908,7 @@ mod routing_repository_tests {
                 StoredContentEncryptionKey {
                     agent_id: agent,
                     key_id: "cek_test".into(),
-                    algorithm: piqae_domain::ENCRYPTED_JOB_V3_RECIPIENT_ALGORITHM.into(),
+                    algorithm: "ECDH-P256-HKDF-SHA256".into(),
                     public_key_spki: "test".into(),
                     created_at: now,
                     lifecycle_state: "active".into(),
@@ -5106,6 +5110,30 @@ mod routing_repository_tests {
                 .expect("replacement key remains active")
                 .key_id,
             "cek_next"
+        );
+        repository
+            .revoke_content_encryption_key(workspace, environment, node, "cek_next")
+            .await
+            .expect("active key can be revoked when unreferenced");
+        assert!(matches!(
+            repository
+                .revoke_content_encryption_key(workspace, environment, node, "cek_next")
+                .await,
+            Err(RepositoryError::NotFound)
+        ));
+        assert!(
+            repository
+                .rotate_content_encryption_key(
+                    workspace,
+                    environment,
+                    node,
+                    "cek_next",
+                    "ECDH-P256-HKDF-SHA256",
+                    "next-spki",
+                )
+                .await
+                .is_err(),
+            "revoked keys cannot be resurrected"
         );
     }
 

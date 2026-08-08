@@ -14,9 +14,9 @@ that may be absent during systemd startup. With the packaged
 beside owner-only files named for each `cek_…` generation. Existing
 `/var/lib/piqae/content-encryption.key` and connector-local
 `device.content-encryption.key` files are migrated to a generation without
-rotating it. The manifest binds the keyring to the stable node identity; if a
-manifest or any referenced generation is missing or corrupt, startup fails
-closed instead of silently generating a replacement.
+rotating the existing key. The manifest binds the keyring to the stable node
+identity; if a manifest or any referenced generation is missing or corrupt,
+startup fails closed instead of silently generating a replacement.
 The device and content-encryption keys are private key material, not
 configuration files. They must be regular files owned by `piqae:piqae`, be
 readable by that account, have no group or other permission bits (the agent

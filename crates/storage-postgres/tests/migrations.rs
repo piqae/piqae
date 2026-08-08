@@ -63,7 +63,7 @@ async fn postgres_reported_complete_billing_upgrades_from_previous_schema() {
         .fetch_one(&pool)
         .await
         .expect("read latest schema version");
-    assert_eq!(latest, 27);
+    assert_eq!(latest, 28);
     let billable_index: Option<String> =
         sqlx::query_scalar("SELECT to_regclass('usage_one_billable_print_per_job_idx')::text")
             .fetch_one(&pool)
@@ -259,7 +259,7 @@ async fn agent_health_migrates_empty_and_previous_schemas_with_tenant_fencing() 
         .fetch_one(&empty_pool)
         .await
         .expect("read empty-database schema version");
-    assert_eq!(latest, 27);
+    assert_eq!(latest, 28);
     empty_pool.close().await;
     sqlx::query(&format!("DROP SCHEMA {empty_schema} CASCADE"))
         .execute(&admin)
@@ -408,7 +408,7 @@ async fn content_encryption_key_algorithm_migrates_fresh_and_legacy_schemas() {
         .fetch_one(&empty_pool)
         .await
         .expect("read empty-database schema version");
-    assert_eq!(empty_latest, 27);
+    assert_eq!(empty_latest, 28);
     empty_pool.close().await;
     sqlx::query(&format!("DROP SCHEMA {empty_schema} CASCADE"))
         .execute(&admin)
@@ -476,7 +476,7 @@ async fn content_encryption_key_algorithm_migrates_fresh_and_legacy_schemas() {
         .fetch_one(&upgrade_pool)
         .await
         .expect("read upgraded schema version");
-    assert_eq!(latest, 27);
+    assert_eq!(latest, 28);
     let legacy_algorithm: String = sqlx::query_scalar(
         "SELECT algorithm FROM node_content_encryption_keys
          WHERE workspace_id = 'wsp_cek_a' AND environment_id = 'env_cek_a'
@@ -548,6 +548,68 @@ async fn content_encryption_key_algorithm_migrates_fresh_and_legacy_schemas() {
     assert!(
         cross_tenant_reference.is_err(),
         "key references cannot cross tenant boundaries"
+    );
+
+    let mut revoke_first = upgrade_pool.begin().await.expect("begin concurrent revoke");
+    sqlx::query(
+        "UPDATE node_content_encryption_keys
+         SET lifecycle_state = 'revoked', revoked_at = now(), state_changed_at = now()
+         WHERE workspace_id = 'wsp_cek_b' AND environment_id = 'env_cek_b'
+           AND agent_id = 'agt_cek_b' AND key_id = 'v3_next'",
+    )
+    .execute(&mut *revoke_first)
+    .await
+    .expect("stage uncommitted revoke");
+    let blocked_pool = upgrade_pool.clone();
+    let blocked_reference = tokio::spawn(async move {
+        sqlx::query("INSERT INTO encrypted_job_key_references (workspace_id,environment_id,agent_id,key_id,job_id) VALUES ('wsp_cek_b','env_cek_b','agt_cek_b','v3_next','job_cek_b')")
+            .execute(&blocked_pool).await
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(
+        !blocked_reference.is_finished(),
+        "reference insert must wait for a concurrent lifecycle update"
+    );
+    revoke_first.commit().await.expect("commit revoke first");
+    assert!(
+        blocked_reference
+            .await
+            .expect("join blocked reference")
+            .is_err(),
+        "a revoke that wins the row lock must reject the later reference"
+    );
+
+    sqlx::query("INSERT INTO node_content_encryption_keys (workspace_id,environment_id,agent_id,key_id,algorithm,public_key_spki) VALUES ('wsp_cek_b','env_cek_b','agt_cek_b','v3_insert_first','ECDH-P256-HKDF-SHA256',$1)")
+        .bind("I".repeat(80)).execute(&upgrade_pool).await.expect("insert concurrency key");
+    let mut reference_first = upgrade_pool
+        .begin()
+        .await
+        .expect("begin concurrent reference");
+    sqlx::query("INSERT INTO encrypted_job_key_references (workspace_id,environment_id,agent_id,key_id,job_id) VALUES ('wsp_cek_b','env_cek_b','agt_cek_b','v3_insert_first','job_cek_b')")
+        .execute(&mut *reference_first).await.expect("stage uncommitted reference");
+    let blocked_pool = upgrade_pool.clone();
+    let blocked_revoke = tokio::spawn(async move {
+        sqlx::query(
+            "UPDATE node_content_encryption_keys
+             SET lifecycle_state = 'revoked', revoked_at = now(), state_changed_at = now()
+             WHERE workspace_id = 'wsp_cek_b' AND environment_id = 'env_cek_b'
+               AND agent_id = 'agt_cek_b' AND key_id = 'v3_insert_first'",
+        )
+        .execute(&blocked_pool)
+        .await
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(
+        !blocked_revoke.is_finished(),
+        "revoke must wait for a concurrent reference insert"
+    );
+    reference_first
+        .commit()
+        .await
+        .expect("commit reference first");
+    assert!(
+        blocked_revoke.await.expect("join blocked revoke").is_err(),
+        "a reference that wins the row lock must make revoke fail"
     );
     let unsupported = sqlx::query("INSERT INTO node_content_encryption_keys (workspace_id,environment_id,agent_id,key_id,algorithm,public_key_spki) VALUES ('wsp_cek_b','env_cek_b','agt_cek_b','unknown_suite','ECDH-P384-HKDF-SHA384',$1)")
         .bind("C".repeat(128))
