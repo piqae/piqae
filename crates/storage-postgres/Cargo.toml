@@ -16,6 +16,7 @@ thiserror.workspace = true
 uuid.workspace = true
 ulid.workspace = true
 piqae-domain.workspace = true
+piqae-protocol.workspace = true
 
 [dev-dependencies]
 piqae-auth = { path = "../auth", version = "0.1.2" }

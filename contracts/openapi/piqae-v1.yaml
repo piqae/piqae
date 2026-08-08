@@ -4364,6 +4364,11 @@ components:
         last_seen_at:
           type: string
           format: date-time
+        health_started_at: { type: [string, "null"], format: date-time }
+        health_observed_at: { type: [string, "null"], format: date-time }
+        sqlite_integrity_ok: { type: [boolean, "null"] }
+        executor_crashes: { type: integer, format: int64, minimum: 0, default: 0 }
+        last_error_code: { type: [string, "null"] }
     Webhook:
       type: object
       required: [id, url, events, enabled, created_at]

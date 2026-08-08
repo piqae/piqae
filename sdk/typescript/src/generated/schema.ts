@@ -2860,6 +2860,17 @@ export interface components {
             version: string;
             /** Format: date-time */
             last_seen_at: string;
+            /** Format: date-time */
+            health_started_at?: string | null;
+            /** Format: date-time */
+            health_observed_at?: string | null;
+            sqlite_integrity_ok?: boolean | null;
+            /**
+             * Format: int64
+             * @default 0
+             */
+            executor_crashes?: number;
+            last_error_code?: string | null;
         };
         Webhook: {
             id: string;

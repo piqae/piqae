@@ -63,7 +63,7 @@ async fn postgres_reported_complete_billing_upgrades_from_previous_schema() {
         .fetch_one(&pool)
         .await
         .expect("read latest schema version");
-    assert_eq!(latest, 24);
+    assert_eq!(latest, 25);
     let billable_index: Option<String> =
         sqlx::query_scalar("SELECT to_regclass('usage_one_billable_print_per_job_idx')::text")
             .fetch_one(&pool)
@@ -232,4 +232,111 @@ async fn node_connector_upgrade_backfills_without_cross_tenant_merging() {
         .execute(&admin)
         .await
         .expect("drop exact disposable schema");
+}
+
+#[tokio::test]
+async fn agent_health_migrates_empty_and_previous_schemas_with_tenant_fencing() {
+    let Some(database_url) = env::var("PIQAE_TEST_DATABASE_URL").ok() else {
+        eprintln!("skipped: set PIQAE_TEST_DATABASE_URL to run PostgreSQL migration evidence");
+        return;
+    };
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&database_url)
+        .await
+        .expect("connect PostgreSQL test database");
+    let all = sqlx::migrate!("../../migrations/postgres");
+
+    let empty_schema = format!("piqae_health_empty_{}", ulid::Ulid::new()).to_ascii_lowercase();
+    sqlx::query(&format!("CREATE SCHEMA {empty_schema}"))
+        .execute(&admin)
+        .await
+        .expect("create empty-database schema");
+    let empty_pool = schema_pool(&database_url, &empty_schema).await;
+    all.run(&empty_pool).await.expect("migrate empty database");
+    let latest: i64 = sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations")
+        .fetch_one(&empty_pool)
+        .await
+        .expect("read empty-database schema version");
+    assert_eq!(latest, 25);
+    empty_pool.close().await;
+    sqlx::query(&format!("DROP SCHEMA {empty_schema} CASCADE"))
+        .execute(&admin)
+        .await
+        .expect("drop exact empty-database schema");
+
+    let upgrade_schema = format!("piqae_health_upgrade_{}", ulid::Ulid::new()).to_ascii_lowercase();
+    sqlx::query(&format!("CREATE SCHEMA {upgrade_schema}"))
+        .execute(&admin)
+        .await
+        .expect("create upgrade schema");
+    let upgrade_pool = schema_pool(&database_url, &upgrade_schema).await;
+    let previous = Migrator {
+        migrations: Cow::Owned(
+            all.iter()
+                .filter(|migration| migration.version < 25)
+                .cloned()
+                .collect(),
+        ),
+        ignore_missing: false,
+        locking: true,
+        no_tx: false,
+    };
+    previous.run(&upgrade_pool).await.expect("apply schema 24");
+    for suffix in ["a", "b"] {
+        sqlx::query("INSERT INTO workspaces (id,name,slug) VALUES ($1,$2,$3)")
+            .bind(format!("wsp_health_{suffix}"))
+            .bind(suffix)
+            .bind(format!("health-{suffix}"))
+            .execute(&upgrade_pool)
+            .await
+            .expect("workspace");
+        sqlx::query(
+            "INSERT INTO environments (id,workspace_id,kind,name) VALUES ($1,$2,'live','Live')",
+        )
+        .bind(format!("env_health_{suffix}"))
+        .bind(format!("wsp_health_{suffix}"))
+        .execute(&upgrade_pool)
+        .await
+        .expect("environment");
+        sqlx::query("INSERT INTO agents (id,workspace_id,environment_id,name,installation_id,os,architecture,version,protocol_version) VALUES ($1,$2,$3,'Node',$4,'test','test','1',1)")
+            .bind(format!("agt_health_{suffix}"))
+            .bind(format!("wsp_health_{suffix}"))
+            .bind(format!("env_health_{suffix}"))
+            .bind(format!("installation-health-{suffix}"))
+            .execute(&upgrade_pool).await.expect("legacy agent");
+    }
+    all.run(&upgrade_pool)
+        .await
+        .expect("upgrade schema 24 to 25");
+    let own_update = sqlx::query(
+        "UPDATE agents SET executor_crashes = 2, last_error_code = 'executor_crashed'
+         WHERE id = 'agt_health_a' AND workspace_id = 'wsp_health_a'
+           AND environment_id = 'env_health_a'",
+    )
+    .execute(&upgrade_pool)
+    .await
+    .expect("tenant health update");
+    assert_eq!(own_update.rows_affected(), 1);
+    let cross_tenant_probe = sqlx::query(
+        "UPDATE agents SET executor_crashes = 99
+         WHERE id = 'agt_health_b' AND workspace_id = 'wsp_health_a'
+           AND environment_id = 'env_health_a'",
+    )
+    .execute(&upgrade_pool)
+    .await
+    .expect("cross-tenant probe");
+    assert_eq!(cross_tenant_probe.rows_affected(), 0);
+    let other_count: i64 =
+        sqlx::query_scalar("SELECT executor_crashes FROM agents WHERE id = 'agt_health_b'")
+            .fetch_one(&upgrade_pool)
+            .await
+            .expect("other tenant health");
+    assert_eq!(other_count, 0);
+
+    upgrade_pool.close().await;
+    sqlx::query(&format!("DROP SCHEMA {upgrade_schema} CASCADE"))
+        .execute(&admin)
+        .await
+        .expect("drop exact upgrade schema");
 }

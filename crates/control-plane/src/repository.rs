@@ -203,6 +203,7 @@ pub trait Repository: Send + Sync + 'static {
         environment_id: EnvironmentId,
         agent_id: AgentId,
         version: &str,
+        health: &piqae_protocol::agent::AgentHealth,
         printers: Option<&[SyncedPrinter]>,
     ) -> Result<(), RepositoryError>;
     async fn enqueue_agent_command(
@@ -971,6 +972,7 @@ impl Repository for PostgresStore {
         environment_id: EnvironmentId,
         agent_id: AgentId,
         version: &str,
+        health: &piqae_protocol::agent::AgentHealth,
         printers: Option<&[SyncedPrinter]>,
     ) -> Result<(), RepositoryError> {
         Self::sync_agent_presence(
@@ -979,6 +981,7 @@ impl Repository for PostgresStore {
             environment_id,
             agent_id,
             version,
+            health,
             printers,
         )
         .await
@@ -2229,6 +2232,11 @@ impl MemoryRepository {
                     state: "connected".into(),
                     version: env!("CARGO_PKG_VERSION").into(),
                     last_seen_at: Utc::now(),
+                    health_started_at: None,
+                    health_observed_at: None,
+                    sqlite_integrity_ok: None,
+                    executor_crashes: 0,
+                    last_error_code: None,
                 },
             ),
         );
@@ -2471,6 +2479,7 @@ impl Repository for MemoryRepository {
         environment_id: EnvironmentId,
         agent_id: AgentId,
         version: &str,
+        health: &piqae_protocol::agent::AgentHealth,
         printers: Option<&[SyncedPrinter]>,
     ) -> Result<(), RepositoryError> {
         let mut state = self.state.write().await;
@@ -2484,6 +2493,11 @@ impl Repository for MemoryRepository {
         agent.state = "connected".into();
         agent.version = version.into();
         agent.last_seen_at = Utc::now();
+        agent.health_started_at = Some(health.started_at);
+        agent.health_observed_at = Some(health.observed_at);
+        agent.sqlite_integrity_ok = Some(health.sqlite_integrity_ok);
+        agent.executor_crashes = health.executor_crashes;
+        agent.last_error_code.clone_from(&health.last_error_code);
         if let Some(printers) = printers {
             state
                 .printers
@@ -3320,6 +3334,11 @@ impl Repository for MemoryRepository {
             state: "disconnected".into(),
             version,
             last_seen_at: Utc::now(),
+            health_started_at: None,
+            health_observed_at: None,
+            sqlite_integrity_ok: None,
+            executor_crashes: 0,
+            last_error_code: None,
         };
         state
             .agents
@@ -3391,6 +3410,11 @@ impl Repository for MemoryRepository {
                     state: "connected".into(),
                     version: version.into(),
                     last_seen_at: Utc::now(),
+                    health_started_at: None,
+                    health_observed_at: None,
+                    sqlite_integrity_ok: None,
+                    executor_crashes: 0,
+                    last_error_code: None,
                 },
             ),
         );
@@ -4617,6 +4641,11 @@ mod routing_repository_tests {
                     state: "connected".into(),
                     version: "1".into(),
                     last_seen_at: Utc::now(),
+                    health_started_at: None,
+                    health_observed_at: None,
+                    sqlite_integrity_ok: None,
+                    executor_crashes: 0,
+                    last_error_code: None,
                 },
             ),
         );
@@ -4683,6 +4712,11 @@ mod routing_repository_tests {
                     state: "connected".into(),
                     version: "1".into(),
                     last_seen_at: Utc::now(),
+                    health_started_at: None,
+                    health_observed_at: None,
+                    sqlite_integrity_ok: None,
+                    executor_crashes: 0,
+                    last_error_code: None,
                 },
             ),
         );

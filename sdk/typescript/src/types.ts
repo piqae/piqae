@@ -266,6 +266,11 @@ export interface Agent {
   state: 'connected' | 'disconnected' | 'paused' | 'degraded';
   version: string;
   last_seen_at: string;
+  health_started_at?: string | null;
+  health_observed_at?: string | null;
+  sqlite_integrity_ok?: boolean | null;
+  executor_crashes?: number;
+  last_error_code?: string | null;
 }
 
 export interface CreateDeviceAuthorization {
