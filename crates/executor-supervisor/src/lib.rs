@@ -10,6 +10,7 @@ use piqae_protocol::executor::{
     ExecutorOperation, ExecutorRequest, ExecutorResponse, ExecutorResult, NativeJobObservation,
 };
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use thiserror::Error;
 use tokio::{
     process::{Child, Command},
@@ -23,14 +24,38 @@ pub enum SupervisorError {
     Spawn(#[source] std::io::Error),
     #[error("executor pipe was unavailable")]
     MissingPipe,
-    #[error("executor framing failed: {0}")]
-    Frame(#[from] FrameError),
-    #[error("executor timed out")]
-    TimedOut,
-    #[error("executor exited unsuccessfully: {0}")]
-    Exit(std::process::ExitStatus),
+    #[error("executor framing failed: {source} ({evidence})")]
+    Frame {
+        #[source]
+        source: FrameError,
+        evidence: CrashEvidence,
+    },
+    #[error("executor timed out ({0})")]
+    TimedOut(CrashEvidence),
+    #[error("executor exited unsuccessfully: {0} ({1})")]
+    Exit(std::process::ExitStatus, CrashEvidence),
     #[error("executor response request ID did not match")]
     RequestMismatch,
+}
+
+/// Privacy-minimised evidence for correlating native crashes without retaining
+/// raw stderr, which may contain document paths, queue names, or driver data.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CrashEvidence {
+    observed_bytes: u64,
+    inspected_bytes: usize,
+    classification: &'static str,
+    drain_complete: bool,
+}
+
+impl std::fmt::Display for CrashEvidence {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "stderr_class={}, stderr_bytes={}, inspected_bytes={}, stderr_drain_complete={}",
+            self.classification, self.observed_bytes, self.inspected_bytes, self.drain_complete
+        )
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -61,23 +86,57 @@ impl ExecutorSupervisor {
         let mut child = self.spawn()?;
         let mut stdin = child.stdin.take().ok_or(SupervisorError::MissingPipe)?;
         let mut stdout = child.stdout.take().ok_or(SupervisorError::MissingPipe)?;
-        write_frame_async(&mut stdin, request).await?;
+        let stderr = child.stderr.take().ok_or(SupervisorError::MissingPipe)?;
+        let stderr_state = Arc::new(Mutex::new(CrashEvidence::empty()));
+        let stderr_task = tokio::spawn(capture_stderr_evidence(stderr, Arc::clone(&stderr_state)));
+        let deadline = tokio::time::Instant::now()
+            + request_timeout(request.deadline_unix_ms, self.hard_timeout);
+        if let Err(source) = write_frame_async(&mut stdin, request).await {
+            terminate(&mut child).await;
+            return Err(SupervisorError::Frame {
+                source,
+                evidence: stderr_evidence(stderr_task, &stderr_state).await,
+            });
+        }
         drop(stdin);
 
-        let response = if let Ok(response) = timeout(
-            request_timeout(request.deadline_unix_ms, self.hard_timeout),
+        let response = match timeout(
+            deadline.saturating_duration_since(tokio::time::Instant::now()),
             read_frame_async::<ExecutorResponse>(&mut stdout),
         )
         .await
         {
-            response?
+            Ok(Ok(response)) => response,
+            Ok(Err(source)) => {
+                terminate(&mut child).await;
+                return Err(SupervisorError::Frame {
+                    source,
+                    evidence: stderr_evidence(stderr_task, &stderr_state).await,
+                });
+            }
+            Err(_) => {
+                terminate(&mut child).await;
+                return Err(SupervisorError::TimedOut(
+                    stderr_evidence(stderr_task, &stderr_state).await,
+                ));
+            }
+        };
+        let status = if let Ok(result) = timeout(
+            deadline.saturating_duration_since(tokio::time::Instant::now()),
+            child.wait(),
+        )
+        .await
+        {
+            result.map_err(SupervisorError::Spawn)?
         } else {
             terminate(&mut child).await;
-            return Err(SupervisorError::TimedOut);
+            return Err(SupervisorError::TimedOut(
+                stderr_evidence(stderr_task, &stderr_state).await,
+            ));
         };
-        let status = child.wait().await.map_err(SupervisorError::Spawn)?;
+        let evidence = stderr_evidence(stderr_task, &stderr_state).await;
         if !status.success() {
-            return Err(SupervisorError::Exit(status));
+            return Err(SupervisorError::Exit(status, evidence));
         }
         if response.request_id != request.request_id {
             return Err(SupervisorError::RequestMismatch);
@@ -90,10 +149,86 @@ impl ExecutorSupervisor {
             .kill_on_drop(true)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
             .spawn()
             .map_err(SupervisorError::Spawn)
     }
+}
+
+impl CrashEvidence {
+    const fn empty() -> Self {
+        Self {
+            observed_bytes: 0,
+            inspected_bytes: 0,
+            classification: "none",
+            drain_complete: false,
+        }
+    }
+}
+
+const MAX_STDERR_INSPECTION_BYTES: usize = 64 * 1024;
+
+fn classify_stderr(bytes: &[u8]) -> &'static str {
+    let text = String::from_utf8_lossy(bytes).to_ascii_lowercase();
+    if text.contains("access is denied") || text.contains("permission denied") {
+        "access_denied"
+    } else if text.contains("not found")
+        || text.contains("no such file")
+        || text.contains("missing")
+    {
+        "missing_dependency"
+    } else if text.contains("panic") || text.contains("fatal") {
+        "native_crash"
+    } else if text.contains("driver") {
+        "driver_failure"
+    } else if bytes.is_empty() {
+        "none"
+    } else {
+        "unclassified"
+    }
+}
+
+async fn capture_stderr_evidence(
+    mut stderr: impl tokio::io::AsyncRead + Unpin,
+    state: Arc<Mutex<CrashEvidence>>,
+) {
+    use tokio::io::AsyncReadExt as _;
+
+    let mut observed_bytes = 0_u64;
+    let mut inspected = Vec::with_capacity(MAX_STDERR_INSPECTION_BYTES);
+    let mut buffer = [0_u8; 8 * 1024];
+    loop {
+        let Ok(count) = stderr.read(&mut buffer).await else {
+            break;
+        };
+        if count == 0 {
+            break;
+        }
+        observed_bytes = observed_bytes.saturating_add(u64::try_from(count).unwrap_or(u64::MAX));
+        let remaining = MAX_STDERR_INSPECTION_BYTES.saturating_sub(inspected.len());
+        inspected.extend_from_slice(&buffer[..count.min(remaining)]);
+        if let Ok(mut evidence) = state.lock() {
+            evidence.observed_bytes = observed_bytes;
+            evidence.inspected_bytes = inspected.len();
+            evidence.classification = classify_stderr(&inspected);
+        }
+    }
+    if let Ok(mut evidence) = state.lock() {
+        evidence.drain_complete = true;
+    }
+}
+
+async fn stderr_evidence(
+    mut task: tokio::task::JoinHandle<()>,
+    state: &Arc<Mutex<CrashEvidence>>,
+) -> CrashEvidence {
+    if timeout(Duration::from_secs(2), &mut task).await.is_err() {
+        task.abort();
+        let _ = task.await;
+    }
+    state
+        .lock()
+        .map_or_else(|_| CrashEvidence::empty(), |evidence| evidence.clone())
 }
 
 fn request_timeout(deadline_unix_ms: i64, hard_timeout: Duration) -> Duration {
@@ -155,7 +290,7 @@ impl SupervisedExecutor {
             Err(error) => Err(ExecutorFailure {
                 code: classify_supervisor_error(&error).into(),
                 message: error.to_string(),
-                retryable: !matches!(error, SupervisorError::TimedOut),
+                retryable: !matches!(error, SupervisorError::TimedOut(_)),
                 handoff_may_have_succeeded: false,
                 native_code: None,
             }),
@@ -239,7 +374,7 @@ impl Executor for SupervisedExecutor {
             Err(error) => Err(ExecutorFailure {
                 code: classify_supervisor_error(&error).into(),
                 message: error.to_string(),
-                retryable: !matches!(error, SupervisorError::TimedOut),
+                retryable: !matches!(error, SupervisorError::TimedOut(_)),
                 // The request was fully written before we awaited a response.
                 // A timeout or process failure can therefore be ambiguous.
                 handoff_may_have_succeeded: true,
@@ -286,8 +421,8 @@ impl Executor for SupervisedExecutor {
 
 const fn classify_supervisor_error(error: &SupervisorError) -> &'static str {
     match error {
-        SupervisorError::TimedOut => "executor_timed_out",
-        SupervisorError::Exit(_) => "executor_crashed",
+        SupervisorError::TimedOut(_) => "executor_timed_out",
+        SupervisorError::Exit(_, _) => "executor_crashed",
         _ => "executor_failed",
     }
 }
@@ -314,12 +449,17 @@ fn invalid_local_job_id() -> ExecutorFailure {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{
+        CrashEvidence, SupervisorError, capture_stderr_evidence, classify_supervisor_error,
+        stderr_evidence,
+    };
+    use std::sync::{Arc, Mutex};
+    use tokio::io::AsyncWriteExt as _;
 
     #[test]
     fn timeout_is_distinct_from_a_process_crash() {
         assert_eq!(
-            classify_supervisor_error(&SupervisorError::TimedOut),
+            classify_supervisor_error(&SupervisorError::TimedOut(CrashEvidence::empty())),
             "executor_timed_out"
         );
         #[cfg(unix)]
@@ -327,9 +467,56 @@ mod tests {
             use std::os::unix::process::ExitStatusExt;
             let exit = std::process::ExitStatus::from_raw(256);
             assert_eq!(
-                classify_supervisor_error(&SupervisorError::Exit(exit)),
+                classify_supervisor_error(&SupervisorError::Exit(
+                    exit,
+                    CrashEvidence::empty()
+                )),
                 "executor_crashed"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn stderr_evidence_is_bounded_and_contains_no_raw_output() {
+        let (reader, mut writer) = tokio::io::duplex(1024);
+        let sensitive = vec![b'x'; 64 * 1024 + 17];
+        let state = Arc::new(Mutex::new(CrashEvidence::empty()));
+        let write = tokio::spawn(async move {
+            if let Err(error) = writer.write_all(&sensitive).await {
+                panic!("write fixture: {error}");
+            }
+        });
+        capture_stderr_evidence(reader, Arc::clone(&state)).await;
+        if let Err(error) = write.await {
+            panic!("writer task: {error}");
+        }
+
+        let evidence = state
+            .lock()
+            .map_or_else(|_| CrashEvidence::empty(), |value| value.clone());
+        assert_eq!(
+            evidence.observed_bytes,
+            u64::try_from(64 * 1024 + 17).unwrap_or_default()
+        );
+        assert_eq!(evidence.inspected_bytes, 64 * 1024);
+        assert_eq!(evidence.classification, "unclassified");
+        assert!(evidence.drain_complete);
+        assert!(!evidence.to_string().contains("xxxx"));
+    }
+
+    #[tokio::test]
+    async fn inherited_stderr_handle_is_cancelled_after_bounded_wait() {
+        let (reader, mut writer) = tokio::io::duplex(128);
+        writer
+            .write_all(b"permission denied: private path")
+            .await
+            .unwrap_or_default();
+        let state = Arc::new(Mutex::new(CrashEvidence::empty()));
+        let task = tokio::spawn(capture_stderr_evidence(reader, Arc::clone(&state)));
+        let evidence = stderr_evidence(task, &state).await;
+        assert_eq!(evidence.classification, "access_denied");
+        assert!(!evidence.drain_complete);
+        assert!(!evidence.to_string().contains("private path"));
+        drop(writer);
     }
 }

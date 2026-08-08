@@ -31,4 +31,15 @@ same path to list retained status, and
 `GET /v1/nodes/{node_id}/diagnostics/{request_id}` for one result. A `failed`
 report includes only a stable collection error code.
 
+Native helper failures expose bounded structured evidence: the exit/timeout
+class, a coarse stderr classification, byte counts, and whether the diagnostic
+pipe closed cleanly. Raw native stderr and stable hashes of that potentially
+sensitive text are deliberately not sent to the control plane. Detailed raw
+driver output remains outside automatic diagnostics.
+
+A support bundle must be redacted before it leaves the node. Treat native
+driver configuration as potentially sensitive even when it appears binary.
+Review every archive manually, encrypt it in transit, set a retention deadline,
+and record who received it.
+
 Use [incident response](../operations/incident-response.md) for fleet impact.

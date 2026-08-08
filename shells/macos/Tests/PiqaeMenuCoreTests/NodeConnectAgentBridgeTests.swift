@@ -3,6 +3,63 @@ import XCTest
 @testable import PiqaeMenuCore
 
 final class NodeConnectAgentBridgeTests: XCTestCase {
+    func testUnknownNativeFailureSurfacesOnlyStructuredEvidence() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let script = directory.appendingPathComponent("fake-agent")
+        try """
+        #!/bin/sh
+        cat >/dev/null
+        echo 'fatal driver secret=/Users/customer/private.pdf' >&2
+        exit 1
+        """.write(to: script, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: script.path)
+
+        XCTAssertThrowsError(try NodeConnectAgentBridge(
+            executableURL: script, dataDirectory: directory
+        ).accept(
+            capability: "piq_enr_0123456789abcdef0123456789abcdef",
+            controlPlaneURL: XCTUnwrap(URL(string: "https://api.example.com")),
+            authorization: NodePrinterAuthorization(grant: .allLocalPrinters)
+        )) { error in
+            guard case let NodeConnectAgentBridgeError.nativeProcessFailure(evidence) = error else {
+                return XCTFail("expected structured native failure evidence")
+            }
+            XCTAssertEqual(evidence.classification, "native_crash")
+            XCTAssertGreaterThan(evidence.stderrBytes, 0)
+            XCTAssertFalse(evidence.description.contains("private.pdf"))
+            XCTAssertFalse(error.localizedDescription.contains("private.pdf"))
+        }
+    }
+
+    func testInheritedStderrHandleCannotBlockBridgeForever() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let script = directory.appendingPathComponent("fake-agent")
+        try """
+        #!/bin/sh
+        cat >/dev/null
+        (sleep 10) &
+        echo 'fatal helper failure' >&2
+        exit 1
+        """.write(to: script, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: script.path)
+
+        let started = Date()
+        XCTAssertThrowsError(try NodeConnectAgentBridge(
+            executableURL: script, dataDirectory: directory
+        ).accept(
+            capability: "piq_enr_0123456789abcdef0123456789abcdef",
+            controlPlaneURL: XCTUnwrap(URL(string: "https://api.example.com")),
+            authorization: NodePrinterAuthorization(grant: .allLocalPrinters)
+        ))
+        XCTAssertLessThan(Date().timeIntervalSince(started), 5)
+    }
+
     func testAcceptSendsExplicitAllPrinterPolicyWithoutPrinterIDs() throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)

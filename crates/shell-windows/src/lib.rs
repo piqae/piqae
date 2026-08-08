@@ -458,7 +458,7 @@ pub fn run_profile_host(
         .env("PIQAE_PROFILE_CAPTURE_TOKEN", &session.capture_token)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .map_err(|error| {
             ShellError::ProfileHost(format!("cannot launch {}: {error}", executable.display()))
@@ -467,6 +467,10 @@ pub fn run_profile_host(
         .stdout
         .take()
         .ok_or_else(|| ShellError::ProfileHost("profile host stdout is unavailable".into()))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| ShellError::ProfileHost("profile host stderr is unavailable".into()))?;
     let (sender, receiver) = mpsc::sync_channel(1);
     std::thread::spawn(move || {
         let mut output = Vec::new();
@@ -476,11 +480,25 @@ pub fn run_profile_host(
             .map(|_| output);
         let _ignored = sender.send(result);
     });
+    let (stderr_sender, stderr_receiver) = mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let _ignored = stderr_sender.send(stderr_fingerprint(stderr));
+    });
     let mut stdin = child
         .stdin
         .take()
         .ok_or_else(|| ShellError::ProfileHost("profile host stdin is unavailable".into()))?;
-    stdin.write_all(&encoded).map_err(ShellError::Io)?;
+    if let Err(error) = stdin.write_all(&encoded) {
+        drop(stdin);
+        let _ignored = child.kill();
+        let _ignored = child.wait();
+        let evidence = stderr_receiver
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap_or_else(|_| NativeStderrEvidence::incomplete());
+        return Err(ShellError::ProfileHost(format!(
+            "profile host request write failed: {error} ({evidence})"
+        )));
+    }
     drop(stdin);
 
     let deadline = Instant::now() + PROFILE_HOST_TIMEOUT;
@@ -491,42 +509,127 @@ pub fn run_profile_host(
         if Instant::now() >= deadline {
             let _ignored = child.kill();
             let _ignored = child.wait();
-            return Err(ShellError::ProfileHost(
-                "printer settings dialog exceeded the 10-minute limit".into(),
-            ));
+            let evidence = stderr_receiver
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap_or_else(|_| NativeStderrEvidence::incomplete());
+            return Err(ShellError::ProfileHost(format!(
+                "printer settings dialog exceeded the 10-minute limit ({evidence})"
+            )));
         }
         std::thread::sleep(Duration::from_millis(50));
     };
+    let evidence = stderr_receiver
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap_or_else(|_| NativeStderrEvidence::incomplete());
     let output = receiver
         .recv_timeout(Duration::from_secs(2))
-        .map_err(|_| ShellError::ProfileHost("profile host output was not closed".into()))?
-        .map_err(ShellError::Io)?;
+        .map_err(|_| {
+            ShellError::ProfileHost(format!("profile host output was not closed ({evidence})"))
+        })?
+        .map_err(|error| {
+            ShellError::ProfileHost(format!(
+                "profile host output read failed: {error} ({evidence})"
+            ))
+        })?;
     if output.len() > PROFILE_HOST_OUTPUT_LIMIT {
-        return Err(ShellError::ResponseTooLarge);
-    }
-    if !exit_status.success() && output.is_empty() {
         return Err(ShellError::ProfileHost(format!(
-            "profile host exited with {exit_status}"
+            "profile host response exceeded the size limit ({evidence})"
         )));
     }
-    let response: ProfileHostResponse =
-        serde_json::from_slice(&output).map_err(ShellError::Json)?;
+    if !exit_status.success() {
+        return Err(ShellError::ProfileHost(format!(
+            "profile host exited with {exit_status} ({evidence})"
+        )));
+    }
+    let response: ProfileHostResponse = serde_json::from_slice(&output).map_err(|_| {
+        ShellError::ProfileHost(format!(
+            "profile host returned malformed output ({evidence})"
+        ))
+    })?;
     if response.protocol_version != WINDOWS_PROFILE_HOST_PROTOCOL_VERSION
         || response.request_id != request_id
     {
-        return Err(ShellError::Protocol(
-            "profile host returned a mismatched response".into(),
-        ));
+        return Err(ShellError::Protocol(format!(
+            "profile host returned a mismatched response ({evidence})"
+        )));
     }
-    match response
-        .result
-        .map_err(|error| ShellError::ProfileHost(error.to_string()))?
-    {
+    match response.result.map_err(|_| {
+        ShellError::ProfileHost(format!("profile host reported a native error ({evidence})"))
+    })? {
         ProfileHostResult::Captured { capture } => Ok(Some(capture)),
         ProfileHostResult::Cancelled => Ok(None),
-        ProfileHostResult::Validated { .. } => Err(ShellError::Protocol(
-            "profile host validated instead of capturing".into(),
-        )),
+        ProfileHostResult::Validated { .. } => Err(ShellError::Protocol(format!(
+            "profile host validated instead of capturing ({evidence})"
+        ))),
+    }
+}
+
+#[derive(Clone, Debug)]
+struct NativeStderrEvidence {
+    observed_bytes: u64,
+    inspected_bytes: usize,
+    classification: &'static str,
+    drain_complete: bool,
+}
+
+impl NativeStderrEvidence {
+    const fn incomplete() -> Self {
+        Self {
+            observed_bytes: 0,
+            inspected_bytes: 0,
+            classification: "unavailable",
+            drain_complete: false,
+        }
+    }
+}
+
+impl std::fmt::Display for NativeStderrEvidence {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "stderr_class={}, stderr_bytes={}, inspected_bytes={}, stderr_drain_complete={}",
+            self.classification, self.observed_bytes, self.inspected_bytes, self.drain_complete
+        )
+    }
+}
+
+fn classify_native_stderr(bytes: &[u8]) -> &'static str {
+    let text = String::from_utf8_lossy(bytes).to_ascii_lowercase();
+    if text.contains("access is denied") || text.contains("permission denied") {
+        "access_denied"
+    } else if text.contains("not found") || text.contains("missing") {
+        "missing_dependency"
+    } else if text.contains("panic") || text.contains("fatal") {
+        "native_crash"
+    } else if text.contains("driver") {
+        "driver_failure"
+    } else if bytes.is_empty() {
+        "none"
+    } else {
+        "unclassified"
+    }
+}
+
+fn stderr_fingerprint(mut reader: impl std::io::Read) -> NativeStderrEvidence {
+    let mut observed = 0_u64;
+    let mut inspected = Vec::with_capacity(64 * 1024);
+    let mut buffer = [0_u8; 8 * 1024];
+    loop {
+        let Ok(count) = reader.read(&mut buffer) else {
+            break;
+        };
+        if count == 0 {
+            break;
+        }
+        observed = observed.saturating_add(u64::try_from(count).unwrap_or(u64::MAX));
+        let remaining = (64 * 1024_usize).saturating_sub(inspected.len());
+        inspected.extend_from_slice(&buffer[..count.min(remaining)]);
+    }
+    NativeStderrEvidence {
+        observed_bytes: observed,
+        inspected_bytes: inspected.len(),
+        classification: classify_native_stderr(&inspected),
+        drain_complete: true,
     }
 }
 
@@ -705,6 +808,17 @@ mod tests {
     use super::*;
     use piqae_domain::{DriverFingerprint, ProfileCaptureOperation};
     use std::net::TcpListener;
+
+    #[test]
+    fn profile_host_stderr_evidence_is_bounded_and_secret_safe() {
+        let raw = vec![b's'; 64 * 1024 + 31];
+        let evidence = stderr_fingerprint(raw.as_slice());
+        assert_eq!(evidence.observed_bytes, 65_567);
+        assert_eq!(evidence.inspected_bytes, 65_536);
+        assert_eq!(evidence.classification, "unclassified");
+        assert!(evidence.drain_complete);
+        assert!(!evidence.to_string().contains("ssss"));
+    }
 
     #[test]
     fn configuration_rejects_non_loopback_origins() {
