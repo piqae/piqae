@@ -525,12 +525,7 @@ async fn main() -> Result<()> {
         return pair_installation(&arguments, PairingIntent::KeyRotation).await;
     }
 
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .json()
-        .init();
+    initialize_logging()?;
 
     anyhow::ensure!(
         arguments.local_bind.ip().is_loopback(),
@@ -678,6 +673,38 @@ fn unexpected_task_exit(
         }
         Err(error) => anyhow::anyhow!("critical task `{name}` failed: {error}"),
     }
+}
+
+fn initialize_logging() -> Result<()> {
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    if let Some(path) = std::env::var_os("PIQAE_LOG_FILE").filter(|path| !path.is_empty()) {
+        let writer = piqae_native_logging::BoundedLogWriter::open_with_defaults(path)
+            .context("open bounded native agent log")?;
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_writer(writer)
+            .json()
+            .init();
+    } else {
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .json()
+            .init();
+    }
+    let default_panic_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |panic| {
+        if let Some(location) = panic.location() {
+            error!(
+                file = location.file(),
+                line = location.line(),
+                "Piqae agent panicked"
+            );
+        } else {
+            error!("Piqae agent panicked");
+        }
+        default_panic_hook(panic);
+    }));
+    Ok(())
 }
 
 const MAX_ENROLMENT_TOKEN_INPUT_BYTES: u64 = 256;

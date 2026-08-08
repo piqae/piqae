@@ -29,6 +29,11 @@ agent API remains loopback-only; a Windows node does not connect directly to a
 Mac's `127.0.0.1` service. Both nodes enrol with the same hosted/self-hosted
 control plane.
 
+Agent, tray, and launcher logs live under `%LOCALAPPDATA%\Spool\logs`. Agent and
+tray files rotate at approximately 5 MiB and retain four prior generations;
+launcher failures rotate at 1 MiB and retain two. Upgrades append to the active
+generation and preserve the retained history.
+
 For complex PostScript drivers, Add Profile opens the manufacturer's genuine
 advanced property sheet. Edit restores the prior DEVMODE before opening it.
 Saving creates an immutable revision; it does not change global queue defaults.

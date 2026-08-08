@@ -175,12 +175,14 @@ jobs:
             packaging/macos/sign-components.sh \
             packaging/macos/uninstall-user.sh \
             packaging/macos/update-native-components.sh \
-            packaging/macos/verify-update-signature.sh
+            packaging/macos/verify-update-signature.sh \
+            packaging/macos/test-packaging.sh
           plutil -lint \
             shells/macos/Resources/Info.plist \
             shells/macos/Resources/Piqae.entitlements \
             packaging/macos/com.piqae.agent.plist.in \
             packaging/macos/com.piqae.menu.plist.in
+          packaging/macos/test-packaging.sh
 
       - name: Build universal Rust node
         shell: bash

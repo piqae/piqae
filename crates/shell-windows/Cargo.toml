@@ -16,6 +16,7 @@ sha2.workspace = true
 piqae-domain.workspace = true
 piqae-executor-windows = { path = "../executor-windows", version = "0.1.2" }
 piqae-local-ipc = { path = "../local-ipc", version = "0.1.2" }
+piqae-native-logging = { path = "../native-logging", version = "0.1.10" }
 thiserror.workspace = true
 url.workspace = true
 uuid.workspace = true

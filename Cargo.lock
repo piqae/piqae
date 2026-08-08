@@ -2262,6 +2262,7 @@ dependencies = [
  "piqae-executor-supervisor",
  "piqae-local-api",
  "piqae-local-ipc",
+ "piqae-native-logging",
  "piqae-protocol",
  "rand 0.8.7",
  "reqwest 0.12.28",
@@ -2505,6 +2506,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "piqae-native-logging"
+version = "0.1.10"
+dependencies = [
+ "tempfile",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "piqae-object-store"
 version = "0.1.2"
 dependencies = [
@@ -2556,6 +2565,7 @@ dependencies = [
  "piqae-domain",
  "piqae-executor-windows",
  "piqae-local-ipc",
+ "piqae-native-logging",
  "serde",
  "serde_json",
  "sha2",

@@ -5,6 +5,27 @@ $ErrorActionPreference = "Stop"
 $InstallDirectory = $PSScriptRoot
 $StateDirectory = Join-Path $env:LOCALAPPDATA "Spool"
 $ConfigPath = Join-Path $StateDirectory "config.json"
+
+function Write-BoundedLauncherLog([string]$Message) {
+    $logDirectory = Join-Path $StateDirectory "logs"
+    New-Item -ItemType Directory -Force -Path $logDirectory | Out-Null
+    $logPath = Join-Path $logDirectory "launcher.log"
+    $maxBytes = 1MB
+    if ((Test-Path -LiteralPath $logPath) -and (Get-Item -LiteralPath $logPath).Length -ge $maxBytes) {
+        Remove-Item -LiteralPath "$logPath.2" -Force -ErrorAction SilentlyContinue
+        if (Test-Path -LiteralPath "$logPath.1") {
+            Move-Item -LiteralPath "$logPath.1" -Destination "$logPath.2" -Force
+        }
+        Move-Item -LiteralPath $logPath -Destination "$logPath.1" -Force
+    }
+    Add-Content -LiteralPath $logPath -Value "$(Get-Date -Format o) $Message" -Encoding UTF8
+}
+
+trap {
+    Write-BoundedLauncherLog "Piqae launcher failed: $($_.Exception.Message)"
+    throw
+}
+
 if (-not (Test-Path -LiteralPath $ConfigPath)) {
     throw "Piqae Node is not configured. Run Configure Piqae Node from the Start menu."
 }
@@ -79,10 +100,10 @@ if (Test-Path -LiteralPath $updateConfigPath) {
 }
 
 New-Item -ItemType Directory -Force -Path (Join-Path $StateDirectory "logs") | Out-Null
+$env:PIQAE_LOG_FILE = Join-Path $StateDirectory "logs\agent.log"
+$env:PIQAE_SHELL_LOG_FILE = Join-Path $StateDirectory "logs\shell.log"
 if (-not (Test-InstalledProcess "piqae-agent" $agentPath)) {
-    Start-Process -FilePath $agentPath -WindowStyle Hidden `
-        -RedirectStandardOutput (Join-Path $StateDirectory "logs\agent.stdout.log") `
-        -RedirectStandardError (Join-Path $StateDirectory "logs\agent.stderr.log")
+    Start-Process -FilePath $agentPath -WindowStyle Hidden
 }
 if (-not (Test-InstalledProcess "piqae-shell-windows" $shellPath)) {
     Start-Process -FilePath $shellPath
