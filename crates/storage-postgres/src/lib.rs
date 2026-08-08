@@ -85,6 +85,8 @@ pub struct StoredContentEncryptionKey {
     pub algorithm: String,
     pub public_key_spki: String,
     pub created_at: DateTime<Utc>,
+    pub lifecycle_state: String,
+    pub state_changed_at: DateTime<Utc>,
 }
 
 #[derive(Clone, Debug)]
@@ -5070,6 +5072,39 @@ impl PostgresStore {
         .execute(&mut *transaction)
         .await?;
 
+        if let piqae_domain::ContentSource::EncryptedUpload { manifest, .. } = &job.content {
+            let mut referenced = false;
+            for recipient in &manifest.recipients {
+                let inserted = sqlx::query(
+                    "INSERT INTO encrypted_job_key_references
+                        (workspace_id, environment_id, agent_id, key_id, job_id)
+                     SELECT $1,$2,$3,key.key_id,$5
+                     FROM node_content_encryption_keys key
+                     WHERE key.workspace_id = $1 AND key.environment_id = $2
+                       AND key.agent_id = $3 AND key.key_id = $4
+                       AND key.algorithm = $6
+                       AND (key.lifecycle_state = 'active' OR
+                            (key.lifecycle_state = 'decrypt_only'
+                             AND key.state_changed_at > now() - interval '15 minutes'))
+                     ON CONFLICT DO NOTHING",
+                )
+                .bind(job.workspace_id.to_string())
+                .bind(job.environment_id.to_string())
+                .bind(agent_id.to_string())
+                .bind(&recipient.key_id)
+                .bind(job.id.to_string())
+                .bind(&recipient.algorithm)
+                .execute(&mut *transaction)
+                .await?;
+                referenced |= inserted.rows_affected() == 1;
+            }
+            if !referenced {
+                return Err(StorageError::InvalidData(
+                    "encrypted job has no admissible recipient key for its node".into(),
+                ));
+            }
+        }
+
         let initial_event = JobEvent {
             id: EventId::new(),
             job_id: job.id,
@@ -5467,24 +5502,63 @@ impl PostgresStore {
             ));
         }
         let mut transaction = self.pool.begin().await?;
-        sqlx::query(
-            "UPDATE node_content_encryption_keys SET revoked_at = now()
-             WHERE workspace_id = $1 AND environment_id = $2 AND agent_id = $3
-               AND revoked_at IS NULL AND key_id <> $4",
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(format!(
+                "content-key:{workspace_id}:{environment_id}:{agent_id}"
+            ))
+            .execute(&mut *transaction)
+            .await?;
+        if let Some(row) = sqlx::query(
+            "SELECT algorithm, public_key_spki, lifecycle_state, created_at
+             FROM node_content_encryption_keys
+             WHERE workspace_id = $1 AND environment_id = $2 AND agent_id = $3 AND key_id = $4",
         )
         .bind(workspace_id.to_string())
         .bind(environment_id.to_string())
         .bind(agent_id.to_string())
         .bind(key_id)
+        .fetch_optional(&mut *transaction)
+        .await?
+        {
+            let existing_algorithm: String = row.try_get("algorithm")?;
+            let existing_material: String = row.try_get("public_key_spki")?;
+            let lifecycle_state: String = row.try_get("lifecycle_state")?;
+            if existing_algorithm != algorithm || existing_material != public_key_spki {
+                return Err(StorageError::InvalidData(
+                    "content encryption key id is already bound to different material".into(),
+                ));
+            }
+            if lifecycle_state != "active" {
+                return Err(StorageError::InvalidData(
+                    "content encryption key cannot be resurrected".into(),
+                ));
+            }
+            transaction.commit().await?;
+            return Ok(StoredContentEncryptionKey {
+                agent_id,
+                key_id: key_id.to_owned(),
+                algorithm: algorithm.to_owned(),
+                public_key_spki: public_key_spki.to_owned(),
+                created_at: row.try_get("created_at")?,
+                lifecycle_state,
+                state_changed_at: row.try_get("created_at")?,
+            });
+        }
+        sqlx::query(
+            "UPDATE node_content_encryption_keys
+             SET lifecycle_state = 'decrypt_only', state_changed_at = now()
+             WHERE workspace_id = $1 AND environment_id = $2 AND agent_id = $3
+               AND lifecycle_state = 'active'",
+        )
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(agent_id.to_string())
         .execute(&mut *transaction)
         .await?;
         let row = sqlx::query(
             "INSERT INTO node_content_encryption_keys
                  (workspace_id, environment_id, agent_id, key_id, algorithm, public_key_spki)
              VALUES ($1,$2,$3,$4,$5,$6)
-             ON CONFLICT (workspace_id, environment_id, agent_id, key_id)
-             DO UPDATE SET algorithm = EXCLUDED.algorithm,
-                           public_key_spki = EXCLUDED.public_key_spki, revoked_at = NULL
              RETURNING created_at",
         )
         .bind(workspace_id.to_string())
@@ -5502,6 +5576,8 @@ impl PostgresStore {
             algorithm: algorithm.to_owned(),
             public_key_spki: public_key_spki.to_owned(),
             created_at: row.try_get("created_at")?,
+            lifecycle_state: "active".into(),
+            state_changed_at: row.try_get("created_at")?,
         })
     }
 
@@ -5512,13 +5588,14 @@ impl PostgresStore {
         printer_id: PrinterId,
     ) -> Result<StoredContentEncryptionKey, StorageError> {
         let row = sqlx::query(
-            "SELECT key.agent_id, key.key_id, key.algorithm, key.public_key_spki, key.created_at
+            "SELECT key.agent_id, key.key_id, key.algorithm, key.public_key_spki, key.created_at,
+                    key.state_changed_at
              FROM printers AS printer
              JOIN node_content_encryption_keys AS key
                ON key.agent_id = printer.agent_id
               AND key.workspace_id = printer.workspace_id
               AND key.environment_id = printer.environment_id
-              AND key.revoked_at IS NULL
+              AND key.lifecycle_state = 'active'
              WHERE printer.id = $1 AND printer.workspace_id = $2 AND printer.environment_id = $3",
         )
         .bind(printer_id.to_string())
@@ -5533,6 +5610,36 @@ impl PostgresStore {
             algorithm: row.try_get("algorithm")?,
             public_key_spki: row.try_get("public_key_spki")?,
             created_at: row.try_get("created_at")?,
+            lifecycle_state: "active".into(),
+            state_changed_at: row.try_get("state_changed_at")?,
+        })
+    }
+
+    pub async fn content_encryption_key_for_agent_recipient(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        key_id: &str,
+    ) -> Result<StoredContentEncryptionKey, StorageError> {
+        let row = sqlx::query(
+            "SELECT algorithm, public_key_spki, created_at, lifecycle_state, state_changed_at
+             FROM node_content_encryption_keys
+             WHERE workspace_id = $1 AND environment_id = $2 AND agent_id = $3 AND key_id = $4
+               AND (lifecycle_state = 'active' OR
+                    (lifecycle_state = 'decrypt_only' AND state_changed_at > now() - interval '15 minutes'))",
+        )
+        .bind(workspace_id.to_string()).bind(environment_id.to_string())
+        .bind(agent_id.to_string()).bind(key_id)
+        .fetch_optional(&self.pool).await?.ok_or(StorageError::NotFound)?;
+        Ok(StoredContentEncryptionKey {
+            agent_id,
+            key_id: key_id.to_owned(),
+            algorithm: row.try_get("algorithm")?,
+            public_key_spki: row.try_get("public_key_spki")?,
+            created_at: row.try_get("created_at")?,
+            lifecycle_state: row.try_get("lifecycle_state")?,
+            state_changed_at: row.try_get("state_changed_at")?,
         })
     }
 
@@ -5544,9 +5651,15 @@ impl PostgresStore {
         key_id: &str,
     ) -> Result<(), StorageError> {
         let result = sqlx::query(
-            "UPDATE node_content_encryption_keys SET revoked_at = now()
+            "UPDATE node_content_encryption_keys
+             SET lifecycle_state = 'revoked', revoked_at = now(), state_changed_at = now()
              WHERE workspace_id = $1 AND environment_id = $2 AND agent_id = $3
-               AND key_id = $4 AND revoked_at IS NULL",
+               AND key_id = $4 AND lifecycle_state IN ('active', 'decrypt_only')
+               AND NOT EXISTS (
+                   SELECT 1 FROM encrypted_job_key_references reference
+                   WHERE reference.workspace_id = $1 AND reference.environment_id = $2
+                     AND reference.agent_id = $3 AND reference.key_id = $4
+               )",
         )
         .bind(workspace_id.to_string())
         .bind(environment_id.to_string())

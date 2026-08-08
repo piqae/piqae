@@ -63,7 +63,7 @@ async fn postgres_reported_complete_billing_upgrades_from_previous_schema() {
         .fetch_one(&pool)
         .await
         .expect("read latest schema version");
-    assert_eq!(latest, 26);
+    assert_eq!(latest, 27);
     let billable_index: Option<String> =
         sqlx::query_scalar("SELECT to_regclass('usage_one_billable_print_per_job_idx')::text")
             .fetch_one(&pool)
@@ -259,7 +259,7 @@ async fn agent_health_migrates_empty_and_previous_schemas_with_tenant_fencing() 
         .fetch_one(&empty_pool)
         .await
         .expect("read empty-database schema version");
-    assert_eq!(latest, 26);
+    assert_eq!(latest, 27);
     empty_pool.close().await;
     sqlx::query(&format!("DROP SCHEMA {empty_schema} CASCADE"))
         .execute(&admin)
@@ -408,7 +408,7 @@ async fn content_encryption_key_algorithm_migrates_fresh_and_legacy_schemas() {
         .fetch_one(&empty_pool)
         .await
         .expect("read empty-database schema version");
-    assert_eq!(empty_latest, 26);
+    assert_eq!(empty_latest, 27);
     empty_pool.close().await;
     sqlx::query(&format!("DROP SCHEMA {empty_schema} CASCADE"))
         .execute(&admin)
@@ -476,7 +476,7 @@ async fn content_encryption_key_algorithm_migrates_fresh_and_legacy_schemas() {
         .fetch_one(&upgrade_pool)
         .await
         .expect("read upgraded schema version");
-    assert_eq!(latest, 26);
+    assert_eq!(latest, 27);
     let legacy_algorithm: String = sqlx::query_scalar(
         "SELECT algorithm FROM node_content_encryption_keys
          WHERE workspace_id = 'wsp_cek_a' AND environment_id = 'env_cek_a'
@@ -492,6 +492,63 @@ async fn content_encryption_key_algorithm_migrates_fresh_and_legacy_schemas() {
         .execute(&upgrade_pool)
         .await
         .expect("v3 P-256 ECDH key is accepted after migration");
+    let lifecycle: String = sqlx::query_scalar(
+        "SELECT lifecycle_state FROM node_content_encryption_keys
+         WHERE workspace_id = 'wsp_cek_b' AND environment_id = 'env_cek_b'
+           AND agent_id = 'agt_cek_b' AND key_id = 'v3_ecdh'",
+    )
+    .fetch_one(&upgrade_pool)
+    .await
+    .expect("read migrated lifecycle state");
+    assert_eq!(lifecycle, "active");
+    sqlx::query(
+        "UPDATE node_content_encryption_keys
+         SET lifecycle_state = 'decrypt_only', state_changed_at = now()
+         WHERE workspace_id = 'wsp_cek_b' AND environment_id = 'env_cek_b'
+           AND agent_id = 'agt_cek_b' AND key_id = 'v3_ecdh'",
+    )
+    .execute(&upgrade_pool)
+    .await
+    .expect("active key becomes decrypt-only");
+    sqlx::query("INSERT INTO node_content_encryption_keys (workspace_id,environment_id,agent_id,key_id,algorithm,public_key_spki) VALUES ('wsp_cek_b','env_cek_b','agt_cek_b','v3_next','ECDH-P256-HKDF-SHA256',$1)")
+        .bind("N".repeat(80)).execute(&upgrade_pool).await.expect("one replacement active key");
+    let mutation = sqlx::query(
+        "UPDATE node_content_encryption_keys SET public_key_spki = $1
+         WHERE workspace_id = 'wsp_cek_b' AND environment_id = 'env_cek_b'
+           AND agent_id = 'agt_cek_b' AND key_id = 'v3_ecdh'",
+    )
+    .bind("M".repeat(80))
+    .execute(&upgrade_pool)
+    .await;
+    assert!(
+        mutation.is_err(),
+        "registered key material must be immutable"
+    );
+
+    sqlx::query("INSERT INTO printers (id,workspace_id,environment_id,agent_id,native_id,name) VALUES ('prn_cek_b','wsp_cek_b','env_cek_b','agt_cek_b','native','Test')")
+        .execute(&upgrade_pool).await.expect("insert lifecycle test printer");
+    sqlx::query("INSERT INTO jobs (id,workspace_id,environment_id,printer_id,agent_id,payload,state,state_sequence,per_printer_sequence,expires_at,created_at,updated_at) VALUES ('job_cek_b','wsp_cek_b','env_cek_b','prn_cek_b','agt_cek_b','{}'::jsonb,'queued',1,1,now()+interval '1 hour',now(),now())")
+        .execute(&upgrade_pool).await.expect("insert lifecycle test job");
+    sqlx::query("INSERT INTO encrypted_job_key_references (workspace_id,environment_id,agent_id,key_id,job_id) VALUES ('wsp_cek_b','env_cek_b','agt_cek_b','v3_ecdh','job_cek_b')")
+        .execute(&upgrade_pool).await.expect("record tenant-scoped job key reference");
+    let referenced_revoke = sqlx::query(
+        "UPDATE node_content_encryption_keys
+         SET lifecycle_state = 'revoked', revoked_at = now(), state_changed_at = now()
+         WHERE workspace_id = 'wsp_cek_b' AND environment_id = 'env_cek_b'
+           AND agent_id = 'agt_cek_b' AND key_id = 'v3_ecdh'",
+    )
+    .execute(&upgrade_pool)
+    .await;
+    assert!(
+        referenced_revoke.is_err(),
+        "referenced keys cannot be revoked"
+    );
+    let cross_tenant_reference = sqlx::query("INSERT INTO encrypted_job_key_references (workspace_id,environment_id,agent_id,key_id,job_id) VALUES ('wsp_cek_a','env_cek_a','agt_cek_b','v3_ecdh','job_cek_b')")
+        .execute(&upgrade_pool).await;
+    assert!(
+        cross_tenant_reference.is_err(),
+        "key references cannot cross tenant boundaries"
+    );
     let unsupported = sqlx::query("INSERT INTO node_content_encryption_keys (workspace_id,environment_id,agent_id,key_id,algorithm,public_key_spki) VALUES ('wsp_cek_b','env_cek_b','agt_cek_b','unknown_suite','ECDH-P384-HKDF-SHA384',$1)")
         .bind("C".repeat(128))
         .execute(&upgrade_pool)

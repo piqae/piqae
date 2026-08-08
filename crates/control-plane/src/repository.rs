@@ -642,6 +642,13 @@ pub trait Repository: Send + Sync + 'static {
         environment_id: EnvironmentId,
         printer_id: PrinterId,
     ) -> Result<StoredContentEncryptionKey, RepositoryError>;
+    async fn content_encryption_key_for_agent_recipient(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        key_id: &str,
+    ) -> Result<StoredContentEncryptionKey, RepositoryError>;
     async fn revoke_content_encryption_key(
         &self,
         workspace_id: WorkspaceId,
@@ -859,6 +866,23 @@ impl Repository for PostgresStore {
             name,
             metadata,
             request_id,
+        )
+        .await
+        .map_err(Into::into)
+    }
+    async fn content_encryption_key_for_agent_recipient(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        key_id: &str,
+    ) -> Result<StoredContentEncryptionKey, RepositoryError> {
+        PostgresStore::content_encryption_key_for_agent_recipient(
+            self,
+            workspace_id,
+            environment_id,
+            agent_id,
+            key_id,
         )
         .await
         .map_err(Into::into)
@@ -2239,7 +2263,8 @@ struct MemoryState {
     /// that in-place key rotation depends on.
     agent_installations: HashMap<(WorkspaceId, EnvironmentId, String), AgentId>,
     agent_public_keys: HashMap<AgentId, Vec<u8>>,
-    content_encryption_keys: HashMap<AgentId, StoredContentEncryptionKey>,
+    content_encryption_keys: HashMap<(AgentId, String), StoredContentEncryptionKey>,
+    encrypted_job_key_references: HashSet<(JobId, AgentId, String)>,
     node_connectors: HashMap<(WorkspaceId, EnvironmentId, AgentId, String), StoredNodeConnector>,
     enrolments: HashMap<String, MemoryEnrolment>,
     device_authorizations: HashMap<String, MemoryDeviceAuthorization>,
@@ -3940,14 +3965,41 @@ impl Repository for MemoryRepository {
         {
             return Err(RepositoryError::NotFound);
         }
+        let now = Utc::now();
+        if let Some(existing) = state
+            .content_encryption_keys
+            .get(&(agent_id, key_id.into()))
+        {
+            if existing.algorithm != algorithm || existing.public_key_spki != public_key_spki {
+                return Err(RepositoryError::Persistence(
+                    "content encryption key id is already bound to different material".into(),
+                ));
+            }
+            if existing.lifecycle_state != "active" {
+                return Err(RepositoryError::Persistence(
+                    "content encryption key cannot be resurrected".into(),
+                ));
+            }
+            return Ok(existing.clone());
+        }
+        for ((existing_agent, _), existing) in &mut state.content_encryption_keys {
+            if *existing_agent == agent_id && existing.lifecycle_state == "active" {
+                existing.lifecycle_state = "decrypt_only".into();
+                existing.state_changed_at = now;
+            }
+        }
         let key = StoredContentEncryptionKey {
             agent_id,
             key_id: key_id.into(),
             algorithm: algorithm.into(),
             public_key_spki: public_key_spki.into(),
-            created_at: Utc::now(),
+            created_at: now,
+            lifecycle_state: "active".into(),
+            state_changed_at: now,
         };
-        state.content_encryption_keys.insert(agent_id, key.clone());
+        state
+            .content_encryption_keys
+            .insert((agent_id, key_id.into()), key.clone());
         Ok(key)
     }
     async fn content_encryption_key_for_printer(
@@ -3965,7 +4017,34 @@ impl Repository for MemoryRepository {
             .ok_or(RepositoryError::NotFound)?;
         state
             .content_encryption_keys
+            .values()
+            .find(|key| key.agent_id == agent_id && key.lifecycle_state == "active")
+            .cloned()
+            .ok_or(RepositoryError::NotFound)
+    }
+    async fn content_encryption_key_for_agent_recipient(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        key_id: &str,
+    ) -> Result<StoredContentEncryptionKey, RepositoryError> {
+        let state = self.state.read().await;
+        if state
+            .agents
             .get(&agent_id)
+            .is_none_or(|(w, e, _)| *w != workspace_id || *e != environment_id)
+        {
+            return Err(RepositoryError::NotFound);
+        }
+        state
+            .content_encryption_keys
+            .get(&(agent_id, key_id.into()))
+            .filter(|key| {
+                key.lifecycle_state == "active"
+                    || (key.lifecycle_state == "decrypt_only"
+                        && key.state_changed_at > Utc::now() - chrono::Duration::minutes(15))
+            })
             .cloned()
             .ok_or(RepositoryError::NotFound)
     }
@@ -3983,12 +4062,22 @@ impl Repository for MemoryRepository {
             .is_none_or(|(w, e, _)| *w != workspace_id || *e != environment_id)
             || state
                 .content_encryption_keys
-                .get(&agent_id)
+                .get(&(agent_id, key_id.into()))
                 .is_none_or(|key| key.key_id != key_id)
+            || state.encrypted_job_key_references.iter().any(
+                |(_, referenced_agent, referenced_key)| {
+                    *referenced_agent == agent_id && referenced_key == key_id
+                },
+            )
         {
             return Err(RepositoryError::NotFound);
         }
-        state.content_encryption_keys.remove(&agent_id);
+        let key = state
+            .content_encryption_keys
+            .get_mut(&(agent_id, key_id.into()))
+            .ok_or(RepositoryError::NotFound)?;
+        key.lifecycle_state = "revoked".into();
+        key.state_changed_at = Utc::now();
         Ok(())
     }
 
@@ -4044,7 +4133,35 @@ impl Repository for MemoryRepository {
                     .map(|record| CreateResult::Existing(record.job.clone()))
                     .ok_or(RepositoryError::NotFound);
             }
+            let now = Utc::now();
+            let admissible = manifest.recipients.iter().find(|recipient| {
+                state
+                    .content_encryption_keys
+                    .get(&(agent_id, recipient.key_id.clone()))
+                    .is_some_and(|key| {
+                        key.algorithm == recipient.algorithm
+                            && (key.lifecycle_state == "active"
+                                || (key.lifecycle_state == "decrypt_only"
+                                    && key.state_changed_at > now - chrono::Duration::minutes(15)))
+                    })
+            });
+            let Some(recipient) = admissible else {
+                if let Some(key) = idempotency_key {
+                    state.idempotency.remove(&(
+                        job.workspace_id,
+                        job.environment_id,
+                        key.to_owned(),
+                    ));
+                }
+                return Err(RepositoryError::Persistence(
+                    "encrypted job has no admissible recipient key for its node".into(),
+                ));
+            };
+            let recipient_key_id = recipient.key_id.clone();
             state.consumed_envelopes.insert(index, (digest, job.id));
+            state
+                .encrypted_job_key_references
+                .insert((job.id, agent_id, recipient_key_id));
         }
         state.jobs.insert(
             job.id,
@@ -4776,6 +4893,24 @@ mod routing_repository_tests {
             expires_at: Utc::now() + chrono::Duration::hours(1),
         };
         let original = make_job(manifest.clone());
+        let now = Utc::now();
+        repository
+            .state
+            .write()
+            .await
+            .content_encryption_keys
+            .insert(
+                (agent, "cek_test".into()),
+                StoredContentEncryptionKey {
+                    agent_id: agent,
+                    key_id: "cek_test".into(),
+                    algorithm: piqae_domain::ENCRYPTED_JOB_V3_RECIPIENT_ALGORITHM.into(),
+                    public_key_spki: "test".into(),
+                    created_at: now,
+                    lifecycle_state: "active".into(),
+                    state_changed_at: now,
+                },
+            );
         assert!(matches!(
             repository
                 .create_job(&original, agent, None, b"one")
@@ -4913,6 +5048,41 @@ mod routing_repository_tests {
             .await
             .expect("supported algorithm");
         assert_eq!(stored.algorithm, "ECDH-P256-HKDF-SHA256");
+        repository
+            .rotate_content_encryption_key(
+                workspace,
+                environment,
+                node,
+                "cek_next",
+                "ECDH-P256-HKDF-SHA256",
+                "next-spki",
+            )
+            .await
+            .expect("rotate to a new active key");
+        assert_eq!(
+            repository
+                .state
+                .read()
+                .await
+                .content_encryption_keys
+                .get(&(node, "cek_test".into()))
+                .expect("previous generation retained")
+                .lifecycle_state,
+            "decrypt_only"
+        );
+        assert!(
+            repository
+                .rotate_content_encryption_key(
+                    workspace,
+                    environment,
+                    node,
+                    "cek_test",
+                    "ECDH-P256-HKDF-SHA256",
+                    "different-spki",
+                )
+                .await
+                .is_err()
+        );
         assert!(matches!(
             repository
                 .rotate_content_encryption_key(
@@ -4932,10 +5102,10 @@ mod routing_repository_tests {
                 .read()
                 .await
                 .content_encryption_keys
-                .get(&node)
-                .expect("original key remains")
+                .get(&(node, "cek_next".into()))
+                .expect("replacement key remains active")
                 .key_id,
-            "cek_test"
+            "cek_next"
         );
     }
 
