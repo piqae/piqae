@@ -1778,19 +1778,24 @@ async fn validate_encrypted_job(
             "The encrypted profile revision is not the selected target revision.",
         ));
     }
-    let key = state
-        .repository
-        .content_encryption_key_for_printer(
-            tenant.workspace_id,
-            tenant.environment_id,
-            destination.printer_id,
-        )
-        .await?;
-    if !manifest
-        .recipients
-        .iter()
-        .any(|recipient| recipient.key_id == key.key_id && recipient.algorithm == key.algorithm)
-    {
+    let mut recipient_available = false;
+    for recipient in &manifest.recipients {
+        if let Ok(key) = state
+            .repository
+            .content_encryption_key_for_agent_recipient(
+                tenant.workspace_id,
+                tenant.environment_id,
+                destination.agent_id,
+                &recipient.key_id,
+            )
+            .await
+            && recipient.algorithm == key.algorithm
+        {
+            recipient_available = true;
+            break;
+        }
+    }
+    if !recipient_available {
         return Err(AppError::invalid(
             "encrypted_recipient_unavailable",
             "The selected node cannot decrypt this envelope.",
