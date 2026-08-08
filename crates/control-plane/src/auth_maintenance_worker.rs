@@ -1,4 +1,4 @@
-//! Periodic removal of expired node-authentication state.
+//! Periodic removal of expired node-authentication state and diagnostics.
 //!
 //! Nonce reservations and pairing rows both expire on a clock rather than on a
 //! request. Sweeping them here keeps the per-request authentication path free
@@ -18,7 +18,8 @@ impl AuthMaintenanceWorker {
         Self { store }
     }
 
-    /// Removes one batch of expired nonces and finished pairing rows.
+    /// Removes expired nonces, finished pairing rows, and a bounded batch of
+    /// expired diagnostic reports.
     ///
     /// # Errors
     ///

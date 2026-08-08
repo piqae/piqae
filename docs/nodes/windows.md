@@ -3,9 +3,9 @@
 **Release tier:** Disabled for production; preview-only on Windows 10/11
 x86-64. The Inno Setup workflow can produce a signed release candidate and uses
 a crash-loop-limited, SID-scoped per-user login supervisor, not a Windows
-Service. Concurrent sessions share one durable agent while retaining a tray in
-each interactive session. The agent runs only while that user remains logged
-in. A signed
+Service. Concurrent sessions share one durable agent while retaining and
+independently restoring a tray in each interactive session. The agent runs only
+while that user remains logged in. A signed
 candidate remains a Preview until its Windows installation, update, rollback,
 and printer evidence gates pass.
 

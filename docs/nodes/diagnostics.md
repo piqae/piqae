@@ -24,7 +24,8 @@ counts, SQLite integrity, executor crash count, and bounded machine-readable
 error codes. They never contain log messages, filesystem paths, job or document
 identifiers, content, credentials, URLs, printer/profile blobs, or driver state.
 The node retains at most eight unacknowledged reports; the server accepts at
-most 16 KiB per report, returns at most fifty reports, and hides expired data.
+most 16 KiB per report, returns at most fifty reports, and physically deletes
+expired data in bounded periodic batches.
 
 Use `POST /v1/nodes/{node_id}/diagnostics` to request collection, `GET` on the
 same path to list retained status, and

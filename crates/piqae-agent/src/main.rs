@@ -527,6 +527,7 @@ async fn main() -> Result<()> {
 
     initialize_logging()?;
 
+    let outcome: Result<()> = async {
     anyhow::ensure!(
         arguments.local_bind.ip().is_loopback(),
         "PIQAE_LOCAL_BIND must use a loopback address; the authenticated local API must not be exposed to the network"
@@ -660,6 +661,12 @@ async fn main() -> Result<()> {
     control_task.abort();
     connector_supervisor_task.abort();
     result
+    }
+    .await;
+    if let Err(error) = &outcome {
+        error!(error = %error, "Piqae agent stopped unexpectedly");
+    }
+    outcome
 }
 
 fn unexpected_task_exit(
@@ -702,7 +709,12 @@ fn initialize_logging() -> Result<()> {
         } else {
             error!("Piqae agent panicked");
         }
-        default_panic_hook(panic);
+        // Packaged nodes have a bounded structured sink. Avoid also emitting
+        // the raw panic payload to inherited stderr because panic messages can
+        // contain document paths, driver data, or credentials.
+        if std::env::var_os("PIQAE_LOG_FILE").is_none() {
+            default_panic_hook(panic);
+        }
     }));
     Ok(())
 }

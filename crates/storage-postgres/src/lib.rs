@@ -388,11 +388,12 @@ pub struct StoredNodeConnector {
     pub created_at: DateTime<Utc>,
 }
 
-/// Rows removed by one authentication-state sweep.
+/// Rows removed by one periodic maintenance sweep.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PurgedAuthState {
     pub nonces: u64,
     pub device_authorizations: u64,
+    pub node_diagnostics: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -2765,7 +2766,7 @@ impl PostgresStore {
         Ok(())
     }
 
-    /// Removes authentication state that can no longer authorize anything.
+    /// Removes expired authentication state and diagnostic reports.
     ///
     /// Expired nonces and finished pairing rows are retained only until they
     /// stop being decisions the control plane must honour. Sweeping them here
@@ -2773,7 +2774,10 @@ impl PostgresStore {
     ///
     /// # Errors
     ///
-    /// Returns a storage error when either delete fails.
+    /// Diagnostic deletion is capped per sweep so accumulated expiry cannot
+    /// monopolize a maintenance tick or hold an unbounded transaction.
+    ///
+    /// Returns a storage error when any delete fails.
     pub async fn purge_expired_authentication_state(
         &self,
     ) -> Result<PurgedAuthState, StorageError> {
@@ -2790,9 +2794,24 @@ impl PostgresStore {
         .execute(&self.pool)
         .await?
         .rows_affected();
+        let node_diagnostics = sqlx::query(
+            "WITH expired AS (
+                 SELECT request_id FROM node_diagnostics
+                 WHERE expires_at <= now()
+                 ORDER BY expires_at, request_id
+                 LIMIT 1000
+             )
+             DELETE FROM node_diagnostics diagnostics
+             USING expired
+             WHERE diagnostics.request_id = expired.request_id",
+        )
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
         Ok(PurgedAuthState {
             nonces,
             device_authorizations,
+            node_diagnostics,
         })
     }
 
