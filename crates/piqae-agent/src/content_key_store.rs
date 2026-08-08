@@ -233,9 +233,12 @@ fn write_manifest_atomic(path: &Path, manifest: &KeyringManifest) -> Result<()> 
         file.sync_all()
             .with_context(|| format!("sync {}", temporary.display()))?;
         replace_manifest(&temporary, path)?;
-        std::fs::File::open(parent)
-            .and_then(|directory| directory.sync_all())
-            .with_context(|| format!("sync {}", parent.display()))?;
+        #[cfg(unix)]
+        {
+            std::fs::File::open(parent)
+                .and_then(|directory| directory.sync_all())
+                .with_context(|| format!("sync {}", parent.display()))?;
+        }
         let verified = read_manifest(path)?;
         if verified.version != manifest.version
             || verified.identity_hash != manifest.identity_hash
@@ -281,8 +284,19 @@ fn replace_manifest(temporary: &Path, destination: &Path) -> Result<()> {
 
 #[cfg(windows)]
 fn recover_manifest_backup(manifest: &Path) -> Result<()> {
+    recover_manifest_backup_files(manifest)
+}
+
+#[cfg(any(windows, test))]
+fn recover_manifest_backup_files(manifest: &Path) -> Result<()> {
     let backup = manifest.with_extension("keyring.backup");
-    if !manifest.exists() && backup.exists() {
+    if !backup.exists() {
+        return Ok(());
+    }
+    if manifest.exists() {
+        std::fs::remove_file(&backup)
+            .context("remove stale content-key manifest backup after replacement")?;
+    } else {
         std::fs::rename(&backup, manifest).context("recover prior content-key manifest")?;
     }
     Ok(())
@@ -582,6 +596,25 @@ mod tests {
             load_or_create(&path, "agt_stable")?.generation_count(),
             MAX_GENERATIONS
         );
+        Ok(())
+    }
+
+    #[test]
+    fn manifest_backup_recovery_restores_or_removes_as_required() -> Result<()> {
+        let directory = tempdir()?;
+        let manifest = directory.path().join("content-encryption.keyring.json");
+        let backup = manifest.with_extension("keyring.backup");
+
+        std::fs::write(&backup, b"prior")?;
+        recover_manifest_backup_files(&manifest)?;
+        assert_eq!(std::fs::read(&manifest)?, b"prior");
+        assert!(!backup.exists());
+
+        std::fs::write(&manifest, b"current")?;
+        std::fs::write(&backup, b"stale")?;
+        recover_manifest_backup_files(&manifest)?;
+        assert_eq!(std::fs::read(&manifest)?, b"current");
+        assert!(!backup.exists());
         Ok(())
     }
 
