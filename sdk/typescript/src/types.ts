@@ -411,6 +411,8 @@ export interface NodeContentEncryptionKey {
   algorithm: 'ECDH-P256-HKDF-SHA256';
   public_key_spki: string;
   node_id: PiqaeId;
+  lifecycle_state: 'active' | 'decrypt_only' | 'revoked';
+  state_changed_at: string;
   created_at: string;
 }
 

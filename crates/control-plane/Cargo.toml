@@ -63,6 +63,8 @@ piqae-storage-postgres = { path = "../storage-postgres", version = "0.1.2" }
 piqae-webhooks = { path = "../webhooks", version = "0.1.2" }
 
 [dev-dependencies]
+aes-gcm.workspace = true
+hkdf.workspace = true
 http-body-util = "0.1"
 sqlx.workspace = true
 

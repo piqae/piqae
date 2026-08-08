@@ -2586,6 +2586,13 @@ export interface components {
             /** @description DER SubjectPublicKeyInfo encoded as unpadded base64url. */
             public_key_spki: string;
             node_id: string;
+            /**
+             * @description Server-managed key lifecycle state. Printer recipient discovery returns only active keys; retired generations remain node-internal.
+             * @enum {string}
+             */
+            lifecycle_state: "active" | "decrypt_only" | "revoked";
+            /** Format: date-time */
+            state_changed_at: string;
             /** Format: date-time */
             created_at: string;
         };

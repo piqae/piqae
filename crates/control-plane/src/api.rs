@@ -1191,6 +1191,8 @@ pub struct ContentEncryptionKeyResponse {
     algorithm: String,
     public_key_spki: String,
     node_id: AgentId,
+    lifecycle_state: String,
+    state_changed_at: chrono::DateTime<Utc>,
     created_at: chrono::DateTime<Utc>,
 }
 
@@ -1237,6 +1239,8 @@ pub async fn register_agent_content_encryption_key(
         algorithm: key.algorithm,
         public_key_spki: key.public_key_spki,
         node_id: key.agent_id,
+        lifecycle_state: key.lifecycle_state,
+        state_changed_at: key.state_changed_at,
         created_at: key.created_at,
     }))
 }
@@ -1284,6 +1288,8 @@ pub async fn printer_content_encryption_key(
         algorithm: key.algorithm,
         public_key_spki: key.public_key_spki,
         node_id: key.agent_id,
+        lifecycle_state: key.lifecycle_state,
+        state_changed_at: key.state_changed_at,
         created_at: key.created_at,
     }))
 }
@@ -1724,21 +1730,7 @@ async fn validate_encrypted_job(
         .collect::<std::collections::HashSet<_>>();
     let recipients_valid = (1..=32).contains(&manifest.recipients.len())
         && recipient_ids.len() == manifest.recipients.len()
-        && manifest.recipients.iter().all(|recipient| {
-            recipient.algorithm == piqae_domain::ENCRYPTED_JOB_V3_RECIPIENT_ALGORITHM
-                && URL_SAFE_NO_PAD
-                    .decode(&recipient.ephemeral_public_key)
-                    .is_ok_and(|value| value.len() == 65 && value.first() == Some(&4))
-                && URL_SAFE_NO_PAD
-                    .decode(&recipient.hkdf_salt)
-                    .is_ok_and(|value| value.len() == 32)
-                && URL_SAFE_NO_PAD
-                    .decode(&recipient.key_wrap_iv)
-                    .is_ok_and(|value| value.len() == 12)
-                && URL_SAFE_NO_PAD
-                    .decode(&recipient.encrypted_content_key)
-                    .is_ok_and(|value| value.len() == 48)
-        });
+        && manifest.recipients.iter().all(encrypted_recipient_valid);
     if !target_binding_matches(request.target_id.as_deref(), &manifest.binding.target_id)
         || manifest.binding.workspace_id != tenant.workspace_id.to_string()
         || manifest.binding.environment_id != tenant.environment_id.to_string()
@@ -1780,7 +1772,7 @@ async fn validate_encrypted_job(
     }
     let mut recipient_available = false;
     for recipient in &manifest.recipients {
-        if let Ok(key) = state
+        if state
             .repository
             .content_encryption_key_for_agent_recipient(
                 tenant.workspace_id,
@@ -1789,7 +1781,7 @@ async fn validate_encrypted_job(
                 &recipient.key_id,
             )
             .await
-            && recipient.algorithm == key.algorithm
+            .is_ok()
         {
             recipient_available = true;
             break;
@@ -1802,6 +1794,22 @@ async fn validate_encrypted_job(
         ));
     }
     Ok(())
+}
+
+fn encrypted_recipient_valid(recipient: &piqae_domain::EncryptedContentRecipient) -> bool {
+    recipient.algorithm == piqae_domain::ENCRYPTED_JOB_V3_RECIPIENT_ALGORITHM
+        && URL_SAFE_NO_PAD
+            .decode(&recipient.ephemeral_public_key)
+            .is_ok_and(|value| value.len() == 65 && value.first() == Some(&4))
+        && URL_SAFE_NO_PAD
+            .decode(&recipient.hkdf_salt)
+            .is_ok_and(|value| value.len() == 32)
+        && URL_SAFE_NO_PAD
+            .decode(&recipient.key_wrap_iv)
+            .is_ok_and(|value| value.len() == 12)
+        && URL_SAFE_NO_PAD
+            .decode(&recipient.encrypted_content_key)
+            .is_ok_and(|value| value.len() == 48)
 }
 
 async fn resolve_target_destination(
