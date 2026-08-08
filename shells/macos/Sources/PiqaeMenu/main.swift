@@ -769,7 +769,7 @@ final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 menu.addItem(informational("\(shortened(job.title, limit: 34)) — \(state)"))
             }
         }
-        if dashboardURL() != nil {
+        if client != nil || dashboardURL() != nil {
             let queue = menu.addItem(
                 withTitle: MenuPresentation.queueTitle,
                 action: #selector(openQueue),
@@ -1019,13 +1019,41 @@ final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func openQueue() {
-        guard let url = dashboardURL() else { return }
-        NSWorkspace.shared.open(url)
+        openNodeDashboard(fallbackURL: dashboardURL())
     }
 
     @objc private func openConnections() {
-        guard let url = connectionsURL() else { return }
-        NSWorkspace.shared.open(url)
+        if let configured = explicitConnectionsURL() {
+            NSWorkspace.shared.open(configured)
+        } else {
+            openNodeDashboard(fallbackURL: dashboardURL())
+        }
+    }
+
+    private func openNodeDashboard(fallbackURL: URL?) {
+        guard let client else {
+            if let fallbackURL { NSWorkspace.shared.open(fallbackURL) }
+            return
+        }
+        actionTask?.cancel()
+        actionTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                let url = try await client.createDashboardSession()
+                NSWorkspace.shared.open(url)
+            } catch is CancellationError {
+                return
+            } catch {
+                if let fallbackURL {
+                    NSWorkspace.shared.open(fallbackURL)
+                } else {
+                    showAlert(
+                        title: "Queue unavailable",
+                        message: error.localizedDescription
+                    )
+                }
+            }
+        }
     }
 
     @objc private func checkForUpdates(_ sender: NSMenuItem) {
@@ -1144,10 +1172,10 @@ final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return url
     }
 
-    private func connectionsURL() -> URL? {
+    private func explicitConnectionsURL() -> URL? {
         let value = ProcessInfo.processInfo.environment["PIQAE_CONNECTIONS_URL"]
             ?? Bundle.main.object(forInfoDictionaryKey: "PiqaeConnectionsURL") as? String
-        guard let value else { return dashboardURL() }
+        guard let value else { return nil }
         guard
             let url = URL(string: value),
             ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
@@ -1156,6 +1184,10 @@ final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             url.password == nil
         else { return nil }
         return url
+    }
+
+    private func connectionsURL() -> URL? {
+        explicitConnectionsURL() ?? (client != nil ? configuration?.baseURL : dashboardURL())
     }
 
     private func agentLogURL() -> URL {
