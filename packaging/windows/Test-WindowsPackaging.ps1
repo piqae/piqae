@@ -84,21 +84,42 @@ try {
     Assert-True ($installer.Contains("Check: HasExistingConfiguration")) "Installer does not restart an already configured node after upgrade."
     Assert-True ($installer.Contains("{localappdata}\Spool\config.json")) "Installer moved the shipped durable state path during the Piqae rename."
     Assert-True ($installer.Contains("ValueName: ""Spool""; Flags: deletevalue")) "Installer leaves the legacy startup registration active."
+    Assert-True ($installer.Contains("Supervise-Piqae.ps1")) "Installer does not stage the durable-agent supervisor."
+    Assert-True ($installer.Contains("runhidden nowait; Check: HasExistingConfiguration")) "Upgrade would wait forever on the long-lived supervisor."
 
     $startScript = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot "Start-Piqae.ps1")
     Assert-True ($startScript.Contains('Join-Path $env:LOCALAPPDATA "Spool"')) "Start script moved the shipped durable state path."
-    Assert-True ($startScript.Contains("piqae-executor-windows.exe")) "Start script does not replace the executor path from an existing configuration."
-    Assert-True ($startScript.Contains("piqae-profile-host-windows.exe")) "Start script does not replace the profile-host path from an existing configuration."
-    Assert-True ($startScript.Contains('PIQAE_LOG_FILE')) "Start script does not configure the bounded agent log."
-    Assert-True ($startScript.Contains('PIQAE_SHELL_LOG_FILE')) "Start script does not configure the bounded shell log."
     Assert-True ($startScript.Contains('launcher.log')) "Start script does not retain bounded launcher failures."
     Assert-True (-not $startScript.Contains('RedirectStandardOutput')) "Start script still creates an unbounded stdout log."
     Assert-True (-not $startScript.Contains('RedirectStandardError')) "Start script still creates an unbounded stderr log."
+    Assert-True ($startScript.Contains("Supervise-Piqae.ps1")) "Start script does not launch the supervisor."
+
+    $supervisorScript = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot "Supervise-Piqae.ps1")
+    Assert-True ($supervisorScript.Contains("piqae-executor-windows.exe")) "Supervisor does not replace the executor path from an existing configuration."
+    Assert-True ($supervisorScript.Contains("piqae-profile-host-windows.exe")) "Supervisor does not replace the profile-host path from an existing configuration."
+    Assert-True ($supervisorScript.Contains('"Global\PiqaeNodeSupervisor-$($identity.User.Value)"')) "Supervisor is not a cross-session per-user singleton."
+    Assert-True ($supervisorScript.Contains("MutexSecurity")) "Supervisor mutex has no explicit user-only security descriptor."
+    Assert-True ($supervisorScript.Contains('SetAccessRuleProtection($true, $false)')) "Supervisor mutex inherits broader access rules."
+    Assert-True ($supervisorScript.Contains("MutexRights]::FullControl")) "Supervisor mutex does not grant its owning user control."
+    Assert-True ($supervisorScript.Contains('"Local\PiqaeNodeShellLauncher"')) "Tray launch is not isolated to each interactive session."
+    Assert-True ($supervisorScript.Contains('$process.SessionId -eq $SessionId')) "Tray detection can mistake another session's tray for the current one."
+    Assert-True ($supervisorScript.Contains('$Mutex.WaitOne(1000, $false)')) "Another active session cannot take over after the owning session exits."
+    Assert-True (-not $supervisorScript.Contains('Remove-Item -LiteralPath $StopPath')) "A supervisor could erase a stop request before standby sessions observe it."
+    Assert-True ($supervisorScript.Contains("crash-loop threshold reached")) "Supervisor has no bounded crash-loop policy."
+    Assert-True ($supervisorScript.Contains('$failures.Count -ge 5')) "Supervisor crash-loop threshold changed unexpectedly."
+    Assert-True ($supervisorScript.Contains('Test-Path -LiteralPath $StopPath')) "Supervisor does not honor clean stop requests."
+    Assert-True ($supervisorScript.Contains("Ensure-ShellRunning")) "Supervisor does not restore the disposable tray after a policy restart or crash."
+    Assert-True ($supervisorScript.Contains('PIQAE_LOG_FILE')) "Supervisor does not configure the bounded agent log."
+    Assert-True ($supervisorScript.Contains('PIQAE_SHELL_LOG_FILE')) "Supervisor does not configure the bounded shell log."
+    Assert-True ($supervisorScript.Contains('$maxBytes = 1MB')) "Supervisor log has no hard rotation threshold."
+    Assert-True (-not $supervisorScript.Contains('RedirectStandardOutput')) "Supervisor creates an unbounded stdout log."
+    Assert-True (-not $supervisorScript.Contains('RedirectStandardError')) "Supervisor creates an unbounded stderr log."
 
     $stopScript = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot "Stop-Piqae.ps1")
     Assert-True ($stopScript.Contains("piqae-agent")) "Stop script does not stop the renamed node."
     Assert-True ($stopScript.Contains("spool-agent")) "Stop script cannot safely hand off an existing pre-rename node."
     Assert-True ($stopScript.Contains("MainModule.FileName")) "Stop script does not bind termination to the installed executable path."
+    Assert-True ($stopScript.Contains("Get-CimInstance Win32_Process")) "Stop script does not verify the supervisor command line before forced termination."
 
     $policyScript = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot "Set-PiqaeUpdatePolicy.ps1")
     Assert-True ($policyScript.Contains("piqae-shell-windows")) "Update-policy changes do not restart the tray."
