@@ -379,3 +379,139 @@ async fn agent_health_migrates_empty_and_previous_schemas_with_tenant_fencing() 
         .await
         .expect("drop exact upgrade schema");
 }
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn content_encryption_key_algorithm_migrates_fresh_and_legacy_schemas() {
+    let Some(database_url) = env::var("PIQAE_TEST_DATABASE_URL").ok() else {
+        eprintln!("skipped: set PIQAE_TEST_DATABASE_URL to run PostgreSQL migration evidence");
+        return;
+    };
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&database_url)
+        .await
+        .expect("connect PostgreSQL test database");
+    let all = sqlx::migrate!("../../migrations/postgres");
+
+    let empty_schema = format!("piqae_cek_empty_{}", ulid::Ulid::new()).to_ascii_lowercase();
+    sqlx::query(&format!("CREATE SCHEMA {empty_schema}"))
+        .execute(&admin)
+        .await
+        .expect("create empty-database schema");
+    let empty_pool = schema_pool(&database_url, &empty_schema).await;
+    PostgresStore::from_pool(empty_pool.clone())
+        .migrate()
+        .await
+        .expect("application startup migrates an empty database");
+    let empty_latest: i64 = sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations")
+        .fetch_one(&empty_pool)
+        .await
+        .expect("read empty-database schema version");
+    assert_eq!(empty_latest, 26);
+    empty_pool.close().await;
+    sqlx::query(&format!("DROP SCHEMA {empty_schema} CASCADE"))
+        .execute(&admin)
+        .await
+        .expect("drop exact empty-database schema");
+
+    let upgrade_schema = format!("piqae_cek_upgrade_{}", ulid::Ulid::new()).to_ascii_lowercase();
+    sqlx::query(&format!("CREATE SCHEMA {upgrade_schema}"))
+        .execute(&admin)
+        .await
+        .expect("create upgrade schema");
+    let upgrade_pool = schema_pool(&database_url, &upgrade_schema).await;
+    let before_algorithm_expansion = Migrator {
+        migrations: Cow::Owned(
+            all.iter()
+                .filter(|migration| migration.version < 24)
+                .cloned()
+                .collect(),
+        ),
+        ignore_missing: false,
+        locking: true,
+        no_tx: false,
+    };
+    before_algorithm_expansion
+        .run(&upgrade_pool)
+        .await
+        .expect("apply schema through 0023");
+
+    for suffix in ["a", "b"] {
+        sqlx::query("INSERT INTO workspaces (id,name,slug) VALUES ($1,$2,$3)")
+            .bind(format!("wsp_cek_{suffix}"))
+            .bind(format!("CEK tenant {suffix}"))
+            .bind(format!("cek-tenant-{suffix}"))
+            .execute(&upgrade_pool)
+            .await
+            .expect("insert workspace");
+        sqlx::query(
+            "INSERT INTO environments (id,workspace_id,kind,name) VALUES ($1,$2,'live','Live')",
+        )
+        .bind(format!("env_cek_{suffix}"))
+        .bind(format!("wsp_cek_{suffix}"))
+        .execute(&upgrade_pool)
+        .await
+        .expect("insert environment");
+        sqlx::query("INSERT INTO agents (id,workspace_id,environment_id,name,installation_id,os,architecture,version,protocol_version) VALUES ($1,$2,$3,'Node',$4,'test','test','1',1)")
+            .bind(format!("agt_cek_{suffix}"))
+            .bind(format!("wsp_cek_{suffix}"))
+            .bind(format!("env_cek_{suffix}"))
+            .bind(format!("installation-cek-{suffix}"))
+            .execute(&upgrade_pool)
+            .await
+            .expect("insert agent");
+    }
+    sqlx::query("INSERT INTO node_content_encryption_keys (workspace_id,environment_id,agent_id,key_id,algorithm,public_key_spki) VALUES ('wsp_cek_a','env_cek_a','agt_cek_a','legacy_rsa','RSA-OAEP-256',$1)")
+        .bind("A".repeat(128))
+        .execute(&upgrade_pool)
+        .await
+        .expect("insert legacy RSA key before algorithm migration");
+
+    PostgresStore::from_pool(upgrade_pool.clone())
+        .migrate()
+        .await
+        .expect("application startup upgrades through algorithm migration");
+    let latest: i64 = sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations")
+        .fetch_one(&upgrade_pool)
+        .await
+        .expect("read upgraded schema version");
+    assert_eq!(latest, 26);
+    let legacy_algorithm: String = sqlx::query_scalar(
+        "SELECT algorithm FROM node_content_encryption_keys
+         WHERE workspace_id = 'wsp_cek_a' AND environment_id = 'env_cek_a'
+           AND agent_id = 'agt_cek_a' AND key_id = 'legacy_rsa'",
+    )
+    .fetch_one(&upgrade_pool)
+    .await
+    .expect("legacy key remains readable after forward migration");
+    assert_eq!(legacy_algorithm, "RSA-OAEP-256");
+
+    sqlx::query("INSERT INTO node_content_encryption_keys (workspace_id,environment_id,agent_id,key_id,algorithm,public_key_spki) VALUES ('wsp_cek_b','env_cek_b','agt_cek_b','v3_ecdh','ECDH-P256-HKDF-SHA256',$1)")
+        .bind("B".repeat(80))
+        .execute(&upgrade_pool)
+        .await
+        .expect("v3 P-256 ECDH key is accepted after migration");
+    let unsupported = sqlx::query("INSERT INTO node_content_encryption_keys (workspace_id,environment_id,agent_id,key_id,algorithm,public_key_spki) VALUES ('wsp_cek_b','env_cek_b','agt_cek_b','unknown_suite','ECDH-P384-HKDF-SHA384',$1)")
+        .bind("C".repeat(128))
+        .execute(&upgrade_pool)
+        .await;
+    assert!(
+        unsupported.is_err(),
+        "unapproved algorithms must remain rejected"
+    );
+    let cross_tenant = sqlx::query("INSERT INTO node_content_encryption_keys (workspace_id,environment_id,agent_id,key_id,algorithm,public_key_spki) VALUES ('wsp_cek_a','env_cek_a','agt_cek_b','cross_tenant','ECDH-P256-HKDF-SHA256',$1)")
+        .bind("D".repeat(80))
+        .execute(&upgrade_pool)
+        .await;
+    assert!(
+        cross_tenant.is_err(),
+        "composite agent foreign key must reject cross-tenant key registration"
+    );
+
+    upgrade_pool.close().await;
+    sqlx::query(&format!("DROP SCHEMA {upgrade_schema} CASCADE"))
+        .execute(&admin)
+        .await
+        .expect("drop exact upgrade schema");
+}
