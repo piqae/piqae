@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 
 public struct NodeConnectPreview: Codable, Equatable, Sendable {
     public let workspaceID: String
@@ -48,6 +49,7 @@ public enum NodeConnectAgentBridgeError: Error, LocalizedError {
     case expired
     case invitationRejected
     case identityRejected
+    case nativeProcessFailure(NativeProcessEvidence)
 
     public var errorDescription: String? {
         switch self {
@@ -57,7 +59,19 @@ public enum NodeConnectAgentBridgeError: Error, LocalizedError {
         case .expired: "This connection invitation has expired. Return to the service and create a new one."
         case .invitationRejected: "This invitation is no longer valid. Return to the service and create a new connection."
         case .identityRejected: "This installation could not prove its identity. Open Piqae Diagnostics and retry the connection."
+        case .nativeProcessFailure: "The Piqae node helper failed. Open Piqae Diagnostics and retry."
         }
+    }
+}
+
+public struct NativeProcessEvidence: Equatable, Sendable, CustomStringConvertible {
+    public let classification: String
+    public let stderrBytes: Int
+    public let inspectedBytes: Int
+    public let drainComplete: Bool
+
+    public var description: String {
+        "stderr_class=\(classification), stderr_bytes=\(stderrBytes), inspected_bytes=\(inspectedBytes), stderr_drain_complete=\(drainComplete)"
     }
 }
 
@@ -80,6 +94,7 @@ public struct NodeConnectAgentBridge: Sendable {
     private static let maximumOutputBytes = 1024 * 1024
     public let executableURL: URL
     public let dataDirectory: URL
+    private let processTimeout: TimeInterval
 
     public init(
         environment: [String: String] = ProcessInfo.processInfo.environment,
@@ -92,11 +107,13 @@ public struct NodeConnectAgentBridge: Sendable {
         guard FileManager.default.isExecutableFile(atPath: executableURL.path) else {
             throw NodeConnectAgentBridgeError.unavailable
         }
+        processTimeout = 15
     }
 
-    public init(executableURL: URL, dataDirectory: URL) {
+    public init(executableURL: URL, dataDirectory: URL, processTimeout: TimeInterval = 15) {
         self.executableURL = executableURL
         self.dataDirectory = dataDirectory
+        self.processTimeout = processTimeout
     }
 
     public func preview(capability: String, controlPlaneURL: URL, now: Date = Date()) throws -> NodeConnectPreview {
@@ -155,6 +172,7 @@ public struct NodeConnectAgentBridge: Sendable {
         let lock = NSLock()
         var output = Data()
         var diagnostic = Data()
+        var diagnosticBytes = 0
         var oversized = false
         var timedOut = false
         group.enter()
@@ -179,39 +197,83 @@ public struct NodeConnectAgentBridge: Sendable {
             while let chunk = try? stderr.fileHandleForReading.read(upToCount: 64 * 1024),
                   !chunk.isEmpty {
                 lock.lock()
+                diagnosticBytes += chunk.count
                 if diagnostic.count < 32 * 1024 {
                     diagnostic.append(chunk.prefix(32 * 1024 - diagnostic.count))
                 }
                 lock.unlock()
             }
         }
-        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 15) {
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + processTimeout) {
             if process.isRunning {
                 lock.lock()
                 timedOut = true
                 lock.unlock()
                 process.terminate()
+                DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2) {
+                    if process.isRunning { _ = Darwin.kill(process.processIdentifier, SIGKILL) }
+                }
             }
         }
         process.waitUntilExit()
-        group.wait()
+        var drainComplete = group.wait(timeout: .now() + 2) == .success
+        if !drainComplete {
+            try? stdout.fileHandleForReading.close()
+            try? stderr.fileHandleForReading.close()
+            drainComplete = group.wait(timeout: .now() + 2) == .success
+        }
         lock.lock()
         let result = output
         let failureDiagnostic = diagnostic
+        let failureDiagnosticBytes = diagnosticBytes
         let wasOversized = oversized
         let didTimeOut = timedOut
         lock.unlock()
+        let evidence = Self.nativeEvidence(
+            failureDiagnostic,
+            observedBytes: failureDiagnosticBytes,
+            drainComplete: drainComplete
+        )
         guard !wasOversized else {
             throw NodeConnectAgentBridgeError.oversizedResponse
         }
-        guard !didTimeOut else { throw NodeConnectAgentBridgeError.failed }
+        guard !didTimeOut else { throw NodeConnectAgentBridgeError.nativeProcessFailure(evidence) }
         guard process.terminationStatus == 0 else {
-            throw Self.classifiedFailure(failureDiagnostic)
+            throw Self.classifiedFailure(failureDiagnostic, evidence: evidence)
         }
         return result
     }
 
-    private static func classifiedFailure(_ diagnostic: Data) -> NodeConnectAgentBridgeError {
+    private static func nativeEvidence(
+        _ diagnostic: Data,
+        observedBytes: Int,
+        drainComplete: Bool
+    ) -> NativeProcessEvidence {
+        let message = String(decoding: diagnostic, as: UTF8.self).lowercased()
+        let classification: String
+        if message.contains("permission denied") || message.contains("access is denied") {
+            classification = "access_denied"
+        } else if message.contains("not found") || message.contains("missing") {
+            classification = "missing_dependency"
+        } else if message.contains("panic") || message.contains("fatal") {
+            classification = "native_crash"
+        } else if diagnostic.isEmpty {
+            classification = "none"
+        } else {
+            classification = "unclassified"
+        }
+        return NativeProcessEvidence(
+            classification: classification,
+            stderrBytes: observedBytes,
+            inspectedBytes: diagnostic.count,
+            drainComplete: drainComplete
+        )
+    }
+
+    private static func classifiedFailure(
+        _ diagnostic: Data,
+        evidence: NativeProcessEvidence
+    ) -> NodeConnectAgentBridgeError {
         let message = String(decoding: diagnostic, as: UTF8.self).lowercased()
         if message.contains("expired") { return .expired }
         if message.contains("401") || message.contains("unauthorized")
@@ -224,6 +286,6 @@ public struct NodeConnectAgentBridge: Sendable {
         {
             return .invitationRejected
         }
-        return .failed
+        return .nativeProcessFailure(evidence)
     }
 }
