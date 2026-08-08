@@ -5074,7 +5074,9 @@ impl PostgresStore {
 
         if let piqae_domain::ContentSource::EncryptedUpload { manifest, .. } = &job.content {
             let mut referenced = false;
-            for recipient in &manifest.recipients {
+            for recipient in manifest.recipients.iter().filter(|recipient| {
+                recipient.algorithm == piqae_domain::ENCRYPTED_JOB_V3_RECIPIENT_ALGORITHM
+            }) {
                 let inserted = sqlx::query(
                     "INSERT INTO encrypted_job_key_references
                         (workspace_id, environment_id, agent_id, key_id, job_id)
@@ -5082,7 +5084,7 @@ impl PostgresStore {
                      FROM node_content_encryption_keys key
                      WHERE key.workspace_id = $1 AND key.environment_id = $2
                        AND key.agent_id = $3 AND key.key_id = $4
-                       AND key.algorithm = $6
+                       AND key.algorithm = 'ECDH-P256-HKDF-SHA256'
                        AND (key.lifecycle_state = 'active' OR
                             (key.lifecycle_state = 'decrypt_only'
                              AND key.state_changed_at > now() - interval '15 minutes'))
@@ -5093,7 +5095,6 @@ impl PostgresStore {
                 .bind(agent_id.to_string())
                 .bind(&recipient.key_id)
                 .bind(job.id.to_string())
-                .bind(&recipient.algorithm)
                 .execute(&mut *transaction)
                 .await?;
                 referenced |= inserted.rows_affected() == 1;
