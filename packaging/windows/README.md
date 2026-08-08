@@ -3,13 +3,25 @@
 The Windows package is a **per-user preview installation**. It installs the
 agent, executor, native driver-profile host, CLI, and notification-area shell
 under `%LOCALAPPDATA%\Programs\Piqae` for new installations, then starts the
-agent and shell at login
-through the current user's `Run` registry key.
+agent and shell at login through the current user's `Run` registry key. A
+machine-global supervisor keyed to the current user's Windows SID keeps one
+durable agent alive across that user's concurrent login sessions. Its named
+mutex ACL grants access only to that user, while every interactive session has
+its own disposable tray. Other active sessions wait without starting another
+agent and can take ownership if the supervising session exits. The supervisor
+restarts the agent with exponential delay. Five exits in five minutes trigger a
+five-minute cooldown so a persistent startup fault cannot create a tight crash
+loop. Supervisor decisions are recorded in `logs\supervisor.log`.
 
 It does not register `piqae-agent.exe` with the Service Control Manager. The
 agent is currently a console process and does not implement the SCM lifecycle.
 Machine-wide unattended printing and service-session-to-user-session profile UI
 are not claimed by this package.
+
+Stop, upgrade, and uninstall create a supervisor stop request, wait up to 15
+seconds for orderly supervisor exit, then terminate only processes whose
+installed executable path (or verified supervisor command line) belongs to this
+installation. Durable queue and identity state remain untouched.
 
 ## Install and connect
 

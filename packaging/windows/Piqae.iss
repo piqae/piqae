@@ -52,6 +52,7 @@ Source: "{#SourceDir}\WinSparkle.dll"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\service\Configure-Piqae.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\service\Start-Piqae.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\service\Stop-Piqae.ps1"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#SourceDir}\service\Supervise-Piqae.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\service\Set-PiqaeUpdatePolicy.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#UpdateConfigFile}"; DestDir: "{app}"; DestName: "update-config.json"; Flags: ignoreversion
 Source: "{#SourceDir}\service\README.md"; DestDir: "{app}"; Flags: ignoreversion
@@ -74,10 +75,10 @@ Root: HKCU; Subkey: "Software\Spool\Updates"; ValueType: string; ValueName: "Pol
 [Run]
 Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\Configure-Piqae.ps1"""; Description: "Configure and start Piqae Node"; Flags: postinstall nowait skipifsilent; Check: NeedsInitialConfiguration
 Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""{app}\Stop-Piqae.ps1"""; Flags: runhidden waituntilterminated; Check: HasExistingConfiguration
-Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""{app}\Start-Piqae.ps1"""; Flags: runhidden waituntilterminated; Check: HasExistingConfiguration
+Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""{app}\Start-Piqae.ps1"""; Flags: runhidden nowait; Check: HasExistingConfiguration
 
 [UninstallRun]
-Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\Stop-Piqae.ps1"""; Flags: runhidden; RunOnceId: "StopPiqae"
+Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\Stop-Piqae.ps1"""; Flags: runhidden waituntilterminated; RunOnceId: "StopPiqae"
 
 [Code]
 function HasExistingConfiguration(): Boolean;
