@@ -46,6 +46,12 @@ Service installation remains Preview. Follow
 [`operations/agent-service-installation.md`](../operations/agent-service-installation.md)
 and [native profiles](../printing/native-profiles.md).
 
+The packaged agent writes `~/Library/Logs/Spool/agent.log`, rotates it at
+approximately 5 MiB, and retains four prior generations. launchd output is sent
+to `/dev/null` because structured agent and panic records are written directly
+to the bounded file. The menu app does not create another redirected log file;
+macOS retains its process crash diagnostics in the operating-system store.
+
 Embedded onboarding is also Preview. It is verified in source and automated
 non-physical tests, but is not a Supported distribution path until a signed,
 notarised artifact and clean-install/update/rollback evidence are published.

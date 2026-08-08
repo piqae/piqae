@@ -22,6 +22,8 @@
         <string>@INSTALL_ROOT@/piqae-executor-cups</string>
         <key>PIQAE_ALLOW_PRIVATE_URI_SOURCES</key>
         <string>false</string>
+        <key>PIQAE_LOG_FILE</key>
+        <string>@LOG_FILE@</string>
     </dict>
     <key>WorkingDirectory</key>
     <string>@DATA_DIR@</string>
@@ -37,8 +39,8 @@
     <key>ProcessType</key>
     <string>Background</string>
     <key>StandardOutPath</key>
-    <string>@LOG_FILE@</string>
+    <string>/dev/null</string>
     <key>StandardErrorPath</key>
-    <string>@LOG_FILE@</string>
+    <string>/dev/null</string>
 </dict>
 </plist>

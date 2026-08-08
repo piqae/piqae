@@ -712,7 +712,28 @@ mod windows_shell {
 
 #[cfg(windows)]
 fn main() {
+    use std::io::Write as _;
+
+    let mut log = std::env::var_os("PIQAE_SHELL_LOG_FILE")
+        .filter(|path| !path.is_empty())
+        .and_then(|path| piqae_native_logging::BoundedLogWriter::open_with_defaults(path).ok());
+    if let Some(panic_log) = log.clone() {
+        let default_panic_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |panic| {
+            let mut panic_log = panic_log.clone();
+            let location = panic
+                .location()
+                .map_or_else(|| "unknown".to_owned(), |location| location.to_string());
+            let _ = writeln!(panic_log, "Piqae Windows shell panicked at {location}");
+            let _ = panic_log.flush();
+            default_panic_hook(panic);
+        }));
+    }
     if let Err(error) = windows_shell::run() {
+        if let Some(log) = log.as_mut() {
+            let _ = writeln!(log, "Piqae Windows shell failed: {error}");
+            let _ = log.flush();
+        }
         eprintln!("Piqae Node for Windows failed: {error}");
         std::process::exit(1);
     }

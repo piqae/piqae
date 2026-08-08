@@ -43,3 +43,11 @@ Review every archive manually, encrypt it in transit, set a retention deadline,
 and record who received it.
 
 Use [incident response](../operations/incident-response.md) for fleet impact.
+
+Native package logs are bounded on disk. The agent keeps `agent.log` plus four
+older generations (`agent.log.1` through `.4`), rotating at approximately 5
+MiB per file. Windows also keeps the tray log with the same policy and a small
+two-generation launcher log. The macOS menu creates no separate redirected
+file; its Open Log action points at the current agent log, while macOS owns menu
+process crash diagnostics. Rotation preserves existing logs during an upgrade
+and does not touch queue, profile, or identity state.
