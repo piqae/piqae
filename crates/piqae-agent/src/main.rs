@@ -34,8 +34,9 @@ use piqae_domain::{
 };
 use piqae_executor_supervisor::{ExecutorSupervisor, SupervisedExecutor};
 use piqae_local_api::{
-    ControlFailure, ControlRequest, LocalApiState, LocalContent, LocalCreateJob, LocalJobAccepted,
-    ProfileCreate, ProfileUpdate,
+    ControlFailure, ControlRequest, LocalApiState, LocalConnectorDetail, LocalContent,
+    LocalCreateJob, LocalHistoryJob, LocalJobAccepted, LocalJobHistory, ProfileCreate,
+    ProfileUpdate,
 };
 use piqae_local_ipc::{
     ConnectionState, LocalNativeQueueJob, LocalPrinter, LocalPrinterProfile, LocalPrinterQueue,
@@ -231,6 +232,9 @@ enum ConnectorSupervisorCommand {
         connector_id: String,
         respond_to: oneshot::Sender<Result<(), ControlFailure>>,
     },
+    Details {
+        respond_to: oneshot::Sender<Result<Vec<LocalConnectorDetail>, ControlFailure>>,
+    },
 }
 
 fn reject_connector_supervisor_command(
@@ -268,6 +272,16 @@ fn reject_connector_supervisor_command(
                 )
             };
             let _ = respond_to.send(Err(failure));
+        }
+        ConnectorSupervisorCommand::Details { respond_to } => {
+            let _ = respond_to.send(Err(control_failure(
+                "connector_supervisor_unavailable",
+                if is_full {
+                    "connector supervisor is busy"
+                } else {
+                    "connector supervisor is unavailable"
+                },
+            )));
         }
     }
 }
@@ -307,6 +321,15 @@ impl ConnectorConnectionTracker {
     async fn remove(&self, connector_id: &str) {
         self.states.lock().await.remove(connector_id);
         self.refresh().await;
+    }
+
+    async fn state(&self, connector_id: &str) -> ConnectionState {
+        self.states
+            .lock()
+            .await
+            .get(connector_id)
+            .copied()
+            .unwrap_or(ConnectionState::Offline)
     }
 
     async fn refresh(&self) {
@@ -1679,6 +1702,36 @@ async fn connector_supervisor_loop(
                 });
                 let _ = respond_to.send(result);
             }
+            ConnectorSupervisorCommand::Details { respond_to } => {
+                let result = connector_runtime::ConnectorRegistry::load(&data_dir)
+                    .map(|registry| registry.enabled().cloned().collect::<Vec<_>>())
+                    .map_err(|error| {
+                        control_failure("connector_details_failed", &error.to_string())
+                    });
+                let details = match result {
+                    Ok(records) => {
+                        let mut details = Vec::with_capacity(records.len());
+                        for record in records {
+                            let connection =
+                                enum_string(connections.state(&record.connector_id).await);
+                            let permission = enum_string(record.printer_grant);
+                            let selected_printer_count = record.allowed_printer_ids.len();
+                            details.push(LocalConnectorDetail {
+                                connector_id: record.connector_id,
+                                endpoint: record.control_plane_url.origin().ascii_serialization(),
+                                connection,
+                                permission,
+                                allowed_printer_ids: record.allowed_printer_ids,
+                                selected_printer_count,
+                                manage_url: None,
+                            });
+                        }
+                        Ok(details)
+                    }
+                    Err(failure) => Err(failure),
+                };
+                let _ = respond_to.send(details);
+            }
         }
     }
     if let Some(worker) = legacy_cloud_worker.take() {
@@ -2102,6 +2155,36 @@ async fn handle_control_request(
         } => {
             let result = printer_queue(engine, &printer_id).await;
             let _ = respond_to.send(result);
+        }
+        ControlRequest::JobHistory {
+            offset,
+            limit,
+            respond_to,
+        } => {
+            let result = local_job_history(engine.store(), offset, limit);
+            let _ = respond_to.send(result);
+        }
+        ControlRequest::ReprintJob {
+            job_id,
+            idempotency_key,
+            confirmed,
+            respond_to,
+        } => {
+            let result = reprint_local_job(
+                engine,
+                &job_id,
+                &idempotency_key,
+                confirmed,
+                paused.load(Ordering::Relaxed),
+            );
+            let _ = respond_to.send(result);
+        }
+        ControlRequest::ConnectorDetails { respond_to } => {
+            if let Err(error) =
+                connector_supervisor.try_send(ConnectorSupervisorCommand::Details { respond_to })
+            {
+                reject_connector_supervisor_command(error);
+            }
         }
         ControlRequest::TestPage {
             printer_id,
@@ -2806,6 +2889,119 @@ async fn printer_queue(
         local_jobs,
         native_jobs,
     })
+}
+
+fn local_job_history(
+    store: &AgentStore,
+    offset: usize,
+    limit: usize,
+) -> Result<LocalJobHistory, ControlFailure> {
+    let jobs = store
+        .local_job_history(offset, limit)
+        .map_err(storage_control_failure)?;
+    let returned = jobs.len();
+    let jobs = jobs
+        .into_iter()
+        .map(|job| {
+            let can_reprint = is_terminal_job_state(&job.state)
+                && std::fs::metadata(&job.content_path).is_ok_and(|metadata| metadata.is_file());
+            LocalHistoryJob {
+                job_id: job.job_id,
+                printer_id: job.printer_id,
+                title: job.title,
+                state: job.state,
+                native_job_id: job.native_job_id,
+                can_reprint,
+            }
+        })
+        .collect();
+    Ok(LocalJobHistory {
+        jobs,
+        next_offset: (returned == limit).then_some(offset.saturating_add(returned)),
+    })
+}
+
+fn is_terminal_job_state(state: &str) -> bool {
+    matches!(
+        state,
+        "completed_reported"
+            | "completed"
+            | "failed_terminal"
+            | "cancelled"
+            | "cancelled_by_server"
+            | "expired"
+            | "expired_before_handoff"
+            | "delivery_uncertain"
+            | "ambiguous_handoff"
+    )
+}
+
+fn reprint_local_job(
+    engine: &mut AgentEngine<SharedRuntimeExecutor>,
+    original_job_id: &str,
+    idempotency_key: &str,
+    confirmed: bool,
+    paused: bool,
+) -> Result<LocalJobAccepted, ControlFailure> {
+    if paused {
+        return Err(control_failure("agent_paused", "the agent is paused"));
+    }
+    if !confirmed {
+        return Err(control_failure(
+            "confirmation_required",
+            "reprint requires explicit confirmation",
+        ));
+    }
+    let original = engine
+        .store()
+        .get_job(original_job_id)
+        .map_err(storage_control_failure)?
+        .ok_or_else(|| control_failure("job_not_found", "the original job was not found"))?;
+    if !is_terminal_job_state(&original.state) {
+        return Err(control_failure(
+            "job_not_terminal",
+            "only a finished print attempt can be reprinted",
+        ));
+    }
+    let _printer = resolve_present_printer(engine.store(), &original.printer_id)?;
+    if !std::fs::metadata(&original.content_path).is_ok_and(|metadata| metadata.is_file()) {
+        return Err(control_failure(
+            "content_unavailable",
+            "retained print content is no longer available",
+        ));
+    }
+    let (job_id, digest) = reprint_job_identity(original_job_id, idempotency_key);
+    let accepted = piqae_agent_storage::AcceptedJob {
+        job_id,
+        submission_id: format!("reprint:{original_job_id}:{digest}"),
+        printer_id: original.printer_id,
+        printer_native_id: original.printer_native_id,
+        title: format!(
+            "Reprint — {}",
+            original.title.chars().take(240).collect::<String>()
+        ),
+        content_sha256: original.content_sha256,
+        content_path: original.content_path,
+        content_kind: original.content_kind,
+        options_json: original.options_json,
+        expires_unix_ms: None,
+        accepted_unix_ms: Utc::now().timestamp_millis(),
+        cloud_managed: false,
+    };
+    let job = engine
+        .accept(&accepted)
+        .map_err(|error| control_failure("reprint_failed", &error.to_string()))?;
+    Ok(LocalJobAccepted {
+        job_id: job.job_id,
+        state: job.state,
+    })
+}
+
+fn reprint_job_identity(original_job_id: &str, idempotency_key: &str) -> (String, String) {
+    let digest = hex::encode(Sha256::digest(
+        format!("local-reprint\0{original_job_id}\0{idempotency_key}").as_bytes(),
+    ));
+    (format!("job_reprint_{}", &digest[..32]), digest)
 }
 
 async fn submit_test_page(
@@ -4823,6 +5019,24 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(20)).await;
         assert!(scheduler_observed.load(Ordering::SeqCst));
         shutdown.await.expect("shutdown task");
+    }
+
+    #[test]
+    fn reprint_identity_is_replay_stable_and_bound_to_original_attempt() {
+        let first = reprint_job_identity("job_original", "operator-action-1");
+        assert_eq!(
+            first,
+            reprint_job_identity("job_original", "operator-action-1")
+        );
+        assert_ne!(
+            first,
+            reprint_job_identity("job_original", "operator-action-2")
+        );
+        assert_ne!(
+            first,
+            reprint_job_identity("job_other", "operator-action-1")
+        );
+        assert!(first.0.starts_with("job_reprint_"));
     }
 
     #[test]

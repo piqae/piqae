@@ -6,8 +6,8 @@
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
-    http::{HeaderMap, StatusCode},
-    response::{IntoResponse, Response},
+    http::{HeaderMap, HeaderValue, StatusCode, header},
+    response::{Html, IntoResponse, Redirect, Response},
     routing::{get, post, put},
 };
 use piqae_local_ipc::{
@@ -16,7 +16,12 @@ use piqae_local_ipc::{
     SessionAuthenticator,
 };
 use serde::{Deserialize, Serialize};
-use std::{net::SocketAddr, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    net::SocketAddr,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 use tower_http::limit::RequestBodyLimitLayer;
@@ -84,6 +89,20 @@ pub enum ControlRequest {
         printer_id: String,
         respond_to: oneshot::Sender<Result<LocalPrinterQueue, ControlFailure>>,
     },
+    JobHistory {
+        offset: usize,
+        limit: usize,
+        respond_to: oneshot::Sender<Result<LocalJobHistory, ControlFailure>>,
+    },
+    ReprintJob {
+        job_id: String,
+        idempotency_key: String,
+        confirmed: bool,
+        respond_to: oneshot::Sender<Result<LocalJobAccepted, ControlFailure>>,
+    },
+    ConnectorDetails {
+        respond_to: oneshot::Sender<Result<Vec<LocalConnectorDetail>, ControlFailure>>,
+    },
     TestPage {
         printer_id: String,
         profile_id: String,
@@ -139,6 +158,48 @@ pub enum LocalContent {
 pub struct LocalJobAccepted {
     pub job_id: String,
     pub state: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LocalJobHistory {
+    pub jobs: Vec<LocalHistoryJob>,
+    pub next_offset: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LocalHistoryJob {
+    pub job_id: String,
+    pub printer_id: String,
+    pub title: String,
+    pub state: String,
+    pub native_job_id: Option<String>,
+    pub can_reprint: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LocalConnectorDetail {
+    pub connector_id: String,
+    pub endpoint: String,
+    pub connection: String,
+    pub permission: String,
+    pub allowed_printer_ids: Vec<String>,
+    pub selected_printer_count: usize,
+    /// Present only when connector enrolment records an authenticated,
+    /// operator-safe management destination. Never guess provider paths.
+    pub manage_url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReprintRequest {
+    idempotency_key: String,
+    #[serde(default)]
+    confirmed: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct DashboardSessionCreated {
+    url: String,
+    expires_in_seconds: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -215,6 +276,13 @@ pub enum LocalApiError {
 pub struct LocalApiState {
     authenticator: Arc<SessionAuthenticator>,
     control: mpsc::Sender<ControlRequest>,
+    browser_sessions: Arc<tokio::sync::Mutex<BrowserSessions>>,
+}
+
+#[derive(Debug, Default)]
+struct BrowserSessions {
+    handoffs: BTreeMap<String, Instant>,
+    sessions: BTreeMap<String, Instant>,
 }
 
 impl std::fmt::Debug for LocalApiState {
@@ -223,6 +291,7 @@ impl std::fmt::Debug for LocalApiState {
             .debug_struct("LocalApiState")
             .field("authenticator", &"<redacted>")
             .field("control", &self.control)
+            .field("browser_sessions", &"<redacted>")
             .finish()
     }
 }
@@ -233,6 +302,7 @@ impl LocalApiState {
         Self {
             authenticator: Arc::new(SessionAuthenticator::from_challenge(challenge)),
             control,
+            browser_sessions: Arc::new(tokio::sync::Mutex::new(BrowserSessions::default())),
         }
     }
 }
@@ -275,6 +345,16 @@ pub fn router(state: LocalApiState) -> Router {
             put(confirm_loaded_media),
         )
         .route("/v1/local/printers/{printer_id}/queue", get(printer_queue))
+        .route(
+            "/v1/local/dashboard-sessions",
+            post(create_dashboard_session),
+        )
+        .route("/local/queue", get(open_dashboard))
+        .route("/local/queue/data", get(dashboard_data))
+        .route(
+            "/local/queue/jobs/{job_id}/reprint",
+            post(dashboard_reprint),
+        )
         .route("/v1/local/printers/{printer_id}/test-page", post(test_page))
         .route("/v1/local/pause", post(pause))
         .route("/v1/local/resume", post(resume))
@@ -288,6 +368,215 @@ pub fn router(state: LocalApiState) -> Router {
         // Base64 expansion. URI submissions remain the low-memory path.
         .layer(RequestBodyLimitLayer::new(72 * 1024 * 1024))
         .with_state(state)
+}
+
+const HANDOFF_LIFETIME: Duration = Duration::from_secs(30);
+const BROWSER_SESSION_LIFETIME: Duration = Duration::from_secs(15 * 60);
+
+async fn create_dashboard_session(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+) -> Response {
+    if !authenticate(&state, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let token = uuid::Uuid::new_v4().simple().to_string();
+    {
+        let mut sessions = state.browser_sessions.lock().await;
+        prune_browser_sessions(&mut sessions);
+        sessions
+            .handoffs
+            .insert(token.clone(), Instant::now() + HANDOFF_LIFETIME);
+    }
+    let authority = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .and_then(loopback_authority)
+        .unwrap_or_else(|| "127.0.0.1:39100".to_owned());
+    Json(DashboardSessionCreated {
+        url: format!("http://{authority}/local/queue?handoff={token}"),
+        expires_in_seconds: HANDOFF_LIFETIME.as_secs(),
+    })
+    .into_response()
+}
+
+#[derive(Debug, Deserialize)]
+struct HandoffQuery {
+    handoff: Option<String>,
+    offset: Option<usize>,
+}
+
+async fn open_dashboard(
+    State(state): State<LocalApiState>,
+    Query(query): Query<HandoffQuery>,
+    headers: HeaderMap,
+) -> Response {
+    if dashboard_authenticated(&state, &headers).await {
+        return dashboard_html().into_response();
+    }
+    let Some(handoff) = query.handoff.filter(|value| value.len() <= 64) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let mut sessions = state.browser_sessions.lock().await;
+    prune_browser_sessions(&mut sessions);
+    if sessions.handoffs.remove(&handoff).is_none() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let session = uuid::Uuid::new_v4().simple().to_string();
+    sessions
+        .sessions
+        .insert(session.clone(), Instant::now() + BROWSER_SESSION_LIFETIME);
+    drop(sessions);
+    let mut response = Redirect::to("/local/queue").into_response();
+    if let Ok(cookie) = HeaderValue::from_str(&format!(
+        "piqae_local_session={session}; HttpOnly; SameSite=Strict; Path=/local/queue; Max-Age={}",
+        BROWSER_SESSION_LIFETIME.as_secs()
+    )) {
+        response.headers_mut().insert(header::SET_COOKIE, cookie);
+    }
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
+}
+
+async fn dashboard_data(
+    State(state): State<LocalApiState>,
+    Query(query): Query<HandoffQuery>,
+    headers: HeaderMap,
+) -> Response {
+    if !dashboard_authenticated(&state, &headers).await {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let offset = query.offset.unwrap_or(0).min(1_000_000);
+    let (history_send, history_receive) = oneshot::channel();
+    if state
+        .control
+        .send(ControlRequest::JobHistory {
+            offset,
+            limit: 100,
+            respond_to: history_send,
+        })
+        .await
+        .is_err()
+    {
+        return unavailable();
+    }
+    let (connector_send, connector_receive) = oneshot::channel();
+    if state
+        .control
+        .send(ControlRequest::ConnectorDetails {
+            respond_to: connector_send,
+        })
+        .await
+        .is_err()
+    {
+        return unavailable();
+    }
+    match (history_receive.await, connector_receive.await) {
+        (Ok(Ok(history)), Ok(Ok(connectors))) => {
+            Json(serde_json::json!({"history": history, "connectors": connectors})).into_response()
+        }
+        (Ok(Err(failure)), _) | (_, Ok(Err(failure))) => {
+            (failure_status(&failure.code), Json(failure)).into_response()
+        }
+        _ => unavailable(),
+    }
+}
+
+async fn dashboard_reprint(
+    State(state): State<LocalApiState>,
+    Path(job_id): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<ReprintRequest>,
+) -> Response {
+    if !dashboard_authenticated(&state, &headers).await
+        || headers.get("x-piqae-local-action").is_none()
+    {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    if job_id.len() > 128
+        || request.idempotency_key.is_empty()
+        || request.idempotency_key.len() > 128
+    {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    let (send, receive) = oneshot::channel();
+    if state
+        .control
+        .send(ControlRequest::ReprintJob {
+            job_id,
+            idempotency_key: request.idempotency_key,
+            confirmed: request.confirmed,
+            respond_to: send,
+        })
+        .await
+        .is_err()
+    {
+        return unavailable();
+    }
+    match receive.await {
+        Ok(Ok(accepted)) => (StatusCode::ACCEPTED, Json(accepted)).into_response(),
+        Ok(Err(failure)) => (failure_status(&failure.code), Json(failure)).into_response(),
+        Err(_) => unavailable(),
+    }
+}
+
+async fn dashboard_authenticated(state: &LocalApiState, headers: &HeaderMap) -> bool {
+    let Some(session) = cookie_value(headers, "piqae_local_session") else {
+        return false;
+    };
+    let mut sessions = state.browser_sessions.lock().await;
+    prune_browser_sessions(&mut sessions);
+    sessions
+        .sessions
+        .get(&session)
+        .is_some_and(|expiry| *expiry > Instant::now())
+}
+
+fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
+    headers
+        .get(header::COOKIE)?
+        .to_str()
+        .ok()?
+        .split(';')
+        .map(str::trim)
+        .find_map(|part| {
+            let (key, value) = part.split_once('=')?;
+            (key == name && !value.is_empty() && value.len() <= 64).then(|| value.to_owned())
+        })
+}
+
+fn prune_browser_sessions(sessions: &mut BrowserSessions) {
+    let now = Instant::now();
+    sessions.handoffs.retain(|_, expiry| *expiry > now);
+    sessions.sessions.retain(|_, expiry| *expiry > now);
+}
+
+fn loopback_authority(value: &str) -> Option<String> {
+    if let Ok(address) = value.parse::<SocketAddr>() {
+        return address.ip().is_loopback().then(|| address.to_string());
+    }
+    let port = value.strip_prefix("localhost:")?.parse::<u16>().ok()?;
+    Some(format!("localhost:{port}"))
+}
+
+fn dashboard_html() -> Response {
+    let mut response = Html(include_str!("dashboard.html")).into_response();
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response.headers_mut().insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static(
+            "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+        ),
+    );
+    response.headers_mut().insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
+    response
 }
 
 /// Serves the operational API on a loopback-only socket.
@@ -756,7 +1045,10 @@ fn unavailable() -> Response {
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use axum::{body::Body, http::Request};
+    use axum::{
+        body::{Body, to_bytes},
+        http::Request,
+    };
     use tower::ServiceExt;
 
     fn test_state() -> (LocalApiState, mpsc::Receiver<ControlRequest>) {
@@ -1046,5 +1338,114 @@ mod tests {
             serve(address, state).await,
             Err(LocalApiError::NonLoopback(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn dashboard_handoff_is_authenticated_one_time_and_url_token_is_removed() {
+        let (state, _receive) = test_state();
+        let created = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/local/dashboard-sessions")
+                    .header("authorization", "Bearer secret")
+                    .header("host", "127.0.0.1:49100")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(created.status(), StatusCode::OK);
+        let body = to_bytes(created.into_body(), 4096).await.expect("body");
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        let url = value["url"].as_str().expect("url");
+        assert!(url.starts_with("http://127.0.0.1:49100/local/queue?handoff="));
+        let path = url.strip_prefix("http://127.0.0.1:49100").expect("path");
+
+        let opened = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri(path)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(opened.status(), StatusCode::SEE_OTHER);
+        assert_eq!(opened.headers()[header::LOCATION], "/local/queue");
+        let cookie = opened.headers()[header::SET_COOKIE]
+            .to_str()
+            .expect("cookie");
+        assert!(cookie.contains("HttpOnly"));
+        assert!(cookie.contains("SameSite=Strict"));
+
+        let replay = router(state)
+            .oneshot(
+                Request::builder()
+                    .uri(path)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(replay.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn dashboard_reprint_requires_session_and_explicit_action_header() {
+        let (state, mut receive) = test_state();
+        let session = "browser-session".to_owned();
+        state
+            .browser_sessions
+            .lock()
+            .await
+            .sessions
+            .insert(session.clone(), Instant::now() + BROWSER_SESSION_LIFETIME);
+        let without_action = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/local/queue/jobs/job_1/reprint")
+                    .header("cookie", format!("piqae_local_session={session}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"idempotency_key":"once","confirmed":true}"#))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(without_action.status(), StatusCode::UNAUTHORIZED);
+        assert!(receive.try_recv().is_err());
+
+        let responder = tokio::spawn(async move {
+            if let Some(ControlRequest::ReprintJob {
+                idempotency_key,
+                confirmed,
+                respond_to,
+                ..
+            }) = receive.recv().await
+            {
+                assert_eq!(idempotency_key, "once");
+                assert!(confirmed);
+                let _ = respond_to.send(Ok(LocalJobAccepted {
+                    job_id: "job_reprint".into(),
+                    state: "queued_local".into(),
+                }));
+            }
+        });
+        let accepted = router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/local/queue/jobs/job_1/reprint")
+                    .header("cookie", format!("piqae_local_session={session}"))
+                    .header("x-piqae-local-action", "reprint")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"idempotency_key":"once","confirmed":true}"#))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(accepted.status(), StatusCode::ACCEPTED);
+        responder.await.expect("responder");
     }
 }

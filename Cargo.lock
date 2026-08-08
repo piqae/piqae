@@ -2485,10 +2485,12 @@ dependencies = [
  "piqae-domain",
  "piqae-local-ipc",
  "serde",
+ "serde_json",
  "thiserror",
  "tokio",
  "tower",
  "tower-http",
+ "uuid",
 ]
 
 [[package]]
