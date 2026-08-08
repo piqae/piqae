@@ -94,6 +94,16 @@ lifecycle only, is bound to the stable node identity, and fails closed if prior
 key material is missing or corrupt. Rotation refuses to discard an old key when
 the generation cap is reached.
 
+The control plane retains each encrypted job's tenant-scoped recipient-key
+reference for as long as the encrypted job row exists. The database removes
+that reference transactionally only when the exact job row is actually deleted
+after retention, through its foreign-key cascade. The current source does not
+yet implement the planned metadata-retention deletion worker, so references
+remain conservatively durable and a referenced key cannot be revoked or
+destroyed. Operators must drain retained encrypted-job records before the
+node's bounded keyring reaches its generation cap; rotation fails closed at the
+cap rather than discarding a potentially required private key.
+
 The v3 upgrade does not reinterpret or convert an existing RSA private key.
 RSA envelopes and RSA-sized stored key material fail closed. Before upgrading
 an enrolled Preview node, drain or cancel its v2 encrypted jobs, deploy v3 to
