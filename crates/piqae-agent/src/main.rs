@@ -3707,13 +3707,11 @@ async fn accept_offer_under_lease(
         )
         .into());
     }
-    if !printer.exposed {
-        return Err(OfferRejection::new(
-            "printer_not_exposed",
-            format!("printer is not exposed: {logical_printer_id}"),
-        )
-        .into());
-    }
+    // Cloud access is authorized by the connector grant. `printer_exposure`
+    // predates multi-connector consent and remains a local compatibility
+    // preference; allowing it to veto a connector would make an approved
+    // all-printer grant publish printers that it then cannot use.
+    let mut uses_current_printer_defaults = false;
     if let Some(pin) = &profile_pin {
         let profile = inventory_store
             .named_profile_revision(&printer.printer_id, &pin.profile_id, pin.profile_revision)?
@@ -3736,6 +3734,7 @@ async fn accept_offer_under_lease(
             )
             .into());
         }
+        uses_current_printer_defaults = profile.uses_current_printer_defaults;
         if let ContentDescriptor::EncryptedDownload { manifest, .. } = &offer.content {
             let expected = format!("{}:{}", pin.profile_id, pin.profile_revision);
             if manifest.binding.profile_revision != expected
@@ -3800,7 +3799,7 @@ async fn accept_offer_under_lease(
         &offer.lease_token,
         offer.lease_expires_at.timestamp_millis(),
     )?;
-    if let Some(pin) = profile_pin {
+    if let Some(pin) = profile_pin.filter(|_| !uses_current_printer_defaults) {
         store.pin_job_profile(
             &job_id.to_string(),
             pin.target_id.as_deref(),
@@ -4373,18 +4372,9 @@ async fn discover_cloud_printers(
                 observed_unix_ms,
             )?;
             store.ensure_current_printer_defaults_profile(&stored.printer_id, observed_unix_ms)?;
-            if !store
-                .printer(&stored.printer_id)?
-                .is_some_and(|printer| printer.exposed)
-            {
-                return Ok(None);
-            }
             let profiles = store
                 .named_profiles(&stored.printer_id)?
                 .into_iter()
-                // The generated live-default profile is a local convenience,
-                // not an immutable configuration that cloud routing can pin.
-                .filter(|profile| !profile.uses_current_printer_defaults)
                 .map(|profile| {
                     Ok(PrinterProfileSnapshot {
                         profile_id: profile.profile_id,
@@ -4407,7 +4397,10 @@ async fn discover_cloud_printers(
                         safe_overrides: serde_json::from_str(&profile.safe_overrides_json)?,
                         last_validated_unix_ms: profile.last_validated_unix_ms,
                         last_test_job_id: profile.last_test_job_id,
-                        published: profile.published,
+                        // The generated live-default preset is always usable
+                        // by an authorized connector even though it is not a
+                        // user-published immutable native capture.
+                        published: profile.published || profile.uses_current_printer_defaults,
                     })
                 })
                 .collect::<Result<Vec<_>>>()?;
@@ -5453,14 +5446,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn live_driver_default_profile_is_never_advertised_to_cloud() {
+    async fn discovered_printer_and_live_default_are_cloud_available_without_global_exposure() {
         let mut store = AgentStore::in_memory().expect("store");
-        assert!(
-            discover_cloud_printers(&mut store, &PrinterDiscovery::Fake)
-                .await
-                .expect("discovery")
-                .is_empty()
-        );
+        let first = discover_cloud_printers(&mut store, &PrinterDiscovery::Fake)
+            .await
+            .expect("discovery");
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].profiles.len(), 1);
+        assert_eq!(first[0].profiles[0].name, "Current printer defaults");
+        assert!(first[0].profiles[0].is_default);
+        assert!(first[0].profiles[0].published);
         let printer = store
             .present_printers()
             .expect("printers")
@@ -5476,36 +5471,38 @@ mod tests {
         assert!(profile.uses_current_printer_defaults);
         assert!(!profile.published);
 
-        store
-            .set_printer_exposed(&printer.printer_id, true, 20)
-            .expect("expose");
-        let snapshots = discover_cloud_printers(&mut store, &PrinterDiscovery::Fake)
+        let restarted = discover_cloud_printers(&mut store, &PrinterDiscovery::Fake)
             .await
-            .expect("discovery");
-        assert_eq!(snapshots.len(), 1);
-        assert!(snapshots[0].profiles.is_empty());
+            .expect("restart discovery");
+        assert_eq!(restarted[0].id, first[0].id);
+        assert_eq!(
+            restarted[0].profiles[0].profile_id,
+            first[0].profiles[0].profile_id
+        );
+        assert_eq!(
+            store
+                .named_profiles(&printer.printer_id)
+                .expect("profiles")
+                .len(),
+            1,
+            "refresh must not duplicate the generated preset"
+        );
     }
 
     #[tokio::test]
     async fn connector_sync_uses_shared_approved_printer_identity() {
         let mut node_inventory = AgentStore::in_memory().expect("node inventory");
         // Initial discovery creates the node-owned stable printer identity.
-        assert!(
-            discover_cloud_printers(&mut node_inventory, &PrinterDiscovery::Fake)
-                .await
-                .expect("initial discovery")
-                .is_empty()
-        );
+        let initial = discover_cloud_printers(&mut node_inventory, &PrinterDiscovery::Fake)
+            .await
+            .expect("initial discovery");
+        assert_eq!(initial.len(), 1);
         let printer = node_inventory
             .present_printers()
             .expect("node printers")
             .into_iter()
             .next()
             .expect("fake printer");
-        node_inventory
-            .set_printer_exposed(&printer.printer_id, true, 20)
-            .expect("approve printer");
-
         // Each connector retains an isolated queue database. It must not
         // create a second, unapproved logical printer identity in that store.
         let mut connector_queue = AgentStore::in_memory().expect("connector queue");
@@ -5525,6 +5522,7 @@ mod tests {
         let snapshots = request.printers.expect("printer inventory");
         assert_eq!(snapshots.len(), 1);
         assert_eq!(snapshots[0].id.to_string(), printer.printer_id);
+        assert_eq!(snapshots[0].profiles.len(), 1);
         assert!(
             connector_queue
                 .present_printers()
@@ -5545,6 +5543,22 @@ mod tests {
             printer.native_id
         );
         assert_eq!(request.printer_revision, 1);
+
+        let mut selected_queue = AgentStore::in_memory().expect("selected connector queue");
+        let selected = std::iter::once("prn_some_other_printer".to_owned()).collect();
+        let request = prepare_sync_request(
+            &mut selected_queue,
+            &mut node_inventory,
+            &PrinterDiscovery::Fake,
+            AgentId::new(),
+            Utc::now(),
+            false,
+            true,
+            Some(&selected),
+        )
+        .await
+        .expect("selected connector sync");
+        assert!(request.printers.expect("printer inventory").is_empty());
     }
 
     #[test]
