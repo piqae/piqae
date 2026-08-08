@@ -112,8 +112,11 @@ The current source and virtual-test path provides:
 4. Local validation of the authenticated target/profile pin.
 5. Bounded decryption into the existing owner-restricted content store and
    immediate ciphertext staging cleanup, including failure paths. Decrypted
-   files have a durable SQLite association, a maximum 15-minute retry window,
-   and startup/periodic orphan cleanup.
+   files have a durable SQLite association and remain available across restart,
+   offline-printer and retry periods. Startup and periodic cleanup remove them
+   only after a truthful terminal state (`completed_reported`,
+   `delivery_uncertain`, `failed_terminal`, `cancelled`, or `expired`). A
+   spooler handoff alone does not authorize plaintext deletion.
 
 Before production promotion this still requires hardware-backed non-exportable key options,
 lost-key/node-replacement UX, fleet soak and crash-injection evidence, physical
