@@ -4730,8 +4730,8 @@ mod routing_repository_tests {
         let printer = PrinterId::new();
         let agent = AgentId::new();
         let manifest = piqae_domain::EncryptedContentManifest {
-            version: "piqae-encrypted-job-v3".into(),
-            suite: "ECDH-P256+HKDF-SHA256+A256GCMKW+A256GCM".into(),
+            version: piqae_domain::ENCRYPTED_JOB_V3_VERSION.into(),
+            suite: piqae_domain::ENCRYPTED_JOB_V3_SUITE.into(),
             binding: piqae_domain::EncryptedContentBinding {
                 envelope_id: "env_012345678901234567890123".into(),
                 workspace_id: workspace.to_string(),
@@ -4749,7 +4749,7 @@ mod routing_repository_tests {
             iv: "A".repeat(16),
             recipients: vec![piqae_domain::EncryptedContentRecipient {
                 key_id: "cek_test".into(),
-                algorithm: "ECDH-P256-HKDF-SHA256".into(),
+                algorithm: piqae_domain::ENCRYPTED_JOB_V3_RECIPIENT_ALGORITHM.into(),
                 ephemeral_public_key: format!("B{}", "A".repeat(86)),
                 hkdf_salt: "A".repeat(43),
                 key_wrap_iv: "A".repeat(16),

@@ -44,6 +44,16 @@ rejected even under a new idempotency key.
 
 ## Envelope properties
 
+V3 uses these exact, case-sensitive identifiers from the OpenAPI contract:
+
+- Envelope suite: `ECDH-ES-P256+HKDF-SHA256+A256GCMKW+A256GCM`
+- Wrapped-key recipient algorithm: `ECDH-ES-P256+HKDF-SHA256+A256GCMKW`
+- Registered node-key capability: `ECDH-P256-HKDF-SHA256`
+
+The node-key capability describes the reusable public key; it is intentionally
+distinct from the per-recipient wrapping algorithm. SDKs and nodes must reject
+aliases rather than silently reinterpret them.
+
 - A fresh 256-bit AES-GCM content key and 96-bit IV are generated per job.
 - PDF or RAW bytes are encrypted once with AES-256-GCM.
 - Tenant, envelope ID, printer, target, profile revision, complete options,

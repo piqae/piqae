@@ -1725,7 +1725,7 @@ async fn validate_encrypted_job(
     let recipients_valid = (1..=32).contains(&manifest.recipients.len())
         && recipient_ids.len() == manifest.recipients.len()
         && manifest.recipients.iter().all(|recipient| {
-            recipient.algorithm == "ECDH-P256-HKDF-SHA256"
+            recipient.algorithm == piqae_domain::ENCRYPTED_JOB_V3_RECIPIENT_ALGORITHM
                 && URL_SAFE_NO_PAD
                     .decode(&recipient.ephemeral_public_key)
                     .is_ok_and(|value| value.len() == 65 && value.first() == Some(&4))
@@ -1749,8 +1749,8 @@ async fn validate_encrypted_job(
         || manifest.binding.raw_authorized != (request.content_type == ContentKind::Raw)
         || binding_expiry <= Utc::now()
         || binding_expiry > Utc::now() + Duration::days(14)
-        || manifest.version != "piqae-encrypted-job-v3"
-        || manifest.suite != "ECDH-P256+HKDF-SHA256+A256GCMKW+A256GCM"
+        || manifest.version != piqae_domain::ENCRYPTED_JOB_V3_VERSION
+        || manifest.suite != piqae_domain::ENCRYPTED_JOB_V3_SUITE
         || !manifest.binding.envelope_id.starts_with("env_")
         || !(24..=259).contains(&manifest.binding.envelope_id.len())
         || !manifest.binding.envelope_id[4..]
