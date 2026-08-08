@@ -365,6 +365,17 @@ pub struct StoredAgent {
     pub last_error_code: Option<String>,
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct StoredNodeDiagnostic {
+    pub request_id: String,
+    pub node_id: AgentId,
+    pub state: String,
+    pub report: Option<serde_json::Value>,
+    pub requested_at: DateTime<Utc>,
+    pub received_at: Option<DateTime<Utc>>,
+    pub expires_at: DateTime<Utc>,
+}
+
 /// A tenant-scoped authorization from one physical node installation.
 /// Installation identifiers and other tenants' connectors are intentionally
 /// excluded from this public projection.
@@ -2892,6 +2903,107 @@ impl PostgresStore {
         }
         transaction.commit().await?;
         Ok(())
+    }
+
+    pub async fn create_node_diagnostic(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        request_id: &str,
+    ) -> Result<StoredNodeDiagnostic, StorageError> {
+        let row = sqlx::query(
+            "INSERT INTO node_diagnostics
+                 (request_id, workspace_id, environment_id, agent_id, state)
+             SELECT $4, $1, $2, $3, 'requested'
+             WHERE EXISTS (
+                 SELECT 1 FROM agents WHERE id = $3 AND workspace_id = $1
+                   AND environment_id = $2 AND revoked_at IS NULL
+             )
+             RETURNING request_id, agent_id, state, report, requested_at, received_at, expires_at",
+        )
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(agent_id.to_string())
+        .bind(request_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(StorageError::NotFound)?;
+        diagnostic_from_row(&row)
+    }
+
+    pub async fn store_node_diagnostic(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        report: &piqae_protocol::agent::DiagnosticReport,
+    ) -> Result<(), StorageError> {
+        let value = serde_json::to_value(report)?;
+        if value.to_string().len() > 16_384 {
+            return Err(StorageError::InvalidData(
+                "diagnostic report exceeds limit".into(),
+            ));
+        }
+        let result = sqlx::query(
+            "UPDATE node_diagnostics SET state = $5, report = $6, received_at = now()
+             WHERE request_id = $4 AND workspace_id = $1 AND environment_id = $2
+               AND agent_id = $3 AND expires_at > now()",
+        )
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(agent_id.to_string())
+        .bind(&report.request_id)
+        .bind(&report.state)
+        .bind(value)
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() == 0 {
+            return Err(StorageError::NotFound);
+        }
+        Ok(())
+    }
+
+    pub async fn list_node_diagnostics(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+    ) -> Result<Vec<StoredNodeDiagnostic>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT request_id, agent_id, state, report, requested_at, received_at, expires_at
+             FROM node_diagnostics WHERE workspace_id = $1 AND environment_id = $2
+               AND agent_id = $3 AND expires_at > now()
+             ORDER BY requested_at DESC LIMIT 50",
+        )
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(agent_id.to_string())
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(diagnostic_from_row).collect()
+    }
+
+    pub async fn get_node_diagnostic(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        request_id: &str,
+    ) -> Result<StoredNodeDiagnostic, StorageError> {
+        let row = sqlx::query(
+            "SELECT request_id, agent_id, state, report, requested_at, received_at, expires_at
+             FROM node_diagnostics WHERE request_id = $4 AND workspace_id = $1
+               AND environment_id = $2 AND agent_id = $3 AND expires_at > now()",
+        )
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(agent_id.to_string())
+        .bind(request_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(StorageError::NotFound)?;
+        diagnostic_from_row(&row)
     }
 
     pub async fn enqueue_agent_command(
@@ -7269,6 +7381,21 @@ fn agent_from_row(row: &PgRow) -> Result<StoredAgent, StorageError> {
         executor_crashes: u64::try_from(row.try_get::<i64, _>("executor_crashes")?)
             .map_err(|error| StorageError::InvalidData(format!("executor crash count: {error}")))?,
         last_error_code: row.try_get("last_error_code")?,
+    })
+}
+
+fn diagnostic_from_row(row: &PgRow) -> Result<StoredNodeDiagnostic, StorageError> {
+    let node_id: String = row.try_get("agent_id")?;
+    Ok(StoredNodeDiagnostic {
+        request_id: row.try_get("request_id")?,
+        node_id: node_id.parse().map_err(|error| {
+            StorageError::InvalidData(format!("diagnostic node id `{node_id}`: {error}"))
+        })?,
+        state: row.try_get("state")?,
+        report: row.try_get("report")?,
+        requested_at: row.try_get("requested_at")?,
+        received_at: row.try_get("received_at")?,
+        expires_at: row.try_get("expires_at")?,
     })
 }
 

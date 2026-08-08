@@ -302,6 +302,15 @@ pub async fn request_node_diagnostics(
     let request_id = format!("diag_{}", ulid::Ulid::new());
     state
         .repository
+        .create_node_diagnostic(
+            tenant.workspace_id,
+            tenant.environment_id,
+            node_id,
+            &request_id,
+        )
+        .await?;
+    state
+        .repository
         .enqueue_agent_command(
             tenant.workspace_id,
             tenant.environment_id,
@@ -326,6 +335,39 @@ pub async fn request_node_diagnostics(
         }),
     )
         .into_response())
+}
+
+pub async fn list_node_diagnostics(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(node_id): Path<AgentId>,
+) -> Result<Json<Vec<piqae_storage_postgres::StoredNodeDiagnostic>>, AppError> {
+    let tenant = authenticate_native(&state, &headers, Scope::AgentsRead).await?;
+    Ok(Json(
+        state
+            .repository
+            .list_node_diagnostics(tenant.workspace_id, tenant.environment_id, node_id)
+            .await?,
+    ))
+}
+
+pub async fn get_node_diagnostic(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((node_id, request_id)): Path<(AgentId, String)>,
+) -> Result<Json<piqae_storage_postgres::StoredNodeDiagnostic>, AppError> {
+    let tenant = authenticate_native(&state, &headers, Scope::AgentsRead).await?;
+    Ok(Json(
+        state
+            .repository
+            .get_node_diagnostic(
+                tenant.workspace_id,
+                tenant.environment_id,
+                node_id,
+                &request_id,
+            )
+            .await?,
+    ))
 }
 
 async fn enqueue_node_command(
@@ -2243,6 +2285,30 @@ pub async fn agent_sync(
             "The sync protocol or event batch is outside supported limits.",
         ));
     }
+    if request.diagnostics.len() > 8
+        || request.diagnostics.iter().any(|report| {
+            !report.request_id.starts_with("diag_")
+                || report.request_id.len() > 64
+                || !matches!(report.state.as_str(), "complete" | "failed")
+                || report.agent_version.len() > 64
+                || report.platform.len() > 32
+                || report.architecture.len() > 32
+                || report
+                    .last_error_code
+                    .as_deref()
+                    .is_some_and(|code| code.len() > 128 || !code.is_ascii())
+                || report
+                    .collection_error_code
+                    .as_deref()
+                    .is_some_and(|code| code.len() > 128 || !code.is_ascii())
+                || serde_json::to_vec(report).map_or(true, |value| value.len() > 16_384)
+        })
+    {
+        return Err(AppError::invalid(
+            "invalid_agent_diagnostics",
+            "The diagnostic report batch is outside supported limits.",
+        ));
+    }
     let now = Utc::now();
     if request.health.started_at > request.health.observed_at
         || request.health.observed_at > now + chrono::TimeDelta::minutes(5)
@@ -2337,6 +2403,24 @@ pub async fn agent_sync(
             printers.as_deref(),
         )
         .await?;
+    let mut acknowledged_diagnostics = Vec::with_capacity(request.diagnostics.len());
+    for report in &request.diagnostics {
+        match state
+            .repository
+            .store_node_diagnostic(
+                tenant.workspace_id,
+                tenant.environment_id,
+                request.agent_id,
+                report,
+            )
+            .await
+        {
+            Ok(()) | Err(crate::repository::RepositoryError::NotFound) => {
+                acknowledged_diagnostics.push(report.request_id.clone());
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
     recover_waiting_target_jobs(&state, tenant).await?;
     for event in &request.events {
         match state
@@ -2461,6 +2545,7 @@ pub async fn agent_sync(
         commands: command_batch.commands,
         candidate_jobs,
         next_poll_after_ms,
+        acknowledged_diagnostics,
     }))
 }
 

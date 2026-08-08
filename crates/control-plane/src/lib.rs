@@ -472,7 +472,11 @@ fn node_operator_router() -> Router<AppState> {
         .route("/v1/nodes/{node_id}/resume", post(api::resume_node))
         .route(
             "/v1/nodes/{node_id}/diagnostics",
-            post(api::request_node_diagnostics),
+            get(api::list_node_diagnostics).post(api::request_node_diagnostics),
+        )
+        .route(
+            "/v1/nodes/{node_id}/diagnostics/{request_id}",
+            get(api::get_node_diagnostic),
         )
         .route(
             "/v1/nodes/{node_id}/update",
@@ -792,6 +796,7 @@ mod tests {
             },
             printers: None,
             events: Vec::new(),
+            diagnostics: Vec::new(),
         })
         .expect("sync body");
 
@@ -1198,6 +1203,7 @@ mod tests {
             },
             printers: None,
             events: Vec::new(),
+            diagnostics: Vec::new(),
         };
         let body = serde_json::to_vec(&request).expect("sync JSON");
         let response = application
@@ -1351,6 +1357,7 @@ mod tests {
             },
             printers: Some(vec![profiled_printer_snapshot(printer_id)]),
             events: Vec::new(),
+            diagnostics: Vec::new(),
         };
         let body = serde_json::to_vec(&request).expect("sync JSON");
         let sync = application
@@ -1485,6 +1492,7 @@ mod tests {
             },
             printers: Some(vec![profiled_printer_snapshot(printer_id)]),
             events: Vec::new(),
+            diagnostics: Vec::new(),
         };
         let body = serde_json::to_vec(&sync_request).expect("sync JSON");
         let response = application
@@ -1659,6 +1667,7 @@ mod tests {
             },
             printers: Some(vec![profiled_printer_snapshot(printer_id)]),
             events: Vec::new(),
+            diagnostics: Vec::new(),
         };
         let reconnect_body = serde_json::to_vec(&reconnect).expect("reconnect JSON");
         let reconnect_response = application
@@ -2703,6 +2712,7 @@ mod tests {
             },
             printers: None,
             events: Vec::new(),
+            diagnostics: Vec::new(),
         };
         let sync_body = serde_json::to_vec(&sync).expect("sync JSON");
         let sync_response = application

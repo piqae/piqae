@@ -3292,6 +3292,7 @@ struct SyncContext<'a> {
 async fn sync_succeeded(response: AgentSyncResponse, context: SyncContext<'_>) -> Duration {
     let AgentSyncResponse {
         acknowledged_event_cursor,
+        acknowledged_diagnostics,
         command_cursor,
         commands,
         candidate_jobs,
@@ -3301,6 +3302,7 @@ async fn sync_succeeded(response: AgentSyncResponse, context: SyncContext<'_>) -
     *context.failures = 0;
     *context.connection.write().await = ConnectionState::Connected;
     apply_event_acknowledgement(context.store, acknowledged_event_cursor);
+    acknowledge_diagnostics(context.store, &acknowledged_diagnostics);
     apply_commands(context.store, context.paused, commands, command_cursor);
     for offer in candidate_jobs {
         if let Err(error) = accept_offer(
@@ -3375,11 +3377,77 @@ fn apply_command(
             info!(%version, "signed update is available");
         }
         AgentCommand::CollectDiagnostics { request_id } => {
-            store.set_setting("diagnostics_request_id", &request_id)?;
-            info!(%request_id, "redacted diagnostics collection requested");
+            collect_diagnostics(store, &request_id)?;
+            info!(%request_id, "bounded redacted diagnostics collected");
         }
     }
     Ok(())
+}
+
+const MAX_PENDING_DIAGNOSTICS: usize = 8;
+
+fn pending_diagnostics(
+    store: &AgentStore,
+) -> Result<Vec<piqae_protocol::agent::DiagnosticReport>, StorageError> {
+    let Some(encoded) = store.setting("pending_diagnostics")? else {
+        return Ok(Vec::new());
+    };
+    serde_json::from_str(&encoded).map_err(StorageError::from)
+}
+
+fn collect_diagnostics(store: &mut AgentStore, request_id: &str) -> Result<(), StorageError> {
+    let counts = store.queue_counts();
+    let integrity = store.integrity_check();
+    let health = store.failure_health();
+    let collection_failed = counts.is_err() || integrity.is_err() || health.is_err();
+    let (queued_jobs, active_jobs) = counts.map_or((0, 0), |value| (value.queued, value.active));
+    let sqlite_integrity_ok = integrity.unwrap_or(false);
+    let (executor_crashes, last_error_code) = health.unwrap_or((0, None));
+    let report = piqae_protocol::agent::DiagnosticReport {
+        request_id: request_id.to_owned(),
+        observed_at: Utc::now(),
+        state: if collection_failed {
+            "failed"
+        } else {
+            "complete"
+        }
+        .into(),
+        agent_version: env!("CARGO_PKG_VERSION").into(),
+        platform: std::env::consts::OS.into(),
+        architecture: std::env::consts::ARCH.into(),
+        queued_jobs,
+        active_jobs,
+        sqlite_integrity_ok,
+        executor_crashes,
+        last_error_code,
+        collection_error_code: collection_failed.then(|| "diagnostic_collection_failed".into()),
+    };
+    let mut reports = pending_diagnostics(store)?;
+    reports.retain(|existing| existing.request_id != request_id);
+    reports.push(report);
+    if reports.len() > MAX_PENDING_DIAGNOSTICS {
+        reports.drain(..reports.len() - MAX_PENDING_DIAGNOSTICS);
+    }
+    store.set_setting("pending_diagnostics", &serde_json::to_string(&reports)?)
+}
+
+fn acknowledge_diagnostics(store: &mut AgentStore, acknowledged: &[String]) {
+    if acknowledged.is_empty() {
+        return;
+    }
+    let Ok(mut reports) = pending_diagnostics(store) else {
+        warn!("diagnostic acknowledgement could not read durable reports");
+        return;
+    };
+    reports.retain(|report| !acknowledged.contains(&report.request_id));
+    match serde_json::to_string(&reports) {
+        Ok(encoded) => {
+            if let Err(error) = store.set_setting("pending_diagnostics", &encoded) {
+                warn!(%error, "diagnostic acknowledgement could not be persisted");
+            }
+        }
+        Err(error) => warn!(%error, "diagnostic acknowledgement could not be encoded"),
+    }
 }
 
 #[allow(
@@ -4149,6 +4217,7 @@ fn sync_request(
         },
         printers,
         events,
+        diagnostics: pending_diagnostics(store)?,
     })
 }
 
@@ -5322,6 +5391,44 @@ mod tests {
             .parse::<usize>()
             .expect("numeric offset");
         assert_eq!(&pdf[xref..xref + 4], b"xref");
+    }
+
+    #[test]
+    fn remote_diagnostics_are_bounded_redacted_durable_and_acknowledged() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let database = directory.path().join("diagnostics.sqlite");
+        {
+            let mut store = AgentStore::open(&database).expect("store");
+            for index in 0..10 {
+                collect_diagnostics(&mut store, &format!("diag_{index}"))
+                    .expect("collect diagnostic");
+            }
+            let reports = pending_diagnostics(&store).expect("pending diagnostics");
+            assert_eq!(reports.len(), MAX_PENDING_DIAGNOSTICS);
+            assert_eq!(reports[0].request_id, "diag_2");
+            let encoded = serde_json::to_string(&reports).expect("encoded reports");
+            for forbidden in [
+                "local.token",
+                "content_path",
+                "lease_token",
+                "signed_url",
+                "native_blob",
+            ] {
+                assert!(!encoded.contains(forbidden));
+            }
+        }
+        let mut restarted = AgentStore::open(&database).expect("restart store");
+        assert_eq!(
+            pending_diagnostics(&restarted)
+                .expect("restart pending")
+                .len(),
+            8
+        );
+        acknowledge_diagnostics(&mut restarted, &["diag_2".into()]);
+        assert_eq!(
+            pending_diagnostics(&restarted).expect("ack pending").len(),
+            7
+        );
     }
 
     #[test]

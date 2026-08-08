@@ -16,11 +16,11 @@ use piqae_storage_postgres::{
     NewDeviceAuthorization, NodeUpdatePolicy, NodeUpdateState, PostgresStore, StorageError,
     StoredAgent, StoredAgentCommandBatch, StoredApiKey, StoredBillingSummary,
     StoredConnectSessionPreview, StoredContentEncryptionKey, StoredDeviceAuthorization,
-    StoredNodeConnector, StoredNodeUpdate, StoredPlatformAccount, StoredPrinter, StoredStock,
-    StoredTarget, StoredTargetBinding, StoredTenantEvent, StoredUpload, StoredUsageSummary,
-    StoredWebhook, StoredWebhookDelivery, StripeBillingEvent, StripeProjectionResult,
-    SyncedPrinter, UpsertedPlatformAccount, WebhookDeliveryWork, WorkOsIdentityEvent,
-    WorkOsProjectionResult,
+    StoredNodeConnector, StoredNodeDiagnostic, StoredNodeUpdate, StoredPlatformAccount,
+    StoredPrinter, StoredStock, StoredTarget, StoredTargetBinding, StoredTenantEvent, StoredUpload,
+    StoredUsageSummary, StoredWebhook, StoredWebhookDelivery, StripeBillingEvent,
+    StripeProjectionResult, SyncedPrinter, UpsertedPlatformAccount, WebhookDeliveryWork,
+    WorkOsIdentityEvent, WorkOsProjectionResult,
 };
 use sha2::Digest as _;
 use std::{
@@ -206,6 +206,33 @@ pub trait Repository: Send + Sync + 'static {
         health: &piqae_protocol::agent::AgentHealth,
         printers: Option<&[SyncedPrinter]>,
     ) -> Result<(), RepositoryError>;
+    async fn create_node_diagnostic(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        request_id: &str,
+    ) -> Result<StoredNodeDiagnostic, RepositoryError>;
+    async fn store_node_diagnostic(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        report: &piqae_protocol::agent::DiagnosticReport,
+    ) -> Result<(), RepositoryError>;
+    async fn list_node_diagnostics(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+    ) -> Result<Vec<StoredNodeDiagnostic>, RepositoryError>;
+    async fn get_node_diagnostic(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        request_id: &str,
+    ) -> Result<StoredNodeDiagnostic, RepositoryError>;
     async fn enqueue_agent_command(
         &self,
         workspace_id: WorkspaceId,
@@ -835,6 +862,53 @@ impl Repository for PostgresStore {
         )
         .await
         .map_err(Into::into)
+    }
+
+    async fn create_node_diagnostic(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        request_id: &str,
+    ) -> Result<StoredNodeDiagnostic, RepositoryError> {
+        Self::create_node_diagnostic(self, workspace_id, environment_id, agent_id, request_id)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn store_node_diagnostic(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        report: &piqae_protocol::agent::DiagnosticReport,
+    ) -> Result<(), RepositoryError> {
+        Self::store_node_diagnostic(self, workspace_id, environment_id, agent_id, report)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn list_node_diagnostics(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+    ) -> Result<Vec<StoredNodeDiagnostic>, RepositoryError> {
+        Self::list_node_diagnostics(self, workspace_id, environment_id, agent_id)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn get_node_diagnostic(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        request_id: &str,
+    ) -> Result<StoredNodeDiagnostic, RepositoryError> {
+        Self::get_node_diagnostic(self, workspace_id, environment_id, agent_id, request_id)
+            .await
+            .map_err(Into::into)
     }
 
     async fn archive_platform_account(
@@ -2178,6 +2252,7 @@ struct MemoryState {
     agent_nonces: HashMap<(AgentId, String), DateTime<Utc>>,
     agent_event_receipts: HashSet<(AgentId, EventId)>,
     agent_commands: HashMap<AgentId, Vec<MemoryAgentCommand>>,
+    node_diagnostics: HashMap<String, (WorkspaceId, EnvironmentId, StoredNodeDiagnostic)>,
     next_agent_command_cursor: u64,
     leases: HashMap<JobId, (AgentId, Uuid, String, DateTime<Utc>)>,
     job_acceptances: HashMap<JobId, MemoryJobAcceptance>,
@@ -2524,6 +2599,111 @@ impl Repository for MemoryRepository {
             }
         }
         Ok(())
+    }
+
+    async fn create_node_diagnostic(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        request_id: &str,
+    ) -> Result<StoredNodeDiagnostic, RepositoryError> {
+        let mut state = self.state.write().await;
+        state
+            .agents
+            .get(&agent_id)
+            .filter(|(workspace, environment, _)| {
+                *workspace == workspace_id && *environment == environment_id
+            })
+            .ok_or(RepositoryError::NotFound)?;
+        let requested_at = Utc::now();
+        let diagnostic = StoredNodeDiagnostic {
+            request_id: request_id.into(),
+            node_id: agent_id,
+            state: "requested".into(),
+            report: None,
+            requested_at,
+            received_at: None,
+            expires_at: requested_at + chrono::TimeDelta::days(14),
+        };
+        state.node_diagnostics.insert(
+            request_id.into(),
+            (workspace_id, environment_id, diagnostic.clone()),
+        );
+        Ok(diagnostic)
+    }
+
+    async fn store_node_diagnostic(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        report: &piqae_protocol::agent::DiagnosticReport,
+    ) -> Result<(), RepositoryError> {
+        let mut state = self.state.write().await;
+        let (_, _, diagnostic) = state
+            .node_diagnostics
+            .get_mut(&report.request_id)
+            .filter(|(workspace, environment, diagnostic)| {
+                *workspace == workspace_id
+                    && *environment == environment_id
+                    && diagnostic.node_id == agent_id
+            })
+            .ok_or(RepositoryError::NotFound)?;
+        diagnostic.state.clone_from(&report.state);
+        diagnostic.report = Some(
+            serde_json::to_value(report)
+                .map_err(|error| RepositoryError::Persistence(error.to_string()))?,
+        );
+        diagnostic.received_at = Some(Utc::now());
+        Ok(())
+    }
+
+    async fn list_node_diagnostics(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+    ) -> Result<Vec<StoredNodeDiagnostic>, RepositoryError> {
+        let mut reports = self
+            .state
+            .read()
+            .await
+            .node_diagnostics
+            .values()
+            .filter(|(workspace, environment, diagnostic)| {
+                *workspace == workspace_id
+                    && *environment == environment_id
+                    && diagnostic.node_id == agent_id
+                    && diagnostic.expires_at > Utc::now()
+            })
+            .map(|(_, _, diagnostic)| diagnostic.clone())
+            .collect::<Vec<_>>();
+        reports.sort_by_key(|report| std::cmp::Reverse(report.requested_at));
+        reports.truncate(50);
+        Ok(reports)
+    }
+
+    async fn get_node_diagnostic(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        request_id: &str,
+    ) -> Result<StoredNodeDiagnostic, RepositoryError> {
+        self.state
+            .read()
+            .await
+            .node_diagnostics
+            .get(request_id)
+            .filter(|(workspace, environment, diagnostic)| {
+                *workspace == workspace_id
+                    && *environment == environment_id
+                    && diagnostic.node_id == agent_id
+                    && diagnostic.expires_at > Utc::now()
+            })
+            .map(|(_, _, diagnostic)| diagnostic.clone())
+            .ok_or(RepositoryError::NotFound)
     }
 
     async fn enqueue_agent_command(
@@ -5110,6 +5290,52 @@ mod routing_repository_tests {
                 .await
                 .routing_attempts
                 .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn diagnostic_reports_are_durable_tenant_scoped_projections() {
+        let repository = MemoryRepository::default();
+        let workspace = WorkspaceId::new();
+        let environment = EnvironmentId::new();
+        let other_workspace = WorkspaceId::new();
+        let node = AgentId::new();
+        repository
+            .add_printer(workspace, environment, PrinterId::new(), node)
+            .await;
+        repository
+            .create_node_diagnostic(workspace, environment, node, "diag_test")
+            .await
+            .expect("request diagnostic");
+        let report = piqae_protocol::agent::DiagnosticReport {
+            request_id: "diag_test".into(),
+            observed_at: Utc::now(),
+            state: "complete".into(),
+            agent_version: "test".into(),
+            platform: "test".into(),
+            architecture: "test".into(),
+            queued_jobs: 1,
+            active_jobs: 0,
+            sqlite_integrity_ok: true,
+            executor_crashes: 2,
+            last_error_code: Some("executor_crashed".into()),
+            collection_error_code: None,
+        };
+        repository
+            .store_node_diagnostic(workspace, environment, node, &report)
+            .await
+            .expect("store report");
+        let stored = repository
+            .get_node_diagnostic(workspace, environment, node, "diag_test")
+            .await
+            .expect("get report");
+        assert_eq!(stored.state, "complete");
+        assert!(stored.report.is_some());
+        assert!(
+            repository
+                .get_node_diagnostic(other_workspace, environment, node, "diag_test")
+                .await
+                .is_err()
         );
     }
 }
