@@ -17,6 +17,17 @@ class CiChangedPathsTests(unittest.TestCase):
         self.assertTrue(sdk["sdk"])
         self.assertFalse(sdk["web"] or sdk["macos_rust"] or sdk["windows_rust"])
 
+    def test_mcp_changes_select_javascript_package_checks(self) -> None:
+        selected = classify(["apps/mcp/src/server.ts"])
+        self.assertTrue(selected["sdk"])
+        self.assertFalse(
+            selected["web"] or selected["macos_rust"] or selected["windows_rust"]
+        )
+
+    def test_mcp_release_workflow_selects_javascript_package_checks(self) -> None:
+        selected = classify([".github/workflows/mcp-release.yml"])
+        self.assertTrue(selected["sdk"] and selected["release_tooling"])
+
     def test_shared_agent_change_checks_both_native_platforms(self) -> None:
         selected = classify(["crates/protocol/src/lib.rs"])
         self.assertTrue(selected["rust_shared"])

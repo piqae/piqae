@@ -232,7 +232,7 @@ jobs:
             --config deploy/cloudflare/domain-router/wrangler.jsonc
 
   sdk:
-    name: SDK
+    name: SDK and MCP
     needs: changes
     if: needs.changes.outputs.sdk == 'true'
     runs-on: ${{ vars.PIQAE_CI_LINUX_RUNNER || 'ubuntu-latest' }}
@@ -256,6 +256,12 @@ jobs:
           pnpm --filter @piqae/sdk lint
       - name: Install the packed SDK in a clean consumer
         run: pnpm --filter @piqae/sdk smoke:package
+      - name: Validate the MCP package
+        run: |
+          pnpm --filter @piqae/mcp-server check
+          pnpm --filter @piqae/mcp-server test
+          pnpm --filter @piqae/mcp-server format:check
+          pnpm --filter @piqae/mcp-server smoke:package
 
   supply-chain:
     name: Supply chain
