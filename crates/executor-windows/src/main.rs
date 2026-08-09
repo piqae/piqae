@@ -169,7 +169,6 @@ mod platform {
                 Ok(ExecutorResult::Capabilities {
                     capabilities,
                     native_options: std::collections::BTreeMap::new(),
-                    driver_fingerprint: None,
                 })
             }
             ExecutorOperation::ListJobs { native_printer_id } => {
@@ -222,15 +221,6 @@ mod platform {
                 native_printer_id,
                 native_job_id,
             } => cancel(&native_printer_id, &native_job_id),
-        }
-    }
-
-    fn native_profile_backend_unavailable(message: &str) -> ExecutorError {
-        ExecutorError {
-            code: "native_profile_backend_unavailable".into(),
-            message: message.into(),
-            retryable: false,
-            handoff_may_have_succeeded: false,
         }
     }
 
@@ -387,6 +377,7 @@ mod platform {
                     state: PrinterState::Unknown,
                     capabilities: PrinterCapabilities::default(),
                     native_options: std::collections::BTreeMap::new(),
+                    driver_fingerprint: None,
                 })
                 .collect();
             Ok(ExecutorResult::Printers { printers })
