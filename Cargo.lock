@@ -2600,6 +2600,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "piqae-support-packs"
+version = "0.1.11"
+dependencies = [
+ "ed25519-dalek",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+]
+
+[[package]]
 name = "piqae-update-guardian"
 version = "0.1.11"
 dependencies = [
