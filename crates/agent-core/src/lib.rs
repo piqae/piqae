@@ -496,19 +496,29 @@ impl<E: Executor, C: Clock> AgentEngine<E, C> {
     }
 
     fn validate_job_options(&mut self, job: &LocalJob) -> Result<Option<JobOptions>, AgentError> {
-        let options: JobOptions = serde_json::from_str(&job.options_json)?;
+        let options: JobOptions = match serde_json::from_str(&job.options_json) {
+            Ok(options) => options,
+            Err(error) => {
+                self.fail_invalid_job_options(job, &error.to_string())?;
+                return Ok(None);
+            }
+        };
         let Err(error) = options.validate_bounds() else {
             return Ok(Some(options));
         };
+        self.fail_invalid_job_options(job, &error.to_string())?;
+        Ok(None)
+    }
+
+    fn fail_invalid_job_options(&mut self, job: &LocalJob, error: &str) -> Result<(), AgentError> {
         self.transition(
             &job.job_id,
             "preparing",
             JobState::FailedTerminal,
             Some("invalid_print_options"),
             "Print options failed local safety validation before native handoff",
-            &serde_json::json!({ "error": error.to_string() }).to_string(),
-        )?;
-        Ok(None)
+            &serde_json::json!({ "error": error }).to_string(),
+        )
     }
 
     async fn reconcile_due(&mut self) -> Result<usize, AgentError> {
@@ -1068,6 +1078,27 @@ mod tests {
         assert_eq!(
             events.last().and_then(|event| event.reason.as_deref()),
             Some("invalid_print_options")
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_durable_option_schema_does_not_leave_a_job_preparing() {
+        let store = AgentStore::in_memory().expect("store");
+        let mut engine = AgentEngine::new(store, FakeExecutor::default(), FixedClock(10));
+        let mut job = accepted("malformed-options", "pdf");
+        job.options_json = r#"{"unrecognized_driver_instruction":true}"#.into();
+        engine.accept(&job).expect("accept");
+
+        assert_eq!(engine.run_once().await.expect("run"), 1);
+        assert!(engine.executor_mut().submitted.is_empty());
+        assert_eq!(
+            engine
+                .store()
+                .get_job("malformed-options")
+                .expect("query")
+                .expect("job")
+                .state,
+            "failed_terminal"
         );
     }
 

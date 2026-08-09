@@ -999,7 +999,7 @@ mod platform {
         native_profile: Option<&NativeProfilePayload>,
     ) -> Result<ExecutorResult, ExecutorError> {
         ensure_printer(printer)?;
-        if native_profile.is_none() && !options.native_options.is_empty() {
+        if !raw && native_profile.is_none() && !options.native_options.is_empty() {
             let (_, native_options) = capability_profile(printer);
             validate_live_native_options(options, &native_options)?;
         }
