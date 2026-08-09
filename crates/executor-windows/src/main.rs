@@ -101,6 +101,27 @@ fn sumatra_settings(options: &piqae_domain::JobOptions) -> Result<Vec<String>, E
     Ok(settings)
 }
 
+#[cfg(any(windows, test))]
+fn raw_submission_rejection(
+    options: &piqae_domain::JobOptions,
+    has_native_profile: bool,
+) -> Option<ExecutorError> {
+    if !options.is_empty() {
+        return Some(ExecutorError {
+            code: "raw_job_options_unsupported".into(),
+            message: "RAW documents already contain device instructions and cannot request rendered or native driver options".into(),
+            retryable: false,
+            handoff_may_have_succeeded: false,
+        });
+    }
+    has_native_profile.then(|| ExecutorError {
+        code: "native_profile_backend_unavailable".into(),
+        message: "RAW jobs cannot replay a Windows driver profile".into(),
+        retryable: false,
+        handoff_may_have_succeeded: false,
+    })
+}
+
 #[cfg(windows)]
 mod platform {
     use piqae_domain::{ContentKind, PrinterCapabilities, PrinterState};
@@ -164,14 +185,10 @@ mod platform {
                 native_profile,
                 ..
             } => {
-                if !options.is_empty() {
-                    Err(native_profile_backend_unavailable(
-                        "RAW documents already contain device instructions and cannot request rendered or native driver options",
-                    ))
-                } else if native_profile.is_some() {
-                    Err(native_profile_backend_unavailable(
-                        "RAW jobs cannot replay a Windows driver profile",
-                    ))
+                if let Some(error) =
+                    super::raw_submission_rejection(&options, native_profile.is_some())
+                {
+                    Err(error)
                 } else {
                     submit_raw(&native_printer_id, &title, &content_path)
                 }
@@ -629,6 +646,25 @@ mod tests {
         assert_eq!(error.code, "windows_pdf_option_unsupported");
         assert!(error.message.contains("native_options"));
         assert!(!error.handoff_may_have_succeeded);
+    }
+
+    #[test]
+    fn raw_options_report_the_specific_contract_error() {
+        let options = JobOptions {
+            copies: Some(2),
+            ..Default::default()
+        };
+        let error = raw_submission_rejection(&options, false).expect("RAW option rejection");
+        assert_eq!(error.code, "raw_job_options_unsupported");
+        assert!(!error.retryable);
+        assert!(!error.handoff_may_have_succeeded);
+    }
+
+    #[test]
+    fn raw_profile_replay_retains_the_profile_backend_error() {
+        let error =
+            raw_submission_rejection(&JobOptions::default(), true).expect("RAW profile rejection");
+        assert_eq!(error.code, "native_profile_backend_unavailable");
     }
 }
 
