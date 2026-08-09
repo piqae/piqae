@@ -53,6 +53,15 @@ pub fn prepare_profile_replay(
     safe_overrides: &BTreeSet<String>,
     backend: WindowsPdfBackend,
 ) -> Result<ProfileReplayPlan, NativeProfileError> {
+    options
+        .validate_bounds()
+        .map_err(|error| NativeProfileError::new("invalid_job_options", error.to_string()))?;
+    if !options.native_options.is_empty() {
+        return Err(NativeProfileError::new(
+            "native_option_override_unsupported",
+            "captured Windows profiles cannot be changed with arbitrary native option names; capture a new immutable profile revision",
+        ));
+    }
     let devmode_bytes = capture.validate_envelope()?;
     if let Some(error) = capture.fingerprint.compatibility_error(current_fingerprint) {
         return Err(error);
@@ -443,6 +452,24 @@ mod tests {
         )
         .expect_err("unsafe");
         assert_eq!(error.code, "profile_override_not_allowed");
+    }
+
+    #[test]
+    fn rejects_arbitrary_native_names_instead_of_ignoring_them() {
+        let capture = fixture();
+        let mut options = JobOptions::default();
+        options
+            .native_options
+            .insert("VendorSecret".into(), "On".into());
+        let error = prepare_profile_replay(
+            &capture,
+            &capture.fingerprint,
+            &options,
+            &BTreeSet::new(),
+            WindowsPdfBackend::GdiPdfium,
+        )
+        .expect_err("native names require a newly captured profile");
+        assert_eq!(error.code, "native_option_override_unsupported");
     }
 
     #[test]

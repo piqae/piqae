@@ -14,7 +14,8 @@ pub use job::{
     ContentKind, ContentSource, Duplex, ENCRYPTED_JOB_V3_RECIPIENT_ALGORITHM,
     ENCRYPTED_JOB_V3_SUITE, ENCRYPTED_JOB_V3_VERSION, EncryptedContentBinding,
     EncryptedContentManifest, EncryptedContentRecipient, Job, JobEvent, JobFailureReason,
-    JobOptions, JobState, Rotation, StateTransitionError, UriAuthentication, validate_transition,
+    JobOptions, JobOptionsError, JobState, Rotation, StateTransitionError, UriAuthentication,
+    validate_transition,
 };
 pub use printer::{
     NativePrinterChoice, NativePrinterOption, PRINTER_PROFILE_SCHEMA_VERSION, PrinterCapabilities,

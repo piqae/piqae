@@ -401,6 +401,10 @@ impl<E: Executor, C: Clock> AgentEngine<E, C> {
             "{}",
         )?;
 
+        let Some(options) = self.validate_job_options(&job)? else {
+            return Ok(());
+        };
+
         if job.content_kind == "pdf" {
             self.transition(
                 &job.job_id,
@@ -426,7 +430,6 @@ impl<E: Executor, C: Clock> AgentEngine<E, C> {
             "{}",
         )?;
 
-        let options: JobOptions = serde_json::from_str(&job.options_json)?;
         let native_profile = self.native_profile_for_job(&job)?;
         let confidential_path = Path::new(&job.content_path)
             .file_name()
@@ -490,6 +493,22 @@ impl<E: Executor, C: Clock> AgentEngine<E, C> {
             }
         }
         Ok(())
+    }
+
+    fn validate_job_options(&mut self, job: &LocalJob) -> Result<Option<JobOptions>, AgentError> {
+        let options: JobOptions = serde_json::from_str(&job.options_json)?;
+        let Err(error) = options.validate_bounds() else {
+            return Ok(Some(options));
+        };
+        self.transition(
+            &job.job_id,
+            "preparing",
+            JobState::FailedTerminal,
+            Some("invalid_print_options"),
+            "Print options failed local safety validation before native handoff",
+            &serde_json::json!({ "error": error.to_string() }).to_string(),
+        )?;
+        Ok(None)
     }
 
     async fn reconcile_due(&mut self) -> Result<usize, AgentError> {
@@ -1022,6 +1041,33 @@ mod tests {
                 .native_job_id
                 .as_deref(),
             Some("fake-1")
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_options_fail_terminally_without_calling_the_executor() {
+        let store = AgentStore::in_memory().expect("store");
+        let mut engine = AgentEngine::new(store, FakeExecutor::default(), FixedClock(10));
+        let mut job = accepted("invalid-options", "pdf");
+        job.options_json = serde_json::to_string(&JobOptions {
+            copies: Some(0),
+            ..Default::default()
+        })
+        .expect("options");
+        engine.accept(&job).expect("accept");
+
+        assert_eq!(engine.run_once().await.expect("run"), 1);
+        assert!(engine.executor_mut().submitted.is_empty());
+        let stored = engine
+            .store()
+            .get_job("invalid-options")
+            .expect("query")
+            .expect("job");
+        assert_eq!(stored.state, "failed_terminal");
+        let events = engine.store().pending_events(0, 20).expect("events");
+        assert_eq!(
+            events.last().and_then(|event| event.reason.as_deref()),
+            Some("invalid_print_options")
         );
     }
 
