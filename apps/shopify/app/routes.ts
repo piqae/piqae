@@ -1,6 +1,7 @@
 import { type RouteConfig, index, route } from "@react-router/dev/routes";
 
 export default [
+  index("routes/_index.tsx"),
   route("auth/*", "routes/auth.$.tsx"),
   route("webhooks", "routes/webhooks.tsx"),
   route("api/print/admin", "routes/api.print.admin.tsx"),
