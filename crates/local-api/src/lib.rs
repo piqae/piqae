@@ -277,6 +277,7 @@ pub struct LocalApiState {
     authenticator: Arc<SessionAuthenticator>,
     control: mpsc::Sender<ControlRequest>,
     browser_sessions: Arc<tokio::sync::Mutex<BrowserSessions>>,
+    bound_address: Arc<tokio::sync::RwLock<Option<SocketAddr>>>,
 }
 
 #[derive(Debug, Default)]
@@ -292,6 +293,7 @@ impl std::fmt::Debug for LocalApiState {
             .field("authenticator", &"<redacted>")
             .field("control", &self.control)
             .field("browser_sessions", &"<redacted>")
+            .field("bound_address", &"<loopback>")
             .finish()
     }
 }
@@ -303,6 +305,7 @@ impl LocalApiState {
             authenticator: Arc::new(SessionAuthenticator::from_challenge(challenge)),
             control,
             browser_sessions: Arc::new(tokio::sync::Mutex::new(BrowserSessions::default())),
+            bound_address: Arc::new(tokio::sync::RwLock::new(None)),
         }
     }
 }
@@ -388,11 +391,18 @@ async fn create_dashboard_session(
             .handoffs
             .insert(token.clone(), Instant::now() + HANDOFF_LIFETIME);
     }
-    let authority = headers
+    let header_authority = headers
         .get(header::HOST)
         .and_then(|value| value.to_str().ok())
-        .and_then(loopback_authority)
-        .unwrap_or_else(|| "127.0.0.1:39100".to_owned());
+        .and_then(loopback_authority);
+    let authority = if let Some(authority) = header_authority {
+        authority
+    } else {
+        state.bound_address.read().await.map_or_else(
+            || "127.0.0.1:39100".to_owned(),
+            |address| address.to_string(),
+        )
+    };
     Json(DashboardSessionCreated {
         url: format!("http://{authority}/local/queue?handoff={token}"),
         expires_in_seconds: HANDOFF_LIFETIME.as_secs(),
@@ -590,6 +600,7 @@ pub async fn serve(address: SocketAddr, state: LocalApiState) -> Result<(), Loca
         return Err(LocalApiError::NonLoopback(address));
     }
     let listener = tokio::net::TcpListener::bind(address).await?;
+    *state.bound_address.write().await = Some(listener.local_addr()?);
     axum::serve(listener, router(state)).await?;
     Ok(())
 }
@@ -1056,6 +1067,14 @@ mod tests {
         (LocalApiState::new("secret", send), receive)
     }
 
+    #[test]
+    fn embedded_dashboard_deduplicates_jobs_across_offset_pages() {
+        let html = include_str!("dashboard.html");
+        assert!(html.contains("const seenJobs=new Set()"));
+        assert!(html.contains("if(seenJobs.has(job.job_id))continue"));
+        assert!(html.contains("seenJobs.clear()"));
+    }
+
     fn profile(profile_id: &str, name: String) -> LocalPrinterProfile {
         LocalPrinterProfile {
             profile_id: profile_id.into(),
@@ -1389,6 +1408,34 @@ mod tests {
             .await
             .expect("response");
         assert_eq!(replay.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn dashboard_handoff_falls_back_to_the_actual_bound_address() {
+        let (state, _receive) = test_state();
+        *state.bound_address.write().await =
+            Some("127.0.0.1:49277".parse().expect("loopback test address"));
+        let created = router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/local/dashboard-sessions")
+                    .header("authorization", "Bearer secret")
+                    .header("host", "remote.example:443")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(created.status(), StatusCode::OK);
+        let body = to_bytes(created.into_body(), 4096).await.expect("body");
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert!(
+            value["url"]
+                .as_str()
+                .expect("url")
+                .starts_with("http://127.0.0.1:49277/local/queue?handoff=")
+        );
     }
 
     #[tokio::test]

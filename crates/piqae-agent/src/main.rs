@@ -2904,6 +2904,7 @@ fn local_job_history(
         .into_iter()
         .map(|job| {
             let can_reprint = is_terminal_job_state(&job.state)
+                && resolve_present_printer(store, &job.printer_id).is_ok()
                 && std::fs::metadata(&job.content_path).is_ok_and(|metadata| metadata.is_file());
             LocalHistoryJob {
                 job_id: job.job_id,

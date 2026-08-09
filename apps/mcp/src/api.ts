@@ -74,44 +74,43 @@ export async function rawRequest<T>(
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 30_000);
   timeout.unref();
-  let response: Response;
   try {
-    response = await fetch(`${config.apiOrigin}${path}`, {
+    const response = await fetch(`${config.apiOrigin}${path}`, {
       method,
       headers,
       signal: controller.signal,
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
+    if (!response.ok) {
+      const envelope = (await response.json().catch(() => undefined)) as
+        | {
+            error?: {
+              code?: string;
+              message?: string;
+              request_id?: string;
+              retryable?: boolean;
+            };
+          }
+        | undefined;
+      throw new PiqaeError(response.status, {
+        code: envelope?.error?.code ?? "unexpected_response",
+        message:
+          envelope?.error?.message ??
+          response.statusText ??
+          "Piqae request failed",
+        ...(envelope?.error?.request_id
+          ? { request_id: envelope.error.request_id }
+          : {}),
+        ...(envelope?.error?.retryable === undefined
+          ? {}
+          : { retryable: envelope.error.retryable }),
+      });
+    }
+    if (response.status === 204) return undefined as T;
+    return (await response.json()) as T;
   } finally {
     clearTimeout(timeout);
   }
-  if (!response.ok) {
-    const envelope = (await response.json().catch(() => undefined)) as
-      | {
-          error?: {
-            code?: string;
-            message?: string;
-            request_id?: string;
-            retryable?: boolean;
-          };
-        }
-      | undefined;
-    throw new PiqaeError(response.status, {
-      code: envelope?.error?.code ?? "unexpected_response",
-      message:
-        envelope?.error?.message ??
-        response.statusText ??
-        "Piqae request failed",
-      ...(envelope?.error?.request_id
-        ? { request_id: envelope.error.request_id }
-        : {}),
-      ...(envelope?.error?.retryable === undefined
-        ? {}
-        : { retryable: envelope.error.retryable }),
-    });
-  }
-  if (response.status === 204) return undefined as T;
-  return (await response.json()) as T;
 }
 
 export async function verifyBearer(

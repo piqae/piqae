@@ -34,14 +34,17 @@ describe("one-time secret delivery", () => {
     );
   });
 
-  it("rejects a secret directory visible to group or other users", async () => {
-    const root = await privateTemporaryDirectory();
-    await chmod(root, 0o755);
-    const config = loadConfig({ PIQAE_MCP_SECRET_DIRECTORY: root });
-    await expect(assertSecretDeliveryReady(config, "file")).rejects.toThrow(
-      /mode 0700/,
-    );
-  });
+  it.skipIf(process.platform === "win32")(
+    "rejects a secret directory visible to group or other users",
+    async () => {
+      const root = await privateTemporaryDirectory();
+      await chmod(root, 0o755);
+      const config = loadConfig({ PIQAE_MCP_SECRET_DIRECTORY: root });
+      await expect(assertSecretDeliveryReady(config, "file")).rejects.toThrow(
+        /mode 0700/,
+      );
+    },
+  );
 
   it("requires both server and per-call opt-in for transcript output", async () => {
     await expect(

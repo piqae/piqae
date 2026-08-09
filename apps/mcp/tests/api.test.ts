@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { verifyBearer } from "../src/api.js";
+import { rawRequest, verifyBearer } from "../src/api.js";
 import { loadConfig } from "../src/config.js";
 
 const originalFetch = globalThis.fetch;
@@ -7,6 +7,7 @@ const originalFetch = globalThis.fetch;
 afterEach(() => {
   globalThis.fetch = originalFetch;
   vi.restoreAllMocks();
+  vi.useRealTimers();
 });
 
 describe("remote OAuth bearer verification", () => {
@@ -45,6 +46,36 @@ describe("remote OAuth bearer verification", () => {
       clientId: "coding-agent",
       scopes: ["jobs_read"],
     });
+  });
+});
+
+describe("API request bounds", () => {
+  it("keeps the timeout active while consuming the response body", async () => {
+    vi.useFakeTimers();
+    globalThis.fetch = vi.fn(async (_input, init) => {
+      const signal = init?.signal;
+      return {
+        ok: true,
+        status: 200,
+        json: () =>
+          new Promise((_resolve, reject) => {
+            signal?.addEventListener("abort", () =>
+              reject(new DOMException("aborted", "AbortError")),
+            );
+          }),
+      } as Response;
+    }) as typeof fetch;
+    const config = loadConfig({
+      PIQAE_API_ORIGIN: "https://api.example.test",
+      PIQAE_API_KEY: "piq_test_example",
+    });
+
+    const request = rawRequest(config, undefined, "GET", "/v1/jobs");
+    const rejection = expect(request).rejects.toMatchObject({
+      name: "AbortError",
+    });
+    await vi.advanceTimersByTimeAsync(30_000);
+    await rejection;
   });
 });
 
