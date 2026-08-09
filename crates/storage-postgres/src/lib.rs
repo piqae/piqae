@@ -503,6 +503,29 @@ pub struct StoredPrintWorkflow {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct StoredResolvedPrintTicket {
+    pub digest: String,
+    pub printer_id: PrinterId,
+    pub capability_revision: u64,
+    pub display_ticket: serde_json::Value,
+    pub expires_at: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct StoredLoadedMedia {
+    pub printer_id: PrinterId,
+    pub source: String,
+    pub stock_id: Option<String>,
+    pub stock_revision: Option<u64>,
+    pub confidence: String,
+    pub calibration_state: String,
+    pub remaining_amount: Option<serde_json::Value>,
+    pub observed_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct StoredTarget {
     pub id: String,
     pub name: String,
@@ -3613,6 +3636,106 @@ impl PostgresStore {
         .await?;
         transaction.commit().await?;
         Ok(workflow.clone())
+    }
+
+    pub async fn store_resolved_print_ticket(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        ticket: &StoredResolvedPrintTicket,
+    ) -> Result<StoredResolvedPrintTicket, StorageError> {
+        sqlx::query(
+            "INSERT INTO resolved_print_tickets
+                (workspace_id, environment_id, digest, printer_id, capability_revision,
+                 display_ticket, expires_at, created_at)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+             ON CONFLICT (workspace_id, environment_id, digest) DO NOTHING",
+        )
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(&ticket.digest)
+        .bind(ticket.printer_id.to_string())
+        .bind(
+            i64::try_from(ticket.capability_revision)
+                .map_err(|error| StorageError::InvalidData(error.to_string()))?,
+        )
+        .bind(&ticket.display_ticket)
+        .bind(ticket.expires_at)
+        .bind(ticket.created_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(ticket.clone())
+    }
+
+    pub async fn get_resolved_print_ticket(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        digest: &str,
+    ) -> Result<StoredResolvedPrintTicket, StorageError> {
+        let row = sqlx::query(
+            "SELECT digest, printer_id, capability_revision, display_ticket, expires_at, created_at
+             FROM resolved_print_tickets
+             WHERE workspace_id = $1 AND environment_id = $2 AND digest = $3",
+        )
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(digest)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(StorageError::NotFound)?;
+        Ok(StoredResolvedPrintTicket {
+            digest: row.try_get("digest")?,
+            printer_id: row.try_get::<String, _>("printer_id")?.parse().map_err(
+                |error: piqae_domain::ParseTypedIdError| {
+                    StorageError::InvalidData(error.to_string())
+                },
+            )?,
+            capability_revision: u64::try_from(row.try_get::<i64, _>("capability_revision")?)
+                .map_err(|error| StorageError::InvalidData(error.to_string()))?,
+            display_ticket: row.try_get("display_ticket")?,
+            expires_at: row.try_get("expires_at")?,
+            created_at: row.try_get("created_at")?,
+        })
+    }
+
+    pub async fn list_loaded_media(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        printer_id: PrinterId,
+    ) -> Result<Vec<StoredLoadedMedia>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT printer_id, source, stock_id, stock_revision, confidence,
+                    calibration_state, remaining_amount, observed_at, updated_at
+             FROM printer_loaded_media
+             WHERE workspace_id = $1 AND environment_id = $2 AND printer_id = $3
+             ORDER BY source",
+        )
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(printer_id.to_string())
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter()
+            .map(|row| {
+                Ok(StoredLoadedMedia {
+                    printer_id,
+                    source: row.try_get("source")?,
+                    stock_id: row.try_get("stock_id")?,
+                    stock_revision: row
+                        .try_get::<Option<i64>, _>("stock_revision")?
+                        .map(u64::try_from)
+                        .transpose()
+                        .map_err(|error| StorageError::InvalidData(error.to_string()))?,
+                    confidence: row.try_get("confidence")?,
+                    calibration_state: row.try_get("calibration_state")?,
+                    remaining_amount: row.try_get("remaining_amount")?,
+                    observed_at: row.try_get("observed_at")?,
+                    updated_at: row.try_get("updated_at")?,
+                })
+            })
+            .collect()
     }
 
     pub async fn get_stock(

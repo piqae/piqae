@@ -1499,6 +1499,8 @@ pub struct CreateJobRequest {
     pub expire_after_seconds: i64,
     #[serde(default)]
     pub metadata: std::collections::BTreeMap<String, String>,
+    pub print_intent: Option<serde_json::Value>,
+    pub resolved_ticket_digest: Option<String>,
 }
 
 const fn default_deliveries() -> u16 {
@@ -1571,6 +1573,7 @@ pub async fn create_job(
     let tenant = authenticate_native(&state, &headers, Scope::JobsWrite).await?;
     validate_create(&request)?;
     let destination = resolve_job_destination(&state, tenant, &request).await?;
+    let resolved_ticket = validate_resolved_ticket(&state, tenant, &request, &destination).await?;
     validate_encrypted_job(&state, tenant, &request, &destination).await?;
     let request_bytes = serde_json::to_vec(&request)?;
     let now = Utc::now();
@@ -1578,6 +1581,13 @@ pub async fn create_job(
         persist_job_content(&state, tenant, request.content_type, request.content).await?;
     let mut metadata = request.metadata;
     metadata.extend(destination.metadata);
+    if let Some(ticket) = resolved_ticket {
+        metadata.insert(
+            "piqae.capability_revision".into(),
+            ticket.capability_revision.to_string(),
+        );
+        metadata.insert("piqae.resolved_ticket_digest".into(), ticket.digest);
+    }
     let job_expires_at = match &persisted.source {
         ContentSource::EncryptedUpload { manifest, .. } => {
             chrono::DateTime::parse_from_rfc3339(&manifest.binding.expires_at)
@@ -2962,6 +2972,73 @@ fn validate_create(request: &CreateJobRequest) -> Result<(), AppError> {
         ));
     }
     Ok(())
+}
+
+async fn validate_resolved_ticket(
+    state: &AppState,
+    tenant: TenantContext,
+    request: &CreateJobRequest,
+    destination: &ResolvedJobDestination,
+) -> Result<Option<piqae_storage_postgres::StoredResolvedPrintTicket>, AppError> {
+    if request.print_intent.is_some() != request.resolved_ticket_digest.is_some() {
+        return Err(AppError::invalid(
+            "resolved_ticket_required",
+            "print_intent and resolved_ticket_digest must be supplied together.",
+        ));
+    }
+    let Some(digest) = request.resolved_ticket_digest.as_deref() else {
+        return Ok(None);
+    };
+    if digest.len() != 64
+        || !digest
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return Err(AppError::invalid(
+            "invalid_resolved_ticket",
+            "Resolved ticket digest is invalid.",
+        ));
+    }
+    let ticket = state
+        .repository
+        .get_resolved_print_ticket(tenant.workspace_id, tenant.environment_id, digest)
+        .await?;
+    if ticket.expires_at <= Utc::now() || ticket.printer_id != destination.printer_id {
+        return Err(AppError::conflict(
+            "resolved_ticket_stale",
+            "The resolved ticket expired or targets a different printer.",
+        ));
+    }
+    let current = state
+        .repository
+        .get_printer(
+            tenant.workspace_id,
+            tenant.environment_id,
+            destination.printer_id,
+        )
+        .await?;
+    if current.capability_revision != ticket.capability_revision {
+        return Err(AppError::conflict(
+            "stale_capability_revision",
+            "Printer capabilities changed after resolution.",
+        ));
+    }
+    let resolved: JobOptions = serde_json::from_value(
+        ticket.display_ticket["resolved_options"].clone(),
+    )
+    .map_err(|_| {
+        AppError::conflict(
+            "invalid_resolved_ticket",
+            "Stored resolved options are invalid.",
+        )
+    })?;
+    if resolved != request.options {
+        return Err(AppError::conflict(
+            "resolved_options_mismatch",
+            "Job options differ from the resolved ticket.",
+        ));
+    }
+    Ok(Some(ticket))
 }
 
 pub(crate) fn parse_job_id(value: &str) -> Result<JobId, AppError> {

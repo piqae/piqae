@@ -11,6 +11,7 @@ pub mod error;
 pub mod identity;
 pub mod pairing;
 pub mod platform;
+pub mod print_intents;
 pub mod rate_limit;
 pub mod repository;
 pub mod request_id;
@@ -266,6 +267,16 @@ pub fn router(state: AppState) -> Router {
         .merge(node_operator_router())
         .route("/v1/printers", get(api::list_printers))
         .route("/v1/printers/{printer_id}", get(api::get_printer))
+        .route(
+            "/v1/printers/{printer_id}/capabilities",
+            get(print_intents::capability_document),
+        )
+        .route(
+            "/v1/printers/{printer_id}/loaded-media",
+            get(print_intents::loaded_media),
+        )
+        .route("/v1/print-intents/validate", post(print_intents::validate))
+        .route("/v1/print-intents/resolve", post(print_intents::resolve))
         .route(
             "/v1/printers/{printer_id}/content-encryption-key",
             get(api::printer_content_encryption_key),

@@ -81,6 +81,7 @@ export function createPiqaeMcpServer(config: McpConfig): McpServer {
   registerApiKeyTool(server, config);
   registerNodeTools(server, config);
   registerPrinterTool(server, config);
+  registerPrintIntentTool(server, config);
   registerStockTool(server, config);
   registerTargetTool(server, config);
   registerUploadTool(server, config);
@@ -417,7 +418,7 @@ function registerPrinterTool(server: McpServer, config: McpConfig): void {
       description:
         "List printers with pagination, retrieve exact synced driver capabilities/profiles, or retrieve the node content-encryption public key. This tool never submits a print.",
       inputSchema: z.object({
-        action: z.enum(["list", "get", "content_encryption_key"]),
+        action: z.enum(["list", "get", "capabilities", "loaded_media", "content_encryption_key"]),
         printer_id: z.string().min(1).optional(),
         limit: z.number().int().min(1).max(100).optional(),
         after: z.string().optional(),
@@ -435,10 +436,28 @@ function registerPrinterTool(server: McpServer, config: McpConfig): void {
           });
         }
         const id = required(input.printer_id, "printer_id");
-        return input.action === "get"
-          ? client.printers.retrieve(id)
-          : client.printers.contentEncryptionKey(id);
+        if (input.action === "get") return client.printers.retrieve(id);
+        if (input.action === "capabilities") return client.printers.capabilities(id);
+        if (input.action === "loaded_media") return client.printers.loadedMedia(id);
+        return client.printers.contentEncryptionKey(id);
       }),
+  );
+}
+
+function registerPrintIntentTool(server: McpServer, config: McpConfig): void {
+  server.registerTool(
+    "piqae_validate_print_intent",
+    {
+      title: "Validate a Piqae print intent",
+      description:
+        "Validates normalized printer, workflow, stock, document, and job-scoped options. This tool never submits or resolves a print.",
+      inputSchema: z.object({ intent: recordSchema, ...selectionShape }),
+      annotations: readOnlyAnnotations("Validate a Piqae print intent"),
+    },
+    (input, extra) => result(async () => {
+      const client = clientFor(config, extra, input);
+      return client.printIntents.validate(input.intent as import("@piqae/sdk").PrintIntent);
+    }),
   );
 }
 

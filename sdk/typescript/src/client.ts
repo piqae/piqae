@@ -3,11 +3,13 @@ import type {
   AgentEnrolment,
   ApiKey,
   BillingSummary,
+  CapabilityDocument,
   BootstrappedLocalOwner,
   CreateApiKey,
   CreateDeviceAuthorization,
   CreateJob,
   CreateNodeConnectSession,
+  CreatePrintWorkflow,
   CreateStock,
   CreateTarget,
   CreateTargetBinding,
@@ -26,6 +28,7 @@ import type {
   Job,
   JobEvent,
   JobListOptions,
+  LoadedMediaObservation,
   ListOptions,
   LocalOwnerSession,
   NodeConnector,
@@ -38,6 +41,10 @@ import type {
   Page,
   PlatformContext,
   Printer,
+  PrintIntent,
+  PrintIntentValidation,
+  PrintWorkflow,
+  ResolvedPrintTicket,
   Stock,
   Target,
   TargetBinding,
@@ -292,7 +299,24 @@ export class PiqaeClient {
     retrieve: (id: string) =>
       this.request<Printer>('GET', `/v1/printers/${encodeURIComponent(id)}`),
     contentEncryptionKey: (id: string) =>
-      this.request<NodeContentEncryptionKey>('GET', `/v1/printers/${encodeURIComponent(id)}/content-encryption-key`)
+      this.request<NodeContentEncryptionKey>('GET', `/v1/printers/${encodeURIComponent(id)}/content-encryption-key`),
+    capabilities: (id: string) =>
+      this.request<CapabilityDocument>('GET', `/v1/printers/${encodeURIComponent(id)}/capabilities`),
+    loadedMedia: (id: string) =>
+      this.request<LoadedMediaObservation[]>('GET', `/v1/printers/${encodeURIComponent(id)}/loaded-media`)
+  };
+
+  readonly printIntents = {
+    validate: (intent: PrintIntent) =>
+      this.request<PrintIntentValidation>('POST', '/v1/print-intents/validate', { body: { intent } }),
+    resolve: (intent: PrintIntent) =>
+      this.request<ResolvedPrintTicket>('POST', '/v1/print-intents/resolve', { body: { intent } })
+  };
+
+  readonly printWorkflows = {
+    list: () => this.request<PrintWorkflow[]>('GET', '/v1/print-workflows'),
+    create: (input: CreatePrintWorkflow) =>
+      this.request<PrintWorkflow>('POST', '/v1/print-workflows', { body: input })
   };
 
   readonly stocks = {

@@ -16,11 +16,12 @@ use piqae_storage_postgres::{
     NewDeviceAuthorization, NodeUpdatePolicy, NodeUpdateState, PostgresStore, StorageError,
     StoredAgent, StoredAgentCommandBatch, StoredApiKey, StoredBillingSummary,
     StoredConnectSessionPreview, StoredContentEncryptionKey, StoredDeviceAuthorization,
-    StoredNodeConnector, StoredNodeDiagnostic, StoredNodeUpdate, StoredPlatformAccount,
-    StoredPrintWorkflow, StoredPrinter, StoredStock, StoredTarget, StoredTargetBinding,
-    StoredTenantEvent, StoredUpload, StoredUsageSummary, StoredWebhook, StoredWebhookDelivery,
-    StripeBillingEvent, StripeProjectionResult, SyncedPrinter, UpsertedPlatformAccount,
-    WebhookDeliveryWork, WorkOsIdentityEvent, WorkOsProjectionResult,
+    StoredLoadedMedia, StoredNodeConnector, StoredNodeDiagnostic, StoredNodeUpdate,
+    StoredPlatformAccount, StoredPrintWorkflow, StoredPrinter, StoredResolvedPrintTicket,
+    StoredStock, StoredTarget, StoredTargetBinding, StoredTenantEvent, StoredUpload,
+    StoredUsageSummary, StoredWebhook, StoredWebhookDelivery, StripeBillingEvent,
+    StripeProjectionResult, SyncedPrinter, UpsertedPlatformAccount, WebhookDeliveryWork,
+    WorkOsIdentityEvent, WorkOsProjectionResult,
 };
 use sha2::Digest as _;
 use std::{
@@ -340,6 +341,30 @@ pub trait Repository: Send + Sync + 'static {
         _workflow: &StoredPrintWorkflow,
     ) -> Result<StoredPrintWorkflow, RepositoryError> {
         Err(RepositoryError::NotFound)
+    }
+    async fn store_resolved_print_ticket(
+        &self,
+        _workspace_id: WorkspaceId,
+        _environment_id: EnvironmentId,
+        _ticket: &StoredResolvedPrintTicket,
+    ) -> Result<StoredResolvedPrintTicket, RepositoryError> {
+        Err(RepositoryError::NotFound)
+    }
+    async fn get_resolved_print_ticket(
+        &self,
+        _workspace_id: WorkspaceId,
+        _environment_id: EnvironmentId,
+        _digest: &str,
+    ) -> Result<StoredResolvedPrintTicket, RepositoryError> {
+        Err(RepositoryError::NotFound)
+    }
+    async fn list_loaded_media(
+        &self,
+        _workspace_id: WorkspaceId,
+        _environment_id: EnvironmentId,
+        _printer_id: PrinterId,
+    ) -> Result<Vec<StoredLoadedMedia>, RepositoryError> {
+        Ok(Vec::new())
     }
     async fn get_stock(
         &self,
@@ -851,6 +876,37 @@ impl Repository for PostgresStore {
         workflow: &StoredPrintWorkflow,
     ) -> Result<StoredPrintWorkflow, RepositoryError> {
         Self::create_print_workflow(self, workspace_id, environment_id, workflow)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn store_resolved_print_ticket(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        ticket: &StoredResolvedPrintTicket,
+    ) -> Result<StoredResolvedPrintTicket, RepositoryError> {
+        Self::store_resolved_print_ticket(self, workspace_id, environment_id, ticket)
+            .await
+            .map_err(Into::into)
+    }
+    async fn get_resolved_print_ticket(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        digest: &str,
+    ) -> Result<StoredResolvedPrintTicket, RepositoryError> {
+        Self::get_resolved_print_ticket(self, workspace_id, environment_id, digest)
+            .await
+            .map_err(Into::into)
+    }
+    async fn list_loaded_media(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        printer_id: PrinterId,
+    ) -> Result<Vec<StoredLoadedMedia>, RepositoryError> {
+        Self::list_loaded_media(self, workspace_id, environment_id, printer_id)
             .await
             .map_err(Into::into)
     }
@@ -2292,6 +2348,8 @@ struct MemoryState {
     printers: HashMap<PrinterId, (WorkspaceId, EnvironmentId, StoredPrinter)>,
     stocks: HashMap<String, (WorkspaceId, EnvironmentId, StoredStock)>,
     print_workflows: HashMap<String, (WorkspaceId, EnvironmentId, StoredPrintWorkflow)>,
+    resolved_print_tickets:
+        HashMap<String, (WorkspaceId, EnvironmentId, StoredResolvedPrintTicket)>,
     targets: HashMap<String, (WorkspaceId, EnvironmentId, StoredTarget)>,
     target_bindings: HashMap<String, (WorkspaceId, EnvironmentId, StoredTargetBinding)>,
     agents: HashMap<AgentId, (WorkspaceId, EnvironmentId, StoredAgent)>,
@@ -3174,6 +3232,46 @@ impl Repository for MemoryRepository {
             (workspace_id, environment_id, workflow.clone()),
         );
         Ok(workflow.clone())
+    }
+
+    async fn store_resolved_print_ticket(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        ticket: &StoredResolvedPrintTicket,
+    ) -> Result<StoredResolvedPrintTicket, RepositoryError> {
+        let mut state = self.state.write().await;
+        if let Some((workspace, environment, existing)) =
+            state.resolved_print_tickets.get(&ticket.digest)
+        {
+            return if *workspace == workspace_id && *environment == environment_id {
+                Ok(existing.clone())
+            } else {
+                Err(RepositoryError::ConcurrentStateChange)
+            };
+        }
+        state.resolved_print_tickets.insert(
+            ticket.digest.clone(),
+            (workspace_id, environment_id, ticket.clone()),
+        );
+        Ok(ticket.clone())
+    }
+    async fn get_resolved_print_ticket(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        digest: &str,
+    ) -> Result<StoredResolvedPrintTicket, RepositoryError> {
+        self.state
+            .read()
+            .await
+            .resolved_print_tickets
+            .get(digest)
+            .filter(|(workspace, environment, _)| {
+                *workspace == workspace_id && *environment == environment_id
+            })
+            .map(|(_, _, ticket)| ticket.clone())
+            .ok_or(RepositoryError::NotFound)
     }
 
     async fn get_stock(
