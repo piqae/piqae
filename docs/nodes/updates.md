@@ -20,6 +20,13 @@ service validates the requested channel and filename, then redirects to a
 short-lived URL for the separate Cloudflare R2 release bucket. Print documents never
 use this bucket.
 
+An explicitly unsigned Windows evaluation build is published only from a
+protected `v<version>-windows-preview.<number>` tag after checksum, SBOM,
+provenance, and unsigned-binary evidence pass. Its preview manifest labels the
+package unsigned, and the workflow never publishes a Windows appcast or any
+stable-channel object. Windows may display Unknown publisher or SmartScreen
+warnings; automatic updates remain disabled.
+
 A reserved URL is not evidence that a release exists. Until the bucket
 credentials and a signed artifact are present, the route returns not found and
 the Downloads page must not offer a supported download.

@@ -167,9 +167,12 @@ profile. This protects the spooler boundary but is not automatic rollback or a
 complete shared update guardian; those remain separate release gates.
 
 Every workflow artifact includes SHA-256 checksums and an SPDX SBOM. GitHub
-build provenance is requested for both preview and signed artifacts. Unsigned
-previews remain workflow artifacts and can never enter the stable release
-bucket.
+build provenance is requested for both preview and signed artifacts. An
+explicit `publish_unsigned_preview` run from a protected
+`v<version>-windows-preview.<number>` tag may publish the installer, checksum,
+SBOM, signing-status record, and preview manifest through the protected release
+publisher. Those objects exist only below `/releases/preview/`; the workflow
+cannot create an appcast or write any stable-channel object.
 
 Signed publication is isolated behind the protected `native-release` GitHub
 environment. The workflow uploads immutable versioned objects to the dedicated
