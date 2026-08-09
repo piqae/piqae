@@ -1,5 +1,6 @@
 import pg from "pg";
 import { normalizeShopDomain } from "./model";
+import { resolveShopifyStorage } from "./piqae-runtime.server";
 
 const development = new Map<
   string,
@@ -24,10 +25,7 @@ export async function recordInstallation(
   scopes: string,
 ): Promise<void> {
   const shop = normalizeShopDomain(rawShop);
-  if (
-    process.env.NODE_ENV === "test" ||
-    process.env.NODE_ENV === "development"
-  ) {
+  if (resolveShopifyStorage() === "memory") {
     development.set(shop, { state: "installed", scopes });
     return;
   }
@@ -42,10 +40,7 @@ export async function markInstallationUninstalled(
   rawShop: string,
 ): Promise<void> {
   const shop = normalizeShopDomain(rawShop);
-  if (
-    process.env.NODE_ENV === "test" ||
-    process.env.NODE_ENV === "development"
-  ) {
+  if (resolveShopifyStorage() === "memory") {
     const current = development.get(shop);
     if (current) development.set(shop, { ...current, state: "uninstalled" });
     return;
@@ -58,10 +53,7 @@ export async function markInstallationUninstalled(
 
 export async function redactInstallation(rawShop: string): Promise<void> {
   const shop = normalizeShopDomain(rawShop);
-  if (
-    process.env.NODE_ENV === "test" ||
-    process.env.NODE_ENV === "development"
-  ) {
+  if (resolveShopifyStorage() === "memory") {
     development.delete(shop);
     return;
   }
