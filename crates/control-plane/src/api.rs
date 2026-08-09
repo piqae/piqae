@@ -2917,6 +2917,12 @@ pub(crate) async fn authenticate_compatibility(
 }
 
 fn validate_create(request: &CreateJobRequest) -> Result<(), AppError> {
+    if request.metadata.keys().any(|key| key.starts_with("piqae.")) {
+        return Err(AppError::invalid(
+            "reserved_metadata_key",
+            "Metadata keys beginning with piqae. are reserved by the control plane.",
+        ));
+    }
     let has_printer = request
         .printer_id
         .as_deref()
