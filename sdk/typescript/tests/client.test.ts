@@ -625,7 +625,7 @@ describe('PiqaeClient', () => {
     await expect(client.jobs.createEncryptedResolved(
       { target_id: 'tgt_1', title: 'Private', content_type: 'pdf' },
       envelope,
-      { digest: 'c'.repeat(64), printer_id: 'prt_other', capability_revision: 1, resolved_options: {}, provenance: {}, expires_at: '2099-01-01T00:00:00Z' },
+      { digest: 'c'.repeat(64), printer_id: 'prt_other', capability_revision: 1, resolved_options: {}, semantic_options: {}, provenance: {}, expires_at: '2099-01-01T00:00:00Z' },
       'encrypted-resolved-1'
     )).rejects.toThrow(/different printers/);
   });

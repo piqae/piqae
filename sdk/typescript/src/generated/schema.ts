@@ -1186,7 +1186,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List published and tenant-owned print workflows */
+        /** List published active print workflows visible to the tenant */
         get: operations["listPrintWorkflows"];
         put?: never;
         /** Create a revisioned print workflow */
@@ -2735,6 +2735,8 @@ export interface components {
             supported: boolean;
             unit?: string | null;
             values?: (string | number | boolean)[];
+            /** @description Subset of values proven safe for job-scoped writes; absent values are display-only. */
+            writable_values?: (string | number | boolean)[];
             minimum?: number | null;
             maximum?: number | null;
             default_value?: unknown;
@@ -2778,9 +2780,13 @@ export interface components {
             capability_revision: number;
             workflow?: components["schemas"]["ResourceRevision"] | null;
             stock?: components["schemas"]["ResourceRevision"] | null;
-            portable_options: components["schemas"]["JobOptions"];
-            /** @description Values keyed only by normalized capability facet name; native driver keys are rejected. */
-            semantic_options: {
+            /** @default {} */
+            portable_options?: components["schemas"]["JobOptions"];
+            /**
+             * @description Values keyed only by normalized capability facet name; native driver keys are rejected.
+             * @default {}
+             */
+            semantic_options?: {
                 [key: string]: unknown;
             };
             document_manifest: components["schemas"]["DocumentManifest"];
@@ -2810,6 +2816,9 @@ export interface components {
             workflow?: components["schemas"]["ResourceRevision"] | null;
             stock?: components["schemas"]["ResourceRevision"] | null;
             resolved_options: components["schemas"]["JobOptions"];
+            semantic_options: {
+                [key: string]: unknown;
+            };
             provenance: {
                 [key: string]: string;
             };
@@ -2828,10 +2837,23 @@ export interface components {
             /** @default false */
             published?: boolean;
         };
-        PrintWorkflow: components["schemas"]["CreatePrintWorkflow"] & {
+        PrintWorkflow: {
             id: string;
             /** Format: int64 */
             revision: number;
+            name: string;
+            printer_id: string;
+            /** Format: int64 */
+            capability_revision: number;
+            profile_id: string | null;
+            /** Format: int64 */
+            profile_revision: number | null;
+            stock_id: string | null;
+            /** Format: int64 */
+            stock_revision: number | null;
+            definition: components["schemas"]["PrintIntent"];
+            safe_overrides: string[];
+            published: boolean;
             archived: boolean;
             /** Format: date-time */
             created_at: string;
@@ -5005,7 +5027,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Tenant-scoped workflows with their latest revision. */
+            /** @description Published, non-archived tenant-scoped workflows with their latest revision. */
             200: {
                 headers: {
                     [name: string]: unknown;
