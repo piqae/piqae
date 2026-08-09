@@ -5,6 +5,10 @@ visible through the API. One installation may therefore authorize multiple
 workspace/environment pairs while every integrator continues to see only its
 own node, printers, jobs, events, and connector grant.
 
+The corresponding customer-facing information architecture and recommended
+consent/Queue language are documented in
+[White-label and integrator product UX](integrator-white-label-ux.md).
+
 `GET /v1/nodes/{node_id}/connectors` lists only connectors belonging to the
 authenticated workspace and environment. It deliberately omits the physical
 installation identifier and never discloses whether another service uses the

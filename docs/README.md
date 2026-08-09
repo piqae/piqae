@@ -21,6 +21,9 @@ print jobs through the same API used by the dashboard.
 ## Build an integration
 
 - [Platform accounts](api/platform-service-accounts.md)
+- [White-label and integrator product UX](api/integrator-white-label-ux.md)
+- [Install and use the Piqae MCP server](api/mcp-installation.md)
+- [MCP architecture and authorization](api/mcp-agent-integration.md)
 - [Authentication](api/authentication.md)
 - [Uploads and design applications](api/uploads-and-design-apps.md)
 - [End-to-end web design platform integration](api/web-design-platform-integration.md)
@@ -32,6 +35,7 @@ print jobs through the same API used by the dashboard.
 - [Signed webhooks](api/webhooks.md)
 - [Printers and native profiles](printing/printers.md)
 - [Complex vendor drivers](printing/complex-drivers.md)
+- [SDK professional printer, profile, and stock capabilities](printing/sdk-professional-capabilities.md)
 
 Platform application code can create, retrieve, list, and archive customer
 accounts, then manage their nodes, printers, profiles, targets, uploads, jobs,
