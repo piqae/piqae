@@ -88,20 +88,13 @@ jobs:
         id: release
         shell: pwsh
         run: |
-          $version = if ("${{ github.ref_type }}" -eq "tag") {
-            "${{ github.ref_name }}".TrimStart("v")
-          } else {
-            "${{ inputs.version }}"
+          $versionArguments = @{
+            RefType = "${{ github.ref_type }}"
+            RefName = "${{ github.ref_name }}"
+            RequestedVersion = "${{ inputs.version }}"
+            UnsignedPreview = "${{ inputs.publish_unsigned_preview }}" -eq "true"
           }
-          if ($version -notmatch "^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$") {
-            throw "Version must be SemVer-like and must not include a leading v."
-          }
-          if (
-            "${{ github.ref_type }}" -eq "tag" -and
-            $version -cne "${{ inputs.version }}"
-          ) {
-            throw "Tag version '$version' does not match requested version '${{ inputs.version }}'."
-          }
+          $version = & "packaging/windows/Resolve-WindowsReleaseVersion.ps1" @versionArguments
           "version=$version" >> $env:GITHUB_OUTPUT
 
           if ($env:WINDOWS_SIGNING_PROVIDER -notin @("artifact-signing", "pfx", "digicert-keylocker")) {
@@ -151,7 +144,7 @@ jobs:
           if ($present -eq 0) {
             "signed=false" >> $env:GITHUB_OUTPUT
             "artifact_name=piqae-windows-x86_64-unsigned-preview" >> $env:GITHUB_OUTPUT
-            "UNSIGNED PREVIEW: no Authenticode or update-signing credentials were supplied." |
+            "UNSIGNED PREVIEW: signing and automatic updates were explicitly disabled." |
               Out-File -Encoding ascii "SIGNING-STATUS.txt"
           } elseif ($present -eq $requirements.Count) {
             $artifactSigningTimestamp = "http://timestamp.acs.microsoft.com"
@@ -213,9 +206,10 @@ jobs:
             if (
               "${{ github.repository }}" -ne "piqae/piqae" -or
               "${{ github.ref_type }}" -ne "tag" -or
-              "${{ github.ref_name }}" -notmatch "^v[0-9]+\.[0-9]+\.[0-9]+-windows-preview\.[0-9]+$"
+              "${{ github.ref_name }}" -notmatch "^v[0-9]+\.[0-9]+\.[0-9]+-windows-preview\.[0-9]+$" -or
+              "${{ github.ref_protected }}" -ne "true"
             ) {
-              throw "Public unsigned previews require a v<version>-windows-preview.<number> tag in piqae/piqae."
+              throw "Public unsigned previews require a protected v<version>-windows-preview.<number> tag in piqae/piqae."
             }
             if ("${{ github.ref_name }}" -notmatch "^v$([regex]::Escape($version))-windows-preview\.[0-9]+$") {
               throw "The preview tag version must match the requested package version '$version'."
@@ -658,25 +652,183 @@ jobs:
     permissions:
       actions: read
       contents: write
+    concurrency:
+      group: piqae-native-preview-promotion
+      cancel-in-progress: false
     steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: ${{ needs.package.outputs.artifact_name }}
           path: artifacts
 
-      - name: Verify and publish the explicitly unsigned preview
+      - name: Verify and stage the explicitly unsigned preview
         shell: bash
         env:
-          GH_TOKEN: ${{ github.token }}
           RELEASE_VERSION: ${{ needs.package.outputs.version }}
         run: |
           set -euo pipefail
           installer="artifacts/piqae-windows-${RELEASE_VERSION}-x86_64-unsigned-preview-setup.exe"
           test -f "$installer"
           grep -Fqx \
-            "UNSIGNED PREVIEW: no Authenticode or update-signing credentials were supplied." \
+            "UNSIGNED PREVIEW: signing and automatic updates were explicitly disabled." \
             artifacts/SIGNING-STATUS.txt
           (cd artifacts && sha256sum --check SHA256SUMS)
+          if find artifacts -maxdepth 1 -type f -name 'appcast-*.xml' | grep -q .; then
+            echo "Unsigned preview publication refuses update appcasts." >&2
+            exit 1
+          fi
+          installer_name=$(basename "$installer")
+          sbom_name="piqae-windows-${RELEASE_VERSION}-unsigned-preview-SBOM.spdx.json"
+          status_name="piqae-windows-${RELEASE_VERSION}-unsigned-preview-SIGNING-STATUS.txt"
+          mkdir -p promotion
+          install -m 0644 "$installer" "promotion/$installer_name"
+          install -m 0644 artifacts/SBOM.spdx.json "promotion/$sbom_name"
+          install -m 0644 artifacts/SIGNING-STATUS.txt "promotion/$status_name"
+          installer_sha=$(sha256sum "promotion/$installer_name" | awk '{print $1}')
+          published_at=$(git show -s --format=%cI "$GITHUB_SHA")
+          printf '%s  %s\n' "$installer_sha" "$installer_name" \
+            > "promotion/$installer_name.sha256"
+          jq -n \
+            --arg version "$RELEASE_VERSION" \
+            --arg file "$installer_name" \
+            --arg sha "$installer_sha" \
+            --arg now "$published_at" \
+            --arg repository_url "https://github.com/$GITHUB_REPOSITORY" \
+            --arg release_url "https://github.com/$GITHUB_REPOSITORY/releases/tag/$GITHUB_REF_NAME" \
+            '{
+              schemaVersion: 1,
+              channel: "preview",
+              currentVersion: $version,
+              updatedAt: $now,
+              releasesUrl: "https://piqae.com/downloads",
+              repositoryUrl: $repository_url,
+              olderReleases: [],
+              artifacts: [{
+                id: "windows-x86_64",
+                platform: "windows",
+                title: "Piqae for Windows",
+                version: $version,
+                fileName: $file,
+                architectures: ["x86_64"],
+                minimumOs: "Windows 10 or 11, 64-bit",
+                status: "preview",
+                statusReason: "Unsigned evaluation build; Microsoft Artifact Signing and Windows certification gates remain open.",
+                downloadUrl: ("https://downloads.piqae.com/releases/preview/" + $file),
+                releaseUrl: $release_url,
+                sha256: $sha,
+                checksumUrl: ("https://downloads.piqae.com/releases/preview/" + $file + ".sha256"),
+                signing: { status: "unsigned", label: "Unsigned Windows preview" },
+                notes: [
+                  "Windows will show an Unknown publisher or Microsoft Defender SmartScreen warning.",
+                  "Automatic updates are disabled; use only for evaluation."
+                ]
+              }]
+            }' > promotion/manifest.json
+          jq -e \
+            --arg version "$RELEASE_VERSION" \
+            '.schemaVersion == 1
+             and .channel == "preview"
+             and .currentVersion == $version
+             and (.artifacts | length == 1)
+             and .artifacts[0].status == "preview"
+             and .artifacts[0].signing.status == "unsigned"
+             and (.artifacts[0].downloadUrl | startswith("https://downloads.piqae.com/releases/preview/"))
+             and (.artifacts[0].sha256 | test("^[a-f0-9]{64}$"))' \
+            promotion/manifest.json >/dev/null
+          manifest_sha=$(sha256sum promotion/manifest.json | awk '{print $1}')
+          printf '%s  manifest.json\n' "$manifest_sha" > promotion/manifest.json.sha256
+
+      - name: Upload and promote verified unsigned preview objects
+        shell: bash
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.PIQAE_RELEASES_S3_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.PIQAE_RELEASES_S3_SECRET_ACCESS_KEY }}
+          AWS_EC2_METADATA_DISABLED: "true"
+          PIQAE_RELEASES_S3_ENDPOINT: ${{ secrets.PIQAE_RELEASES_S3_ENDPOINT }}
+          PIQAE_RELEASES_S3_BUCKET: ${{ secrets.PIQAE_RELEASES_S3_BUCKET }}
+          PIQAE_RELEASES_S3_REGION: ${{ secrets.PIQAE_RELEASES_S3_REGION }}
+          RELEASE_VERSION: ${{ needs.package.outputs.version }}
+        run: |
+          set -euo pipefail
+          prefix="native/releases/$RELEASE_VERSION/windows-preview-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          installer_name="piqae-windows-${RELEASE_VERSION}-x86_64-unsigned-preview-setup.exe"
+          sbom_name="piqae-windows-${RELEASE_VERSION}-unsigned-preview-SBOM.spdx.json"
+          status_name="piqae-windows-${RELEASE_VERSION}-unsigned-preview-SIGNING-STATUS.txt"
+          declare -A content_types=(
+            ["$installer_name"]="application/vnd.microsoft.portable-executable"
+            ["$installer_name.sha256"]="text/plain"
+            ["$sbom_name"]="application/spdx+json"
+            ["$status_name"]="text/plain"
+            ["manifest.json"]="application/json"
+            ["manifest.json.sha256"]="text/plain"
+          )
+          for name in "$installer_name" "$installer_name.sha256" "$sbom_name" "$status_name" manifest.json manifest.json.sha256; do
+            packaging/release/publish-s3-object.sh immutable \
+              "promotion/$name" "$prefix/$name" "${content_types[$name]}"
+          done
+          # Preview manifest is the channel commit point. Stable keys and
+          # appcasts are deliberately unreachable from this job.
+          for name in "$installer_name" "$installer_name.sha256" "$sbom_name" "$status_name" manifest.json.sha256 manifest.json; do
+            packaging/release/publish-s3-object.sh promote \
+              "$prefix/$name" "native/preview/$name" "${content_types[$name]}"
+          done
+
+      - name: Verify public unsigned preview routes
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ needs.package.outputs.version }}
+        run: |
+          set -euo pipefail
+          base=https://downloads.piqae.com/releases/preview
+          installer_name="piqae-windows-${RELEASE_VERSION}-x86_64-unsigned-preview-setup.exe"
+          sbom_name="piqae-windows-${RELEASE_VERSION}-unsigned-preview-SBOM.spdx.json"
+          status_name="piqae-windows-${RELEASE_VERSION}-unsigned-preview-SIGNING-STATUS.txt"
+          smoke_dir=$(mktemp -d)
+          trap 'rm -rf -- "$smoke_dir"' EXIT
+          manifest="$smoke_dir/manifest.json"
+          curl --fail --location --silent --show-error --max-time 30 \
+            "$base/manifest.json" --output "$manifest"
+          jq -e \
+            --arg version "$RELEASE_VERSION" \
+            --arg download "$base/$installer_name" \
+            '.channel == "preview"
+             and .currentVersion == $version
+             and any(.artifacts[];
+               .id == "windows-x86_64"
+               and .version == $version
+               and .status == "preview"
+               and .signing.status == "unsigned"
+               and .downloadUrl == $download)' \
+            "$manifest" >/dev/null
+          curl --fail --location --silent --show-error --max-time 30 \
+            --range 0-0 "$base/$installer_name" --output /dev/null
+          curl --fail --location --silent --show-error --max-time 30 \
+            "$base/$installer_name.sha256" \
+            | grep -Fx "$(jq -r '.artifacts[0].sha256' "$manifest")  $installer_name"
+          curl --fail --location --silent --show-error --max-time 30 \
+            "$base/$sbom_name" | jq -e '.spdxVersion | startswith("SPDX-")' >/dev/null
+          curl --fail --location --silent --show-error --max-time 30 \
+            "$base/$status_name" \
+            | grep -Fx "UNSIGNED PREVIEW: signing and automatic updates were explicitly disabled."
+          manifest_checksum="$smoke_dir/manifest.json.sha256"
+          curl --fail --location --silent --show-error --max-time 30 \
+            "$base/manifest.json.sha256" --output "$manifest_checksum"
+          (cd "$smoke_dir" && sha256sum --check manifest.json.sha256)
+          if curl --fail --location --silent --show-error --max-time 10 \
+            "$base/appcast-windows.xml" --output /dev/null; then
+            echo "Unsigned preview publication must not expose a Windows appcast." >&2
+            exit 1
+          fi
+
+      - name: Publish GitHub prerelease
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ needs.package.outputs.version }}
+        run: |
+          set -euo pipefail
           notes_file="$RUNNER_TEMP/windows-preview-notes.md"
           printf '%s\n' \
             '# Unsigned Windows Preview' \
@@ -696,7 +848,7 @@ jobs:
               --title "Piqae ${RELEASE_VERSION} — unsigned Windows preview" \
               --notes-file "$notes_file"
           fi
-          gh release upload "$GITHUB_REF_NAME" artifacts/* --clobber
+          gh release upload "$GITHUB_REF_NAME" promotion/* --clobber
 
   publish:
     name: Promote signed Windows release

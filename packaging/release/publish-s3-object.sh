@@ -68,9 +68,9 @@ validate_immutable_key() {
   fi
 }
 
-validate_stable_key() {
+validate_channel_key() {
   local key=$1
-  if [[ ! "$key" =~ ^native/stable/[A-Za-z0-9][A-Za-z0-9._-]{0,180}$ ]] ||
+  if [[ ! "$key" =~ ^native/(stable|preview)/[A-Za-z0-9][A-Za-z0-9._-]{0,180}$ ]] ||
     [[ "$key" == *".."* ]]; then
     echo "refusing unsafe stable release key: $key" >&2
     exit 2
@@ -149,7 +149,7 @@ promote)
   stable_key=$second
   [[ -n "$immutable_key" && -n "$stable_key" && -n "$content_type" ]] || usage
   validate_immutable_key "$immutable_key"
-  validate_stable_key "$stable_key"
+  validate_channel_key "$stable_key"
   scratch=$(mktemp)
   trap 'rm -f -- "$scratch"' EXIT
   head=$(aws "${aws_args[@]}" s3api head-object \
@@ -182,7 +182,7 @@ fetch)
   key=$first
   output=$second
   [[ -n "$key" && -n "$output" && -z "$content_type" ]] || usage
-  validate_stable_key "$key"
+  validate_channel_key "$key"
   if [[ "$(object_count "$key")" == 0 ]]; then
     exit 3
   fi

@@ -30,6 +30,9 @@ concurrency:
 jobs:
   prepare:
     name: Resolve release
+    # Platform-scoped unsigned preview tags are dispatched explicitly through
+    # windows-release.yml and must never enter the signed multi-platform path.
+    if: github.event_name != 'push' || !contains(github.ref_name, '-windows-preview.')
     runs-on: ${{ vars.PIQAE_CI_LIGHT_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 5
     outputs:

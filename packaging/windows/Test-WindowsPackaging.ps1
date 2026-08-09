@@ -11,6 +11,16 @@ function Assert-True([bool]$Condition, [string]$Message) {
     }
 }
 
+function Assert-Throws([scriptblock]$Action, [string]$Message) {
+    $threw = $false
+    try {
+        & $Action
+    } catch {
+        $threw = $true
+    }
+    Assert-True $threw $Message
+}
+
 try {
     New-Item -ItemType Directory -Force $TemporaryDirectory | Out-Null
 
@@ -134,6 +144,8 @@ try {
     Assert-True ($signerScript.Contains("AllowRotatingCertificate")) "Authenticode verification cannot explicitly handle managed rotating leaf certificates."
 
     $releaseWorkflow = Get-Content -Raw -LiteralPath (Join-Path $RepositoryRoot ".github\workflows\windows-release.yml")
+    $orchestratorWorkflow = Get-Content -Raw -LiteralPath (Join-Path $RepositoryRoot ".github\workflows\release.yml")
+    Assert-True ($orchestratorWorkflow.Contains("!contains(github.ref_name, '-windows-preview.')")) "Unsigned Windows preview tags can enter the signed multi-platform release path."
     foreach ($component in @(
         "piqae-agent",
         "piqaectl",
@@ -153,6 +165,33 @@ try {
     Assert-True ($releaseWorkflow.Contains('$env:WINDOWS_TIMESTAMP_URL -eq $artifactSigningTimestamp')) "Release workflow does not restrict the HTTP timestamp exception to Microsoft's exact endpoint."
     Assert-True ($releaseWorkflow.Contains("files-folder-filter: piqae-*.exe,piqaectl.exe")) "Artifact Signing omits the piqaectl executable."
     Assert-True (([regex]::Matches($releaseWorkflow, '\$_.Name -like "piqae-\*\.exe" -or \$_.Name -eq "piqaectl\.exe"')).Count -eq 3) "Legacy signing or signature verification does not cover both node and CLI executables."
+
+    $versionResolver = Join-Path $PSScriptRoot "Resolve-WindowsReleaseVersion.ps1"
+    $previewVersion = & $versionResolver `
+        -RefType tag `
+        -RefName "v0.1.11-windows-preview.1" `
+        -RequestedVersion "0.1.11" `
+        -UnsignedPreview
+    Assert-True ($previewVersion -ceq "0.1.11") "Preview tag did not resolve to the Cargo package version."
+    $stableVersion = & $versionResolver `
+        -RefType tag `
+        -RefName "v0.1.11" `
+        -RequestedVersion "0.1.11"
+    Assert-True ($stableVersion -ceq "0.1.11") "Stable tag version resolution regressed."
+    Assert-Throws {
+        & $versionResolver `
+            -RefType tag `
+            -RefName "v0.1.11-windows-preview.1" `
+            -RequestedVersion "0.1.12" `
+            -UnsignedPreview
+    } "Preview tag must fail when it differs from the requested package version."
+    Assert-Throws {
+        & $versionResolver `
+            -RefType tag `
+            -RefName "v0.1.11" `
+            -RequestedVersion "0.1.11" `
+            -UnsignedPreview
+    } "Unsigned preview mode must reject a stable tag."
 
     Write-Host "Windows packaging static tests passed."
 } finally {
