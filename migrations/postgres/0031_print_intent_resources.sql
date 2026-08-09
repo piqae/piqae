@@ -9,6 +9,10 @@ ALTER TABLE printers
     ADD CONSTRAINT printers_tenant_identity_unique
     UNIQUE (workspace_id, environment_id, id);
 
+ALTER TABLE printers
+    ADD COLUMN semantic_capabilities jsonb NOT NULL DEFAULT '{}'::jsonb
+        CHECK (jsonb_typeof(semantic_capabilities) = 'object');
+
 ALTER TABLE stocks
     ADD CONSTRAINT stocks_tenant_identity_unique
     UNIQUE (workspace_id, environment_id, id);

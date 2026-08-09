@@ -435,6 +435,7 @@ pub struct StoredPrinter {
     pub capabilities: PrinterCapabilities,
     pub capability_revision: u64,
     pub native_options: BTreeMap<String, NativePrinterOption>,
+    pub semantic_capabilities: piqae_domain::SemanticPrinterCapabilities,
     pub profiles: Vec<PrinterProfileSnapshot>,
     pub updated_at: DateTime<Utc>,
 }
@@ -643,6 +644,7 @@ pub struct SyncedPrinter {
     pub capabilities: PrinterCapabilities,
     pub capability_revision: u64,
     pub native_options: BTreeMap<String, NativePrinterOption>,
+    pub semantic_capabilities: piqae_domain::SemanticPrinterCapabilities,
     pub profiles: Vec<PrinterProfileSnapshot>,
 }
 
@@ -2938,14 +2940,15 @@ impl PostgresStore {
                     "INSERT INTO printers (
                         id, workspace_id, environment_id, agent_id, native_id, name,
                         state, capabilities, capabilities_revision, is_default,
-                        native_options, profiles, last_seen_at, removed_at
-                     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,now(),NULL)
+                        native_options, semantic_capabilities, profiles, last_seen_at, removed_at
+                     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,now(),NULL)
                      ON CONFLICT (agent_id, native_id) DO UPDATE SET
                         name = EXCLUDED.name, state = EXCLUDED.state,
                         capabilities = EXCLUDED.capabilities,
                         capabilities_revision = EXCLUDED.capabilities_revision,
                         is_default = EXCLUDED.is_default,
                         native_options = EXCLUDED.native_options,
+                        semantic_capabilities = EXCLUDED.semantic_capabilities,
                         profiles = EXCLUDED.profiles,
                         last_seen_at = now(), removed_at = NULL",
                 )
@@ -2962,6 +2965,7 @@ impl PostgresStore {
                 })?)
                 .bind(printer.is_default)
                 .bind(serde_json::to_value(&printer.native_options)?)
+                .bind(serde_json::to_value(&printer.semantic_capabilities)?)
                 .bind(serde_json::to_value(&printer.profiles)?)
                 .execute(&mut *transaction)
                 .await?;
@@ -3487,7 +3491,7 @@ impl PostgresStore {
     ) -> Result<Vec<StoredPrinter>, StorageError> {
         let rows = sqlx::query(
             "SELECT id, agent_id, name, state, capabilities, capabilities_revision,
-                    native_options, profiles,
+                    native_options, semantic_capabilities, profiles,
                     COALESCE(last_seen_at, created_at) AS updated_at
              FROM printers
              WHERE workspace_id = $1 AND environment_id = $2 AND removed_at IS NULL
@@ -3514,7 +3518,7 @@ impl PostgresStore {
     ) -> Result<StoredPrinter, StorageError> {
         let row = sqlx::query(
             "SELECT id, agent_id, name, state, capabilities, capabilities_revision,
-                    native_options, profiles,
+                    native_options, semantic_capabilities, profiles,
                     COALESCE(last_seen_at, created_at) AS updated_at
              FROM printers
              WHERE id = $1 AND workspace_id = $2 AND environment_id = $3
@@ -7901,6 +7905,7 @@ fn printer_from_row(row: &PgRow) -> Result<StoredPrinter, StorageError> {
                 StorageError::InvalidData(format!("capability revision is negative: {error}"))
             })?,
         native_options: serde_json::from_value(row.try_get("native_options")?)?,
+        semantic_capabilities: serde_json::from_value(row.try_get("semantic_capabilities")?)?,
         profiles: serde_json::from_value(row.try_get("profiles")?)?,
         updated_at: row.try_get("updated_at")?,
     })

@@ -78,6 +78,7 @@ pub async fn capability_document(
         printer.capability_revision,
         &printer.capabilities,
         &printer.native_options,
+        &printer.semantic_capabilities,
     ))?;
     let fingerprint = hex::encode(Sha256::digest(fingerprint_input));
     let evidence = json!({"level":"discovered","source":"installed_driver","support_pack_id":null,"support_pack_digest":null});
@@ -115,9 +116,59 @@ pub async fn capability_document(
         !printer.capabilities.medias.is_empty(),
         json!(printer.capabilities.medias),
     );
+    append_semantic_facets(&printer, &mut facets);
     Ok(Json(
         json!({"schema_version":1,"printer_id":id,"revision":printer.capability_revision,"driver_fingerprint_sha256":fingerprint,"facets":facets,"created_at":printer.updated_at}),
     ))
+}
+
+fn append_semantic_facets(
+    printer: &piqae_storage_postgres::StoredPrinter,
+    facets: &mut serde_json::Map<String, Value>,
+) {
+    let pack = &printer.semantic_capabilities.support_pack;
+    for (name, values) in &printer.semantic_capabilities.facets {
+        let writable_values = printer.semantic_capabilities.native_resolutions.get(name);
+        let writable_values = values
+            .iter()
+            .filter(|value| {
+                writable_values
+                    .and_then(|choices| choices.get(*value))
+                    .is_some_and(|resolution| {
+                        printer
+                            .native_options
+                            .get(&resolution.native_option)
+                            .is_some_and(|option| {
+                                option
+                                    .choices
+                                    .iter()
+                                    .any(|choice| choice.value == resolution.native_choice)
+                            })
+                    })
+            })
+            .collect::<Vec<_>>();
+        facets.insert(
+            name.clone(),
+            json!({
+                "type":"enum",
+                "mutability":if writable_values.is_empty() {"read_only"} else {"job_override"},
+                "supported":true,
+                "unit":null,
+                "values":values,
+                "writable_values":writable_values,
+                "minimum":null,
+                "maximum":null,
+                "dependencies":[],
+                "conflicts":[],
+                "evidence":{
+                    "level":pack.as_ref().map_or("discovered", |value| value.evidence.as_str()),
+                    "source":"trusted_support_pack",
+                    "support_pack_id":pack.as_ref().map(|value| &value.pack_id),
+                    "support_pack_digest":pack.as_ref().map(|value| &value.digest_sha256),
+                }
+            }),
+        );
+    }
 }
 
 pub async fn validate(
@@ -166,7 +217,11 @@ pub async fn resolve(
         "printer_id": intent["printer_id"], "capability_revision": intent["capability_revision"],
         "workflow": intent["workflow"], "stock": intent["stock"],
         "resolved_options": intent["portable_options"],
-        "provenance": {"portable_options":"installed_driver_capability_revision"},
+        "semantic_options": intent["semantic_options"],
+        "provenance": {
+            "portable_options":"installed_driver_capability_revision",
+            "semantic_options":"trusted_support_pack_exact_native_resolution"
+        },
         "expires_at": expires_at,
     });
     let canonical = serde_json::to_vec(&display)?;
@@ -433,13 +488,7 @@ async fn validate_for_tenant(
             )),
         }
     }
-    if !intent.semantic_options.is_empty() {
-        errors.push(finding(
-            "unsupported_semantic_option",
-            "semantic_options",
-            "No trusted support-pack mapping exists for these semantic options.",
-        ));
-    }
+    resolve_semantic_options(&mut intent, &printer, &mut errors);
     let options = &intent.portable_options;
     if options.color == Some(true) && !printer.capabilities.color {
         errors.push(finding(
@@ -526,6 +575,71 @@ async fn validate_for_tenant(
 
 fn finding(code: &str, path: &str, message: &str) -> Value {
     json!({"code":code,"path":path,"message":message})
+}
+
+fn resolve_semantic_options(
+    intent: &mut PrintIntent,
+    printer: &piqae_storage_postgres::StoredPrinter,
+    errors: &mut Vec<Value>,
+) {
+    for (facet, requested) in &intent.semantic_options {
+        let path = format!("semantic_options.{facet}");
+        let Some(choice) = requested.as_str() else {
+            errors.push(finding(
+                "unsupported_semantic_option",
+                &path,
+                "Semantic choices must be advertised string values.",
+            ));
+            continue;
+        };
+        let Some(resolution) = printer
+            .semantic_capabilities
+            .native_resolutions
+            .get(facet)
+            .and_then(|choices| choices.get(choice))
+        else {
+            errors.push(finding(
+                "semantic_option_read_only",
+                &path,
+                "This semantic choice has no exact writable native resolution.",
+            ));
+            continue;
+        };
+        let advertised = printer
+            .native_options
+            .get(&resolution.native_option)
+            .is_some_and(|option| {
+                option
+                    .choices
+                    .iter()
+                    .any(|native| native.value == resolution.native_choice)
+            });
+        if !advertised {
+            errors.push(finding(
+                "stale_semantic_resolution",
+                &path,
+                "The mapped native choice is absent from the current driver snapshot.",
+            ));
+            continue;
+        }
+        match intent
+            .portable_options
+            .native_options
+            .get(&resolution.native_option)
+        {
+            Some(existing) if existing != &resolution.native_choice => errors.push(finding(
+                "conflicting_semantic_resolution",
+                &path,
+                "The semantic choice conflicts with another requested native choice.",
+            )),
+            _ => {
+                intent.portable_options.native_options.insert(
+                    resolution.native_option.clone(),
+                    resolution.native_choice.clone(),
+                );
+            }
+        }
+    }
 }
 
 fn same_revision(left: Option<&ResourceRevision>, right: Option<&ResourceRevision>) -> bool {
@@ -618,6 +732,10 @@ fn merge_workflow_intent(
 #[allow(clippy::expect_used)]
 mod workflow_tests {
     use super::*;
+    use piqae_domain::{
+        AgentId, NativePrinterChoice, NativePrinterOption, PrinterCapabilities, PrinterState,
+        SemanticNativeResolution, SemanticPrinterCapabilities,
+    };
     fn intent(copies: Option<u32>) -> PrintIntent {
         PrintIntent {
             schema_version: 1,
@@ -664,5 +782,74 @@ mod workflow_tests {
         let findings = merge_workflow_intent(intent(None), &requested, &[])
             .expect_err("workflow identity must remain pinned");
         assert_eq!(findings[0]["code"], "workflow_definition_mismatch");
+    }
+
+    fn semantic_printer() -> piqae_storage_postgres::StoredPrinter {
+        piqae_storage_postgres::StoredPrinter {
+            id: PrinterId::new(),
+            agent_id: AgentId::new(),
+            name: "Mapped printer".into(),
+            state: PrinterState::Online,
+            capabilities: PrinterCapabilities::default(),
+            capability_revision: 2,
+            native_options: BTreeMap::from([(
+                "SensingMode".into(),
+                NativePrinterOption {
+                    display_name: "Sensing".into(),
+                    default_choice: Some("Gap".into()),
+                    selected_choice: None,
+                    choices: vec![NativePrinterChoice {
+                        value: "Gap".into(),
+                        display_name: "Gap".into(),
+                    }],
+                },
+            )]),
+            semantic_capabilities: SemanticPrinterCapabilities {
+                facets: BTreeMap::from([("media.sensing".into(), vec!["gap".into()])]),
+                native_resolutions: BTreeMap::from([(
+                    "media.sensing".into(),
+                    BTreeMap::from([(
+                        "gap".into(),
+                        SemanticNativeResolution {
+                            native_option: "SensingMode".into(),
+                            native_choice: "Gap".into(),
+                        },
+                    )]),
+                )]),
+                support_pack: None,
+            },
+            profiles: Vec::new(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn semantic_choice_resolves_only_to_current_advertised_native_choice() {
+        let printer = semantic_printer();
+        let mut requested = intent(None);
+        requested
+            .semantic_options
+            .insert("media.sensing".into(), json!("gap"));
+        let mut errors = Vec::new();
+        resolve_semantic_options(&mut requested, &printer, &mut errors);
+        assert!(errors.is_empty());
+        assert_eq!(
+            requested.portable_options.native_options["SensingMode"],
+            "Gap"
+        );
+    }
+
+    #[test]
+    fn semantic_choice_without_exact_resolution_remains_read_only() {
+        let mut printer = semantic_printer();
+        printer.semantic_capabilities.native_resolutions.clear();
+        let mut requested = intent(None);
+        requested
+            .semantic_options
+            .insert("media.sensing".into(), json!("gap"));
+        let mut errors = Vec::new();
+        resolve_semantic_options(&mut requested, &printer, &mut errors);
+        assert_eq!(errors[0]["code"], "semantic_option_read_only");
+        assert!(requested.portable_options.native_options.is_empty());
     }
 }
