@@ -671,9 +671,8 @@ jobs:
           set -euo pipefail
           installer="artifacts/piqae-windows-${RELEASE_VERSION}-x86_64-unsigned-preview-setup.exe"
           test -f "$installer"
-          grep -Fqx \
-            "UNSIGNED PREVIEW: signing and automatic updates were explicitly disabled." \
-            artifacts/SIGNING-STATUS.txt
+          tr -d '\r' < artifacts/SIGNING-STATUS.txt \
+            | grep -Fqx "UNSIGNED PREVIEW: signing and automatic updates were explicitly disabled."
           (cd artifacts && sha256sum --check SHA256SUMS)
           if find artifacts -maxdepth 1 -type f -name 'appcast-*.xml' | grep -q .; then
             echo "Unsigned preview publication refuses update appcasts." >&2
@@ -811,6 +810,7 @@ jobs:
             "$base/$sbom_name" | jq -e '.spdxVersion | startswith("SPDX-")' >/dev/null
           curl --fail --location --silent --show-error --max-time 30 \
             "$base/$status_name" \
+            | tr -d '\r' \
             | grep -Fx "UNSIGNED PREVIEW: signing and automatic updates were explicitly disabled."
           manifest_checksum="$smoke_dir/manifest.json.sha256"
           curl --fail --location --silent --show-error --max-time 30 \
