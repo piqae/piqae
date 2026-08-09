@@ -631,19 +631,19 @@ describe('PiqaeClient', () => {
     await expect(client.jobs.createEncryptedResolved(
       { target_id: 'tgt_1', title: 'Private', content_type: 'pdf' },
       envelope,
-      { digest: 'c'.repeat(64), printer_id: 'prt_1', capability_revision: 1, resolved_options: {}, provenance: {}, expires_at: '2020-01-01T00:00:00Z' },
+      { digest: 'c'.repeat(64), printer_id: 'prt_1', capability_revision: 1, resolved_options: {}, semantic_options: {}, provenance: {}, expires_at: '2020-01-01T00:00:00Z' },
       'encrypted-expired-1'
     )).rejects.toThrow(/ticket has expired/);
     await expect(client.jobs.createEncryptedResolved(
       { target_id: 'tgt_1', title: 'Private', content_type: 'pdf' },
       envelope,
-      { digest: 'c'.repeat(64), printer_id: 'prt_1', capability_revision: 1, resolved_options: {}, provenance: {}, expires_at: 'not-a-date' },
+      { digest: 'c'.repeat(64), printer_id: 'prt_1', capability_revision: 1, resolved_options: {}, semantic_options: {}, provenance: {}, expires_at: 'not-a-date' },
       'encrypted-invalid-expiry-1'
     )).rejects.toThrow(/ticket has expired/);
     await expect(client.jobs.createEncryptedResolved(
       { target_id: 'tgt_1', title: 'Private', content_type: 'pdf' },
       envelope,
-      { digest: 'c'.repeat(64), printer_id: 'prt_1', capability_revision: 1, resolved_options: {}, provenance: {}, expires_at: '2099-02-30T00:00:00Z' },
+      { digest: 'c'.repeat(64), printer_id: 'prt_1', capability_revision: 1, resolved_options: {}, semantic_options: {}, provenance: {}, expires_at: '2099-02-30T00:00:00Z' },
       'encrypted-invalid-calendar-1'
     )).rejects.toThrow(/ticket has expired/);
   });
