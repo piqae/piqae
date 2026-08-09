@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  combineReleaseManifests,
   detectClient,
   loadReleaseManifest,
   parseReleaseManifest,
@@ -76,6 +77,69 @@ describe('server-owned release manifest', () => {
     const unsigned = structuredClone(supportedManifest);
     unsigned.artifacts.at(0)!.signing.status = 'unsigned';
     expect(() => parseReleaseManifest(unsigned)).toThrow(/cannot be supported/);
+  });
+
+  it('allows checksummed unsigned downloads only on the preview channel', () => {
+    const preview = structuredClone(supportedManifest);
+    preview.channel = 'preview';
+    preview.artifacts[0]!.status = 'preview';
+    preview.artifacts[0]!.signing = { status: 'unsigned', label: 'Unsigned prerelease' };
+    expect(parseReleaseManifest(preview).artifacts[0]!.downloadUrl).not.toBeNull();
+
+    preview.channel = 'stable';
+    expect(() => parseReleaseManifest(preview)).toThrow(/unsigned download outside/);
+    preview.channel = 'preview';
+    preview.artifacts[0]!.sha256 = null as never;
+    expect(() => parseReleaseManifest(preview)).toThrow(/unsigned download outside/);
+  });
+
+  it('fills only platforms without stable downloads from preview', () => {
+    const stable = parseReleaseManifest(supportedManifest);
+    const previewInput = structuredClone(supportedManifest);
+    previewInput.channel = 'preview';
+    previewInput.currentVersion = '1.3.0';
+    previewInput.artifacts = [
+      {
+        ...previewInput.artifacts[0]!,
+        version: '1.3.0',
+        status: 'preview',
+        downloadUrl: 'https://releases.piqae.test/Piqae-1.3.0.zip'
+      },
+      {
+        ...previewInput.artifacts[0]!,
+        id: 'windows-x86_64',
+        platform: 'windows',
+        title: 'Windows node',
+        version: '1.3.0',
+        status: 'preview',
+        downloadUrl: 'https://releases.piqae.test/Piqae-1.3.0.exe',
+        signing: { status: 'unsigned', label: 'Unsigned prerelease' }
+      }
+    ];
+    const combined = combineReleaseManifests(stable, parseReleaseManifest(previewInput));
+
+    expect(combined?.artifacts.map(({ platform, version }) => [platform, version])).toEqual([
+      ['macos', '1.2.3'],
+      ['windows', '1.3.0']
+    ]);
+    expect(combined?.channel).toBe('stable');
+  });
+
+  it('replaces a non-downloadable stable placeholder with a preview artifact', () => {
+    const stableInput = structuredClone(supportedManifest);
+    stableInput.artifacts[0]!.downloadUrl = null as never;
+    stableInput.artifacts[0]!.sha256 = null as never;
+    stableInput.artifacts[0]!.fileName = null as never;
+    stableInput.artifacts[0]!.status = 'unavailable';
+    const stable = parseReleaseManifest(stableInput);
+    const previewInput = structuredClone(supportedManifest);
+    previewInput.channel = 'preview';
+    previewInput.artifacts[0]!.status = 'preview';
+
+    expect(combineReleaseManifests(stable, parseReleaseManifest(previewInput))?.artifacts)
+      .toHaveLength(1);
+    expect(combineReleaseManifests(stable, parseReleaseManifest(previewInput))?.artifacts[0]!.status)
+      .toBe('preview');
   });
 
   it('rejects insecure, credentialed, and fragmented release URLs', () => {

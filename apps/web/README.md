@@ -39,6 +39,14 @@ values, signing state, release notes, and older releases. The parser accepts
 only HTTPS release URLs and refuses a `supported` claim unless the artifact has
 a direct download, SHA-256, and verified platform-signing state.
 
+When the private release origin is configured, the page reads both channel
+manifests. A downloadable stable artifact remains authoritative for its entire
+platform; a checksummed Preview artifact fills only a platform that has no
+stable download. An unsigned artifact can be offered only from the Preview
+channel with the Preview support tier, a SHA-256, and explicit unsigned
+prerelease and operating-system warning text. Signed Preview-tier artifacts are
+described as releases while retaining a separate Preview support label.
+
 When the setting is absent, the checked-in manifest reflects the repository
 support matrix: Windows is Development-only and macOS/Linux are Preview, with
 no fabricated download link or checksum. Browser user-agent hints highlight a

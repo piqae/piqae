@@ -81,13 +81,13 @@ describe('downloads', () => {
   it.each([
     {
       status: 'preview' as const,
-      heading: 'Download the Piqae preview for macOS',
-      link: 'Download preview for Mac'
+      heading: 'Download Piqae for macOS',
+      link: 'Download release for Mac'
     },
     {
       status: 'supported' as const,
       heading: 'Download Piqae for macOS',
-      link: 'Download for Mac'
+      link: 'Download release for Mac'
     }
   ])('shows a real primary download for a signed $status artifact', ({ status, heading, link }) => {
     const manifest = loadReleaseManifest({});
@@ -120,5 +120,37 @@ describe('downloads', () => {
     for (const downloadLink of downloadLinks) {
       expect(downloadLink).toHaveAttribute('href', mac.downloadUrl);
     }
+  });
+
+  it('labels an unsigned Windows download as a prerelease with an accessible warning', () => {
+    const manifest = loadReleaseManifest({});
+    const windows = manifest.artifacts.find((artifact) => artifact.id === 'windows-x86_64');
+    if (!windows) throw new Error('Windows fixture missing');
+    windows.status = 'preview';
+    windows.fileName = 'Piqae-unsigned-preview-setup.exe';
+    windows.downloadUrl = 'https://github.com/piqae/piqae/releases/download/v0.1.11/Piqae.exe';
+    windows.sha256 = 'b'.repeat(64);
+    windows.signing = { status: 'unsigned', label: 'Unsigned prerelease' };
+
+    render(Page, {
+      data: {
+        meta: {
+          deployment: 'cloud',
+          version: '0.1.11',
+          auth: { provider: 'workos', workspaceSwitching: true, invitations: true },
+          billing: { enabled: true },
+          updates: { officialFeed: true, customFeed: false }
+        },
+        manifest,
+        detected: { platform: 'windows', architecture: 'x86_64', label: 'this Windows computer' },
+        recommendedArtifactId: 'windows-x86_64'
+      } as never
+    });
+
+    expect(screen.getByRole('alert')).toHaveTextContent(/^Unsigned prerelease\./);
+    expect(screen.getAllByRole('link', { name: 'Download unsigned prerelease for Windows' }))
+      .toHaveLength(2);
+    expect(screen.getAllByText(/Unsigned prerelease/).length).toBeGreaterThan(1);
+    expect(screen.getByText(/automatic updates are disabled/i)).toBeInTheDocument();
   });
 });

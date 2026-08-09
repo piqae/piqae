@@ -39,15 +39,24 @@
   function isDownloadable(artifact: Artifact) {
     return (
       (artifact.status === 'supported' || artifact.status === 'preview') &&
-      artifact.signing.status === 'verified' &&
-      Boolean(artifact.downloadUrl && artifact.fileName)
+      Boolean(artifact.downloadUrl && artifact.fileName && artifact.sha256) &&
+      (artifact.signing.status === 'verified' ||
+        (artifact.status === 'preview' && artifact.signing.status === 'unsigned'))
     );
   }
 
+  function isUnsignedPreview(artifact: Artifact) {
+    return artifact.status === 'preview' && artifact.signing.status === 'unsigned';
+  }
+
   function downloadLabel(artifact: Artifact) {
-    return artifact.status === 'preview'
-      ? `Download preview for ${shortPlatformName(artifact.platform)}`
-      : `Download for ${shortPlatformName(artifact.platform)}`;
+    if (isUnsignedPreview(artifact)) {
+      return `Download unsigned prerelease for ${shortPlatformName(artifact.platform)}`;
+    }
+    if (artifact.signing.status === 'verified') {
+      return `Download release for ${shortPlatformName(artifact.platform)}`;
+    }
+    return `Download for ${shortPlatformName(artifact.platform)}`;
   }
 
   function statusLabel(status: Artifact['status']) {
@@ -55,6 +64,16 @@
     if (status === 'preview') return 'Preview';
     if (status === 'development') return 'In development';
     return 'Unavailable';
+  }
+
+  function artifactStatusLabel(artifact: Artifact) {
+    if (isUnsignedPreview(artifact)) return 'Unsigned prerelease';
+    if (artifact.signing.status === 'verified') return 'Release';
+    return statusLabel(artifact.status);
+  }
+
+  function supportLabel(artifact: Artifact) {
+    return artifact.status === 'preview' ? 'Preview support' : statusLabel(artifact.status);
   }
 
   function formatDate(value: string) {
@@ -98,8 +117,8 @@
           <span class="m-eyebrow">Piqae for {platformName(detectedArtifact.platform)}</span>
           <h1>
             {#if isDownloadable(detectedArtifact)}
-              {#if detectedArtifact.status === 'preview'}
-                Download the Piqae preview for {platformName(detectedArtifact.platform)}
+              {#if detectedArtifact.signing.status === 'verified'}
+                Download Piqae for {platformName(detectedArtifact.platform)}
               {:else}
                 Download Piqae for {platformName(detectedArtifact.platform)}
               {/if}
@@ -111,6 +130,14 @@
             Connect this computer to the printers it already knows. Piqae works quietly in the
             background so your apps can print from anywhere.
           </p>
+
+          {#if isUnsignedPreview(detectedArtifact)}
+            <p class="unsigned-warning" role="alert">
+              <strong>Unsigned prerelease.</strong> Windows will show an unknown-publisher or
+              SmartScreen warning. Use this evaluation build only if you accept that risk; automatic
+              updates are disabled.
+            </p>
+          {/if}
 
           <div class="hero-actions">
             {#if isDownloadable(detectedArtifact) && detectedArtifact.downloadUrl}
@@ -138,7 +165,8 @@
           </div>
 
           <p class="release-line">
-            {statusLabel(detectedArtifact.status)} · v{detectedArtifact.version} ·
+            {artifactStatusLabel(detectedArtifact)} v{detectedArtifact.version} ·
+            {supportLabel(detectedArtifact)} ·
             {detectedArtifact.architectures.join(' + ')}
           </p>
         {:else}
@@ -208,7 +236,10 @@
               {#if artifact.id === data.recommendedArtifactId}<span class="you-are-here">This device</span>{/if}
             </div>
             <p>{artifact.minimumOs}</p>
-            <small>{artifact.architectures.join(' · ')} · {statusLabel(artifact.status)}</small>
+            <small>{artifact.architectures.join(' · ')} · {artifactStatusLabel(artifact)} · {supportLabel(artifact)}</small>
+            {#if isUnsignedPreview(artifact)}
+              <p class="platform-warning">Unsigned evaluation build · Unknown publisher warning expected</p>
+            {/if}
           </div>
           {#if isDownloadable(artifact) && artifact.downloadUrl}
             <a
@@ -218,7 +249,7 @@
               data-platform={artifact.platform}
               aria-label={downloadLabel(artifact)}
             >
-              {artifact.status === 'preview' ? 'Download preview' : 'Download'}
+              {isUnsignedPreview(artifact) ? 'Download unsigned prerelease' : artifact.signing.status === 'verified' ? 'Download release' : 'Download'}
               <Icon name="arrow-right" size={12} />
             </a>
           {:else}
@@ -282,7 +313,7 @@
           <summary>
             <span>
               <strong>{platformName(artifact.platform)}</strong>
-              <small>v{artifact.version} · {statusLabel(artifact.status)}</small>
+              <small>v{artifact.version} · {artifactStatusLabel(artifact)} · {supportLabel(artifact)}</small>
             </span>
             <Icon name="chevron-down" size={16} />
           </summary>
@@ -387,6 +418,17 @@
     font-size: clamp(16px, 1.7vw, 19px);
     line-height: 1.55;
     text-wrap: pretty;
+  }
+  .unsigned-warning {
+    max-width: 560px;
+    margin: 22px 0 0;
+    padding: 14px 16px;
+    border: 1px solid #d8a12d;
+    border-radius: 10px;
+    background: #fff8e6;
+    color: #5d4100;
+    font-size: 13px;
+    line-height: 1.5;
   }
   .hero-actions {
     display: flex;
@@ -578,6 +620,13 @@
   }
   .platform-copy p { min-height: 42px; margin: 9px 0 0; color: var(--m-muted); font-size: 13px; line-height: 1.45; }
   .platform-copy small { color: var(--m-faint); font-size: 10px; text-transform: uppercase; letter-spacing: .035em; }
+  .platform-copy .platform-warning {
+    min-height: 0;
+    margin: 9px 0 0;
+    color: #7a5000;
+    font-size: 11px;
+    font-weight: 650;
+  }
   .platform-action {
     display: inline-flex;
     align-items: center;
