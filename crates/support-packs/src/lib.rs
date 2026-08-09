@@ -5,6 +5,9 @@
 //! safe overrides are intentionally absent from the format.
 
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use piqae_domain::{
+    DriverFingerprint, NativePrinterOption, SemanticPrinterCapabilities, SupportPackProvenance,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -133,6 +136,18 @@ pub struct TrustPolicy {
     pub verifying_keys: Vec<VerifyingKey>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct RegistryConfig {
+    pub pack_directories: Vec<PathBuf>,
+    pub pinned_digest_hex: Vec<String>,
+    pub ed25519_public_key_hex: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SupportPackRegistry {
+    packs: Vec<LoadedPack>,
+}
+
 #[derive(Debug, Error)]
 pub enum PackError {
     #[error("support-pack I/O error at {path}: {source}")]
@@ -155,6 +170,129 @@ pub enum PackError {
     NoMatch,
     #[error("multiple trusted support packs match the printer fingerprint: {0:?}")]
     Ambiguous(Vec<String>),
+}
+
+impl SupportPackRegistry {
+    /// Loads all configured packs. A configured but invalid pack prevents the
+    /// registry from starting; silently skipping it could alter capabilities
+    /// across restarts.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PackError`] for invalid trust material or any invalid pack.
+    pub fn load(config: &RegistryConfig) -> Result<Self, PackError> {
+        let pinned_digests = config
+            .pinned_digest_hex
+            .iter()
+            .map(|value| parse_array::<32>(value, "pinned digest"))
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        let verifying_keys = config
+            .ed25519_public_key_hex
+            .iter()
+            .map(|value| {
+                VerifyingKey::from_bytes(&parse_array::<32>(value, "Ed25519 public key")?)
+                    .map_err(|_| PackError::Invalid("invalid Ed25519 public key".into()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let trust = TrustPolicy {
+            pinned_digests,
+            verifying_keys,
+        };
+        let packs = config
+            .pack_directories
+            .iter()
+            .map(|directory| load_pack(directory, &trust))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self { packs })
+    }
+
+    /// Projects observed display-safe choices through one exact trusted pack.
+    /// An absent package digest or driver version returns an empty projection.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PackError::Ambiguous`] when multiple packs match. No match is
+    /// intentionally represented by an empty projection.
+    pub fn normalize(
+        &self,
+        fingerprint: Option<&DriverFingerprint>,
+        native_options: &BTreeMap<String, NativePrinterOption>,
+    ) -> Result<SemanticPrinterCapabilities, PackError> {
+        let Some(fingerprint) = fingerprint.and_then(to_printer_fingerprint) else {
+            return Ok(SemanticPrinterCapabilities::default());
+        };
+        let pack = match select_pack(&self.packs, &fingerprint) {
+            Ok(pack) => pack,
+            Err(PackError::NoMatch) => return Ok(SemanticPrinterCapabilities::default()),
+            Err(error) => return Err(error),
+        };
+        let mut values = BTreeMap::<String, BTreeSet<String>>::new();
+        for rule in &pack.mappings {
+            if rule.platform != fingerprint.platform {
+                continue;
+            }
+            let Some(option) = native_options.get(&rule.native_capability_key) else {
+                continue;
+            };
+            for native_choice in &option.choices {
+                if let Some(semantic_choice) = rule.choices.get(&native_choice.value) {
+                    values
+                        .entry(rule.semantic_facet.clone())
+                        .or_default()
+                        .insert(semantic_choice.clone());
+                }
+            }
+        }
+        Ok(SemanticPrinterCapabilities {
+            facets: values
+                .into_iter()
+                .map(|(facet, choices)| (facet, choices.into_iter().collect()))
+                .collect(),
+            support_pack: Some(SupportPackProvenance {
+                pack_id: pack.manifest.pack_id.clone(),
+                digest_sha256: hex::encode(pack.digest),
+                evidence: evidence_name(pack.manifest.evidence).into(),
+            }),
+        })
+    }
+}
+
+fn parse_array<const N: usize>(value: &str, label: &str) -> Result<[u8; N], PackError> {
+    let bytes = hex::decode(value).map_err(|_| PackError::Invalid(format!("invalid {label}")))?;
+    bytes
+        .try_into()
+        .map_err(|_| PackError::Invalid(format!("invalid {label} length")))
+}
+
+fn to_printer_fingerprint(value: &DriverFingerprint) -> Option<PrinterFingerprint> {
+    let platform = match value.platform.as_str() {
+        "windows" => Platform::Windows,
+        "macos" | "linux" | "cups" | "ipp" => Platform::CupsIpp,
+        _ => return None,
+    };
+    let driver_package_sha256 = value.driver_package_fingerprint.as_ref()?.clone();
+    validate_sha256(&driver_package_sha256).ok()?;
+    let driver_version = value.driver_version.as_ref()?.clone();
+    if value.driver_name.is_empty() || driver_version.is_empty() {
+        return None;
+    }
+    Some(PrinterFingerprint {
+        platform,
+        driver_package_sha256,
+        driver_id: value.driver_name.clone(),
+        driver_version,
+        device_id: value.device_fingerprint.clone(),
+        firmware_version: value.firmware_version.clone(),
+    })
+}
+
+const fn evidence_name(value: EvidenceTier) -> &'static str {
+    match value {
+        EvidenceTier::Discovered => "discovered",
+        EvidenceTier::Mapped => "mapped",
+        EvidenceTier::ReplayTested => "replay_tested",
+        EvidenceTier::PhysicallyCertified => "physically_certified",
+    }
 }
 
 /// Loads, verifies and validates a support-pack directory.
@@ -698,6 +836,70 @@ mod tests {
             },
         )?;
         assert_eq!(loaded.digest, digest);
+        Ok(())
+    }
+
+    #[test]
+    fn registry_projects_only_exact_proven_driver_fingerprints()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let pack = TestPack::new()?;
+        let digest = pack_digest(&pack.0)?;
+        let config = RegistryConfig {
+            pack_directories: vec![pack.0.clone()],
+            pinned_digest_hex: vec![hex::encode(digest)],
+            ed25519_public_key_hex: Vec::new(),
+        };
+        let registry = SupportPackRegistry::load(&config)?;
+        let options = BTreeMap::from([(
+            "display-safe-option".into(),
+            NativePrinterOption {
+                display_name: "Sensing".into(),
+                default_choice: Some("Native A".into()),
+                selected_choice: None,
+                choices: vec![piqae_domain::NativePrinterChoice {
+                    value: "Native A".into(),
+                    display_name: "Native A".into(),
+                }],
+            },
+        )]);
+        let fingerprint = DriverFingerprint {
+            platform: "windows".into(),
+            driver_name: "example-driver".into(),
+            driver_version: Some("1.2.3".into()),
+            architecture: None,
+            native_queue_id: "queue".into(),
+            device_fingerprint: Some("USBPRINT/example".into()),
+            driver_package_fingerprint: Some("a".repeat(64)),
+            firmware_version: Some("4.5".into()),
+        };
+        let projection = registry.normalize(Some(&fingerprint), &options)?;
+        assert_eq!(projection.facets["media.sensing"], ["gap"]);
+        assert_eq!(
+            projection
+                .support_pack
+                .as_ref()
+                .map(|pack| pack.pack_id.as_str()),
+            Some("pack.example")
+        );
+
+        let mut wrong_firmware = fingerprint.clone();
+        wrong_firmware.firmware_version = Some("4.6".into());
+        assert_eq!(
+            registry.normalize(Some(&wrong_firmware), &options)?,
+            SemanticPrinterCapabilities::default()
+        );
+
+        let mut incomplete = fingerprint;
+        incomplete.driver_package_fingerprint = None;
+        assert_eq!(
+            registry.normalize(Some(&incomplete), &options)?,
+            SemanticPrinterCapabilities::default()
+        );
+        // Reconstructing after a process restart produces the same projection.
+        assert_eq!(
+            SupportPackRegistry::load(&config)?.normalize(Some(&incomplete), &options)?,
+            SemanticPrinterCapabilities::default()
+        );
         Ok(())
     }
 

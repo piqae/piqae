@@ -109,6 +109,24 @@ pub struct NativePrinterOption {
     pub choices: Vec<NativePrinterChoice>,
 }
 
+/// Display-safe provenance for semantic capabilities normalized by one exact,
+/// trusted driver support pack.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SupportPackProvenance {
+    pub pack_id: String,
+    pub digest_sha256: String,
+    pub evidence: String,
+}
+
+/// Normalized, display-safe choices. This never carries native execution
+/// values or changes the overrides authorized by an immutable profile.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default)]
+pub struct SemanticPrinterCapabilities {
+    pub facets: BTreeMap<String, Vec<String>>,
+    pub support_pack: Option<SupportPackProvenance>,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct NativePrinterChoice {
     pub value: String,

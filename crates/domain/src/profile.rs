@@ -75,6 +75,9 @@ pub struct DriverFingerprint {
     pub native_queue_id: String,
     pub device_fingerprint: Option<String>,
     pub driver_package_fingerprint: Option<String>,
+    /// Exact firmware version when the platform can discover it reliably.
+    /// Absence prevents matching support-pack selectors that require firmware.
+    pub firmware_version: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]

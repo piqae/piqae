@@ -19,7 +19,8 @@ pub use job::{
 };
 pub use printer::{
     NativePrinterChoice, NativePrinterOption, PRINTER_PROFILE_SCHEMA_VERSION, PrinterCapabilities,
-    PrinterCapabilityProfile, PrinterProfileError, PrinterState,
+    PrinterCapabilityProfile, PrinterProfileError, PrinterState, SemanticPrinterCapabilities,
+    SupportPackProvenance,
 };
 pub use profile::{
     BindingRole, DriverFingerprint, JobProfilePin, LoadedMedia, LoadedMediaConfidence,

@@ -1278,6 +1278,7 @@ mod tests {
             exposed: true,
             capability_revision: 7,
             native_options,
+            semantic_capabilities: piqae_domain::SemanticPrinterCapabilities::default(),
             profiles: vec![PrinterProfileSnapshot {
                 profile_id: "profile_shipping".into(),
                 revision: 4,

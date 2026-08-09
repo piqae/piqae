@@ -145,6 +145,10 @@ pub struct DiscoveredPrinter {
     pub capabilities: PrinterCapabilities,
     #[serde(default)]
     pub native_options: BTreeMap<String, NativePrinterOption>,
+    /// Exact, locally discovered identity. Absent or incomplete fingerprints
+    /// must never activate vendor support-pack mappings.
+    #[serde(default)]
+    pub driver_fingerprint: Option<DriverFingerprint>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

@@ -333,6 +333,7 @@ mod platform {
                         state,
                         capabilities,
                         native_options,
+                        driver_fingerprint: None,
                     }
                 })
                 .collect();
