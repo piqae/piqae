@@ -223,19 +223,23 @@ and queue reconciliation have been observed.
 
 ## Current blockers
 
-- macOS build `0.1.0 (7)` completed Developer ID signing for the app, agent,
-  executor, and installer; Apple notarisation/stapling for the app and DMG;
-  Sparkle Ed25519 signing; immutable publication; and public checksum
-  verification in GitHub Actions run `30507639987`.
-- The currently published macOS `0.1.0 (8)` appcast omits `/stable/` from its
-  enclosure URL and the shared stable manifest is absent. The archive exists at
-  the correct stable path, but desktop discovery remains broken until a
-  protected release repairs both channel pointers.
+- `v0.1.11 (14)` completed universal macOS compilation, Developer ID signing,
+  Apple notarisation and stapling for the app, PKG and DMG, Sparkle Ed25519
+  signing, checksum/SBOM generation, repository-bound provenance validation,
+  protected promotion and public-feed smoke checks in GitHub Actions run
+  `31287558654` at commit
+  `ce309cecd7740a7d8b43bc79aa8ecf67671e6a21`.
+- The public stable macOS appcast and shared manifest now use the corrected
+  `/releases/stable/` paths and advertise `0.1.11`. The earlier `0.1.0` feed
+  defect is closed.
 - No Windows appcast is published; its stable route correctly remains absent
-  while Windows release evidence is incomplete.
+  while Windows remains Disabled for production. Unsigned Windows builds may
+  be used for Preview evaluation, but Microsoft Artifact Signing identity
+  validation, a certificate profile and signed candidate evidence are still
+  required before publishing a Windows updater feed.
 - macOS Sparkle replaces the app bundle; the relaunched app transactionally
   activates its embedded, matching Rust agent and executor after an idle gate.
-- Windows WinSparkle source integration still needs a Windows CI run,
+- Windows WinSparkle source integration still needs signed Windows CI,
   clean-install evidence, busy-node deferral evidence, and rollback evidence.
 - Coordinated update restoration still needs destructive fault-injection
   evidence before it can move beyond Preview.
