@@ -31,3 +31,6 @@ Recommended qualification:
 
 See [native profiles](native-profiles.md) and the
 [stock/routing specification](../16-native-print-profiles-stock-and-routing.md).
+For the current SDK surface, identified gaps, proposed semantic capability
+document, richer stock contract, and an OKI Pro1050 qualification slice, see
+[SDK access to professional capabilities](sdk-professional-capabilities.md).
