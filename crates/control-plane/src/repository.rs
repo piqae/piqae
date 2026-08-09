@@ -2291,6 +2291,7 @@ struct MemoryState {
     jobs: HashMap<JobId, MemoryJob>,
     printers: HashMap<PrinterId, (WorkspaceId, EnvironmentId, StoredPrinter)>,
     stocks: HashMap<String, (WorkspaceId, EnvironmentId, StoredStock)>,
+    print_workflows: HashMap<String, (WorkspaceId, EnvironmentId, StoredPrintWorkflow)>,
     targets: HashMap<String, (WorkspaceId, EnvironmentId, StoredTarget)>,
     target_bindings: HashMap<String, (WorkspaceId, EnvironmentId, StoredTargetBinding)>,
     agents: HashMap<AgentId, (WorkspaceId, EnvironmentId, StoredAgent)>,
@@ -3126,6 +3127,53 @@ impl Repository for MemoryRepository {
             .collect::<Vec<_>>();
         values.sort_by_key(|stock| (stock.created_at, stock.id.clone()));
         Ok(values)
+    }
+
+    async fn list_print_workflows(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+    ) -> Result<Vec<StoredPrintWorkflow>, RepositoryError> {
+        let mut values = self
+            .state
+            .read()
+            .await
+            .print_workflows
+            .values()
+            .filter(|(workspace, environment, _)| {
+                *workspace == workspace_id && *environment == environment_id
+            })
+            .map(|(_, _, workflow)| workflow.clone())
+            .collect::<Vec<_>>();
+        values.sort_by_key(|workflow| (workflow.created_at, workflow.id.clone()));
+        Ok(values)
+    }
+
+    async fn create_print_workflow(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        workflow: &StoredPrintWorkflow,
+    ) -> Result<StoredPrintWorkflow, RepositoryError> {
+        let mut state = self.state.write().await;
+        let printer_visible = state.printers.get(&workflow.printer_id).is_some_and(
+            |(workspace, environment, printer)| {
+                *workspace == workspace_id
+                    && *environment == environment_id
+                    && printer.capability_revision == workflow.capability_revision
+            },
+        );
+        if !printer_visible {
+            return Err(RepositoryError::NotFound);
+        }
+        if state.print_workflows.contains_key(&workflow.id) {
+            return Err(RepositoryError::ConcurrentStateChange);
+        }
+        state.print_workflows.insert(
+            workflow.id.clone(),
+            (workspace_id, environment_id, workflow.clone()),
+        );
+        Ok(workflow.clone())
     }
 
     async fn get_stock(
