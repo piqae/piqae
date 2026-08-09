@@ -13,6 +13,115 @@ afterEach(() => {
 });
 
 describe("Piqae MCP server", () => {
+  it("keeps intent reads separate from confirmed workflow writes", async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      Response.json({
+        status: "valid",
+        capability_revision: 1,
+        errors: [],
+        warnings: [],
+      }),
+    );
+    globalThis.fetch = fetchMock as typeof fetch;
+    const { client, server } = await linked(config());
+    const intent = {
+      schema_version: 1,
+      printer_id: "ptr_test",
+      capability_revision: 1,
+      portable_options: {},
+      semantic_options: {},
+      document_manifest: {
+        page_count: 1,
+        page_boxes: [{ width_mm: 100, height_mm: 150 }],
+        color_spaces: [],
+        separations: [],
+        scaling: "none",
+      },
+    };
+    const validated = await client.callTool({
+      name: "piqae_print_intents",
+      arguments: { action: "validate", intent },
+    });
+    expect(validated.isError).not.toBe(true);
+    expect(new URL(String(fetchMock.mock.calls[0]?.[0])).pathname).toBe(
+      "/v1/print-intents/validate",
+    );
+
+    fetchMock.mockClear();
+    const denied = await client.callTool({
+      name: "piqae_workflows",
+      arguments: {
+        action: "create",
+        name: "Labels",
+        printer_id: "ptr_test",
+        capability_revision: 1,
+        definition: intent,
+        safe_overrides: [],
+        confirm: "some_other_printer",
+      },
+    });
+    expect(denied.isError).toBe(true);
+    expect(fetchMock).not.toHaveBeenCalled();
+    await client.close();
+    await server.close();
+  });
+
+  it("rejects native driver escapes before intent requests reach the API", async () => {
+    const fetchMock = vi.fn();
+    globalThis.fetch = fetchMock as typeof fetch;
+    const { client, server } = await linked(config());
+    const response = await client.callTool({
+      name: "piqae_print_intents",
+      arguments: {
+        action: "resolve",
+        intent: {
+          schema_version: 1,
+          printer_id: "ptr_test",
+          capability_revision: 1,
+          portable_options: { native_options: { PrivateByte: "1" } },
+          semantic_options: {},
+          document_manifest: {
+            page_count: 1,
+            page_boxes: [{ width_mm: 100, height_mm: 150 }],
+            color_spaces: [],
+            separations: [],
+            scaling: "none",
+          },
+        },
+      },
+    });
+    expect(response.isError).toBe(true);
+    expect(JSON.stringify(response.structuredContent)).toContain(
+      "Driver-native intent field is forbidden",
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+    await client.close();
+    await server.close();
+  });
+
+  it("rejects nested camel-case native blobs before workflow creation", async () => {
+    const fetchMock = vi.fn();
+    globalThis.fetch = fetchMock as typeof fetch;
+    const { client, server } = await linked(config());
+    const response = await client.callTool({
+      name: "piqae_workflows",
+      arguments: {
+        action: "create",
+        name: "Unsafe",
+        printer_id: "ptr_test",
+        capability_revision: 1,
+        definition: { semantic_options: { effect: { nativeBlob: "opaque" } } },
+        safe_overrides: [],
+        published: false,
+        confirm: "ptr_test",
+      },
+    });
+    expect(response.isError).toBe(true);
+    expect(fetchMock).not.toHaveBeenCalled();
+    await client.close();
+    await server.close();
+  });
+
   it("advertises the complete grouped tool and knowledge surface", async () => {
     const { client, server } = await linked(config());
     const tools = await client.listTools();

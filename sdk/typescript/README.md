@@ -152,6 +152,34 @@ if (spec.readiness.status !== 'ready') throw new Error('Print setup is not ready
 console.log(spec.stock?.attributes, spec.destinations, spec.specification_revision);
 ```
 
+Build normalized job-scoped settings without exposing driver-native keys:
+
+```ts
+import { PrintIntentBuilder, preliminarilyValidatePrintIntent } from '@piqae/sdk';
+
+const capabilities = await piqae.printers.capabilities('prt_01K...');
+const intent = PrintIntentBuilder.create({
+  printerId: capabilities.printer_id,
+  capabilityRevision: capabilities.revision,
+  documentManifest: {
+    page_count: 1,
+    page_boxes: [{ width_mm: 100, height_mm: 150 }],
+    color_spaces: ['DeviceCMYK'],
+    separations: ['White'],
+    scaling: 'none'
+  }
+}).semantic('media.sensing', 'black_mark').build();
+
+const preliminary = preliminarilyValidatePrintIntent(intent, capabilities);
+const authoritative = await piqae.printIntents.validate(intent);
+```
+
+Preliminary validation only supports responsive UI. Server and node validation
+remain authoritative. `jobs.createEncryptedResolved()` verifies that resolved
+portable options are bound by encrypted-job v3 AAD. It deliberately rejects
+unbound intents and ticket digests; use ordinary submission when the server must
+enforce workflow-revision provenance.
+
 Reconcile queues with exact server-side filters:
 
 ```ts

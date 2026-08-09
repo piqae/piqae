@@ -2,7 +2,10 @@ import type { components } from './generated/schema.js';
 
 export type PiqaeId = string;
 export type CapabilityDocument = components['schemas']['CapabilityDocument'];
+export type CapabilityFacet = components['schemas']['CapabilityFacet'];
+export type DocumentManifest = components['schemas']['DocumentManifest'];
 export type PrintIntent = components['schemas']['PrintIntent'];
+export type PrintIntentFinding = components['schemas']['PrintIntentFinding'];
 export type PrintIntentValidation = components['schemas']['PrintIntentValidation'];
 export type ResolvedPrintTicket = components['schemas']['ResolvedPrintTicket'];
 export type LoadedMediaObservation = components['schemas']['LoadedMediaObservation'];
@@ -708,6 +711,10 @@ export interface CreateJobBase {
   deliveries?: number;
   expire_after_seconds?: number;
   metadata?: Record<string, string>;
+  /** Validated normalized intent; driver-native values are forbidden. */
+  print_intent?: PrintIntent;
+  /** Short-lived digest returned by printIntents.resolve. */
+  resolved_ticket_digest?: string;
 }
 
 export type CreateJob = CreateJobBase &
