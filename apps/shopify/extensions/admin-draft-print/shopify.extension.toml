@@ -3,6 +3,7 @@ api_version = "2026-07"
 [[extensions]]
 name = "Print draft order"
 handle = "piqae-draft-order-print"
+uid = "208e46d4-10e0-a6a0-a49e-babde9ac5961949a136f"
 type = "ui_extension"
 
 [[extensions.targeting]]

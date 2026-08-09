@@ -17,7 +17,7 @@ use futures::StreamExt as _;
 use piqae_auth::Scope;
 use piqae_document_renderer::DocumentSpecV1;
 use piqae_domain::{ContentKind, ContentSource, JobOptions};
-use piqae_storage_postgres::{CreateDocumentResult, StoredDocumentRender};
+use piqae_storage_postgres::{CreateDocumentResult, StoredDocumentPreview, StoredDocumentRender};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -50,6 +50,23 @@ pub fn router() -> Router<AppState> {
             get(download_render_artifact),
         )
         .route("/v1/document-renders/{render_id}/print", post(print_render))
+        .route(
+            "/v1/document-renders/{render_id}/previews",
+            post(create_preview),
+        )
+        .route("/v1/document-previews/{preview_id}", get(get_preview))
+        .route(
+            "/v1/document-previews/{preview_id}/artifact",
+            get(download_preview_artifact),
+        )
+        .route(
+            "/v1/document-previews/{preview_id}/approve",
+            post(approve_preview),
+        )
+        .route(
+            "/v1/document-previews/{preview_id}/cancel",
+            post(cancel_preview),
+        )
 }
 
 #[derive(Debug, Deserialize)]
@@ -354,18 +371,27 @@ async fn create_conversion(
     let tenant = authenticate_native(&state, &headers, Scope::JobsWrite).await?;
     let key = required_idempotency_key(&headers)?;
     if request.adapter != "pdfme"
-        || request.adapter_version != crate::document_adapters::PDFME_ADAPTER_VERSION
+        || ![
+            crate::document_adapters::PDFME_ADAPTER_VERSION,
+            crate::document_adapters::PDFME_LEGACY_ADAPTER_VERSION,
+        ]
+        .contains(&request.adapter_version.as_str())
     {
         return Err(AppError::invalid(
             "unsupported_document_adapter",
-            "Only exact adapter pdfme@1.0.0 is supported.",
+            "Only exact adapters pdfme@1.0.0 and pdfme@1.1.0 are supported.",
         ));
     }
     let mut canonical_source = request.source.clone();
     canonical_source.sort_all_objects();
     let source = validate_json(&canonical_source, true)?;
     let source_sha256 = hex::encode(Sha256::digest(&source));
-    let converted = crate::document_adapters::convert_pdfme(&canonical_source, request.strict)
+    let converted =
+        if request.adapter_version == crate::document_adapters::PDFME_LEGACY_ADAPTER_VERSION {
+            crate::document_adapters::convert_pdfme_legacy(&canonical_source, request.strict)
+        } else {
+            crate::document_adapters::convert_pdfme(&canonical_source, request.strict)
+        }
         .map_err(|_| {
             AppError::invalid(
                 "document_conversion_incompatible",
@@ -735,7 +761,7 @@ async fn print_render(
     .await
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct PrintRenderRequest {
     printer_id: Option<String>,
@@ -745,6 +771,188 @@ struct PrintRenderRequest {
     options: JobOptions,
     #[serde(default = "default_print_deliveries")]
     deliveries: u16,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CreatePreviewRequest {
+    #[serde(default = "default_preview_ttl")]
+    expires_in_seconds: i64,
+}
+const fn default_preview_ttl() -> i64 {
+    600
+}
+
+#[derive(Debug, Serialize)]
+struct PreviewResponse {
+    id: String,
+    render_id: String,
+    state: String,
+    job_id: Option<String>,
+    expires_at: chrono::DateTime<chrono::Utc>,
+    created_at: chrono::DateTime<chrono::Utc>,
+    updated_at: chrono::DateTime<chrono::Utc>,
+}
+impl From<StoredDocumentPreview> for PreviewResponse {
+    fn from(v: StoredDocumentPreview) -> Self {
+        Self {
+            id: v.id,
+            render_id: v.render_id,
+            state: v.state,
+            job_id: v.job_id,
+            expires_at: v.expires_at,
+            created_at: v.created_at,
+            updated_at: v.updated_at,
+        }
+    }
+}
+
+async fn create_preview(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(render_id): Path<String>,
+    Json(request): Json<CreatePreviewRequest>,
+) -> Result<Response, AppError> {
+    let tenant = authenticate_native(&state, &headers, Scope::JobsWrite).await?;
+    let key = required_idempotency_key(&headers)?;
+    if !(60..=1800).contains(&request.expires_in_seconds) {
+        return Err(AppError::invalid(
+            "invalid_document_preview",
+            "Preview expiry must be between 60 and 1800 seconds.",
+        ));
+    }
+    let hash = hex::encode(Sha256::digest(
+        [
+            render_id.as_bytes(),
+            b"\0",
+            request.expires_in_seconds.to_string().as_bytes(),
+        ]
+        .concat(),
+    ));
+    let id = preview_stable_id(
+        &tenant.workspace_id.to_string(),
+        &tenant.environment_id.to_string(),
+        &render_id,
+        &key,
+    );
+    let result = state
+        .repository
+        .create_document_preview(
+            tenant.workspace_id,
+            tenant.environment_id,
+            &id,
+            &render_id,
+            &key,
+            &hash,
+            chrono::Utc::now() + chrono::Duration::seconds(request.expires_in_seconds),
+        )
+        .await?;
+    let (status, p) = match result {
+        CreateDocumentResult::Created(v) => (StatusCode::CREATED, v),
+        CreateDocumentResult::Existing(v) => (StatusCode::OK, v),
+    };
+    Ok((status, Json(PreviewResponse::from(p))).into_response())
+}
+async fn get_preview(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<PreviewResponse>, AppError> {
+    let t = authenticate_native(&state, &headers, Scope::JobsRead).await?;
+    Ok(Json(
+        state
+            .repository
+            .get_document_preview(t.workspace_id, t.environment_id, &id)
+            .await?
+            .into(),
+    ))
+}
+async fn download_preview_artifact(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Response, AppError> {
+    let t = authenticate_native(&state, &headers, Scope::JobsRead).await?;
+    let p = state
+        .repository
+        .get_document_preview(t.workspace_id, t.environment_id, &id)
+        .await?;
+    if !matches!(
+        p.state.as_str(),
+        "awaiting_approval" | "approving" | "approved"
+    ) {
+        return Err(AppError::conflict(
+            "document_preview_unavailable",
+            "The preview is no longer available.",
+        ));
+    }
+    download_render_artifact(State(state), headers, Path(p.render_id)).await
+}
+async fn cancel_preview(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<PreviewResponse>, AppError> {
+    let t = authenticate_native(&state, &headers, Scope::JobsWrite).await?;
+    let _ = required_idempotency_key(&headers)?;
+    Ok(Json(
+        state
+            .repository
+            .cancel_document_preview(t.workspace_id, t.environment_id, &id)
+            .await?
+            .into(),
+    ))
+}
+
+#[derive(Debug, Serialize)]
+struct ApprovedPreviewResponse {
+    preview: PreviewResponse,
+    job: Value,
+}
+async fn approve_preview(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(request): Json<PrintRenderRequest>,
+) -> Result<Response, AppError> {
+    let t = authenticate_native(&state, &headers, Scope::JobsWrite).await?;
+    let key = required_idempotency_key(&headers)?;
+    let encoded = serde_json::to_vec(&request)
+        .map_err(|_| AppError::invalid("invalid_document_preview", "Approval is invalid."))?;
+    let hash = hex::encode(Sha256::digest(&encoded));
+    let preview = state
+        .repository
+        .begin_document_preview_approval(t.workspace_id, t.environment_id, &id, &key, &hash)
+        .await?;
+    let response = print_render(
+        State(state.clone()),
+        headers,
+        Path(preview.render_id.clone()),
+        Json(request),
+    )
+    .await?;
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .map_err(|_| AppError::service_unavailable("document_preview_approval_failed"))?;
+    let job: Value = serde_json::from_slice(&bytes)
+        .map_err(|_| AppError::service_unavailable("document_preview_approval_failed"))?;
+    let job_id = job
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| AppError::service_unavailable("document_preview_approval_failed"))?;
+    let preview = state
+        .repository
+        .complete_document_preview_approval(t.workspace_id, t.environment_id, &id, &key, job_id)
+        .await?;
+    Ok((
+        status,
+        Json(ApprovedPreviewResponse {
+            preview: preview.into(),
+            job,
+        }),
+    )
+        .into_response())
 }
 
 const fn default_print_deliveries() -> u16 {
@@ -790,6 +998,9 @@ fn stable_id(prefix: &str, a: &str, b: &str, key: &str) -> String {
         [a.as_bytes(), b"\0", b.as_bytes(), b"\0", key.as_bytes()].concat(),
     ));
     format!("{prefix}_{}", &digest[..32])
+}
+fn preview_stable_id(workspace: &str, environment: &str, render: &str, key: &str) -> String {
+    stable_id("dpvw", workspace, environment, &format!("{render}\0{key}"))
 }
 pub(crate) fn document_aad(workspace: &str, environment: &str, resource: &str) -> Vec<u8> {
     document_aad_for("template-spec", workspace, environment, resource)
@@ -873,6 +1084,14 @@ mod tests {
     use piqae_domain::{EnvironmentId, WorkspaceId};
 
     #[test]
+    fn preview_ids_are_environment_scoped() {
+        assert_ne!(
+            preview_stable_id("workspace", "environment_a", "render", "key"),
+            preview_stable_id("workspace", "environment_b", "render", "key")
+        );
+    }
+
+    #[test]
     fn document_specs_are_bounded_and_reject_runtime_urls() {
         assert!(
             validate_document_spec(&serde_json::json!({
@@ -930,6 +1149,89 @@ mod tests {
                 .get_document_template(workspace_b, environment_b, "dtpl_probe")
                 .await,
             Err(crate::repository::RepositoryError::NotFound)
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn preview_gate_is_tenant_scoped_and_creates_no_job_before_approval()
+    -> Result<(), crate::repository::RepositoryError> {
+        let repository = MemoryRepository::default();
+        let workspace = WorkspaceId::new();
+        let environment = EnvironmentId::new();
+        repository
+            .create_document_template(
+                workspace,
+                environment,
+                "template",
+                "Receipt",
+                b"encrypted",
+                &"a".repeat(64),
+            )
+            .await?;
+        repository
+            .publish_document_template(workspace, environment, "template", "revision")
+            .await?;
+        repository
+            .register_document_render(
+                workspace,
+                environment,
+                "render",
+                "revision",
+                b"input",
+                &"b".repeat(64),
+                "render-key",
+                &"c".repeat(64),
+            )
+            .await?;
+        repository
+            .complete_document_render(
+                workspace,
+                environment,
+                "render",
+                b"object",
+                &"d".repeat(64),
+                10,
+            )
+            .await?;
+        let preview = repository
+            .create_document_preview(
+                workspace,
+                environment,
+                "preview",
+                "render",
+                "preview-key",
+                &"e".repeat(64),
+                chrono::Utc::now() + chrono::Duration::minutes(10),
+            )
+            .await?;
+        let preview = match preview {
+            CreateDocumentResult::Created(value) => value,
+            CreateDocumentResult::Existing(_) => panic!("new preview"),
+        };
+        assert_eq!(preview.state, "awaiting_approval");
+        assert!(preview.job_id.is_none());
+        assert!(matches!(
+            repository
+                .get_document_preview(WorkspaceId::new(), EnvironmentId::new(), "preview")
+                .await,
+            Err(crate::repository::RepositoryError::NotFound)
+        ));
+        let cancelled = repository
+            .cancel_document_preview(workspace, environment, "preview")
+            .await?;
+        assert_eq!(cancelled.state, "cancelled");
+        assert!(matches!(
+            repository
+                .begin_document_preview_approval(
+                    workspace,
+                    environment,
+                    "preview",
+                    "approval-key",
+                    &"f".repeat(64)
+                )
+                .await,
+            Err(crate::repository::RepositoryError::ConcurrentStateChange)
         ));
         Ok(())
     }

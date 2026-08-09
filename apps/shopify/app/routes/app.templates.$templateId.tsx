@@ -1,5 +1,6 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
-import { Form, useActionData, useLoaderData } from "react-router";
+import { Form, redirect, useActionData, useLoaderData } from "react-router";
+import { useEffect, useState } from "react";
 import shopify from "../shopify.server";
 import {
   bounded,
@@ -8,12 +9,71 @@ import {
   workflows,
   type MerchantTemplate,
 } from "../core/workflows.server";
-import { TemplatePreview, editorDocument } from "../components/shopify-ui";
-export type EditorMode = "visual" | "liquid";
+import { TemplatePreview } from "../components/shopify-ui";
+import { PdfmeDesigner } from "../components/PdfmeDesigner";
+import { starterTemplates } from "../core/starter-templates";
+import {
+  parseTemplateEnvelope,
+  serializeTemplateEnvelope,
+  visualCompatibility,
+  visualToCanonical,
+  type PdfmeVisualModel,
+  type TemplateEnvelope,
+  type TemplateEditorMode,
+} from "../core/template-model";
+import { syncTemplateIndex } from "../core/template-index.server";
+import { publishCanonicalTemplate } from "../core/template-publisher.server";
+import { createProductionServices } from "../services.server";
+import {
+  canonicalToLiquid,
+  liquidToCanonical,
+} from "../core/liquid-document-adapter";
+export type EditorMode = TemplateEditorMode;
 export function liquidCompatibilityNotice(mode: EditorMode) {
   return mode === "liquid"
     ? "Advanced Liquid is compatibility-gated. Unsupported tags or filters must be resolved before publishing."
     : null;
+}
+export function canSubmitTemplateMode(
+  mode: TemplateEditorMode,
+  visual: unknown,
+) {
+  return mode !== "visual" || visual != null;
+}
+export function customizedTemplateName(name: string) {
+  return `${name} — customized`.slice(0, 200);
+}
+export function editorLiquidForMode(mode: TemplateEditorMode, liquid: string) {
+  return mode === "liquid" ? liquid : "";
+}
+export function removeSystemOwnership(envelope: TemplateEnvelope) {
+  delete envelope.system;
+  return envelope;
+}
+export function parseVisualEditorSource(source: string): PdfmeVisualModel {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(source);
+  } catch {
+    throw new Error("Visual source must be valid JSON");
+  }
+  if (
+    !parsed ||
+    typeof parsed !== "object" ||
+    (parsed as { schema?: unknown }).schema !== "pdfme-compatible/v1" ||
+    !["A4", "A5", "Letter", "80mm"].includes(
+      String((parsed as { page?: unknown }).page ?? ""),
+    ) ||
+    !Array.isArray((parsed as { fields?: unknown }).fields) ||
+    ((parsed as { template?: { schemas?: unknown } }).template != null &&
+      !Array.isArray(
+        (parsed as { template?: { schemas?: unknown } }).template?.schemas,
+      ))
+  )
+    throw new Error(
+      "Visual source must use the supported pdfme-compatible/v1 shape",
+    );
+  return parsed as PdfmeVisualModel;
 }
 export async function loader({ request, params }: LoaderFunctionArgs) {
   const { session } = await shopify.authenticate.admin(request);
@@ -22,7 +82,7 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
   return { template: await workflows().getTemplate(session.shop, id) };
 }
 export async function action({ request, params }: ActionFunctionArgs) {
-  const { session } = await shopify.authenticate.admin(request);
+  const { session, admin } = await shopify.authenticate.admin(request);
   const form = await request.formData();
   try {
     const intent = String(form.get("intent") ?? "draft");
@@ -38,6 +98,24 @@ export async function action({ request, params }: ActionFunctionArgs) {
         throw new Error("Only draft templates can be deleted");
       return { ok: true, error: "", deleted: true };
     }
+    if (intent === "customize") {
+      if (!existing) throw new Error("System document was not found");
+      const envelope = parseTemplateEnvelope(existing.source);
+      if (!envelope.system?.immutable)
+        throw new Error("Only system documents are customized this way");
+      removeSystemOwnership(envelope);
+      const saved = await workflows().saveTemplate(session.shop, {
+        id: newWorkflowId(),
+        name: customizedTemplateName(existing.name),
+        kind: existing.kind,
+        pageSize: existing.pageSize,
+        state: "draft",
+        source: serializeTemplateEnvelope(envelope),
+        revision: 1,
+      });
+      await syncTemplateIndex(admin, workflows(), session.shop);
+      return redirect(`/app/templates/${encodeURIComponent(saved.id)}`, 303);
+    }
     const kind = bounded(form, "kind", 30, true);
     const pageSize = bounded(form, "pageSize", 10, true);
     if (
@@ -52,7 +130,60 @@ export async function action({ request, params }: ActionFunctionArgs) {
       !["A4", "A5", "Letter", "80mm"].includes(pageSize)
     )
       throw new Error("Template format is invalid");
-    const source = validateDocumentSource(bounded(form, "source", 65536, true));
+    if (existing && parseTemplateEnvelope(existing.source).system?.immutable)
+      throw new Error("System documents are immutable; choose Customize first");
+    let source = validateDocumentSource(bounded(form, "source", 65536, true));
+    const envelope = parseTemplateEnvelope(source);
+    removeSystemOwnership(envelope);
+    const mode = bounded(form, "mode", 10) as TemplateEditorMode;
+    if (!["visual", "liquid", "native"].includes(mode))
+      throw new Error("Editor mode is invalid");
+    envelope.editor.mode = mode;
+    envelope.editor.liquid = editorLiquidForMode(
+      mode,
+      mode === "liquid" ? bounded(form, "liquid", 32768) : "",
+    );
+    if (mode === "liquid") {
+      if (!envelope.editor.liquid.trim())
+        throw new Error(
+          "Liquid source is required in the Liquid editing view.",
+        );
+      const conversion = liquidToCanonical(
+        envelope.editor.liquid,
+        envelope.canonical.page,
+      );
+      if (!conversion.ok) {
+        const diagnostic = conversion.diagnostics[0]!;
+        throw new Error(
+          `Liquid ${diagnostic.code} on line ${diagnostic.line}: ${diagnostic.message}`,
+        );
+      }
+      envelope.canonical = conversion.document;
+      delete envelope.editor.pdfme;
+      envelope.editor.liquid = conversion.normalizedSource;
+      envelope.editor.roundTrip = "lossless";
+      envelope.editor.warnings = [];
+    }
+    if (mode === "visual") {
+      const visual = parseVisualEditorSource(
+        bounded(form, "visual", 32768, true),
+      );
+      envelope.editor.pdfme = visual;
+      envelope.canonical = visualToCanonical(visual);
+      Object.assign(envelope.editor, visualCompatibility(visual));
+    }
+    source = serializeTemplateEnvelope(envelope);
+    if (intent === "publish") {
+      const services = createProductionServices();
+      source = await publishCanonicalTemplate({
+        shop: session.shop,
+        name: bounded(form, "name", 200, true),
+        source,
+        shops: services.repository,
+        vault: services.vault,
+        baseUrl: services.baseUrl,
+      });
+    }
     const saved = await workflows().saveTemplate(session.shop, {
       id: existing?.id ?? newWorkflowId(),
       name: bounded(form, "name", 200, true),
@@ -62,6 +193,7 @@ export async function action({ request, params }: ActionFunctionArgs) {
       source,
       revision: existing?.revision ?? 1,
     });
+    await syncTemplateIndex(admin, workflows(), session.shop);
     return { ok: true, error: "", deleted: false, id: saved.id };
   } catch (error) {
     return Response.json(
@@ -79,7 +211,24 @@ export async function action({ request, params }: ActionFunctionArgs) {
 export default function TemplateEditor() {
   const { template } = useLoaderData<typeof loader>();
   const result = useActionData<typeof action>();
-  const source = template?.source ?? JSON.stringify(editorDocument, null, 2);
+  const initialEnvelope = parseTemplateEnvelope(
+    template?.source ?? starterTemplates[0]!.source,
+  );
+  if (!template) delete initialEnvelope.system;
+  const source = template?.source ?? serializeTemplateEnvelope(initialEnvelope);
+  const envelope = parseTemplateEnvelope(source);
+  const [mode, setMode] = useState<TemplateEditorMode>(envelope.editor.mode);
+  const [visual, setVisual] = useState(envelope.editor.pdfme);
+  const generatedLiquid = canonicalToLiquid(envelope.canonical);
+  const [liquid, setLiquid] = useState(
+    envelope.editor.liquid ?? generatedLiquid.source ?? "",
+  );
+  useEffect(() => {
+    setMode(envelope.editor.mode);
+    setVisual(envelope.editor.pdfme);
+    setLiquid(envelope.editor.liquid ?? generatedLiquid.source ?? "");
+  }, [source]);
+  const immutable = Boolean(envelope.system?.immutable);
   return (
     <s-page heading={template?.name ?? "New template"}>
       <s-section>
@@ -93,9 +242,16 @@ export default function TemplateEditor() {
               <s-banner tone="critical">{result.error}</s-banner>
             ) : null}
             <s-banner tone="info">
-              Publishing pins an immutable document revision for queued jobs.
-              Unsupported Liquid and arbitrary HTML are not executed.
+              Publishing converts and pins the canonical Piqae document revision
+              used by preview, download and print. Arbitrary Liquid, PDFme
+              plugins and HTML are not executed.
             </s-banner>
+            {immutable ? (
+              <s-banner tone="info">
+                This is a read-only system document. Customize it to create a
+                merchant-owned draft.
+              </s-banner>
+            ) : null}
             <div className="piqae-split">
               <div className="piqae-card">
                 <s-stack direction="block" gap="base">
@@ -138,32 +294,135 @@ export default function TemplateEditor() {
                     </select>
                   </label>
                   <label>
-                    Piqae document JSON
+                    Editing view
+                    <select
+                      className="piqae-input"
+                      name="mode"
+                      value={mode}
+                      onChange={(event) =>
+                        setMode(event.currentTarget.value as TemplateEditorMode)
+                      }
+                      disabled={immutable}
+                    >
+                      <option value="visual">Visual (PDFme-compatible)</option>
+                      <option value="liquid">Liquid</option>
+                      <option value="native">Canonical JSON</option>
+                    </select>
+                  </label>
+                  {envelope.editor.roundTrip !== "lossless" ? (
+                    <s-banner tone="warning">
+                      Switching views is {envelope.editor.roundTrip}.{" "}
+                      {envelope.editor.warnings.join(" ") ||
+                        "This source cannot be represented by the visual editor without losing unsupported constructs."}
+                    </s-banner>
+                  ) : null}
+                  {mode === "liquid" ? (
+                    generatedLiquid.diagnostics.length ? (
+                      <s-banner tone="warning">
+                        This canonical document cannot switch losslessly to the
+                        bounded Liquid view:{" "}
+                        {generatedLiquid.diagnostics[0]!.message}
+                      </s-banner>
+                    ) : (
+                      <s-banner tone="info">
+                        This safe Liquid subset maps directly to the canonical
+                        document. Whole-line variables, for/if blocks, QR,
+                        lines, spacers and page breaks are supported. HTML,
+                        filters, includes and plugins are never executed.
+                      </s-banner>
+                    )
+                  ) : null}
+                  {mode === "visual" ? (
+                    <div className="piqae-card">
+                      <s-heading>Visual layout</s-heading>
+                      <s-paragraph>
+                        This client-only PDFme canvas edits the supported text,
+                        QR and line subset. The canonical preview is
+                        authoritative. Images, custom fonts and other plugins
+                        remain unsupported and are never silently discarded.
+                      </s-paragraph>
+                      {visual ? (
+                        <input
+                          type="hidden"
+                          name="visual"
+                          value={JSON.stringify(visual)}
+                        />
+                      ) : null}
+                      {visual ? (
+                        <PdfmeDesigner
+                          value={visual}
+                          disabled={immutable}
+                          onChange={setVisual}
+                        />
+                      ) : (
+                        <s-banner tone="critical">
+                          This template has no visual source. Continue in the
+                          canonical or Liquid editor.
+                        </s-banner>
+                      )}
+                    </div>
+                  ) : null}
+                  {mode === "liquid" ? (
+                    <label>
+                      Bounded Liquid source
+                      <textarea
+                        className="piqae-code"
+                        name="liquid"
+                        maxLength={32768}
+                        value={liquid}
+                        onChange={(event) =>
+                          setLiquid(event.currentTarget.value)
+                        }
+                        disabled={immutable}
+                      />
+                    </label>
+                  ) : (
+                    <input type="hidden" name="liquid" value="" />
+                  )}
+                  <label>
+                    Canonical Piqae document envelope
                     <textarea
+                      key={source}
                       className="piqae-code"
                       name="source"
                       required
                       maxLength={65536}
                       defaultValue={source}
+                      readOnly={immutable || mode !== "native"}
                     />
                   </label>
                   <div className="piqae-actions">
-                    <button
-                      className="piqae-link-button"
-                      type="submit"
-                      name="intent"
-                      value="draft"
-                    >
-                      Save draft
-                    </button>
-                    <button
-                      className="piqae-link-button"
-                      type="submit"
-                      name="intent"
-                      value="publish"
-                    >
-                      Publish revision
-                    </button>
+                    {immutable ? (
+                      <button
+                        className="piqae-link-button"
+                        type="submit"
+                        name="intent"
+                        value="customize"
+                      >
+                        Customize
+                      </button>
+                    ) : (
+                      <>
+                        <button
+                          className="piqae-link-button"
+                          type="submit"
+                          name="intent"
+                          value="draft"
+                          disabled={!canSubmitTemplateMode(mode, visual)}
+                        >
+                          Save draft
+                        </button>
+                        <button
+                          className="piqae-link-button"
+                          type="submit"
+                          name="intent"
+                          value="publish"
+                          disabled={!canSubmitTemplateMode(mode, visual)}
+                        >
+                          Publish revision
+                        </button>
+                      </>
+                    )}
                     {template?.state === "draft" ? (
                       <button
                         className="piqae-link-button"

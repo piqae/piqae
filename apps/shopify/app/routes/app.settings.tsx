@@ -2,17 +2,34 @@ import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { Form, useActionData, useLoaderData } from "react-router";
 import shopify from "../shopify.server";
 import { parseSettings, workflows } from "../core/workflows.server";
+import { syncTemplateIndex } from "../core/template-index.server";
+import { createProductionServices } from "../services.server";
 
 export async function loader({ request }: LoaderFunctionArgs) {
   const { session } = await shopify.authenticate.admin(request);
-  return { settings: await workflows().getSettings(session.shop) };
+  const services = createProductionServices();
+  return {
+    settings: await workflows().getSettings(session.shop),
+    connected: Boolean(await services.repository.get(session.shop)),
+    runtime: services.runtime.mode,
+  };
 }
 export async function action({ request }: ActionFunctionArgs) {
-  const { session } = await shopify.authenticate.admin(request);
+  const { session, admin } = await shopify.authenticate.admin(request);
   try {
-    const settings = parseSettings(await request.formData());
+    const form = await request.formData();
+    if (form.get("intent") === "link-piqae") {
+      await createProductionServices().accountLinker.linkExisting(
+        session.shop,
+        String(form.get("credential") ?? ""),
+      );
+      await syncTemplateIndex(admin, workflows(), session.shop);
+      return { ok: true, error: "", linked: true };
+    }
+    const settings = parseSettings(form);
     await workflows().saveSettings(session.shop, settings);
-    return { ok: true, error: "" };
+    await syncTemplateIndex(admin, workflows(), session.shop);
+    return { ok: true, error: "", linked: false };
   } catch (error) {
     return Response.json(
       {
@@ -27,10 +44,44 @@ export async function action({ request }: ActionFunctionArgs) {
   }
 }
 export default function Settings() {
-  const { settings } = useLoaderData<typeof loader>();
+  const { settings, connected, runtime } = useLoaderData<typeof loader>();
   const result = useActionData<typeof action>();
   return (
     <s-page heading="Settings">
+      <s-section heading="Piqae connection">
+        <s-stack direction="block" gap="base">
+          <s-banner tone={connected ? "success" : "warning"}>
+            {connected
+              ? `Connected to the ${runtime} Piqae environment.`
+              : `No account is connected to the ${runtime} Piqae environment.`}
+          </s-banner>
+          {!connected ? (
+            <Form method="post">
+              <input type="hidden" name="intent" value="link-piqae" />
+              <label>
+                Piqae API key
+                <input
+                  className="piqae-input"
+                  type="password"
+                  name="credential"
+                  minLength={16}
+                  maxLength={4096}
+                  autoComplete="off"
+                  required
+                />
+              </label>
+              <s-paragraph>
+                The key is verified against Piqae, encrypted for this shop, and
+                never returned to Shopify Admin. Linking also publishes the
+                default invoice so preview works immediately.
+              </s-paragraph>
+              <s-button type="submit" variant="primary">
+                Connect Piqae
+              </s-button>
+            </Form>
+          ) : null}
+        </s-stack>
+      </s-section>
       <s-section heading="Printing defaults">
         <Form method="post">
           <s-stack direction="block" gap="base">

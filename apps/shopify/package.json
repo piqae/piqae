@@ -16,6 +16,9 @@
     "extensions:check": "node scripts/check-extensions.mjs"
   },
   "dependencies": {
+    "@pdfme/common": "5.4.3",
+    "@pdfme/schemas": "5.4.3",
+    "@pdfme/ui": "5.4.3",
     "@piqae/sdk": "workspace:*",
     "@react-router/node": "7.12.0",
     "@react-router/serve": "7.12.0",

@@ -607,6 +607,23 @@ pub struct StoredDocumentRender {
 }
 
 #[derive(Clone, Debug, Serialize)]
+pub struct StoredDocumentPreview {
+    pub id: String,
+    pub render_id: String,
+    pub state: String,
+    pub job_id: Option<String>,
+    pub expires_at: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    #[serde(skip)]
+    pub request_sha256: String,
+    #[serde(skip)]
+    pub approval_request_sha256: Option<String>,
+    #[serde(skip)]
+    pub approval_idempotency_key: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
 pub struct StoredDocumentConversion {
     pub id: String,
     pub adapter_id: String,
@@ -6758,6 +6775,162 @@ impl PostgresStore {
     }
 
     #[allow(clippy::too_many_arguments)]
+    pub async fn create_document_preview(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        id: &str,
+        render_id: &str,
+        idempotency_key: &str,
+        request_sha256: &str,
+        expires_at: DateTime<Utc>,
+    ) -> Result<CreateDocumentResult<StoredDocumentPreview>, StorageError> {
+        let inserted = sqlx::query(
+            "INSERT INTO document_previews
+             (id,workspace_id,environment_id,render_id,idempotency_key,request_sha256,expires_at)
+             SELECT $1,$2,$3,$4,$5,$6,$7 FROM document_renders
+              WHERE id=$4 AND workspace_id=$2 AND environment_id=$3 AND state='completed'
+             ON CONFLICT (workspace_id,environment_id,idempotency_key) DO NOTHING RETURNING *",
+        )
+        .bind(id)
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(render_id)
+        .bind(idempotency_key)
+        .bind(request_sha256)
+        .bind(expires_at)
+        .fetch_optional(&self.pool)
+        .await?;
+        if let Some(row) = inserted {
+            return Ok(CreateDocumentResult::Created(document_preview_from_row(
+                &row,
+            )?));
+        }
+        let row = sqlx::query("SELECT * FROM document_previews WHERE workspace_id=$1 AND environment_id=$2 AND idempotency_key=$3")
+            .bind(workspace_id.to_string()).bind(environment_id.to_string()).bind(idempotency_key)
+            .fetch_optional(&self.pool).await?.ok_or(StorageError::NotFound)?;
+        if row.try_get::<String, _>("request_sha256")? != request_sha256 {
+            return Err(StorageError::IdempotencyConflict);
+        }
+        Ok(CreateDocumentResult::Existing(document_preview_from_row(
+            &row,
+        )?))
+    }
+
+    pub async fn get_document_preview(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        id: &str,
+    ) -> Result<StoredDocumentPreview, StorageError> {
+        let row = sqlx::query(
+            "UPDATE document_previews SET state='expired',updated_at=now()
+             WHERE id=$1 AND workspace_id=$2 AND environment_id=$3
+               AND state='awaiting_approval' AND expires_at <= now()
+             RETURNING *",
+        )
+        .bind(id)
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .fetch_optional(&self.pool)
+        .await?;
+        if let Some(row) = row {
+            return document_preview_from_row(&row);
+        }
+        let row = sqlx::query(
+            "SELECT * FROM document_previews WHERE id=$1 AND workspace_id=$2 AND environment_id=$3",
+        )
+        .bind(id)
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(StorageError::NotFound)?;
+        document_preview_from_row(&row)
+    }
+
+    pub async fn begin_document_preview_approval(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        id: &str,
+        idempotency_key: &str,
+        request_sha256: &str,
+    ) -> Result<StoredDocumentPreview, StorageError> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("UPDATE document_previews SET state='expired',updated_at=now() WHERE id=$1 AND workspace_id=$2 AND environment_id=$3 AND state='awaiting_approval' AND expires_at <= now()")
+            .bind(id).bind(workspace_id.to_string()).bind(environment_id.to_string()).execute(&mut *tx).await?;
+        let row = sqlx::query("SELECT * FROM document_previews WHERE id=$1 AND workspace_id=$2 AND environment_id=$3 FOR UPDATE")
+            .bind(id).bind(workspace_id.to_string()).bind(environment_id.to_string())
+            .fetch_optional(&mut *tx).await?.ok_or(StorageError::NotFound)?;
+        let preview = document_preview_from_row(&row)?;
+        match preview.state.as_str() {
+            "awaiting_approval" => {
+                let row = sqlx::query("UPDATE document_previews SET state='approving',approval_idempotency_key=$4,approval_request_sha256=$5,updated_at=now() WHERE id=$1 AND workspace_id=$2 AND environment_id=$3 RETURNING *")
+                    .bind(id).bind(workspace_id.to_string()).bind(environment_id.to_string())
+                    .bind(idempotency_key).bind(request_sha256).fetch_one(&mut *tx).await?;
+                tx.commit().await?;
+                document_preview_from_row(&row)
+            }
+            "approving" | "approved"
+                if preview.approval_idempotency_key.as_deref() == Some(idempotency_key)
+                    && preview.approval_request_sha256.as_deref() == Some(request_sha256) =>
+            {
+                tx.commit().await?;
+                Ok(preview)
+            }
+            "approving" | "approved" => Err(StorageError::IdempotencyConflict),
+            _ => Err(StorageError::ConcurrentStateChange),
+        }
+    }
+
+    pub async fn complete_document_preview_approval(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        id: &str,
+        idempotency_key: &str,
+        job_id: &str,
+    ) -> Result<StoredDocumentPreview, StorageError> {
+        let row = sqlx::query("UPDATE document_previews SET state='approved',job_id=$5,updated_at=now() WHERE id=$1 AND workspace_id=$2 AND environment_id=$3 AND state='approving' AND approval_idempotency_key=$4 RETURNING *")
+            .bind(id).bind(workspace_id.to_string()).bind(environment_id.to_string()).bind(idempotency_key).bind(job_id)
+            .fetch_optional(&self.pool).await?;
+        if let Some(row) = row {
+            return document_preview_from_row(&row);
+        }
+        let current = self
+            .get_document_preview(workspace_id, environment_id, id)
+            .await?;
+        if current.state == "approved" && current.job_id.as_deref() == Some(job_id) {
+            Ok(current)
+        } else {
+            Err(StorageError::ConcurrentStateChange)
+        }
+    }
+
+    pub async fn cancel_document_preview(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        id: &str,
+    ) -> Result<StoredDocumentPreview, StorageError> {
+        let row = sqlx::query("UPDATE document_previews SET state='cancelled',updated_at=now() WHERE id=$1 AND workspace_id=$2 AND environment_id=$3 AND state='awaiting_approval' AND expires_at > now() RETURNING *")
+            .bind(id).bind(workspace_id.to_string()).bind(environment_id.to_string())
+            .fetch_optional(&self.pool).await?;
+        if let Some(row) = row {
+            return document_preview_from_row(&row);
+        }
+        let current = self
+            .get_document_preview(workspace_id, environment_id, id)
+            .await?;
+        if current.state == "cancelled" {
+            Ok(current)
+        } else {
+            Err(StorageError::ConcurrentStateChange)
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub async fn create_document_conversion(
         &self,
         workspace_id: WorkspaceId,
@@ -7204,6 +7377,11 @@ impl PostgresStore {
                  WHERE ref.workspace_id=r.workspace_id AND ref.environment_id=r.environment_id
                    AND ref.render_id=r.id AND ref.released_at IS NULL
                    AND ref.retained_until > now())
+               AND NOT EXISTS (SELECT 1 FROM document_previews preview
+                 WHERE preview.workspace_id=r.workspace_id AND preview.environment_id=r.environment_id
+                   AND preview.render_id=r.id
+                   AND (preview.state='approving'
+                     OR (preview.state='awaiting_approval' AND preview.expires_at > now())))
                ORDER BY r.expires_at,r.id FOR UPDATE OF r SKIP LOCKED LIMIT $1)
              UPDATE document_renders r SET state='expiring',lease_owner=$2,lease_token=gen_random_uuid(),
                lease_expires_at=now()+make_interval(secs=>$3::double precision),updated_at=now()
@@ -7341,6 +7519,21 @@ fn document_render_from_row(row: &PgRow) -> Result<StoredDocumentRender, Storage
         max_attempts: row.try_get("max_attempts")?,
         lease_token: row.try_get("lease_token")?,
         lease_expires_at: row.try_get("lease_expires_at")?,
+    })
+}
+
+fn document_preview_from_row(row: &PgRow) -> Result<StoredDocumentPreview, StorageError> {
+    Ok(StoredDocumentPreview {
+        id: row.try_get("id")?,
+        render_id: row.try_get("render_id")?,
+        state: row.try_get("state")?,
+        job_id: row.try_get("job_id")?,
+        expires_at: row.try_get("expires_at")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+        request_sha256: row.try_get("request_sha256")?,
+        approval_request_sha256: row.try_get("approval_request_sha256")?,
+        approval_idempotency_key: row.try_get("approval_idempotency_key")?,
     })
 }
 

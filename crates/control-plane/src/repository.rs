@@ -17,7 +17,7 @@ use piqae_storage_postgres::{
     NewDeviceAuthorization, NodeUpdatePolicy, NodeUpdateState, PostgresStore, StorageError,
     StoredAgent, StoredAgentCommandBatch, StoredApiKey, StoredBillingSummary,
     StoredConnectSessionPreview, StoredContentEncryptionKey, StoredDeviceAuthorization,
-    StoredDocumentConversion, StoredDocumentRender, StoredDocumentTemplate,
+    StoredDocumentConversion, StoredDocumentPreview, StoredDocumentRender, StoredDocumentTemplate,
     StoredDocumentTemplateRevision, StoredNodeConnector, StoredNodeDiagnostic, StoredNodeUpdate,
     StoredPlatformAccount, StoredPrinter, StoredStock, StoredTarget, StoredTargetBinding,
     StoredTenantEvent, StoredUpload, StoredUsageSummary, StoredWebhook, StoredWebhookDelivery,
@@ -139,6 +139,44 @@ pub trait Repository: Send + Sync + 'static {
         environment_id: EnvironmentId,
         id: &str,
     ) -> Result<StoredDocumentRender, RepositoryError>;
+    async fn create_document_preview(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        id: &str,
+        render_id: &str,
+        idempotency_key: &str,
+        request_sha256: &str,
+        expires_at: DateTime<Utc>,
+    ) -> Result<CreateDocumentResult<StoredDocumentPreview>, RepositoryError>;
+    async fn get_document_preview(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        id: &str,
+    ) -> Result<StoredDocumentPreview, RepositoryError>;
+    async fn begin_document_preview_approval(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        id: &str,
+        idempotency_key: &str,
+        request_sha256: &str,
+    ) -> Result<StoredDocumentPreview, RepositoryError>;
+    async fn complete_document_preview_approval(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        id: &str,
+        idempotency_key: &str,
+        job_id: &str,
+    ) -> Result<StoredDocumentPreview, RepositoryError>;
+    async fn cancel_document_preview(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        id: &str,
+    ) -> Result<StoredDocumentPreview, RepositoryError>;
     #[allow(clippy::too_many_arguments)]
     async fn create_document_conversion(
         &self,
@@ -937,6 +975,65 @@ pub trait Repository: Send + Sync + 'static {
 impl Repository for PostgresStore {
     async fn ready(&self) -> Result<(), RepositoryError> {
         self.readiness().await.map_err(Into::into)
+    }
+    #[allow(clippy::many_single_char_names)]
+    async fn create_document_preview(
+        &self,
+        w: WorkspaceId,
+        e: EnvironmentId,
+        id: &str,
+        r: &str,
+        k: &str,
+        h: &str,
+        x: DateTime<Utc>,
+    ) -> Result<CreateDocumentResult<StoredDocumentPreview>, RepositoryError> {
+        PostgresStore::create_document_preview(self, w, e, id, r, k, h, x)
+            .await
+            .map_err(Into::into)
+    }
+    async fn get_document_preview(
+        &self,
+        w: WorkspaceId,
+        e: EnvironmentId,
+        id: &str,
+    ) -> Result<StoredDocumentPreview, RepositoryError> {
+        PostgresStore::get_document_preview(self, w, e, id)
+            .await
+            .map_err(Into::into)
+    }
+    async fn begin_document_preview_approval(
+        &self,
+        w: WorkspaceId,
+        e: EnvironmentId,
+        id: &str,
+        k: &str,
+        h: &str,
+    ) -> Result<StoredDocumentPreview, RepositoryError> {
+        PostgresStore::begin_document_preview_approval(self, w, e, id, k, h)
+            .await
+            .map_err(Into::into)
+    }
+    async fn complete_document_preview_approval(
+        &self,
+        w: WorkspaceId,
+        e: EnvironmentId,
+        id: &str,
+        k: &str,
+        j: &str,
+    ) -> Result<StoredDocumentPreview, RepositoryError> {
+        PostgresStore::complete_document_preview_approval(self, w, e, id, k, j)
+            .await
+            .map_err(Into::into)
+    }
+    async fn cancel_document_preview(
+        &self,
+        w: WorkspaceId,
+        e: EnvironmentId,
+        id: &str,
+    ) -> Result<StoredDocumentPreview, RepositoryError> {
+        PostgresStore::cancel_document_preview(self, w, e, id)
+            .await
+            .map_err(Into::into)
     }
 
     async fn create_document_template(
@@ -2659,6 +2756,7 @@ struct MemoryState {
             StoredDocumentRender,
         ),
     >,
+    document_previews: HashMap<String, (WorkspaceId, EnvironmentId, String, StoredDocumentPreview)>,
     document_conversions: HashMap<
         String,
         (
@@ -3139,6 +3237,152 @@ impl Repository for MemoryRepository {
             .filter(|(w, e, _, _, _)| *w == workspace_id && *e == environment_id)
             .map(|(_, _, _, _, v)| v.clone())
             .ok_or(RepositoryError::NotFound)
+    }
+
+    #[allow(clippy::many_single_char_names)]
+    async fn create_document_preview(
+        &self,
+        w: WorkspaceId,
+        e: EnvironmentId,
+        id: &str,
+        r: &str,
+        k: &str,
+        h: &str,
+        x: DateTime<Utc>,
+    ) -> Result<CreateDocumentResult<StoredDocumentPreview>, RepositoryError> {
+        let mut s = self.state.write().await;
+        if !s
+            .document_renders
+            .get(r)
+            .is_some_and(|(rw, re, _, _, v)| *rw == w && *re == e && v.state == "completed")
+        {
+            return Err(RepositoryError::NotFound);
+        }
+        if let Some((_, _, _, p)) = s
+            .document_previews
+            .values()
+            .find(|(pw, pe, key, _)| *pw == w && *pe == e && key == k)
+        {
+            if p.request_sha256 != h {
+                return Err(RepositoryError::IdempotencyConflict);
+            }
+            return Ok(CreateDocumentResult::Existing(p.clone()));
+        }
+        if s.document_previews.contains_key(id) {
+            return Err(RepositoryError::IdempotencyConflict);
+        }
+        let now = Utc::now();
+        let p = StoredDocumentPreview {
+            id: id.into(),
+            render_id: r.into(),
+            state: "awaiting_approval".into(),
+            job_id: None,
+            expires_at: x,
+            created_at: now,
+            updated_at: now,
+            request_sha256: h.into(),
+            approval_request_sha256: None,
+            approval_idempotency_key: None,
+        };
+        s.document_previews
+            .insert(id.into(), (w, e, k.into(), p.clone()));
+        Ok(CreateDocumentResult::Created(p))
+    }
+    async fn get_document_preview(
+        &self,
+        w: WorkspaceId,
+        e: EnvironmentId,
+        id: &str,
+    ) -> Result<StoredDocumentPreview, RepositoryError> {
+        let mut s = self.state.write().await;
+        let (_, _, _, p) = s
+            .document_previews
+            .get_mut(id)
+            .filter(|(pw, pe, _, _)| *pw == w && *pe == e)
+            .ok_or(RepositoryError::NotFound)?;
+        if p.state == "awaiting_approval" && p.expires_at <= Utc::now() {
+            p.state = "expired".into();
+            p.updated_at = Utc::now();
+        }
+        Ok(p.clone())
+    }
+    #[allow(clippy::many_single_char_names)]
+    async fn begin_document_preview_approval(
+        &self,
+        w: WorkspaceId,
+        e: EnvironmentId,
+        id: &str,
+        k: &str,
+        h: &str,
+    ) -> Result<StoredDocumentPreview, RepositoryError> {
+        let mut s = self.state.write().await;
+        let (_, _, _, p) = s
+            .document_previews
+            .get_mut(id)
+            .filter(|(pw, pe, _, _)| *pw == w && *pe == e)
+            .ok_or(RepositoryError::NotFound)?;
+        if p.state == "awaiting_approval" && p.expires_at <= Utc::now() {
+            p.state = "expired".into();
+            return Err(RepositoryError::ConcurrentStateChange);
+        }
+        if p.state == "awaiting_approval" {
+            p.state = "approving".into();
+            p.approval_idempotency_key = Some(k.into());
+            p.approval_request_sha256 = Some(h.into());
+        } else if matches!(p.state.as_str(), "approving" | "approved") {
+            if p.approval_idempotency_key.as_deref() != Some(k)
+                || p.approval_request_sha256.as_deref() != Some(h)
+            {
+                return Err(RepositoryError::IdempotencyConflict);
+            }
+        } else {
+            return Err(RepositoryError::ConcurrentStateChange);
+        }
+        Ok(p.clone())
+    }
+    #[allow(clippy::many_single_char_names)]
+    async fn complete_document_preview_approval(
+        &self,
+        w: WorkspaceId,
+        e: EnvironmentId,
+        id: &str,
+        k: &str,
+        j: &str,
+    ) -> Result<StoredDocumentPreview, RepositoryError> {
+        let mut s = self.state.write().await;
+        let (_, _, _, p) = s
+            .document_previews
+            .get_mut(id)
+            .filter(|(pw, pe, _, _)| *pw == w && *pe == e)
+            .ok_or(RepositoryError::NotFound)?;
+        if p.state == "approving" && p.approval_idempotency_key.as_deref() == Some(k) {
+            p.state = "approved".into();
+            p.job_id = Some(j.into());
+            p.updated_at = Utc::now();
+        } else if p.state != "approved" || p.job_id.as_deref() != Some(j) {
+            return Err(RepositoryError::ConcurrentStateChange);
+        }
+        Ok(p.clone())
+    }
+    async fn cancel_document_preview(
+        &self,
+        w: WorkspaceId,
+        e: EnvironmentId,
+        id: &str,
+    ) -> Result<StoredDocumentPreview, RepositoryError> {
+        let mut s = self.state.write().await;
+        let (_, _, _, p) = s
+            .document_previews
+            .get_mut(id)
+            .filter(|(pw, pe, _, _)| *pw == w && *pe == e)
+            .ok_or(RepositoryError::NotFound)?;
+        if p.state == "awaiting_approval" {
+            p.state = "cancelled".into();
+            p.updated_at = Utc::now();
+        } else if p.state != "cancelled" {
+            return Err(RepositoryError::ConcurrentStateChange);
+        }
+        Ok(p.clone())
     }
 
     async fn create_document_conversion(
@@ -5754,6 +5998,127 @@ mod routing_repository_tests {
     use super::*;
     use piqae_domain::JobOptions;
     use piqae_storage_postgres::PrinterProfileSnapshot;
+
+    #[tokio::test]
+    async fn memory_document_previews_reject_duplicate_ids_and_finish_admitted_approvals() {
+        let repository = MemoryRepository::default();
+        let workspace = WorkspaceId::new();
+        let environment = EnvironmentId::new();
+        let now = Utc::now();
+        for render_id in ["render_one", "render_two"] {
+            let render = StoredDocumentRender {
+                id: render_id.into(),
+                template_revision_id: "revision".into(),
+                state: "completed".into(),
+                artifact_sha256: Some("a".repeat(64)),
+                artifact_byte_length: Some(1),
+                artifact_media_type: Some("application/pdf".into()),
+                failure_code: None,
+                created_at: now,
+                updated_at: now,
+                input_ciphertext: vec![1],
+                input_sha256: "b".repeat(64),
+                artifact_object_key_ciphertext: Some(vec![2]),
+                attempt: 1,
+                max_attempts: 5,
+                lease_token: None,
+                lease_expires_at: None,
+            };
+            repository.state.write().await.document_renders.insert(
+                render.id.clone(),
+                (
+                    workspace,
+                    environment,
+                    format!("key_{render_id}"),
+                    format!("hash_{render_id}"),
+                    render,
+                ),
+            );
+        }
+
+        repository
+            .create_document_preview(
+                workspace,
+                environment,
+                "preview_same",
+                "render_one",
+                "key_one",
+                "hash_one",
+                now + chrono::Duration::minutes(5),
+            )
+            .await
+            .expect("create first preview");
+        assert!(matches!(
+            repository
+                .create_document_preview(
+                    workspace,
+                    environment,
+                    "preview_same",
+                    "render_two",
+                    "key_two",
+                    "hash_two",
+                    now + chrono::Duration::minutes(5),
+                )
+                .await,
+            Err(RepositoryError::IdempotencyConflict)
+        ));
+        assert_eq!(
+            repository
+                .get_document_preview(workspace, environment, "preview_same")
+                .await
+                .expect("original preview")
+                .render_id,
+            "render_one"
+        );
+
+        repository
+            .begin_document_preview_approval(
+                workspace,
+                environment,
+                "preview_same",
+                "approval_key",
+                "approval_hash",
+            )
+            .await
+            .expect("begin approval");
+        repository
+            .state
+            .write()
+            .await
+            .document_previews
+            .get_mut("preview_same")
+            .expect("preview fixture")
+            .3
+            .expires_at = now - chrono::Duration::seconds(1);
+        let approved = repository
+            .complete_document_preview_approval(
+                workspace,
+                environment,
+                "preview_same",
+                "approval_key",
+                "job_id",
+            )
+            .await
+            .expect("finish approval admitted before expiry");
+        assert_eq!(approved.state, "approved");
+        assert_eq!(approved.job_id.as_deref(), Some("job_id"));
+        let replay = repository
+            .begin_document_preview_approval(
+                workspace,
+                environment,
+                "preview_same",
+                "approval_key",
+                "approval_hash",
+            )
+            .await
+            .expect("replay admitted approval after deadline");
+        assert_eq!(replay.state, "approved");
+        let stored = repository
+            .get_document_preview(workspace, environment, "preview_same")
+            .await
+            .expect("approved preview");
+        assert_eq!(stored.state, "approved");
+    }
 
     #[tokio::test]
     async fn artifact_acquisition_replay_returns_the_canonical_upload() {

@@ -13,10 +13,10 @@ pdfme, plugins, JavaScript, files, or network assets.
 ## Fidelity and compatibility
 
 Every conversion returns `exact`, `lossy`, or `incompatible`, plus structured
-warnings and errors containing stable codes and JSON paths. Strict conversion
-is the default, so a known loss such as reducing pdfme absolute boxes to Piqae's
-flow layout produces no document. A caller must explicitly select non-strict
-conversion and surface its warnings before using a lossy result.
+warnings and errors containing stable codes and JSON paths. `pdfme@1.1.0`
+retains finite text, QR and line boxes in a clipped, ordered page canvas.
+`pdfme@1.0.0` remains available with its original flow-reduction semantics for
+compatibility. Unsupported plugins and transforms produce no document.
 
 The versioned, machine-readable
 [`pdfme-v1.json`](../../sdk/document-adapters/compatibility/pdfme-v1.json)
@@ -40,7 +40,7 @@ they must fall back visibly to PDF rather than silently changing output.
 Conversion can remain explicit and client-side. The optional hosted boundary is
 `POST /v1/document-conversions`, followed by
 `GET /v1/document-conversions/{conversion_id}`. It accepts only the exact
-`pdfme@1.0.0` data-only subset and requires an idempotency key. It never loads
+`pdfme@1.0.0` or `pdfme@1.1.0` data-only subset and requires an idempotency key. It never loads
 pdfme, plugins, JavaScript, local files, background PDFs, or remote assets.
 
 Each successful conversion atomically stores the tenant, exact adapter ID and

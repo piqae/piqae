@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  authorizedJson,
   buildAdminPrintUrl,
   buildDraftPrintUrl,
   buildPosPrintUrl,
@@ -8,10 +9,31 @@ import {
 } from "./print-urls.js";
 
 describe("print URL contracts", () => {
+  it("preserves Headers instances while adding Shopify authorization", async () => {
+    vi.stubGlobal("shopify", {
+      auth: { idToken: vi.fn().mockResolvedValue("session-token") },
+    });
+    const fetcher = vi.fn().mockResolvedValue(Response.json({ ok: true }));
+    vi.stubGlobal("fetch", fetcher);
+    await authorizedJson("/api/example", {
+      headers: new Headers([
+        ["content-type", "application/json"],
+        ["x-request-id", "request-1"],
+      ]),
+    });
+    const headers = fetcher.mock.calls[0][1].headers;
+    expect(headers).toBeInstanceOf(Headers);
+    expect(headers.get("content-type")).toBe("application/json");
+    expect(headers.get("x-request-id")).toBe("request-1");
+    expect(headers.get("authorization")).toBe("Bearer session-token");
+    expect(headers.get("accept")).toBe("application/json");
+    vi.unstubAllGlobals();
+  });
   it("builds an encoded bulk admin PDF URL and removes duplicate document types", () => {
     const url = buildAdminPrintUrl({
       orderIds: ["gid://shopify/Order/1", "gid://shopify/Order/2"],
       documents: ["invoice", "invoice", "packing_slip"],
+      templateId: "published-template-4",
     });
     const parsed = new URL(url, "https://app.example");
     expect(parsed.pathname).toBe("/api/print/admin");
@@ -20,6 +42,7 @@ describe("print URL contracts", () => {
     );
     expect(parsed.searchParams.get("documents")).toBe("invoice,packing_slip");
     expect(parsed.searchParams.get("format")).toBe("pdf");
+    expect(parsed.searchParams.get("templateId")).toBe("published-template-4");
   });
 
   it("does not produce a printable URL without a selected resource and document", () => {

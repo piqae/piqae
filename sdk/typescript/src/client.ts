@@ -23,6 +23,9 @@ import type {
   DocumentTemplate,
   DocumentTemplateRevision,
   PrintDocumentRender,
+  CreateDocumentPreview,
+  DocumentPreview,
+  ApprovedDocumentPreview,
   DeviceAuthorizationExchange,
   DeviceAuthorizationReview,
   DeviceAuthorizationStatus,
@@ -406,6 +409,13 @@ export class PiqaeClient {
       download: (id: string) => this.requestBinary(`/v1/document-renders/${encodeURIComponent(id)}/artifact`),
       downloadBytes: async (id: string) => new Uint8Array(await (await this.requestBinary(`/v1/document-renders/${encodeURIComponent(id)}/artifact`)).arrayBuffer()),
       print: (id: string, input: PrintDocumentRender, idempotencyKey: string) => this.request<Job>('POST', `/v1/document-renders/${encodeURIComponent(id)}/print`, { body: input, idempotencyKey })
+    },
+    previews: {
+      create: (renderId:string,input:CreateDocumentPreview,idempotencyKey:string)=>this.request<DocumentPreview>('POST',`/v1/document-renders/${encodeURIComponent(renderId)}/previews`,{body:input,idempotencyKey}),
+      retrieve: (id:string)=>this.request<DocumentPreview>('GET',`/v1/document-previews/${encodeURIComponent(id)}`),
+      download: (id:string)=>this.requestBinary(`/v1/document-previews/${encodeURIComponent(id)}/artifact`),
+      approve: (id:string,input:PrintDocumentRender,idempotencyKey:string)=>this.request<ApprovedDocumentPreview>('POST',`/v1/document-previews/${encodeURIComponent(id)}/approve`,{body:input,idempotencyKey}),
+      cancel: (id:string,idempotencyKey:string)=>this.request<DocumentPreview>('POST',`/v1/document-previews/${encodeURIComponent(id)}/cancel`,{idempotencyKey})
     },
     conversions: {
       create: (input: CreateDocumentConversion, idempotencyKey: string) => this.request<DocumentConversion>('POST', '/v1/document-conversions', {

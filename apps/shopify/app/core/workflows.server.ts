@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
 import pg, { type Pool } from "pg";
 import { normalizeShopDomain } from "./model";
+import { parseTemplateEnvelope } from "./template-model";
+import { resolveShopifyStorage } from "./piqae-runtime.server";
 
 export type MerchantSettings = {
   defaultPrinterId: string;
@@ -416,7 +418,7 @@ export function setWorkflowRepositoryForTests(
 }
 export function workflows(): WorkflowRepository {
   if (injected) return injected;
-  if (process.env.NODE_ENV !== "production") return development;
+  if (resolveShopifyStorage() === "memory") return development;
   if (!production) {
     const connectionString = process.env.DATABASE_URL;
     if (!connectionString) throw new Error("DATABASE_URL is required");
@@ -467,19 +469,6 @@ export function bounded(
 }
 
 export function validateDocumentSource(source: string): string {
-  if (!source || Buffer.byteLength(source, "utf8") > 65_536)
-    throw new Error("Document source is invalid");
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(source);
-  } catch {
-    throw new Error("Document source must be valid JSON");
-  }
-  if (
-    !parsed ||
-    typeof parsed !== "object" ||
-    (parsed as { schema?: unknown }).schema !== "piqae.document/v1"
-  )
-    throw new Error("Document source must use piqae.document/v1");
+  parseTemplateEnvelope(source);
   return source;
 }

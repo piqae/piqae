@@ -16,10 +16,19 @@ import {
   hostedPricingUrl,
 } from "../app/core/shopify-app-pricing.server";
 import { editorDocument } from "../app/components/shopify-ui";
-import { liquidCompatibilityNotice } from "../app/routes/app.templates.$templateId";
+import {
+  canSubmitTemplateMode,
+  customizedTemplateName,
+  editorLiquidForMode,
+  liquidCompatibilityNotice,
+  parseVisualEditorSource,
+  removeSystemOwnership,
+} from "../app/routes/app.templates.$templateId";
 import { templates } from "../app/routes/app.templates";
 import { selectedOrderIds } from "../app/routes/app.print";
 import { starterTemplates } from "../app/core/starter-templates";
+import { MemoryWorkflowRepository } from "../app/core/workflows.server";
+import { parseTemplateEnvelope } from "../app/core/template-model";
 
 const shop = "fixture-shop.myshopify.com";
 const order = {
@@ -181,6 +190,107 @@ describe("Shopify boundary", () => {
       /^shopify-print-[a-f0-9]{64}-printer_1$/,
     );
   });
+  it("fails closed when a selected published document has no pinned Piqae revision", async () => {
+    const repository = new MemoryShopRepository();
+    const workflow = new MemoryWorkflowRepository();
+    const vault = new CredentialVault(Buffer.alloc(32, 9));
+    await repository.put({
+      shop,
+      piqaeAccountId: "acct_1",
+      encryptedCredential: vault.seal("token", shop),
+      templateRevisionId: "fallback_revision",
+      createdAt: new Date().toISOString(),
+    });
+    await workflow.saveTemplate(shop, {
+      ...starterTemplates[0]!,
+      state: "published",
+      revision: 1,
+    });
+    const service = new ShopifyPrintingService(
+      repository,
+      vault,
+      () => ({ documents: {} }) as never,
+      "https://app.example",
+      undefined,
+      workflow,
+    );
+    await expect(
+      service.previewOrders({
+        admin,
+        shop,
+        orderIds: ["42"],
+        templateId: starterTemplates[0]!.id,
+        requestKey: "preview-unpinned",
+      }),
+    ).rejects.toThrow("has no published Piqae revision");
+  });
+  it("approves the exact rendered preview without rendering again", async () => {
+    const repository = new MemoryShopRepository();
+    const vault = new CredentialVault(Buffer.alloc(32, 7));
+    await repository.put({
+      shop,
+      piqaeAccountId: "acct_preview",
+      encryptedCredential: vault.seal("token", shop),
+      templateRevisionId: "rev_preview",
+      createdAt: new Date().toISOString(),
+    });
+    const createRender = vi.fn(async () => ({
+      id: "render_preview",
+      state: "completed",
+      failure_code: null,
+    }));
+    const createPreview = vi.fn(async () => ({
+      id: "preview_1",
+      render_id: "render_preview",
+      state: "awaiting_approval",
+      expires_at: new Date(Date.now() + 60_000).toISOString(),
+    }));
+    const approve = vi.fn(async () => ({
+      preview: { state: "approved" },
+      job: { id: "job_preview" },
+    }));
+    const client = {
+      documents: {
+        renders: { create: createRender, retrieve: vi.fn(), print: vi.fn() },
+        previews: {
+          create: createPreview,
+          retrieve: vi.fn(async () => ({ render_id: "render_preview" })),
+          approve,
+        },
+      },
+    } as never;
+    const service = new ShopifyPrintingService(
+      repository,
+      vault,
+      () => client,
+      "https://app.example",
+    );
+    const preview = await service.previewOrders({
+      admin,
+      shop,
+      orderIds: ["42"],
+      requestKey: "preview-click",
+    });
+    const result = await service.approvePreview({
+      shop,
+      previewId: preview.previewId,
+      renderId: preview.renderId,
+      printerId: "printer_1",
+      requestKey: "approve-click",
+    });
+    expect(result).toEqual({ jobId: "job_preview", state: "approved" });
+    expect(createRender).toHaveBeenCalledTimes(1);
+    expect(createPreview).toHaveBeenCalledWith(
+      "render_preview",
+      { expires_in_seconds: 900 },
+      expect.stringMatching(/^shopify-preview-/),
+    );
+    expect(approve).toHaveBeenCalledWith(
+      "preview_1",
+      expect.objectContaining({ printer_id: "printer_1" }),
+      "approve-click",
+    );
+  });
 });
 
 describe("bounded Liquid subset", () => {
@@ -271,6 +381,17 @@ describe("customer download grants", () => {
     });
     expect(vault.open(token).renderId).toBe("render_1");
     expect(() => vault.open(`${token.slice(0, -1)}A`)).toThrow();
+    const previewToken = vault.issuePreview({
+      shop,
+      renderId: "render_2",
+      previewId: "preview_2",
+    });
+    expect(vault.openPreview(previewToken)).toMatchObject({
+      shop,
+      renderId: "render_2",
+      previewId: "preview_2",
+    });
+    expect(() => vault.open(previewToken)).toThrow();
   });
 });
 
@@ -445,5 +566,33 @@ describe("Shopify document experience", () => {
     expect(liquidCompatibilityNotice("liquid")).toContain(
       "Unsupported tags or filters",
     );
+    expect(canSubmitTemplateMode("visual", undefined)).toBe(false);
+    expect(canSubmitTemplateMode("visual", {})).toBe(true);
+    expect(canSubmitTemplateMode("native", undefined)).toBe(true);
+    expect(customizedTemplateName("x".repeat(200))).toHaveLength(200);
+    expect(customizedTemplateName("Invoice")).toBe("Invoice — customized");
+    expect(editorLiquidForMode("visual", "{{ stale }}")).toBe("");
+    expect(editorLiquidForMode("native", "{{ stale }}")).toBe("");
+    expect(editorLiquidForMode("liquid", "{{ order.name }}")).toBe(
+      "{{ order.name }}",
+    );
+    expect(() => parseVisualEditorSource("not json")).toThrow(
+      "Visual source must be valid JSON",
+    );
+    expect(() => parseVisualEditorSource("{}")).toThrow(
+      "pdfme-compatible/v1 shape",
+    );
+    expect(
+      parseVisualEditorSource(
+        JSON.stringify({
+          schema: "pdfme-compatible/v1",
+          page: "A4",
+          fields: [],
+        }),
+      ).page,
+    ).toBe("A4");
+    const ownedEnvelope = parseTemplateEnvelope(starterTemplates[0]!.source);
+    expect(ownedEnvelope.system).toBeDefined();
+    expect(removeSystemOwnership(ownedEnvelope).system).toBeUndefined();
   });
 });

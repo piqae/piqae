@@ -2552,6 +2552,99 @@ paths:
         "400": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
+  /v1/document-renders/{render_id}/previews:
+    post:
+      summary: Create an expiring approval gate for a completed render
+      description: Retains the exact rendered artifact. No print job is created before approval.
+      tags: [Documents]
+      operationId: createDocumentPreview
+      parameters:
+        - name: render_id
+          in: path
+          required: true
+          schema: { type: string }
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateDocumentPreview" }
+      responses:
+        "200": { description: Existing idempotent preview, content: { application/json: { schema: { $ref: "#/components/schemas/DocumentPreview" } } } }
+        "201": { description: Preview awaiting approval, content: { application/json: { schema: { $ref: "#/components/schemas/DocumentPreview" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /v1/document-previews/{preview_id}:
+    get:
+      summary: Retrieve a document preview approval gate
+      tags: [Documents]
+      operationId: retrieveDocumentPreview
+      parameters:
+        - name: preview_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200": { description: Preview lifecycle, content: { application/json: { schema: { $ref: "#/components/schemas/DocumentPreview" } } } }
+        "401": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /v1/document-previews/{preview_id}/artifact:
+    get:
+      summary: Download the exact artifact held by a live preview
+      tags: [Documents]
+      operationId: downloadDocumentPreviewArtifact
+      parameters:
+        - name: preview_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200": { description: Integrity-verified PDF, content: { application/pdf: { schema: { type: string, format: binary } } } }
+        "401": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /v1/document-previews/{preview_id}/approve:
+    post:
+      summary: Approve a preview and idempotently create exactly one print job
+      tags: [Documents]
+      operationId: approveDocumentPreview
+      parameters:
+        - name: preview_id
+          in: path
+          required: true
+          schema: { type: string }
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PrintDocumentRender" }
+      responses:
+        "200": { description: Approved preview and idempotent job, content: { application/json: { schema: { $ref: "#/components/schemas/ApprovedDocumentPreview" } } } }
+        "201": { description: Approved preview and newly registered job, content: { application/json: { schema: { $ref: "#/components/schemas/ApprovedDocumentPreview" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /v1/document-previews/{preview_id}/cancel:
+    post:
+      summary: Cancel a preview before approval
+      tags: [Documents]
+      operationId: cancelDocumentPreview
+      parameters:
+        - name: preview_id
+          in: path
+          required: true
+          schema: { type: string }
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "200": { description: Cancelled preview, content: { application/json: { schema: { $ref: "#/components/schemas/DocumentPreview" } } } }
+        "401": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
 components:
   headers:
     RequestId:
@@ -4801,6 +4894,47 @@ components:
                   heading: { type: string, maxLength: 500 }
                   pointer: { type: string, pattern: '^(\.|\./|/)', maxLength: 500 }
                   width_weight: { type: number, exclusiveMinimum: 0, maximum: 1000, default: 1 }
+        - type: object
+          additionalProperties: false
+          required: [type, children]
+          properties:
+            type: { const: canvas }
+            children:
+              type: array
+              maxItems: 1000
+              items: { $ref: "#/components/schemas/DocumentCanvasElement" }
+    DocumentCanvasElement:
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [type, value, x_mm, y_mm, width_mm, height_mm]
+          properties:
+            type: { const: text }
+            value: { $ref: "#/components/schemas/DocumentValue" }
+            x_mm: { type: number, minimum: 0, maximum: 2000 }
+            y_mm: { type: number, minimum: 0, maximum: 2000 }
+            width_mm: { type: number, exclusiveMinimum: 0, maximum: 2000 }
+            height_mm: { type: number, exclusiveMinimum: 0, maximum: 2000 }
+            font_size: { type: number, minimum: 4, maximum: 96, default: 10 }
+        - type: object
+          additionalProperties: false
+          required: [type, value, x_mm, y_mm, width_mm, height_mm]
+          properties:
+            type: { const: qr }
+            value: { $ref: "#/components/schemas/DocumentValue" }
+            x_mm: { type: number, minimum: 0, maximum: 2000 }
+            y_mm: { type: number, minimum: 0, maximum: 2000 }
+            width_mm: { type: number, exclusiveMinimum: 0, maximum: 2000 }
+            height_mm: { type: number, exclusiveMinimum: 0, maximum: 2000 }
+        - type: object
+          additionalProperties: false
+          required: [type, x_mm, y_mm, width_mm, height_mm]
+          properties:
+            type: { const: line }
+            x_mm: { type: number, minimum: 0, maximum: 2000 }
+            y_mm: { type: number, minimum: 0, maximum: 2000 }
+            width_mm: { type: number, exclusiveMinimum: 0, maximum: 2000 }
+            height_mm: { type: number, exclusiveMinimum: 0, maximum: 2000 }
     DocumentSpec:
       type: object
       additionalProperties: false
@@ -4868,7 +5002,7 @@ components:
       required: [adapter, adapter_version, source, strict]
       properties:
         adapter: { type: string, const: pdfme }
-        adapter_version: { type: string, const: 1.0.0 }
+        adapter_version: { type: string, enum: [1.0.0, 1.1.0] }
         source:
           type: object
           description: Bounded JSON template data. Runtime code and remote assets are rejected.
@@ -4894,7 +5028,7 @@ components:
       properties:
         id: { type: string }
         adapter: { type: string, const: pdfme }
-        adapter_version: { type: string, const: 1.0.0 }
+        adapter_version: { type: string, enum: [1.0.0, 1.1.0] }
         adapter_api_version: { type: string, const: piqae.adapter/v1 }
         source_format: { type: string, const: pdfme.template }
         source_sha256: { type: string, pattern: '^[a-f0-9]{64}$' }
@@ -4935,6 +5069,30 @@ components:
           not: { required: [target_id] }
         - required: [target_id]
           not: { required: [printer_id] }
+    CreateDocumentPreview:
+      type: object
+      additionalProperties: false
+      properties:
+        expires_in_seconds: { type: integer, minimum: 60, maximum: 1800, default: 600 }
+    DocumentPreview:
+      type: object
+      additionalProperties: false
+      required: [id, render_id, state, job_id, expires_at, created_at, updated_at]
+      properties:
+        id: { type: string }
+        render_id: { type: string }
+        state: { enum: [awaiting_approval, approving, approved, cancelled, expired] }
+        job_id: { type: [string, "null"] }
+        expires_at: { type: string, format: date-time }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    ApprovedDocumentPreview:
+      type: object
+      additionalProperties: false
+      required: [preview, job]
+      properties:
+        preview: { $ref: "#/components/schemas/DocumentPreview" }
+        job: { $ref: "#/components/schemas/Job" }
     ErrorEnvelope:
       type: object
       required: [error]

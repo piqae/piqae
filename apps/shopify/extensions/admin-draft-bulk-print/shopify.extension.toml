@@ -3,6 +3,7 @@ api_version = "2026-07"
 [[extensions]]
 name = "Print selected drafts"
 handle = "piqae-draft-bulk-print"
+uid = "a3438e04-f02e-4eb3-9454-339b5ca1249c270a2af9"
 type = "ui_extension"
 
 [[extensions.targeting]]

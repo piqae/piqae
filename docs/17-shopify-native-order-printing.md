@@ -1,6 +1,21 @@
 # Shopify-native order printing concept
 
-**Status:** product and technical concept. No production support claim.
+**Status:** private-development implementation. No production support claim.
+
+The current implementation includes Shopify Admin order/detail and bulk print
+actions, a preview approval gate, PDF fallback, direct Piqae destinations,
+durable tenant-scoped templates, eight starters, a bounded Liquid adapter and a
+client-only PDFme editor for the exact text/QR/line canvas subset. Preview,
+download and print reuse one verified immutable artifact. The Shopify app can
+explicitly target fake, local or live Piqae; selecting live does not authorize a
+physical-printer test.
+
+Public release remains blocked on Shopify approvals and real development-store
+evidence, including protected customer data/scopes, extension placement,
+customer-account network access, POS/mobile behavior, PDFme CSP/browser loading,
+live Piqae/node delivery, and physical printer fixtures. Document packs,
+full-fidelity images/custom fonts/barcodes, full Liquid/HTML/CSS, multilingual
+and jurisdiction-specific documents are not implemented parity claims.
 
 ## Decision
 

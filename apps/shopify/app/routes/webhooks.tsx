@@ -10,8 +10,14 @@ export async function action({ request }: ActionFunctionArgs) {
   const { topic, shop, payload, webhookId, resourceId } =
     await shopify.authenticate.webhook(request);
   const services = createProductionServices();
-  const synchronousLifecycle = ["APP_UNINSTALLED", "SHOP_REDACT", "CUSTOMERS_REDACT", "CUSTOMERS_DATA_REQUEST"].includes(topic);
-  if (!synchronousLifecycle &&
+  const synchronousLifecycle = [
+    "APP_UNINSTALLED",
+    "SHOP_REDACT",
+    "CUSTOMERS_REDACT",
+    "CUSTOMERS_DATA_REQUEST",
+  ].includes(topic);
+  if (
+    !synchronousLifecycle &&
     !(await services.repository.claimWebhook(webhookId, {
       shop,
       topic,

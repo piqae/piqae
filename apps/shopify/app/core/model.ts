@@ -53,7 +53,17 @@ export class MemoryShopRepository implements ShopRepository {
   async deleteShop(shop: string) {
     this.links.delete(shop);
   }
-  async redactCustomer(shop: string, customerId: string) { const customerGid=customerId.startsWith("gid://shopify/Customer/")?customerId:`gid://shopify/Customer/${customerId}`;for(const[id,value]of this.renders)if(value.shop===normalizeShopDomain(shop)&&value.customerGid===customerGid)this.renders.delete(id); }
+  async redactCustomer(shop: string, customerId: string) {
+    const customerGid = customerId.startsWith("gid://shopify/Customer/")
+      ? customerId
+      : `gid://shopify/Customer/${customerId}`;
+    for (const [id, value] of this.renders)
+      if (
+        value.shop === normalizeShopDomain(shop) &&
+        value.customerGid === customerGid
+      )
+        this.renders.delete(id);
+  }
   async claimWebhook(
     id: string,
     _event?: { shop: string; topic: string; resourceId?: string },

@@ -4,6 +4,7 @@ api_version = "2026-07"
 type = "ui_extension"
 name = "Print order documents"
 handle = "piqae-pos-print"
+uid = "fe1a7bac-75ec-0368-1139-5c90d7d578f89d655ae5"
 description = "Print receipts directly or open a PDF print dialog"
 
 [[extensions.targeting]]

@@ -1525,6 +1525,28 @@ mod tests {
             .await
             .expect("cross tenant response");
         assert_eq!(probe.status(), StatusCode::NOT_FOUND);
+
+        let canvas_body = serde_json::json!({
+            "adapter":"pdfme", "adapter_version":"1.1.0", "strict":true,
+            "source":{"basePdf":{"width":210,"height":297}, "schemas":[[
+                {"type":"text","name":"order/name","position":{"x":12,"y":18},"width":80,"height":10}
+            ]]}
+        }).to_string();
+        let canvas = json_response(
+            &application.router,
+            idempotent_api_request(
+                "POST",
+                "/v1/document-conversions",
+                "piq_test_integration",
+                "convert-pdfme-v1-1",
+                Some(&canvas_body),
+            ),
+        )
+        .await;
+        assert_eq!(canvas["adapter_version"], "1.1.0");
+        assert_eq!(canvas["fidelity"], "exact");
+        assert_eq!(canvas["document"]["body"][0]["type"], "canvas");
+        assert_eq!(canvas["document"]["body"][0]["children"][0]["x_mm"], 12.0);
     }
 
     #[tokio::test]

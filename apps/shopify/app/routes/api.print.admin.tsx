@@ -13,6 +13,11 @@ async function execute(request: Request) {
     request.method === "POST"
       ? String(body?.get("printerId") ?? "").trim() || undefined
       : undefined;
+  const templateId = String(
+    body?.get("templateId") ?? url.searchParams.get("templateId") ?? "",
+  ).trim();
+  if (templateId && !/^[a-zA-Z0-9_-]{1,80}$/.test(templateId))
+    return cors(Response.json({ error: "invalid document" }, { status: 400 }));
   const documents = String(
     body?.get("documents") ?? url.searchParams.get("documents") ?? "invoice",
   );
@@ -28,6 +33,7 @@ async function execute(request: Request) {
       .map((v) => v.trim())
       .filter(Boolean),
     printerId,
+    templateId: templateId || undefined,
     requestKey: request.headers.get("idempotency-key") ?? undefined,
   });
   if (request.method === "GET" && result.mode === "download")

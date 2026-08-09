@@ -4,6 +4,20 @@ export default [
   route("auth/*", "routes/auth.$.tsx"),
   route("webhooks", "routes/webhooks.tsx"),
   route("api/print/admin", "routes/api.print.admin.tsx"),
+  route("api/print/admin/options", "routes/api.print.admin-options.tsx"),
+  route("api/print/admin/previews", "routes/api.print.admin-previews.tsx"),
+  route(
+    "api/print/previews/:previewId/approve",
+    "routes/api.print.preview-approve.tsx",
+  ),
+  route(
+    "api/print/previews/:previewId/cancel",
+    "routes/api.print.preview-cancel.tsx",
+  ),
+  route(
+    "api/print/previews/:previewId/artifact",
+    "routes/api.print.preview-artifact.tsx",
+  ),
   route("api/print/admin-drafts", "routes/api.print.admin-drafts.tsx"),
   route("api/print/pos", "routes/api.print.pos.tsx"),
   route(
@@ -14,6 +28,10 @@ export default [
   route(
     "api/public/documents/download",
     "routes/api.public.documents.download.tsx",
+  ),
+  route(
+    "api/public/previews/artifact",
+    "routes/api.public.preview-artifact.tsx",
   ),
   route(
     "api/renders/:renderId/download",

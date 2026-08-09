@@ -5,8 +5,17 @@ import { ShopifyPrintingService } from "./core/printing.server";
 import { PostgresShopRepository } from "./core/postgres-shop-repository.server";
 import pg from "pg";
 import { DownloadTokenVault } from "./core/download-token.server";
-import { CloudflareEmailClient, EmailDeliveryError } from "./core/cloudflare-email.server";
+import {
+  CloudflareEmailClient,
+  EmailDeliveryError,
+} from "./core/cloudflare-email.server";
 import { ProductionAutomationDelivery } from "./core/production-automation-delivery.server";
+import {
+  resolvePiqaeRuntime,
+  resolveShopifyStorage,
+} from "./core/piqae-runtime.server";
+import { PiqaeAccountLinker } from "./core/piqae-account-link.server";
+import { workflows } from "./core/workflows.server";
 
 let injected: ShopRepository | undefined;
 let memoizedProduction: ReturnType<typeof buildServices> | undefined;
@@ -29,9 +38,10 @@ export function createProductionServices() {
 }
 
 function buildServices() {
+  const storage = resolveShopifyStorage();
   const repository =
     injected ??
-    (process.env.NODE_ENV === "production"
+    (storage === "postgres"
       ? new PostgresShopRepository(
           new pg.Pool({
             connectionString: required("DATABASE_URL"),
@@ -46,12 +56,20 @@ function buildServices() {
   const downloadTokens = new DownloadTokenVault(
     Buffer.from(required("PIQAE_SHOPIFY_DOWNLOAD_KEY"), "base64"),
   );
-  const baseUrl = process.env.PIQAE_API_URL ?? "https://api.piqae.com";
+  const runtime = resolvePiqaeRuntime();
+  const baseUrl = runtime.baseUrl;
   const printing = new ShopifyPrintingService(
     repository,
     vault,
     (token) => new PiqaeClient({ baseUrl, accessToken: () => token }),
     required("SHOPIFY_APP_URL"),
+    downloadTokens,
+  );
+  const accountLinker = new PiqaeAccountLinker(
+    repository,
+    workflows(),
+    vault,
+    (credential) => new PiqaeClient({ baseUrl, accessToken: () => credential }),
   );
   const emailConfigured =
     process.env.CLOUDFLARE_ACCOUNT_ID &&
@@ -76,25 +94,40 @@ function buildServices() {
             for (let attempt = 0; attempt < 20; attempt += 1) {
               const response = await fetch(
                 `${baseUrl}/v1/document-renders/${encodeURIComponent(renderId)}/artifact`,
-                { headers: { authorization: `Bearer ${credential}` }, signal: AbortSignal.timeout(10_000) },
+                {
+                  headers: { authorization: `Bearer ${credential}` },
+                  signal: AbortSignal.timeout(10_000),
+                },
               );
               if (response.ok)
                 return new Uint8Array(await response.arrayBuffer());
               if (response.status !== 409)
                 throw new Error(`PIQAE_ARTIFACT_FAILED_${response.status}`);
-              await new Promise((resolve) => setTimeout(resolve, Math.min(2_000, 100 * 2 ** attempt)));
+              await new Promise((resolve) =>
+                setTimeout(resolve, Math.min(2_000, 100 * 2 ** attempt)),
+              );
             }
             throw new Error("PIQAE_ARTIFACT_TIMEOUT");
           },
         },
       )
-    : new ProductionAutomationDelivery(printing, undefined, { load: async () => { throw new EmailDeliveryError("email provider is not configured", false); } });
+    : new ProductionAutomationDelivery(printing, undefined, {
+        load: async () => {
+          throw new EmailDeliveryError(
+            "email provider is not configured",
+            false,
+          );
+        },
+      });
   return {
     repository,
     vault,
     downloadTokens,
     baseUrl,
+    runtime,
+    storage,
     printing,
+    accountLinker,
     automationDelivery,
   };
 }

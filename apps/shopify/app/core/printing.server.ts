@@ -8,7 +8,9 @@ import {
   fetchOrders,
   type AdminGraphql,
 } from "./orders.server";
-import { workflows } from "./workflows.server";
+import { workflows, type WorkflowRepository } from "./workflows.server";
+import { parseTemplateEnvelope } from "./template-model";
+import type { DownloadTokenVault } from "./download-token.server";
 
 export type PrintResult =
   | { mode: "direct"; renderId: string; jobId: string }
@@ -21,18 +23,150 @@ export class ShopifyPrintingService {
     private readonly vault: CredentialVault,
     private readonly clientFactory: (token: string) => Client,
     private readonly appUrl: string,
+    private readonly previewTokens?: Pick<DownloadTokenVault, "issuePreview">,
+    private readonly workflow: WorkflowRepository = workflows(),
   ) {}
+  async previewOrders(input: {
+    admin: AdminGraphql;
+    shop: string;
+    orderIds: string[];
+    templateId?: string;
+    requestKey: string;
+  }) {
+    const shop = normalizeShopDomain(input.shop);
+    const link = await this.shops.get(shop);
+    if (!link) throw new Error("Connect a Piqae account before printing");
+    const templateRevisionId = await this.resolveTemplateRevision(
+      shop,
+      link.templateRevisionId,
+      input.templateId,
+    );
+    const orders = await fetchOrders(input.admin, input.orderIds);
+    const digest = createHash("sha256")
+      .update(
+        JSON.stringify({
+          shop,
+          ids: orders.map((order) => order.id),
+          templateRevisionId,
+          requestKey: input.requestKey,
+        }),
+      )
+      .digest("hex");
+    const client = this.clientFactory(
+      this.vault.open(link.encryptedCredential, shop),
+    );
+    const render = await client.documents.renders.create(
+      {
+        template_revision_id: templateRevisionId,
+        input: { shop, orders },
+      },
+      `shopify-preview-render-${digest}`,
+    );
+    await this.shops.recordRender(
+      shop,
+      render.id,
+      `shopify-preview-render-${digest}`,
+    );
+    const completed = await waitForRender(client, render);
+    if (completed.state !== "completed")
+      throw new Error(
+        `document render failed: ${completed.failure_code ?? completed.state}`,
+      );
+    const preview = await client.documents.previews.create(
+      completed.id,
+      { expires_in_seconds: 900 },
+      `shopify-preview-${digest}`,
+    );
+    return {
+      previewId: preview.id,
+      renderId: completed.id,
+      expiresAt: preview.expires_at,
+      artifactUrl: this.previewTokens
+        ? `${this.appUrl}/api/public/previews/artifact?token=${encodeURIComponent(this.previewTokens.issuePreview({ shop, renderId: completed.id, previewId: preview.id }))}`
+        : `${this.appUrl}/api/print/previews/${encodeURIComponent(preview.id)}/artifact?renderId=${encodeURIComponent(completed.id)}`,
+    };
+  }
+
+  async approvePreview(input: {
+    shop: string;
+    previewId: string;
+    renderId: string;
+    printerId: string;
+    requestKey: string;
+  }) {
+    const shop = normalizeShopDomain(input.shop);
+    if (!(await this.shops.ownsRender(shop, input.renderId)))
+      throw new Error("Preview not found");
+    const link = await this.shops.get(shop);
+    if (!link) throw new Error("Connect a Piqae account before printing");
+    const client = this.clientFactory(
+      this.vault.open(link.encryptedCredential, shop),
+    );
+    const preview = await client.documents.previews.retrieve(input.previewId);
+    if (preview.render_id !== input.renderId)
+      throw new Error("Preview not found");
+    const approved = await client.documents.previews.approve(
+      input.previewId,
+      { printer_id: input.printerId, title: "Shopify order documents" },
+      input.requestKey,
+    );
+    return { jobId: approved.job.id, state: approved.preview.state };
+  }
+
+  async cancelPreview(input: {
+    shop: string;
+    previewId: string;
+    renderId: string;
+    requestKey: string;
+  }) {
+    const shop = normalizeShopDomain(input.shop);
+    if (!(await this.shops.ownsRender(shop, input.renderId)))
+      throw new Error("Preview not found");
+    const link = await this.shops.get(shop);
+    if (!link) throw new Error("Preview not found");
+    const client = this.clientFactory(
+      this.vault.open(link.encryptedCredential, shop),
+    );
+    const preview = await client.documents.previews.retrieve(input.previewId);
+    if (preview.render_id !== input.renderId)
+      throw new Error("Preview not found");
+    return client.documents.previews.cancel(input.previewId, input.requestKey);
+  }
+
+  private async resolveTemplateRevision(
+    shop: string,
+    fallback: string,
+    templateId?: string,
+  ) {
+    if (!templateId) return fallback;
+    const selected = await this.workflow.getTemplate(shop, templateId);
+    if (!selected || selected.state !== "published")
+      throw new Error("The selected document is not published");
+    const revision = parseTemplateEnvelope(selected.source).published
+      ?.piqaeRevisionId;
+    if (!revision)
+      throw new Error(
+        "The selected document has no published Piqae revision; publish it again before printing",
+      );
+    return revision;
+  }
   async printOrders(input: {
     admin: AdminGraphql;
     shop: string;
     orderIds: string[];
     printerId?: string;
     requestKey?: string;
+    templateId?: string;
     resourceType?: "orders" | "draft_orders";
   }): Promise<PrintResult> {
     const shop = normalizeShopDomain(input.shop);
     const link = await this.shops.get(shop);
     if (!link) throw new Error("Connect a Piqae account before printing");
+    const templateRevisionId = await this.resolveTemplateRevision(
+      shop,
+      link.templateRevisionId,
+      input.templateId,
+    );
     const orders =
       input.resourceType === "draft_orders"
         ? await fetchDraftOrders(input.admin, input.orderIds)
@@ -42,7 +176,7 @@ export class ShopifyPrintingService {
         JSON.stringify({
           shop,
           ids: orders.map((o) => o.id),
-          template: link.templateRevisionId,
+          template: templateRevisionId,
           requestKey: input.requestKey ?? "",
         }),
       )
@@ -52,7 +186,7 @@ export class ShopifyPrintingService {
     );
     const render = await client.documents.renders.create(
       {
-        template_revision_id: link.templateRevisionId,
+        template_revision_id: templateRevisionId,
         input: { shop, orders },
       },
       `shopify-render-${digest}`,

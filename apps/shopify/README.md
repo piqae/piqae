@@ -23,6 +23,18 @@ it must not imply that older orders are accessible.
 
 No real Shopify or Piqae credentials are needed for unit tests.
 
+## Piqae test runtime
+
+`PIQAE_SHOPIFY_RUNTIME` is explicit: `fake` uses only the loopback virtual
+printer environment, `local` targets a loopback or HTTPS self-hosted control
+plane, and `live` requires an HTTPS Piqae endpoint. Live mode exercises the real
+network and enrolled nodes, but it does not bypass Piqae's separate explicit
+physical-printer authorization and destination confirmation controls. CI and
+ordinary development use `fake`; staging may deliberately select `live`.
+`PIQAE_SHOPIFY_STORAGE` defaults to durable PostgreSQL outside tests; the
+in-memory repository is allowed only for explicit development fixtures and unit
+tests, and is rejected in production.
+
 ## Production Shopify configuration
 
 `shopify.app.toml` deliberately contains non-deployable placeholder values. Do

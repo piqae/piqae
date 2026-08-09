@@ -24,10 +24,15 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
   for (let attempt = 0; attempt < 20; attempt += 1) {
     upstream = await fetch(
       `${services.baseUrl}/v1/document-renders/${encodeURIComponent(renderId)}/artifact`,
-      { headers: { authorization: `Bearer ${credential}` }, signal: AbortSignal.timeout(10_000) },
+      {
+        headers: { authorization: `Bearer ${credential}` },
+        signal: AbortSignal.timeout(10_000),
+      },
     );
     if (upstream.ok || upstream.status !== 409) break;
-    await new Promise((resolve) => setTimeout(resolve, Math.min(2_000, 100 * 2 ** attempt)));
+    await new Promise((resolve) =>
+      setTimeout(resolve, Math.min(2_000, 100 * 2 ** attempt)),
+    );
   }
   if (!upstream?.ok || !upstream.body)
     return Response.json(

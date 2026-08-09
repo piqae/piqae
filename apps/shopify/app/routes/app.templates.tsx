@@ -8,6 +8,10 @@ import {
   workflows,
   type MerchantTemplate,
 } from "../core/workflows.server";
+import {
+  seedStarterTemplates,
+  syncTemplateIndex,
+} from "../core/template-index.server";
 export const templates = [
   ["Invoice", "Orders · A4", "Published"],
   ["Packing slip", "Fulfillment · A4", "Published"],
@@ -20,10 +24,11 @@ export const templates = [
 ] as const;
 export async function loader({ request }: LoaderFunctionArgs) {
   const { session } = await shopify.authenticate.admin(request);
+  await seedStarterTemplates(workflows(), session.shop);
   return { templates: await workflows().listTemplates(session.shop) };
 }
 export async function action({ request }: ActionFunctionArgs) {
-  const { session } = await shopify.authenticate.admin(request);
+  const { session, admin } = await shopify.authenticate.admin(request);
   const form = await request.formData();
   try {
     const raw = bounded(form, "import", 65536, true);
@@ -49,6 +54,7 @@ export async function action({ request }: ActionFunctionArgs) {
       source,
       revision: 1,
     } as Omit<MerchantTemplate, "updatedAt">);
+    await syncTemplateIndex(admin, workflows(), session.shop);
     return { ok: true, error: "", id: saved.id };
   } catch (error) {
     return Response.json(
@@ -97,7 +103,11 @@ export default function Templates() {
                   {t.revision}
                 </s-paragraph>
                 <div className="piqae-actions">
-                  <s-button href={`/app/templates/${t.id}`}>Edit</s-button>
+                  <s-button href={`/app/templates/${t.id}`}>
+                    {t.source.includes('"immutable":true')
+                      ? "Customize"
+                      : "Edit"}
+                  </s-button>
                   <a
                     className="piqae-link-button"
                     download={`${t.name}.piqae-template.json`}

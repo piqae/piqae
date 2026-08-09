@@ -1,4 +1,8 @@
 import type { DocumentSpec } from "@piqae/sdk";
+import {
+  serializeTemplateEnvelope,
+  type PdfmeVisualModel,
+} from "./template-model";
 
 export type StarterTemplate = {
   id: string;
@@ -6,6 +10,15 @@ export type StarterTemplate = {
   details: string;
   status: "Published" | "Draft";
   specification: DocumentSpec;
+  kind:
+    | "invoice"
+    | "packing_slip"
+    | "receipt"
+    | "returns"
+    | "credit_note"
+    | "custom";
+  pageSize: "A4" | "A5" | "80mm";
+  source: string;
 };
 
 const orderRows: DocumentSpec["body"] = [
@@ -40,61 +53,120 @@ function document(size: DocumentSpec["page"]["size"] = "a4"): DocumentSpec {
   };
 }
 
+function visual(page: PdfmeVisualModel["page"]): PdfmeVisualModel {
+  return {
+    schema: "pdfme-compatible/v1",
+    page,
+    fields: [
+      {
+        id: "title",
+        type: "text",
+        x: 10,
+        y: 10,
+        width: 100,
+        height: 12,
+        binding: "/document/title",
+      },
+      {
+        id: "order",
+        type: "text",
+        x: 10,
+        y: 28,
+        width: 80,
+        height: 8,
+        binding: "/order/name",
+      },
+    ],
+  };
+}
+
+function starter(
+  key: string,
+  name: string,
+  details: string,
+  kind: StarterTemplate["kind"],
+  pageSize: StarterTemplate["pageSize"],
+  specification: DocumentSpec,
+): StarterTemplate {
+  return {
+    id: key,
+    name,
+    details,
+    status: "Published",
+    kind,
+    pageSize,
+    specification,
+    source: serializeTemplateEnvelope({
+      schema: "piqae.shopify-template/v1",
+      canonical: specification,
+      editor: {
+        mode: "visual",
+        pdfme: visual(pageSize),
+        roundTrip: "lossless",
+        warnings: [],
+      },
+      assets: [],
+      system: { key, immutable: true },
+    }),
+  };
+}
+
 export const starterTemplates: readonly StarterTemplate[] = [
-  {
-    id: "invoice",
-    name: "Invoice",
-    details: "Orders · A4",
-    status: "Published",
-    specification: document(),
-  },
-  {
-    id: "packing-slip",
-    name: "Packing slip",
-    details: "Fulfillment · A4",
-    status: "Published",
-    specification: document(),
-  },
-  {
-    id: "receipt",
-    name: "Receipt",
-    details: "Orders · 80 mm",
-    status: "Published",
-    specification: document("roll80mm"),
-  },
-  {
-    id: "returns-form",
-    name: "Returns form",
-    details: "Returns · A4",
-    status: "Published",
-    specification: document(),
-  },
-  {
-    id: "quote-pro-forma",
-    name: "Quote / pro forma",
-    details: "Draft orders · A4",
-    status: "Published",
-    specification: document(),
-  },
-  {
-    id: "credit-note",
-    name: "Refund / credit note",
-    details: "Refunds · A4",
-    status: "Published",
-    specification: document(),
-  },
-  {
-    id: "gift-receipt",
-    name: "Gift receipt",
-    details: "Orders · A5",
-    status: "Published",
-    specification: document("a5"),
-  },
-  {
-    id: "delivery-note",
-    name: "Delivery note",
-    details: "Fulfillment · A4",
-    status: "Published",
-    specification: document(),
-  },
+  starter("invoice", "Invoice", "Orders · A4", "invoice", "A4", document()),
+  starter(
+    "packing-slip",
+    "Packing slip",
+    "Fulfillment · A4",
+    "packing_slip",
+    "A4",
+    document(),
+  ),
+  starter(
+    "receipt",
+    "Receipt",
+    "Orders · 80 mm",
+    "receipt",
+    "80mm",
+    document("roll80mm"),
+  ),
+  starter(
+    "returns-form",
+    "Returns form",
+    "Returns · A4",
+    "returns",
+    "A4",
+    document(),
+  ),
+  starter(
+    "quote-pro-forma",
+    "Quote / pro forma",
+    "Draft orders · A4",
+    "custom",
+    "A4",
+    document(),
+  ),
+  starter(
+    "credit-note",
+    "Refund / credit note",
+    "Refunds · A4",
+    "credit_note",
+    "A4",
+    document(),
+  ),
+  starter(
+    "gift-receipt",
+    "Gift receipt",
+    "Orders · A5",
+    "receipt",
+    "A5",
+    document("a5"),
+  ),
+  starter(
+    "delivery-note",
+    "Delivery note",
+    "Fulfillment · A4",
+    "packing_slip",
+    "A4",
+    document(),
+  ),
 ] as const;

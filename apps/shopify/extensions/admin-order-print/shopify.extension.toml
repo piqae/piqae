@@ -3,6 +3,7 @@ api_version = "2026-07"
 [[extensions]]
 name = "Print order documents"
 handle = "piqae-order-print"
+uid = "c838eca8-77bd-3a1b-f51d-24c117b75ec2f7180ae3"
 type = "ui_extension"
 
 [[extensions.targeting]]

@@ -4,7 +4,7 @@ function safeDocuments(documents) {
   return [...new Set(documents.filter((document) => DOCUMENTS.has(document)))];
 }
 
-export function buildAdminPrintUrl({ orderIds, documents }) {
+export function buildAdminPrintUrl({ orderIds, documents, templateId }) {
   const selectedDocuments = safeDocuments(documents);
   if (orderIds.length === 0 || selectedDocuments.length === 0) return null;
 
@@ -13,7 +13,23 @@ export function buildAdminPrintUrl({ orderIds, documents }) {
     documents: selectedDocuments.join(","),
     format: "pdf",
   });
+  if (templateId) params.set("templateId", templateId);
   return `/api/print/admin?${params.toString()}`;
+}
+
+export async function authorizedJson(url, options = {}) {
+  const token = await shopify.auth.idToken();
+  const headers = new Headers(options.headers);
+  headers.set("authorization", `Bearer ${token}`);
+  headers.set("accept", "application/json");
+  const response = await fetch(url, {
+    ...options,
+    headers,
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok)
+    throw new Error(body.error || `Request failed (${response.status})`);
+  return body;
 }
 
 export function buildDraftPrintUrl({ draftOrderIds }) {

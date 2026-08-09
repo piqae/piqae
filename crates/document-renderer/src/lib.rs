@@ -142,6 +142,39 @@ pub enum Node {
         #[serde(default)]
         header: bool,
     },
+    /// Absolute, top-left-origin page elements in millimetres. Each element is
+    /// clipped to its declared box. This deliberately small primitive set is
+    /// suitable for data-only visual-editor adapters without HTML or plugins.
+    Canvas {
+        children: Vec<CanvasElement>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum CanvasElement {
+    Text {
+        value: TextValue,
+        x_mm: f32,
+        y_mm: f32,
+        width_mm: f32,
+        height_mm: f32,
+        #[serde(default = "default_font_size")]
+        font_size: f32,
+    },
+    Qr {
+        value: TextValue,
+        x_mm: f32,
+        y_mm: f32,
+        width_mm: f32,
+        height_mm: f32,
+    },
+    Line {
+        x_mm: f32,
+        y_mm: f32,
+        width_mm: f32,
+        height_mm: f32,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -173,6 +206,13 @@ pub enum TextValue {
 
 #[derive(Debug, Clone)]
 enum Draw {
+    ClipStart {
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+    },
+    ClipEnd,
     Text {
         x: f32,
         y: f32,
@@ -423,8 +463,151 @@ fn layout(
                     )?;
                 }
             }
+            Node::Canvas { children } => {
+                state.nodes = state.nodes.saturating_add(children.len());
+                if state.nodes > limits.max_nodes {
+                    return Err(RenderError::Limit("nodes"));
+                }
+                for child in children {
+                    draw_canvas_element(child, root, current, state, limits)?;
+                }
+            }
         }
     }
+    Ok(())
+}
+
+fn canvas_box(
+    x_mm: f32,
+    y_mm: f32,
+    width_mm: f32,
+    height_mm: f32,
+    state: &State,
+) -> Result<(f32, f32, f32, f32), RenderError> {
+    if [x_mm, y_mm, width_mm, height_mm]
+        .iter()
+        .any(|v| !v.is_finite())
+        || x_mm < 0.0
+        || y_mm < 0.0
+        || width_mm <= 0.0
+        || height_mm <= 0.0
+        || width_mm > 2_000.0
+        || height_mm > 2_000.0
+    {
+        return Err(RenderError::Limit("canvas bounds"));
+    }
+    let (x, top, width, height) = (mm(x_mm), mm(y_mm), mm(width_mm), mm(height_mm));
+    if x >= state.width || top >= state.height {
+        return Err(RenderError::Limit("canvas bounds"));
+    }
+    Ok((
+        x,
+        (state.height - top - height).max(0.0),
+        width.min(state.width - x),
+        height.min(state.height - top),
+    ))
+}
+
+fn draw_canvas_element(
+    element: &CanvasElement,
+    root: &Value,
+    current: &Value,
+    state: &mut State,
+    limits: RenderLimits,
+) -> Result<(), RenderError> {
+    let (x, y, width, height) = match element {
+        CanvasElement::Text {
+            x_mm,
+            y_mm,
+            width_mm,
+            height_mm,
+            ..
+        }
+        | CanvasElement::Qr {
+            x_mm,
+            y_mm,
+            width_mm,
+            height_mm,
+            ..
+        }
+        | CanvasElement::Line {
+            x_mm,
+            y_mm,
+            width_mm,
+            height_mm,
+        } => canvas_box(*x_mm, *y_mm, *width_mm, *height_mm, state)?,
+    };
+    state
+        .pages
+        .last_mut()
+        .ok_or(RenderError::Limit("pages"))?
+        .push(Draw::ClipStart {
+            x,
+            y,
+            width,
+            height,
+        });
+    match element {
+        CanvasElement::Text {
+            value, font_size, ..
+        } => {
+            let text = resolve_text(value, root, current)?;
+            account_text(state, &text, limits)?;
+            if !font_size.is_finite() {
+                return Err(RenderError::Limit("font size"));
+            }
+            let size = font_size.clamp(4.0, 96.0);
+            state
+                .pages
+                .last_mut()
+                .ok_or(RenderError::Limit("pages"))?
+                .push(Draw::Text {
+                    x,
+                    y: y + height - size,
+                    size,
+                    text,
+                });
+        }
+        CanvasElement::Qr { value, .. } => {
+            let text = resolve_text(value, root, current)?;
+            account_text(state, &text, limits)?;
+            let code = QrCode::with_error_correction_level(text.as_bytes(), EcLevel::M)
+                .map_err(|_| RenderError::QrTooLarge)?;
+            let count = code.width();
+            let modules = code
+                .into_colors()
+                .chunks(count)
+                .map(|row| row.iter().map(|c| c == &qrcode::Color::Dark).collect())
+                .collect();
+            let size = width.min(height);
+            state
+                .pages
+                .last_mut()
+                .ok_or(RenderError::Limit("pages"))?
+                .push(Draw::Qr {
+                    x,
+                    y: y + height - size,
+                    size,
+                    modules,
+                });
+        }
+        CanvasElement::Line { .. } => {
+            state
+                .pages
+                .last_mut()
+                .ok_or(RenderError::Limit("pages"))?
+                .push(Draw::Line {
+                    x1: x,
+                    y: y + height / 2.0,
+                    x2: x + width,
+                });
+        }
+    }
+    state
+        .pages
+        .last_mut()
+        .ok_or(RenderError::Limit("pages"))?
+        .push(Draw::ClipEnd);
     Ok(())
 }
 
@@ -641,6 +824,15 @@ fn content(draws: &[Draw]) -> String {
     let mut out = String::new();
     for draw in draws {
         match draw {
+            Draw::ClipStart {
+                x,
+                y,
+                width,
+                height,
+            } => {
+                let _ = writeln!(out, "q {x:.2} {y:.2} {width:.2} {height:.2} re W n");
+            }
+            Draw::ClipEnd => out.push_str("Q\n"),
             Draw::Text { x, y, size, text } => {
                 let _ = writeln!(
                     out,
@@ -722,6 +914,52 @@ mod tests {
         assert_eq!(one, two);
         assert!(one.starts_with(b"%PDF-1.7"));
         assert!(String::from_utf8_lossy(&one).contains("Invoice \\(safe\\)"));
+    }
+    #[test]
+    fn canvas_is_absolute_clipped_and_ordered() {
+        let doc = spec(vec![Node::Canvas {
+            children: vec![
+                CanvasElement::Text {
+                    value: TextValue::Literal("placed".into()),
+                    x_mm: 10.0,
+                    y_mm: 20.0,
+                    width_mm: 30.0,
+                    height_mm: 8.0,
+                    font_size: 10.0,
+                },
+                CanvasElement::Line {
+                    x_mm: 2.0,
+                    y_mm: 4.0,
+                    width_mm: 40.0,
+                    height_mm: 1.0,
+                },
+            ],
+        }]);
+        let Ok(pdf) = render(&doc, &Value::Null, RenderLimits::default()) else {
+            panic!("canvas render failed")
+        };
+        let source = String::from_utf8_lossy(&pdf);
+        assert!(source.contains("q 28.35 762.52 85.04 22.68 re W n"));
+        assert!(source.contains("(placed) Tj"));
+        assert_eq!(source.matches("Q\n").count(), 2);
+    }
+
+    #[test]
+    fn canvas_rejects_non_finite_and_off_page_boxes() {
+        for x_mm in [f32::NAN, -1.0, 500.0] {
+            let doc = spec(vec![Node::Canvas {
+                children: vec![CanvasElement::Line {
+                    x_mm,
+                    y_mm: 1.0,
+                    width_mm: 1.0,
+                    height_mm: 1.0,
+                }],
+            }]);
+            assert_eq!(
+                render(&doc, &Value::Null, RenderLimits::default()),
+                Err(RenderError::Limit("canvas bounds"))
+            );
+        }
     }
     #[test]
     fn repeat_is_bounded() {

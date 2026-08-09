@@ -28,7 +28,10 @@ export async function loader({ request }: LoaderFunctionArgs) {
   const credential = services.vault.open(link.encryptedCredential, grant.shop);
   const upstream = await fetch(
     `${services.baseUrl}/v1/document-renders/${encodeURIComponent(grant.renderId)}/artifact`,
-    { headers: { authorization: `Bearer ${credential}` }, signal: AbortSignal.timeout(10_000) },
+    {
+      headers: { authorization: `Bearer ${credential}` },
+      signal: AbortSignal.timeout(10_000),
+    },
   );
   if (!upstream.ok || !upstream.body)
     return Response.json(

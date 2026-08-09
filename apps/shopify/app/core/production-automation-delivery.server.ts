@@ -46,7 +46,8 @@ export class ProductionAutomationDelivery implements AutomationDelivery {
     idempotencyKey: string;
     admin: AdminGraphql;
   }) {
-    if (!this.email) throw new EmailDeliveryError("email provider is not configured", false);
+    if (!this.email)
+      throw new EmailDeliveryError("email provider is not configured", false);
     const order = await resolveOrder(input.admin, input.resourceId);
     const result = await this.printing.printOrders({
       admin: input.admin,
