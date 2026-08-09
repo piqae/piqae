@@ -279,6 +279,10 @@ pub fn router(state: AppState) -> Router {
             axum::routing::patch(routing::patch_stock),
         )
         .route(
+            "/v1/print-workflows",
+            get(routing::list_print_workflows).post(routing::create_print_workflow),
+        )
+        .route(
             "/v1/targets",
             get(routing::list_targets).post(routing::create_target),
         )
