@@ -15,17 +15,10 @@ afterEach(async () => {
 
 describe("Streamable HTTP", () => {
   it("publishes RFC 9728 metadata for the exact MCP resource", async () => {
-    const port = await unusedPort();
-    const publicUrl = `http://127.0.0.1:${port}/mcp`;
-    closers.push(
-      await startHttpServer(
-        loadConfig({
-          PIQAE_MCP_PORT: String(port),
-          PIQAE_MCP_PUBLIC_URL: publicUrl,
-          PIQAE_MCP_AUTHORIZATION_SERVER: "https://identity.example.com",
-        }),
-      ),
-    );
+    const { port, publicUrl, close } = await startTestServer({
+      PIQAE_MCP_AUTHORIZATION_SERVER: "https://identity.example.com",
+    });
+    closers.push(close);
     const response = await originalFetch(
       `http://127.0.0.1:${port}/.well-known/oauth-protected-resource/mcp`,
     );
@@ -37,15 +30,8 @@ describe("Streamable HTTP", () => {
   });
 
   it("requires a bearer before processing MCP JSON-RPC", async () => {
-    const port = await unusedPort();
-    closers.push(
-      await startHttpServer(
-        loadConfig({
-          PIQAE_MCP_PORT: String(port),
-          PIQAE_MCP_PUBLIC_URL: `http://127.0.0.1:${port}/mcp`,
-        }),
-      ),
-    );
+    const { port, close } = await startTestServer();
+    closers.push(close);
     const response = await originalFetch(`http://127.0.0.1:${port}/mcp`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -56,7 +42,6 @@ describe("Streamable HTTP", () => {
   });
 
   it("verifies a loopback Piqae key and completes MCP initialization", async () => {
-    const port = await unusedPort();
     const apiOrigin = "https://api.example.test";
     globalThis.fetch = vi.fn(
       async (input: string | URL | Request, init?: RequestInit) => {
@@ -74,15 +59,10 @@ describe("Streamable HTTP", () => {
         return originalFetch(input, init);
       },
     ) as typeof fetch;
-    closers.push(
-      await startHttpServer(
-        loadConfig({
-          PIQAE_API_ORIGIN: apiOrigin,
-          PIQAE_MCP_PORT: String(port),
-          PIQAE_MCP_PUBLIC_URL: `http://127.0.0.1:${port}/mcp`,
-        }),
-      ),
-    );
+    const { port, close } = await startTestServer({
+      PIQAE_API_ORIGIN: apiOrigin,
+    });
+    closers.push(close);
     const response = await originalFetch(`http://127.0.0.1:${port}/mcp`, {
       method: "POST",
       headers: {
@@ -101,18 +81,12 @@ describe("Streamable HTTP", () => {
   });
 
   it("rejects an oversized chunked body without trusting Content-Length", async () => {
-    const port = await unusedPort();
     const apiOrigin = "https://api.example.test";
     mockIdentity(apiOrigin);
-    closers.push(
-      await startHttpServer(
-        loadConfig({
-          PIQAE_API_ORIGIN: apiOrigin,
-          PIQAE_MCP_PORT: String(port),
-          PIQAE_MCP_PUBLIC_URL: `http://127.0.0.1:${port}/mcp`,
-        }),
-      ),
-    );
+    const { port, close } = await startTestServer({
+      PIQAE_API_ORIGIN: apiOrigin,
+    });
+    closers.push(close);
     const response = await chunkedRequest(port, 17, 64 * 1024);
     expect(response.status).toBe(413);
     expect(response.body).toContain("request_too_large");
@@ -145,6 +119,32 @@ async function unusedPort(): Promise<number> {
     server.close((error) => (error ? reject(error) : resolve()));
   });
   return address.port;
+}
+
+async function startTestServer(
+  environment: Record<string, string> = {},
+): Promise<{
+  port: number;
+  publicUrl: string;
+  close: () => Promise<void>;
+}> {
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const port = await unusedPort();
+    const publicUrl = `http://127.0.0.1:${port}/mcp`;
+    try {
+      const close = await startHttpServer(
+        loadConfig({
+          ...environment,
+          PIQAE_MCP_PORT: String(port),
+          PIQAE_MCP_PUBLIC_URL: publicUrl,
+        }),
+      );
+      return { port, publicUrl, close };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EADDRINUSE") throw error;
+    }
+  }
+  throw new Error("failed to bind a test HTTP port after 5 attempts");
 }
 
 function mockIdentity(apiOrigin: string): void {
