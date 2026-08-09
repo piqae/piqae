@@ -24,7 +24,7 @@ import {
   parseVisualEditorSource,
   removeSystemOwnership,
 } from "../app/routes/app.templates.$templateId";
-import { templates } from "../app/routes/app.templates";
+import { customizedSystemDraft, templates } from "../app/routes/app.templates";
 import { selectedOrderIds } from "../app/routes/app.print";
 import { starterTemplates } from "../app/core/starter-templates";
 import { MemoryWorkflowRepository } from "../app/core/workflows.server";
@@ -559,6 +559,36 @@ describe("Shopify document experience", () => {
     expect(editorDocument.nodes.some((node) => node.type === "repeat")).toBe(
       true,
     );
+  });
+
+  it("customizes an immutable system document into an editable draft", () => {
+    const starter = starterTemplates[0]!;
+    const draft = customizedSystemDraft(
+      {
+        id: starter.id,
+        name: starter.name,
+        kind: starter.kind,
+        pageSize: starter.pageSize,
+        state: "published",
+        source: starter.source,
+        revision: 1,
+        updatedAt: "2026-08-10T00:00:00.000Z",
+      },
+      "draft-id",
+    );
+    expect(draft).toMatchObject({
+      id: "draft-id",
+      name: `${starter.name} — customized`,
+      state: "draft",
+      revision: 1,
+    });
+    expect(parseTemplateEnvelope(draft.source).system).toBeUndefined();
+    expect(() =>
+      customizedSystemDraft(
+        { ...draft, updatedAt: "2026-08-10T00:00:00.000Z" },
+        "again",
+      ),
+    ).toThrow("Only system documents");
   });
 
   it("keeps advanced Liquid explicitly compatibility-gated", () => {

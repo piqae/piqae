@@ -67,7 +67,10 @@ export type PdfmeVisualModel = {
 };
 
 const ALLOWED_ASSET_HOSTS = new Set(
-  (process.env.TEMPLATE_ASSET_CDN_HOSTS ?? "cdn.shopify.com")
+  (typeof process === "undefined"
+    ? "cdn.shopify.com"
+    : (process.env.TEMPLATE_ASSET_CDN_HOSTS ?? "cdn.shopify.com")
+  )
     .split(",")
     .map((value) => value.trim().toLowerCase())
     .filter(Boolean),

@@ -5,7 +5,7 @@ import styles from "./shopify-ui.css?url";
 export const links: LinksFunction = () => [{ rel: "stylesheet", href: styles }];
 export const headers = () => ({
   "content-security-policy":
-    "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.shopify.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self' https://api.piqae.com https://partners.shopify.com; frame-ancestors https://admin.shopify.com https://*.myshopify.com; base-uri 'self'; object-src 'none'",
+    "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.shopify.com; style-src 'self' 'unsafe-inline' https://cdn.shopify.com; font-src 'self' https://cdn.shopify.com; img-src 'self' data: https:; connect-src 'self' https://api.piqae.com https://partners.shopify.com; frame-ancestors https://admin.shopify.com https://*.myshopify.com; base-uri 'self'; object-src 'none'",
   "referrer-policy": "strict-origin-when-cross-origin",
   "x-content-type-options": "nosniff",
 });
