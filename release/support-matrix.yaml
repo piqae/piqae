@@ -5,19 +5,19 @@ platforms:
     reason: physical PDF and RAW release gates have not run
   macos_13_plus_aarch64:
     tier: preview
-    reason: native onboarding and packaging workflows are tested in source, but no signed/notarised release evidence or physical printing gate is recorded
+    reason: v0.1.11 is Developer ID signed, Apple notarised and stapled with SBOM, checksum and repository-bound provenance; clean-install, update/rollback and physical printing gates remain open
   macos_15_x86_64:
     tier: preview
-    reason: native onboarding and packaging workflows are tested in source, but no signed/notarised release evidence or physical printing gate is recorded
+    reason: v0.1.11 is Developer ID signed, Apple notarised and stapled with SBOM, checksum and repository-bound provenance; clean-install, update/rollback and physical printing gates remain open
   ubuntu_22_04_24_04_x86_64:
     tier: preview
-    reason: packaging and physical printing gates have not run
+    reason: v0.1.11 x86_64 packaging, checksum, SBOM and provenance evidence exists; clean-install, upgrade/rollback and physical printing gates have not run
   debian_12_x86_64:
     tier: preview
-    reason: packaging and physical printing gates have not run
+    reason: v0.1.11 x86_64 packaging, checksum, SBOM and provenance evidence exists; clean-install, upgrade/rollback and physical printing gates have not run
   linux_aarch64:
     tier: preview
-    reason: low-power hardware gates have not run
+    reason: v0.1.11 aarch64 packaging, checksum, SBOM and provenance evidence exists; clean-install, upgrade/rollback and low-power hardware gates have not run
 features:
   durable_job_registration:
     tier: preview
@@ -54,7 +54,7 @@ features:
     reason: encrypted transport and local decryption are implemented for evaluation but lack independent cryptographic review, hardware-backed keys and physical release evidence
   macos_embedded_node_onboarding:
     tier: preview
-    reason: Piqae-branded application-link consent and proof-of-possession are tested in source and unsigned packaging only
+    reason: Piqae-branded application-link consent and proof-of-possession are tested in source and included in signed/notarised v0.1.11 Preview packaging; clean-install, update/rollback and fleet evidence remain open
   windows_linux_embedded_node_onboarding:
     tier: disabled
     reason: only the shared headless stdin transaction exists; native application-link registration and local consent shells are not implemented

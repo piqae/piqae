@@ -45,7 +45,7 @@ do not block the controlled Railway private beta.
 | WorkOS | Preview | OIDC validation and hosted environment contract | production tenant/session/invitation run |
 | Stripe | Preview | canonical Free/Pro checkout validation, signed idempotent webhook projection and durable overage exporter | live-mode price/webhook/meter replay evidence |
 | Sentry | Preview | server/browser SDK, aggressive PII redaction and release-bound source-map upload | production project and redaction evidence |
-| Native signing | Blocked externally | fail-closed packaging workflows | Apple notarisation and Windows Authenticode records |
+| Native signing | Partial Preview evidence | `v0.1.11` macOS Developer ID signing, notarisation, stapling, signed appcast, checksum, SBOM and repository-bound provenance | Windows Microsoft Artifact Signing identity/profile and signed candidate; macOS/Windows clean-install, update and rollback evidence |
 | Availability | Blocked externally | lease/outbox architecture and HA foundations | regional DR rehearsal and 30-day no-loss soak |
 
 `release/support-matrix.yaml` remains the public source of support claims.

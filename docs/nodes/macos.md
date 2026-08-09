@@ -53,5 +53,7 @@ to the bounded file. The menu app does not create another redirected log file;
 macOS retains its process crash diagnostics in the operating-system store.
 
 Embedded onboarding is also Preview. It is verified in source and automated
-non-physical tests, but is not a Supported distribution path until a signed,
-notarised artifact and clean-install/update/rollback evidence are published.
+non-physical tests and is included in the signed and notarised `v0.1.11`
+Preview artifact. It is not a Supported distribution path until the remaining
+clean-install, update/rollback, fleet and physical-printer evidence is
+published.
