@@ -14,11 +14,12 @@ Printable endpoints authenticate Shopify session tokens and derive the shop
 from that context. Callers cannot provide a shop domain. Order IDs are validated
 as Shopify Order GIDs and re-fetched with the authenticated GraphQL client.
 
-`read_all_orders` is requested deliberately for historical invoice reprints and
-exports beyond Shopify's default order window. It is protected access and must
-be approved by Shopify before release. Until approval is present, the product
-must explicitly describe and enforce the shorter history available through
-`read_orders`; it must not imply that older orders are accessible.
+The default development configuration requests `read_orders`, which covers
+Shopify's standard order-history window. Historical invoice reprints and exports
+beyond that window require the protected `read_all_orders` scope. Add that scope
+to the production configuration only after Shopify approves it. Until approval
+is present, the product must explicitly describe and enforce the shorter history;
+it must not imply that older orders are accessible.
 
 No real Shopify or Piqae credentials are needed for unit tests.
 

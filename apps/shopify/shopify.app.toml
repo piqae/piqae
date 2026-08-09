@@ -4,7 +4,7 @@ application_url = "https://example.invalid"
 embedded = true
 
 [access_scopes]
-scopes = "read_orders,read_all_orders,read_draft_orders,read_products,read_customers"
+scopes = "read_orders,read_draft_orders,read_products,read_customers"
 
 [auth]
 redirect_urls = [ "https://example.invalid/auth/callback" ]
