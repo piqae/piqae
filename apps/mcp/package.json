@@ -29,8 +29,9 @@
     "lint": "tsc --noEmit",
     "test": "vitest run",
     "format:check": "prettier --check 'src/**/*.ts' 'tests/**/*.ts' README.md",
+    "smoke:package": "node scripts/smoke-package.mjs",
     "dev": "tsx src/index.ts --stdio",
-    "prepack": "pnpm build"
+    "prepack": "pnpm --filter @piqae/sdk build && pnpm build"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.30.0",
