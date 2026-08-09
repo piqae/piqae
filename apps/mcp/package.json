@@ -13,7 +13,7 @@
     "node": ">=20"
   },
   "bin": {
-    "piqae-mcp": "./dist/index.js"
+    "piqae-mcp": "dist/index.js"
   },
   "exports": {
     ".": {
