@@ -26,6 +26,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 fn sumatra_settings(options: &piqae_domain::JobOptions) -> Result<Vec<String>, ExecutorError> {
     use piqae_domain::{Duplex, Rotation};
 
+    options.validate_bounds().map_err(|error| ExecutorError {
+        code: "invalid_job_options".into(),
+        message: error.to_string(),
+        retryable: false,
+        handoff_may_have_succeeded: false,
+    })?;
+
     let mut unsupported = Vec::new();
     if options.dpi.is_some() {
         unsupported.push("dpi");
@@ -35,6 +42,9 @@ fn sumatra_settings(options: &piqae_domain::JobOptions) -> Result<Vec<String>, E
     }
     if options.nup.is_some() {
         unsupported.push("nup");
+    }
+    if !options.native_options.is_empty() {
+        unsupported.push("native_options");
     }
     if !unsupported.is_empty() {
         return Err(ExecutorError {
@@ -140,10 +150,15 @@ mod platform {
                 title,
                 content_kind: ContentKind::Raw,
                 content_path,
+                options,
                 native_profile,
                 ..
             } => {
-                if native_profile.is_some() {
+                if !options.is_empty() {
+                    Err(native_profile_backend_unavailable(
+                        "RAW documents already contain device instructions and cannot request rendered or native driver options",
+                    ))
+                } else if native_profile.is_some() {
                     Err(native_profile_backend_unavailable(
                         "RAW jobs cannot replay a Windows driver profile",
                     ))
@@ -591,6 +606,18 @@ mod tests {
         let error = sumatra_settings(&options).expect_err("unsupported");
         assert_eq!(error.code, "windows_pdf_option_unsupported");
         assert!(error.message.contains("dpi, media, nup"));
+        assert!(!error.handoff_may_have_succeeded);
+    }
+
+    #[test]
+    fn sumatra_rejects_native_options_instead_of_ignoring_them() {
+        let mut options = JobOptions::default();
+        options
+            .native_options
+            .insert("VendorSecret".into(), "On".into());
+        let error = sumatra_settings(&options).expect_err("unsupported native option");
+        assert_eq!(error.code, "windows_pdf_option_unsupported");
+        assert!(error.message.contains("native_options"));
         assert!(!error.handoff_may_have_succeeded);
     }
 }

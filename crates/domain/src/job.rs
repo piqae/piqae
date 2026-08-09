@@ -4,6 +4,12 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use thiserror::Error;
 
+pub const MAX_JOB_COPIES: u32 = 32_767;
+pub const MAX_JOB_NUP: u16 = 64;
+pub const MAX_JOB_OPTION_TEXT_BYTES: usize = 4_096;
+pub const MAX_JOB_NATIVE_OPTIONS: usize = 256;
+pub const MAX_JOB_NATIVE_OPTION_NAME_BYTES: usize = 255;
+
 /// Exact encrypted-job envelope identifiers defined by the public `OpenAPI` contract.
 pub const ENCRYPTED_JOB_V3_VERSION: &str = "piqae-encrypted-job-v3";
 pub const ENCRYPTED_JOB_V3_SUITE: &str = "ECDH-ES-P256+HKDF-SHA256+A256GCMKW+A256GCM";
@@ -100,12 +106,145 @@ pub struct JobOptions {
     pub native_options: BTreeMap<String, String>,
 }
 
+impl JobOptions {
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.bin.is_none()
+            && self.collate.is_none()
+            && self.color.is_none()
+            && self.copies.is_none()
+            && self.dpi.is_none()
+            && self.duplex.is_none()
+            && self.fit_to_page.is_none()
+            && self.media.is_none()
+            && self.nup.is_none()
+            && self.pages.is_none()
+            && self.paper.is_none()
+            && self.rotate.is_none()
+            && self.native_options.is_empty()
+    }
+
+    /// Validates transport-safe bounds that every executor must enforce before
+    /// consulting a driver. This deliberately does not infer support: live
+    /// capability/profile validation remains a separate, fail-closed step.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error for an out-of-range numeric value or unsafe,
+    /// empty, oversized option text.
+    pub fn validate_bounds(&self) -> Result<(), JobOptionsError> {
+        if self
+            .copies
+            .is_some_and(|value| value == 0 || value > MAX_JOB_COPIES)
+        {
+            return Err(JobOptionsError::CopiesOutOfRange);
+        }
+        if self
+            .nup
+            .is_some_and(|value| value == 0 || value > MAX_JOB_NUP)
+        {
+            return Err(JobOptionsError::NupOutOfRange);
+        }
+        for (name, value) in [
+            ("bin", self.bin.as_deref()),
+            ("dpi", self.dpi.as_deref()),
+            ("media", self.media.as_deref()),
+            ("pages", self.pages.as_deref()),
+            ("paper", self.paper.as_deref()),
+        ] {
+            if value.is_some_and(invalid_option_text) {
+                return Err(JobOptionsError::InvalidText(name));
+            }
+        }
+        if self.native_options.len() > MAX_JOB_NATIVE_OPTIONS {
+            return Err(JobOptionsError::TooManyNativeOptions);
+        }
+        for (name, value) in &self.native_options {
+            if name.is_empty()
+                || name.len() > MAX_JOB_NATIVE_OPTION_NAME_BYTES
+                || name.bytes().any(|byte| byte.is_ascii_control())
+                || invalid_option_text(value)
+            {
+                return Err(JobOptionsError::InvalidNativeOption(name.clone()));
+            }
+        }
+        Ok(())
+    }
+}
+
+fn invalid_option_text(value: &str) -> bool {
+    value.is_empty()
+        || value.len() > MAX_JOB_OPTION_TEXT_BYTES
+        || value
+            .bytes()
+            .any(|byte| byte == 0 || byte.is_ascii_control())
+}
+
+#[derive(Clone, Debug, Error, Eq, PartialEq)]
+pub enum JobOptionsError {
+    #[error("copies must be between 1 and {MAX_JOB_COPIES}")]
+    CopiesOutOfRange,
+    #[error("n-up must be between 1 and {MAX_JOB_NUP}")]
+    NupOutOfRange,
+    #[error("{0} contains empty, oversized, or control-character data")]
+    InvalidText(&'static str),
+    #[error("a job may contain at most {MAX_JOB_NATIVE_OPTIONS} native options")]
+    TooManyNativeOptions,
+    #[error("native option {0:?} has an invalid name or value")]
+    InvalidNativeOption(String),
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Duplex {
     OneSided,
     LongEdge,
     ShortEdge,
+}
+
+#[cfg(test)]
+mod option_tests {
+    use super::*;
+
+    #[test]
+    fn bounded_options_reject_values_that_must_not_reach_a_driver() {
+        assert_eq!(
+            JobOptions {
+                copies: Some(0),
+                ..Default::default()
+            }
+            .validate_bounds(),
+            Err(JobOptionsError::CopiesOutOfRange)
+        );
+        assert_eq!(
+            JobOptions {
+                nup: Some(MAX_JOB_NUP + 1),
+                ..Default::default()
+            }
+            .validate_bounds(),
+            Err(JobOptionsError::NupOutOfRange)
+        );
+        let mut options = JobOptions::default();
+        options
+            .native_options
+            .insert("Vendor\nKey".into(), "On".into());
+        assert!(matches!(
+            options.validate_bounds(),
+            Err(JobOptionsError::InvalidNativeOption(_))
+        ));
+    }
+
+    #[test]
+    fn empty_is_explicit_for_raw_job_policy() {
+        assert!(JobOptions::default().is_empty());
+        assert!(
+            !JobOptions {
+                fit_to_page: Some(false),
+                ..Default::default()
+            }
+            .is_empty()
+        );
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
