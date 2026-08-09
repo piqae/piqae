@@ -11,6 +11,10 @@ webhooks, billing/usage, and platform/integrator accounts. It also exposes the
 OpenAPI contract, SDK guide, authentication guide, lifecycle guidance, a docs
 search tool, and an operator prompt.
 
+For copy-ready setup for Codex, Claude Code, VS Code/Copilot, native Windows,
+platform customer contexts, and a first safe tool session, see
+[`docs/api/mcp-installation.md`](../../docs/api/mcp-installation.md).
+
 ## Local stdio
 
 Use a separate, least-privilege key for each agent and environment:

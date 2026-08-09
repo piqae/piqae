@@ -9,6 +9,10 @@ Platform accounts give a trusted SaaS backend one server-side Piqae credential
 while keeping every customer in a separate workspace. The intended integration
 should feel like this:
 
+For customer-facing navigation, consent, printer pickers, provider-neutral node
+details, queue/reprint behavior, sub-account mapping, and white-label language,
+see [White-label and integrator product UX](integrator-white-label-ux.md).
+
 Piqae Cloud workspace owners and admins enable Platform mode in **Dashboard →
 Settings → Platform integration**. Enabling is explicit: it atomically creates
 one platform identity, grants it the owner workspace's Test and Live
@@ -17,35 +21,35 @@ that credential in the integrating platform's server-side secret manager. It
 must never be embedded in browser JavaScript or a node download link.
 
 ```ts
-import { readFile } from 'node:fs/promises';
-import { PiqaePlatform } from '@piqae/sdk';
+import { readFile } from "node:fs/promises";
+import { PiqaePlatform } from "@piqae/sdk";
 
 const platformKey = process.env.PIQAE_PLATFORM_KEY;
-if (!platformKey) throw new Error('PIQAE_PLATFORM_KEY is required');
+if (!platformKey) throw new Error("PIQAE_PLATFORM_KEY is required");
 const platform = new PiqaePlatform({ platformKey });
 
 // Stable in your system: do not use a display name or browser-supplied ID.
-const account = await platform.accounts.getOrCreate('org_01JQ8K8M6Q', {
-  name: 'Northwind Foods',
-  metadata: { plan: 'pro', region: 'nz' }
+const account = await platform.accounts.getOrCreate("org_01JQ8K8M6Q", {
+  name: "Northwind Foods",
+  metadata: { plan: "pro", region: "nz" },
 });
 
 const printers = await account.printers.list({ limit: 25 });
-const printer = printers.data.find((item) => item.state === 'online');
-if (!printer) throw new Error('No online printer for Northwind Foods');
+const printer = printers.data.find((item) => item.state === "online");
+if (!printer) throw new Error("No online printer for Northwind Foods");
 
-const pdf = await readFile('./shipping-label.pdf');
+const pdf = await readFile("./shipping-label.pdf");
 const job = await account.printPdf({
   printerId: printer.id,
-  title: 'Order 10428 shipping label',
+  title: "Order 10428 shipping label",
   pdf,
-  metadata: { order_id: '10428' },
-  idempotencyKey: 'northwind-order-10428-label-v1'
+  metadata: { order_id: "10428" },
+  idempotencyKey: "northwind-order-10428-label-v1",
 });
 
 const webhook = await account.webhooks.create({
-  url: 'https://example.com/webhooks/piqae',
-  events: ['job.updated']
+  url: "https://example.com/webhooks/piqae",
+  events: ["job.updated"],
 });
 // Store webhook.secret now; Piqae returns it only once.
 ```
@@ -59,8 +63,8 @@ const piqae = new PiqaeClient({
   platformKey,
   platformContext: {
     workspaceId: account.id,
-    environmentId: account.environments.live.id
-  }
+    environmentId: account.environments.live.id,
+  },
 });
 ```
 

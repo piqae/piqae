@@ -11,8 +11,11 @@ deployments publish RFC 9728 protected-resource metadata and delegate OAuth to
 an operator-selected authorization server rather than storing OAuth clients,
 authorization codes, refresh tokens, or consent state inside Piqae MCP.
 
-See [`apps/mcp/README.md`](../../apps/mcp/README.md) for client configuration,
-OAuth requirements, tool coverage, secret delivery, and job-safety policy.
+See [Install and use the Piqae MCP server](mcp-installation.md) for copy-ready
+Codex, Claude Code, VS Code/Copilot, Windows and generic stdio configurations,
+authentication choices, first-use verification, and troubleshooting. See
+[`apps/mcp/README.md`](../../apps/mcp/README.md) for remote OAuth deployment,
+tool coverage, secret delivery, and job-safety policy.
 
 ## Authorization boundary
 
