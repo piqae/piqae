@@ -2,6 +2,7 @@ client_id = "development-client-id"
 name = "Piqae Order Printing"
 application_url = "https://example.invalid"
 embedded = true
+web_directories = ["web"]
 
 [access_scopes]
 scopes = "read_orders,read_draft_orders,read_products,read_customers"
