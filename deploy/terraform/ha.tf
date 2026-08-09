@@ -104,15 +104,21 @@ resource "google_cloud_run_v2_service" "server_secondary" {
         name  = "PIQAE_SERVICE_ROLE"
         value = each.key
       }
+      env {
+        name  = "PIQAE_DOCUMENT_ACTIVE_KEY_ID"
+        value = var.document_active_key_id
+      }
 
       dynamic "env" {
         for_each = {
-          PIQAE_DATABASE_URL         = google_secret_manager_secret.database_url.secret_id
-          PIQAE_S3_ACCESS_KEY_ID     = google_secret_manager_secret.object_access_key.secret_id
-          PIQAE_S3_SECRET_ACCESS_KEY = google_secret_manager_secret.object_secret_key.secret_id
-          PIQAE_WEBHOOK_MASTER_KEY   = google_secret_manager_secret.webhook_master_key.secret_id
-          STRIPE_SECRET_KEY          = google_secret_manager_secret.stripe_secret_key.secret_id
-          STRIPE_WEBHOOK_SECRET      = google_secret_manager_secret.stripe_webhook_secret.secret_id
+          PIQAE_DATABASE_URL             = google_secret_manager_secret.database_url.secret_id
+          PIQAE_S3_ACCESS_KEY_ID         = google_secret_manager_secret.object_access_key.secret_id
+          PIQAE_S3_SECRET_ACCESS_KEY     = google_secret_manager_secret.object_secret_key.secret_id
+          PIQAE_WEBHOOK_MASTER_KEY       = google_secret_manager_secret.webhook_master_key.secret_id
+          PIQAE_DOCUMENT_MASTER_KEY      = google_secret_manager_secret.document_master_key.secret_id
+          PIQAE_DOCUMENT_DECRYPTION_KEYS = google_secret_manager_secret.document_decryption_keys.secret_id
+          STRIPE_SECRET_KEY              = google_secret_manager_secret.stripe_secret_key.secret_id
+          STRIPE_WEBHOOK_SECRET          = google_secret_manager_secret.stripe_webhook_secret.secret_id
         }
         content {
           name = env.key

@@ -19,7 +19,7 @@ use sqlx::{
     PgPool, Postgres, Row, Transaction,
     postgres::{PgPoolOptions, PgRow},
 };
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, str::FromStr};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -550,6 +550,122 @@ pub struct StoredUpload {
     pub expected_bytes: i64,
     pub state: String,
     pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct StoredDocumentTemplate {
+    pub id: String,
+    pub name: String,
+    pub state: String,
+    pub published_revision_id: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    #[serde(skip)]
+    pub draft_ciphertext: Vec<u8>,
+    #[serde(skip)]
+    pub draft_sha256: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct StoredDocumentTemplateRevision {
+    pub id: String,
+    pub template_id: String,
+    pub revision: i32,
+    pub renderer_profile: String,
+    pub created_at: DateTime<Utc>,
+    #[serde(skip)]
+    pub spec_ciphertext: Vec<u8>,
+    #[serde(skip)]
+    pub spec_sha256: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct StoredDocumentRender {
+    pub id: String,
+    pub template_revision_id: String,
+    pub state: String,
+    pub artifact_sha256: Option<String>,
+    pub artifact_byte_length: Option<i64>,
+    pub artifact_media_type: Option<String>,
+    pub failure_code: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    #[serde(skip)]
+    pub input_ciphertext: Vec<u8>,
+    #[serde(skip)]
+    pub input_sha256: String,
+    #[serde(skip)]
+    pub artifact_object_key_ciphertext: Option<Vec<u8>>,
+    #[serde(skip)]
+    pub attempt: i32,
+    #[serde(skip)]
+    pub max_attempts: i32,
+    #[serde(skip)]
+    pub lease_token: Option<Uuid>,
+    #[serde(skip)]
+    pub lease_expires_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct StoredDocumentConversion {
+    pub id: String,
+    pub adapter_id: String,
+    pub adapter_version: String,
+    pub adapter_api_version: String,
+    pub source_format: String,
+    pub source_sha256: String,
+    pub strict: bool,
+    pub fidelity: String,
+    pub renderer_version: String,
+    pub created_at: DateTime<Utc>,
+    #[serde(skip)]
+    pub result_ciphertext: Vec<u8>,
+    #[serde(skip)]
+    pub result_sha256: String,
+}
+
+/// A tenant-scoped render claimed by exactly one worker until its lease expires.
+#[derive(Clone, Debug)]
+pub struct DocumentRenderWork {
+    pub workspace_id: WorkspaceId,
+    pub environment_id: EnvironmentId,
+    pub render: StoredDocumentRender,
+    pub lease_token: Uuid,
+    pub attempt: i32,
+}
+
+#[derive(Clone, Debug)]
+pub struct ExpiredDocumentArtifactWork {
+    pub workspace_id: WorkspaceId,
+    pub environment_id: EnvironmentId,
+    pub render_id: String,
+    pub lease_token: Uuid,
+    pub object_key_ciphertext: Option<Vec<u8>>,
+}
+
+#[derive(Clone, Debug)]
+pub enum CreateDocumentResult<T> {
+    Created(T),
+    Existing(T),
+}
+
+#[derive(Clone, Debug)]
+pub struct DocumentCiphertextRecord {
+    pub workspace_id: WorkspaceId,
+    pub environment_id: EnvironmentId,
+    pub resource_id: String,
+    pub aad_resource_id: String,
+    pub field: DocumentCiphertextField,
+    pub ciphertext: Vec<u8>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DocumentCiphertextField {
+    TemplateDraft,
+    TemplateRevision,
+    RenderInput,
+    RenderArtifactReference,
+    AdapterConversionResult,
 }
 
 #[derive(Clone, Debug)]
@@ -4868,6 +4984,58 @@ impl PostgresStore {
         Ok(())
     }
 
+    /// Registers an immutable render artifact as upload-backed job content.
+    /// The acquisition digest makes retries stable without retaining the
+    /// caller's idempotency key. No object bytes are read or copied.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn acquire_document_artifact_upload(
+        &self,
+        upload_id: &str,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        render_id: &str,
+        object_key: &str,
+        artifact_sha256: &str,
+        artifact_bytes: i64,
+        acquisition_sha256: &str,
+        expires_at: DateTime<Utc>,
+    ) -> Result<StoredUpload, StorageError> {
+        let row = sqlx::query(
+            "INSERT INTO uploads (id,workspace_id,environment_id,object_key,media_type,
+                 expected_sha256,expected_bytes,state,expires_at,completed_at,
+                 source_document_render_id,acquisition_sha256)
+             SELECT $1,$2,$3,$5,'application/pdf',$6,$7,'complete',$9,now(),$4,$8
+               FROM document_renders
+              WHERE id=$4 AND workspace_id=$2 AND environment_id=$3
+                AND state='completed' AND artifact_sha256=$6 AND artifact_byte_length=$7
+             ON CONFLICT (workspace_id,environment_id,source_document_render_id,acquisition_sha256)
+               WHERE source_document_render_id IS NOT NULL
+             DO UPDATE SET expires_at=GREATEST(uploads.expires_at,EXCLUDED.expires_at)
+             RETURNING id,object_key,media_type,expected_sha256,expected_bytes,state,expires_at",
+        )
+        .bind(upload_id)
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(render_id)
+        .bind(object_key)
+        .bind(artifact_sha256)
+        .bind(artifact_bytes)
+        .bind(acquisition_sha256)
+        .bind(expires_at)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(StorageError::NotFound)?;
+        Ok(StoredUpload {
+            id: row.try_get("id")?,
+            object_key: row.try_get("object_key")?,
+            media_type: row.try_get("media_type")?,
+            expected_sha256: row.try_get("expected_sha256")?,
+            expected_bytes: row.try_get("expected_bytes")?,
+            state: row.try_get("state")?,
+            expires_at: row.try_get("expires_at")?,
+        })
+    }
+
     pub async fn get_upload(
         &self,
         workspace_id: WorkspaceId,
@@ -6350,6 +6518,721 @@ impl PostgresStore {
         Ok(job)
     }
 
+    pub async fn create_document_template(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        id: &str,
+        name: &str,
+        ciphertext: &[u8],
+        sha256: &str,
+    ) -> Result<CreateDocumentResult<StoredDocumentTemplate>, StorageError> {
+        let inserted = sqlx::query(
+            "INSERT INTO document_templates
+             (id,workspace_id,environment_id,name,draft_ciphertext,draft_sha256)
+             VALUES ($1,$2,$3,$4,$5,$6)
+             ON CONFLICT (id) DO NOTHING
+             RETURNING *",
+        )
+        .bind(id)
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(name)
+        .bind(ciphertext)
+        .bind(sha256)
+        .fetch_optional(&self.pool)
+        .await?;
+        if let Some(row) = inserted {
+            return Ok(CreateDocumentResult::Created(document_template_from_row(
+                &row,
+            )?));
+        }
+        let existing = sqlx::query(
+            "SELECT * FROM document_templates
+             WHERE id=$1 AND workspace_id=$2 AND environment_id=$3",
+        )
+        .bind(id)
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(StorageError::NotFound)?;
+        let existing = document_template_from_row(&existing)?;
+        if existing.name != name || existing.draft_sha256 != sha256 {
+            return Err(StorageError::IdempotencyConflict);
+        }
+        Ok(CreateDocumentResult::Existing(existing))
+    }
+
+    pub async fn get_document_template(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        id: &str,
+    ) -> Result<StoredDocumentTemplate, StorageError> {
+        let row = sqlx::query(
+            "SELECT * FROM document_templates
+             WHERE id=$1 AND workspace_id=$2 AND environment_id=$3",
+        )
+        .bind(id)
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(StorageError::NotFound)?;
+        document_template_from_row(&row)
+    }
+
+    pub async fn update_document_template_draft(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        id: &str,
+        ciphertext: &[u8],
+        sha256: &str,
+    ) -> Result<StoredDocumentTemplate, StorageError> {
+        let row = sqlx::query(
+            "UPDATE document_templates SET draft_ciphertext=$4,draft_sha256=$5,updated_at=now()
+            WHERE id=$1 AND workspace_id=$2 AND environment_id=$3
+              AND (state='draft' OR draft_sha256=$5) RETURNING *",
+        )
+        .bind(id)
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(ciphertext)
+        .bind(sha256)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(row) = row else {
+            let exists: bool = sqlx::query_scalar(
+                "SELECT EXISTS (
+                    SELECT 1 FROM document_templates
+                     WHERE id=$1 AND workspace_id=$2 AND environment_id=$3
+                 )",
+            )
+            .bind(id)
+            .bind(workspace_id.to_string())
+            .bind(environment_id.to_string())
+            .fetch_one(&self.pool)
+            .await?;
+            return Err(if exists {
+                StorageError::IdempotencyConflict
+            } else {
+                StorageError::NotFound
+            });
+        };
+        document_template_from_row(&row)
+    }
+
+    pub async fn publish_document_template(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        template_id: &str,
+        revision_id: &str,
+    ) -> Result<CreateDocumentResult<StoredDocumentTemplateRevision>, StorageError> {
+        let mut transaction = self.pool.begin().await?;
+        let template = sqlx::query(
+            "SELECT * FROM document_templates
+             WHERE id=$1 AND workspace_id=$2 AND environment_id=$3 FOR UPDATE",
+        )
+        .bind(template_id)
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(StorageError::NotFound)?;
+        if let Some(published) = template.try_get::<Option<String>, _>("published_revision_id")? {
+            let row = sqlx::query(
+                "SELECT * FROM document_template_revisions
+                 WHERE id=$1 AND workspace_id=$2 AND environment_id=$3 AND template_id=$4",
+            )
+            .bind(&published)
+            .bind(workspace_id.to_string())
+            .bind(environment_id.to_string())
+            .bind(template_id)
+            .fetch_one(&mut *transaction)
+            .await?;
+            let revision = document_revision_from_row(&row)?;
+            if revision.id != revision_id {
+                return Err(StorageError::IdempotencyConflict);
+            }
+            transaction.commit().await?;
+            return Ok(CreateDocumentResult::Existing(revision));
+        }
+        let revision = 1_i32;
+        let row = sqlx::query(
+            "INSERT INTO document_template_revisions
+             (id,workspace_id,environment_id,template_id,revision,spec_ciphertext,spec_sha256,renderer_profile)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,'piqae.document/v1') RETURNING *",
+        ).bind(revision_id).bind(workspace_id.to_string()).bind(environment_id.to_string())
+        .bind(template_id).bind(revision).bind(template.try_get::<Vec<u8>, _>("draft_ciphertext")?)
+        .bind(template.try_get::<String, _>("draft_sha256")?).fetch_one(&mut *transaction).await?;
+        sqlx::query(
+            "UPDATE document_templates SET state='published',published_revision_id=$4,updated_at=now()
+             WHERE id=$1 AND workspace_id=$2 AND environment_id=$3",
+        ).bind(template_id).bind(workspace_id.to_string()).bind(environment_id.to_string())
+        .bind(revision_id).execute(&mut *transaction).await?;
+        transaction.commit().await?;
+        Ok(CreateDocumentResult::Created(document_revision_from_row(
+            &row,
+        )?))
+    }
+
+    pub async fn get_document_revision(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        id: &str,
+    ) -> Result<StoredDocumentTemplateRevision, StorageError> {
+        let row = sqlx::query(
+            "SELECT * FROM document_template_revisions
+             WHERE id=$1 AND workspace_id=$2 AND environment_id=$3",
+        )
+        .bind(id)
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(StorageError::NotFound)?;
+        document_revision_from_row(&row)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn register_document_render(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        id: &str,
+        template_revision_id: &str,
+        ciphertext: &[u8],
+        input_sha256: &str,
+        idempotency_key: &str,
+        request_sha256: &str,
+    ) -> Result<CreateDocumentResult<StoredDocumentRender>, StorageError> {
+        let inserted = sqlx::query(
+            "INSERT INTO document_renders
+             (id,workspace_id,environment_id,template_revision_id,input_ciphertext,input_sha256,idempotency_key,request_sha256)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+             ON CONFLICT (workspace_id,environment_id,idempotency_key) DO NOTHING RETURNING *",
+        ).bind(id).bind(workspace_id.to_string()).bind(environment_id.to_string())
+        .bind(template_revision_id).bind(ciphertext).bind(input_sha256).bind(idempotency_key)
+        .bind(request_sha256).fetch_optional(&self.pool).await?;
+        if let Some(row) = inserted {
+            return Ok(CreateDocumentResult::Created(document_render_from_row(
+                &row,
+            )?));
+        }
+        let row = sqlx::query(
+            "SELECT * FROM document_renders
+             WHERE workspace_id=$1 AND environment_id=$2 AND idempotency_key=$3",
+        )
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(idempotency_key)
+        .fetch_one(&self.pool)
+        .await?;
+        let existing = document_render_from_row(&row)?;
+        if row.try_get::<String, _>("request_sha256")? != request_sha256 {
+            return Err(StorageError::IdempotencyConflict);
+        }
+        Ok(CreateDocumentResult::Existing(existing))
+    }
+
+    pub async fn get_document_render(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        id: &str,
+    ) -> Result<StoredDocumentRender, StorageError> {
+        let row = sqlx::query(
+            "SELECT * FROM document_renders WHERE id=$1 AND workspace_id=$2 AND environment_id=$3",
+        )
+        .bind(id)
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(StorageError::NotFound)?;
+        document_render_from_row(&row)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_document_conversion(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        id: &str,
+        adapter_id: &str,
+        adapter_version: &str,
+        source_sha256: &str,
+        strict: bool,
+        fidelity: &str,
+        renderer_version: &str,
+        result_ciphertext: &[u8],
+        result_sha256: &str,
+        idempotency_key: &str,
+        request_sha256: &str,
+    ) -> Result<CreateDocumentResult<StoredDocumentConversion>, StorageError> {
+        let inserted = sqlx::query(
+            "INSERT INTO document_conversions
+             (id,workspace_id,environment_id,adapter_id,adapter_version,adapter_api_version,
+              source_format,source_sha256,strict,fidelity,renderer_version,result_ciphertext,
+              result_sha256,idempotency_key,request_sha256)
+             VALUES ($1,$2,$3,$4,$5,'piqae.adapter/v1','pdfme.template',$6,$7,$8,$9,$10,$11,$12,$13)
+             ON CONFLICT (workspace_id,environment_id,idempotency_key) DO NOTHING RETURNING *",
+        )
+        .bind(id)
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(adapter_id)
+        .bind(adapter_version)
+        .bind(source_sha256)
+        .bind(strict)
+        .bind(fidelity)
+        .bind(renderer_version)
+        .bind(result_ciphertext)
+        .bind(result_sha256)
+        .bind(idempotency_key)
+        .bind(request_sha256)
+        .fetch_optional(&self.pool)
+        .await?;
+        if let Some(row) = inserted {
+            return Ok(CreateDocumentResult::Created(document_conversion_from_row(
+                &row,
+            )?));
+        }
+        let row = sqlx::query(
+            "SELECT * FROM document_conversions
+             WHERE workspace_id=$1 AND environment_id=$2 AND idempotency_key=$3",
+        )
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(idempotency_key)
+        .fetch_one(&self.pool)
+        .await?;
+        if row.try_get::<String, _>("request_sha256")? != request_sha256 {
+            return Err(StorageError::IdempotencyConflict);
+        }
+        Ok(CreateDocumentResult::Existing(
+            document_conversion_from_row(&row)?,
+        ))
+    }
+
+    pub async fn get_document_conversion(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        id: &str,
+    ) -> Result<StoredDocumentConversion, StorageError> {
+        let row = sqlx::query(
+            "SELECT * FROM document_conversions
+             WHERE id=$1 AND workspace_id=$2 AND environment_id=$3",
+        )
+        .bind(id)
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(StorageError::NotFound)?;
+        document_conversion_from_row(&row)
+    }
+
+    pub async fn complete_document_render(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        id: &str,
+        object_key_ciphertext: &[u8],
+        artifact_sha256: &str,
+        byte_length: i64,
+    ) -> Result<StoredDocumentRender, StorageError> {
+        let row = sqlx::query(
+            "UPDATE document_renders SET state='completed', artifact_object_key_ciphertext=$4,
+             artifact_sha256=$5,artifact_byte_length=$6,artifact_media_type='application/pdf',
+             failure_code=NULL,updated_at=now()
+             WHERE id=$1 AND workspace_id=$2 AND environment_id=$3
+               AND (state IN ('registered','rendering') OR
+                 (state='completed' AND artifact_object_key_ciphertext=$4
+                  AND artifact_sha256=$5 AND artifact_byte_length=$6)) RETURNING *",
+        )
+        .bind(id)
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(object_key_ciphertext)
+        .bind(artifact_sha256)
+        .bind(byte_length)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(StorageError::ConcurrentStateChange)?;
+        document_render_from_row(&row)
+    }
+
+    /// Synchronizes the configured document keyring lifecycle without storing
+    /// key material. Existing active keys become decrypt-only before the new
+    /// active key is selected, so in-flight and retained renders remain readable.
+    pub async fn configure_document_encryption_keys<'a>(
+        &self,
+        active_key_id: &str,
+        configured_key_ids: impl IntoIterator<Item = &'a str>,
+    ) -> Result<(), StorageError> {
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext('piqae.document-key-rotation'))")
+            .execute(&mut *transaction)
+            .await?;
+        for key_id in configured_key_ids {
+            sqlx::query(
+                "INSERT INTO document_encryption_keys (key_id,lifecycle_state)
+                 VALUES ($1,'standby') ON CONFLICT (key_id) DO NOTHING",
+            )
+            .bind(key_id)
+            .execute(&mut *transaction)
+            .await?;
+        }
+        sqlx::query(
+            "UPDATE document_encryption_keys
+             SET lifecycle_state='decrypt_only',state_changed_at=now()
+             WHERE lifecycle_state='active' AND key_id<>$1",
+        )
+        .bind(active_key_id)
+        .execute(&mut *transaction)
+        .await?;
+        let activated = sqlx::query(
+            "UPDATE document_encryption_keys
+             SET lifecycle_state='active',state_changed_at=now()
+             WHERE key_id=$1 AND lifecycle_state<>'retired'",
+        )
+        .bind(active_key_id)
+        .execute(&mut *transaction)
+        .await?;
+        if activated.rows_affected() != 1 {
+            return Err(StorageError::InvalidTransition);
+        }
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    /// Fails startup when retained ciphertext references a generation absent
+    /// from this process. This prevents a partially configured worker fleet
+    /// from claiming work it cannot decrypt during rotation.
+    pub async fn verify_document_encryption_keyring<'a>(
+        &self,
+        configured_key_ids: impl IntoIterator<Item = &'a str>,
+    ) -> Result<(), StorageError> {
+        let configured = configured_key_ids.into_iter().collect::<Vec<_>>();
+        let missing: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                 SELECT 1 FROM document_encryption_key_references reference
+                 WHERE NOT (reference.key_id = ANY($1))
+             )",
+        )
+        .bind(configured)
+        .fetch_one(&self.pool)
+        .await?;
+        if missing {
+            return Err(StorageError::InvalidTransition);
+        }
+        Ok(())
+    }
+
+    /// Verifies an operator/maintenance process against durable lifecycle
+    /// state without mutating it. In particular, `--dry-run` stays read-only.
+    pub async fn verify_persisted_document_encryption_keyring<'a>(
+        &self,
+        active_key_id: &str,
+        configured_key_ids: impl IntoIterator<Item = &'a str>,
+    ) -> Result<(), StorageError> {
+        let configured = configured_key_ids.into_iter().collect::<Vec<_>>();
+        let valid: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                 SELECT 1 FROM document_encryption_keys
+                  WHERE key_id=$1 AND lifecycle_state='active'
+             ) AND NOT EXISTS (
+                 SELECT 1 FROM document_encryption_key_references reference
+                  WHERE NOT (reference.key_id = ANY($2))
+             )",
+        )
+        .bind(active_key_id)
+        .bind(configured)
+        .fetch_one(&self.pool)
+        .await?;
+        if !valid {
+            return Err(StorageError::InvalidTransition);
+        }
+        Ok(())
+    }
+
+    /// Returns a bounded, stable batch of retained ciphertexts for one key.
+    /// Rendering rows with a live lease are excluded and can be retried later.
+    pub async fn document_ciphertexts_for_rewrap(
+        &self,
+        key_id: &str,
+        limit: i64,
+    ) -> Result<Vec<DocumentCiphertextRecord>, StorageError> {
+        let rows = sqlx::query(
+            "WITH key_refs AS MATERIALIZED (
+                 SELECT key_id,resource_type,workspace_id,environment_id,resource_id
+                   FROM document_encryption_key_references
+                  WHERE key_id=$1
+                  ORDER BY workspace_id,environment_id,resource_type,resource_id
+                  LIMIT $2
+             ), retained AS (
+                 SELECT reference.workspace_id,reference.environment_id,template.id AS resource_id,
+                        template.id AS aad_resource_id,reference.resource_type AS field,
+                        template.draft_ciphertext AS ciphertext
+                   FROM key_refs reference
+                   JOIN document_templates template
+                     ON template.workspace_id=reference.workspace_id
+                    AND template.environment_id=reference.environment_id
+                    AND template.id=reference.resource_id
+                  WHERE reference.resource_type='template_draft'
+                 UNION ALL
+                 SELECT reference.workspace_id,reference.environment_id,revision.id,
+                        revision.template_id,reference.resource_type,revision.spec_ciphertext
+                   FROM key_refs reference
+                   JOIN document_template_revisions revision
+                     ON revision.workspace_id=reference.workspace_id
+                    AND revision.environment_id=reference.environment_id
+                    AND revision.id=reference.resource_id
+                  WHERE reference.resource_type='template_revision'
+                 UNION ALL
+                 SELECT reference.workspace_id,reference.environment_id,render.id,render.id,
+                        reference.resource_type,render.input_ciphertext
+                   FROM key_refs reference
+                   JOIN document_renders render
+                     ON render.workspace_id=reference.workspace_id
+                    AND render.environment_id=reference.environment_id
+                    AND render.id=reference.resource_id
+                  WHERE reference.resource_type='render_input'
+                    AND NOT (render.state='rendering' AND render.lease_expires_at > now())
+                 UNION ALL
+                 SELECT reference.workspace_id,reference.environment_id,conversion.id,conversion.id,
+                        reference.resource_type,conversion.result_ciphertext
+                   FROM key_refs reference
+                   JOIN document_conversions conversion
+                     ON conversion.workspace_id=reference.workspace_id
+                    AND conversion.environment_id=reference.environment_id
+                    AND conversion.id=reference.resource_id
+                  WHERE reference.resource_type='adapter_conversion_result'
+                 UNION ALL
+                 SELECT reference.workspace_id,reference.environment_id,render.id,render.id,
+                        reference.resource_type,render.artifact_object_key_ciphertext
+                   FROM key_refs reference
+                   JOIN document_renders render
+                     ON render.workspace_id=reference.workspace_id
+                    AND render.environment_id=reference.environment_id
+                    AND render.id=reference.resource_id
+                  WHERE reference.resource_type='render_artifact_reference'
+                    AND render.artifact_object_key_ciphertext IS NOT NULL
+                    AND NOT (render.state='rendering' AND render.lease_expires_at > now())
+             )
+             SELECT * FROM retained
+             ORDER BY workspace_id,environment_id,field,resource_id",
+        )
+        .bind(key_id)
+        .bind(limit.clamp(1, 1_000))
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter()
+            .map(document_ciphertext_record_from_row)
+            .collect()
+    }
+
+    /// Compare-and-swaps one ciphertext. A concurrent edit, completion, or
+    /// lease transition wins and causes `false`; the rewrap loop retries it.
+    pub async fn rewrap_document_ciphertext(
+        &self,
+        record: &DocumentCiphertextRecord,
+        replacement: &[u8],
+    ) -> Result<bool, StorageError> {
+        let query = match record.field {
+            DocumentCiphertextField::TemplateDraft => {
+                "UPDATE document_templates SET draft_ciphertext=$6,updated_at=now()
+                 WHERE id=$1 AND workspace_id=$2 AND environment_id=$3 AND draft_ciphertext=$4
+                   AND document_ciphertext_key_id(draft_ciphertext)=$5"
+            }
+            DocumentCiphertextField::TemplateRevision => {
+                "UPDATE document_template_revisions SET spec_ciphertext=$6
+                 WHERE id=$1 AND workspace_id=$2 AND environment_id=$3 AND spec_ciphertext=$4
+                   AND document_ciphertext_key_id(spec_ciphertext)=$5"
+            }
+            DocumentCiphertextField::RenderInput => {
+                "UPDATE document_renders SET input_ciphertext=$6,updated_at=now()
+                 WHERE id=$1 AND workspace_id=$2 AND environment_id=$3 AND input_ciphertext=$4
+                   AND document_ciphertext_key_id(input_ciphertext)=$5
+                   AND NOT (state='rendering' AND lease_expires_at > now())"
+            }
+            DocumentCiphertextField::RenderArtifactReference => {
+                "UPDATE document_renders SET artifact_object_key_ciphertext=$6,updated_at=now()
+                 WHERE id=$1 AND workspace_id=$2 AND environment_id=$3
+                   AND artifact_object_key_ciphertext=$4
+                   AND document_ciphertext_key_id(artifact_object_key_ciphertext)=$5
+                   AND NOT (state='rendering' AND lease_expires_at > now())"
+            }
+            DocumentCiphertextField::AdapterConversionResult => {
+                "UPDATE document_conversions SET result_ciphertext=$6
+                 WHERE id=$1 AND workspace_id=$2 AND environment_id=$3
+                   AND result_ciphertext=$4
+                   AND document_ciphertext_key_id(result_ciphertext)=$5"
+            }
+        };
+        let old_key_id: String = sqlx::query_scalar("SELECT document_ciphertext_key_id($1::bytea)")
+            .bind(&record.ciphertext)
+            .fetch_one(&self.pool)
+            .await?;
+        let result = sqlx::query(query)
+            .bind(&record.resource_id)
+            .bind(record.workspace_id.to_string())
+            .bind(record.environment_id.to_string())
+            .bind(&record.ciphertext)
+            .bind(old_key_id)
+            .bind(replacement)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    pub async fn document_encryption_key_reference_count(
+        &self,
+        key_id: &str,
+    ) -> Result<i64, StorageError> {
+        sqlx::query_scalar(
+            "SELECT count(*) FROM document_encryption_key_references WHERE key_id=$1",
+        )
+        .bind(key_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(Into::into)
+    }
+
+    /// Atomically claims render work, including work abandoned by a crashed worker.
+    pub async fn claim_document_renders(
+        &self,
+        worker_id: &str,
+        limit: i64,
+        lease_seconds: i64,
+    ) -> Result<Vec<DocumentRenderWork>, StorageError> {
+        let rows = sqlx::query(
+            "WITH candidates AS (
+                SELECT id FROM document_renders
+                WHERE state IN ('registered','rendering')
+                  AND available_at <= now()
+                  AND (lease_expires_at IS NULL OR lease_expires_at <= now())
+                  AND attempt < max_attempts
+                ORDER BY available_at, created_at, id
+                FOR UPDATE SKIP LOCKED LIMIT $1
+             )
+             UPDATE document_renders r
+             SET state='rendering', attempt=r.attempt+1, lease_owner=$2,
+                 lease_token=gen_random_uuid(),
+                 lease_expires_at=now() + make_interval(secs => $3::double precision),
+                 updated_at=now()
+             FROM candidates c WHERE r.id=c.id RETURNING r.*",
+        )
+        .bind(limit.clamp(1, 100))
+        .bind(worker_id)
+        .bind(lease_seconds.clamp(5, 3600))
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(document_render_work_from_row).collect()
+    }
+
+    /// Completes only the current lease. Retried workers cannot overwrite a
+    /// newer completion, which makes object publication idempotent.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn complete_claimed_document_render(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        id: &str,
+        lease_token: Uuid,
+        object_key_ciphertext: &[u8],
+        artifact_sha256: &str,
+        byte_length: i64,
+    ) -> Result<StoredDocumentRender, StorageError> {
+        let row = sqlx::query(
+            "UPDATE document_renders SET state='completed', artifact_object_key_ciphertext=$5,
+             artifact_sha256=$6, artifact_byte_length=$7, artifact_media_type='application/pdf',
+             failure_code=NULL,last_failure_code=NULL,completed_at=now(),lease_owner=NULL,
+             lease_token=NULL,lease_expires_at=NULL,updated_at=now()
+             WHERE id=$1 AND workspace_id=$2 AND environment_id=$3 AND state='rendering'
+               AND lease_token=$4 RETURNING *",
+        )
+        .bind(id)
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(lease_token)
+        .bind(object_key_ciphertext)
+        .bind(artifact_sha256)
+        .bind(byte_length)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(StorageError::ConcurrentStateChange)?;
+        document_render_from_row(&row)
+    }
+
+    pub async fn fail_claimed_document_render(
+        &self,
+        work: &DocumentRenderWork,
+        failure_code: &str,
+        retryable: bool,
+    ) -> Result<StoredDocumentRender, StorageError> {
+        let terminal = !retryable || work.attempt >= work.render.max_attempts;
+        let row = sqlx::query(
+            "UPDATE document_renders SET
+               state=CASE WHEN $5 THEN 'failed_terminal' ELSE 'registered' END,
+               failure_code=CASE WHEN $5 THEN $6 ELSE NULL END,last_failure_code=$6,
+               available_at=CASE WHEN $5 THEN available_at ELSE now() + make_interval(secs => LEAST(300, (1 << LEAST(attempt, 8)))) END,
+               lease_owner=NULL,lease_token=NULL,lease_expires_at=NULL,updated_at=now()
+             WHERE id=$1 AND workspace_id=$2 AND environment_id=$3 AND lease_token=$4 RETURNING *",
+        ).bind(&work.render.id).bind(work.workspace_id.to_string()).bind(work.environment_id.to_string())
+        .bind(work.lease_token).bind(terminal).bind(failure_code)
+        .fetch_optional(&self.pool).await?.ok_or(StorageError::ConcurrentStateChange)?;
+        document_render_from_row(&row)
+    }
+
+    pub async fn claim_expired_document_artifacts(
+        &self,
+        worker_id: &str,
+        limit: i64,
+        lease_seconds: i64,
+    ) -> Result<Vec<ExpiredDocumentArtifactWork>, StorageError> {
+        let rows = sqlx::query(
+            "WITH expired AS (SELECT r.id FROM document_renders r WHERE r.state IN ('completed','failed_terminal','expiring')
+               AND r.expires_at <= now() AND (r.lease_expires_at IS NULL OR r.lease_expires_at <= now())
+               AND NOT EXISTS (SELECT 1 FROM document_artifact_job_references ref
+                 WHERE ref.workspace_id=r.workspace_id AND ref.environment_id=r.environment_id
+                   AND ref.render_id=r.id AND ref.released_at IS NULL
+                   AND ref.retained_until > now())
+               ORDER BY r.expires_at,r.id FOR UPDATE OF r SKIP LOCKED LIMIT $1)
+             UPDATE document_renders r SET state='expiring',lease_owner=$2,lease_token=gen_random_uuid(),
+               lease_expires_at=now()+make_interval(secs=>$3::double precision),updated_at=now()
+             FROM expired e WHERE r.id=e.id RETURNING r.*",
+        )
+        .bind(limit.clamp(1, 100)).bind(worker_id).bind(lease_seconds.clamp(5,3600))
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter()
+            .map(expired_document_artifact_from_row)
+            .collect()
+    }
+
+    pub async fn complete_document_artifact_expiry(
+        &self,
+        work: &ExpiredDocumentArtifactWork,
+    ) -> Result<(), StorageError> {
+        let result = sqlx::query("UPDATE document_renders SET state='expired',artifact_object_key_ciphertext=NULL,
+          lease_owner=NULL,lease_token=NULL,lease_expires_at=NULL,updated_at=now()
+          WHERE id=$1 AND workspace_id=$2 AND environment_id=$3 AND state='expiring' AND lease_token=$4")
+          .bind(&work.render_id).bind(work.workspace_id.to_string()).bind(work.environment_id.to_string()).bind(work.lease_token)
+          .execute(&self.pool).await?;
+        if result.rows_affected() == 1 {
+            Ok(())
+        } else {
+            Err(StorageError::ConcurrentStateChange)
+        }
+    }
+
     pub async fn release_expired_jobs(&self) -> Result<u64, StorageError> {
         let result = sqlx::query(
             "UPDATE jobs SET state = 'expired', final_at = now(), updated_at = now()
@@ -6367,6 +7250,128 @@ impl PostgresStore {
             .await?;
         Ok(())
     }
+}
+
+fn document_template_from_row(row: &PgRow) -> Result<StoredDocumentTemplate, StorageError> {
+    Ok(StoredDocumentTemplate {
+        id: row.try_get("id")?,
+        name: row.try_get("name")?,
+        state: row.try_get("state")?,
+        published_revision_id: row.try_get("published_revision_id")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+        draft_ciphertext: row.try_get("draft_ciphertext")?,
+        draft_sha256: row.try_get("draft_sha256")?,
+    })
+}
+
+fn document_ciphertext_record_from_row(
+    row: &PgRow,
+) -> Result<DocumentCiphertextRecord, StorageError> {
+    let field = match row.try_get::<String, _>("field")?.as_str() {
+        "template_draft" => DocumentCiphertextField::TemplateDraft,
+        "template_revision" => DocumentCiphertextField::TemplateRevision,
+        "render_input" => DocumentCiphertextField::RenderInput,
+        "render_artifact_reference" => DocumentCiphertextField::RenderArtifactReference,
+        "adapter_conversion_result" => DocumentCiphertextField::AdapterConversionResult,
+        value => {
+            return Err(StorageError::InvalidData(format!(
+                "unknown ciphertext field {value}"
+            )));
+        }
+    };
+    Ok(DocumentCiphertextRecord {
+        workspace_id: WorkspaceId::from_str(row.try_get::<String, _>("workspace_id")?.as_str())
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?,
+        environment_id: EnvironmentId::from_str(
+            row.try_get::<String, _>("environment_id")?.as_str(),
+        )
+        .map_err(|error| StorageError::InvalidData(error.to_string()))?,
+        resource_id: row.try_get("resource_id")?,
+        aad_resource_id: row.try_get("aad_resource_id")?,
+        field,
+        ciphertext: row.try_get("ciphertext")?,
+    })
+}
+
+fn document_revision_from_row(row: &PgRow) -> Result<StoredDocumentTemplateRevision, StorageError> {
+    Ok(StoredDocumentTemplateRevision {
+        id: row.try_get("id")?,
+        template_id: row.try_get("template_id")?,
+        revision: row.try_get("revision")?,
+        renderer_profile: row.try_get("renderer_profile")?,
+        created_at: row.try_get("created_at")?,
+        spec_ciphertext: row.try_get("spec_ciphertext")?,
+        spec_sha256: row.try_get("spec_sha256")?,
+    })
+}
+
+fn document_conversion_from_row(row: &PgRow) -> Result<StoredDocumentConversion, StorageError> {
+    Ok(StoredDocumentConversion {
+        id: row.try_get("id")?,
+        adapter_id: row.try_get("adapter_id")?,
+        adapter_version: row.try_get("adapter_version")?,
+        adapter_api_version: row.try_get("adapter_api_version")?,
+        source_format: row.try_get("source_format")?,
+        source_sha256: row.try_get("source_sha256")?,
+        strict: row.try_get("strict")?,
+        fidelity: row.try_get("fidelity")?,
+        renderer_version: row.try_get("renderer_version")?,
+        created_at: row.try_get("created_at")?,
+        result_ciphertext: row.try_get("result_ciphertext")?,
+        result_sha256: row.try_get("result_sha256")?,
+    })
+}
+
+fn document_render_from_row(row: &PgRow) -> Result<StoredDocumentRender, StorageError> {
+    Ok(StoredDocumentRender {
+        id: row.try_get("id")?,
+        template_revision_id: row.try_get("template_revision_id")?,
+        state: row.try_get("state")?,
+        artifact_sha256: row.try_get("artifact_sha256")?,
+        artifact_byte_length: row.try_get("artifact_byte_length")?,
+        artifact_media_type: row.try_get("artifact_media_type")?,
+        failure_code: row.try_get("failure_code")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+        input_ciphertext: row.try_get("input_ciphertext")?,
+        input_sha256: row.try_get("input_sha256")?,
+        artifact_object_key_ciphertext: row.try_get("artifact_object_key_ciphertext")?,
+        attempt: row.try_get("attempt")?,
+        max_attempts: row.try_get("max_attempts")?,
+        lease_token: row.try_get("lease_token")?,
+        lease_expires_at: row.try_get("lease_expires_at")?,
+    })
+}
+
+fn document_render_work_from_row(row: &PgRow) -> Result<DocumentRenderWork, StorageError> {
+    Ok(DocumentRenderWork {
+        workspace_id: WorkspaceId::from_str(row.try_get::<String, _>("workspace_id")?.as_str())
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?,
+        environment_id: EnvironmentId::from_str(
+            row.try_get::<String, _>("environment_id")?.as_str(),
+        )
+        .map_err(|error| StorageError::InvalidData(error.to_string()))?,
+        render: document_render_from_row(row)?,
+        lease_token: row.try_get("lease_token")?,
+        attempt: row.try_get("attempt")?,
+    })
+}
+
+fn expired_document_artifact_from_row(
+    row: &PgRow,
+) -> Result<ExpiredDocumentArtifactWork, StorageError> {
+    Ok(ExpiredDocumentArtifactWork {
+        workspace_id: WorkspaceId::from_str(row.try_get::<String, _>("workspace_id")?.as_str())
+            .map_err(|e| StorageError::InvalidData(e.to_string()))?,
+        environment_id: EnvironmentId::from_str(
+            row.try_get::<String, _>("environment_id")?.as_str(),
+        )
+        .map_err(|e| StorageError::InvalidData(e.to_string()))?,
+        render_id: row.try_get("id")?,
+        lease_token: row.try_get("lease_token")?,
+        object_key_ciphertext: row.try_get("artifact_object_key_ciphertext")?,
+    })
 }
 
 fn valid_external_installation_id(value: &str) -> bool {

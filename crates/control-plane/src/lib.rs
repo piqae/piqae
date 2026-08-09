@@ -7,6 +7,10 @@ pub mod billing;
 pub mod billing_usage_worker;
 pub mod compatibility;
 pub mod device_auth;
+pub mod document_adapters;
+pub mod document_crypto;
+pub mod document_render_worker;
+pub mod documents;
 pub mod error;
 pub mod identity;
 pub mod pairing;
@@ -48,6 +52,7 @@ pub struct AppState {
     pub authenticator: Arc<dyn Authenticator>,
     pub events: broadcast::Sender<PublishedEvent>,
     pub webhook_secrets: Arc<WebhookSecretBox>,
+    pub document_secrets: Arc<document_crypto::DocumentSecretBox>,
     pub object_store: Arc<dyn ObjectStore>,
     pub capabilities: DeploymentCapabilities,
     pub local_identity: Option<identity::LocalIdentityState>,
@@ -66,18 +71,27 @@ impl fmt::Debug for AppState {
 }
 
 impl AppState {
+    /// Builds an in-memory state with deterministic zero-valued test keys.
+    /// Production entrypoints must use [`Self::new_with_resources`].
+    #[doc(hidden)]
     #[must_use]
-    pub fn new(repository: Arc<dyn Repository>, authenticator: Arc<dyn Authenticator>) -> Self {
+    pub fn new_for_tests(
+        repository: Arc<dyn Repository>,
+        authenticator: Arc<dyn Authenticator>,
+    ) -> Self {
         Self::new_with_resources(
             repository,
             authenticator,
             [0; 32],
+            document_crypto::DocumentSecretBox::new([0; 32]),
             Arc::new(MemoryObjectStore::default()),
         )
     }
 
     #[must_use]
-    pub fn new_with_webhook_key(
+    /// Test-only convenience constructor with an explicit webhook fixture key.
+    #[doc(hidden)]
+    pub fn new_with_webhook_key_for_tests(
         repository: Arc<dyn Repository>,
         authenticator: Arc<dyn Authenticator>,
         webhook_key: [u8; 32],
@@ -86,6 +100,7 @@ impl AppState {
             repository,
             authenticator,
             webhook_key,
+            document_crypto::DocumentSecretBox::new([0; 32]),
             Arc::new(MemoryObjectStore::default()),
         )
     }
@@ -95,6 +110,7 @@ impl AppState {
         repository: Arc<dyn Repository>,
         authenticator: Arc<dyn Authenticator>,
         webhook_key: [u8; 32],
+        document_secrets: document_crypto::DocumentSecretBox,
         object_store: Arc<dyn ObjectStore>,
     ) -> Self {
         let (events, _) = broadcast::channel(1_024);
@@ -103,6 +119,7 @@ impl AppState {
             authenticator,
             events,
             webhook_secrets: Arc::new(WebhookSecretBox::new(webhook_key)),
+            document_secrets: Arc::new(document_secrets),
             object_store,
             capabilities: DeploymentCapabilities::default(),
             local_identity: None,
@@ -115,6 +132,18 @@ impl AppState {
     #[must_use]
     pub fn with_capabilities(mut self, capabilities: DeploymentCapabilities) -> Self {
         self.capabilities = capabilities;
+        self
+    }
+
+    #[must_use]
+    pub fn with_document_key(mut self, key: [u8; 32]) -> Self {
+        self.document_secrets = Arc::new(document_crypto::DocumentSecretBox::new(key));
+        self
+    }
+
+    #[must_use]
+    pub fn with_document_keyring(mut self, keyring: document_crypto::DocumentSecretBox) -> Self {
+        self.document_secrets = Arc::new(keyring);
         self
     }
 
@@ -239,6 +268,7 @@ pub fn router(state: AppState) -> Router {
         .merge(identity::router())
         .merge(workos_identity_router())
         .merge(pairing_router())
+        .merge(documents::router())
         .route("/v1/platform/status", get(platform::status))
         .route("/v1/platform/enable", post(platform::enable))
         .route("/v1/platform/accounts", get(platform::list))
@@ -572,6 +602,7 @@ mod tests {
 
     struct TestApplication {
         router: Router,
+        state: AppState,
         repository: MemoryRepository,
         printer_id: PrinterId,
         agent_id: AgentId,
@@ -648,11 +679,10 @@ mod tests {
                 TenantContext::unrestricted(WorkspaceId::new(), EnvironmentId::new()),
             )
             .await;
+        let state = AppState::new_for_tests(Arc::new(repository.clone()), Arc::new(authenticator));
         TestApplication {
-            router: router(AppState::new(
-                Arc::new(repository.clone()),
-                Arc::new(authenticator),
-            )),
+            router: router(state.clone()),
+            state,
             repository,
             printer_id,
             agent_id,
@@ -670,7 +700,7 @@ mod tests {
             authenticator.insert(token, *tenant).await;
         }
         (
-            router(AppState::new(
+            router(AppState::new_for_tests(
                 Arc::new(repository.clone()),
                 Arc::new(authenticator),
             )),
@@ -689,6 +719,20 @@ mod tests {
         request
             .body(body.map_or_else(Body::empty, |value| Body::from(value.to_owned())))
             .expect("valid API request")
+    }
+
+    fn idempotent_api_request(
+        method: &str,
+        path: &str,
+        token: &str,
+        key: &str,
+        body: Option<&str>,
+    ) -> Request<Body> {
+        let mut request = api_request(method, path, token, body);
+        request
+            .headers_mut()
+            .insert("idempotency-key", key.parse().expect("idempotency header"));
+        request
     }
 
     fn compatibility_request(method: &str, path: &str, body: Option<String>) -> Request<Body> {
@@ -1074,6 +1118,254 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn document_template_publish_and_render_is_tenant_scoped_end_to_end() {
+        let application = application().await;
+        let template = json_response(
+            &application.router,
+            idempotent_api_request(
+                "POST",
+                "/v1/document-templates",
+                "piq_test_integration",
+                "template-receipt-v1",
+                Some(
+                    &serde_json::json!({
+                        "name": "Receipt",
+                        "specification": {"spec_version":"piqae.document/v1","page":{"size":"a4"},
+                            "body":[{"type":"text","value":{"pointer":"/number"}}]}
+                    })
+                    .to_string(),
+                ),
+            ),
+        )
+        .await;
+        let template_id = template["id"].as_str().expect("template id");
+        let revision = json_response(
+            &application.router,
+            idempotent_api_request(
+                "POST",
+                &format!("/v1/document-templates/{template_id}/publish"),
+                "piq_test_integration",
+                "publish-receipt-v1",
+                Some(&serde_json::json!({"specification": template["specification"]}).to_string()),
+            ),
+        )
+        .await;
+        let revision_id = revision["id"].as_str().expect("revision id");
+        let replay = json_response(
+            &application.router,
+            idempotent_api_request(
+                "POST",
+                &format!("/v1/document-templates/{template_id}/publish"),
+                "piq_test_integration",
+                "publish-receipt-v1",
+                Some(&serde_json::json!({"specification": template["specification"]}).to_string()),
+            ),
+        )
+        .await;
+        assert_eq!(replay["specification"], revision["specification"]);
+        let mismatch = application
+            .router
+            .clone()
+            .oneshot(idempotent_api_request(
+                "POST",
+                &format!("/v1/document-templates/{template_id}/publish"),
+                "piq_test_integration",
+                "publish-receipt-v1",
+                Some(
+                    &serde_json::json!({"specification": {
+                        "spec_version":"piqae.document/v1","page":{"size":"a4"},
+                        "body":[{"type":"text","value":"different"}]
+                    }})
+                    .to_string(),
+                ),
+            ))
+            .await
+            .expect("mismatched replay response");
+        assert_eq!(mismatch.status(), StatusCode::CONFLICT);
+        let render = json_response(
+            &application.router,
+            idempotent_api_request(
+                "POST",
+                "/v1/document-renders",
+                "piq_test_integration",
+                "render-receipt-1042",
+                Some(
+                    &serde_json::json!({
+                        "template_revision_id": revision_id, "input":{"number":"R-1042"},
+                    })
+                    .to_string(),
+                ),
+            ),
+        )
+        .await;
+        assert_eq!(render["state"], "registered");
+        for private_field in [
+            "input_ciphertext",
+            "input_sha256",
+            "artifact_object_key_ciphertext",
+            "attempt",
+            "max_attempts",
+            "lease_token",
+            "lease_expires_at",
+        ] {
+            assert!(render.get(private_field).is_none());
+        }
+        let render_replay = application
+            .router
+            .clone()
+            .oneshot(idempotent_api_request(
+                "POST",
+                "/v1/document-renders",
+                "piq_test_integration",
+                "render-receipt-1042",
+                Some(
+                    &serde_json::json!({
+                        "template_revision_id": revision_id, "input":{"number":"R-1042"},
+                    })
+                    .to_string(),
+                ),
+            ))
+            .await
+            .expect("render replay response");
+        assert_eq!(render_replay.status(), StatusCode::OK);
+        let worker = crate::document_render_worker::DocumentRenderWorker::new(
+            application.state.clone(),
+            "test-worker",
+        );
+        assert_eq!(worker.run_once(1).await.expect("render batch"), 1);
+        let render = json_response(
+            &application.router,
+            api_request(
+                "GET",
+                &format!(
+                    "/v1/document-renders/{}",
+                    render["id"].as_str().expect("render id")
+                ),
+                "piq_test_integration",
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(render["state"], "completed");
+        assert_eq!(render["artifact_media_type"], "application/pdf");
+        assert!(render.get("artifact_object_key_ciphertext").is_none());
+        assert!(render.get("input_ciphertext").is_none());
+        assert!(
+            render["artifact_byte_length"]
+                .as_i64()
+                .is_some_and(|bytes| bytes > 0)
+        );
+        let job = json_response(
+            &application.router,
+            idempotent_api_request(
+                "POST",
+                &format!(
+                    "/v1/document-renders/{}/print",
+                    render["id"].as_str().expect("render id")
+                ),
+                "piq_test_integration",
+                "print-receipt-1042",
+                Some(
+                    &serde_json::json!({
+                        "printer_id": application.printer_id.to_string(),
+                        "title": "Receipt R-1042"
+                    })
+                    .to_string(),
+                ),
+            ),
+        )
+        .await;
+        assert_eq!(job["content_type"], "pdf");
+        assert_eq!(job["state"], "waiting_for_agent");
+        let probe = application
+            .router
+            .clone()
+            .oneshot(api_request(
+                "GET",
+                &format!(
+                    "/v1/document-renders/{}",
+                    render["id"].as_str().expect("render id")
+                ),
+                "piq_test_other",
+                None,
+            ))
+            .await
+            .expect("cross tenant probe");
+        assert_eq!(probe.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn hosted_pdfme_conversion_is_reproducible_and_tenant_scoped() {
+        let application = application().await;
+        let body = serde_json::json!({
+            "adapter":"pdfme", "adapter_version":"1.0.0", "strict":true,
+            "source":{"basePdf":{"width":210,"height":297},
+                "schemas":[[{"type":"text","name":"order/name","fontSize":12}]]}
+        })
+        .to_string();
+        let created = json_response(
+            &application.router,
+            idempotent_api_request(
+                "POST",
+                "/v1/document-conversions",
+                "piq_test_integration",
+                "convert-pdfme-v1",
+                Some(&body),
+            ),
+        )
+        .await;
+        assert_eq!(created["adapter_version"], "1.0.0");
+        assert_eq!(
+            created["document"]["body"][0]["value"]["pointer"],
+            "/order~1name"
+        );
+        let replay = json_response(
+            &application.router,
+            idempotent_api_request(
+                "POST",
+                "/v1/document-conversions",
+                "piq_test_integration",
+                "convert-pdfme-v1",
+                Some(&body),
+            ),
+        )
+        .await;
+        assert_eq!(created, replay);
+        let conflict_body = serde_json::json!({
+            "adapter":"pdfme", "adapter_version":"1.0.0", "strict":false,
+            "source":{"basePdf":{"width":210,"height":297},"schemas":[[]]}
+        })
+        .to_string();
+        let conflict = application
+            .router
+            .clone()
+            .oneshot(idempotent_api_request(
+                "POST",
+                "/v1/document-conversions",
+                "piq_test_integration",
+                "convert-pdfme-v1",
+                Some(&conflict_body),
+            ))
+            .await
+            .expect("conflicting replay");
+        assert_eq!(conflict.status(), StatusCode::CONFLICT);
+        let id = created["id"].as_str().expect("conversion id");
+        let probe = application
+            .router
+            .clone()
+            .oneshot(api_request(
+                "GET",
+                &format!("/v1/document-conversions/{id}"),
+                "piq_test_other",
+                None,
+            ))
+            .await
+            .expect("cross tenant response");
+        assert_eq!(probe.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
     async fn readiness_accepts_a_missing_health_object() {
         let application = application().await;
         let response = application
@@ -1160,6 +1452,7 @@ mod tests {
             Arc::new(MemoryRepository::default()),
             Arc::new(StaticAuthenticator::default()),
             [0; 32],
+            document_crypto::DocumentSecretBox::new([0; 32]),
             Arc::new(UnavailableObjectStore),
         );
         let application = router(state);

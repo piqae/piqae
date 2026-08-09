@@ -1,0 +1,29 @@
+{
+  "manifestVersion": "piqae.adapter-compatibility/v1",
+  "adapter": "pdfme",
+  "adapterVersion": "1.0.0",
+  "sourceFormat": "pdfme.template",
+  "targetFormat": "piqae.document/v1",
+  "reviewedSourceVersions": ["5.x", "6.x"],
+  "execution": "conversion-only",
+  "features": [
+    { "feature": "blank-page.a4", "level": "exact", "notes": "Object basePdf dimensions 210 x 297 mm." },
+    { "feature": "blank-page.a5", "level": "exact", "notes": "Object basePdf dimensions 148 x 210 mm." },
+    { "feature": "blank-page.letter", "level": "exact", "notes": "Object basePdf dimensions 215.9 x 279.4 mm." },
+    { "feature": "blank-page.4x6", "level": "exact", "notes": "Object basePdf dimensions 101.6 x 152.4 mm." },
+    { "feature": "blank-page.roll58mm", "level": "exact", "notes": "Object basePdf width 58 mm and finite height from 1 through 2000 mm." },
+    { "feature": "blank-page.roll80mm", "level": "exact", "notes": "Object basePdf width 80 mm and finite height from 1 through 2000 mm." },
+    { "feature": "multipage", "level": "mapped", "notes": "Each schemas entry becomes a page separated by page_break." },
+    { "feature": "text.content", "level": "mapped", "notes": "Named schemas bind using RFC 6901 JSON Pointer escaping (~ as ~0 and / as ~1); unnamed content is literal." },
+    { "feature": "text.font-size", "level": "mapped", "notes": "Font size is retained; Piqae controls font face and shaping." },
+    { "feature": "qrcode", "level": "mapped", "notes": "Named QR schemas bind using an RFC 6901 JSON Pointer token (~ becomes ~0 and / becomes ~1)." },
+    { "feature": "absolute-positioning", "level": "lossy", "notes": "Vertical spacing is approximated; horizontal coordinates and boxes are not retained in document/v1." },
+    { "feature": "base-pdf", "level": "unsupported", "notes": "Existing/background PDF data is never fetched or executed." },
+    { "feature": "images", "level": "unsupported", "notes": "document/v1 has no image node." },
+    { "feature": "tables", "level": "unsupported", "notes": "document/v1 has a bounded flow-table node, but this adapter does not yet map pdfme table schemas." },
+    { "feature": "barcodes", "level": "unsupported", "notes": "Only QR is available in document/v1." },
+    { "feature": "custom-fonts", "level": "unsupported", "notes": "No remote or embedded source fonts are accepted by this adapter." },
+    { "feature": "plugins", "level": "unsupported", "notes": "Arbitrary pdfme plugins or JavaScript are never loaded or run." },
+    { "feature": "remote-assets", "level": "unsupported", "notes": "Network URLs are never fetched." }
+  ]
+}

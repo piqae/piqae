@@ -15,6 +15,14 @@ import type {
   CreatedUpload,
   CreatedDeviceAuthorization,
   DeploymentMeta,
+  CreateDocumentRender,
+  CreateDocumentConversion,
+  CreateDocumentTemplate,
+  DocumentRender,
+  DocumentConversion,
+  DocumentTemplate,
+  DocumentTemplateRevision,
+  PrintDocumentRender,
   DeviceAuthorizationExchange,
   DeviceAuthorizationReview,
   DeviceAuthorizationStatus,
@@ -381,6 +389,33 @@ export class PiqaeClient {
       ),
     cancel: (id: string) =>
       this.request<Job>('POST', `/v1/jobs/${encodeURIComponent(id)}/cancel`)
+  };
+
+  /** Optional declarative document generation. PDF and RAW job APIs remain independent. */
+  readonly documents = {
+    templates: {
+      create: (input: CreateDocumentTemplate, idempotencyKey: string) => this.request<DocumentTemplate>('POST', '/v1/document-templates', { body: input, idempotencyKey }),
+      retrieve: (id: string) => this.request<DocumentTemplate>('GET', `/v1/document-templates/${encodeURIComponent(id)}`),
+      publish: (id: string, specification: CreateDocumentTemplate['specification'], idempotencyKey: string) => this.request<DocumentTemplateRevision>('POST', `/v1/document-templates/${encodeURIComponent(id)}/publish`, { body: { specification }, idempotencyKey }),
+      retrieveRevision: (id: string) => this.request<DocumentTemplateRevision>('GET', `/v1/document-template-revisions/${encodeURIComponent(id)}`)
+    },
+    renders: {
+      create: (input: CreateDocumentRender, idempotencyKey: string) => this.request<DocumentRender>('POST', '/v1/document-renders', { body: input, idempotencyKey }),
+      retrieve: (id: string) => this.request<DocumentRender>('GET', `/v1/document-renders/${encodeURIComponent(id)}`),
+      print: (id: string, input: PrintDocumentRender, idempotencyKey: string) => this.request<Job>('POST', `/v1/document-renders/${encodeURIComponent(id)}/print`, { body: input, idempotencyKey })
+    },
+    conversions: {
+      create: (input: CreateDocumentConversion, idempotencyKey: string) => this.request<DocumentConversion>('POST', '/v1/document-conversions', {
+        body: { adapter: input.adapter, adapter_version: input.adapterVersion, source: input.source, strict: input.strict },
+        idempotencyKey
+      }),
+      retrieve: (id: string) => this.request<DocumentConversion>('GET', `/v1/document-conversions/${encodeURIComponent(id)}`)
+    },
+    renderAndPrint: async (input: CreateDocumentRender, print: PrintDocumentRender, idempotencyKeys: { render: string; print: string }) => {
+      const render = await this.documents.renders.create(input, idempotencyKeys.render);
+      const job = await this.documents.renders.print(render.id, print, idempotencyKeys.print);
+      return { render, job };
+    }
   };
 
   readonly webhooks = {

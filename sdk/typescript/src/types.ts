@@ -1,5 +1,34 @@
 export type PiqaeId = string;
 
+export type DocumentValue = string | { pointer: `/${string}` };
+export type DocumentNode =
+  | { type: 'text'; value: DocumentValue; font_size?: number }
+  | { type: 'stack' | 'row'; children: DocumentNode[]; gap_mm?: number }
+  | { type: 'spacer'; height_mm: number }
+  | { type: 'line' | 'page_break' }
+  | { type: 'when' | 'repeat'; pointer: `/${string}`; children: DocumentNode[] }
+  | { type: 'qr'; value: DocumentValue; size_mm?: number };
+export interface DocumentSpec {
+  spec_version: 'piqae.document/v1';
+  page: { size: 'a4' | 'a5' | 'letter' | 'four-by-six' | 'roll58mm' | 'roll80mm'; margin_mm?: number };
+  body: DocumentNode[];
+}
+export interface CreateDocumentTemplate { name: string; specification: DocumentSpec }
+export interface DocumentTemplate extends CreateDocumentTemplate { id: PiqaeId; state: 'draft' | 'published' | 'archived'; published_revision_id?: PiqaeId | null; created_at: string; updated_at: string }
+export interface DocumentTemplateRevision { id: PiqaeId; template_id: PiqaeId; revision: number; renderer_profile: 'piqae.document/v1'; specification: DocumentSpec; created_at: string }
+export interface CreateDocumentRender { template_revision_id: PiqaeId; input: Record<string, unknown> }
+export interface DocumentRender { id: PiqaeId; template_revision_id: PiqaeId; state: 'registered' | 'rendering' | 'completed' | 'failed_terminal' | 'expiring' | 'expired'; artifact_sha256: string | null; artifact_byte_length: number | null; artifact_media_type: 'application/pdf' | null; failure_code: string | null; created_at: string; updated_at: string }
+export interface CreateDocumentConversion { adapter: 'pdfme'; adapterVersion: '1.0.0'; source: Record<string, unknown>; strict: boolean }
+export interface DocumentConversionDiagnostic { code: string; severity: 'warning' | 'error'; path: string; message: string; feature?: string }
+export interface DocumentConversion {
+  id: PiqaeId; adapter: 'pdfme'; adapter_version: '1.0.0'; adapter_api_version: 'piqae.adapter/v1';
+  source_format: 'pdfme.template'; source_sha256: string; strict: boolean; fidelity: 'exact' | 'lossy';
+  renderer_version: string; document: DocumentSpec; warnings: DocumentConversionDiagnostic[]; created_at: string;
+}
+export type PrintDocumentRender =
+  & { title: string; options?: JobOptions; deliveries?: number }
+  & ({ printer_id: PiqaeId; target_id?: never } | { target_id: PiqaeId; printer_id?: never });
+
 export interface NodeConnector {
   id: string;
   node_id: string;

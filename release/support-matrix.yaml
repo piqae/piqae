@@ -52,6 +52,9 @@ features:
   content_confidential_printing:
     tier: disabled
     reason: encrypted transport and local decryption are implemented for evaluation but lack independent cryptographic review, hardware-backed keys and physical release evidence
+  declarative_document_generation:
+    tier: disabled
+    reason: bounded deterministic rendering, encrypted tenant persistence, SDK/MCP contracts, and virtual end-to-end tests exist; PostgreSQL fault injection, security review, load soak, and physical release gates remain open
   macos_embedded_node_onboarding:
     tier: preview
     reason: Piqae-branded application-link consent and proof-of-possession are tested in source and included in signed/notarised v0.1.11 Preview packaging; clean-install, update/rollback and fleet evidence remain open

@@ -3,6 +3,29 @@
 Typed, dependency-free TypeScript client for Piqae's native API. It works in
 Node.js, browsers, serverless runtimes, and against a local-only agent.
 
+Optional declarative documents are exposed through `client.documents`. Existing
+PDF and RAW printing does not require templates. Templates use the bounded
+`piqae.document/v1` specification; remote assets, HTML, Liquid, and executable
+template code are not accepted.
+`documents.renderAndPrint` composes the durable render and print bridge with
+separate idempotency keys; job state still distinguishes spooler acceptance
+from reported completion and uncertain delivery.
+
+The optional hosted pdfme subset is available through
+`documents.conversions.create`. It persists the exact adapter and renderer
+versions, canonical source digest, strict/fidelity decision, and encrypted
+converted document atomically:
+
+```ts
+const conversion = await piqae.documents.conversions.create({
+  adapter: 'pdfme', adapterVersion: '1.0.0', source: pdfmeTemplate, strict: true
+}, 'convert-order-template-v1'); // Stable idempotency key for this logical conversion.
+```
+
+The server does not run pdfme, plugins, JavaScript, files, background PDFs, or
+network assets. Conversion remains optional; callers can still render locally
+and submit PDF bytes.
+
 Install the public package from npm:
 
 ```console

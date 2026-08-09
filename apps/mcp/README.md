@@ -5,6 +5,12 @@ Piqae's checked-in API and operational knowledge. It is a thin adapter over the
 public Piqae API and TypeScript SDK: it does not connect to PostgreSQL, invent a
 second authorization model, or bypass tenant and scope checks.
 
+The optional `piqae_documents` tool validates and operates bounded
+`piqae.document/v1` templates. It does not return template inputs or document
+content, accept credentials as tool arguments, or bypass the existing explicit
+authorization context. Printing a completed render remains behind the normal
+job-submission policy and exact destination confirmation.
+
 It exposes MCP tools for deployment/workspace context, API keys, nodes and node
 onboarding, printers, stocks, targets and profile bindings, uploads, jobs,
 webhooks, billing/usage, and platform/integrator accounts. It also exposes the

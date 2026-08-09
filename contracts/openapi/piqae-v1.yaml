@@ -31,6 +31,8 @@ tags:
     description: Inspect canonical Cloud entitlements, reported-complete usage, and Stripe projections.
   - name: Jobs
     description: Register and observe durable print jobs.
+  - name: Documents
+    description: Optionally publish declarative templates and asynchronously render immutable PDF artifacts.
   - name: Printers
     description: Inspect installed printer queues and driver capabilities.
   - name: Routing
@@ -2313,6 +2315,214 @@ paths:
           $ref: "#/components/responses/Error"
         "503":
           $ref: "#/components/responses/Error"
+  /v1/document-templates:
+    post:
+      summary: Create a draft document template
+      tags: [Documents]
+      operationId: createDocumentTemplate
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateDocumentTemplate" }
+      responses:
+        "200":
+          description: Existing idempotent draft template.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DocumentTemplate" }
+        "201":
+          description: Draft template created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DocumentTemplate" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /v1/document-templates/{template_id}:
+    get:
+      summary: Retrieve a document template
+      tags: [Documents]
+      operationId: retrieveDocumentTemplate
+      parameters:
+        - name: template_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Current template metadata and draft specification.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DocumentTemplate" }
+        "401": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /v1/document-templates/{template_id}/publish:
+    post:
+      summary: Publish an immutable document template revision
+      tags: [Documents]
+      operationId: publishDocumentTemplate
+      parameters:
+        - name: template_id
+          in: path
+          required: true
+          schema: { type: string }
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PublishDocumentTemplate" }
+      responses:
+        "200":
+          description: Existing idempotent immutable revision.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DocumentTemplateRevision" }
+        "201":
+          description: Immutable revision published.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DocumentTemplateRevision" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /v1/document-template-revisions/{revision_id}:
+    get:
+      summary: Retrieve an immutable document template revision
+      tags: [Documents]
+      operationId: retrieveDocumentTemplateRevision
+      parameters:
+        - name: revision_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Published immutable template revision.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DocumentTemplateRevision" }
+        "401": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /v1/document-renders:
+    post:
+      summary: Register an asynchronous document render
+      tags: [Documents]
+      operationId: createDocumentRender
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateDocumentRender" }
+      responses:
+        "200":
+          description: Existing idempotent render registration.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DocumentRender" }
+        "202":
+          description: Render durably registered.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DocumentRender" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /v1/document-conversions:
+    post:
+      summary: Convert a supported external template into a reproducible Piqae document
+      description: Conversion is data-only and never executes plugins, JavaScript, files, or network requests.
+      tags: [Documents]
+      operationId: createDocumentConversion
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateDocumentConversion" }
+      responses:
+        "200":
+          description: Existing idempotent conversion.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DocumentConversion" }
+        "201":
+          description: Conversion and reproducibility metadata persisted atomically.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DocumentConversion" }
+        "400": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /v1/document-conversions/{conversion_id}:
+    get:
+      summary: Retrieve a persisted document conversion
+      tags: [Documents]
+      operationId: retrieveDocumentConversion
+      parameters:
+        - name: conversion_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Persisted conversion and exact reproducibility metadata.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DocumentConversion" }
+        "404": { $ref: "#/components/responses/Error" }
+  /v1/document-renders/{render_id}:
+    get:
+      summary: Retrieve a document render
+      tags: [Documents]
+      operationId: retrieveDocumentRender
+      parameters:
+        - name: render_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Render lifecycle and artifact metadata.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DocumentRender" }
+        "404": { $ref: "#/components/responses/Error" }
+  /v1/document-renders/{render_id}/print:
+    post:
+      summary: Register a print job for a completed document render
+      tags: [Documents]
+      operationId: printDocumentRender
+      parameters:
+        - name: render_id
+          in: path
+          required: true
+          schema: { type: string }
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PrintDocumentRender" }
+      responses:
+        "200":
+          description: Existing idempotent print job; this is not proof of physical delivery.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Job" }
+        "201":
+          description: Durable print job registered; this is not proof of physical delivery.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Job" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
 components:
   headers:
     RequestId:
@@ -4491,6 +4701,211 @@ components:
         dead_lettered_at:
           type: [string, "null"]
           format: date-time
+    DocumentValue:
+      description: A literal string or JSON Pointer binding into the render input.
+      oneOf:
+        - type: string
+          maxLength: 10000
+        - type: object
+          additionalProperties: false
+          required: [pointer]
+          properties:
+            pointer: { type: string, pattern: '^/', maxLength: 500 }
+    DocumentNode:
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [type, value]
+          properties:
+            type: { const: text }
+            value: { $ref: "#/components/schemas/DocumentValue" }
+            font_size: { type: number, minimum: 4, maximum: 96, default: 10 }
+        - type: object
+          additionalProperties: false
+          required: [type, children]
+          properties:
+            type: { enum: [stack, row] }
+            children: { type: array, maxItems: 1000, items: { $ref: "#/components/schemas/DocumentNode" } }
+            gap_mm: { type: number, minimum: 0, maximum: 100, default: 0 }
+        - type: object
+          additionalProperties: false
+          required: [type, height_mm]
+          properties:
+            type: { const: spacer }
+            height_mm: { type: number, minimum: 0, maximum: 1000 }
+        - type: object
+          additionalProperties: false
+          required: [type]
+          properties:
+            type: { enum: [line, page_break] }
+        - type: object
+          additionalProperties: false
+          required: [type, pointer, children]
+          properties:
+            type: { enum: [when, repeat] }
+            pointer: { type: string, pattern: '^/', maxLength: 500 }
+            children: { type: array, maxItems: 1000, items: { $ref: "#/components/schemas/DocumentNode" } }
+        - type: object
+          additionalProperties: false
+          required: [type, value]
+          properties:
+            type: { const: qr }
+            value: { $ref: "#/components/schemas/DocumentValue" }
+            size_mm: { type: number, minimum: 1, maximum: 200, default: 24 }
+        - type: object
+          additionalProperties: false
+          required: [type, pointer, columns]
+          properties:
+            type: { const: table }
+            pointer: { type: string, pattern: '^/', maxLength: 500 }
+            font_size: { type: number, minimum: 4, maximum: 96, default: 10 }
+            header: { type: boolean, default: false }
+            columns:
+              type: array
+              minItems: 1
+              maxItems: 64
+              items:
+                type: object
+                additionalProperties: false
+                required: [heading, pointer]
+                properties:
+                  heading: { type: string, maxLength: 500 }
+                  pointer: { type: string, pattern: '^(\.|\./|/)', maxLength: 500 }
+                  width_weight: { type: number, exclusiveMinimum: 0, maximum: 1000, default: 1 }
+    DocumentSpec:
+      type: object
+      additionalProperties: false
+      required: [spec_version, page, body]
+      properties:
+        spec_version: { type: string, const: piqae.document/v1 }
+        page:
+          type: object
+          additionalProperties: false
+          required: [size]
+          properties:
+            size: { enum: [a4, a5, letter, four-by-six, roll58mm, roll80mm] }
+            margin_mm: { type: number, minimum: 0, maximum: 50 }
+        body:
+          type: array
+          maxItems: 2000
+          items: { $ref: "#/components/schemas/DocumentNode" }
+    CreateDocumentTemplate:
+      type: object
+      additionalProperties: false
+      required: [name, specification]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 120 }
+        specification: { $ref: "#/components/schemas/DocumentSpec" }
+    PublishDocumentTemplate:
+      type: object
+      additionalProperties: false
+      required: [specification]
+      properties:
+        specification: { $ref: "#/components/schemas/DocumentSpec" }
+    DocumentTemplate:
+      type: object
+      required: [id, name, state, specification, created_at, updated_at]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        state: { enum: [draft, published, archived] }
+        specification: { $ref: "#/components/schemas/DocumentSpec" }
+        published_revision_id: { type: [string, "null"] }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    DocumentTemplateRevision:
+      type: object
+      required: [id, template_id, revision, renderer_profile, specification, created_at]
+      properties:
+        id: { type: string }
+        template_id: { type: string }
+        specification: { $ref: "#/components/schemas/DocumentSpec" }
+        revision: { type: integer, minimum: 1 }
+        renderer_profile: { type: string, const: piqae.document/v1 }
+        created_at: { type: string, format: date-time }
+    CreateDocumentRender:
+      type: object
+      additionalProperties: false
+      required: [template_revision_id, input]
+      properties:
+        template_revision_id: { type: string }
+        input:
+          type: object
+          maxProperties: 1000
+          additionalProperties: true
+    CreateDocumentConversion:
+      type: object
+      additionalProperties: false
+      required: [adapter, adapter_version, source, strict]
+      properties:
+        adapter: { type: string, const: pdfme }
+        adapter_version: { type: string, const: 1.0.0 }
+        source:
+          type: object
+          description: Bounded JSON template data. Runtime code and remote assets are rejected.
+          maxProperties: 1000
+          additionalProperties: true
+        strict:
+          type: boolean
+          description: When true, reject mappings with known fidelity loss.
+    DocumentConversionDiagnostic:
+      type: object
+      additionalProperties: false
+      required: [code, severity, path, message]
+      properties:
+        code: { type: string }
+        severity: { enum: [warning, error] }
+        path: { type: string }
+        message: { type: string }
+        feature: { type: string }
+    DocumentConversion:
+      type: object
+      additionalProperties: false
+      required: [id, adapter, adapter_version, adapter_api_version, source_format, source_sha256, strict, fidelity, renderer_version, document, warnings, created_at]
+      properties:
+        id: { type: string }
+        adapter: { type: string, const: pdfme }
+        adapter_version: { type: string, const: 1.0.0 }
+        adapter_api_version: { type: string, const: piqae.adapter/v1 }
+        source_format: { type: string, const: pdfme.template }
+        source_sha256: { type: string, pattern: '^[a-f0-9]{64}$' }
+        strict: { type: boolean }
+        fidelity: { enum: [exact, lossy] }
+        renderer_version: { type: string }
+        document: { $ref: "#/components/schemas/DocumentSpec" }
+        warnings:
+          type: array
+          maxItems: 2000
+          items: { $ref: "#/components/schemas/DocumentConversionDiagnostic" }
+        created_at: { type: string, format: date-time }
+    DocumentRender:
+      type: object
+      required: [id, template_revision_id, state, created_at, updated_at]
+      properties:
+        id: { type: string }
+        template_revision_id: { type: string }
+        state: { enum: [registered, rendering, completed, failed_terminal, expiring, expired] }
+        artifact_sha256: { type: [string, "null"], pattern: '^[a-f0-9]{64}$' }
+        artifact_byte_length: { type: [integer, "null"], minimum: 1 }
+        artifact_media_type: { type: [string, "null"], enum: [application/pdf, null] }
+        failure_code: { type: [string, "null"] }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    PrintDocumentRender:
+      type: object
+      additionalProperties: false
+      required: [title]
+      properties:
+        printer_id: { type: string }
+        target_id: { type: string }
+        title: { type: string, minLength: 1, maxLength: 255 }
+        options: { $ref: "#/components/schemas/JobOptions" }
+        deliveries: { type: integer, minimum: 1, maximum: 100, default: 1 }
+      oneOf:
+        - required: [printer_id]
+          not: { required: [target_id] }
+        - required: [target_id]
+          not: { required: [printer_id] }
     ErrorEnvelope:
       type: object
       required: [error]

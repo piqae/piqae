@@ -27,6 +27,7 @@ describe("Piqae MCP server", () => {
         "piqae_targets",
         "piqae_uploads",
         "piqae_jobs",
+        "piqae_documents",
         "piqae_webhooks",
         "piqae_platform_accounts",
         "piqae_search_docs",
@@ -80,6 +81,29 @@ describe("Piqae MCP server", () => {
     expect(JSON.stringify(response.structuredContent)).toContain(
       "Job submission is disabled",
     );
+    expect(fetchMock).not.toHaveBeenCalled();
+    await client.close();
+    await server.close();
+  });
+
+  it("keeps document print submission disabled by default", async () => {
+    const fetchMock = vi.fn();
+    globalThis.fetch = fetchMock as typeof fetch;
+    const { client, server } = await linked(config());
+    const response = await client.callTool({
+      name: "piqae_documents",
+      arguments: {
+        action: "print",
+        render_id: "drnd_test",
+        target_id: "tgt_test",
+        title: "Fake receipt",
+        idempotency_key: "print-fixture-0001",
+        confirm_destination: "tgt_test",
+        fixture: "deterministic virtual printer",
+      },
+    });
+    expect(response.isError).toBe(true);
+    expect(JSON.stringify(response.structuredContent)).toContain("Job submission is disabled");
     expect(fetchMock).not.toHaveBeenCalled();
     await client.close();
     await server.close();

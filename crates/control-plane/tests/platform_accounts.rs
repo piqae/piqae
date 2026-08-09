@@ -248,6 +248,7 @@ async fn postgres_http_platform_accounts_are_owned_idempotent_and_archive_safely
         Arc::new(store.clone()) as Arc<dyn Repository>,
         Arc::new(authenticator),
         [7; 32],
+        piqae_control_plane::document_crypto::DocumentSecretBox::new([0; 32]),
         Arc::new(MemoryObjectStore::default()),
     ));
     let meta = application

@@ -299,7 +299,7 @@ mod tests {
         transport: Arc<MockTransport>,
     ) -> (WebhookWorker, MemoryRepository) {
         let repository = MemoryRepository::default();
-        let state = AppState::new_with_webhook_key(
+        let state = AppState::new_with_webhook_key_for_tests(
             Arc::new(repository.clone()),
             Arc::new(StaticAuthenticator::default()),
             [7; 32],

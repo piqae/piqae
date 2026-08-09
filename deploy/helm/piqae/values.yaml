@@ -24,6 +24,7 @@ config:
   s3AllowHttp: false
   s3VirtualHostedStyle: false
   rustLog: info,sqlx=warn
+  documentActiveKeyId: legacy-v1
   extraEnv: []
 
 secrets:
@@ -31,6 +32,8 @@ secrets:
   keys:
     databaseUrl: PIQAE_DATABASE_URL
     webhookMasterKey: PIQAE_WEBHOOK_MASTER_KEY
+    documentMasterKey: PIQAE_DOCUMENT_MASTER_KEY
+    documentDecryptionKeys: PIQAE_DOCUMENT_DECRYPTION_KEYS
     s3AccessKeyId: PIQAE_S3_ACCESS_KEY_ID
     s3SecretAccessKey: PIQAE_S3_SECRET_ACCESS_KEY
 

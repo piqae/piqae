@@ -12,15 +12,17 @@ use piqae_domain::{
 };
 use piqae_protocol::agent::AgentCommand;
 use piqae_storage_postgres::{
-    AgentAuthenticationRecord, CreateJobResult as PgCreateJobResult, EnrolledAgent, JobLease,
+    AgentAuthenticationRecord, CreateDocumentResult, CreateJobResult as PgCreateJobResult,
+    DocumentRenderWork, EnrolledAgent, ExpiredDocumentArtifactWork, JobLease,
     NewDeviceAuthorization, NodeUpdatePolicy, NodeUpdateState, PostgresStore, StorageError,
     StoredAgent, StoredAgentCommandBatch, StoredApiKey, StoredBillingSummary,
     StoredConnectSessionPreview, StoredContentEncryptionKey, StoredDeviceAuthorization,
-    StoredNodeConnector, StoredNodeDiagnostic, StoredNodeUpdate, StoredPlatformAccount,
-    StoredPrinter, StoredStock, StoredTarget, StoredTargetBinding, StoredTenantEvent, StoredUpload,
-    StoredUsageSummary, StoredWebhook, StoredWebhookDelivery, StripeBillingEvent,
-    StripeProjectionResult, SyncedPrinter, UpsertedPlatformAccount, WebhookDeliveryWork,
-    WorkOsIdentityEvent, WorkOsProjectionResult,
+    StoredDocumentConversion, StoredDocumentRender, StoredDocumentTemplate,
+    StoredDocumentTemplateRevision, StoredNodeConnector, StoredNodeDiagnostic, StoredNodeUpdate,
+    StoredPlatformAccount, StoredPrinter, StoredStock, StoredTarget, StoredTargetBinding,
+    StoredTenantEvent, StoredUpload, StoredUsageSummary, StoredWebhook, StoredWebhookDelivery,
+    StripeBillingEvent, StripeProjectionResult, SyncedPrinter, UpsertedPlatformAccount,
+    WebhookDeliveryWork, WorkOsIdentityEvent, WorkOsProjectionResult,
 };
 use sha2::Digest as _;
 use std::{
@@ -84,6 +86,120 @@ impl From<StorageError> for RepositoryError {
 #[async_trait]
 pub trait Repository: Send + Sync + 'static {
     async fn ready(&self) -> Result<(), RepositoryError>;
+    async fn create_document_template(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        id: &str,
+        name: &str,
+        ciphertext: &[u8],
+        sha256: &str,
+    ) -> Result<CreateDocumentResult<StoredDocumentTemplate>, RepositoryError>;
+    async fn get_document_template(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        id: &str,
+    ) -> Result<StoredDocumentTemplate, RepositoryError>;
+    async fn update_document_template_draft(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        id: &str,
+        ciphertext: &[u8],
+        sha256: &str,
+    ) -> Result<StoredDocumentTemplate, RepositoryError>;
+    async fn publish_document_template(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        template_id: &str,
+        revision_id: &str,
+    ) -> Result<CreateDocumentResult<StoredDocumentTemplateRevision>, RepositoryError>;
+    async fn get_document_revision(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        id: &str,
+    ) -> Result<StoredDocumentTemplateRevision, RepositoryError>;
+    async fn register_document_render(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        id: &str,
+        template_revision_id: &str,
+        ciphertext: &[u8],
+        input_sha256: &str,
+        idempotency_key: &str,
+        request_sha256: &str,
+    ) -> Result<CreateDocumentResult<StoredDocumentRender>, RepositoryError>;
+    async fn get_document_render(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        id: &str,
+    ) -> Result<StoredDocumentRender, RepositoryError>;
+    #[allow(clippy::too_many_arguments)]
+    async fn create_document_conversion(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        id: &str,
+        adapter_id: &str,
+        adapter_version: &str,
+        source_sha256: &str,
+        strict: bool,
+        fidelity: &str,
+        renderer_version: &str,
+        result_ciphertext: &[u8],
+        result_sha256: &str,
+        idempotency_key: &str,
+        request_sha256: &str,
+    ) -> Result<CreateDocumentResult<StoredDocumentConversion>, RepositoryError>;
+    async fn get_document_conversion(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        id: &str,
+    ) -> Result<StoredDocumentConversion, RepositoryError>;
+    async fn complete_document_render(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        id: &str,
+        object_key_ciphertext: &[u8],
+        artifact_sha256: &str,
+        byte_length: i64,
+    ) -> Result<StoredDocumentRender, RepositoryError>;
+    async fn claim_document_renders(
+        &self,
+        worker_id: &str,
+        limit: i64,
+        lease_seconds: i64,
+    ) -> Result<Vec<DocumentRenderWork>, RepositoryError>;
+    async fn complete_claimed_document_render(
+        &self,
+        work: &DocumentRenderWork,
+        object_key_ciphertext: &[u8],
+        artifact_sha256: &str,
+        byte_length: i64,
+    ) -> Result<StoredDocumentRender, RepositoryError>;
+    async fn fail_claimed_document_render(
+        &self,
+        work: &DocumentRenderWork,
+        failure_code: &str,
+        retryable: bool,
+    ) -> Result<StoredDocumentRender, RepositoryError>;
+    async fn claim_expired_document_artifacts(
+        &self,
+        worker_id: &str,
+        limit: i64,
+        lease_seconds: i64,
+    ) -> Result<Vec<ExpiredDocumentArtifactWork>, RepositoryError>;
+    async fn complete_document_artifact_expiry(
+        &self,
+        work: &ExpiredDocumentArtifactWork,
+    ) -> Result<(), RepositoryError>;
     async fn has_platform_manager(
         &self,
         _owner_workspace_id: WorkspaceId,
@@ -601,6 +717,19 @@ pub trait Repository: Send + Sync + 'static {
         workspace_id: WorkspaceId,
         environment_id: EnvironmentId,
     ) -> Result<(), RepositoryError>;
+    #[allow(clippy::too_many_arguments)]
+    async fn acquire_document_artifact_upload(
+        &self,
+        upload_id: &str,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        render_id: &str,
+        object_key: &str,
+        artifact_sha256: &str,
+        artifact_bytes: i64,
+        acquisition_sha256: &str,
+        expires_at: DateTime<Utc>,
+    ) -> Result<StoredUpload, RepositoryError>;
     async fn get_upload(
         &self,
         workspace_id: WorkspaceId,
@@ -808,6 +937,245 @@ pub trait Repository: Send + Sync + 'static {
 impl Repository for PostgresStore {
     async fn ready(&self) -> Result<(), RepositoryError> {
         self.readiness().await.map_err(Into::into)
+    }
+
+    async fn create_document_template(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        id: &str,
+        name: &str,
+        ciphertext: &[u8],
+        sha256: &str,
+    ) -> Result<CreateDocumentResult<StoredDocumentTemplate>, RepositoryError> {
+        PostgresStore::create_document_template(
+            self,
+            workspace_id,
+            environment_id,
+            id,
+            name,
+            ciphertext,
+            sha256,
+        )
+        .await
+        .map_err(Into::into)
+    }
+    async fn claim_document_renders(
+        &self,
+        worker_id: &str,
+        limit: i64,
+        lease_seconds: i64,
+    ) -> Result<Vec<DocumentRenderWork>, RepositoryError> {
+        PostgresStore::claim_document_renders(self, worker_id, limit, lease_seconds)
+            .await
+            .map_err(Into::into)
+    }
+    async fn complete_claimed_document_render(
+        &self,
+        work: &DocumentRenderWork,
+        object_key_ciphertext: &[u8],
+        artifact_sha256: &str,
+        byte_length: i64,
+    ) -> Result<StoredDocumentRender, RepositoryError> {
+        PostgresStore::complete_claimed_document_render(
+            self,
+            work.workspace_id,
+            work.environment_id,
+            &work.render.id,
+            work.lease_token,
+            object_key_ciphertext,
+            artifact_sha256,
+            byte_length,
+        )
+        .await
+        .map_err(Into::into)
+    }
+    async fn fail_claimed_document_render(
+        &self,
+        work: &DocumentRenderWork,
+        failure_code: &str,
+        retryable: bool,
+    ) -> Result<StoredDocumentRender, RepositoryError> {
+        PostgresStore::fail_claimed_document_render(self, work, failure_code, retryable)
+            .await
+            .map_err(Into::into)
+    }
+    async fn claim_expired_document_artifacts(
+        &self,
+        worker_id: &str,
+        limit: i64,
+        lease_seconds: i64,
+    ) -> Result<Vec<ExpiredDocumentArtifactWork>, RepositoryError> {
+        PostgresStore::claim_expired_document_artifacts(self, worker_id, limit, lease_seconds)
+            .await
+            .map_err(Into::into)
+    }
+    async fn complete_document_artifact_expiry(
+        &self,
+        work: &ExpiredDocumentArtifactWork,
+    ) -> Result<(), RepositoryError> {
+        PostgresStore::complete_document_artifact_expiry(self, work)
+            .await
+            .map_err(Into::into)
+    }
+    async fn get_document_template(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        id: &str,
+    ) -> Result<StoredDocumentTemplate, RepositoryError> {
+        PostgresStore::get_document_template(self, workspace_id, environment_id, id)
+            .await
+            .map_err(Into::into)
+    }
+    async fn update_document_template_draft(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        id: &str,
+        ciphertext: &[u8],
+        sha256: &str,
+    ) -> Result<StoredDocumentTemplate, RepositoryError> {
+        PostgresStore::update_document_template_draft(
+            self,
+            workspace_id,
+            environment_id,
+            id,
+            ciphertext,
+            sha256,
+        )
+        .await
+        .map_err(Into::into)
+    }
+    async fn complete_document_render(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        id: &str,
+        object_key_ciphertext: &[u8],
+        artifact_sha256: &str,
+        byte_length: i64,
+    ) -> Result<StoredDocumentRender, RepositoryError> {
+        PostgresStore::complete_document_render(
+            self,
+            workspace_id,
+            environment_id,
+            id,
+            object_key_ciphertext,
+            artifact_sha256,
+            byte_length,
+        )
+        .await
+        .map_err(Into::into)
+    }
+    async fn publish_document_template(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        template_id: &str,
+        revision_id: &str,
+    ) -> Result<CreateDocumentResult<StoredDocumentTemplateRevision>, RepositoryError> {
+        PostgresStore::publish_document_template(
+            self,
+            workspace_id,
+            environment_id,
+            template_id,
+            revision_id,
+        )
+        .await
+        .map_err(Into::into)
+    }
+    async fn get_document_revision(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        id: &str,
+    ) -> Result<StoredDocumentTemplateRevision, RepositoryError> {
+        PostgresStore::get_document_revision(self, workspace_id, environment_id, id)
+            .await
+            .map_err(Into::into)
+    }
+    async fn register_document_render(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        id: &str,
+        template_revision_id: &str,
+        ciphertext: &[u8],
+        input_sha256: &str,
+        idempotency_key: &str,
+        request_sha256: &str,
+    ) -> Result<CreateDocumentResult<StoredDocumentRender>, RepositoryError> {
+        PostgresStore::register_document_render(
+            self,
+            workspace_id,
+            environment_id,
+            id,
+            template_revision_id,
+            ciphertext,
+            input_sha256,
+            idempotency_key,
+            request_sha256,
+        )
+        .await
+        .map_err(Into::into)
+    }
+    async fn get_document_render(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        id: &str,
+    ) -> Result<StoredDocumentRender, RepositoryError> {
+        PostgresStore::get_document_render(self, workspace_id, environment_id, id)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn create_document_conversion(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        id: &str,
+        adapter_id: &str,
+        adapter_version: &str,
+        source_sha256: &str,
+        strict: bool,
+        fidelity: &str,
+        renderer_version: &str,
+        result_ciphertext: &[u8],
+        result_sha256: &str,
+        idempotency_key: &str,
+        request_sha256: &str,
+    ) -> Result<CreateDocumentResult<StoredDocumentConversion>, RepositoryError> {
+        PostgresStore::create_document_conversion(
+            self,
+            workspace_id,
+            environment_id,
+            id,
+            adapter_id,
+            adapter_version,
+            source_sha256,
+            strict,
+            fidelity,
+            renderer_version,
+            result_ciphertext,
+            result_sha256,
+            idempotency_key,
+            request_sha256,
+        )
+        .await
+        .map_err(Into::into)
+    }
+
+    async fn get_document_conversion(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        id: &str,
+    ) -> Result<StoredDocumentConversion, RepositoryError> {
+        PostgresStore::get_document_conversion(self, workspace_id, environment_id, id)
+            .await
+            .map_err(Into::into)
     }
 
     async fn has_platform_manager(
@@ -1844,6 +2212,34 @@ impl Repository for PostgresStore {
             .map_err(Into::into)
     }
 
+    async fn acquire_document_artifact_upload(
+        &self,
+        upload_id: &str,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        render_id: &str,
+        object_key: &str,
+        artifact_sha256: &str,
+        artifact_bytes: i64,
+        acquisition_sha256: &str,
+        expires_at: DateTime<Utc>,
+    ) -> Result<StoredUpload, RepositoryError> {
+        Self::acquire_document_artifact_upload(
+            self,
+            upload_id,
+            workspace_id,
+            environment_id,
+            render_id,
+            object_key,
+            artifact_sha256,
+            artifact_bytes,
+            acquisition_sha256,
+            expires_at,
+        )
+        .await
+        .map_err(Into::into)
+    }
+
     async fn get_upload(
         &self,
         workspace_id: WorkspaceId,
@@ -2250,6 +2646,29 @@ type MemoryEnrolment = (
 
 #[derive(Debug, Default)]
 struct MemoryState {
+    document_templates: HashMap<String, (WorkspaceId, EnvironmentId, StoredDocumentTemplate)>,
+    document_revisions:
+        HashMap<String, (WorkspaceId, EnvironmentId, StoredDocumentTemplateRevision)>,
+    document_renders: HashMap<
+        String,
+        (
+            WorkspaceId,
+            EnvironmentId,
+            String,
+            String,
+            StoredDocumentRender,
+        ),
+    >,
+    document_conversions: HashMap<
+        String,
+        (
+            WorkspaceId,
+            EnvironmentId,
+            String,
+            String,
+            StoredDocumentConversion,
+        ),
+    >,
     platform_managers: HashMap<WorkspaceId, String>,
     api_keys: HashMap<String, (WorkspaceId, EnvironmentId, StoredApiKey, String)>,
     jobs: HashMap<JobId, MemoryJob>,
@@ -2274,6 +2693,7 @@ struct MemoryState {
     webhook_work: HashMap<String, WebhookDeliveryWork>,
     tenant_events: Vec<(WorkspaceId, EnvironmentId, StoredTenantEvent)>,
     uploads: HashMap<String, (WorkspaceId, EnvironmentId, StoredUpload)>,
+    document_artifact_acquisitions: HashMap<(WorkspaceId, EnvironmentId, String, String), String>,
     agent_nonces: HashMap<(AgentId, String), DateTime<Utc>>,
     agent_event_receipts: HashSet<(AgentId, EventId)>,
     agent_commands: HashMap<AgentId, Vec<MemoryAgentCommand>>,
@@ -2295,6 +2715,12 @@ pub struct MemoryRepository {
 }
 
 impl MemoryRepository {
+    #[cfg(test)]
+    pub async fn expire_document_render_lease_for_test(&self, id: &str) {
+        if let Some((_, _, _, _, render)) = self.state.write().await.document_renders.get_mut(id) {
+            render.lease_expires_at = Some(Utc::now() - chrono::Duration::seconds(1));
+        }
+    }
     pub async fn add_printer(
         &self,
         workspace_id: WorkspaceId,
@@ -2370,6 +2796,422 @@ impl MemoryRepository {
 impl Repository for MemoryRepository {
     async fn ready(&self) -> Result<(), RepositoryError> {
         Ok(())
+    }
+
+    async fn create_document_template(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        id: &str,
+        name: &str,
+        ciphertext: &[u8],
+        sha256: &str,
+    ) -> Result<CreateDocumentResult<StoredDocumentTemplate>, RepositoryError> {
+        let mut state = self.state.write().await;
+        if let Some((workspace, environment, existing)) = state.document_templates.get(id) {
+            if *workspace != workspace_id || *environment != environment_id {
+                return Err(RepositoryError::NotFound);
+            }
+            if existing.name != name || existing.draft_sha256 != sha256 {
+                return Err(RepositoryError::IdempotencyConflict);
+            }
+            return Ok(CreateDocumentResult::Existing(existing.clone()));
+        }
+        let now = Utc::now();
+        let template = StoredDocumentTemplate {
+            id: id.into(),
+            name: name.into(),
+            state: "draft".into(),
+            published_revision_id: None,
+            created_at: now,
+            updated_at: now,
+            draft_ciphertext: ciphertext.to_vec(),
+            draft_sha256: sha256.into(),
+        };
+        state
+            .document_templates
+            .insert(id.into(), (workspace_id, environment_id, template.clone()));
+        Ok(CreateDocumentResult::Created(template))
+    }
+    async fn get_document_template(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        id: &str,
+    ) -> Result<StoredDocumentTemplate, RepositoryError> {
+        self.state
+            .read()
+            .await
+            .document_templates
+            .get(id)
+            .filter(|(w, e, _)| *w == workspace_id && *e == environment_id)
+            .map(|(_, _, v)| v.clone())
+            .ok_or(RepositoryError::NotFound)
+    }
+    async fn update_document_template_draft(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        id: &str,
+        ciphertext: &[u8],
+        sha256: &str,
+    ) -> Result<StoredDocumentTemplate, RepositoryError> {
+        let mut state = self.state.write().await;
+        let (_, _, template) = state
+            .document_templates
+            .get_mut(id)
+            .filter(|(w, e, _)| *w == workspace_id && *e == environment_id)
+            .ok_or(RepositoryError::NotFound)?;
+        if template.state != "draft" && template.draft_sha256 != sha256 {
+            return Err(RepositoryError::IdempotencyConflict);
+        }
+        template.draft_ciphertext = ciphertext.to_vec();
+        template.draft_sha256 = sha256.into();
+        template.updated_at = Utc::now();
+        Ok(template.clone())
+    }
+    async fn complete_document_render(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        id: &str,
+        object_key_ciphertext: &[u8],
+        artifact_sha256: &str,
+        byte_length: i64,
+    ) -> Result<StoredDocumentRender, RepositoryError> {
+        let mut state = self.state.write().await;
+        let (_, _, _, _, render) = state
+            .document_renders
+            .get_mut(id)
+            .filter(|(w, e, _, _, _)| *w == workspace_id && *e == environment_id)
+            .ok_or(RepositoryError::NotFound)?;
+        if matches!(render.state.as_str(), "registered" | "rendering") {
+            render.state = "completed".into();
+            render.artifact_object_key_ciphertext = Some(object_key_ciphertext.to_vec());
+            render.artifact_sha256 = Some(artifact_sha256.into());
+            render.artifact_byte_length = Some(byte_length);
+            render.artifact_media_type = Some("application/pdf".into());
+            render.updated_at = Utc::now();
+        } else if render.state != "completed"
+            || render.artifact_object_key_ciphertext.as_deref() != Some(object_key_ciphertext)
+            || render.artifact_sha256.as_deref() != Some(artifact_sha256)
+            || render.artifact_byte_length != Some(byte_length)
+        {
+            return Err(RepositoryError::ConcurrentStateChange);
+        }
+        Ok(render.clone())
+    }
+    async fn claim_document_renders(
+        &self,
+        _worker_id: &str,
+        limit: i64,
+        _lease_seconds: i64,
+    ) -> Result<Vec<DocumentRenderWork>, RepositoryError> {
+        let mut state = self.state.write().await;
+        let now = Utc::now();
+        let mut work = Vec::new();
+        for (workspace_id, environment_id, _, _, render) in state.document_renders.values_mut() {
+            if work.len() >= usize::try_from(limit.max(0)).unwrap_or(usize::MAX) {
+                break;
+            }
+            if (render.state == "registered"
+                || (render.state == "rendering"
+                    && render.lease_expires_at.is_some_and(|expiry| expiry <= now)))
+                && render.attempt < render.max_attempts
+            {
+                let token = Uuid::new_v4();
+                render.state = "rendering".into();
+                render.attempt += 1;
+                render.lease_token = Some(token);
+                render.lease_expires_at = Some(now + chrono::Duration::seconds(30));
+                render.updated_at = now;
+                work.push(DocumentRenderWork {
+                    workspace_id: *workspace_id,
+                    environment_id: *environment_id,
+                    render: render.clone(),
+                    lease_token: token,
+                    attempt: render.attempt,
+                });
+            }
+        }
+        Ok(work)
+    }
+    async fn complete_claimed_document_render(
+        &self,
+        work: &DocumentRenderWork,
+        object_key_ciphertext: &[u8],
+        artifact_sha256: &str,
+        byte_length: i64,
+    ) -> Result<StoredDocumentRender, RepositoryError> {
+        let mut state = self.state.write().await;
+        let (_, _, _, _, render) = state
+            .document_renders
+            .get_mut(&work.render.id)
+            .ok_or(RepositoryError::NotFound)?;
+        if render.state != "rendering" || render.lease_token != Some(work.lease_token) {
+            return Err(RepositoryError::ConcurrentStateChange);
+        }
+        render.state = "completed".into();
+        render.artifact_object_key_ciphertext = Some(object_key_ciphertext.to_vec());
+        render.artifact_sha256 = Some(artifact_sha256.into());
+        render.artifact_byte_length = Some(byte_length);
+        render.artifact_media_type = Some("application/pdf".into());
+        render.failure_code = None;
+        render.lease_token = None;
+        render.lease_expires_at = None;
+        render.updated_at = Utc::now();
+        Ok(render.clone())
+    }
+    async fn fail_claimed_document_render(
+        &self,
+        work: &DocumentRenderWork,
+        failure_code: &str,
+        retryable: bool,
+    ) -> Result<StoredDocumentRender, RepositoryError> {
+        let mut state = self.state.write().await;
+        let (_, _, _, _, render) = state
+            .document_renders
+            .get_mut(&work.render.id)
+            .ok_or(RepositoryError::NotFound)?;
+        if render.lease_token != Some(work.lease_token) {
+            return Err(RepositoryError::ConcurrentStateChange);
+        }
+        let terminal = !retryable || render.attempt >= render.max_attempts;
+        render.state = if terminal {
+            "failed_terminal"
+        } else {
+            "registered"
+        }
+        .into();
+        render.failure_code = terminal.then(|| failure_code.into());
+        render.lease_token = None;
+        render.lease_expires_at = None;
+        render.updated_at = Utc::now();
+        Ok(render.clone())
+    }
+    async fn claim_expired_document_artifacts(
+        &self,
+        _worker_id: &str,
+        _limit: i64,
+        _lease_seconds: i64,
+    ) -> Result<Vec<ExpiredDocumentArtifactWork>, RepositoryError> {
+        Ok(Vec::new())
+    }
+    async fn complete_document_artifact_expiry(
+        &self,
+        _work: &ExpiredDocumentArtifactWork,
+    ) -> Result<(), RepositoryError> {
+        Ok(())
+    }
+    async fn publish_document_template(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        template_id: &str,
+        revision_id: &str,
+    ) -> Result<CreateDocumentResult<StoredDocumentTemplateRevision>, RepositoryError> {
+        let mut state = self.state.write().await;
+        let (_, _, template) = state
+            .document_templates
+            .get(template_id)
+            .filter(|(w, e, _)| *w == workspace_id && *e == environment_id)
+            .ok_or(RepositoryError::NotFound)?;
+        let published_revision_id = template.published_revision_id.clone();
+        if let Some(existing_id) = published_revision_id {
+            if existing_id != revision_id {
+                return Err(RepositoryError::IdempotencyConflict);
+            }
+            return state
+                .document_revisions
+                .get(&existing_id)
+                .map(|(_, _, v)| CreateDocumentResult::Existing(v.clone()))
+                .ok_or(RepositoryError::NotFound);
+        }
+        let (_, _, template) = state
+            .document_templates
+            .get_mut(template_id)
+            .ok_or(RepositoryError::NotFound)?;
+        let revision = StoredDocumentTemplateRevision {
+            id: revision_id.into(),
+            template_id: template_id.into(),
+            revision: 1,
+            renderer_profile: "piqae.document/v1".into(),
+            created_at: Utc::now(),
+            spec_ciphertext: template.draft_ciphertext.clone(),
+            spec_sha256: template.draft_sha256.clone(),
+        };
+        template.state = "published".into();
+        template.published_revision_id = Some(revision_id.into());
+        template.updated_at = Utc::now();
+        state.document_revisions.insert(
+            revision_id.into(),
+            (workspace_id, environment_id, revision.clone()),
+        );
+        Ok(CreateDocumentResult::Created(revision))
+    }
+    async fn get_document_revision(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        id: &str,
+    ) -> Result<StoredDocumentTemplateRevision, RepositoryError> {
+        self.state
+            .read()
+            .await
+            .document_revisions
+            .get(id)
+            .filter(|(w, e, _)| *w == workspace_id && *e == environment_id)
+            .map(|(_, _, v)| v.clone())
+            .ok_or(RepositoryError::NotFound)
+    }
+    async fn register_document_render(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        id: &str,
+        template_revision_id: &str,
+        ciphertext: &[u8],
+        input_sha256: &str,
+        idempotency_key: &str,
+        request_sha256: &str,
+    ) -> Result<CreateDocumentResult<StoredDocumentRender>, RepositoryError> {
+        let mut state = self.state.write().await;
+        if !state
+            .document_revisions
+            .get(template_revision_id)
+            .is_some_and(|(w, e, _)| *w == workspace_id && *e == environment_id)
+        {
+            return Err(RepositoryError::NotFound);
+        }
+        if let Some((_, _, key, hash, render)) =
+            state.document_renders.values().find(|(w, e, key, _, _)| {
+                *w == workspace_id && *e == environment_id && key == idempotency_key
+            })
+        {
+            if hash != request_sha256 {
+                return Err(RepositoryError::IdempotencyConflict);
+            }
+            let _ = key;
+            return Ok(CreateDocumentResult::Existing(render.clone()));
+        }
+        let now = Utc::now();
+        let render = StoredDocumentRender {
+            id: id.into(),
+            template_revision_id: template_revision_id.into(),
+            state: "registered".into(),
+            artifact_sha256: None,
+            artifact_byte_length: None,
+            artifact_media_type: None,
+            failure_code: None,
+            created_at: now,
+            updated_at: now,
+            input_ciphertext: ciphertext.to_vec(),
+            input_sha256: input_sha256.into(),
+            artifact_object_key_ciphertext: None,
+            attempt: 0,
+            max_attempts: 5,
+            lease_token: None,
+            lease_expires_at: None,
+        };
+        state.document_renders.insert(
+            id.into(),
+            (
+                workspace_id,
+                environment_id,
+                idempotency_key.into(),
+                request_sha256.into(),
+                render.clone(),
+            ),
+        );
+        Ok(CreateDocumentResult::Created(render))
+    }
+    async fn get_document_render(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        id: &str,
+    ) -> Result<StoredDocumentRender, RepositoryError> {
+        self.state
+            .read()
+            .await
+            .document_renders
+            .get(id)
+            .filter(|(w, e, _, _, _)| *w == workspace_id && *e == environment_id)
+            .map(|(_, _, _, _, v)| v.clone())
+            .ok_or(RepositoryError::NotFound)
+    }
+
+    async fn create_document_conversion(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        id: &str,
+        adapter_id: &str,
+        adapter_version: &str,
+        source_sha256: &str,
+        strict: bool,
+        fidelity: &str,
+        renderer_version: &str,
+        result_ciphertext: &[u8],
+        result_sha256: &str,
+        idempotency_key: &str,
+        request_sha256: &str,
+    ) -> Result<CreateDocumentResult<StoredDocumentConversion>, RepositoryError> {
+        let mut state = self.state.write().await;
+        if let Some((_, _, _, hash, value)) =
+            state
+                .document_conversions
+                .values()
+                .find(|(w, e, key, _, _)| {
+                    *w == workspace_id && *e == environment_id && key == idempotency_key
+                })
+        {
+            if hash != request_sha256 {
+                return Err(RepositoryError::IdempotencyConflict);
+            }
+            return Ok(CreateDocumentResult::Existing(value.clone()));
+        }
+        let value = StoredDocumentConversion {
+            id: id.into(),
+            adapter_id: adapter_id.into(),
+            adapter_version: adapter_version.into(),
+            adapter_api_version: "piqae.adapter/v1".into(),
+            source_format: "pdfme.template".into(),
+            source_sha256: source_sha256.into(),
+            strict,
+            fidelity: fidelity.into(),
+            renderer_version: renderer_version.into(),
+            created_at: Utc::now(),
+            result_ciphertext: result_ciphertext.to_vec(),
+            result_sha256: result_sha256.into(),
+        };
+        state.document_conversions.insert(
+            id.into(),
+            (
+                workspace_id,
+                environment_id,
+                idempotency_key.into(),
+                request_sha256.into(),
+                value.clone(),
+            ),
+        );
+        Ok(CreateDocumentResult::Created(value))
+    }
+
+    async fn get_document_conversion(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        id: &str,
+    ) -> Result<StoredDocumentConversion, RepositoryError> {
+        self.state
+            .read()
+            .await
+            .document_conversions
+            .get(id)
+            .filter(|(w, e, _, _, _)| *w == workspace_id && *e == environment_id)
+            .map(|(_, _, _, _, value)| value.clone())
+            .ok_or(RepositoryError::NotFound)
     }
 
     async fn has_platform_manager(
@@ -3862,6 +4704,76 @@ impl Repository for MemoryRepository {
         Ok(())
     }
 
+    async fn acquire_document_artifact_upload(
+        &self,
+        upload_id: &str,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        render_id: &str,
+        object_key: &str,
+        artifact_sha256: &str,
+        artifact_bytes: i64,
+        acquisition_sha256: &str,
+        expires_at: DateTime<Utc>,
+    ) -> Result<StoredUpload, RepositoryError> {
+        let mut state = self.state.write().await;
+        state
+            .document_renders
+            .get(render_id)
+            .filter(|(w, e, _, _, render)| {
+                *w == workspace_id
+                    && *e == environment_id
+                    && render.state == "completed"
+                    && render.artifact_sha256.as_deref() == Some(artifact_sha256)
+                    && render.artifact_byte_length == Some(artifact_bytes)
+            })
+            .ok_or(RepositoryError::NotFound)?;
+        let acquisition = (
+            workspace_id,
+            environment_id,
+            render_id.to_owned(),
+            acquisition_sha256.to_owned(),
+        );
+        if let Some(canonical_upload_id) = state.document_artifact_acquisitions.get(&acquisition) {
+            let canonical_upload_id = canonical_upload_id.clone();
+            let (_, _, existing) = state
+                .uploads
+                .get_mut(&canonical_upload_id)
+                .ok_or(RepositoryError::NotFound)?;
+            if existing.object_key != object_key
+                || existing.expected_sha256 != artifact_sha256
+                || existing.expected_bytes != artifact_bytes
+            {
+                return Err(RepositoryError::IdempotencyConflict);
+            }
+            existing.expires_at = existing.expires_at.max(expires_at);
+            return Ok(existing.clone());
+        }
+        if state.uploads.contains_key(upload_id) {
+            // PostgreSQL's upload primary key rejects reusing an upload ID for
+            // a different acquisition. Canonical retries returned above are
+            // the only admissible reuse.
+            return Err(RepositoryError::IdempotencyConflict);
+        }
+        let upload = StoredUpload {
+            id: upload_id.into(),
+            object_key: object_key.into(),
+            media_type: "application/pdf".into(),
+            expected_sha256: artifact_sha256.into(),
+            expected_bytes: artifact_bytes,
+            state: "complete".into(),
+            expires_at,
+        };
+        state.uploads.insert(
+            upload_id.into(),
+            (workspace_id, environment_id, upload.clone()),
+        );
+        state
+            .document_artifact_acquisitions
+            .insert(acquisition, upload_id.into());
+        Ok(upload)
+    }
+
     async fn get_upload(
         &self,
         workspace_id: WorkspaceId,
@@ -4842,6 +5754,98 @@ mod routing_repository_tests {
     use super::*;
     use piqae_domain::JobOptions;
     use piqae_storage_postgres::PrinterProfileSnapshot;
+
+    #[tokio::test]
+    async fn artifact_acquisition_replay_returns_the_canonical_upload() {
+        let repository = MemoryRepository::default();
+        let workspace = WorkspaceId::new();
+        let environment = EnvironmentId::new();
+        let now = Utc::now();
+        let render = StoredDocumentRender {
+            id: "drnd_canonical".into(),
+            template_revision_id: "drev_fixture".into(),
+            state: "completed".into(),
+            artifact_sha256: Some("a".repeat(64)),
+            artifact_byte_length: Some(123),
+            artifact_media_type: Some("application/pdf".into()),
+            failure_code: None,
+            created_at: now,
+            updated_at: now,
+            input_ciphertext: vec![1],
+            input_sha256: "b".repeat(64),
+            artifact_object_key_ciphertext: Some(vec![2]),
+            attempt: 1,
+            max_attempts: 5,
+            lease_token: None,
+            lease_expires_at: None,
+        };
+        repository.state.write().await.document_renders.insert(
+            render.id.clone(),
+            (
+                workspace,
+                environment,
+                "key".into(),
+                "request".into(),
+                render,
+            ),
+        );
+        let first = repository
+            .acquire_document_artifact_upload(
+                "dua_first",
+                workspace,
+                environment,
+                "drnd_canonical",
+                "object/key",
+                &"a".repeat(64),
+                123,
+                &"c".repeat(64),
+                now + chrono::Duration::hours(1),
+            )
+            .await
+            .expect("first acquisition");
+        let replay = repository
+            .acquire_document_artifact_upload(
+                "dua_different",
+                workspace,
+                environment,
+                "drnd_canonical",
+                "object/key",
+                &"a".repeat(64),
+                123,
+                &"c".repeat(64),
+                now + chrono::Duration::hours(2),
+            )
+            .await
+            .expect("canonical replay");
+        assert_eq!(first.id, "dua_first");
+        assert_eq!(replay.id, first.id);
+        assert!(replay.expires_at >= now + chrono::Duration::hours(2));
+        assert!(
+            !repository
+                .state
+                .read()
+                .await
+                .uploads
+                .contains_key("dua_different")
+        );
+        let conflicting = repository
+            .acquire_document_artifact_upload(
+                "dua_first",
+                workspace,
+                environment,
+                "drnd_canonical",
+                "object/key",
+                &"a".repeat(64),
+                123,
+                &"d".repeat(64),
+                now + chrono::Duration::hours(1),
+            )
+            .await;
+        assert!(matches!(
+            conflicting,
+            Err(RepositoryError::IdempotencyConflict)
+        ));
+    }
 
     #[tokio::test]
     async fn encrypted_envelope_replay_returns_original_and_substitution_is_rejected() {
