@@ -168,6 +168,7 @@ async function chunkedRequest(
   chunkBytes: number,
 ): Promise<{ status: number; body: string }> {
   return new Promise((resolve, reject) => {
+    let responseStarted = false;
     const request = httpRequest(
       {
         host: "127.0.0.1",
@@ -181,8 +182,10 @@ async function chunkedRequest(
         },
       },
       (response) => {
+        responseStarted = true;
         const body: Buffer[] = [];
         response.on("data", (chunk: Buffer) => body.push(chunk));
+        response.on("error", reject);
         response.on("end", () =>
           resolve({
             status: response.statusCode ?? 0,
@@ -191,7 +194,9 @@ async function chunkedRequest(
         );
       },
     );
-    request.once("error", reject);
+    request.on("error", (error) => {
+      if (!responseStarted) reject(error);
+    });
     const body = Buffer.alloc(chunkBytes, 0x20);
     for (let index = 0; index < chunks; index += 1) request.write(body);
     request.end();
