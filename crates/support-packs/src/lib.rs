@@ -101,6 +101,7 @@ pub struct ConformanceFile {
 #[serde(deny_unknown_fields)]
 pub struct ConformanceCase {
     pub name: String,
+    pub platform: Platform,
     pub native_capability_key: String,
     pub native_choice: String,
     #[serde(default)]
@@ -498,22 +499,23 @@ fn validate_conformance(
         }
         for case in file.cases {
             validate_id("conformance case name", &case.name, 256)?;
-            let resolved = rules
-                .iter()
-                .find(|rule| rule.native_capability_key == case.native_capability_key)
-                .and_then(|rule| {
-                    rule.choices
-                        .get(&case.native_choice)
-                        .map(|choice| (&rule.semantic_facet, choice))
-                });
-            match (resolved, case.expected_error.as_deref()) {
-                (Some((facet, choice)), None)
+            let matched_rule = rules.iter().find(|rule| {
+                rule.platform == case.platform
+                    && rule.native_capability_key == case.native_capability_key
+            });
+            let resolved = matched_rule.and_then(|rule| {
+                rule.choices
+                    .get(&case.native_choice)
+                    .map(|choice| (&rule.semantic_facet, choice))
+            });
+            match (matched_rule, resolved, case.expected_error.as_deref()) {
+                (_, Some((facet, choice)), None)
                     if case.expected_semantic_facet.as_ref() == Some(facet)
                         && case.expected_semantic_choice.as_ref() == Some(choice) =>
                 {
                     has_positive = true;
                 }
-                (None, Some("unsupported_native_choice")) => has_unknown = true,
+                (Some(_), None, Some("unsupported_native_choice")) => has_unknown = true,
                 _ => {
                     return Err(PackError::Invalid(format!(
                         "conformance case failed: {}",
@@ -813,7 +815,7 @@ mod tests {
     }
 
     fn conformance_json() -> &'static str {
-        r#"{"schema_version":1,"cases":[{"name":"maps","native_capability_key":"display-safe-option","native_choice":"Native A","expected_semantic_facet":"media.sensing","expected_semantic_choice":"gap"},{"name":"unknown","native_capability_key":"display-safe-option","native_choice":"Other","expected_error":"unsupported_native_choice"}]}"#
+        r#"{"schema_version":1,"cases":[{"name":"maps","platform":"windows","native_capability_key":"display-safe-option","native_choice":"Native A","expected_semantic_facet":"media.sensing","expected_semantic_choice":"gap"},{"name":"unknown","platform":"windows","native_capability_key":"display-safe-option","native_choice":"Other","expected_error":"unsupported_native_choice"}]}"#
     }
 
     fn fingerprint() -> PrinterFingerprint {
@@ -1006,6 +1008,25 @@ mod tests {
         assert!(
             matches!(load_pack(&pack.0, &trust), Err(PackError::Invalid(message)) if message.contains("unsafe pack path"))
         );
+        Ok(())
+    }
+
+    #[test]
+    fn conformance_cases_match_platform_and_native_key() -> Result<(), Box<dyn std::error::Error>> {
+        for case_name in ["maps", "unknown"] {
+            let pack = TestPack::new()?;
+            fs::write(
+                pack.0.join("tests/conformance.json"),
+                conformance_json().replace(
+                    &format!(r#""name":"{case_name}","platform":"windows""#),
+                    &format!(r#""name":"{case_name}","platform":"cups_ipp""#),
+                ),
+            )?;
+            let trust = pack.trust()?;
+            assert!(
+                matches!(load_pack(&pack.0, &trust), Err(PackError::Invalid(message)) if message.contains(&format!("conformance case failed: {case_name}")))
+            );
+        }
         Ok(())
     }
 }

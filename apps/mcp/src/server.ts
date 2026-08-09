@@ -478,7 +478,7 @@ function registerPrintIntentTools(server: McpServer, config: McpConfig): void {
         const client = clientFor(config, extra, input);
         if (input.action === "list_workflows")
           return client.printWorkflows.list();
-        rejectNativeIntentKeys(input.intent);
+        rejectNativeIntentKeys(input.intent, "intent");
         const intent = input.intent as PrintIntent;
         return input.action === "validate"
           ? client.printIntents.validate(intent)
@@ -491,7 +491,7 @@ function registerPrintIntentTools(server: McpServer, config: McpConfig): void {
     {
       title: "Create Piqae print workflows",
       description:
-        "Create a revisioned professional print workflow from a normalized intent. This is a configuration write and requires printer_id to be repeated exactly in confirm. It never submits a print or accepts native driver blobs.",
+        "Create a revisioned professional print workflow from a normalized intent and normalized safe overrides. This is a configuration write and requires printer_id to be repeated exactly in confirm. It never submits a print or accepts native driver fields, blobs, or native-option overrides.",
       inputSchema: z.object({
         action: z.literal("create"),
         name: z.string().min(1).max(255),
@@ -522,7 +522,8 @@ function registerPrintIntentTools(server: McpServer, config: McpConfig): void {
     (input, extra) =>
       result(async () => {
         requireConfirmation(input.printer_id, input.confirm);
-        rejectNativeIntentKeys(input.definition);
+        rejectNativeIntentKeys(input.definition, "definition");
+        validateSafeOverrides(input.safe_overrides);
         return clientFor(config, extra, input).printWorkflows.create(
           withoutUndefined({
             name: input.name,
@@ -1168,7 +1169,10 @@ function requireConfirmation(
   }
 }
 
-function rejectNativeIntentKeys(value: Record<string, unknown>): void {
+function rejectNativeIntentKeys(
+  value: Record<string, unknown>,
+  rootPath: string,
+): void {
   const visit = (candidate: unknown, path: string): void => {
     if (Array.isArray(candidate)) {
       candidate.forEach((item, index) => visit(item, `${path}[${index}]`));
@@ -1177,7 +1181,7 @@ function rejectNativeIntentKeys(value: Record<string, unknown>): void {
     if (!isRecord(candidate)) return;
     for (const [key, child] of Object.entries(candidate)) {
       const childPath = path ? `${path}.${key}` : key;
-      if (/^native(?:[._-]|[A-Z])/.test(key)) {
+      if (/^native(?:$|[._-]|[A-Z])/.test(key)) {
         throw new Error(
           `Driver-native intent field is forbidden: ${childPath}`,
         );
@@ -1185,7 +1189,31 @@ function rejectNativeIntentKeys(value: Record<string, unknown>): void {
       visit(child, childPath);
     }
   };
-  visit(value, "intent");
+  visit(value, rootPath);
+}
+
+function validateSafeOverrides(overrides: string[]): void {
+  const seen = new Set<string>();
+  for (const path of overrides) {
+    if (seen.has(path)) {
+      throw new Error(`Duplicate safe override is forbidden: ${path}`);
+    }
+    seen.add(path);
+    if (
+      !/^(?:portable_options|semantic_options)\.[A-Za-z0-9_.-]+$/.test(path)
+    ) {
+      throw new Error(
+        `Safe override must use a portable_options. or semantic_options. path: ${path}`,
+      );
+    }
+    if (
+      path
+        .split(".")
+        .some((segment) => /^native(?:$|[._-]|[A-Z])/.test(segment))
+    ) {
+      throw new Error(`Driver-native safe override is forbidden: ${path}`);
+    }
+  }
 }
 
 function withoutUndefined<T extends Record<string, unknown>>(

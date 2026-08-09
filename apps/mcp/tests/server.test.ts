@@ -122,6 +122,59 @@ describe("Piqae MCP server", () => {
     await server.close();
   });
 
+  it("rejects exact native fields with the caller's root path", async () => {
+    const fetchMock = vi.fn();
+    globalThis.fetch = fetchMock as typeof fetch;
+    const { client, server } = await linked(config());
+    const response = await client.callTool({
+      name: "piqae_workflows",
+      arguments: {
+        action: "create",
+        name: "Unsafe",
+        printer_id: "ptr_test",
+        capability_revision: 1,
+        definition: { semantic_options: { effect: { native: "opaque" } } },
+        safe_overrides: [],
+        published: false,
+        confirm: "ptr_test",
+      },
+    });
+    expect(response.isError).toBe(true);
+    expect(JSON.stringify(response.structuredContent)).toContain(
+      "definition.semantic_options.effect.native",
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+    await client.close();
+    await server.close();
+  });
+
+  it.each([
+    ["driver-native", ["portable_options.native_options.InputSlot"]],
+    ["invalid prefix", ["document_manifest.scaling"]],
+    ["duplicate", ["portable_options.copies", "portable_options.copies"]],
+  ])("rejects %s workflow safe overrides", async (_name, safeOverrides) => {
+    const fetchMock = vi.fn();
+    globalThis.fetch = fetchMock as typeof fetch;
+    const { client, server } = await linked(config());
+    const response = await client.callTool({
+      name: "piqae_workflows",
+      arguments: {
+        action: "create",
+        name: "Unsafe",
+        printer_id: "ptr_test",
+        capability_revision: 1,
+        definition: {},
+        safe_overrides: safeOverrides,
+        published: false,
+        confirm: "ptr_test",
+      },
+    });
+    expect(response.isError).toBe(true);
+    expect(fetchMock).not.toHaveBeenCalled();
+    await client.close();
+    await server.close();
+  });
+
   it("advertises the complete grouped tool and knowledge surface", async () => {
     const { client, server } = await linked(config());
     const tools = await client.listTools();
