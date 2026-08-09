@@ -73,7 +73,8 @@ printers. Production trace export is covered in the
 
 ## Packages
 
-- TypeScript: `npm install @piqae/sdk`
+- TypeScript: `npm install @piqae/sdk` after the first public SDK release;
+  until then, use the workspace package at `sdk/typescript`
 - Containers: `ghcr.io/piqae/piqae/server`, `ghcr.io/piqae/piqae/migrate`, and
   `ghcr.io/piqae/piqae/web`
 - Native candidates: draft releases in
