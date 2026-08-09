@@ -86,7 +86,9 @@ def classify(paths: Iterable[str], *, run_all: bool = False) -> dict[str, bool]:
         selected["web"] |= js_workspace or openapi or path.startswith(
             ("apps/web/", "contracts/", "deploy/cloudflare/")
         )
-        selected["sdk"] |= js_workspace or openapi or path.startswith("sdk/")
+        selected["sdk"] |= js_workspace or openapi or path.startswith(
+            ("sdk/", "apps/mcp/")
+        )
         selected["openapi"] |= openapi
         selected["terraform"] |= path.startswith("deploy/terraform/")
         selected["dependency_policy"] |= root_rust or path in {
@@ -97,7 +99,7 @@ def classify(paths: Iterable[str], *, run_all: bool = False) -> dict[str, bool]:
         if path.startswith(".github/workflows/"):
             selected["release_tooling"] = True
             name = path.removeprefix(".github/workflows/")
-            selected["sdk"] |= name == "sdk-release.yml"
+            selected["sdk"] |= name in {"sdk-release.yml", "mcp-release.yml"}
             selected["dependency_policy"] |= name == "supply-chain.yml"
             selected["macos_packaging"] |= name in {
                 "macos-release.yml",
