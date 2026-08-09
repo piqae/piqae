@@ -243,6 +243,10 @@ behavior, ribbon overlay, or a second physical pass; those are not interchangeab
 
 ## Open-source driver support packs
 
+The executable format, trust rules and contribution template live in the
+[`driver-support` contributor guide](../../driver-support/README.md). The Rust
+loader enforces these rules independently of documentation.
+
 Make mappings data-driven and reviewable rather than accumulating vendor/model
 conditionals in executor code. A support pack should be a versioned directory:
 
