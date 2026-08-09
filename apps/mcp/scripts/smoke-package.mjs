@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { access, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -52,9 +52,11 @@ try {
   assert.equal(typeof mcp.createPiqaeMcpServer, "function");
   assert.equal(typeof mcp.loadConfig, "function");
 
+  const executable = join(scratch, "node_modules/.bin/piqae-mcp");
+  await access(executable);
   const help = run(
-    "node",
-    [join(scratch, "node_modules/@piqae/mcp-server/dist/index.js"), "--help"],
+    executable,
+    ["--help"],
     scratch,
   );
   assert.match(help, /piqae-mcp \[--stdio \| --http\]/);
