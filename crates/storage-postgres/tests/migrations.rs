@@ -4,6 +4,91 @@ use piqae_storage_postgres::PostgresStore;
 use sqlx::{PgPool, migrate::Migrator, postgres::PgPoolOptions};
 use std::{borrow::Cow, env};
 
+#[tokio::test]
+async fn semantic_capabilities_upgrade_is_tenant_scoped_and_backfilled() {
+    let Some(database_url) = env::var("PIQAE_TEST_DATABASE_URL").ok() else {
+        eprintln!("skipped: set PIQAE_TEST_DATABASE_URL to run PostgreSQL migration evidence");
+        return;
+    };
+    let schema = format!("piqae_semantic_migration_{}", ulid::Ulid::new()).to_ascii_lowercase();
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&database_url)
+        .await
+        .expect("connect PostgreSQL test database");
+    sqlx::query(&format!("CREATE SCHEMA {schema}"))
+        .execute(&admin)
+        .await
+        .expect("create disposable schema");
+    let pool = schema_pool(&database_url, &schema).await;
+    let all = sqlx::migrate!("../../migrations/postgres");
+    let previous = Migrator {
+        migrations: Cow::Owned(
+            all.iter()
+                .filter(|migration| migration.version < 31)
+                .cloned()
+                .collect(),
+        ),
+        ignore_missing: false,
+        locking: true,
+        no_tx: false,
+    };
+    previous.run(&pool).await.expect("apply version 30 schema");
+    for suffix in ["a", "b"] {
+        sqlx::query("INSERT INTO workspaces (id, name, slug) VALUES ($1, $2, $3)")
+            .bind(format!("wsp_{suffix}"))
+            .bind(format!("Workspace {suffix}"))
+            .bind(format!("workspace-{suffix}"))
+            .execute(&pool)
+            .await
+            .expect("insert workspace");
+        sqlx::query(
+            "INSERT INTO environments (id, workspace_id, kind, name) VALUES ($1,$2,'test','Test')",
+        )
+        .bind(format!("env_{suffix}"))
+        .bind(format!("wsp_{suffix}"))
+        .execute(&pool)
+        .await
+        .expect("insert environment");
+        sqlx::query("INSERT INTO agents (id, workspace_id, environment_id, name, installation_id, os, architecture, version, protocol_version) VALUES ($1,$2,$3,'Node',$4,'linux','x86_64','test',1)")
+            .bind(format!("agt_{suffix}"))
+            .bind(format!("wsp_{suffix}"))
+            .bind(format!("env_{suffix}"))
+            .bind(format!("install-{suffix}"))
+            .execute(&pool).await.expect("insert agent");
+        sqlx::query("INSERT INTO printers (id, workspace_id, environment_id, agent_id, native_id, name) VALUES ($1,$2,$3,$4,$5,'Printer')")
+            .bind(format!("prt_{suffix}"))
+            .bind(format!("wsp_{suffix}"))
+            .bind(format!("env_{suffix}"))
+            .bind(format!("agt_{suffix}"))
+            .bind(format!("native-{suffix}"))
+            .execute(&pool).await.expect("insert printer");
+    }
+    PostgresStore::from_pool(pool.clone())
+        .migrate()
+        .await
+        .expect("upgrade to semantic capability schema");
+    let defaults: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM printers WHERE semantic_capabilities = '{}'::jsonb",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("verify safe backfill");
+    assert_eq!(defaults, 2);
+    sqlx::query("UPDATE printers SET semantic_capabilities = '{\"facets\":{\"media.sensing\":[\"gap\"]}}'::jsonb WHERE id = 'prt_a' AND workspace_id = 'wsp_a' AND environment_id = 'env_a'")
+        .execute(&pool).await.expect("update exact tenant printer");
+    let untouched: serde_json::Value = sqlx::query_scalar(
+        "SELECT semantic_capabilities FROM printers WHERE id = 'prt_b' AND workspace_id = 'wsp_b' AND environment_id = 'env_b'",
+    )
+    .fetch_one(&pool).await.expect("read other tenant printer");
+    assert_eq!(untouched, serde_json::json!({}));
+    pool.close().await;
+    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+        .execute(&admin)
+        .await
+        .expect("drop exact disposable schema");
+}
+
 async fn schema_pool(database_url: &str, schema: &str) -> PgPool {
     let schema = schema.to_owned();
     PgPoolOptions::new()

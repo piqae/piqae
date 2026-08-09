@@ -2370,6 +2370,7 @@ pub async fn agent_sync(
                 capabilities: printer.capabilities.clone(),
                 capability_revision: printer.capability_revision,
                 native_options: printer.native_options.clone(),
+                semantic_capabilities: printer.semantic_capabilities.clone(),
                 profiles: printer
                     .profiles
                     .iter()

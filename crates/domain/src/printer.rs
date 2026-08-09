@@ -124,7 +124,16 @@ pub struct SupportPackProvenance {
 #[serde(default)]
 pub struct SemanticPrinterCapabilities {
     pub facets: BTreeMap<String, Vec<String>>,
+    /// Exact reverse mappings derived from the matched pack and the live
+    /// advertised native choices. Missing or ambiguous entries are read-only.
+    pub native_resolutions: BTreeMap<String, BTreeMap<String, SemanticNativeResolution>>,
     pub support_pack: Option<SupportPackProvenance>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SemanticNativeResolution {
+    pub native_option: String,
+    pub native_choice: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

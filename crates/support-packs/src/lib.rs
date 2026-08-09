@@ -6,7 +6,8 @@
 
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use piqae_domain::{
-    DriverFingerprint, NativePrinterOption, SemanticPrinterCapabilities, SupportPackProvenance,
+    DriverFingerprint, NativePrinterOption, SemanticNativeResolution, SemanticPrinterCapabilities,
+    SupportPackProvenance,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -227,6 +228,8 @@ impl SupportPackRegistry {
             Err(error) => return Err(error),
         };
         let mut values = BTreeMap::<String, BTreeSet<String>>::new();
+        let mut resolutions =
+            BTreeMap::<String, BTreeMap<String, Option<SemanticNativeResolution>>>::new();
         for rule in &pack.mappings {
             if rule.platform != fingerprint.platform {
                 continue;
@@ -240,6 +243,20 @@ impl SupportPackRegistry {
                         .entry(rule.semantic_facet.clone())
                         .or_default()
                         .insert(semantic_choice.clone());
+                    let candidate = SemanticNativeResolution {
+                        native_option: rule.native_capability_key.clone(),
+                        native_choice: native_choice.value.clone(),
+                    };
+                    resolutions
+                        .entry(rule.semantic_facet.clone())
+                        .or_default()
+                        .entry(semantic_choice.clone())
+                        .and_modify(|current| {
+                            if current.as_ref() != Some(&candidate) {
+                                *current = None;
+                            }
+                        })
+                        .or_insert(Some(candidate));
                 }
             }
         }
@@ -247,6 +264,16 @@ impl SupportPackRegistry {
             facets: values
                 .into_iter()
                 .map(|(facet, choices)| (facet, choices.into_iter().collect()))
+                .collect(),
+            native_resolutions: resolutions
+                .into_iter()
+                .filter_map(|(facet, choices)| {
+                    let choices = choices
+                        .into_iter()
+                        .filter_map(|(choice, resolution)| resolution.map(|value| (choice, value)))
+                        .collect::<BTreeMap<_, _>>();
+                    (!choices.is_empty()).then_some((facet, choices))
+                })
                 .collect(),
             support_pack: Some(SupportPackProvenance {
                 pack_id: pack.manifest.pack_id.clone(),
@@ -874,6 +901,13 @@ mod tests {
         };
         let projection = registry.normalize(Some(&fingerprint), &options)?;
         assert_eq!(projection.facets["media.sensing"], ["gap"]);
+        assert_eq!(
+            projection.native_resolutions["media.sensing"]["gap"],
+            SemanticNativeResolution {
+                native_option: "display-safe-option".into(),
+                native_choice: "Native A".into(),
+            }
+        );
         assert_eq!(
             projection
                 .support_pack
