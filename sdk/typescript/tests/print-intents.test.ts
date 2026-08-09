@@ -71,7 +71,14 @@ describe("PrintIntentBuilder", () => {
         capabilityRevision: 7,
         documentManifest: manifest,
       }).portable({ native_options: { undocumented: "value" } }),
-    ).toThrow(/driver-native/);
+    ).toThrow(/Driver-native/);
+    expect(() =>
+      PrintIntentBuilder.create({
+        printerId: "ptr_1",
+        capabilityRevision: 7,
+        documentManifest: manifest,
+      }).portable({ copies: 1, nested: { native: "opaque" } } as never),
+    ).toThrow(/Driver-native field/);
     expect(() =>
       PrintIntentBuilder.create({
         printerId: "ptr_1",
@@ -91,6 +98,15 @@ describe("PrintIntentBuilder", () => {
         ({ code }) => code,
       ),
     ).toEqual(["stale_capability_revision", "facet_value_not_allowed"]);
+    const escaped = structuredClone(intent) as typeof intent & {
+      portable_options: { nested: { native_config: string } };
+    };
+    escaped.portable_options = { nested: { native_config: "opaque" } };
+    expect(
+      preliminarilyValidatePrintIntent(escaped, capabilities).errors.map(
+        ({ code }) => code,
+      ),
+    ).toContain("native_options_forbidden");
   });
 
   it("checks declared dependencies and conflicts without pretending to be authoritative", () => {

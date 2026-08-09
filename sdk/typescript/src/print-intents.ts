@@ -42,9 +42,7 @@ export class PrintIntentBuilder {
   }
 
   portable(options: JobOptions): PrintIntentBuilder {
-    if ("native_options" in options) {
-      throw new TypeError("Print intents cannot contain driver-native options");
-    }
+    assertNoNativeFields(options, "portable_options");
     return this.with({ portable_options: structuredClone(options) });
   }
 
@@ -106,22 +104,14 @@ export function preliminarilyValidatePrintIntent(
       ),
     );
   }
-  if ("native_options" in intent.portable_options) {
-    errors.push(
-      finding(
-        "native_options_forbidden",
-        "portable_options.native_options",
-        "Driver-native options cannot be supplied through a print intent.",
-      ),
-    );
-  }
   try {
+    assertNoNativeFields(intent.portable_options, "portable_options");
     assertNoNativeFields(intent.semantic_options, "semantic_options");
   } catch (error) {
     errors.push(
       finding(
         "native_options_forbidden",
-        "semantic_options",
+        "print_intent",
         String((error as Error).message),
       ),
     );
@@ -297,7 +287,7 @@ function assertNoNativeFields(value: unknown, path: string): void {
   if (typeof value !== "object" || value === null) return;
   for (const [key, child] of Object.entries(value)) {
     const childPath = `${path}.${key}`;
-    if (/^native(?:[._-]|[A-Z])/.test(key)) {
+    if (/^native(?:$|[._-]|[A-Z])/.test(key)) {
       throw new TypeError(`Driver-native field is forbidden: ${childPath}`);
     }
     assertNoNativeFields(child, childPath);

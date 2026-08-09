@@ -2599,8 +2599,6 @@ export interface components {
             metadata?: {
                 [key: string]: string;
             };
-            /** @description Optional validated job-scoped intent. Existing options-only submissions remain supported. */
-            print_intent?: components["schemas"]["PrintIntent"];
             /** @description Digest returned by resolvePrintIntent. Required when submitting a resolved professional workflow. */
             resolved_ticket_digest?: components["schemas"]["Sha256Hex"];
         } & (unknown | unknown);
