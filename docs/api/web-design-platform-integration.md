@@ -49,7 +49,7 @@ coordinated product journey with four visible or operational surfaces:
 | Piqae native app and durable node | Piqae plus local operator | Explicit local consent, printer selection, OS permissions, driver/profile capture, durable offline queue, native handoff, and local recovery. |
 
 The host product should own the surrounding journey and vocabulary while
-Piqae remains visible at security boundaries: installer identity, operating-
+Piqae remains visible at security boundaries: installer identity, operating
 system permission prompts, one-time connection approval, native diagnostics,
 and support evidence. Do not visually spoof those boundaries or describe a
 download as a connected printer.

@@ -34,7 +34,9 @@ export async function assertSecretDeliveryReady(
       "PIQAE_MCP_SECRET_DIRECTORY must be a real directory, not a symlink.",
     );
   }
-  if ((directory.mode & 0o077) !== 0) {
+  // Windows security is enforced by NTFS ACLs; fs.Stats.mode does not
+  // represent those access-control entries.
+  if (process.platform !== "win32" && (directory.mode & 0o077) !== 0) {
     throw new Error(
       "PIQAE_MCP_SECRET_DIRECTORY must not grant group or other permissions (use mode 0700).",
     );

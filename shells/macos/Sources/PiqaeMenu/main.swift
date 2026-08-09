@@ -751,6 +751,8 @@ final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             profileName: profile.name
         )
         test.image = symbol("doc.text", description: "Test print preset")
+        test.isEnabled = PrinterProfileCaptureAvailability(printerState: printer.state).canCapture
+            && profile.status != "invalid"
         return test
     }
 
@@ -804,7 +806,7 @@ final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             informational(MenuPresentation.connectionStatusTitle(connection: status?.connection ?? ""))
         )
         connections.addItem(informational("Access is set separately for each service"))
-        if connectionsURL() != nil {
+        if explicitConnectionsURL() != nil {
             connections.addItem(.separator())
             let manage = connections.addItem(
                 withTitle: "Manage Access & Reauthorize…",
@@ -813,6 +815,15 @@ final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             )
             manage.target = self
             manage.image = symbol("person.badge.key", description: "Manage connection access")
+        } else if client != nil {
+            connections.addItem(.separator())
+            let details = connections.addItem(
+                withTitle: "View Connections…",
+                action: #selector(openConnections),
+                keyEquivalent: ""
+            )
+            details.target = self
+            details.image = symbol("list.bullet.rectangle", description: "View connections")
         } else {
             connections.addItem(informational("Connection management link unavailable"))
         }
@@ -1184,10 +1195,6 @@ final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             url.password == nil
         else { return nil }
         return url
-    }
-
-    private func connectionsURL() -> URL? {
-        explicitConnectionsURL() ?? (client != nil ? configuration?.baseURL : dashboardURL())
     }
 
     private func agentLogURL() -> URL {

@@ -2,6 +2,7 @@
 
 - [Quickstart](quickstart.md)
 - [Jobs, content, options, and printer capabilities](jobs-content-and-capabilities.md)
+- [MCP agent integration](mcp-agent-integration.md)
 - [Authentication](authentication.md)
 - [Platform service accounts](platform-service-accounts.md)
 - [Headless SaaS quickstart](platform-headless-quickstart.md)
