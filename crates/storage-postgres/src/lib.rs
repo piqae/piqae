@@ -3579,6 +3579,39 @@ impl PostgresStore {
         rows.iter().map(print_workflow_from_row).collect()
     }
 
+    pub async fn get_print_workflow_revision(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        workflow_id: &str,
+        revision: u64,
+    ) -> Result<StoredPrintWorkflow, StorageError> {
+        let revision = i64::try_from(revision)
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        let row = sqlx::query(
+            "SELECT workflow.id, revision.revision, workflow.name, revision.printer_id,
+                    revision.capability_revision, revision.profile_id, revision.profile_revision,
+                    revision.stock_id, revision.stock_revision, revision.definition,
+                    revision.safe_overrides, revision.published, workflow.archived,
+                    workflow.created_at, workflow.updated_at
+             FROM print_workflows workflow
+             JOIN print_workflow_revisions revision
+               ON revision.workspace_id = workflow.workspace_id
+              AND revision.environment_id = workflow.environment_id
+              AND revision.workflow_id = workflow.id
+             WHERE workflow.workspace_id = $1 AND workflow.environment_id = $2
+               AND workflow.id = $3 AND revision.revision = $4",
+        )
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(workflow_id)
+        .bind(revision)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(StorageError::NotFound)?;
+        print_workflow_from_row(&row)
+    }
+
     pub async fn create_print_workflow(
         &self,
         workspace_id: WorkspaceId,
@@ -3668,7 +3701,8 @@ impl PostgresStore {
         .bind(ticket.created_at)
         .execute(&self.pool)
         .await?;
-        Ok(ticket.clone())
+        self.get_resolved_print_ticket(workspace_id, environment_id, &ticket.digest)
+            .await
     }
 
     pub async fn get_resolved_print_ticket(

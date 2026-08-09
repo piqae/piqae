@@ -105,8 +105,8 @@ export function preliminarilyValidatePrintIntent(
     );
   }
   try {
-    assertNoNativeFields(intent.portable_options, "portable_options");
-    assertNoNativeFields(intent.semantic_options, "semantic_options");
+    assertNoNativeFields(intent.portable_options ?? {}, "portable_options");
+    assertNoNativeFields(intent.semantic_options ?? {}, "semantic_options");
   } catch (error) {
     errors.push(
       finding(
@@ -116,7 +116,8 @@ export function preliminarilyValidatePrintIntent(
       ),
     );
   }
-  for (const [name, value] of Object.entries(intent.semantic_options)) {
+  const semanticOptions = intent.semantic_options ?? {};
+  for (const [name, value] of Object.entries(semanticOptions)) {
     try {
       assertFacetName(name);
     } catch (error) {
@@ -152,7 +153,7 @@ export function preliminarilyValidatePrintIntent(
     }
     validateFacet(name, value, facet, errors);
     for (const dependency of facet.dependencies ?? []) {
-      if (!(dependency in intent.semantic_options)) {
+      if (!(dependency in semanticOptions)) {
         errors.push(
           finding(
             "facet_dependency_missing",
@@ -163,7 +164,7 @@ export function preliminarilyValidatePrintIntent(
       }
     }
     for (const conflict of facet.conflicts ?? []) {
-      if (conflict in intent.semantic_options) {
+      if (conflict in semanticOptions) {
         errors.push(
           finding(
             "facet_conflict",

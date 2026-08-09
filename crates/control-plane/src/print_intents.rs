@@ -22,23 +22,23 @@ use std::{collections::BTreeMap, str::FromStr};
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PrintIntent {
-    schema_version: u8,
-    printer_id: String,
-    capability_revision: u64,
-    workflow: Option<ResourceRevision>,
-    stock: Option<ResourceRevision>,
+    pub(crate) schema_version: u8,
+    pub(crate) printer_id: String,
+    pub(crate) capability_revision: u64,
+    pub(crate) workflow: Option<ResourceRevision>,
+    pub(crate) stock: Option<ResourceRevision>,
     #[serde(default)]
-    portable_options: JobOptions,
+    pub(crate) portable_options: JobOptions,
     #[serde(default)]
-    semantic_options: BTreeMap<String, Value>,
-    document_manifest: Value,
+    pub(crate) semantic_options: BTreeMap<String, Value>,
+    pub(crate) document_manifest: Value,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct ResourceRevision {
-    id: String,
-    revision: u64,
+pub(crate) struct ResourceRevision {
+    pub(crate) id: String,
+    pub(crate) revision: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -176,7 +176,7 @@ pub async fn validate(
     headers: HeaderMap,
     Json(request): Json<ValidationRequest>,
 ) -> Result<Json<Value>, AppError> {
-    let tenant = authenticate_native(&state, &headers, Scope::JobsWrite).await?;
+    let tenant = authenticate_native(&state, &headers, Scope::PrintersRead).await?;
     let result = validate_for_tenant(
         &state,
         tenant.workspace_id,
@@ -212,8 +212,7 @@ pub async fn resolve(
         .ok_or_else(|| {
             AppError::conflict("print_intent_invalid", "Normalized intent is unavailable.")
         })?;
-    let expires_at = Utc::now() + Duration::minutes(15);
-    let mut display = json!({
+    let ticket_identity = json!({
         "printer_id": intent["printer_id"], "capability_revision": intent["capability_revision"],
         "workflow": intent["workflow"], "stock": intent["stock"],
         "resolved_options": intent["portable_options"],
@@ -221,18 +220,23 @@ pub async fn resolve(
         "provenance": {
             "portable_options":"installed_driver_capability_revision",
             "semantic_options":"trusted_support_pack_exact_native_resolution"
-        },
-        "expires_at": expires_at,
+        }
     });
-    let canonical = serde_json::to_vec(&display)?;
+    let canonical = serde_json::to_vec(&ticket_identity)?;
     let digest = hex::encode(Sha256::digest(canonical));
+    let expires_at = Utc::now() + Duration::minutes(15);
+    let mut display = ticket_identity;
+    display
+        .as_object_mut()
+        .ok_or_else(|| AppError::invalid("invalid_print_intent", "Resolved ticket is invalid."))?
+        .insert("expires_at".into(), json!(expires_at));
     display
         .as_object_mut()
         .ok_or_else(|| AppError::invalid("invalid_print_intent", "Resolved ticket is invalid."))?
         .insert("digest".into(), json!(digest));
     let printer_id = PrinterId::from_str(intent["printer_id"].as_str().unwrap_or_default())
         .map_err(|_| AppError::invalid("invalid_printer_id", "Printer ID is invalid."))?;
-    state
+    let stored = state
         .repository
         .store_resolved_print_ticket(
             tenant.workspace_id,
@@ -247,7 +251,7 @@ pub async fn resolve(
             },
         )
         .await?;
-    Ok((StatusCode::CREATED, Json(display)).into_response())
+    Ok((StatusCode::CREATED, Json(stored.display_ticket)).into_response())
 }
 
 pub async fn loaded_media(
@@ -334,6 +338,12 @@ pub async fn upsert_loaded_media(
                 request.remaining_amount,
             )
         } else {
+            if request.calibration_state != "unknown" || request.remaining_amount.is_some() {
+                return Err(AppError::invalid(
+                    "invalid_loaded_media",
+                    "Clearing stock requires unknown calibration and no remaining amount.",
+                ));
+            }
             (None, None, "unknown".to_owned(), "unknown".to_owned(), None)
         };
     let now = Utc::now();
@@ -399,14 +409,15 @@ async fn validate_for_tenant(
     if let Some(workflow_ref) = intent.workflow.clone() {
         let workflow = state
             .repository
-            .list_print_workflows(workspace_id, environment_id)
-            .await?
-            .into_iter()
-            .find(|current| {
-                current.id == workflow_ref.id && current.revision == workflow_ref.revision
-            });
+            .get_print_workflow_revision(
+                workspace_id,
+                environment_id,
+                &workflow_ref.id,
+                workflow_ref.revision,
+            )
+            .await;
         match workflow {
-            Some(workflow)
+            Ok(workflow)
                 if workflow.published
                     && !workflow.archived
                     && workflow.printer_id == printer_id =>
@@ -476,16 +487,17 @@ async fn validate_for_tenant(
                     )),
                 }
             }
-            Some(_) => errors.push(finding(
+            Ok(_) => errors.push(finding(
                 "workflow_not_published",
                 "workflow",
                 "The exact workflow revision is not published for this printer.",
             )),
-            None => errors.push(finding(
+            Err(crate::repository::RepositoryError::NotFound) => errors.push(finding(
                 "workflow_revision_unavailable",
                 "workflow",
                 "The exact workflow revision is unavailable for this printer.",
             )),
+            Err(error) => return Err(error.into()),
         }
     }
     resolve_semantic_options(&mut intent, &printer, &mut errors);

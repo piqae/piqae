@@ -1423,12 +1423,12 @@ paths:
         "409": { $ref: "#/components/responses/Error" }
   /v1/print-workflows:
     get:
-      summary: List published and tenant-owned print workflows
+      summary: List published active print workflows visible to the tenant
       tags: [Routing]
       operationId: listPrintWorkflows
       responses:
         "200":
-          description: Tenant-scoped workflows with their latest revision.
+          description: Published, non-archived tenant-scoped workflows with their latest revision.
           content:
             application/json:
               schema:
@@ -4032,6 +4032,11 @@ components:
           type: array
           maxItems: 512
           items: { type: [string, number, integer, boolean] }
+        writable_values:
+          type: array
+          maxItems: 512
+          description: Subset of values proven safe for job-scoped writes; absent values are display-only.
+          items: { type: [string, number, integer, boolean] }
         minimum: { type: [number, "null"] }
         maximum: { type: [number, "null"] }
         default_value: {}
@@ -4083,7 +4088,7 @@ components:
     PrintIntent:
       type: object
       additionalProperties: false
-      required: [schema_version, printer_id, capability_revision, portable_options, semantic_options, document_manifest]
+      required: [schema_version, printer_id, capability_revision, document_manifest]
       properties:
         schema_version: { type: integer, const: 1 }
         printer_id: { type: string }
@@ -4096,9 +4101,12 @@ components:
           oneOf:
             - { $ref: "#/components/schemas/ResourceRevision" }
             - { type: "null" }
-        portable_options: { $ref: "#/components/schemas/JobOptions" }
+        portable_options:
+          allOf: [{ $ref: "#/components/schemas/JobOptions" }]
+          default: {}
         semantic_options:
           type: object
+          default: {}
           maxProperties: 128
           description: Values keyed only by normalized capability facet name; native driver keys are rejected.
           additionalProperties: true
@@ -4133,7 +4141,7 @@ components:
     ResolvedPrintTicket:
       type: object
       additionalProperties: false
-      required: [digest, printer_id, capability_revision, resolved_options, provenance, expires_at]
+      required: [digest, printer_id, capability_revision, resolved_options, semantic_options, provenance, expires_at]
       properties:
         digest: { $ref: "#/components/schemas/Sha256Hex" }
         printer_id: { type: string }
@@ -4147,6 +4155,10 @@ components:
             - { $ref: "#/components/schemas/ResourceRevision" }
             - { type: "null" }
         resolved_options: { $ref: "#/components/schemas/JobOptions" }
+        semantic_options:
+          type: object
+          maxProperties: 128
+          additionalProperties: true
         provenance:
           type: object
           maxProperties: 128
@@ -4176,16 +4188,29 @@ components:
           items: { type: string, minLength: 1, maxLength: 255 }
         published: { type: boolean, default: false }
     PrintWorkflow:
-      allOf:
-        - $ref: "#/components/schemas/CreatePrintWorkflow"
-        - type: object
-          required: [id, revision, archived, created_at, updated_at]
-          properties:
-            id: { type: string, pattern: "^pwf_" }
-            revision: { type: integer, format: int64, minimum: 1 }
-            archived: { type: boolean }
-            created_at: { type: string, format: date-time }
-            updated_at: { type: string, format: date-time }
+      type: object
+      additionalProperties: false
+      required: [id, revision, name, printer_id, capability_revision, profile_id, profile_revision, stock_id, stock_revision, definition, safe_overrides, published, archived, created_at, updated_at]
+      properties:
+        id: { type: string, pattern: "^pwf_" }
+        revision: { type: integer, format: int64, minimum: 1 }
+        name: { type: string, minLength: 1, maxLength: 255 }
+        printer_id: { type: string }
+        capability_revision: { type: integer, format: int64, minimum: 1 }
+        profile_id: { type: [string, "null"], maxLength: 255 }
+        profile_revision: { type: [integer, "null"], format: int64, minimum: 1 }
+        stock_id: { type: [string, "null"], maxLength: 255 }
+        stock_revision: { type: [integer, "null"], format: int64, minimum: 1 }
+        definition: { $ref: "#/components/schemas/PrintIntent" }
+        safe_overrides:
+          type: array
+          uniqueItems: true
+          maxItems: 128
+          items: { type: string, minLength: 1, maxLength: 255 }
+        published: { type: boolean }
+        archived: { type: boolean }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
     LoadedMediaObservation:
       type: object
       additionalProperties: false

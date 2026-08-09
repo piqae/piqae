@@ -334,6 +334,15 @@ pub trait Repository: Send + Sync + 'static {
     ) -> Result<Vec<StoredPrintWorkflow>, RepositoryError> {
         Err(RepositoryError::NotFound)
     }
+    async fn get_print_workflow_revision(
+        &self,
+        _workspace_id: WorkspaceId,
+        _environment_id: EnvironmentId,
+        _workflow_id: &str,
+        _revision: u64,
+    ) -> Result<StoredPrintWorkflow, RepositoryError> {
+        Err(RepositoryError::NotFound)
+    }
     async fn create_print_workflow(
         &self,
         _workspace_id: WorkspaceId,
@@ -873,6 +882,17 @@ impl Repository for PostgresStore {
         environment_id: EnvironmentId,
     ) -> Result<Vec<StoredPrintWorkflow>, RepositoryError> {
         Self::list_print_workflows(self, workspace_id, environment_id)
+            .await
+            .map_err(Into::into)
+    }
+    async fn get_print_workflow_revision(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        workflow_id: &str,
+        revision: u64,
+    ) -> Result<StoredPrintWorkflow, RepositoryError> {
+        Self::get_print_workflow_revision(self, workspace_id, environment_id, workflow_id, revision)
             .await
             .map_err(Into::into)
     }
@@ -3270,6 +3290,27 @@ impl Repository for MemoryRepository {
         Ok(values)
     }
 
+    async fn get_print_workflow_revision(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        workflow_id: &str,
+        revision: u64,
+    ) -> Result<StoredPrintWorkflow, RepositoryError> {
+        self.state
+            .read()
+            .await
+            .print_workflows
+            .get(workflow_id)
+            .filter(|(workspace, environment, workflow)| {
+                *workspace == workspace_id
+                    && *environment == environment_id
+                    && workflow.revision == revision
+            })
+            .map(|(_, _, workflow)| workflow.clone())
+            .ok_or(RepositoryError::NotFound)
+    }
+
     async fn create_print_workflow(
         &self,
         workspace_id: WorkspaceId,
@@ -5144,6 +5185,89 @@ mod routing_repository_tests {
                 .await,
             Err(RepositoryError::NotFound)
         ));
+    }
+
+    #[tokio::test]
+    async fn workflow_revision_lookup_is_exact_and_tenant_scoped() {
+        let repository = MemoryRepository::default();
+        let workspace = WorkspaceId::new();
+        let other_workspace = WorkspaceId::new();
+        let environment = EnvironmentId::new();
+        let printer = PrinterId::new();
+        repository
+            .add_printer(workspace, environment, printer, AgentId::new())
+            .await;
+        let now = Utc::now();
+        let workflow = StoredPrintWorkflow {
+            id: "pwf_exact".into(),
+            revision: 3,
+            name: "Exact".into(),
+            printer_id: printer,
+            capability_revision: 0,
+            profile_id: None,
+            profile_revision: None,
+            stock_id: None,
+            stock_revision: None,
+            definition: serde_json::json!({}),
+            safe_overrides: Vec::new(),
+            published: true,
+            archived: false,
+            created_at: now,
+            updated_at: now,
+        };
+        repository
+            .create_print_workflow(workspace, environment, &workflow)
+            .await
+            .expect("create workflow");
+        assert_eq!(
+            repository
+                .get_print_workflow_revision(workspace, environment, "pwf_exact", 3)
+                .await
+                .expect("exact revision")
+                .revision,
+            3
+        );
+        assert!(matches!(
+            repository
+                .get_print_workflow_revision(workspace, environment, "pwf_exact", 2)
+                .await,
+            Err(RepositoryError::NotFound)
+        ));
+        assert!(matches!(
+            repository
+                .get_print_workflow_revision(other_workspace, environment, "pwf_exact", 3)
+                .await,
+            Err(RepositoryError::NotFound)
+        ));
+    }
+
+    #[tokio::test]
+    async fn resolved_ticket_digest_conflict_returns_original_ticket() {
+        let repository = MemoryRepository::default();
+        let workspace = WorkspaceId::new();
+        let environment = EnvironmentId::new();
+        let now = Utc::now();
+        let original = StoredResolvedPrintTicket {
+            digest: "a".repeat(64),
+            printer_id: PrinterId::new(),
+            capability_revision: 4,
+            display_ticket: serde_json::json!({"expires_at":"original"}),
+            expires_at: now + chrono::Duration::minutes(15),
+            created_at: now,
+        };
+        repository
+            .store_resolved_print_ticket(workspace, environment, &original)
+            .await
+            .expect("store original");
+        let mut retry = original.clone();
+        retry.display_ticket = serde_json::json!({"expires_at":"retry"});
+        retry.expires_at = now + chrono::Duration::minutes(30);
+        let stored = repository
+            .store_resolved_print_ticket(workspace, environment, &retry)
+            .await
+            .expect("load original conflict");
+        assert_eq!(stored.display_ticket, original.display_ticket);
+        assert_eq!(stored.expires_at, original.expires_at);
     }
 
     #[tokio::test]

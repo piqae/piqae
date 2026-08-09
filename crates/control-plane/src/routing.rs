@@ -16,6 +16,7 @@ use piqae_storage_postgres::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use std::str::FromStr;
 
 #[derive(Debug, Deserialize)]
@@ -122,7 +123,10 @@ pub async fn list_print_workflows(
         state
             .repository
             .list_print_workflows(tenant.workspace_id, tenant.environment_id)
-            .await?,
+            .await?
+            .into_iter()
+            .filter(|workflow| workflow.published && !workflow.archived)
+            .collect(),
     ))
 }
 
@@ -150,6 +154,7 @@ pub async fn create_print_workflow(
     }
     if !request.definition.is_object()
         || request.safe_overrides.len() > 128
+        || invalid_safe_override_set(&request.safe_overrides)
         || request.safe_overrides.iter().any(|value| {
             value.is_empty()
                 || value.len() > 255
@@ -163,16 +168,19 @@ pub async fn create_print_workflow(
             "Workflow definition and safe overrides must use bounded normalized fields.",
         ));
     }
-    if request.definition["schema_version"] != 1
-        || request.definition["printer_id"] != request.printer_id
-        || request.definition["capability_revision"] != request.capability_revision
-        || !request.definition["portable_options"].is_object()
-        || !request.definition["semantic_options"].is_object()
-        || !request.definition["document_manifest"].is_object()
-        || !request
-            .definition
-            .get("workflow")
-            .is_none_or(serde_json::Value::is_null)
+    let definition =
+        serde_json::from_value::<crate::print_intents::PrintIntent>(request.definition.clone())
+            .map_err(|_| {
+                AppError::invalid(
+                    "workflow_definition_mismatch",
+                    "Workflow definition must match the print-intent contract.",
+                )
+            })?;
+    if definition.schema_version != 1
+        || definition.printer_id != request.printer_id
+        || definition.capability_revision != request.capability_revision
+        || !definition.document_manifest.is_object()
+        || definition.workflow.is_some()
     {
         return Err(AppError::invalid(
             "workflow_definition_mismatch",
@@ -765,6 +773,20 @@ fn validate_routing_policy(value: &str) -> Result<(), AppError> {
     Ok(())
 }
 
+fn invalid_safe_override_set(values: &[String]) -> bool {
+    let mut seen = HashSet::new();
+    values.iter().any(|value| !seen.insert(value.as_str()))
+        || values.iter().enumerate().any(|(index, left)| {
+            values.iter().skip(index + 1).any(|right| {
+                left.strip_prefix(right)
+                    .is_some_and(|suffix| suffix.starts_with('.'))
+                    || right
+                        .strip_prefix(left)
+                        .is_some_and(|suffix| suffix.starts_with('.'))
+            })
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -787,6 +809,22 @@ mod tests {
             Some(Some(valid))
         );
         assert!(clean_optional(Some("é".repeat(2_001)), 2_000, "invalid_target").is_err());
+    }
+
+    #[test]
+    fn safe_overrides_reject_duplicates_and_parent_child_ambiguity() {
+        assert!(invalid_safe_override_set(&[
+            "semantic_options.media".into(),
+            "semantic_options.media.sensing".into(),
+        ]));
+        assert!(invalid_safe_override_set(&[
+            "portable_options.copies".into(),
+            "portable_options.copies".into(),
+        ]));
+        assert!(!invalid_safe_override_set(&[
+            "portable_options.copies".into(),
+            "semantic_options.media.sensing".into(),
+        ]));
     }
 
     #[test]
