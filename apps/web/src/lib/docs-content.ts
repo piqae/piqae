@@ -23,8 +23,8 @@ export const docs: Doc[] = [
     description: 'Prepare the SDK integration, connect a customer, and send a durable PDF job from your server.',
     blocks: [
       {
-        heading: 'Install after the first SDK release',
-        body: 'The public npm package has not yet been released; the command below becomes available with the first SDK release. Repository development uses the workspace package at sdk/typescript. Use Piqae Cloud unless you have a specific reason to operate the control plane yourself. Platform keys are server credentials and must never be used in a browser, mobile app, or distributed desktop client.',
+        heading: 'Install',
+        body: 'Install the public SDK package. Use Piqae Cloud unless you have a specific reason to operate the control plane yourself. Platform keys are server credentials and must never be used in a browser, mobile app, or distributed desktop client.',
         code: `pnpm add @piqae/sdk
 
 # Server-only secret
