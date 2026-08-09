@@ -11,8 +11,8 @@ use chrono::{DateTime, TimeDelta, Utc};
 use piqae_auth::Scope;
 use piqae_domain::{PrinterId, PrinterState};
 use piqae_storage_postgres::{
-    StoredAgent, StoredBindingReadiness, StoredStock, StoredTarget, StoredTargetBinding,
-    StoredTargetReadiness,
+    StoredAgent, StoredBindingReadiness, StoredPrintWorkflow, StoredStock, StoredTarget,
+    StoredTargetBinding, StoredTargetReadiness,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -67,6 +67,27 @@ pub struct CreateBindingRequest {
     enabled: bool,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CreatePrintWorkflowRequest {
+    name: String,
+    printer_id: String,
+    capability_revision: u64,
+    profile: Option<ResourceRevision>,
+    stock: Option<ResourceRevision>,
+    definition: serde_json::Value,
+    safe_overrides: Vec<String>,
+    #[serde(default)]
+    published: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResourceRevision {
+    id: String,
+    revision: u64,
+}
+
 fn empty_object() -> serde_json::Value {
     serde_json::json!({})
 }
@@ -90,6 +111,82 @@ pub async fn list_stocks(
             .list_stocks(tenant.workspace_id, tenant.environment_id)
             .await?,
     ))
+}
+
+pub async fn list_print_workflows(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<StoredPrintWorkflow>>, AppError> {
+    let tenant = authenticate_native(&state, &headers, Scope::PrintersRead).await?;
+    Ok(Json(
+        state
+            .repository
+            .list_print_workflows(tenant.workspace_id, tenant.environment_id)
+            .await?,
+    ))
+}
+
+pub async fn create_print_workflow(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<CreatePrintWorkflowRequest>,
+) -> Result<Response, AppError> {
+    let tenant = authenticate_native(&state, &headers, Scope::PrintersWrite).await?;
+    let name = validate_name(&request.name, "invalid_print_workflow")?;
+    let printer_id = PrinterId::from_str(&request.printer_id)
+        .map_err(|_| AppError::invalid("invalid_print_workflow", "Printer ID is invalid."))?;
+    let printer = state
+        .repository
+        .get_printer(tenant.workspace_id, tenant.environment_id, printer_id)
+        .await?;
+    if request.capability_revision == 0
+        || printer.capability_revision != request.capability_revision
+    {
+        return Err(AppError::conflict(
+            "stale_capability_revision",
+            "The printer capability revision changed; refresh and validate again.",
+        ));
+    }
+    if !request.definition.is_object()
+        || request.safe_overrides.len() > 128
+        || request.safe_overrides.iter().any(|value| {
+            value.is_empty()
+                || value.len() > 255
+                || value.starts_with("native_options")
+                || value.starts_with("driver.")
+        })
+    {
+        return Err(AppError::invalid(
+            "invalid_print_workflow",
+            "Workflow definition and safe overrides must use bounded normalized fields.",
+        ));
+    }
+    let now = Utc::now();
+    let workflow = StoredPrintWorkflow {
+        id: format!("pwf_{}", ulid::Ulid::new()),
+        revision: 1,
+        name,
+        printer_id,
+        capability_revision: request.capability_revision,
+        profile_id: request.profile.as_ref().map(|value| value.id.clone()),
+        profile_revision: request.profile.map(|value| value.revision),
+        stock_id: request.stock.as_ref().map(|value| value.id.clone()),
+        stock_revision: request.stock.map(|value| value.revision),
+        definition: request.definition,
+        safe_overrides: request.safe_overrides,
+        published: request.published,
+        archived: false,
+        created_at: now,
+        updated_at: now,
+    };
+    let workflow = state
+        .repository
+        .create_print_workflow(tenant.workspace_id, tenant.environment_id, &workflow)
+        .await?;
+    state
+        .publish(tenant, "print_workflow.created", &workflow)
+        .await?;
+    Ok((StatusCode::CREATED, Json(workflow)).into_response())
 }
 
 pub async fn create_stock(
