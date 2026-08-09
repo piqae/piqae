@@ -3793,9 +3793,6 @@ components:
           type: object
           additionalProperties:
             type: string
-        print_intent:
-          $ref: "#/components/schemas/PrintIntent"
-          description: Optional validated job-scoped intent. Existing options-only submissions remain supported.
         resolved_ticket_digest:
           $ref: "#/components/schemas/Sha256Hex"
           description: Digest returned by resolvePrintIntent. Required when submitting a resolved professional workflow.

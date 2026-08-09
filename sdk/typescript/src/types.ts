@@ -712,8 +712,6 @@ export interface CreateJobBase {
   deliveries?: number;
   expire_after_seconds?: number;
   metadata?: Record<string, string>;
-  /** Validated normalized intent; driver-native values are forbidden. */
-  print_intent?: PrintIntent;
   /** Short-lived digest returned by printIntents.resolve. */
   resolved_ticket_digest?: string;
 }

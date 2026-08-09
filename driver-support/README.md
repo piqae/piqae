@@ -11,7 +11,7 @@ Start from [`templates/minimal`](templates/minimal). A contribution must contain
 - platform and, where relevant, exact device and firmware constraints;
 - display-safe native capability fixtures with documented redistribution rights;
 - bounded native-choice to semantic-choice mappings;
-- positive, negative and unknown-choice conformance cases;
+- positive and unknown-choice rejection conformance cases;
 - evidence explaining how each mapping was observed; and
 - an Apache-2.0-compatible licence for contributed data.
 
@@ -69,7 +69,7 @@ have different maturity.
 2. Confirm fixtures contain no serials, usernames, paths, documents or secrets.
 3. Confirm mappings use existing canonical facets and never
    `profile.safe_overrides`.
-4. Include negative and unknown-choice cases; unknown values remain unsupported.
+4. Include a positive mapping and an unknown-choice rejection case; unknown values remain unsupported.
 5. Document fixture provenance and licences in `evidence/README.md` and
    `LICENSES.md`.
 6. Sign commits with DCO (`git commit -s`).

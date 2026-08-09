@@ -1499,7 +1499,6 @@ pub struct CreateJobRequest {
     pub expire_after_seconds: i64,
     #[serde(default)]
     pub metadata: std::collections::BTreeMap<String, String>,
-    pub print_intent: Option<serde_json::Value>,
     pub resolved_ticket_digest: Option<String>,
 }
 
@@ -2981,12 +2980,6 @@ async fn validate_resolved_ticket(
     request: &CreateJobRequest,
     destination: &ResolvedJobDestination,
 ) -> Result<Option<piqae_storage_postgres::StoredResolvedPrintTicket>, AppError> {
-    if request.print_intent.is_some() != request.resolved_ticket_digest.is_some() {
-        return Err(AppError::invalid(
-            "resolved_ticket_required",
-            "print_intent and resolved_ticket_digest must be supplied together.",
-        ));
-    }
     let Some(digest) = request.resolved_ticket_digest.as_deref() else {
         return Ok(None);
     };

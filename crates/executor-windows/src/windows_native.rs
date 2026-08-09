@@ -119,7 +119,7 @@ pub fn portable_capabilities(
     let copies = scalar(DC_COPIES);
     let mut capabilities = PrinterCapabilities {
         color: scalar(DC_COLORDEVICE) == 1,
-        copies: u32::try_from(copies).unwrap_or_default(),
+        copies: u32::try_from(copies).unwrap_or(1).max(1),
         duplex: scalar(DC_DUPLEX) == 1,
         ..Default::default()
     };
