@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "vendor": "OKI",
+  "driver_family": "Pro1040/Pro1050 PS Printer Driver",
+  "observed_official_driver_version": "1.2.2",
+  "platform": "windows",
+  "models": [
+    {
+      "model": "Pro1040",
+      "process_colors": ["cyan", "magenta", "yellow", "black"],
+      "media_format": "roll",
+      "qualification_facets": [
+        "color.process",
+        "media.sensing",
+        "media.width",
+        "media.length",
+        "media.thickness",
+        "media.feed_direction",
+        "output.resolution",
+        "finishing.cut"
+      ]
+    },
+    {
+      "model": "Pro1050",
+      "process_colors": ["cyan", "magenta", "yellow", "black", "white"],
+      "media_format": "roll",
+      "qualification_facets": [
+        "color.process",
+        "color.white",
+        "media.sensing",
+        "media.width",
+        "media.length",
+        "media.thickness",
+        "media.feed_direction",
+        "output.resolution",
+        "finishing.cut"
+      ]
+    }
+  ],
+  "activation": "prohibited_without_exact_captured_driver_evidence"
+}

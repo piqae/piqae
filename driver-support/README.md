@@ -80,3 +80,9 @@ Vendor-family directories should only be added with real, legally
 redistributable evidence. The repository intentionally ships no illustrative
 OKI, Brother or Epson native option keys because invented mappings would be
 unsafe.
+
+Model qualification kits may live under `qualifications/` when authoritative
+product facts are known but exact native driver choices have not yet been
+captured. They are never passed to `PIQAE_SUPPORT_PACK_DIRS` and cannot activate
+runtime mappings. The OKI Pro1040/Pro1050 PostScript process starts at
+[`qualifications/oki-pro10xx-postscript`](qualifications/oki-pro10xx-postscript/README.md).
