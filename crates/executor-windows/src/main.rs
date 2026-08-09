@@ -136,8 +136,17 @@ mod platform {
             }
             ExecutorOperation::GetPrinterCapabilities { native_printer_id } => {
                 ensure_printer(&native_printer_id)?;
+                let capabilities = piqae_executor_windows::windows_native::portable_capabilities(
+                    &native_printer_id,
+                )
+                .map_err(|error| ExecutorError {
+                    code: error.code,
+                    message: error.message,
+                    retryable: false,
+                    handoff_may_have_succeeded: false,
+                })?;
                 Ok(ExecutorResult::Capabilities {
-                    capabilities: PrinterCapabilities::default(),
+                    capabilities,
                     native_options: std::collections::BTreeMap::new(),
                 })
             }
