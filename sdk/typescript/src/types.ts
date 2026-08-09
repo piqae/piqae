@@ -1,4 +1,13 @@
+import type { components } from './generated/schema.js';
+
 export type PiqaeId = string;
+export type CapabilityDocument = components['schemas']['CapabilityDocument'];
+export type PrintIntent = components['schemas']['PrintIntent'];
+export type PrintIntentValidation = components['schemas']['PrintIntentValidation'];
+export type ResolvedPrintTicket = components['schemas']['ResolvedPrintTicket'];
+export type LoadedMediaObservation = components['schemas']['LoadedMediaObservation'];
+export type PrintWorkflow = components['schemas']['PrintWorkflow'];
+export type CreatePrintWorkflow = components['schemas']['CreatePrintWorkflow'];
 
 export interface NodeConnector {
   id: string;
