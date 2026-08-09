@@ -9,6 +9,7 @@ export type PrintIntentFinding = components['schemas']['PrintIntentFinding'];
 export type PrintIntentValidation = components['schemas']['PrintIntentValidation'];
 export type ResolvedPrintTicket = components['schemas']['ResolvedPrintTicket'];
 export type LoadedMediaObservation = components['schemas']['LoadedMediaObservation'];
+export type UpsertLoadedMediaObservation = components['schemas']['UpsertLoadedMediaObservation'];
 export type PrintWorkflow = components['schemas']['PrintWorkflow'];
 export type CreatePrintWorkflow = components['schemas']['CreatePrintWorkflow'];
 

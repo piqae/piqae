@@ -126,6 +126,7 @@ pub async fn list_print_workflows(
     ))
 }
 
+#[allow(clippy::too_many_lines)]
 pub async fn create_print_workflow(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -152,13 +153,75 @@ pub async fn create_print_workflow(
         || request.safe_overrides.iter().any(|value| {
             value.is_empty()
                 || value.len() > 255
-                || value.starts_with("native_options")
+                || !(value.starts_with("portable_options.")
+                    || value.starts_with("semantic_options."))
                 || value.starts_with("driver.")
         })
     {
         return Err(AppError::invalid(
             "invalid_print_workflow",
             "Workflow definition and safe overrides must use bounded normalized fields.",
+        ));
+    }
+    if request.definition["schema_version"] != 1
+        || request.definition["printer_id"] != request.printer_id
+        || request.definition["capability_revision"] != request.capability_revision
+        || !request.definition["portable_options"].is_object()
+        || !request.definition["semantic_options"].is_object()
+        || !request.definition["document_manifest"].is_object()
+        || !request
+            .definition
+            .get("workflow")
+            .is_none_or(serde_json::Value::is_null)
+    {
+        return Err(AppError::invalid(
+            "workflow_definition_mismatch",
+            "Workflow definition must pin this printer and capability revision and cannot reference another workflow.",
+        ));
+    }
+    if let Some(profile) = &request.profile {
+        let requested_profile_id = profile.id.as_str();
+        let requested_profile_revision = profile.revision;
+        if profile.revision == 0
+            || !printer.profiles.iter().any(|current| {
+                current.profile_id == requested_profile_id
+                    && current.revision == requested_profile_revision
+                    && current.published
+            })
+        {
+            return Err(AppError::conflict(
+                "workflow_profile_unavailable",
+                "The exact published printer profile revision is unavailable.",
+            ));
+        }
+    }
+    if let Some(stock) = &request.stock {
+        let current = state
+            .repository
+            .get_stock(tenant.workspace_id, tenant.environment_id, &stock.id)
+            .await?;
+        if stock.revision == 0 || current.revision != stock.revision || current.archived {
+            return Err(AppError::conflict(
+                "workflow_stock_unavailable",
+                "The exact active stock revision is unavailable.",
+            ));
+        }
+        if request.definition["stock"]["id"] != stock.id
+            || request.definition["stock"]["revision"] != stock.revision
+        {
+            return Err(AppError::invalid(
+                "workflow_stock_mismatch",
+                "Workflow definition stock must match the pinned stock revision.",
+            ));
+        }
+    } else if !request
+        .definition
+        .get("stock")
+        .is_none_or(serde_json::Value::is_null)
+    {
+        return Err(AppError::invalid(
+            "workflow_stock_mismatch",
+            "A workflow definition cannot use an unpinned stock.",
         ));
     }
     let now = Utc::now();

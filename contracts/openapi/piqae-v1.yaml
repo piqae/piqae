@@ -1475,6 +1475,26 @@ paths:
         "401": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
+    put:
+      summary: Confirm or clear an operator-observed loaded-media source
+      tags: [Printers, Routing]
+      operationId: upsertPrinterLoadedMedia
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpsertLoadedMediaObservation" }
+      responses:
+        "200":
+          description: Current operator-confirmed or explicitly unknown observation.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LoadedMediaObservation" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
   /v1/stocks:
     get:
       summary: List stocks
@@ -4172,7 +4192,8 @@ components:
     LoadedMediaObservation:
       type: object
       additionalProperties: false
-      required: [printer_id, source, confidence, calibration_state, observed_at, updated_at]
+      required:
+        [printer_id, source, stock, confidence, calibration_state, remaining_amount, observed_at, updated_at]
       properties:
         printer_id: { type: string }
         source: { type: string, minLength: 1, maxLength: 255 }
@@ -4187,6 +4208,22 @@ components:
           additionalProperties: true
         observed_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
+    UpsertLoadedMediaObservation:
+      type: object
+      additionalProperties: false
+      required: [source, stock, calibration_state]
+      properties:
+        source: { type: string, minLength: 1, maxLength: 255 }
+        stock:
+          oneOf:
+            - { $ref: "#/components/schemas/ResourceRevision" }
+            - { type: "null" }
+          description: Null explicitly records that the loaded medium is unknown.
+        calibration_state: { type: string, enum: [current, required, unknown] }
+        remaining_amount:
+          type: [object, "null"]
+          maxProperties: 16
+          additionalProperties: true
     JobOptions:
       type: object
       additionalProperties: false

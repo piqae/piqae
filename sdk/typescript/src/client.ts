@@ -51,6 +51,7 @@ import type {
   TargetReadiness,
   Upload,
   UsageSummary,
+  UpsertLoadedMediaObservation,
   Webhook,
   WebhookDelivery,
   Workspace,
@@ -303,7 +304,9 @@ export class PiqaeClient {
     capabilities: (id: string) =>
       this.request<CapabilityDocument>('GET', `/v1/printers/${encodeURIComponent(id)}/capabilities`),
     loadedMedia: (id: string) =>
-      this.request<LoadedMediaObservation[]>('GET', `/v1/printers/${encodeURIComponent(id)}/loaded-media`)
+      this.request<LoadedMediaObservation[]>('GET', `/v1/printers/${encodeURIComponent(id)}/loaded-media`),
+    confirmLoadedMedia: (id: string, input: UpsertLoadedMediaObservation) =>
+      this.request<LoadedMediaObservation>('PUT', `/v1/printers/${encodeURIComponent(id)}/loaded-media`, { body: input })
   };
 
   readonly printIntents = {
