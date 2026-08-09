@@ -1,0 +1,146 @@
+name: Publish Piqae MCP server
+
+on:
+  push:
+    tags:
+      - "mcp-v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  id-token: write
+  packages: write
+
+concurrency:
+  group: mcp-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  registry-preflight:
+    name: Verify npm package ownership readiness
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ${{ vars.PIQAE_CI_LIGHT_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 5
+    steps:
+      - name: Require the public package record before trusted publication
+        shell: bash
+        run: |
+          status=$(curl --silent --show-error --output package.json --write-out '%{http_code}' \
+            https://registry.npmjs.org/@piqae%2fmcp-server)
+          if [[ "$status" != 200 ]]; then
+            echo '::error::Create/reserve @piqae/mcp-server on npm and configure its GitHub trusted publisher before pushing an MCP tag.'
+            exit 1
+          fi
+          jq -e '.name == "@piqae/mcp-server"' package.json >/dev/null
+
+  package:
+    name: Verify and package @piqae/mcp-server
+    runs-on: ${{ vars.PIQAE_CI_LINUX_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
+        with:
+          version: 11.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: pnpm
+          registry-url: https://registry.npmjs.org
+      - run: pnpm install --frozen-lockfile
+      - name: Verify release tag and package version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          expected="mcp-v$(node -p "require('./apps/mcp/package.json').version")"
+          if [ "${GITHUB_REF_NAME}" != "${expected}" ]; then
+            echo "Expected tag ${expected}; received ${GITHUB_REF_NAME}." >&2
+            exit 1
+          fi
+      - name: Verify SDK dependency and MCP package
+        run: |
+          pnpm --filter @piqae/sdk generate:check
+          pnpm --filter @piqae/sdk build
+          pnpm --filter @piqae/mcp-server check
+          pnpm --filter @piqae/mcp-server test
+          pnpm --filter @piqae/mcp-server format:check
+          pnpm --filter @piqae/mcp-server smoke:package
+      - name: Create package tarball
+        working-directory: apps/mcp
+        run: |
+          mkdir -p ../../artifacts
+          pnpm pack --pack-destination ../../artifacts
+          cd ../../artifacts
+          sha256sum piqae-mcp-server-*.tgz > SHA256SUMS-mcp
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: piqae-mcp-${{ github.ref_name }}
+          path: |
+            artifacts/piqae-mcp-server-*.tgz
+            artifacts/SHA256SUMS-mcp
+          if-no-files-found: error
+          retention-days: 14
+
+  publish-npm:
+    name: Publish npm package with provenance
+    needs: [registry-preflight, package]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ${{ vars.PIQAE_CI_LINUX_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: piqae-mcp-${{ github.ref_name }}
+          path: artifacts
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - run: npm install --global npm@11.19.0
+      - name: Publish the already-tested tarball
+        run: npm publish ./artifacts/piqae-mcp-server-*.tgz --access public --provenance
+
+  publish-github-packages:
+    name: Mirror MCP server to GitHub Packages
+    needs: package
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ${{ vars.PIQAE_CI_LINUX_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: piqae-mcp-${{ github.ref_name }}
+          path: artifacts
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          registry-url: https://npm.pkg.github.com
+          scope: '@piqae'
+      - env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npm publish ./artifacts/piqae-mcp-server-*.tgz --registry https://npm.pkg.github.com --access public
+
+  github-release:
+    name: Attach MCP package to GitHub release
+    needs: package
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ${{ vars.PIQAE_CI_LIGHT_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: piqae-mcp-${{ github.ref_name }}
+          path: artifacts
+      - env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" artifacts/* --verify-tag \
+            --title "Piqae MCP server ${GITHUB_REF_NAME#mcp-v}" --generate-notes
