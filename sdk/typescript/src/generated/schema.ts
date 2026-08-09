@@ -1208,7 +1208,8 @@ export interface paths {
         };
         /** List loaded-media observations by source */
         get: operations["listPrinterLoadedMedia"];
-        put?: never;
+        /** Confirm or clear an operator-observed loaded-media source */
+        put: operations["upsertPrinterLoadedMedia"];
         post?: never;
         delete?: never;
         options?: never;
@@ -2842,18 +2843,28 @@ export interface components {
         LoadedMediaObservation: {
             printer_id: string;
             source: string;
-            stock?: components["schemas"]["ResourceRevision"] | null;
+            stock: components["schemas"]["ResourceRevision"] | null;
             /** @enum {string} */
             confidence: "reported" | "operator_confirmed" | "inferred" | "unknown";
             /** @enum {string} */
             calibration_state: "current" | "required" | "unknown";
-            remaining_amount?: {
+            remaining_amount: {
                 [key: string]: unknown;
             } | null;
             /** Format: date-time */
             observed_at: string;
             /** Format: date-time */
             updated_at: string;
+        };
+        UpsertLoadedMediaObservation: {
+            source: string;
+            /** @description Null explicitly records that the loaded medium is unknown. */
+            stock: components["schemas"]["ResourceRevision"] | null;
+            /** @enum {string} */
+            calibration_state: "current" | "required" | "unknown";
+            remaining_amount?: {
+                [key: string]: unknown;
+            } | null;
         };
         JobOptions: {
             bin?: string;
@@ -5059,6 +5070,37 @@ export interface operations {
             401: components["responses"]["Error"];
             403: components["responses"]["Error"];
             404: components["responses"]["Error"];
+        };
+    };
+    upsertPrinterLoadedMedia: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                printer_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpsertLoadedMediaObservation"];
+            };
+        };
+        responses: {
+            /** @description Current operator-confirmed or explicitly unknown observation. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LoadedMediaObservation"];
+                };
+            };
+            400: components["responses"]["Error"];
+            401: components["responses"]["Error"];
+            403: components["responses"]["Error"];
+            404: components["responses"]["Error"];
+            409: components["responses"]["Error"];
         };
     };
     listStocks: {

@@ -273,7 +273,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route(
             "/v1/printers/{printer_id}/loaded-media",
-            get(print_intents::loaded_media),
+            get(print_intents::loaded_media).put(print_intents::upsert_loaded_media),
         )
         .route("/v1/print-intents/validate", post(print_intents::validate))
         .route("/v1/print-intents/resolve", post(print_intents::resolve))

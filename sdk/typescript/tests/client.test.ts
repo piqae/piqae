@@ -107,6 +107,30 @@ describe('PiqaeClient', () => {
     );
   });
 
+  it('confirms or clears a printer loaded-media observation', async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(JSON.stringify({ source: 'main-roll', stock: null }), { status: 200 })
+    );
+    const client = new PiqaeClient({ fetch: fetcher });
+
+    await client.printers.confirmLoadedMedia('printer / one', {
+      source: 'main-roll',
+      stock: null,
+      calibration_state: 'unknown'
+    });
+
+    const [url, init] = fetcher.mock.calls[0] ?? [];
+    expect(String(url)).toBe(
+      'https://api.piqae.com/v1/printers/printer%20%2F%20one/loaded-media'
+    );
+    expect(init?.method).toBe('PUT');
+    expect(JSON.parse(String(init?.body))).toEqual({
+      source: 'main-roll',
+      stock: null,
+      calibration_state: 'unknown'
+    });
+  });
+
   it('verifies signed webhooks and rejects stale or changed bodies', async () => {
     const timestamp = 1_700_000_000;
     const body = '{"id":"evt_1"}';

@@ -366,6 +366,14 @@ pub trait Repository: Send + Sync + 'static {
     ) -> Result<Vec<StoredLoadedMedia>, RepositoryError> {
         Ok(Vec::new())
     }
+    async fn upsert_loaded_media(
+        &self,
+        _workspace_id: WorkspaceId,
+        _environment_id: EnvironmentId,
+        _observation: &StoredLoadedMedia,
+    ) -> Result<StoredLoadedMedia, RepositoryError> {
+        Err(RepositoryError::NotFound)
+    }
     async fn get_stock(
         &self,
         workspace_id: WorkspaceId,
@@ -907,6 +915,16 @@ impl Repository for PostgresStore {
         printer_id: PrinterId,
     ) -> Result<Vec<StoredLoadedMedia>, RepositoryError> {
         Self::list_loaded_media(self, workspace_id, environment_id, printer_id)
+            .await
+            .map_err(Into::into)
+    }
+    async fn upsert_loaded_media(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        observation: &StoredLoadedMedia,
+    ) -> Result<StoredLoadedMedia, RepositoryError> {
+        Self::upsert_loaded_media(self, workspace_id, environment_id, observation)
             .await
             .map_err(Into::into)
     }
@@ -2350,6 +2368,7 @@ struct MemoryState {
     print_workflows: HashMap<String, (WorkspaceId, EnvironmentId, StoredPrintWorkflow)>,
     resolved_print_tickets:
         HashMap<String, (WorkspaceId, EnvironmentId, StoredResolvedPrintTicket)>,
+    loaded_media: HashMap<(PrinterId, String), (WorkspaceId, EnvironmentId, StoredLoadedMedia)>,
     targets: HashMap<String, (WorkspaceId, EnvironmentId, StoredTarget)>,
     target_bindings: HashMap<String, (WorkspaceId, EnvironmentId, StoredTargetBinding)>,
     agents: HashMap<AgentId, (WorkspaceId, EnvironmentId, StoredAgent)>,
@@ -2604,6 +2623,48 @@ impl Repository for MemoryRepository {
                     .unwrap_or_default(),
             })
             .ok_or(RepositoryError::NotFound)
+    }
+
+    async fn list_loaded_media(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        printer_id: PrinterId,
+    ) -> Result<Vec<StoredLoadedMedia>, RepositoryError> {
+        Ok(self
+            .state
+            .read()
+            .await
+            .loaded_media
+            .values()
+            .filter(|(workspace, environment, observation)| {
+                *workspace == workspace_id
+                    && *environment == environment_id
+                    && observation.printer_id == printer_id
+            })
+            .map(|(_, _, observation)| observation.clone())
+            .collect())
+    }
+
+    async fn upsert_loaded_media(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        observation: &StoredLoadedMedia,
+    ) -> Result<StoredLoadedMedia, RepositoryError> {
+        let mut state = self.state.write().await;
+        if !state.printers.get(&observation.printer_id).is_some_and(
+            |(workspace, environment, _)| {
+                *workspace == workspace_id && *environment == environment_id
+            },
+        ) {
+            return Err(RepositoryError::NotFound);
+        }
+        state.loaded_media.insert(
+            (observation.printer_id, observation.source.clone()),
+            (workspace_id, environment_id, observation.clone()),
+        );
+        Ok(observation.clone())
     }
 
     async fn node_installation_public_key(
@@ -5026,6 +5087,62 @@ mod routing_repository_tests {
     use super::*;
     use piqae_domain::JobOptions;
     use piqae_storage_postgres::PrinterProfileSnapshot;
+
+    #[tokio::test]
+    async fn loaded_media_upsert_is_source_keyed_and_tenant_scoped() {
+        let repository = MemoryRepository::default();
+        let workspace = WorkspaceId::new();
+        let other_workspace = WorkspaceId::new();
+        let environment = EnvironmentId::new();
+        let printer = PrinterId::new();
+        repository
+            .add_printer(workspace, environment, printer, AgentId::new())
+            .await;
+        let now = Utc::now();
+        let mut observation = StoredLoadedMedia {
+            printer_id: printer,
+            source: "main-roll".into(),
+            stock_id: Some("stk_labels".into()),
+            stock_revision: Some(3),
+            confidence: "operator_confirmed".into(),
+            calibration_state: "current".into(),
+            remaining_amount: None,
+            observed_at: now,
+            updated_at: now,
+        };
+        repository
+            .upsert_loaded_media(workspace, environment, &observation)
+            .await
+            .expect("confirm media");
+        observation.stock_id = None;
+        observation.stock_revision = None;
+        observation.confidence = "unknown".into();
+        observation.calibration_state = "unknown".into();
+        repository
+            .upsert_loaded_media(workspace, environment, &observation)
+            .await
+            .expect("clear media knowledge");
+
+        let current = repository
+            .list_loaded_media(workspace, environment, printer)
+            .await
+            .expect("list observation");
+        assert_eq!(current.len(), 1);
+        assert_eq!(current[0].confidence, "unknown");
+        assert!(
+            repository
+                .list_loaded_media(other_workspace, environment, printer)
+                .await
+                .expect("tenant scoped list")
+                .is_empty()
+        );
+        assert!(matches!(
+            repository
+                .upsert_loaded_media(other_workspace, environment, &observation)
+                .await,
+            Err(RepositoryError::NotFound)
+        ));
+    }
 
     #[tokio::test]
     async fn encrypted_envelope_replay_returns_original_and_substitution_is_rejected() {

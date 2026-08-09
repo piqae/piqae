@@ -1,6 +1,8 @@
 //! Pure capability-aware validation and display-safe ticket resolution.
 //! No handler in this module submits, spools, or mutates printer defaults.
 
+#![allow(clippy::missing_errors_doc)]
+
 use crate::{AppState, api::authenticate_native, error::AppError};
 use axum::{
     Json,
@@ -11,7 +13,7 @@ use axum::{
 use chrono::{Duration, Utc};
 use piqae_auth::Scope;
 use piqae_domain::{JobOptions, PrinterId};
-use piqae_storage_postgres::StoredResolvedPrintTicket;
+use piqae_storage_postgres::{StoredLoadedMedia, StoredResolvedPrintTicket};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -43,6 +45,15 @@ struct ResourceRevision {
 #[serde(deny_unknown_fields)]
 pub struct ValidationRequest {
     intent: PrintIntent,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpsertLoadedMediaRequest {
+    source: String,
+    stock: Option<ResourceRevision>,
+    calibration_state: String,
+    remaining_amount: Option<Value>,
 }
 
 pub async fn capability_document(
@@ -210,6 +221,98 @@ pub async fn loaded_media(
     Ok(Json(values))
 }
 
+pub async fn upsert_loaded_media(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(request): Json<UpsertLoadedMediaRequest>,
+) -> Result<Json<Value>, AppError> {
+    let tenant = authenticate_native(&state, &headers, Scope::PrintersWrite).await?;
+    let printer_id = PrinterId::from_str(&id)
+        .map_err(|_| AppError::invalid("invalid_printer_id", "Printer ID is invalid."))?;
+    state
+        .repository
+        .get_printer(tenant.workspace_id, tenant.environment_id, printer_id)
+        .await?;
+    let source = request.source.trim();
+    if source.is_empty() || source.chars().count() > 255 || source.chars().any(char::is_control) {
+        return Err(AppError::invalid(
+            "invalid_loaded_media",
+            "Source must be a bounded printable identifier.",
+        ));
+    }
+    if !matches!(
+        request.calibration_state.as_str(),
+        "current" | "required" | "unknown"
+    ) {
+        return Err(AppError::invalid(
+            "invalid_loaded_media",
+            "Calibration state is invalid.",
+        ));
+    }
+    if request.remaining_amount.as_ref().is_some_and(|value| {
+        value.as_object().is_none_or(|object| object.len() > 16)
+            || serde_json::to_vec(value).map_or(true, |bytes| bytes.len() > 4096)
+    }) {
+        return Err(AppError::invalid(
+            "invalid_loaded_media",
+            "Remaining amount must be an object no larger than 4096 bytes.",
+        ));
+    }
+    let (stock_id, stock_revision, confidence, calibration_state, remaining_amount) =
+        if let Some(stock) = request.stock {
+            let current = state
+                .repository
+                .get_stock(tenant.workspace_id, tenant.environment_id, &stock.id)
+                .await?;
+            if current.archived || current.revision != stock.revision {
+                return Err(AppError::conflict(
+                    "stock_revision_unavailable",
+                    "The exact active stock revision is unavailable.",
+                ));
+            }
+            (
+                Some(stock.id),
+                Some(stock.revision),
+                "operator_confirmed".to_owned(),
+                request.calibration_state,
+                request.remaining_amount,
+            )
+        } else {
+            (None, None, "unknown".to_owned(), "unknown".to_owned(), None)
+        };
+    let now = Utc::now();
+    let observation = state
+        .repository
+        .upsert_loaded_media(
+            tenant.workspace_id,
+            tenant.environment_id,
+            &StoredLoadedMedia {
+                printer_id,
+                source: source.to_owned(),
+                stock_id,
+                stock_revision,
+                confidence,
+                calibration_state,
+                remaining_amount,
+                observed_at: now,
+                updated_at: now,
+            },
+        )
+        .await?;
+    state
+        .publish(tenant, "printer.loaded_media.updated", &observation)
+        .await?;
+    Ok(Json(json!({
+        "printer_id": observation.printer_id, "source": observation.source,
+        "stock": observation.stock_id.zip(observation.stock_revision).map(|(id, revision)| json!({"id":id,"revision":revision})),
+        "confidence": observation.confidence, "calibration_state": observation.calibration_state,
+        "remaining_amount": observation.remaining_amount, "observed_at": observation.observed_at,
+        "updated_at": observation.updated_at,
+    })))
+}
+
+#[allow(clippy::cognitive_complexity, clippy::too_many_lines)]
 async fn validate_for_tenant(
     state: &AppState,
     workspace_id: piqae_domain::WorkspaceId,
@@ -229,6 +332,7 @@ async fn validate_for_tenant(
         .get_printer(workspace_id, environment_id, printer_id)
         .await?;
     let mut errors = Vec::new();
+    let mut intent = intent;
     if intent.capability_revision == 0 || intent.capability_revision != printer.capability_revision
     {
         errors.push(finding(
@@ -236,6 +340,98 @@ async fn validate_for_tenant(
             "capability_revision",
             "The printer capability revision changed.",
         ));
+    }
+    if let Some(workflow_ref) = intent.workflow.clone() {
+        let workflow = state
+            .repository
+            .list_print_workflows(workspace_id, environment_id)
+            .await?
+            .into_iter()
+            .find(|current| {
+                current.id == workflow_ref.id && current.revision == workflow_ref.revision
+            });
+        match workflow {
+            Some(workflow)
+                if workflow.published
+                    && !workflow.archived
+                    && workflow.printer_id == printer_id =>
+            {
+                if workflow.capability_revision != printer.capability_revision {
+                    errors.push(finding(
+                        "stale_workflow_capability",
+                        "workflow",
+                        "The workflow was approved against a different capability revision.",
+                    ));
+                }
+                match (&workflow.profile_id, workflow.profile_revision) {
+                    (Some(profile_id), Some(profile_revision))
+                        if !printer.profiles.iter().any(|profile| {
+                            profile.profile_id == *profile_id
+                                && profile.revision == profile_revision
+                                && profile.published
+                        }) =>
+                    {
+                        errors.push(finding(
+                            "workflow_profile_unavailable",
+                            "workflow",
+                            "The workflow's exact published profile revision is unavailable.",
+                        ));
+                    }
+                    (Some(_), None) | (None, Some(_)) => errors.push(finding(
+                        "workflow_profile_invalid",
+                        "workflow",
+                        "The workflow has an incomplete profile revision binding.",
+                    )),
+                    _ => {}
+                }
+                if workflow.stock_id.is_some() != workflow.stock_revision.is_some() {
+                    errors.push(finding(
+                        "workflow_stock_invalid",
+                        "workflow",
+                        "The workflow has an incomplete stock revision binding.",
+                    ));
+                }
+                let pinned_stock = workflow
+                    .stock_id
+                    .clone()
+                    .zip(workflow.stock_revision)
+                    .map(|(id, revision)| ResourceRevision { id, revision });
+                if intent.stock.is_some()
+                    && !same_revision(intent.stock.as_ref(), pinned_stock.as_ref())
+                {
+                    errors.push(finding(
+                        "workflow_stock_mismatch",
+                        "stock",
+                        "The requested stock differs from the workflow's pinned stock revision.",
+                    ));
+                } else if pinned_stock.is_some() {
+                    intent.stock = pinned_stock;
+                }
+                match serde_json::from_value::<PrintIntent>(workflow.definition.clone()) {
+                    Ok(base) => {
+                        match merge_workflow_intent(base, &intent, &workflow.safe_overrides) {
+                            Ok(merged) => intent = merged,
+                            Err(mut findings) => errors.append(&mut findings),
+                        }
+                    }
+                    Err(_) => errors.push(finding(
+                        "workflow_definition_invalid",
+                        "workflow",
+                        "The stored workflow definition is invalid.",
+                    )),
+                }
+            }
+            Some(_) => errors.push(finding(
+                "workflow_not_published",
+                "workflow",
+                "The exact workflow revision is not published for this printer.",
+            )),
+            None => errors.push(finding(
+                "workflow_revision_unavailable",
+                "workflow",
+                "The exact workflow revision is unavailable for this printer.",
+            )),
+        }
     }
     if !intent.semantic_options.is_empty() {
         errors.push(finding(
@@ -318,26 +514,6 @@ async fn validate_for_tenant(
             )),
         }
     }
-    if let Some(workflow) = &intent.workflow {
-        let found = state
-            .repository
-            .list_print_workflows(workspace_id, environment_id)
-            .await?
-            .into_iter()
-            .any(|current| {
-                current.id == workflow.id
-                    && current.revision == workflow.revision
-                    && !current.archived
-                    && current.printer_id == printer_id
-            });
-        if !found {
-            errors.push(finding(
-                "workflow_revision_unavailable",
-                "workflow",
-                "The exact workflow revision is unavailable for this printer.",
-            ));
-        }
-    }
     let status = if errors.is_empty() {
         "valid"
     } else {
@@ -350,4 +526,143 @@ async fn validate_for_tenant(
 
 fn finding(code: &str, path: &str, message: &str) -> Value {
     json!({"code":code,"path":path,"message":message})
+}
+
+fn same_revision(left: Option<&ResourceRevision>, right: Option<&ResourceRevision>) -> bool {
+    matches!((left, right), (None, None))
+        || matches!((left, right), (Some(left), Some(right)) if left.id == right.id && left.revision == right.revision)
+}
+
+#[allow(clippy::cognitive_complexity)]
+fn merge_workflow_intent(
+    mut base: PrintIntent,
+    requested: &PrintIntent,
+    safe_overrides: &[String],
+) -> Result<PrintIntent, Vec<Value>> {
+    let allowed = |path: &str| safe_overrides.iter().any(|candidate| candidate == path);
+    let mut errors = Vec::new();
+    macro_rules! apply {
+        ($field:ident) => {
+            if let Some(value) = requested.portable_options.$field.clone() {
+                let path = concat!("portable_options.", stringify!($field));
+                if allowed(path) {
+                    base.portable_options.$field = Some(value);
+                } else if base.portable_options.$field.as_ref() != Some(&value) {
+                    errors.push(finding(
+                        "workflow_override_not_allowed",
+                        path,
+                        "This workflow does not allow the requested override.",
+                    ));
+                }
+            }
+        };
+    }
+    apply!(bin);
+    apply!(collate);
+    apply!(color);
+    apply!(copies);
+    apply!(dpi);
+    apply!(duplex);
+    apply!(fit_to_page);
+    apply!(media);
+    apply!(nup);
+    apply!(pages);
+    apply!(paper);
+    apply!(rotate);
+    for (key, value) in &requested.portable_options.native_options {
+        let path = format!("portable_options.native_options.{key}");
+        if allowed(&path) {
+            base.portable_options
+                .native_options
+                .insert(key.clone(), value.clone());
+        } else if base.portable_options.native_options.get(key) != Some(value) {
+            errors.push(finding(
+                "workflow_override_not_allowed",
+                &path,
+                "This workflow does not allow the requested native override.",
+            ));
+        }
+    }
+    for (key, value) in &requested.semantic_options {
+        let path = format!("semantic_options.{key}");
+        if allowed(&path) {
+            base.semantic_options.insert(key.clone(), value.clone());
+        } else if base.semantic_options.get(key) != Some(value) {
+            errors.push(finding(
+                "workflow_override_not_allowed",
+                &path,
+                "This workflow does not allow the requested semantic override.",
+            ));
+        }
+    }
+    base.workflow.clone_from(&requested.workflow);
+    base.stock = requested.stock.clone().or(base.stock);
+    base.document_manifest = requested.document_manifest.clone();
+    if base.printer_id != requested.printer_id
+        || base.capability_revision != requested.capability_revision
+    {
+        errors.push(finding(
+            "workflow_definition_mismatch",
+            "workflow",
+            "Workflow printer or capability revision does not match the request.",
+        ));
+    }
+    if errors.is_empty() {
+        Ok(base)
+    } else {
+        Err(errors)
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod workflow_tests {
+    use super::*;
+    fn intent(copies: Option<u32>) -> PrintIntent {
+        PrintIntent {
+            schema_version: 1,
+            printer_id: "prt_test".into(),
+            capability_revision: 3,
+            workflow: None,
+            stock: None,
+            portable_options: JobOptions {
+                copies,
+                ..JobOptions::default()
+            },
+            semantic_options: BTreeMap::new(),
+            document_manifest: json!({}),
+        }
+    }
+    #[test]
+    fn workflow_safe_override_merges_over_pinned_base() {
+        let merged = merge_workflow_intent(
+            intent(Some(2)),
+            &intent(Some(5)),
+            &["portable_options.copies".into()],
+        )
+        .expect("allowed override");
+        assert_eq!(merged.portable_options.copies, Some(5));
+    }
+    #[test]
+    fn workflow_unsafe_override_fails_closed() {
+        let findings = merge_workflow_intent(intent(Some(2)), &intent(Some(5)), &[])
+            .expect_err("override rejected");
+        assert_eq!(findings[0]["code"], "workflow_override_not_allowed");
+    }
+
+    #[test]
+    fn workflow_matching_value_does_not_require_override_permission() {
+        let merged = merge_workflow_intent(intent(Some(2)), &intent(Some(2)), &[])
+            .expect("matching pinned value is not an override");
+        assert_eq!(merged.portable_options.copies, Some(2));
+    }
+
+    #[test]
+    fn workflow_identity_cannot_be_overridden() {
+        let mut requested = intent(None);
+        requested.capability_revision = 4;
+        let findings = merge_workflow_intent(intent(None), &requested, &[])
+            .expect_err("workflow identity must remain pinned");
+        assert_eq!(findings[0]["code"], "workflow_definition_mismatch");
+    }
 }

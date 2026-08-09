@@ -3738,6 +3738,43 @@ impl PostgresStore {
             .collect()
     }
 
+    pub async fn upsert_loaded_media(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        observation: &StoredLoadedMedia,
+    ) -> Result<StoredLoadedMedia, StorageError> {
+        sqlx::query(
+            "INSERT INTO printer_loaded_media
+                (workspace_id, environment_id, printer_id, source, stock_id, stock_revision,
+                 confidence, calibration_state, remaining_amount, observed_at, updated_at)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+             ON CONFLICT (workspace_id, environment_id, printer_id, source) DO UPDATE SET
+                 stock_id = EXCLUDED.stock_id, stock_revision = EXCLUDED.stock_revision,
+                 confidence = EXCLUDED.confidence, calibration_state = EXCLUDED.calibration_state,
+                 remaining_amount = EXCLUDED.remaining_amount, observed_at = EXCLUDED.observed_at,
+                 updated_at = EXCLUDED.updated_at",
+        )
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(observation.printer_id.to_string())
+        .bind(&observation.source)
+        .bind(&observation.stock_id)
+        .bind(
+            observation
+                .stock_revision
+                .and_then(|value| i64::try_from(value).ok()),
+        )
+        .bind(&observation.confidence)
+        .bind(&observation.calibration_state)
+        .bind(&observation.remaining_amount)
+        .bind(observation.observed_at)
+        .bind(observation.updated_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(observation.clone())
+    }
+
     pub async fn get_stock(
         &self,
         workspace_id: WorkspaceId,
