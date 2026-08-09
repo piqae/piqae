@@ -5,11 +5,15 @@ use crate::{
 };
 use axum::{
     Json, Router,
+    body::Body,
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+use bytes::BytesMut;
+use futures::StreamExt as _;
 use piqae_auth::Scope;
 use piqae_document_renderer::DocumentSpecV1;
 use piqae_domain::{ContentKind, ContentSource, JobOptions};
@@ -41,6 +45,10 @@ pub fn router() -> Router<AppState> {
             get(get_conversion),
         )
         .route("/v1/document-renders/{render_id}", get(get_render))
+        .route(
+            "/v1/document-renders/{render_id}/artifact",
+            get(download_render_artifact),
+        )
         .route("/v1/document-renders/{render_id}/print", post(print_render))
 }
 
@@ -558,6 +566,94 @@ async fn get_render(
             .get_document_render(tenant.workspace_id, tenant.environment_id, &id)
             .await?,
     )))
+}
+
+async fn download_render_artifact(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Response, AppError> {
+    let tenant = authenticate_native(&state, &headers, Scope::JobsRead).await?;
+    let render = state
+        .repository
+        .get_document_render(tenant.workspace_id, tenant.environment_id, &id)
+        .await?;
+    if render.state != "completed" {
+        return Err(AppError::conflict(
+            "document_render_not_completed",
+            "Only a completed document render has a downloadable artifact.",
+        ));
+    }
+    let expected_sha256 = render
+        .artifact_sha256
+        .as_deref()
+        .ok_or_else(|| AppError::service_unavailable("document_artifact_unavailable"))?;
+    let expected_bytes = render
+        .artifact_byte_length
+        .and_then(|value| usize::try_from(value).ok())
+        .filter(|value| (1..=50 * 1024 * 1024).contains(value))
+        .ok_or_else(|| AppError::service_unavailable("document_artifact_unavailable"))?;
+    let _buffer_permit = state
+        .document_artifact_downloads
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| AppError::service_unavailable("document_artifact_download_busy"))?;
+    let encrypted_key = render
+        .artifact_object_key_ciphertext
+        .as_deref()
+        .ok_or_else(|| AppError::service_unavailable("document_artifact_unavailable"))?;
+    let aad = artifact_key_aad(
+        &tenant.workspace_id.to_string(),
+        &tenant.environment_id.to_string(),
+        &render.id,
+    );
+    let object_key = state
+        .document_secrets
+        .decrypt(&aad, encrypted_key)
+        .map_err(|_| AppError::service_unavailable("document_decryption_failed"))?;
+    let object_key = String::from_utf8(object_key)
+        .map_err(|_| AppError::service_unavailable("invalid_stored_document"))?;
+    // Validate the complete bounded object before constructing the response so
+    // a corrupt prefix can never be exposed to a browser or POS proxy.
+    let mut stream = state
+        .object_store
+        .get_stream(&object_key)
+        .await
+        .map_err(|_| AppError::service_unavailable("document_artifact_unavailable"))?;
+    let mut content = BytesMut::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk =
+            chunk.map_err(|_| AppError::service_unavailable("document_artifact_unavailable"))?;
+        if chunk.len() > expected_bytes.saturating_sub(content.len()) {
+            return Err(AppError::service_unavailable(
+                "document_artifact_integrity_failed",
+            ));
+        }
+        content.extend_from_slice(&chunk);
+    }
+    let actual_digest = Sha256::digest(&content);
+    if content.len() != expected_bytes
+        || !hex::encode(actual_digest).eq_ignore_ascii_case(expected_sha256)
+    {
+        return Err(AppError::service_unavailable(
+            "document_artifact_integrity_failed",
+        ));
+    }
+    Response::builder()
+        .header(axum::http::header::CONTENT_TYPE, "application/pdf")
+        .header(axum::http::header::CONTENT_LENGTH, expected_bytes)
+        .header(
+            axum::http::header::CONTENT_DISPOSITION,
+            "attachment; filename=\"document.pdf\"",
+        )
+        .header(axum::http::header::CACHE_CONTROL, "private, no-store")
+        .header("x-content-type-options", "nosniff")
+        .header(
+            "digest",
+            format!("sha-256={}", STANDARD.encode(actual_digest)),
+        )
+        .body(Body::from(content.freeze()))
+        .map_err(|_| AppError::service_unavailable("content_response_failed"))
 }
 
 async fn print_render(

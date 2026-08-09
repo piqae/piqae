@@ -1,6 +1,7 @@
 export type PiqaeId = string;
 
-export type DocumentValue = string | { pointer: `/${string}` };
+export type DocumentPointer = "." | `./${string}` | `/${string}`;
+export type DocumentValue = string | { pointer: DocumentPointer };
 export type DocumentNode =
   | { type: 'text'; value: DocumentValue; font_size?: number }
   | { type: 'stack' | 'row'; children: DocumentNode[]; gap_mm?: number }

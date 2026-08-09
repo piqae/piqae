@@ -2493,6 +2493,35 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/DocumentRender" }
         "404": { $ref: "#/components/responses/Error" }
+  /v1/document-renders/{render_id}/artifact:
+    get:
+      summary: Download a completed document render artifact
+      description: Authenticated same-origin PDF download. The response never exposes an object-store key or signed URL.
+      tags: [Documents]
+      operationId: downloadDocumentRenderArtifact
+      parameters:
+        - name: render_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Integrity-verified PDF artifact.
+          headers:
+            Content-Disposition:
+              schema: { type: string }
+            Content-Length:
+              schema: { type: integer }
+            Digest:
+              description: RFC Digest field using a standard Base64-encoded SHA-256 value.
+              schema: { type: string, pattern: '^sha-256=[A-Za-z0-9+/]{43}=$' }
+          content:
+            application/pdf:
+              schema: { type: string, format: binary }
+        "401": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
   /v1/document-renders/{render_id}/print:
     post:
       summary: Register a print job for a completed document render
@@ -4702,7 +4731,7 @@ components:
           type: [string, "null"]
           format: date-time
     DocumentValue:
-      description: A literal string or JSON Pointer binding into the render input.
+      description: A literal string or binding into the root (`/path`) or current repeat/table item (`.` or `./path`).
       oneOf:
         - type: string
           maxLength: 10000
@@ -4710,7 +4739,7 @@ components:
           additionalProperties: false
           required: [pointer]
           properties:
-            pointer: { type: string, pattern: '^/', maxLength: 500 }
+            pointer: { type: string, pattern: '^(\.|\./|/)', maxLength: 500 }
     DocumentNode:
       oneOf:
         - type: object

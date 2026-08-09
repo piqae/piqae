@@ -1,0 +1,11 @@
+api_version = "2026-07"
+
+[[extensions]]
+name = "Print draft order"
+handle = "piqae-draft-order-print"
+type = "ui_extension"
+
+[[extensions.targeting]]
+module = "./src/DraftAction.jsx"
+target = "admin.draft-order-details.action.render"
+

@@ -25,6 +25,7 @@ config:
   s3VirtualHostedStyle: false
   rustLog: info,sqlx=warn
   documentActiveKeyId: legacy-v1
+  documentArtifactDownloadConcurrency: 4
   extraEnv: []
 
 secrets:

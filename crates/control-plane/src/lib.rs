@@ -35,7 +35,7 @@ use piqae_webhooks::WebhookSecretBox;
 use repository::Repository;
 use serde::Serialize;
 use std::{fmt, sync::Arc};
-use tokio::sync::broadcast;
+use tokio::sync::{Semaphore, broadcast};
 use tower_http::compression::CompressionLayer;
 
 #[derive(Clone, Debug)]
@@ -54,6 +54,7 @@ pub struct AppState {
     pub webhook_secrets: Arc<WebhookSecretBox>,
     pub document_secrets: Arc<document_crypto::DocumentSecretBox>,
     pub object_store: Arc<dyn ObjectStore>,
+    pub document_artifact_downloads: Arc<Semaphore>,
     pub capabilities: DeploymentCapabilities,
     pub local_identity: Option<identity::LocalIdentityState>,
     pub stripe_webhook_secret: Option<Arc<str>>,
@@ -121,6 +122,7 @@ impl AppState {
             webhook_secrets: Arc::new(WebhookSecretBox::new(webhook_key)),
             document_secrets: Arc::new(document_secrets),
             object_store,
+            document_artifact_downloads: Arc::new(Semaphore::new(4)),
             capabilities: DeploymentCapabilities::default(),
             local_identity: None,
             stripe_webhook_secret: None,
@@ -144,6 +146,12 @@ impl AppState {
     #[must_use]
     pub fn with_document_keyring(mut self, keyring: document_crypto::DocumentSecretBox) -> Self {
         self.document_secrets = Arc::new(keyring);
+        self
+    }
+
+    #[must_use]
+    pub fn with_document_artifact_download_concurrency(mut self, concurrency: usize) -> Self {
+        self.document_artifact_downloads = Arc::new(Semaphore::new(concurrency.clamp(1, 32)));
         self
     }
 
@@ -1229,6 +1237,21 @@ mod tests {
             .await
             .expect("render replay response");
         assert_eq!(render_replay.status(), StatusCode::OK);
+        let not_ready = application
+            .router
+            .clone()
+            .oneshot(api_request(
+                "GET",
+                &format!(
+                    "/v1/document-renders/{}/artifact",
+                    render["id"].as_str().expect("render id")
+                ),
+                "piq_test_integration",
+                None,
+            ))
+            .await
+            .expect("not-ready artifact response");
+        assert_eq!(not_ready.status(), StatusCode::CONFLICT);
         let worker = crate::document_render_worker::DocumentRenderWorker::new(
             application.state.clone(),
             "test-worker",
@@ -1255,6 +1278,78 @@ mod tests {
             render["artifact_byte_length"]
                 .as_i64()
                 .is_some_and(|bytes| bytes > 0)
+        );
+        let held_download_permits = application
+            .state
+            .document_artifact_downloads
+            .clone()
+            .try_acquire_many_owned(4)
+            .expect("hold bounded artifact buffers");
+        let busy = application
+            .router
+            .clone()
+            .oneshot(api_request(
+                "GET",
+                &format!(
+                    "/v1/document-renders/{}/artifact",
+                    render["id"].as_str().expect("render id")
+                ),
+                "piq_test_integration",
+                None,
+            ))
+            .await
+            .expect("busy artifact response");
+        assert_eq!(busy.status(), StatusCode::SERVICE_UNAVAILABLE);
+        drop(held_download_permits);
+        let artifact = application
+            .router
+            .clone()
+            .oneshot(api_request(
+                "GET",
+                &format!(
+                    "/v1/document-renders/{}/artifact",
+                    render["id"].as_str().expect("render id")
+                ),
+                "piq_test_integration",
+                None,
+            ))
+            .await
+            .expect("artifact response");
+        assert_eq!(artifact.status(), StatusCode::OK);
+        assert_eq!(
+            artifact
+                .headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok()),
+            Some("application/pdf")
+        );
+        assert_eq!(
+            artifact
+                .headers()
+                .get("content-disposition")
+                .and_then(|v| v.to_str().ok()),
+            Some("attachment; filename=\"document.pdf\"")
+        );
+        let digest_header = artifact
+            .headers()
+            .get("digest")
+            .and_then(|value| value.to_str().ok())
+            .expect("standards-compatible digest")
+            .to_owned();
+        let artifact_body = artifact
+            .into_body()
+            .collect()
+            .await
+            .expect("PDF body")
+            .to_bytes();
+        assert!(artifact_body.starts_with(b"%PDF-"));
+        assert_eq!(
+            digest_header,
+            format!(
+                "sha-256={}",
+                base64::engine::general_purpose::STANDARD
+                    .encode(sha2::Sha256::digest(&artifact_body))
+            )
         );
         let job = json_response(
             &application.router,
@@ -1293,6 +1388,73 @@ mod tests {
             .await
             .expect("cross tenant probe");
         assert_eq!(probe.status(), StatusCode::NOT_FOUND);
+        let artifact_probe = application
+            .router
+            .clone()
+            .oneshot(api_request(
+                "GET",
+                &format!(
+                    "/v1/document-renders/{}/artifact",
+                    render["id"].as_str().expect("render id")
+                ),
+                "piq_test_other",
+                None,
+            ))
+            .await
+            .expect("cross tenant artifact probe");
+        assert_eq!(artifact_probe.status(), StatusCode::NOT_FOUND);
+        let object_key = format!(
+            "{}/{}/documents/{}.pdf",
+            application.tenant.workspace_id,
+            application.tenant.environment_id,
+            render["id"].as_str().expect("render id")
+        );
+        application
+            .state
+            .object_store
+            .put(
+                &object_key,
+                Bytes::from(vec![0_u8; artifact_body.len()]),
+                None,
+            )
+            .await
+            .expect("replace fixture with same-length corrupt artifact");
+        let corrupt = application
+            .router
+            .clone()
+            .oneshot(api_request(
+                "GET",
+                &format!(
+                    "/v1/document-renders/{}/artifact",
+                    render["id"].as_str().expect("render id")
+                ),
+                "piq_test_integration",
+                None,
+            ))
+            .await
+            .expect("corrupt artifact response");
+        assert_eq!(corrupt.status(), StatusCode::SERVICE_UNAVAILABLE);
+        application
+            .state
+            .object_store
+            .delete(&object_key)
+            .await
+            .expect("delete fixture artifact");
+        let missing = application
+            .router
+            .clone()
+            .oneshot(api_request(
+                "GET",
+                &format!(
+                    "/v1/document-renders/{}/artifact",
+                    render["id"].as_str().expect("render id")
+                ),
+                "piq_test_integration",
+                None,
+            ))
+            .await
+            .expect("missing artifact response");
+        assert_eq!(missing.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[tokio::test]

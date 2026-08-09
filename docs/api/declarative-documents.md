@@ -29,6 +29,21 @@ font requests. Unsupported fields and node types are rejected.
 4. `POST /v1/document-renders/{id}/print` reuses that artifact through the
    normal PDF job pipeline. Its response reports durable job registration, not
    proof of physical delivery.
+5. `GET /v1/document-renders/{id}/artifact` returns the completed,
+   integrity-verified PDF through the authenticated Piqae origin. It returns no
+   object key or signed storage URL.
+
+Shopify Admin and POS extensions should call a same-origin application backend
+that holds the Piqae credential and proxies the returned `Response`; credentials
+must not be embedded in extension JavaScript. The TypeScript SDK's
+`documents.renders.download()` preserves the PDF body and headers for this use,
+while `downloadBytes()` is available for trusted server-side consumers.
+Each API instance admits at most
+`PIQAE_DOCUMENT_ARTIFACT_DOWNLOAD_CONCURRENCY` concurrent verification buffers
+(default 4, range 1–32); excess requests receive a retryable service-unavailable
+response. Objects are accumulated without reserving their declared maximum in
+advance, and the `Digest` response field carries the verified SHA-256 in
+standard Base64 form.
 
 ### Zero-copy print ownership
 

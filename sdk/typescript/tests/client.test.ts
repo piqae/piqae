@@ -20,6 +20,24 @@ describe('PiqaeClient', () => {
     expect(new Headers(fetcher.mock.calls[1]?.[1]?.headers).get('idempotency-key')).toBe('print-0001');
   });
 
+  it('downloads verified render PDFs as a Response or bytes for same-origin proxies', async () => {
+    const pdf = new TextEncoder().encode('%PDF-fixture');
+    const fetcher = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response(pdf, { headers: { 'content-type': 'application/pdf' } }))
+      .mockResolvedValueOnce(new Response(pdf, { headers: { 'content-type': 'application/pdf' } }));
+    const client = new PiqaeClient({ apiKey: 'piq_test_redacted', fetch: fetcher });
+    const response = await client.documents.renders.download('drnd_1');
+    expect(response.headers.get('content-type')).toBe('application/pdf');
+    expect(await client.documents.renders.downloadBytes('drnd_1')).toEqual(pdf);
+    expect(String(fetcher.mock.calls[0]?.[0])).toBe(
+      'https://api.piqae.com/v1/document-renders/drnd_1/artifact'
+    );
+    expect(new Headers(fetcher.mock.calls[0]?.[1]?.headers).get('accept')).toBe('application/pdf');
+    expect(new Headers(fetcher.mock.calls[0]?.[1]?.headers).get('authorization')).toBe(
+      'Bearer piq_test_redacted'
+    );
+  });
+
   it('maps the conversion SDK camelCase version to the wire contract', async () => {
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(Response.json({ id: 'dcnv_1' }, { status: 201 }));
     const client = new PiqaeClient({ fetch: fetcher });

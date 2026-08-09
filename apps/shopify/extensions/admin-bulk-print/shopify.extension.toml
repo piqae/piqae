@@ -1,0 +1,10 @@
+api_version = "2026-07"
+
+[[extensions]]
+name = "Print selected orders"
+handle = "piqae-bulk-order-print"
+type = "ui_extension"
+
+[[extensions.targeting]]
+module = "./src/PrintAction.jsx"
+target = "admin.order-index.selection-print-action.render"

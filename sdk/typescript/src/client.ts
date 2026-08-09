@@ -402,6 +402,9 @@ export class PiqaeClient {
     renders: {
       create: (input: CreateDocumentRender, idempotencyKey: string) => this.request<DocumentRender>('POST', '/v1/document-renders', { body: input, idempotencyKey }),
       retrieve: (id: string) => this.request<DocumentRender>('GET', `/v1/document-renders/${encodeURIComponent(id)}`),
+      /** Preserves headers/body streaming for a same-origin Admin or POS proxy. */
+      download: (id: string) => this.requestBinary(`/v1/document-renders/${encodeURIComponent(id)}/artifact`),
+      downloadBytes: async (id: string) => new Uint8Array(await (await this.requestBinary(`/v1/document-renders/${encodeURIComponent(id)}/artifact`)).arrayBuffer()),
       print: (id: string, input: PrintDocumentRender, idempotencyKey: string) => this.request<Job>('POST', `/v1/document-renders/${encodeURIComponent(id)}/print`, { body: input, idempotencyKey })
     },
     conversions: {
@@ -505,6 +508,41 @@ export class PiqaeClient {
     const text = await response.text();
     if (text === '') return undefined as T;
     return JSON.parse(text) as T;
+  }
+
+  private async requestBinary(path: string): Promise<Response> {
+    const dynamicToken = await this.accessToken?.();
+    const authorization = this.platformKey ?? this.apiKey ?? dynamicToken;
+    const headers: Record<string, string> = {
+      accept: 'application/pdf',
+      ...this.defaultHeaders
+    };
+    if (this.platformContext) {
+      headers['x-piqae-workspace-id'] = this.platformContext.workspaceId;
+      headers['x-piqae-environment-id'] = this.platformContext.environmentId;
+    }
+    if (authorization) headers.authorization = `Bearer ${authorization}`;
+    const response = await this.fetcher(new URL(`${this.baseUrl}${path}`), {
+      method: 'GET',
+      headers
+    });
+    if (!response.ok) {
+      let body: ErrorEnvelope | undefined;
+      try {
+        body = (await response.json()) as ErrorEnvelope;
+      } catch {
+        // Preserve a stable error when a same-origin proxy emits no JSON body.
+      }
+      throw new PiqaeError(
+        response.status,
+        body?.error ?? {
+          code: 'unexpected_response',
+          message: response.statusText || 'Piqae artifact download failed',
+          retryable: response.status >= 500
+        }
+      );
+    }
+    return response;
   }
 
   private async putUpload(upload: CreatedUpload, content: BodyInit): Promise<Upload | undefined> {

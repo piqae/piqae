@@ -1,0 +1,26 @@
+client_id = "development-client-id"
+name = "Piqae Order Printing"
+application_url = "https://example.invalid"
+embedded = true
+
+[access_scopes]
+scopes = "read_orders,read_all_orders,read_draft_orders,read_products,read_customers"
+
+[auth]
+redirect_urls = [ "https://example.invalid/auth/callback" ]
+
+[webhooks]
+api_version = "2026-07"
+
+[[webhooks.subscriptions]]
+topics = [ "app/uninstalled", "app/scopes_update", "orders/create", "orders/updated", "orders/cancelled", "orders/paid", "orders/fulfilled", "orders/partially_fulfilled", "refunds/create", "draft_orders/create", "draft_orders/update", "draft_orders/delete" ]
+uri = "/webhooks"
+
+[[webhooks.subscriptions]]
+compliance_topics = [ "customers/data_request", "customers/redact", "shop/redact" ]
+uri = "/webhooks"
+
+[app_proxy]
+url = "https://example.invalid"
+subpath = "piqae-print"
+prefix = "apps"

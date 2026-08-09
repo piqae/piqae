@@ -59,6 +59,8 @@ spec:
               valueFrom: { secretKeyRef: { name: {{ include "piqae.secretName" $root }}, key: {{ $root.Values.secrets.keys.documentMasterKey }} } }
             - name: PIQAE_DOCUMENT_ACTIVE_KEY_ID
               value: {{ $root.Values.config.documentActiveKeyId | quote }}
+            - name: PIQAE_DOCUMENT_ARTIFACT_DOWNLOAD_CONCURRENCY
+              value: {{ $root.Values.config.documentArtifactDownloadConcurrency | quote }}
             - name: PIQAE_DOCUMENT_DECRYPTION_KEYS
               valueFrom: { secretKeyRef: { name: {{ include "piqae.secretName" $root }}, key: {{ $root.Values.secrets.keys.documentDecryptionKeys }} } }
             - name: PIQAE_S3_ACCESS_KEY_ID

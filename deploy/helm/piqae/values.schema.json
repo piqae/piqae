@@ -11,7 +11,7 @@
     "config": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["environment", "authMode", "documentActiveKeyId", "s3Bucket"],
+      "required": ["environment", "authMode", "documentActiveKeyId", "documentArtifactDownloadConcurrency", "s3Bucket"],
       "properties": {
         "environment": { "type": "string", "enum": ["staging", "production"] },
         "authMode": { "type": "string", "enum": ["api_key", "bootstrap", "hybrid", "oidc"] },
@@ -28,6 +28,7 @@
           "maxLength": 64,
           "pattern": "^[A-Za-z0-9_.-]+$"
         },
+        "documentArtifactDownloadConcurrency": { "type": "integer", "minimum": 1, "maximum": 32 },
         "s3Endpoint": { "type": "string" },
         "s3Bucket": { "type": "string" },
         "s3Region": { "type": "string" },

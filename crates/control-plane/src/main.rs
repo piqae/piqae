@@ -212,6 +212,19 @@ async fn run() -> Result<()> {
     let public_control_plane_url =
         piqae_control_plane::api::validated_control_plane_url(&public_control_plane_url)
             .context("PIQAE_PUBLIC_API_URL is invalid")?;
+    let artifact_download_concurrency = product_env("PIQAE_DOCUMENT_ARTIFACT_DOWNLOAD_CONCURRENCY")
+        .ok()
+        .map_or(Ok(4_usize), |value| {
+            value
+                .parse::<usize>()
+                .ok()
+                .filter(|value| (1..=32).contains(value))
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "PIQAE_DOCUMENT_ARTIFACT_DOWNLOAD_CONCURRENCY must be between 1 and 32",
+                    )
+                })
+        })?;
     let mut application = AppState::new_with_resources(
         repository,
         Arc::new(authenticator),
@@ -219,6 +232,7 @@ async fn run() -> Result<()> {
         document_keyring,
         object_store,
     )
+    .with_document_artifact_download_concurrency(artifact_download_concurrency)
     .with_capabilities(capabilities.clone())
     .with_public_control_plane_url(public_control_plane_url);
     if capabilities.auth.provider == "workos" && service_role.accepts_identity_webhooks() {

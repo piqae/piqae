@@ -100,6 +100,16 @@ variable "document_active_key_id" {
   }
 }
 
+variable "document_artifact_download_concurrency" {
+  type        = number
+  default     = 4
+  description = "Maximum concurrent integrity-verified document artifact buffers per API instance."
+  validation {
+    condition     = var.document_artifact_download_concurrency >= 1 && var.document_artifact_download_concurrency <= 32 && floor(var.document_artifact_download_concurrency) == var.document_artifact_download_concurrency
+    error_message = "document_artifact_download_concurrency must be an integer between 1 and 32"
+  }
+}
+
 variable "document_decryption_keys_secret" {
   type        = string
   sensitive   = true

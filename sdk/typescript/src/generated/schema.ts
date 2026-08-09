@@ -1943,6 +1943,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/document-renders/{render_id}/artifact": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Download a completed document render artifact
+         * @description Authenticated same-origin PDF download. The response never exposes an object-store key or signed URL.
+         */
+        get: operations["downloadDocumentRenderArtifact"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/document-renders/{render_id}/print": {
         parameters: {
             query?: never;
@@ -3111,7 +3131,7 @@ export interface components {
             /** Format: date-time */
             dead_lettered_at: string | null;
         };
-        /** @description A literal string or JSON Pointer binding into the render input. */
+        /** @description A literal string or binding into the root (`/path`) or current repeat/table item (`.` or `./path`). */
         DocumentValue: string | {
             pointer: string;
         };
@@ -6360,6 +6380,36 @@ export interface operations {
                 };
             };
             404: components["responses"]["Error"];
+        };
+    };
+    downloadDocumentRenderArtifact: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                render_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Integrity-verified PDF artifact. */
+            200: {
+                headers: {
+                    "Content-Disposition"?: string;
+                    "Content-Length"?: number;
+                    /** @description RFC Digest field using a standard Base64-encoded SHA-256 value. */
+                    Digest?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/pdf": string;
+                };
+            };
+            401: components["responses"]["Error"];
+            404: components["responses"]["Error"];
+            409: components["responses"]["Error"];
+            503: components["responses"]["Error"];
         };
     };
     printDocumentRender: {

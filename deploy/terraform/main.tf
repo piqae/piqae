@@ -350,6 +350,10 @@ resource "google_cloud_run_v2_service" "server" {
         value = var.document_active_key_id
       }
       env {
+        name  = "PIQAE_DOCUMENT_ARTIFACT_DOWNLOAD_CONCURRENCY"
+        value = tostring(var.document_artifact_download_concurrency)
+      }
+      env {
         name = "PIQAE_DOCUMENT_DECRYPTION_KEYS"
         value_source {
           secret_key_ref {
