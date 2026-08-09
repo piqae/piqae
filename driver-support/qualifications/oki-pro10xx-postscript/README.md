@@ -18,6 +18,9 @@ Authoritative starting points:
 
 ## Capture (does not print)
 
+Use the general [printer-driver contribution workflow](../../CONTRIBUTING.md).
+The commands below are the Windows application of that vendor-neutral process.
+
 On a Windows test computer with the official PS driver installed and a queue
 for the model, open 64-bit PowerShell from a clean checkout and run:
 

@@ -5,7 +5,8 @@ installed printer driver. They do not replace a driver and cannot contain code,
 commands, native profile blobs, documents, credentials, licensed binaries or
 permission changes.
 
-Start from [`templates/minimal`](templates/minimal). A contribution must contain:
+Follow the cross-platform [contributor workflow](CONTRIBUTING.md), then start
+from [`templates/minimal`](templates/minimal). A contribution must contain:
 
 - an exact driver-package SHA-256, driver identifier and driver version;
 - platform and, where relevant, exact device and firmware constraints;
