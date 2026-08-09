@@ -1403,30 +1403,6 @@ fn write_device_key_file(path: &Path, secret: &[u8; 32], create_new: bool) -> Re
     restrict_secret_to_owner(path)
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "ios", windows)))]
-fn write_new_secret_file(path: &Path, secret: &[u8]) -> Result<()> {
-    let parent = path
-        .parent()
-        .context("secret path has no parent directory")?;
-    std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options.mode(0o600);
-    }
-    let mut file = options
-        .open(path)
-        .with_context(|| format!("create {}", path.display()))?;
-    file.write_all(secret)
-        .with_context(|| format!("write {}", path.display()))?;
-    file.sync_all()
-        .with_context(|| format!("sync {}", path.display()))?;
-    drop(file);
-    restrict_secret_to_owner(path)
-}
-
 /// Restricts a secret file to its owner on platforms without POSIX modes.
 ///
 /// On Unix the mode is applied at creation. On Windows a newly created file
