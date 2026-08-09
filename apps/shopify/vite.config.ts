@@ -16,6 +16,9 @@ const allowedHosts = appUrl ? [new URL(appUrl).hostname] : [];
 
 export default defineConfig({
   plugins: [reactRouter()],
+  resolve: {
+    dedupe: ["react", "react-dom", "react-router"],
+  },
   server: {
     host: "127.0.0.1",
     port: assignedPort,
