@@ -160,6 +160,17 @@ export function parseReleaseManifest(value: unknown): ReleaseManifest {
   }
   const ids = new Set(artifacts.map((artifact) => artifact.id));
   if (ids.size !== artifacts.length) throw new Error('manifest artifact ids must be unique');
+  for (const [index, artifact] of artifacts.entries()) {
+    if (
+      artifact.downloadUrl &&
+      artifact.signing.status === 'unsigned' &&
+      (channel !== 'preview' || artifact.status !== 'preview' || !artifact.sha256)
+    ) {
+      throw new Error(
+        `manifest.artifacts[${index}] cannot offer an unsigned download outside a checksummed preview`
+      );
+    }
+  }
 
   return {
     schemaVersion: 1,
@@ -172,6 +183,41 @@ export function parseReleaseManifest(value: unknown): ReleaseManifest {
       .map((entry, index) => parseOlderRelease(entry, index)),
     releasesUrl: httpsUrl(root.releasesUrl, 'manifest.releasesUrl'),
     repositoryUrl: httpsUrl(root.repositoryUrl, 'manifest.repositoryUrl')
+  };
+}
+
+/**
+ * Keep the stable channel authoritative while filling only platforms that do not
+ * have a downloadable stable artifact from the preview channel. This prevents a
+ * newer preview from silently replacing a released build on the same platform.
+ */
+export function combineReleaseManifests(
+  stable: ReleaseManifest | null,
+  preview: ReleaseManifest | null
+): ReleaseManifest | null {
+  if (!stable) return preview ? structuredClone(preview) : null;
+  if (!preview) return structuredClone(stable);
+
+  const stablePlatforms = new Set(
+    stable.artifacts
+      .filter((artifact) => artifact.downloadUrl !== null)
+      .map((artifact) => artifact.platform)
+  );
+  const previewFallbacks = preview.artifacts.filter(
+    (artifact) =>
+      !stablePlatforms.has(artifact.platform) &&
+      artifact.status === 'preview' &&
+      artifact.downloadUrl !== null &&
+      artifact.sha256 !== null
+  );
+  const fallbackPlatforms = new Set(previewFallbacks.map((artifact) => artifact.platform));
+
+  return {
+    ...structuredClone(stable),
+    artifacts: [
+      ...stable.artifacts.filter((artifact) => !fallbackPlatforms.has(artifact.platform)),
+      ...previewFallbacks
+    ].map((artifact) => structuredClone(artifact))
   };
 }
 
