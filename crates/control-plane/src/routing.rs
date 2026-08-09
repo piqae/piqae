@@ -108,6 +108,7 @@ pub async fn create_stock(
     let now = Utc::now();
     let stock = StoredStock {
         id: format!("stk_{}", ulid::Ulid::new()),
+        revision: 1,
         name,
         sku: clean_optional(request.sku, 120, "invalid_stock")?,
         description: clean_optional(request.description, 2_000, "invalid_stock")?,

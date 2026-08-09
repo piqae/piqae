@@ -2538,6 +2538,16 @@ pub async fn agent_sync(
             },
         };
         candidate_jobs.push(JobOffer {
+            expected_capability_revision: lease
+                .job
+                .metadata
+                .get("piqae.capability_revision")
+                .and_then(|revision| revision.parse().ok()),
+            resolved_ticket_digest: lease
+                .job
+                .metadata
+                .get("piqae.resolved_ticket_digest")
+                .cloned(),
             job: lease.job,
             lease_id: lease.lease_id,
             lease_token: lease.lease_token,
