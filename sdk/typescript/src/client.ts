@@ -398,6 +398,8 @@ export class PiqaeClient {
     },
     /** Submit resolved options bound by v3 AAD; ticket provenance is intentionally not attached. */
     createEncryptedResolved: async (input: Omit<CreateJob, 'content' | 'resolved_ticket_digest'> & { target_id: string; printer_id?: never; resolved_ticket_digest?: never }, envelope: EncryptedJobEnvelope, ticket: ResolvedPrintTicket, idempotencyKey: string) => {
+      const ticketExpiry = parseApiTimestamp(ticket.expires_at);
+      if (!Number.isFinite(ticketExpiry) || ticketExpiry <= Date.now()) throw new TypeError('Resolved ticket has expired');
       if (ticket.printer_id !== envelope.binding.printer_id) throw new TypeError('Resolved ticket and encrypted envelope target different printers');
       if (JSON.stringify(canonicalJobOptions(ticket.resolved_options)) !== JSON.stringify(envelope.binding.options)) throw new TypeError('Resolved ticket options are not bound by the encrypted envelope');
       if (JSON.stringify(canonicalJobOptions(input.options)) !== JSON.stringify(envelope.binding.options)) throw new TypeError('Resolved ticket options do not match the job request');
@@ -563,4 +565,24 @@ function withoutPlatformSelectionHeaders(
       ([name]) => !PLATFORM_SELECTION_HEADERS.has(name.toLowerCase())
     )
   );
+}
+
+function parseApiTimestamp(value: string): number {
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|[+-](\d{2}):(\d{2}))$/.exec(value);
+  if (!match) return Number.NaN;
+  const [, year, month, day, hour, minute, second, offsetHour, offsetMinute] = match;
+  const parts = [year, month, day, hour, minute, second].map(Number);
+  const [yearNumber, monthNumber, dayNumber, hourNumber, minuteNumber, secondNumber] = parts;
+  const calendarDate = new Date(Date.UTC(yearNumber!, monthNumber! - 1, dayNumber!));
+  if (
+    calendarDate.getUTCFullYear() !== yearNumber ||
+    calendarDate.getUTCMonth() + 1 !== monthNumber ||
+    calendarDate.getUTCDate() !== dayNumber ||
+    hourNumber! > 23 ||
+    minuteNumber! > 59 ||
+    secondNumber! > 59 ||
+    Number(offsetHour ?? 0) > 23 ||
+    Number(offsetMinute ?? 0) > 59
+  ) return Number.NaN;
+  return Date.parse(value);
 }
