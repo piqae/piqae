@@ -597,5 +597,12 @@ describe('PiqaeClient', () => {
     expect(new Headers(jobCall?.[1]?.headers).get('idempotency-key')).toBe('encrypted-retry-1');
     await expect(client.jobs.createEncrypted({ target_id: 'tgt_1', title: 'Private', content_type: 'pdf' }, envelope, 'short')).rejects.toThrow(/Idempotency-Key/);
     await expect(client.jobs.createEncrypted({ target_id: 'tgt_1', title: 'Private', content_type: 'pdf' }, envelope, '🔐'.repeat(64))).rejects.toThrow(/Idempotency-Key/);
+    await expect(client.jobs.createEncrypted({ target_id: 'tgt_1', title: 'Unsafe', content_type: 'pdf', resolved_ticket_digest: 'b'.repeat(64) } as never, envelope, 'encrypted-unsafe-1')).rejects.toThrow(/cannot attach unbound/);
+    await expect(client.jobs.createEncryptedResolved(
+      { target_id: 'tgt_1', title: 'Private', content_type: 'pdf' },
+      envelope,
+      { digest: 'c'.repeat(64), printer_id: 'prt_other', capability_revision: 1, resolved_options: {}, provenance: {}, expires_at: '2099-01-01T00:00:00Z' },
+      'encrypted-resolved-1'
+    )).rejects.toThrow(/different printers/);
   });
 });

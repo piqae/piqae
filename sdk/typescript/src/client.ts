@@ -382,7 +382,8 @@ export class PiqaeClient {
   };
 
   readonly jobs = {
-    createEncrypted: async (input: Omit<CreateJob, 'content'> & { target_id: string; printer_id?: never }, envelope: EncryptedJobEnvelope, idempotencyKey: string) => {
+    createEncrypted: async (input: Omit<CreateJob, 'content' | 'print_intent' | 'resolved_ticket_digest'> & { target_id: string; printer_id?: never; print_intent?: never; resolved_ticket_digest?: never }, envelope: EncryptedJobEnvelope, idempotencyKey: string) => {
+      if ('print_intent' in input || 'resolved_ticket_digest' in input) throw new TypeError('Encrypted v3 jobs cannot attach unbound print intent or ticket provenance');
       const idempotencyKeyBytes = new TextEncoder().encode(idempotencyKey).byteLength;
       if (idempotencyKeyBytes < 8 || idempotencyKeyBytes > 255) throw new TypeError('Encrypted jobs require an Idempotency-Key between 8 and 255 bytes');
       if (envelope.binding.target_id !== input.target_id || envelope.binding.content_type !== input.content_type || envelope.binding.deliveries !== (input.deliveries ?? 1) || JSON.stringify(envelope.binding.options) !== JSON.stringify(canonicalJobOptions(input.options))) throw new TypeError('Encrypted envelope does not match the job request');
@@ -391,6 +392,13 @@ export class PiqaeClient {
       const sha256 = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
       const upload = await this.uploads.createAndPut({ media_type: 'application/octet-stream', byte_length: ciphertext.byteLength, sha256 }, ciphertext);
       return this.request<Job>('POST', '/v1/jobs', { body: { ...input, content: { type: 'encrypted_upload', upload_id: upload.id, manifest: encryptedJobManifest(envelope) } }, idempotencyKey });
+    },
+    /** Submit resolved options bound by v3 AAD; ticket provenance is intentionally not attached. */
+    createEncryptedResolved: async (input: Omit<CreateJob, 'content' | 'print_intent' | 'resolved_ticket_digest'> & { target_id: string; printer_id?: never; print_intent?: never; resolved_ticket_digest?: never }, envelope: EncryptedJobEnvelope, ticket: ResolvedPrintTicket, idempotencyKey: string) => {
+      if (ticket.printer_id !== envelope.binding.printer_id) throw new TypeError('Resolved ticket and encrypted envelope target different printers');
+      if (JSON.stringify(canonicalJobOptions(ticket.resolved_options)) !== JSON.stringify(envelope.binding.options)) throw new TypeError('Resolved ticket options are not bound by the encrypted envelope');
+      if (JSON.stringify(canonicalJobOptions(input.options)) !== JSON.stringify(envelope.binding.options)) throw new TypeError('Resolved ticket options do not match the job request');
+      return this.jobs.createEncrypted(input, envelope, idempotencyKey);
     },
     list: (options?: JobListOptions) =>
       this.request<Page<Job>>('GET', '/v1/jobs', options ? { query: options } : {}),

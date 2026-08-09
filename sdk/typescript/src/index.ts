@@ -1,5 +1,7 @@
 export { PiqaeClient, PiqaeError } from './client.js';
 export type { PiqaeClientOptions } from './client.js';
+export { PrintIntentBuilder, preliminarilyValidatePrintIntent } from './print-intents.js';
+export type { PrintIntentBuilderInput } from './print-intents.js';
 export { PiqaeAccount, PiqaeAccountEnvironment, PiqaePlatform } from './platform.js';
 export type { PrintPdfInput, PiqaePlatformOptions } from './platform.js';
 export { verifyWebhookSignature } from './webhooks.js';
