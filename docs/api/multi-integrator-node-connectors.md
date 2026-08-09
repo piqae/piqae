@@ -39,8 +39,9 @@ initial job default. That live preset follows the installed driver's defaults;
 captured native presets remain immutable, revision-pinned configurations.
 
 This remains a **Preview implementation**, not a Supported fleet claim. macOS
-has the Piqae-branded browser-to-app handoff and local consent flow in signed,
-notarised packaging. Windows and Linux have the shared headless
+has the Piqae-branded browser-to-app handoff and local consent flow in source
+and unsigned packaging tests, but no signed/notarised release evidence is
+recorded. Windows and Linux have the shared headless
 stdin-only preview/accept transaction but do not register an application link
 or provide an equivalent native consent shell. No platform yet has the
 clean-install physical-printer, concurrent-fleet and revocation-soak evidence

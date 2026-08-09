@@ -35,6 +35,155 @@ native profile payloads to browser JavaScript. The browser calls the design
 platform's own authorization-checked endpoints; the backend resolves the
 tenant from that authenticated session.
 
+## What is embedded and what remains native
+
+The clean integration is not an iframe of the complete Piqae dashboard and it
+is not an SDK running with a platform key in the customer's browser. It is a
+coordinated product journey with four visible or operational surfaces:
+
+| Surface | Owner | Responsibility |
+| --- | --- | --- |
+| Host product UI | Integrator | Customer identity, product authorization, template/design experience, print intent, status presentation, and business audit trail. |
+| Host product backend/BFF | Integrator | Piqae account mapping, platform credential, environment policy, rendering/preflight, uploads, idempotent jobs, webhooks, and reconciliation. |
+| Piqae-hosted connection handoff | Piqae | Short-lived connection session, verified download/application-link routing, and security identity that must not be imitated by partner UI. |
+| Piqae native app and durable node | Piqae plus local operator | Explicit local consent, printer selection, OS permissions, driver/profile capture, durable offline queue, native handoff, and local recovery. |
+
+The host product should own the surrounding journey and vocabulary while
+Piqae remains visible at security boundaries: installer identity, operating-
+system permission prompts, one-time connection approval, native diagnostics,
+and support evidence. Do not visually spoof those boundaries or describe a
+download as a connected printer.
+
+The normal user should not need to understand workspaces, environment IDs,
+API keys, connector grants, upload objects, leases, or spooler identifiers.
+Translate those into product concepts such as organisation, test setup,
+production setup, printer computer, print destination, print attempt, and
+needs attention. Preserve the exact underlying IDs and states in the backend
+for audit and support.
+
+## Recommended end-user journey
+
+The shortest safe path is progressive: users design first, connect printing
+only when they need it, validate setup in Test, and deliberately promote a
+known destination to Live.
+
+### 1. Product administrator enables printing
+
+From the authenticated organisation context, the backend gets or creates the
+Piqae account using the host organisation's immutable ID. The host stores the
+returned account/Test/Live mapping and shows printing as **Not set up**. This
+step is server-only and should not expose Piqae credentials or tenant selectors.
+
+If the same administrator repeats setup, reconcile the existing mapping; do
+not create a second account. If a mutable organisation slug changes, retain
+the original external ID mapping.
+
+### 2. Operator connects a printer computer
+
+Show one primary action, **Connect a printer computer**, to an authorized
+operator. The backend creates a short-lived Test connect session and returns
+only the intended navigation URL to that user's browser. The operator installs
+or opens the native app, reviews the requesting service and customer identity,
+selects concrete printers, and approves the connector locally.
+
+The host UI polls the opaque session ID at a bounded interval and presents
+distinct results:
+
+- **Waiting for approval** while the session is pending;
+- **Connected** only after the API reports `connected` and a node ID;
+- **Connection expired** with an action to create a new session; or
+- a platform-specific manual/download path when native handoff is unavailable.
+
+Never treat opening the URL, copying a code, downloading a package, or seeing
+a process online as equivalent to successful tenant connection.
+
+### 3. Operator configures a destination
+
+After discovery, guide the operator through one deliberate setup wizard:
+
+1. choose a discovered OS printer;
+2. open the real installed-driver controls through the native app;
+3. capture a named immutable profile revision;
+4. define or select the business stock and portable geometry;
+5. create a logical target and bind the exact printer/profile revision;
+6. inspect readiness reasons; and
+7. run the approved Test fixture before publishing the destination.
+
+The host product may present the resulting target as “62 × 29 product label”,
+but it must not recreate the vendor driver UI or claim that the expected roll
+is physically loaded. Only options explicitly marked safe may be varied per
+job.
+
+### 4. Designer uses a stable product destination
+
+The designer selects a business target rather than a machine queue. The host
+loads `designSpecification`, builds the canvas from stock geometry, and saves
+the `specification_revision` plus the relevant portable snapshot with the
+design. If printing is not yet configured, design work can continue while the
+product shows that production output still needs setup.
+
+Before final output, re-fetch the specification. A changed revision triggers a
+comparison and explicit resolution; it never silently rescales artwork or
+falls back to another native profile.
+
+### 5. User submits one print intent
+
+The host backend authorizes the actor, organisation, design version, target,
+quantity, and environment; renders and preflights the exact bytes; uploads
+them; and registers one job with a stable print-attempt idempotency key. The UI
+can immediately show **Queued** after durable registration, with copy such as
+“Piqae has accepted this print attempt” rather than “Printed”.
+
+Disable accidental double submission in the browser, but rely on server-side
+idempotency for correctness. A user choosing **Print again** creates a new,
+linked business attempt; it is not an HTTP retry of the old request.
+
+### 6. Product follows and explains delivery
+
+The backend consumes signed webhooks and runs reconciliation independent of
+the browser. The UI groups states into waiting, processing, printing, reported
+complete, needs attention, cancelling, and ended, while retaining the exact
+Piqae state and event timeline.
+
+Give each actionable condition one clear next step: reconnect an offline node,
+ask an operator to fix a blocked native queue, recapture a stale profile, or
+reconcile uncertain delivery. Never automatically reprint
+`delivery_uncertain`.
+
+### 7. Administrators maintain and offboard
+
+Expose connection health, destination readiness, profile revision, last
+successful validation, and revocation to authorized administrators. Connector
+revocation removes only that tenant projection; it must not reveal or disturb
+other integrators using the same physical installation.
+
+When the customer disables printing, stop new host-product submissions first,
+allow already durable attempts to reach a final state, archive the Piqae
+account, retain a non-reusable mapping tombstone, and follow the operator's
+separate retention/deletion process.
+
+## Integration lifecycle and systems of record
+
+| Phase | Host product record | Piqae record | Completion condition |
+| --- | --- | --- | --- |
+| Provision | Organisation and immutable external ID | Account plus Test/Live environments | Mapping stored and repeatable |
+| Connect | Setup session reference and initiating actor | Expiring connect session and connector grant | API reports connected node ID |
+| Discover | Product-visible location/role mapping | Tenant-scoped node and printer snapshots | Intended queue is visible and online |
+| Configure | Business destination/template association | Stock, target, binding, immutable profile | Readiness selects an exact binding |
+| Validate | Test result and operator acknowledgement | Test job and complete event history | Declared fixture passes required evidence |
+| Design | Artwork version and portable geometry snapshot | Design specification revision | Saved constraints match current revision |
+| Submit | One immutable print-attempt record | Upload and idempotently created job | Job ID durably stored by both systems |
+| Observe | Business status plus deduplicated webhook ledger | Job state and ordered events | Terminal or explicitly reconciled outcome |
+| Recover | Authorized decision and replacement relationship | Original uncertain/failed job plus optional new job | No ambiguous automatic duplicate |
+| Revoke/offboard | Disabled integration and retention tombstone | Revoked connector or archived account | New access stopped; durable work handled |
+
+The host product is authoritative for who may print, what business action the
+output represents, design versions, and operator decisions. Piqae is
+authoritative for tenant-scoped printing resources, durable job/event history,
+node acceptance, and observed native state. The installed OS driver is
+authoritative for vendor settings. None is independently authoritative for
+physical paper delivery without stronger hardware evidence.
+
 Use one immutable, non-personal identifier from the platform database as the
 Piqae external ID. Do not accept an external ID, workspace ID, or environment
 choice directly from a browser request.
@@ -72,6 +221,24 @@ the complete Piqae API. A useful minimum is:
 Apply the product's roles and location rules before returning printers or
 templates. Piqae's tenant boundary does not replace application-level rules
 such as which store, team, or user may use a particular target.
+
+A practical host API can remain small and stable even as Piqae evolves:
+
+| Host endpoint example | Required authorization and behavior |
+| --- | --- |
+| `GET /printing/setup` | Administrator/operator role; return mapped setup/readiness state without secrets. |
+| `POST /printing/connect-sessions` | Operator role, CSRF protection and rate limit; create one short-lived session for the authenticated organisation. |
+| `GET /printing/connect-sessions/:id` | Same organisation and authorized actor; return only product-safe state. |
+| `GET /printing/destinations` | Apply organisation/location visibility; return targets and portable design summaries, not opaque native blobs. |
+| `GET /printing/destinations/:id/specification` | Authorize target ownership; return geometry, revision and actionable readiness. |
+| `POST /printing/attempts` | Authorize design/version/quantity/environment, preflight server-side, create one immutable idempotent attempt. |
+| `GET /printing/attempts/:id` | Authorize business-record visibility; return grouped and exact state plus a redacted timeline. |
+| `POST /printing/attempts/:id/cancel` | Authorized operator; relay cancellation as a request and display the returned state. |
+| `POST /printing/attempts/:id/replacements` | Authorized operator plus reason; create a new linked attempt, never mutate/reuse the old key. |
+
+Do not implement a generic authenticated `/piqae/*` proxy. A narrow BFF keeps
+tenant resolution, role checks, environment selection, quantity policy,
+redaction, and lifecycle language under the host application's control.
 
 ## Discovering design specifications
 
@@ -326,6 +493,7 @@ Preview. The authoritative current result is always the checked-in
 ## Related contracts
 
 - [Platform accounts](platform-service-accounts.md)
+- [Jobs, content, options, and printer capabilities](jobs-content-and-capabilities.md)
 - [Uploads and design applications](uploads-and-design-apps.md)
 - [Webhooks](webhooks.md)
 - [Jobs and statuses](../printing/jobs-and-statuses.md)

@@ -3,11 +3,15 @@
 Typed, dependency-free TypeScript client for Piqae's native API. It works in
 Node.js, browsers, serverless runtimes, and against a local-only agent.
 
-Install the public package from npm:
+After the first public release, install the package from npm:
 
 ```console
 pnpm add @piqae/sdk
 ```
+
+The package is not currently installable from the public registry because that
+first SDK release has not been published. When working from the repository,
+pnpm resolves the workspace package from `sdk/typescript`.
 
 Release tarballs and checksums are also attached to `sdk-vX.Y.Z` GitHub
 Releases, and the package is mirrored to GitHub Packages for authenticated
@@ -194,3 +198,10 @@ upload URLs.
 
 Set `baseUrl` for self-hosted deployments or
 `http://127.0.0.1:39100` for local-only mode.
+
+For complete request structures and server-side validation—not just the
+TypeScript surface—read the repository's
+[jobs, content, options, and capabilities guide](../../docs/api/jobs-content-and-capabilities.md).
+For a multi-tenant product lifecycle from customer provisioning through
+offboarding, read the
+[web design platform integration guide](../../docs/api/web-design-platform-integration.md).

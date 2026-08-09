@@ -1,6 +1,7 @@
 # API guides
 
 - [Quickstart](quickstart.md)
+- [Jobs, content, options, and printer capabilities](jobs-content-and-capabilities.md)
 - [Authentication](authentication.md)
 - [Platform service accounts](platform-service-accounts.md)
 - [Headless SaaS quickstart](platform-headless-quickstart.md)
