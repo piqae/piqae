@@ -469,6 +469,8 @@ pub struct PrinterSnapshot {
     #[serde(default)]
     pub native_options: BTreeMap<String, NativePrinterOption>,
     #[serde(default)]
+    pub semantic_capabilities: piqae_domain::SemanticPrinterCapabilities,
+    #[serde(default)]
     pub profiles: Vec<PrinterProfileSnapshot>,
 }
 

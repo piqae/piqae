@@ -28,6 +28,23 @@ that digest or configure an Ed25519 trust root and provide a hex-encoded detache
 Ed25519 signature over the 32 digest bytes in `SIGNATURE`. Any content change
 invalidates both forms of trust.
 
+The durable node loads packs explicitly at startup. Directories and trust
+material are comma-separated and may also be repeated on the command line:
+
+```console
+PIQAE_SUPPORT_PACK_DIRS=/opt/piqae/packs/vendor-family \
+PIQAE_SUPPORT_PACK_DIGESTS=<canonical-sha256> \
+piqae-agent
+```
+
+For publisher trust, use `PIQAE_SUPPORT_PACK_TRUST_KEYS` with one or more
+hex-encoded Ed25519 public keys instead of a pinned digest. Configuring an
+untrusted, malformed or ambiguous pack prevents the affected runtime operation
+from proceeding; packs are never selected by install order. A pack is projected
+only when discovery supplies its exact driver package digest, driver identity,
+driver version and every optional device or firmware predicate declared by the
+selector. Missing evidence produces no semantic facets.
+
 Symlinks, traversal paths, oversized packs and sensitive fixture fields are
 rejected before a mapping is usable. A trusted pack still supplies normalized
 data only; the platform adapter must validate and apply a requested choice to a

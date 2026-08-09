@@ -148,6 +148,7 @@ mod platform {
                 Ok(ExecutorResult::Capabilities {
                     capabilities,
                     native_options: std::collections::BTreeMap::new(),
+                    driver_fingerprint: None,
                 })
             }
             ExecutorOperation::ListJobs { native_printer_id } => {

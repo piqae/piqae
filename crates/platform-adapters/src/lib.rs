@@ -184,6 +184,7 @@ mod tests {
                 state: PrinterState::Online,
                 capabilities: PrinterCapabilities::default(),
                 native_options: std::collections::BTreeMap::new(),
+                driver_fingerprint: None,
             }],
             submitted_jobs: 0,
         };

@@ -703,6 +703,7 @@ pub fn capture_payload(
             native_queue_id: fingerprint.native_queue_id.clone(),
             device_fingerprint: Some(fingerprint.device_fingerprint.clone()),
             driver_package_fingerprint: None,
+            firmware_version: None,
         },
         summary: profile_summary,
         stock_id: session.stock_id.clone(),

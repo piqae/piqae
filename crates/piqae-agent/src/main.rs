@@ -54,6 +54,7 @@ use piqae_protocol::{
     },
     executor::{DiscoveredPrinter, ExecutorOperation, ExecutorResult, NativeJobObservation},
 };
+use piqae_support_packs::{RegistryConfig as SupportPackConfig, SupportPackRegistry};
 use sha2::{Digest as _, Sha256};
 use std::{
     future::Future,
@@ -131,6 +132,18 @@ struct Arguments {
     /// Executor child-process path when --executor=process.
     #[arg(long, env = "PIQAE_EXECUTOR_PATH")]
     executor_path: Option<PathBuf>,
+
+    /// Trusted declarative driver support-pack directory. Repeat for multiple packs.
+    #[arg(long, env = "PIQAE_SUPPORT_PACK_DIRS", value_delimiter = ',')]
+    support_pack_dirs: Vec<PathBuf>,
+
+    /// Pinned canonical support-pack SHA-256. Repeat or comma-separate.
+    #[arg(long, env = "PIQAE_SUPPORT_PACK_DIGESTS", value_delimiter = ',')]
+    support_pack_digests: Vec<String>,
+
+    /// Trusted Ed25519 publisher public key as 64 hexadecimal characters.
+    #[arg(long, env = "PIQAE_SUPPORT_PACK_TRUST_KEYS", value_delimiter = ',')]
+    support_pack_trust_keys: Vec<String>,
 
     /// Allow trusted private, loopback, and link-local URI content sources.
     /// Cloud metadata and unspecified/multicast destinations remain blocked.
@@ -423,6 +436,7 @@ impl RuntimeExecutor {
                 state: piqae_domain::PrinterState::Online,
                 capabilities: piqae_domain::PrinterCapabilities::default(),
                 native_options: std::collections::BTreeMap::new(),
+                driver_fingerprint: None,
             }],
             Self::Process(executor) => match executor
                 .execute_operation(
@@ -569,6 +583,11 @@ async fn main() -> Result<()> {
         anyhow::bail!("agent database integrity check failed");
     }
     let initially_paused = store.setting("paused")?.as_deref() == Some("true");
+    let support_packs = Arc::new(SupportPackRegistry::load(&SupportPackConfig {
+        pack_directories: arguments.support_pack_dirs.clone(),
+        pinned_digest_hex: arguments.support_pack_digests.clone(),
+        ed25519_public_key_hex: arguments.support_pack_trust_keys.clone(),
+    }).context("load trusted driver support packs")?);
 
     let challenge = load_or_create_private_token(&arguments.data_dir.join("local.token"))?;
     let content_store = ContentStore::open(arguments.data_dir.join("content")).await?;
@@ -635,6 +654,7 @@ async fn main() -> Result<()> {
             cloud_content_store,
             cloud_uri_fetcher.clone(),
             printer_discovery.clone(),
+            Arc::clone(&support_packs),
             Arc::clone(&connection),
             Arc::clone(&paused),
             Arc::clone(&cloud_sync_wakeup),
@@ -657,6 +677,7 @@ async fn main() -> Result<()> {
         executor,
         cloud_uri_fetcher,
         printer_discovery,
+        support_packs,
         legacy_cloud_worker,
         connector_connections,
     ));
@@ -1556,6 +1577,7 @@ async fn connector_scheduler_loop(
 #[allow(
     clippy::cognitive_complexity,
     clippy::needless_collect,
+    clippy::too_many_arguments,
     clippy::too_many_lines,
     reason = "supervisor owns command, recovery, liveness, and shutdown transitions in one audit point"
 )]
@@ -1565,6 +1587,7 @@ async fn connector_supervisor_loop(
     executor: SharedRuntimeExecutor,
     uri_fetcher: UriFetcher,
     printer_discovery: PrinterDiscovery,
+    support_packs: Arc<SupportPackRegistry>,
     mut legacy_cloud_worker: Option<LegacyCloudWorker>,
     connections: ConnectorConnectionTracker,
 ) {
@@ -1580,6 +1603,7 @@ async fn connector_supervisor_loop(
         &executor,
         &uri_fetcher,
         &printer_discovery,
+        &support_packs,
         &connections,
     )
     .await
@@ -1608,6 +1632,7 @@ async fn connector_supervisor_loop(
                         &executor,
                         &uri_fetcher,
                         &printer_discovery,
+                        &support_packs,
                         &connections,
                     ).await
                 {
@@ -1626,6 +1651,7 @@ async fn connector_supervisor_loop(
                     &executor,
                     &uri_fetcher,
                     &printer_discovery,
+                    &support_packs,
                     &connections,
                 ).await {
                     warn!(%error, "periodic connector recovery deferred");
@@ -1649,6 +1675,7 @@ async fn connector_supervisor_loop(
                                 &executor,
                                 &uri_fetcher,
                                 &printer_discovery,
+                                &support_packs,
                                 &connections,
                             )
                             .await
@@ -1763,6 +1790,7 @@ async fn reload_connector_workers(
     executor: &SharedRuntimeExecutor,
     uri_fetcher: &UriFetcher,
     printer_discovery: &PrinterDiscovery,
+    support_packs: &Arc<SupportPackRegistry>,
     connections: &ConnectorConnectionTracker,
 ) -> Result<()> {
     let registry = connector_runtime::ConnectorRegistry::load(data_dir)?;
@@ -1816,6 +1844,7 @@ async fn reload_connector_workers(
             executor.clone(),
             uri_fetcher.clone(),
             printer_discovery.clone(),
+            Arc::clone(support_packs),
             connections.clone(),
         )
         .await
@@ -1842,6 +1871,10 @@ fn connector_worker_has_exited(worker: &ConnectorWorker) -> bool {
         || worker.connection_watch.is_finished()
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "connector workers receive explicit isolated runtime capabilities"
+)]
 async fn start_connector_worker(
     record: connector_runtime::ConnectorRecord,
     paths: connector_runtime::ConnectorRuntimePaths,
@@ -1849,6 +1882,7 @@ async fn start_connector_worker(
     executor: SharedRuntimeExecutor,
     uri_fetcher: UriFetcher,
     printer_discovery: PrinterDiscovery,
+    support_packs: Arc<SupportPackRegistry>,
     connections: ConnectorConnectionTracker,
 ) -> Result<ConnectorWorker> {
     let parent = paths
@@ -1888,6 +1922,7 @@ async fn start_connector_worker(
         content,
         uri_fetcher,
         printer_discovery,
+        support_packs,
         Arc::clone(&connector_connection),
         paused,
         wakeup,
@@ -3334,6 +3369,7 @@ async fn cloud_sync_loop(
     content_store: ContentStore,
     uri_fetcher: UriFetcher,
     printer_discovery: PrinterDiscovery,
+    support_packs: Arc<SupportPackRegistry>,
     connection: Arc<RwLock<ConnectionState>>,
     paused: Arc<AtomicBool>,
     cloud_sync_wakeup: Arc<Notify>,
@@ -3369,6 +3405,7 @@ async fn cloud_sync_loop(
         content_store,
         uri_fetcher,
         printer_discovery,
+        support_packs,
         connection,
         paused,
         cloud_sync_wakeup,
@@ -3381,6 +3418,7 @@ async fn cloud_sync_loop(
 #[allow(
     clippy::too_many_arguments,
     clippy::cognitive_complexity,
+    clippy::too_many_lines,
     reason = "cloud synchronization dependencies are explicit process-boundary capabilities"
 )]
 async fn run_cloud_sync_loop(
@@ -3390,6 +3428,7 @@ async fn run_cloud_sync_loop(
     content_store: ContentStore,
     uri_fetcher: UriFetcher,
     printer_discovery: PrinterDiscovery,
+    support_packs: Arc<SupportPackRegistry>,
     connection: Arc<RwLock<ConnectionState>>,
     paused: Arc<AtomicBool>,
     cloud_sync_wakeup: Arc<Notify>,
@@ -3447,6 +3486,7 @@ async fn run_cloud_sync_loop(
             &mut store,
             &mut inventory_store,
             &printer_discovery,
+            &support_packs,
             cloud.agent_id,
             started_at,
             paused.load(Ordering::Relaxed),
@@ -3531,6 +3571,7 @@ async fn prepare_sync_request(
     store: &mut AgentStore,
     inventory_store: &mut AgentStore,
     printer_discovery: &PrinterDiscovery,
+    support_packs: &SupportPackRegistry,
     agent_id: AgentId,
     started_at: chrono::DateTime<Utc>,
     paused: bool,
@@ -3538,7 +3579,7 @@ async fn prepare_sync_request(
     allowed_printer_ids: Option<&std::collections::BTreeSet<String>>,
 ) -> Result<AgentSyncRequest> {
     let printers = if refresh_printers {
-        match discover_cloud_printers(inventory_store, printer_discovery).await {
+        match discover_cloud_printers(inventory_store, printer_discovery, support_packs).await {
             Ok(mut printers) => {
                 printers.retain(|printer| {
                     printer_is_allowed(allowed_printer_ids, &printer.id.to_string())
@@ -4516,6 +4557,7 @@ fn sync_request(
 async fn discover_cloud_printers(
     store: &mut AgentStore,
     discovery: &PrinterDiscovery,
+    support_packs: &SupportPackRegistry,
 ) -> Result<Vec<PrinterSnapshot>> {
     let discovered = run_printer_discovery(discovery).await?;
     let present_native_ids = discovered
@@ -4526,6 +4568,9 @@ async fn discover_cloud_printers(
     let snapshots = discovered
         .into_iter()
         .map(|printer| {
+            let semantic_capabilities = support_packs
+                .normalize(printer.driver_fingerprint.as_ref(), &printer.native_options)
+                .context("normalize trusted driver support pack")?;
             let state = serde_json::to_string(&printer.state)?;
             let capabilities = serde_json::to_string(&printer.capabilities)?;
             let stored = store.upsert_printer(
@@ -4587,6 +4632,7 @@ async fn discover_cloud_printers(
                 exposed: true,
                 capability_revision: profile.revision,
                 native_options: printer.native_options,
+                semantic_capabilities,
                 profiles,
             }))
         })
@@ -4605,6 +4651,7 @@ async fn run_printer_discovery(discovery: &PrinterDiscovery) -> Result<Vec<Disco
             state: piqae_domain::PrinterState::Online,
             capabilities: piqae_domain::PrinterCapabilities::default(),
             native_options: std::collections::BTreeMap::new(),
+            driver_fingerprint: None,
         }],
         PrinterDiscovery::Process(executor) => match executor
             .execute_operation(
@@ -4939,6 +4986,7 @@ mod tests {
             &executor,
             &UriFetcher::new(false),
             &PrinterDiscovery::Disabled,
+            &Arc::new(SupportPackRegistry::default()),
             &connections,
         )
         .await
@@ -5639,9 +5687,13 @@ mod tests {
     #[tokio::test]
     async fn discovered_printer_and_live_default_are_cloud_available_without_global_exposure() {
         let mut store = AgentStore::in_memory().expect("store");
-        let first = discover_cloud_printers(&mut store, &PrinterDiscovery::Fake)
-            .await
-            .expect("discovery");
+        let first = discover_cloud_printers(
+            &mut store,
+            &PrinterDiscovery::Fake,
+            &SupportPackRegistry::default(),
+        )
+        .await
+        .expect("discovery");
         assert_eq!(first.len(), 1);
         assert_eq!(first[0].profiles.len(), 1);
         assert_eq!(first[0].profiles[0].name, "Current printer defaults");
@@ -5662,9 +5714,13 @@ mod tests {
         assert!(profile.uses_current_printer_defaults);
         assert!(!profile.published);
 
-        let restarted = discover_cloud_printers(&mut store, &PrinterDiscovery::Fake)
-            .await
-            .expect("restart discovery");
+        let restarted = discover_cloud_printers(
+            &mut store,
+            &PrinterDiscovery::Fake,
+            &SupportPackRegistry::default(),
+        )
+        .await
+        .expect("restart discovery");
         assert_eq!(restarted[0].id, first[0].id);
         assert_eq!(
             restarted[0].profiles[0].profile_id,
@@ -5684,9 +5740,13 @@ mod tests {
     async fn connector_sync_uses_shared_approved_printer_identity() {
         let mut node_inventory = AgentStore::in_memory().expect("node inventory");
         // Initial discovery creates the node-owned stable printer identity.
-        let initial = discover_cloud_printers(&mut node_inventory, &PrinterDiscovery::Fake)
-            .await
-            .expect("initial discovery");
+        let initial = discover_cloud_printers(
+            &mut node_inventory,
+            &PrinterDiscovery::Fake,
+            &SupportPackRegistry::default(),
+        )
+        .await
+        .expect("initial discovery");
         assert_eq!(initial.len(), 1);
         let printer = node_inventory
             .present_printers()
@@ -5701,6 +5761,7 @@ mod tests {
             &mut connector_queue,
             &mut node_inventory,
             &PrinterDiscovery::Fake,
+            &SupportPackRegistry::default(),
             AgentId::new(),
             Utc::now(),
             false,
@@ -5741,6 +5802,7 @@ mod tests {
             &mut selected_queue,
             &mut node_inventory,
             &PrinterDiscovery::Fake,
+            &SupportPackRegistry::default(),
             AgentId::new(),
             Utc::now(),
             false,
