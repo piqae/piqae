@@ -17,10 +17,10 @@ use piqae_storage_postgres::{
     StoredAgent, StoredAgentCommandBatch, StoredApiKey, StoredBillingSummary,
     StoredConnectSessionPreview, StoredContentEncryptionKey, StoredDeviceAuthorization,
     StoredNodeConnector, StoredNodeDiagnostic, StoredNodeUpdate, StoredPlatformAccount,
-    StoredPrinter, StoredStock, StoredTarget, StoredTargetBinding, StoredTenantEvent, StoredUpload,
-    StoredUsageSummary, StoredWebhook, StoredWebhookDelivery, StripeBillingEvent,
-    StripeProjectionResult, SyncedPrinter, UpsertedPlatformAccount, WebhookDeliveryWork,
-    WorkOsIdentityEvent, WorkOsProjectionResult,
+    StoredPrintWorkflow, StoredPrinter, StoredStock, StoredTarget, StoredTargetBinding,
+    StoredTenantEvent, StoredUpload, StoredUsageSummary, StoredWebhook, StoredWebhookDelivery,
+    StripeBillingEvent, StripeProjectionResult, SyncedPrinter, UpsertedPlatformAccount,
+    WebhookDeliveryWork, WorkOsIdentityEvent, WorkOsProjectionResult,
 };
 use sha2::Digest as _;
 use std::{
@@ -326,6 +326,21 @@ pub trait Repository: Send + Sync + 'static {
         workspace_id: WorkspaceId,
         environment_id: EnvironmentId,
     ) -> Result<Vec<StoredStock>, RepositoryError>;
+    async fn list_print_workflows(
+        &self,
+        _workspace_id: WorkspaceId,
+        _environment_id: EnvironmentId,
+    ) -> Result<Vec<StoredPrintWorkflow>, RepositoryError> {
+        Err(RepositoryError::NotFound)
+    }
+    async fn create_print_workflow(
+        &self,
+        _workspace_id: WorkspaceId,
+        _environment_id: EnvironmentId,
+        _workflow: &StoredPrintWorkflow,
+    ) -> Result<StoredPrintWorkflow, RepositoryError> {
+        Err(RepositoryError::NotFound)
+    }
     async fn get_stock(
         &self,
         workspace_id: WorkspaceId,
@@ -815,6 +830,27 @@ impl Repository for PostgresStore {
         owner_workspace_id: WorkspaceId,
     ) -> Result<bool, RepositoryError> {
         self.has_platform_manager_for_owner_workspace(owner_workspace_id)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn list_print_workflows(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+    ) -> Result<Vec<StoredPrintWorkflow>, RepositoryError> {
+        Self::list_print_workflows(self, workspace_id, environment_id)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn create_print_workflow(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        workflow: &StoredPrintWorkflow,
+    ) -> Result<StoredPrintWorkflow, RepositoryError> {
+        Self::create_print_workflow(self, workspace_id, environment_id, workflow)
             .await
             .map_err(Into::into)
     }
@@ -3150,8 +3186,10 @@ impl Repository for MemoryRepository {
                 *workspace == workspace_id && *environment == environment_id
             })
             .ok_or(RepositoryError::NotFound)?;
-        *existing = stock.clone();
-        Ok(stock.clone())
+        let mut updated = stock.clone();
+        updated.revision = existing.revision.saturating_add(1);
+        *existing = updated.clone();
+        Ok(updated)
     }
 
     async fn list_targets(
