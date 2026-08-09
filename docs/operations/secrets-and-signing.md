@@ -93,22 +93,16 @@ environment.
 
 Use one of these mutually exclusive public-trust paths:
 
-1. **SignPath Foundation (preferred first attempt):** free for eligible,
-   entirely open-source projects. SignPath holds the certificate in its HSM and
-   the displayed publisher is SignPath Foundation. Configure repository and
-   signing-policy identifiers after the application is approved; there is no
-   exportable PFX to recover.
-2. **Microsoft Artifact Signing:** managed public-trust signing with GitHub OIDC
+1. **Microsoft Artifact Signing (preferred):** managed public-trust signing with GitHub OIDC
    and no exportable certificate. At the time of this decision, Microsoft
-   accepts Public Trust organizations only in the USA, Canada, EU, and UK, so a
-   Confirm the current Piqae publisher's billing/legal identity is eligible. Recheck the
-   official availability list before reconsidering it; do not misrepresent the
-   legal entity or billing country. If it becomes eligible, store the Azure
+   accepts Public Trust organizations in New Zealand. Confirm that the Piqae
+   publisher's Azure billing profile exactly matches its legal identity and
+   recheck the official availability list during setup. Store the Azure
    tenant, client, subscription, signing-account endpoint, and
    certificate-profile identifiers as GitHub environment variables. Grant the
    federated release identity only the Artifact Signing Certificate Profile
    Signer role. No client secret is required when OIDC is used.
-3. **Public-CA cloud HSM provider:** the paid New Zealand fallback. The checked-in
+2. **Public-CA cloud HSM provider:** a separately billed fallback. The checked-in
    workflow supports DigiCert KeyLocker through DigiCert's current pinned
    GitHub integration. Set `WINDOWS_SIGNING_PROVIDER=digicert-keylocker`; keep
    its API key, client-authentication certificate/password, and keypair alias in
@@ -127,6 +121,31 @@ from Authenticode and always needs its own
 Do not set the remote provider variable before all provider, signer-policy, and
 WinSparkle fields exist: a partial signing configuration deliberately fails
 rather than producing an ambiguously signed candidate.
+
+For Artifact Signing, set `WINDOWS_SIGNING_PROVIDER=artifact-signing` and
+configure these `native-signing` environment variables:
+
+```text
+AZURE_ARTIFACT_SIGNING_CLIENT_ID
+AZURE_ARTIFACT_SIGNING_TENANT_ID
+AZURE_ARTIFACT_SIGNING_SUBSCRIPTION_ID
+AZURE_ARTIFACT_SIGNING_ENDPOINT
+AZURE_ARTIFACT_SIGNING_ACCOUNT_NAME
+AZURE_ARTIFACT_SIGNING_CERTIFICATE_PROFILE_NAME
+```
+
+The Entra application needs a federated credential restricted to the
+`native-signing` GitHub environment in `piqae/piqae`, and its service principal
+needs only `Artifact Signing Certificate Profile Signer` on the selected
+certificate profile. The workflow uses GitHub OIDC and deliberately has no
+Azure client secret. Artifact Signing certificates rotate frequently, so the
+workflow binds signing authority to the OIDC identity, account, profile, and
+exact certificate subject instead of pinning a transient leaf thumbprint.
+Use the account's documented regional endpoint and Microsoft's RFC 3161
+timestamp endpoint, `http://timestamp.acs.microsoft.com`.
+
+See Microsoft's current [Artifact Signing eligibility, setup, and regional availability](https://learn.microsoft.com/azure/artifact-signing/quickstart)
+and [GitHub OIDC setup](https://learn.microsoft.com/azure/developer/github/connect-from-azure-openid-connect).
 
 ### WorkOS and web sessions
 

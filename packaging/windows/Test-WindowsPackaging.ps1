@@ -131,6 +131,7 @@ try {
     $signerScript = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot "Assert-AuthenticodeSigner.ps1")
     Assert-True ($signerScript.Contains("SignerCertificate.Subject")) "Authenticode verification does not bind the signer subject."
     Assert-True ($signerScript.Contains("SignerCertificate.Thumbprint")) "Authenticode verification does not bind the signer thumbprint."
+    Assert-True ($signerScript.Contains("AllowRotatingCertificate")) "Authenticode verification cannot explicitly handle managed rotating leaf certificates."
 
     $releaseWorkflow = Get-Content -Raw -LiteralPath (Join-Path $RepositoryRoot ".github\workflows\windows-release.yml")
     foreach ($component in @(
@@ -143,6 +144,15 @@ try {
     }
     Assert-True ($releaseWorkflow.Contains("WINDOWS_EXPECTED_CERTIFICATE_SUBJECT")) "Release workflow does not require the expected signer subject."
     Assert-True ($releaseWorkflow.Contains("WINDOWS_EXPECTED_CERTIFICATE_THUMBPRINT")) "Release workflow does not require the expected signer thumbprint."
+    Assert-True ($releaseWorkflow.Contains("WINDOWS_SIGNING_PROVIDER || 'artifact-signing'")) "Microsoft Artifact Signing is not the default Windows signer."
+    Assert-True ($releaseWorkflow.Contains("azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82")) "Artifact Signing action is not immutable-pinned."
+    Assert-True ($releaseWorkflow.Contains("azure/login@f5d393ae46f8fde4be8b75f32e3fc50e654ad0ca")) "Azure OIDC login action is not immutable-pinned."
+    Assert-True ($releaseWorkflow.Contains("id-token: write")) "Artifact Signing workflow cannot request a GitHub OIDC token."
+    Assert-True (-not $releaseWorkflow.Contains("azure-client-secret")) "Artifact Signing workflow must not use an Azure client secret."
+    Assert-True ($releaseWorkflow.Contains('$artifactSigningTimestamp = "http://timestamp.acs.microsoft.com"')) "Release workflow does not pin Microsoft's documented Artifact Signing timestamp endpoint."
+    Assert-True ($releaseWorkflow.Contains('$env:WINDOWS_TIMESTAMP_URL -eq $artifactSigningTimestamp')) "Release workflow does not restrict the HTTP timestamp exception to Microsoft's exact endpoint."
+    Assert-True ($releaseWorkflow.Contains("files-folder-filter: piqae-*.exe,piqaectl.exe")) "Artifact Signing omits the piqaectl executable."
+    Assert-True (([regex]::Matches($releaseWorkflow, '\$_.Name -like "piqae-\*\.exe" -or \$_.Name -eq "piqaectl\.exe"')).Count -eq 3) "Legacy signing or signature verification does not cover both node and CLI executables."
 
     Write-Host "Windows packaging static tests passed."
 } finally {

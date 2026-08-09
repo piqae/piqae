@@ -136,8 +136,30 @@ WINSPARKLE_ED25519_PRIVATE_KEY_BASE64
 WINSPARKLE_ED25519_PUBLIC_KEY
 ```
 
-Set `WINDOWS_SIGNING_PROVIDER=digicert-keylocker` for the preferred remote-HSM
-path, then configure:
+Set `WINDOWS_SIGNING_PROVIDER=artifact-signing` for the preferred Microsoft
+Artifact Signing path, then configure these non-secret `native-signing`
+environment variables:
+
+```text
+AZURE_ARTIFACT_SIGNING_CLIENT_ID
+AZURE_ARTIFACT_SIGNING_TENANT_ID
+AZURE_ARTIFACT_SIGNING_SUBSCRIPTION_ID
+AZURE_ARTIFACT_SIGNING_ENDPOINT
+AZURE_ARTIFACT_SIGNING_ACCOUNT_NAME
+AZURE_ARTIFACT_SIGNING_CERTIFICATE_PROFILE_NAME
+```
+
+The workflow authenticates through a GitHub-environment-scoped Entra federated
+credential; do not create an Azure client secret. Configure
+`WINDOWS_RFC3161_TIMESTAMP_URL=http://timestamp.acs.microsoft.com`, the exact
+issued subject in `WINDOWS_EXPECTED_CERTIFICATE_SUBJECT`, and leave
+`WINDOWS_EXPECTED_CERTIFICATE_THUMBPRINT` unset because Artifact Signing leaf
+certificates rotate. Microsoft currently makes Public Trust available to New
+Zealand organizations; the Azure billing profile must exactly match the legal
+publisher identity.
+
+DigiCert KeyLocker remains a separately reviewed remote-HSM fallback. Set
+`WINDOWS_SIGNING_PROVIDER=digicert-keylocker`, then configure:
 
 ```text
 DIGICERT_SM_HOST

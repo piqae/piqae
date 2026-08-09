@@ -57,7 +57,13 @@ jobs:
       attestations: write
     env:
       TARGET: x86_64-pc-windows-msvc
-      WINDOWS_SIGNING_PROVIDER: ${{ vars.WINDOWS_SIGNING_PROVIDER || 'pfx' }}
+      WINDOWS_SIGNING_PROVIDER: ${{ vars.WINDOWS_SIGNING_PROVIDER || 'artifact-signing' }}
+      AZURE_CLIENT_ID: ${{ vars.AZURE_ARTIFACT_SIGNING_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ vars.AZURE_ARTIFACT_SIGNING_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_ARTIFACT_SIGNING_SUBSCRIPTION_ID }}
+      ARTIFACT_SIGNING_ENDPOINT: ${{ vars.AZURE_ARTIFACT_SIGNING_ENDPOINT }}
+      ARTIFACT_SIGNING_ACCOUNT_NAME: ${{ vars.AZURE_ARTIFACT_SIGNING_ACCOUNT_NAME }}
+      ARTIFACT_SIGNING_CERTIFICATE_PROFILE_NAME: ${{ vars.AZURE_ARTIFACT_SIGNING_CERTIFICATE_PROFILE_NAME }}
       WINDOWS_PFX_BASE64: ${{ secrets.WINDOWS_AUTHENTICODE_PFX_BASE64 }}
       WINDOWS_PFX_PASSWORD: ${{ secrets.WINDOWS_AUTHENTICODE_PFX_PASSWORD }}
       WINDOWS_TIMESTAMP_URL: ${{ vars.WINDOWS_RFC3161_TIMESTAMP_URL }}
@@ -98,10 +104,19 @@ jobs:
           }
           "version=$version" >> $env:GITHUB_OUTPUT
 
-          if ($env:WINDOWS_SIGNING_PROVIDER -notin @("pfx", "digicert-keylocker")) {
-            throw "WINDOWS_SIGNING_PROVIDER must be 'pfx' or 'digicert-keylocker'."
+          if ($env:WINDOWS_SIGNING_PROVIDER -notin @("artifact-signing", "pfx", "digicert-keylocker")) {
+            throw "WINDOWS_SIGNING_PROVIDER must be 'artifact-signing', 'pfx', or 'digicert-keylocker'."
           }
-          $authenticodeRequirements = if ($env:WINDOWS_SIGNING_PROVIDER -eq "digicert-keylocker") {
+          $authenticodeRequirements = if ($env:WINDOWS_SIGNING_PROVIDER -eq "artifact-signing") {
+            [ordered]@{
+              azure_client_id = $env:AZURE_CLIENT_ID
+              azure_tenant_id = $env:AZURE_TENANT_ID
+              azure_subscription_id = $env:AZURE_SUBSCRIPTION_ID
+              artifact_signing_endpoint = $env:ARTIFACT_SIGNING_ENDPOINT
+              artifact_signing_account = $env:ARTIFACT_SIGNING_ACCOUNT_NAME
+              artifact_signing_certificate_profile = $env:ARTIFACT_SIGNING_CERTIFICATE_PROFILE_NAME
+            }
+          } elseif ($env:WINDOWS_SIGNING_PROVIDER -eq "digicert-keylocker") {
             [ordered]@{
               digicert_host = $env:SM_HOST
               digicert_api_key = $env:SM_API_KEY
@@ -118,9 +133,11 @@ jobs:
           $requirements = [ordered]@{
             timestamp_url = $env:WINDOWS_TIMESTAMP_URL
             expected_certificate_subject = $env:WINDOWS_EXPECTED_CERTIFICATE_SUBJECT
-            expected_certificate_thumbprint = $env:WINDOWS_EXPECTED_CERTIFICATE_THUMBPRINT
             winsparkle_private_key = $env:WINSPARKLE_PRIVATE_KEY_BASE64
             winsparkle_public_key = $env:WINSPARKLE_PUBLIC_KEY
+          }
+          if ($env:WINDOWS_SIGNING_PROVIDER -ne "artifact-signing") {
+            $requirements["expected_certificate_thumbprint"] = $env:WINDOWS_EXPECTED_CERTIFICATE_THUMBPRINT
           }
           foreach ($entry in $authenticodeRequirements.GetEnumerator()) {
             $requirements[$entry.Key] = $entry.Value
@@ -137,15 +154,28 @@ jobs:
             "UNSIGNED PREVIEW: no Authenticode or update-signing credentials were supplied." |
               Out-File -Encoding ascii "SIGNING-STATUS.txt"
           } elseif ($present -eq $requirements.Count) {
-            if (-not $env:WINDOWS_TIMESTAMP_URL.StartsWith("https://")) {
-              throw "WINDOWS_RFC3161_TIMESTAMP_URL must use HTTPS."
+            $artifactSigningTimestamp = "http://timestamp.acs.microsoft.com"
+            if (
+              -not $env:WINDOWS_TIMESTAMP_URL.StartsWith("https://") -and
+              -not (
+                $env:WINDOWS_SIGNING_PROVIDER -eq "artifact-signing" -and
+                $env:WINDOWS_TIMESTAMP_URL -eq $artifactSigningTimestamp
+              )
+            ) {
+              throw "WINDOWS_RFC3161_TIMESTAMP_URL must use HTTPS, except for Microsoft's documented Artifact Signing timestamp endpoint."
             }
             if (-not $env:WINDOWS_UPDATE_FEED_URL.StartsWith("https://")) {
               throw "WINDOWS_UPDATE_FEED_URL must use HTTPS."
             }
-            $expectedThumbprint = $env:WINDOWS_EXPECTED_CERTIFICATE_THUMBPRINT -replace "\s", ""
-            if ($expectedThumbprint -notmatch "^[0-9A-Fa-f]{40}$") {
-              throw "WINDOWS_EXPECTED_CERTIFICATE_THUMBPRINT must be a 40-character SHA-1 certificate thumbprint."
+            if ($env:WINDOWS_SIGNING_PROVIDER -eq "artifact-signing") {
+              if ($env:ARTIFACT_SIGNING_ENDPOINT -notmatch '^https://[a-z0-9-]+\.codesigning\.azure\.net/?$') {
+                throw "AZURE_ARTIFACT_SIGNING_ENDPOINT must be an official regional HTTPS codesigning.azure.net endpoint."
+              }
+            } else {
+              $expectedThumbprint = $env:WINDOWS_EXPECTED_CERTIFICATE_THUMBPRINT -replace "\s", ""
+              if ($expectedThumbprint -notmatch "^[0-9A-Fa-f]{40}$") {
+                throw "WINDOWS_EXPECTED_CERTIFICATE_THUMBPRINT must be a 40-character SHA-1 certificate thumbprint."
+              }
             }
             "signed=true" >> $env:GITHUB_OUTPUT
             "signing_provider=$env:WINDOWS_SIGNING_PROVIDER" >> $env:GITHUB_OUTPUT
@@ -311,8 +341,31 @@ jobs:
             throw "DigiCert KeyLocker certificate synchronization failed."
           }
 
+      - name: Authenticate to Azure with GitHub OIDC
+        if: steps.release.outputs.signed == 'true' && steps.release.outputs.signing_provider == 'artifact-signing'
+        uses: azure/login@f5d393ae46f8fde4be8b75f32e3fc50e654ad0ca # v3.0.0
+        with:
+          client-id: ${{ env.AZURE_CLIENT_ID }}
+          tenant-id: ${{ env.AZURE_TENANT_ID }}
+          subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Artifact Signing-sign staged Piqae binaries
+        if: steps.release.outputs.signed == 'true' && steps.release.outputs.signing_provider == 'artifact-signing'
+        uses: azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2.0.0
+        with:
+          endpoint: ${{ env.ARTIFACT_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ env.ARTIFACT_SIGNING_ACCOUNT_NAME }}
+          certificate-profile-name: ${{ env.ARTIFACT_SIGNING_CERTIFICATE_PROFILE_NAME }}
+          files-folder: ${{ github.workspace }}\artifacts\stage
+          files-folder-filter: piqae-*.exe,piqaectl.exe
+          file-digest: SHA256
+          timestamp-rfc3161: ${{ env.WINDOWS_TIMESTAMP_URL }}
+          timestamp-digest: SHA256
+          exclude-environment-credential: true
+          exclude-azure-cli-credential: false
+
       - name: Authenticode-sign staged Piqae binaries
-        if: steps.release.outputs.signed == 'true'
+        if: steps.release.outputs.signed == 'true' && steps.release.outputs.signing_provider != 'artifact-signing'
         id: authenticode
         shell: pwsh
         run: |
@@ -335,7 +388,8 @@ jobs:
             throw "Windows SDK signtool.exe was not found."
           }
           "signtool=$signTool" >> $env:GITHUB_OUTPUT
-          $binaries = Get-ChildItem "artifacts\stage\piqae-*.exe"
+          $binaries = Get-ChildItem "artifacts\stage" -File |
+            Where-Object { $_.Name -like "piqae-*.exe" -or $_.Name -eq "piqaectl.exe" }
           foreach ($binary in $binaries) {
             $signArguments = @(
               "sign", "/fd", "SHA256", "/td", "SHA256",
@@ -360,11 +414,32 @@ jobs:
               -ExpectedThumbprint $env:WINDOWS_EXPECTED_CERTIFICATE_THUMBPRINT
           }
 
+      - name: Verify staged Piqae Authenticode signatures
+        if: steps.release.outputs.signed == 'true'
+        shell: pwsh
+        run: |
+          $binaries = Get-ChildItem "artifacts\stage" -File |
+            Where-Object { $_.Name -like "piqae-*.exe" -or $_.Name -eq "piqaectl.exe" }
+          foreach ($binary in $binaries) {
+            $arguments = @{
+              Path = $binary.FullName
+              ExpectedSubject = $env:WINDOWS_EXPECTED_CERTIFICATE_SUBJECT
+            }
+            if ("${{ steps.release.outputs.signing_provider }}" -ne "artifact-signing") {
+              $arguments["ExpectedThumbprint"] = $env:WINDOWS_EXPECTED_CERTIFICATE_THUMBPRINT
+            } else {
+              $arguments["AllowRotatingCertificate"] = $true
+            }
+            & "packaging/windows/Assert-AuthenticodeSigner.ps1" @arguments
+          }
+
       - name: Verify preview binaries are not represented as signed
         if: steps.release.outputs.signed != 'true'
         shell: pwsh
         run: |
-          foreach ($binary in Get-ChildItem "artifacts\stage\piqae-*.exe") {
+          $binaries = Get-ChildItem "artifacts\stage" -File |
+            Where-Object { $_.Name -like "piqae-*.exe" -or $_.Name -eq "piqaectl.exe" }
+          foreach ($binary in $binaries) {
             $signature = Get-AuthenticodeSignature -LiteralPath $binary.FullName
             if ($signature.Status -eq "Valid") {
               throw "$($binary.Name) is signed but this workflow selected unsigned-preview mode."
@@ -389,7 +464,10 @@ jobs:
             "/DUpdateConfigFile=$updateConfig"
             "packaging\windows\Piqae.iss"
           )
-          if ("${{ steps.release.outputs.signed }}" -eq "true") {
+          if (
+            "${{ steps.release.outputs.signed }}" -eq "true" -and
+            "${{ steps.release.outputs.signing_provider }}" -ne "artifact-signing"
+          ) {
             if ("${{ steps.release.outputs.signing_provider }}" -eq "digicert-keylocker") {
               $thumbprint = $env:WINDOWS_EXPECTED_CERTIFICATE_THUMBPRINT -replace "\s", ""
               $signCommand = (
@@ -417,15 +495,36 @@ jobs:
             throw "Inno Setup failed with exit code $LASTEXITCODE"
           }
 
+      - name: Artifact Signing-sign Windows installer
+        if: steps.release.outputs.signed == 'true' && steps.release.outputs.signing_provider == 'artifact-signing'
+        uses: azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2.0.0
+        with:
+          endpoint: ${{ env.ARTIFACT_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ env.ARTIFACT_SIGNING_ACCOUNT_NAME }}
+          certificate-profile-name: ${{ env.ARTIFACT_SIGNING_CERTIFICATE_PROFILE_NAME }}
+          files-folder: ${{ github.workspace }}\artifacts\release
+          files-folder-filter: piqae-windows-x86_64-setup.exe
+          file-digest: SHA256
+          timestamp-rfc3161: ${{ env.WINDOWS_TIMESTAMP_URL }}
+          timestamp-digest: SHA256
+          exclude-environment-credential: true
+          exclude-azure-cli-credential: false
+
       - name: Verify installer Authenticode signature
         if: steps.release.outputs.signed == 'true'
         shell: pwsh
         run: |
           $installer = "artifacts\release\piqae-windows-x86_64-setup.exe"
-          & "packaging/windows/Assert-AuthenticodeSigner.ps1" `
-            -Path $installer `
-            -ExpectedSubject $env:WINDOWS_EXPECTED_CERTIFICATE_SUBJECT `
-            -ExpectedThumbprint $env:WINDOWS_EXPECTED_CERTIFICATE_THUMBPRINT
+          $arguments = @{
+            Path = $installer
+            ExpectedSubject = $env:WINDOWS_EXPECTED_CERTIFICATE_SUBJECT
+          }
+          if ("${{ steps.release.outputs.signing_provider }}" -ne "artifact-signing") {
+            $arguments["ExpectedThumbprint"] = $env:WINDOWS_EXPECTED_CERTIFICATE_THUMBPRINT
+          } else {
+            $arguments["AllowRotatingCertificate"] = $true
+          }
+          & "packaging/windows/Assert-AuthenticodeSigner.ps1" @arguments
 
       - name: Verify preview installer is unsigned
         if: steps.release.outputs.signed != 'true'
