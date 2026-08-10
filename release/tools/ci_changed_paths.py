@@ -18,6 +18,8 @@ GROUPS = (
     "windows_installer",
     "web",
     "sdk",
+    "mcp",
+    "shopify",
     "openapi",
     "terraform",
     "release_tooling",
@@ -37,16 +39,6 @@ NATIVE_SHARED = (
     "crates/protocol/",
     "crates/update-guardian/",
     "crates/update-metadata/",
-)
-SERVER_ONLY = (
-    "crates/auth/",
-    "crates/control-plane/",
-    "crates/object-store/",
-    "crates/platform-adapters/",
-    "crates/storage-postgres/",
-    "crates/usage/",
-    "crates/webhooks/",
-    "migrations/",
 )
 
 
@@ -69,9 +61,13 @@ def classify(paths: Iterable[str], *, run_all: bool = False) -> dict[str, bool]:
             continue
         root_rust = path in {"Cargo.toml", "Cargo.lock"} or path.startswith(".cargo/")
         shared = root_rust or path.startswith(NATIVE_SHARED)
-        server = shared or path.startswith(SERVER_ONLY) or path.startswith(("bins/", "xtask/"))
+        # Every workspace crate must at least run Linux Rust CI. Keep an explicit
+        # list only for the narrower native-platform fan-out; otherwise adding a
+        # crate can silently create an untested path.
+        server = shared or path.startswith(("crates/", "migrations/", "bins/", "xtask/"))
         js_workspace = path in {"package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml"}
         openapi = path.startswith("contracts/openapi/")
+        sdk = path.startswith("sdk/")
 
         selected["rust_shared"] |= shared
         selected["rust_server"] |= server
@@ -86,8 +82,12 @@ def classify(paths: Iterable[str], *, run_all: bool = False) -> dict[str, bool]:
         selected["web"] |= js_workspace or openapi or path.startswith(
             ("apps/web/", "contracts/", "deploy/cloudflare/")
         )
-        selected["sdk"] |= js_workspace or openapi or path.startswith(
-            ("sdk/", "apps/mcp/")
+        selected["sdk"] |= js_workspace or openapi or sdk
+        # MCP and Shopify consume @piqae/sdk as a workspace dependency, so SDK
+        # and contract changes must test those downstream consumers too.
+        selected["mcp"] |= js_workspace or openapi or sdk or path.startswith("apps/mcp/")
+        selected["shopify"] |= (
+            js_workspace or openapi or sdk or path.startswith("apps/shopify/")
         )
         selected["openapi"] |= openapi
         selected["terraform"] |= path.startswith("deploy/terraform/")
@@ -99,7 +99,8 @@ def classify(paths: Iterable[str], *, run_all: bool = False) -> dict[str, bool]:
         if path.startswith(".github/workflows/"):
             selected["release_tooling"] = True
             name = path.removeprefix(".github/workflows/")
-            selected["sdk"] |= name in {"sdk-release.yml", "mcp-release.yml"}
+            selected["sdk"] |= name == "sdk-release.yml"
+            selected["mcp"] |= name == "mcp-release.yml"
             selected["dependency_policy"] |= name == "supply-chain.yml"
             selected["macos_packaging"] |= name in {
                 "macos-release.yml",

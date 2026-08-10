@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
 
 from ci_changed_paths import GROUPS, classify
 
@@ -9,24 +10,58 @@ class CiChangedPathsTests(unittest.TestCase):
     def test_documentation_only_selects_no_expensive_jobs(self) -> None:
         self.assertFalse(any(classify(["docs/nodes/updates.md"]).values()))
 
-    def test_web_and_sdk_are_independent(self) -> None:
+    def test_javascript_packages_are_independently_scoped(self) -> None:
         web = classify(["apps/web/src/routes/+page.svelte"])
         sdk = classify(["sdk/typescript/src/index.ts"])
+        mcp = classify(["apps/mcp/src/server.ts"])
+        shopify = classify(["apps/shopify/app/routes/app.tsx"])
         self.assertTrue(web["web"])
-        self.assertFalse(web["sdk"] or web["macos_rust"] or web["windows_rust"])
+        self.assertFalse(web["sdk"] or web["mcp"] or web["shopify"])
         self.assertTrue(sdk["sdk"])
-        self.assertFalse(sdk["web"] or sdk["macos_rust"] or sdk["windows_rust"])
+        self.assertTrue(sdk["mcp"] and sdk["shopify"])
+        self.assertFalse(sdk["web"])
+        self.assertTrue(mcp["mcp"])
+        self.assertFalse(mcp["web"] or mcp["sdk"] or mcp["shopify"])
+        self.assertTrue(shopify["shopify"])
+        self.assertFalse(shopify["web"] or shopify["sdk"] or shopify["mcp"])
 
-    def test_mcp_changes_select_javascript_package_checks(self) -> None:
-        selected = classify(["apps/mcp/src/server.ts"])
-        self.assertTrue(selected["sdk"])
-        self.assertFalse(
-            selected["web"] or selected["macos_rust"] or selected["windows_rust"]
-        )
+    def test_root_javascript_files_select_every_javascript_package(self) -> None:
+        for path in ("package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml"):
+            with self.subTest(path=path):
+                selected = classify([path])
+                self.assertTrue(
+                    selected["web"]
+                    and selected["sdk"]
+                    and selected["mcp"]
+                    and selected["shopify"]
+                )
 
     def test_mcp_release_workflow_selects_javascript_package_checks(self) -> None:
         selected = classify([".github/workflows/mcp-release.yml"])
-        self.assertTrue(selected["sdk"] and selected["release_tooling"])
+        self.assertTrue(selected["mcp"] and selected["release_tooling"])
+        self.assertFalse(selected["sdk"])
+
+    def test_every_checked_in_crate_selects_linux_rust(self) -> None:
+        repository_root = Path(__file__).resolve().parents[2]
+        crate_manifests = sorted((repository_root / "crates").glob("*/Cargo.toml"))
+        self.assertTrue(crate_manifests)
+        for manifest in crate_manifests:
+            source_path = f"crates/{manifest.parent.name}/src/lib.rs"
+            with self.subTest(crate=manifest.parent.name):
+                self.assertTrue(classify([source_path])["rust_server"])
+
+    def test_new_crates_fail_closed_to_linux_rust(self) -> None:
+        selected = classify(["crates/future-crate/src/lib.rs"])
+        self.assertTrue(selected["rust_server"])
+        self.assertFalse(selected["rust_shared"])
+
+    def test_document_renderer_and_support_packs_select_linux_rust(self) -> None:
+        for path in (
+            "crates/document-renderer/src/lib.rs",
+            "crates/support-packs/src/lib.rs",
+        ):
+            with self.subTest(path=path):
+                self.assertTrue(classify([path])["rust_server"])
 
     def test_shared_agent_change_checks_both_native_platforms(self) -> None:
         selected = classify(["crates/protocol/src/lib.rs"])
@@ -66,7 +101,13 @@ class CiChangedPathsTests(unittest.TestCase):
 
     def test_contract_change_checks_contract_and_javascript(self) -> None:
         selected = classify(["contracts/openapi/piqae-v1.yaml"])
-        self.assertTrue(selected["openapi"] and selected["web"] and selected["sdk"])
+        self.assertTrue(
+            selected["openapi"]
+            and selected["web"]
+            and selected["sdk"]
+            and selected["mcp"]
+            and selected["shopify"]
+        )
 
     def test_root_lockfile_selects_every_rust_platform(self) -> None:
         selected = classify(["Cargo.lock"])

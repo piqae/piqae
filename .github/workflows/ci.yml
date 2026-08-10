@@ -21,7 +21,6 @@ jobs:
     runs-on: ${{ vars.PIQAE_CI_LIGHT_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 5
     outputs:
-      dependency_policy: ${{ steps.scope.outputs.dependency_policy }}
       macos_packaging: ${{ steps.scope.outputs.macos_packaging }}
       macos_rust: ${{ steps.scope.outputs.macos_rust }}
       macos_shell: ${{ steps.scope.outputs.macos_shell }}
@@ -29,7 +28,9 @@ jobs:
       release_tooling: ${{ steps.scope.outputs.release_tooling }}
       rust_server: ${{ steps.scope.outputs.rust_server }}
       rust_shared: ${{ steps.scope.outputs.rust_shared }}
+      mcp: ${{ steps.scope.outputs.mcp }}
       sdk: ${{ steps.scope.outputs.sdk }}
+      shopify: ${{ steps.scope.outputs.shopify }}
       terraform: ${{ steps.scope.outputs.terraform }}
       web: ${{ steps.scope.outputs.web }}
       windows_installer: ${{ steps.scope.outputs.windows_installer }}
@@ -232,7 +233,7 @@ jobs:
             --config deploy/cloudflare/domain-router/wrangler.jsonc
 
   sdk:
-    name: SDK and MCP
+    name: SDK
     needs: changes
     if: needs.changes.outputs.sdk == 'true'
     runs-on: ${{ vars.PIQAE_CI_LINUX_RUNNER || 'ubuntu-latest' }}
@@ -256,6 +257,23 @@ jobs:
           pnpm --filter @piqae/sdk lint
       - name: Install the packed SDK in a clean consumer
         run: pnpm --filter @piqae/sdk smoke:package
+
+  mcp:
+    name: MCP
+    needs: changes
+    if: needs.changes.outputs.mcp == 'true'
+    runs-on: ${{ vars.PIQAE_CI_LINUX_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
+        with:
+          version: 11.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
       - name: Validate the MCP package
         run: |
           pnpm --filter @piqae/mcp-server check
@@ -263,22 +281,44 @@ jobs:
           pnpm --filter @piqae/mcp-server format:check
           pnpm --filter @piqae/mcp-server smoke:package
 
-  supply-chain:
-    name: Supply chain
+  shopify:
+    name: Shopify
     needs: changes
-    if: needs.changes.outputs.dependency_policy == 'true'
+    if: needs.changes.outputs.shopify == 'true'
     runs-on: ${{ vars.PIQAE_CI_LINUX_RUNNER || 'ubuntu-latest' }}
-    timeout-minutes: 10
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
+        env:
+          POSTGRES_DB: piqae_shopify_test
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d piqae_shopify_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      PIQAE_REQUIRE_POSTGRES_TESTS: "1"
+      PIQAE_TEST_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/piqae_shopify_test
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
         with:
-          toolchain: 1.88.0
-      - uses: taiki-e/install-action@18b1216eba7f8039b0f8d131d5473787f0edce68 # v2
+          version: 11.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          tool: cargo-deny@0.20.2
-          fallback: none
-      - run: cargo deny check --allow warnings --hide-inclusion-graph
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @piqae/shopify-app check
+      - run: pnpm --filter @piqae/shopify-app test
+      - run: pnpm --filter @piqae/shopify-app test:postgres
+      - run: pnpm --filter @piqae/shopify-app format:check
+      - run: pnpm --filter @piqae/shopify-app build
 
   openapi:
     name: API contract
@@ -319,12 +359,13 @@ jobs:
     needs:
       - changes
       - macos-shell
+      - mcp
       - openapi
       - rust-linux
       - rust-macos
       - rust-windows
       - sdk
-      - supply-chain
+      - shopify
       - terraform
       - web
     if: always()
@@ -335,24 +376,26 @@ jobs:
         env:
           CHANGES: ${{ needs.changes.result }}
           MACOS_SHELL: ${{ needs.macos-shell.result }}
+          MCP: ${{ needs.mcp.result }}
           OPENAPI: ${{ needs.openapi.result }}
           RUST_LINUX: ${{ needs.rust-linux.result }}
           RUST_MACOS: ${{ needs.rust-macos.result }}
           RUST_WINDOWS: ${{ needs.rust-windows.result }}
           SDK: ${{ needs.sdk.result }}
-          SUPPLY_CHAIN: ${{ needs.supply-chain.result }}
+          SHOPIFY: ${{ needs.shopify.result }}
           TERRAFORM: ${{ needs.terraform.result }}
           WEB: ${{ needs.web.result }}
         run: |
           for result in \
             "$CHANGES" \
             "$MACOS_SHELL" \
+            "$MCP" \
             "$OPENAPI" \
             "$RUST_LINUX" \
             "$RUST_MACOS" \
             "$RUST_WINDOWS" \
             "$SDK" \
-            "$SUPPLY_CHAIN" \
+            "$SHOPIFY" \
             "$TERRAFORM" \
             "$WEB"
           do
