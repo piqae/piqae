@@ -39,12 +39,13 @@ const printer = printers.data.find((item) => item.state === "online");
 if (!printer) throw new Error("No online printer for Northwind Foods");
 
 const pdf = await readFile("./shipping-label.pdf");
+const orderId = "10428";
 const job = await account.printPdf({
   printerId: printer.id,
-  title: "Order 10428 shipping label",
+  title: `Order ${orderId} shipping label`,
   pdf,
-  metadata: { order_id: "10428" },
-  idempotencyKey: "northwind-order-10428-label-v1",
+  metadata: { order_id: orderId },
+  idempotencyKey: ["northwind", "order", orderId, "label", "v1"].join(":"),
 });
 
 const webhook = await account.webhooks.create({
