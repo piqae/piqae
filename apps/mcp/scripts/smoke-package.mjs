@@ -2,10 +2,12 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { access, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { pathToFileURL } from "node:url";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const scratch = await mkdtemp(join(tmpdir(), "piqae-mcp-smoke-"));
+const scriptDirectory = dirname(fileURLToPath(import.meta.url));
+const sdkDirectory = resolve(scriptDirectory, "../../../sdk/typescript");
 
 function run(command, args, cwd) {
   const result = spawnSync(command, args, {
@@ -22,11 +24,15 @@ function run(command, args, cwd) {
 }
 
 try {
+  run("pnpm", ["pack", "--pack-destination", scratch], sdkDirectory);
   run("pnpm", ["pack", "--pack-destination", scratch], process.cwd());
-  const archive = (await readdir(scratch)).find((entry) =>
-    entry.endsWith(".tgz"),
+  const archives = await readdir(scratch);
+  const sdkArchive = archives.find((entry) => entry.startsWith("piqae-sdk-"));
+  const mcpArchive = archives.find((entry) =>
+    entry.startsWith("piqae-mcp-server-"),
   );
-  assert.ok(archive, "pnpm pack did not create an MCP archive");
+  assert.ok(sdkArchive, "pnpm pack did not create an SDK archive");
+  assert.ok(mcpArchive, "pnpm pack did not create an MCP archive");
 
   await writeFile(
     join(scratch, "package.json"),
@@ -39,7 +45,8 @@ try {
       "--ignore-scripts",
       "--no-audit",
       "--no-fund",
-      join(scratch, archive),
+      join(scratch, sdkArchive),
+      join(scratch, mcpArchive),
     ],
     scratch,
   );
@@ -54,11 +61,7 @@ try {
 
   const executable = join(scratch, "node_modules/.bin/piqae-mcp");
   await access(executable);
-  const help = run(
-    executable,
-    ["--help"],
-    scratch,
-  );
+  const help = run(executable, ["--help"], scratch);
   assert.match(help, /piqae-mcp \[--stdio \| --http\]/);
 } finally {
   await rm(scratch, { recursive: true, force: true });
