@@ -6,6 +6,10 @@ export default [
   route("webhooks", "routes/webhooks.tsx"),
   route("api/print/admin", "routes/api.print.admin.tsx"),
   route("api/print/admin/options", "routes/api.print.admin-options.tsx"),
+  route(
+    "api/public/print-placeholder",
+    "routes/api.public.print-placeholder.tsx",
+  ),
   route("api/print/admin/previews", "routes/api.print.admin-previews.tsx"),
   route(
     "api/print/previews/:previewId/approve",

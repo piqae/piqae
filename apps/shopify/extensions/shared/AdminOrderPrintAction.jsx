@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 import { authorizedJson } from "./print-urls.js";
 
 export const ADMIN_OPTIONS_TIMEOUT_MS = 8_000;
+export const PRINT_PLACEHOLDER_URL = "/api/public/print-placeholder";
 
 let interactionSequence = 0;
 
@@ -163,7 +164,10 @@ function AdminOrderPrintActionContent({ bulk = false }) {
     };
   }, [options, selectedDocument?.id, orderIds.join(",")]);
 
-  const src = preview?.artifactUrl ?? null;
+  // Shopify's print host can suppress the extension body while `src` is
+  // absent. Keep a safe same-origin document attached from the first paint,
+  // then atomically replace it with the signed preview artifact.
+  const src = preview?.artifactUrl ?? PRINT_PLACEHOLDER_URL;
 
   useEffect(() => {
     if (!preview) return;
@@ -217,10 +221,10 @@ function AdminOrderPrintActionContent({ bulk = false }) {
   }
 
   const eligible = options?.destinations?.filter((item) => item.eligible) ?? [];
-  const canPrint = Boolean(src && destinationId && state === "ready");
+  const canPrint = Boolean(preview && destinationId && state === "ready");
 
   return (
-    <s-admin-print-action src={src ?? undefined}>
+    <s-admin-print-action src={src}>
       <s-stack direction="block" gap="base">
         {bulk && (
           <s-text type="strong">{orderIds.length} selected orders</s-text>
@@ -310,7 +314,7 @@ function AdminOrderPrintActionContent({ bulk = false }) {
             >
               {state === "printing" ? "Sending…" : "Print with Piqae"}
             </s-button>
-            {src && <s-button href={src}>Download PDF</s-button>}
+            {preview && <s-button href={src}>Download PDF</s-button>}
           </>
         )}
       </s-stack>

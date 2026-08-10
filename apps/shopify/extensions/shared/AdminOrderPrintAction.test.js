@@ -5,6 +5,7 @@ import {
   loadWithTimeout,
   messageForLoadError,
   newInteractionId,
+  PRINT_PLACEHOLDER_URL,
 } from "./AdminOrderPrintAction.jsx";
 
 describe("admin print action state", () => {
@@ -14,6 +15,10 @@ describe("admin print action state", () => {
     expect(first).toMatch(/Order-1004-[a-z0-9]+-[a-z0-9]+$/);
     expect(second).not.toBe(first);
     expect(first.length).toBeLessThanOrEqual(128);
+  });
+
+  it("uses a same-origin first-paint print placeholder", () => {
+    expect(PRINT_PLACEHOLDER_URL).toBe("/api/public/print-placeholder");
   });
   it("uses the configured ready default", () => {
     expect(
