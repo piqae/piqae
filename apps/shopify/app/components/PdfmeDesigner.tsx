@@ -73,8 +73,9 @@ export function PdfmeDesigner({
       <div
         ref={host}
         style={{
-          height: 680,
-          minHeight: 480,
+          height: "min(76vh, 960px)",
+          minHeight: 640,
+          width: "100%",
           border: "1px solid #d8d8d8",
           borderRadius: 8,
         }}

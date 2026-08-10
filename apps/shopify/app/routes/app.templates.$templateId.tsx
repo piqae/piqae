@@ -223,6 +223,9 @@ export default function TemplateEditor() {
   const [liquid, setLiquid] = useState(
     envelope.editor.liquid ?? generatedLiquid.source ?? "",
   );
+  const [workspaceView, setWorkspaceView] = useState<"editor" | "preview">(
+    "editor",
+  );
   useEffect(() => {
     setMode(envelope.editor.mode);
     setVisual(envelope.editor.pdfme);
@@ -230,7 +233,7 @@ export default function TemplateEditor() {
   }, [source]);
   const immutable = Boolean(envelope.system?.immutable);
   return (
-    <s-page heading={template?.name ?? "New template"}>
+    <s-page heading={template?.name ?? "New template"} inlineSize="large">
       <s-section>
         <Form method="post">
           <s-stack direction="block" gap="base">
@@ -252,63 +255,85 @@ export default function TemplateEditor() {
                 merchant-owned draft.
               </s-banner>
             ) : null}
-            <div className="piqae-split">
-              <div className="piqae-card">
+            <s-button-group accessibilityLabel="Template workspace view">
+              <s-button
+                type="button"
+                variant={workspaceView === "editor" ? "primary" : "secondary"}
+                onClick={() => setWorkspaceView("editor")}
+              >
+                Editor
+              </s-button>
+              <s-button
+                type="button"
+                variant={workspaceView === "preview" ? "primary" : "secondary"}
+                onClick={() => setWorkspaceView("preview")}
+              >
+                Preview
+              </s-button>
+            </s-button-group>
+            {workspaceView === "editor" ? (
+              <div className="piqae-editor-surface">
                 <s-stack direction="block" gap="base">
-                  <label>
-                    Name
-                    <input
-                      className="piqae-input"
-                      name="name"
-                      required
-                      maxLength={200}
-                      defaultValue={template?.name ?? "Invoice"}
-                    />
-                  </label>
-                  <label>
-                    Document type
-                    <select
-                      className="piqae-input"
-                      name="kind"
-                      defaultValue={template?.kind ?? "invoice"}
-                    >
-                      <option value="invoice">Invoice</option>
-                      <option value="packing_slip">Packing slip</option>
-                      <option value="receipt">Receipt</option>
-                      <option value="returns">Returns form</option>
-                      <option value="credit_note">Credit note</option>
-                      <option value="custom">Custom</option>
-                    </select>
-                  </label>
-                  <label>
-                    Page size
-                    <select
-                      className="piqae-input"
-                      name="pageSize"
-                      defaultValue={template?.pageSize ?? "A4"}
-                    >
-                      <option>A4</option>
-                      <option>A5</option>
-                      <option>Letter</option>
-                      <option value="80mm">80 mm receipt</option>
-                    </select>
-                  </label>
-                  <label>
-                    Editing view
-                    <select
-                      className="piqae-input"
-                      name="mode"
-                      value={mode}
-                      onChange={(event) =>
-                        setMode(event.currentTarget.value as TemplateEditorMode)
-                      }
-                      disabled={immutable}
-                    >
-                      <option value="visual">Visual (PDFme-compatible)</option>
-                      <option value="liquid">Liquid</option>
-                      <option value="native">Canonical JSON</option>
-                    </select>
-                  </label>
+                  <div className="piqae-editor-settings">
+                    <label>
+                      Name
+                      <input
+                        className="piqae-input"
+                        name="name"
+                        required
+                        maxLength={200}
+                        defaultValue={template?.name ?? "Invoice"}
+                      />
+                    </label>
+                    <label>
+                      Document type
+                      <select
+                        className="piqae-input"
+                        name="kind"
+                        defaultValue={template?.kind ?? "invoice"}
+                      >
+                        <option value="invoice">Invoice</option>
+                        <option value="packing_slip">Packing slip</option>
+                        <option value="receipt">Receipt</option>
+                        <option value="returns">Returns form</option>
+                        <option value="credit_note">Credit note</option>
+                        <option value="custom">Custom</option>
+                      </select>
+                    </label>
+                    <label>
+                      Page size
+                      <select
+                        className="piqae-input"
+                        name="pageSize"
+                        defaultValue={template?.pageSize ?? "A4"}
+                      >
+                        <option>A4</option>
+                        <option>A5</option>
+                        <option>Letter</option>
+                        <option value="80mm">80 mm receipt</option>
+                      </select>
+                    </label>
+                    <label>
+                      Editing view
+                      <select
+                        className="piqae-input"
+                        name="mode"
+                        value={mode}
+                        onChange={(event) =>
+                          setMode(
+                            event.currentTarget.value as TemplateEditorMode,
+                          )
+                        }
+                        disabled={immutable}
+                      >
+                        <option value="visual">
+                          Visual (PDFme-compatible)
+                        </option>
+                        <option value="liquid">Liquid</option>
+                        <option value="native">Canonical JSON</option>
+                      </select>
+                    </label>
+                  </div>
                   {envelope.editor.roundTrip !== "lossless" ? (
                     <s-banner tone="warning">
                       Switching views is {envelope.editor.roundTrip}.{" "}
@@ -436,8 +461,9 @@ export default function TemplateEditor() {
                   </div>
                 </s-stack>
               </div>
+            ) : (
               <TemplatePreview />
-            </div>
+            )}
           </s-stack>
         </Form>
       </s-section>

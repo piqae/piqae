@@ -11,6 +11,20 @@
   gap: 1rem;
   grid-template-columns: minmax(18rem, 2fr) minmax(16rem, 1fr);
 }
+.piqae-editor-surface {
+  min-width: 0;
+  width: 100%;
+  padding: 1rem;
+  border: 1px solid color-mix(in srgb, currentColor 18%, transparent);
+  border-radius: 0.75rem;
+  background: Canvas;
+}
+.piqae-editor-settings {
+  display: grid;
+  grid-template-columns: minmax(16rem, 2fr) repeat(3, minmax(10rem, 1fr));
+  gap: 1rem;
+  align-items: end;
+}
 .piqae-toolbar {
   display: flex;
   flex-wrap: wrap;
@@ -116,6 +130,9 @@
   width: 100%;
 }
 @media (max-width: 52rem) {
+  .piqae-editor-settings {
+    grid-template-columns: 1fr;
+  }
   .piqae-split {
     grid-template-columns: 1fr;
   }
