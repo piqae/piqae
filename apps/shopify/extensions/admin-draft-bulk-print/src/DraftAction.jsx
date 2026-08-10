@@ -1,3 +1,4 @@
+/** @jsxImportSource preact */
 import { render } from "preact";
 import { buildDraftPrintUrl } from "../../shared/print-urls.js";
 
