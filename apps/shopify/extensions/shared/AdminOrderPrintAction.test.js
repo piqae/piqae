@@ -4,9 +4,17 @@ import {
   chooseDefault,
   loadWithTimeout,
   messageForLoadError,
+  newInteractionId,
 } from "./AdminOrderPrintAction.jsx";
 
 describe("admin print action state", () => {
+  it("creates bounded request IDs without Web Crypto", () => {
+    const first = newInteractionId(["gid://shopify/Order/1004"]);
+    const second = newInteractionId(["gid://shopify/Order/1004"]);
+    expect(first).toMatch(/Order-1004-[a-z0-9]+-[a-z0-9]+$/);
+    expect(second).not.toBe(first);
+    expect(first.length).toBeLessThanOrEqual(128);
+  });
   it("uses the configured ready default", () => {
     expect(
       chooseDefault([

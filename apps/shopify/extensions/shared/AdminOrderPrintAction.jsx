@@ -1,8 +1,45 @@
+import { Component } from "preact";
 import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 
 import { authorizedJson } from "./print-urls.js";
 
 export const ADMIN_OPTIONS_TIMEOUT_MS = 8_000;
+
+let interactionSequence = 0;
+
+export function newInteractionId(orderIds) {
+  interactionSequence += 1;
+  const resource = orderIds
+    .join("-")
+    .replaceAll(/[^A-Za-z0-9_-]/g, "-")
+    .slice(-96);
+  return `${resource || "orders"}-${Date.now().toString(36)}-${interactionSequence.toString(36)}`;
+}
+
+class PrintActionErrorBoundary extends Component {
+  state = { error: "" };
+
+  componentDidCatch(error) {
+    this.setState({
+      error:
+        error instanceof Error
+          ? error.message
+          : "The print action could not be opened.",
+    });
+  }
+
+  render() {
+    if (this.state.error)
+      return (
+        <s-admin-print-action>
+          <s-banner tone="critical">
+            Piqae Order Printing could not start: {this.state.error}
+          </s-banner>
+        </s-admin-print-action>
+      );
+    return this.props.children;
+  }
+}
 
 export function messageForLoadError(error) {
   if (error?.name === "AbortError" || error?.name === "TimeoutError")
@@ -33,7 +70,15 @@ export async function loadWithTimeout(
   }
 }
 
-export function AdminOrderPrintAction({ bulk = false }) {
+export function AdminOrderPrintAction(props) {
+  return (
+    <PrintActionErrorBoundary>
+      <AdminOrderPrintActionContent {...props} />
+    </PrintActionErrorBoundary>
+  );
+}
+
+function AdminOrderPrintActionContent({ bulk = false }) {
   const orderIds = useMemo(
     () => (shopify.data.selected ?? []).map(({ id }) => id),
     [],
@@ -47,7 +92,7 @@ export function AdminOrderPrintAction({ bulk = false }) {
   const [preview, setPreview] = useState(null);
   const requestSequence = useRef(0);
   const previewSequence = useRef(0);
-  const interactionId = useRef(crypto.randomUUID());
+  const interactionId = useRef(newInteractionId(orderIds));
   const approvedPreview = useRef("");
 
   async function loadOptions() {
