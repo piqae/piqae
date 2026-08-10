@@ -2,6 +2,7 @@
 .env
 .env.*
 !.env.example
+apps/shopify/shopify.app.*.toml
 .idea/
 .vscode/
 target/

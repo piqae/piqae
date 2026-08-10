@@ -119,7 +119,7 @@ async fn postgres_platform_http_auth_is_tenant_scoped_audited_and_revocable() {
         .await
         .expect("create scope-limited second grant");
 
-    let application = router(AppState::new(
+    let application = router(AppState::new_for_tests(
         Arc::new(MemoryRepository::default()),
         Arc::new(PostgresAuthenticator::new(store.clone())),
     ));

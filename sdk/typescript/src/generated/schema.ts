@@ -1901,6 +1901,270 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/document-templates": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Create a draft document template */
+        post: operations["createDocumentTemplate"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/document-templates/{template_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Retrieve a document template */
+        get: operations["retrieveDocumentTemplate"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/document-templates/{template_id}/publish": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Publish an immutable document template revision */
+        post: operations["publishDocumentTemplate"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/document-template-revisions/{revision_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Retrieve an immutable document template revision */
+        get: operations["retrieveDocumentTemplateRevision"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/document-renders": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Register an asynchronous document render */
+        post: operations["createDocumentRender"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/document-conversions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Convert a supported external template into a reproducible Piqae document
+         * @description Conversion is data-only and never executes plugins, JavaScript, files, or network requests.
+         */
+        post: operations["createDocumentConversion"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/document-conversions/{conversion_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Retrieve a persisted document conversion */
+        get: operations["retrieveDocumentConversion"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/document-renders/{render_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Retrieve a document render */
+        get: operations["retrieveDocumentRender"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/document-renders/{render_id}/artifact": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Download a completed document render artifact
+         * @description Authenticated same-origin PDF download. The response never exposes an object-store key or signed URL.
+         */
+        get: operations["downloadDocumentRenderArtifact"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/document-renders/{render_id}/print": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Register a print job for a completed document render */
+        post: operations["printDocumentRender"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/document-renders/{render_id}/previews": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Create an expiring approval gate for a completed render
+         * @description Retains the exact rendered artifact. No print job is created before approval.
+         */
+        post: operations["createDocumentPreview"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/document-previews/{preview_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Retrieve a document preview approval gate */
+        get: operations["retrieveDocumentPreview"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/document-previews/{preview_id}/artifact": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Download the exact artifact held by a live preview */
+        get: operations["downloadDocumentPreviewArtifact"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/document-previews/{preview_id}/approve": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Approve a preview and idempotently create exactly one print job */
+        post: operations["approveDocumentPreview"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/document-previews/{preview_id}/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Cancel a preview before approval */
+        post: operations["cancelDocumentPreview"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -3246,6 +3510,214 @@ export interface components {
             delivered_at: string | null;
             /** Format: date-time */
             dead_lettered_at: string | null;
+        };
+        /** @description A literal string or binding into the root (`/path`) or current repeat/table item (`.` or `./path`). */
+        DocumentValue: string | {
+            pointer: string;
+        };
+        DocumentNode: {
+            /** @constant */
+            type: "text";
+            value: components["schemas"]["DocumentValue"];
+            /** @default 10 */
+            font_size?: number;
+        } | {
+            /** @enum {unknown} */
+            type: "stack" | "row";
+            children: components["schemas"]["DocumentNode"][];
+            /** @default 0 */
+            gap_mm?: number;
+        } | {
+            /** @constant */
+            type: "spacer";
+            height_mm: number;
+        } | {
+            /** @enum {unknown} */
+            type: "line" | "page_break";
+        } | {
+            /** @enum {unknown} */
+            type: "when" | "repeat";
+            pointer: string;
+            children: components["schemas"]["DocumentNode"][];
+        } | {
+            /** @constant */
+            type: "qr";
+            value: components["schemas"]["DocumentValue"];
+            /** @default 24 */
+            size_mm?: number;
+        } | {
+            /** @constant */
+            type: "table";
+            pointer: string;
+            /** @default 10 */
+            font_size?: number;
+            /** @default false */
+            header?: boolean;
+            columns: {
+                heading: string;
+                pointer: string;
+                /** @default 1 */
+                width_weight?: number;
+            }[];
+        } | {
+            /** @constant */
+            type: "canvas";
+            children: components["schemas"]["DocumentCanvasElement"][];
+        };
+        DocumentCanvasElement: {
+            /** @constant */
+            type: "text";
+            value: components["schemas"]["DocumentValue"];
+            x_mm: number;
+            y_mm: number;
+            width_mm: number;
+            height_mm: number;
+            /** @default 10 */
+            font_size?: number;
+        } | {
+            /** @constant */
+            type: "qr";
+            value: components["schemas"]["DocumentValue"];
+            x_mm: number;
+            y_mm: number;
+            width_mm: number;
+            height_mm: number;
+        } | {
+            /** @constant */
+            type: "line";
+            x_mm: number;
+            y_mm: number;
+            width_mm: number;
+            height_mm: number;
+        };
+        DocumentSpec: {
+            /** @constant */
+            spec_version: "piqae.document/v1";
+            page: {
+                /** @enum {unknown} */
+                size: "a4" | "a5" | "letter" | "four-by-six" | "roll58mm" | "roll80mm";
+                margin_mm?: number;
+            };
+            body: components["schemas"]["DocumentNode"][];
+        };
+        CreateDocumentTemplate: {
+            name: string;
+            specification: components["schemas"]["DocumentSpec"];
+        };
+        PublishDocumentTemplate: {
+            specification: components["schemas"]["DocumentSpec"];
+        };
+        DocumentTemplate: {
+            id: string;
+            name: string;
+            /** @enum {unknown} */
+            state: "draft" | "published" | "archived";
+            specification: components["schemas"]["DocumentSpec"];
+            published_revision_id?: string | null;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: date-time */
+            updated_at: string;
+        };
+        DocumentTemplateRevision: {
+            id: string;
+            template_id: string;
+            specification: components["schemas"]["DocumentSpec"];
+            revision: number;
+            /** @constant */
+            renderer_profile: "piqae.document/v1";
+            /** Format: date-time */
+            created_at: string;
+        };
+        CreateDocumentRender: {
+            template_revision_id: string;
+            input: {
+                [key: string]: unknown;
+            };
+        };
+        CreateDocumentConversion: {
+            /** @constant */
+            adapter: "pdfme";
+            /** @enum {string} */
+            adapter_version: "1.0.0" | "1.1.0";
+            /** @description Bounded JSON template data. Runtime code and remote assets are rejected. */
+            source: {
+                [key: string]: unknown;
+            };
+            /** @description When true, reject mappings with known fidelity loss. */
+            strict: boolean;
+        };
+        DocumentConversionDiagnostic: {
+            code: string;
+            /** @enum {unknown} */
+            severity: "warning" | "error";
+            path: string;
+            message: string;
+            feature?: string;
+        };
+        DocumentConversion: {
+            id: string;
+            /** @constant */
+            adapter: "pdfme";
+            /** @enum {string} */
+            adapter_version: "1.0.0" | "1.1.0";
+            /** @constant */
+            adapter_api_version: "piqae.adapter/v1";
+            /** @constant */
+            source_format: "pdfme.template";
+            source_sha256: string;
+            strict: boolean;
+            /** @enum {unknown} */
+            fidelity: "exact" | "lossy";
+            renderer_version: string;
+            document: components["schemas"]["DocumentSpec"];
+            warnings: components["schemas"]["DocumentConversionDiagnostic"][];
+            /** Format: date-time */
+            created_at: string;
+        };
+        DocumentRender: {
+            id: string;
+            template_revision_id: string;
+            /** @enum {unknown} */
+            state: "registered" | "rendering" | "completed" | "failed_terminal" | "expiring" | "expired";
+            artifact_sha256?: string | null;
+            artifact_byte_length?: number | null;
+            /** @enum {string|null} */
+            artifact_media_type?: "application/pdf" | null;
+            failure_code?: string | null;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: date-time */
+            updated_at: string;
+        };
+        PrintDocumentRender: {
+            printer_id?: string;
+            target_id?: string;
+            title: string;
+            options?: components["schemas"]["JobOptions"];
+            /** @default 1 */
+            deliveries?: number;
+        } & (unknown | unknown);
+        CreateDocumentPreview: {
+            /** @default 600 */
+            expires_in_seconds?: number;
+        };
+        DocumentPreview: {
+            id: string;
+            render_id: string;
+            /** @enum {unknown} */
+            state: "awaiting_approval" | "approving" | "approved" | "cancelled" | "expired";
+            job_id: string | null;
+            /** Format: date-time */
+            expires_at: string;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: date-time */
+            updated_at: string;
+        };
+        ApprovedDocumentPreview: {
+            preview: components["schemas"]["DocumentPreview"];
+            job: components["schemas"]["Job"];
         };
         ErrorEnvelope: {
             error: {
@@ -6280,6 +6752,482 @@ export interface operations {
             404: components["responses"]["Error"];
             409: components["responses"]["Error"];
             503: components["responses"]["Error"];
+        };
+    };
+    createDocumentTemplate: {
+        parameters: {
+            query?: never;
+            header?: {
+                "Idempotency-Key"?: components["parameters"]["IdempotencyKey"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateDocumentTemplate"];
+            };
+        };
+        responses: {
+            /** @description Existing idempotent draft template. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DocumentTemplate"];
+                };
+            };
+            /** @description Draft template created. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DocumentTemplate"];
+                };
+            };
+            400: components["responses"]["Error"];
+            401: components["responses"]["Error"];
+            409: components["responses"]["Error"];
+        };
+    };
+    retrieveDocumentTemplate: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                template_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Current template metadata and draft specification. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DocumentTemplate"];
+                };
+            };
+            401: components["responses"]["Error"];
+            404: components["responses"]["Error"];
+        };
+    };
+    publishDocumentTemplate: {
+        parameters: {
+            query?: never;
+            header?: {
+                "Idempotency-Key"?: components["parameters"]["IdempotencyKey"];
+            };
+            path: {
+                template_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PublishDocumentTemplate"];
+            };
+        };
+        responses: {
+            /** @description Existing idempotent immutable revision. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DocumentTemplateRevision"];
+                };
+            };
+            /** @description Immutable revision published. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DocumentTemplateRevision"];
+                };
+            };
+            400: components["responses"]["Error"];
+            404: components["responses"]["Error"];
+            409: components["responses"]["Error"];
+        };
+    };
+    retrieveDocumentTemplateRevision: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                revision_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Published immutable template revision. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DocumentTemplateRevision"];
+                };
+            };
+            401: components["responses"]["Error"];
+            404: components["responses"]["Error"];
+        };
+    };
+    createDocumentRender: {
+        parameters: {
+            query?: never;
+            header?: {
+                "Idempotency-Key"?: components["parameters"]["IdempotencyKey"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateDocumentRender"];
+            };
+        };
+        responses: {
+            /** @description Existing idempotent render registration. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DocumentRender"];
+                };
+            };
+            /** @description Render durably registered. */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DocumentRender"];
+                };
+            };
+            400: components["responses"]["Error"];
+            404: components["responses"]["Error"];
+            409: components["responses"]["Error"];
+        };
+    };
+    createDocumentConversion: {
+        parameters: {
+            query?: never;
+            header?: {
+                "Idempotency-Key"?: components["parameters"]["IdempotencyKey"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateDocumentConversion"];
+            };
+        };
+        responses: {
+            /** @description Existing idempotent conversion. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DocumentConversion"];
+                };
+            };
+            /** @description Conversion and reproducibility metadata persisted atomically. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DocumentConversion"];
+                };
+            };
+            400: components["responses"]["Error"];
+            409: components["responses"]["Error"];
+        };
+    };
+    retrieveDocumentConversion: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                conversion_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Persisted conversion and exact reproducibility metadata. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DocumentConversion"];
+                };
+            };
+            404: components["responses"]["Error"];
+        };
+    };
+    retrieveDocumentRender: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                render_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Render lifecycle and artifact metadata. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DocumentRender"];
+                };
+            };
+            404: components["responses"]["Error"];
+        };
+    };
+    downloadDocumentRenderArtifact: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                render_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Integrity-verified PDF artifact. */
+            200: {
+                headers: {
+                    "Content-Disposition"?: string;
+                    "Content-Length"?: number;
+                    /** @description RFC Digest field using a standard Base64-encoded SHA-256 value. */
+                    Digest?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/pdf": string;
+                };
+            };
+            401: components["responses"]["Error"];
+            404: components["responses"]["Error"];
+            409: components["responses"]["Error"];
+            503: components["responses"]["Error"];
+        };
+    };
+    printDocumentRender: {
+        parameters: {
+            query?: never;
+            header?: {
+                "Idempotency-Key"?: components["parameters"]["IdempotencyKey"];
+            };
+            path: {
+                render_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PrintDocumentRender"];
+            };
+        };
+        responses: {
+            /** @description Existing idempotent print job; this is not proof of physical delivery. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Job"];
+                };
+            };
+            /** @description Durable print job registered; this is not proof of physical delivery. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Job"];
+                };
+            };
+            400: components["responses"]["Error"];
+            404: components["responses"]["Error"];
+            409: components["responses"]["Error"];
+        };
+    };
+    createDocumentPreview: {
+        parameters: {
+            query?: never;
+            header?: {
+                "Idempotency-Key"?: components["parameters"]["IdempotencyKey"];
+            };
+            path: {
+                render_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateDocumentPreview"];
+            };
+        };
+        responses: {
+            /** @description Existing idempotent preview */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DocumentPreview"];
+                };
+            };
+            /** @description Preview awaiting approval */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DocumentPreview"];
+                };
+            };
+            400: components["responses"]["Error"];
+            401: components["responses"]["Error"];
+            404: components["responses"]["Error"];
+            409: components["responses"]["Error"];
+        };
+    };
+    retrieveDocumentPreview: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                preview_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Preview lifecycle */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DocumentPreview"];
+                };
+            };
+            401: components["responses"]["Error"];
+            404: components["responses"]["Error"];
+        };
+    };
+    downloadDocumentPreviewArtifact: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                preview_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Integrity-verified PDF */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/pdf": string;
+                };
+            };
+            401: components["responses"]["Error"];
+            404: components["responses"]["Error"];
+            409: components["responses"]["Error"];
+            503: components["responses"]["Error"];
+        };
+    };
+    approveDocumentPreview: {
+        parameters: {
+            query?: never;
+            header?: {
+                "Idempotency-Key"?: components["parameters"]["IdempotencyKey"];
+            };
+            path: {
+                preview_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PrintDocumentRender"];
+            };
+        };
+        responses: {
+            /** @description Approved preview and idempotent job */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApprovedDocumentPreview"];
+                };
+            };
+            /** @description Approved preview and newly registered job */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApprovedDocumentPreview"];
+                };
+            };
+            400: components["responses"]["Error"];
+            401: components["responses"]["Error"];
+            404: components["responses"]["Error"];
+            409: components["responses"]["Error"];
+        };
+    };
+    cancelDocumentPreview: {
+        parameters: {
+            query?: never;
+            header?: {
+                "Idempotency-Key"?: components["parameters"]["IdempotencyKey"];
+            };
+            path: {
+                preview_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Cancelled preview */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DocumentPreview"];
+                };
+            };
+            401: components["responses"]["Error"];
+            404: components["responses"]["Error"];
+            409: components["responses"]["Error"];
         };
     };
 }

@@ -21,6 +21,8 @@ use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use uuid::Uuid;
 
+pub mod document_render;
+
 #[derive(Debug, Error)]
 pub enum AgentError {
     #[error("local storage failed: {0}")]

@@ -17,6 +17,17 @@ import type {
   CreatedUpload,
   CreatedDeviceAuthorization,
   DeploymentMeta,
+  CreateDocumentRender,
+  CreateDocumentConversion,
+  CreateDocumentTemplate,
+  DocumentRender,
+  DocumentConversion,
+  DocumentTemplate,
+  DocumentTemplateRevision,
+  PrintDocumentRender,
+  CreateDocumentPreview,
+  DocumentPreview,
+  ApprovedDocumentPreview,
   DeviceAuthorizationExchange,
   DeviceAuthorizationReview,
   DeviceAuthorizationStatus,
@@ -420,6 +431,43 @@ export class PiqaeClient {
       this.request<Job>('POST', `/v1/jobs/${encodeURIComponent(id)}/cancel`)
   };
 
+  /** Optional declarative document generation. PDF and RAW job APIs remain independent. */
+  readonly documents = {
+    templates: {
+      create: (input: CreateDocumentTemplate, idempotencyKey: string) => this.request<DocumentTemplate>('POST', '/v1/document-templates', { body: input, idempotencyKey }),
+      retrieve: (id: string) => this.request<DocumentTemplate>('GET', `/v1/document-templates/${encodeURIComponent(id)}`),
+      publish: (id: string, specification: CreateDocumentTemplate['specification'], idempotencyKey: string) => this.request<DocumentTemplateRevision>('POST', `/v1/document-templates/${encodeURIComponent(id)}/publish`, { body: { specification }, idempotencyKey }),
+      retrieveRevision: (id: string) => this.request<DocumentTemplateRevision>('GET', `/v1/document-template-revisions/${encodeURIComponent(id)}`)
+    },
+    renders: {
+      create: (input: CreateDocumentRender, idempotencyKey: string) => this.request<DocumentRender>('POST', '/v1/document-renders', { body: input, idempotencyKey }),
+      retrieve: (id: string) => this.request<DocumentRender>('GET', `/v1/document-renders/${encodeURIComponent(id)}`),
+      /** Preserves headers/body streaming for a same-origin Admin or POS proxy. */
+      download: (id: string) => this.requestBinary(`/v1/document-renders/${encodeURIComponent(id)}/artifact`),
+      downloadBytes: async (id: string) => new Uint8Array(await (await this.requestBinary(`/v1/document-renders/${encodeURIComponent(id)}/artifact`)).arrayBuffer()),
+      print: (id: string, input: PrintDocumentRender, idempotencyKey: string) => this.request<Job>('POST', `/v1/document-renders/${encodeURIComponent(id)}/print`, { body: input, idempotencyKey })
+    },
+    previews: {
+      create: (renderId:string,input:CreateDocumentPreview,idempotencyKey:string)=>this.request<DocumentPreview>('POST',`/v1/document-renders/${encodeURIComponent(renderId)}/previews`,{body:input,idempotencyKey}),
+      retrieve: (id:string)=>this.request<DocumentPreview>('GET',`/v1/document-previews/${encodeURIComponent(id)}`),
+      download: (id:string)=>this.requestBinary(`/v1/document-previews/${encodeURIComponent(id)}/artifact`),
+      approve: (id:string,input:PrintDocumentRender,idempotencyKey:string)=>this.request<ApprovedDocumentPreview>('POST',`/v1/document-previews/${encodeURIComponent(id)}/approve`,{body:input,idempotencyKey}),
+      cancel: (id:string,idempotencyKey:string)=>this.request<DocumentPreview>('POST',`/v1/document-previews/${encodeURIComponent(id)}/cancel`,{idempotencyKey})
+    },
+    conversions: {
+      create: (input: CreateDocumentConversion, idempotencyKey: string) => this.request<DocumentConversion>('POST', '/v1/document-conversions', {
+        body: { adapter: input.adapter, adapter_version: input.adapterVersion, source: input.source, strict: input.strict },
+        idempotencyKey
+      }),
+      retrieve: (id: string) => this.request<DocumentConversion>('GET', `/v1/document-conversions/${encodeURIComponent(id)}`)
+    },
+    renderAndPrint: async (input: CreateDocumentRender, print: PrintDocumentRender, idempotencyKeys: { render: string; print: string }) => {
+      const render = await this.documents.renders.create(input, idempotencyKeys.render);
+      const job = await this.documents.renders.print(render.id, print, idempotencyKeys.print);
+      return { render, job };
+    }
+  };
+
   readonly webhooks = {
     list: () => this.request<Webhook[]>('GET', '/v1/webhooks'),
     create: (input: { url: string; events: string[] }) =>
@@ -507,6 +555,41 @@ export class PiqaeClient {
     const text = await response.text();
     if (text === '') return undefined as T;
     return JSON.parse(text) as T;
+  }
+
+  private async requestBinary(path: string): Promise<Response> {
+    const dynamicToken = await this.accessToken?.();
+    const authorization = this.platformKey ?? this.apiKey ?? dynamicToken;
+    const headers: Record<string, string> = {
+      accept: 'application/pdf',
+      ...this.defaultHeaders
+    };
+    if (this.platformContext) {
+      headers['x-piqae-workspace-id'] = this.platformContext.workspaceId;
+      headers['x-piqae-environment-id'] = this.platformContext.environmentId;
+    }
+    if (authorization) headers.authorization = `Bearer ${authorization}`;
+    const response = await this.fetcher(new URL(`${this.baseUrl}${path}`), {
+      method: 'GET',
+      headers
+    });
+    if (!response.ok) {
+      let body: ErrorEnvelope | undefined;
+      try {
+        body = (await response.json()) as ErrorEnvelope;
+      } catch {
+        // Preserve a stable error when a same-origin proxy emits no JSON body.
+      }
+      throw new PiqaeError(
+        response.status,
+        body?.error ?? {
+          code: 'unexpected_response',
+          message: response.statusText || 'Piqae artifact download failed',
+          retryable: response.status >= 500
+        }
+      );
+    }
+    return response;
   }
 
   private async putUpload(upload: CreatedUpload, content: BodyInit): Promise<Upload | undefined> {

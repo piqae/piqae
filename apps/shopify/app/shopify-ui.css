@@ -1,0 +1,156 @@
+:root {
+  color-scheme: light dark;
+}
+.piqae-grid {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 18rem), 1fr));
+}
+.piqae-split {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: minmax(18rem, 2fr) minmax(16rem, 1fr);
+}
+.piqae-editor-surface {
+  min-width: 0;
+  width: 100%;
+  padding: 1rem;
+  border: 1px solid color-mix(in srgb, currentColor 18%, transparent);
+  border-radius: 0.75rem;
+  background: Canvas;
+}
+.piqae-editor-settings {
+  display: grid;
+  grid-template-columns: minmax(16rem, 2fr) repeat(3, minmax(10rem, 1fr));
+  gap: 1rem;
+  align-items: end;
+}
+.piqae-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  align-items: end;
+}
+.piqae-toolbar > * {
+  flex: 1 1 12rem;
+}
+.piqae-toolbar > s-button,
+.piqae-toolbar > button {
+  flex: 0 0 auto;
+}
+.piqae-card {
+  border: 1px solid color-mix(in srgb, currentColor 18%, transparent);
+  border-radius: 0.75rem;
+  padding: 1rem;
+  background: Canvas;
+}
+.piqae-list {
+  width: 100%;
+  border-collapse: collapse;
+}
+.piqae-list th,
+.piqae-list td {
+  padding: 0.75rem;
+  text-align: left;
+  border-bottom: 1px solid color-mix(in srgb, currentColor 14%, transparent);
+  vertical-align: middle;
+}
+.piqae-list th {
+  font-weight: 600;
+}
+.piqae-muted {
+  opacity: 0.72;
+}
+.piqae-actions {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  align-items: center;
+}
+.piqae-preview {
+  min-height: 32rem;
+  padding: 2rem;
+  background: Canvas;
+  color: CanvasText;
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, currentColor 15%, transparent);
+}
+.piqae-paper {
+  max-width: 34rem;
+  min-height: 28rem;
+  margin: auto;
+  padding: 2rem;
+  border: 1px solid color-mix(in srgb, currentColor 18%, transparent);
+}
+.piqae-code {
+  width: 100%;
+  min-height: 22rem;
+  font: inherit;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  background: Canvas;
+  color: CanvasText;
+  border: 1px solid color-mix(in srgb, currentColor 24%, transparent);
+  border-radius: 0.5rem;
+  padding: 0.75rem;
+}
+.piqae-code-short {
+  min-height: 8rem;
+}
+.piqae-input {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  margin-top: 0.25rem;
+  padding: 0.625rem;
+  border: 1px solid color-mix(in srgb, currentColor 24%, transparent);
+  border-radius: 0.5rem;
+  background: Canvas;
+  color: CanvasText;
+  font: inherit;
+}
+.piqae-check {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+.piqae-link-button {
+  display: inline-block;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid currentColor;
+  border-radius: 0.5rem;
+  color: inherit;
+  text-decoration: none;
+}
+.piqae-input:focus-visible,
+.piqae-code:focus-visible,
+.piqae-link-button:focus-visible {
+  outline: 2px solid Highlight;
+  outline-offset: 2px;
+}
+.piqae-progress {
+  width: 100%;
+}
+@media (max-width: 52rem) {
+  .piqae-editor-settings {
+    grid-template-columns: 1fr;
+  }
+  .piqae-split {
+    grid-template-columns: 1fr;
+  }
+  .piqae-list thead {
+    position: absolute;
+    clip: rect(0 0 0 0);
+  }
+  .piqae-list tr {
+    display: block;
+    padding: 0.5rem 0;
+  }
+  .piqae-list td {
+    display: flex;
+    justify-content: space-between;
+    gap: 1rem;
+  }
+  .piqae-list td::before {
+    content: attr(data-label);
+    font-weight: 600;
+  }
+}

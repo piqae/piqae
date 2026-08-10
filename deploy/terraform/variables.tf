@@ -75,8 +75,49 @@ variable "webhook_master_key_secret" {
   sensitive   = true
   description = "Base64-encoded 32-byte key used to encrypt webhook signing secrets."
   validation {
-    condition     = can(base64decode(var.webhook_master_key_secret)) && length(base64decode(var.webhook_master_key_secret)) == 32
+    condition     = can(regex("^[A-Za-z0-9+/]{43}=$", var.webhook_master_key_secret))
     error_message = "webhook_master_key_secret must be base64 that decodes to exactly 32 bytes"
+  }
+}
+
+variable "document_master_key_secret" {
+  type        = string
+  sensitive   = true
+  description = "Distinct base64-encoded 32-byte key used to encrypt document templates, inputs, and artifact references."
+  validation {
+    condition     = can(regex("^[A-Za-z0-9+/]{43}=$", var.document_master_key_secret))
+    error_message = "document_master_key_secret must be canonical standard Base64 for exactly 32 bytes"
+  }
+}
+
+variable "document_active_key_id" {
+  type        = string
+  default     = "legacy-v1"
+  description = "Non-secret identifier for the active document encryption generation."
+  validation {
+    condition     = can(regex("^[A-Za-z0-9_.-]{1,64}$", var.document_active_key_id))
+    error_message = "document_active_key_id must be a valid document key identifier"
+  }
+}
+
+variable "document_artifact_download_concurrency" {
+  type        = number
+  default     = 4
+  description = "Maximum concurrent integrity-verified document artifact buffers per API instance."
+  validation {
+    condition     = var.document_artifact_download_concurrency >= 1 && var.document_artifact_download_concurrency <= 32 && floor(var.document_artifact_download_concurrency) == var.document_artifact_download_concurrency
+    error_message = "document_artifact_download_concurrency must be an integer between 1 and 32"
+  }
+}
+
+variable "document_decryption_keys_secret" {
+  type        = string
+  sensitive   = true
+  default     = "{}"
+  description = "JSON mapping retained decrypt-only document key ids to base64-encoded keys."
+  validation {
+    condition     = can(tomap(jsondecode(var.document_decryption_keys_secret)))
+    error_message = "document_decryption_keys_secret must be a valid JSON object"
   }
 }
 

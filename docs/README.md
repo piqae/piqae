@@ -20,12 +20,15 @@ print jobs through the same API used by the dashboard.
 
 ## Build an integration
 
+- [Shopify-native order printing concept](17-shopify-native-order-printing.md)
 - [Platform accounts](api/platform-service-accounts.md)
 - [White-label and integrator product UX](api/integrator-white-label-ux.md)
 - [Install and use the Piqae MCP server](api/mcp-installation.md)
 - [MCP architecture and authorization](api/mcp-agent-integration.md)
 - [Authentication](api/authentication.md)
 - [Uploads and design applications](api/uploads-and-design-apps.md)
+- [Declarative documents](api/declarative-documents.md)
+- [Document format adapters](api/document-format-adapters.md)
 - [End-to-end web design platform integration](api/web-design-platform-integration.md)
 - [Multi-integrator node connectors](api/multi-integrator-node-connectors.md)
 - [Content-confidential printing](api/content-confidential-printing.md)
@@ -36,6 +39,8 @@ print jobs through the same API used by the dashboard.
 - [Printers and native profiles](printing/printers.md)
 - [Complex vendor drivers](printing/complex-drivers.md)
 - [SDK professional printer, profile, and stock capabilities](printing/sdk-professional-capabilities.md)
+- [Optional node document rendering negotiation](architecture/node-document-rendering.md)
+- [Accelerated document delivery fault soak](testing/document-delivery-fault-soak.md)
 
 Platform application code can create, retrieve, list, and archive customer
 accounts, then manage their nodes, printers, profiles, targets, uploads, jobs,

@@ -14,6 +14,7 @@ use piqae_control_plane::{
         PostgresAuthenticator, StaticAuthenticator, TenantContext,
     },
     billing_usage_worker::BillingUsageWorker,
+    document_render_worker::DocumentRenderWorker,
     identity::LocalIdentityState,
     repository::Repository,
     router,
@@ -34,6 +35,9 @@ async fn main() -> Result<()> {
     }
     if env::args().nth(1).as_deref() == Some("migrate") {
         return migrate_only().await;
+    }
+    if env::args().nth(1).as_deref() == Some("document-key-rewrap") {
+        return document_key_rewrap().await;
     }
     let observability = observability::init()?;
     let run_span = tracing::info_span!(
@@ -56,6 +60,55 @@ async fn main() -> Result<()> {
     result.and(shutdown_result)
 }
 
+async fn document_key_rewrap() -> Result<()> {
+    let database_url = product_env("PIQAE_DATABASE_URL")
+        .or_else(|_| env::var("DATABASE_URL"))
+        .context("PIQAE_DATABASE_URL or DATABASE_URL is required")?;
+    let keyring = parse_document_keyring(
+        &product_env("PIQAE_DOCUMENT_MASTER_KEY")
+            .context("PIQAE_DOCUMENT_MASTER_KEY is required")?,
+        product_env("PIQAE_DOCUMENT_ACTIVE_KEY_ID")
+            .unwrap_or_else(|_| piqae_control_plane::document_crypto::LEGACY_KEY_ID.into()),
+        product_env("PIQAE_DOCUMENT_DECRYPTION_KEYS")
+            .ok()
+            .as_deref(),
+    )?;
+    let old_key_id = env::args()
+        .nth(2)
+        .context("usage: document-key-rewrap OLD_KEY_ID [LIMIT] [--dry-run]")?;
+    let limit = env::args()
+        .nth(3)
+        .filter(|value| value != "--dry-run")
+        .map(|value| value.parse::<i64>())
+        .transpose()
+        .context("rewrap limit must be an integer")?
+        .unwrap_or(100)
+        .clamp(1, 1_000);
+    let dry_run = env::args().any(|value| value == "--dry-run");
+    let store = PostgresStore::connect(&database_url, 4)
+        .await
+        .context("connect to PostgreSQL")?;
+    store.readiness().await.context("check PostgreSQL schema")?;
+    store
+        .verify_persisted_document_encryption_keyring(keyring.active_key_id(), keyring.key_ids())
+        .await
+        .context("configured document keyring does not match durable lifecycle state")?;
+    let report = keyring
+        .rewrap_postgres_batch(&store, &old_key_id, limit, dry_run)
+        .await
+        .context("rewrap document ciphertext batch")?;
+    println!(
+        "references_before={} scanned={} rewrapped={} concurrent_changes={} unreadable={} references_after={}",
+        report.references_before,
+        report.scanned,
+        report.rewrapped,
+        report.concurrent_changes,
+        report.unreadable,
+        report.references_after
+    );
+    Ok(())
+}
+
 #[allow(clippy::too_many_lines)]
 async fn run() -> Result<()> {
     let service_role = ServiceRole::from_environment()?;
@@ -68,6 +121,15 @@ async fn run() -> Result<()> {
     let webhook_key = parse_webhook_key(
         &product_env("PIQAE_WEBHOOK_MASTER_KEY").context("PIQAE_WEBHOOK_MASTER_KEY is required")?,
     )?;
+    let document_keyring = parse_document_keyring(
+        &product_env("PIQAE_DOCUMENT_MASTER_KEY")
+            .context("PIQAE_DOCUMENT_MASTER_KEY is required")?,
+        product_env("PIQAE_DOCUMENT_ACTIVE_KEY_ID")
+            .unwrap_or_else(|_| piqae_control_plane::document_crypto::LEGACY_KEY_ID.into()),
+        product_env("PIQAE_DOCUMENT_DECRYPTION_KEYS")
+            .ok()
+            .as_deref(),
+    )?;
     let bootstrap_key = product_env("PIQAE_BOOTSTRAP_API_KEY")
         .ok()
         .filter(|value| !value.is_empty());
@@ -78,6 +140,17 @@ async fn run() -> Result<()> {
     if startup_migrations_enabled() {
         store.migrate().await.context("run PostgreSQL migrations")?;
     }
+    store
+        .configure_document_encryption_keys(
+            document_keyring.active_key_id(),
+            document_keyring.key_ids(),
+        )
+        .await
+        .context("register document encryption keyring")?;
+    store
+        .verify_document_encryption_keyring(document_keyring.key_ids())
+        .await
+        .context("document keyring is missing a retained ciphertext generation")?;
     let repository: Arc<dyn Repository> = Arc::new(store.clone());
     let object_store = build_object_store().await?;
     let bootstrap = if let Some(bootstrap_key) = bootstrap_key {
@@ -139,12 +212,27 @@ async fn run() -> Result<()> {
     let public_control_plane_url =
         piqae_control_plane::api::validated_control_plane_url(&public_control_plane_url)
             .context("PIQAE_PUBLIC_API_URL is invalid")?;
+    let artifact_download_concurrency = product_env("PIQAE_DOCUMENT_ARTIFACT_DOWNLOAD_CONCURRENCY")
+        .ok()
+        .map_or(Ok(4_usize), |value| {
+            value
+                .parse::<usize>()
+                .ok()
+                .filter(|value| (1..=32).contains(value))
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "PIQAE_DOCUMENT_ARTIFACT_DOWNLOAD_CONCURRENCY must be between 1 and 32",
+                    )
+                })
+        })?;
     let mut application = AppState::new_with_resources(
         repository,
         Arc::new(authenticator),
         webhook_key,
+        document_keyring,
         object_store,
     )
+    .with_document_artifact_download_concurrency(artifact_download_concurrency)
     .with_capabilities(capabilities.clone())
     .with_public_control_plane_url(public_control_plane_url);
     if capabilities.auth.provider == "workos" && service_role.accepts_identity_webhooks() {
@@ -191,6 +279,48 @@ async fn run() -> Result<()> {
                     Ok(0) => {}
                     Ok(count) => tracing::debug!(count, "processed webhook deliveries"),
                     Err(error) => tracing::error!(%error, "webhook worker batch failed"),
+                }
+            }
+        }))
+    } else {
+        None
+    };
+    let _document_render_worker = if service_role.runs_workers() {
+        let worker_id = format!("document-renderer-{}", uuid::Uuid::new_v4());
+        let concurrency = product_env("PIQAE_DOCUMENT_RENDER_CONCURRENCY")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(4_usize)
+            .clamp(1, 32);
+        let timeout_seconds = product_env("PIQAE_DOCUMENT_RENDER_TIMEOUT_SECONDS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(20_u64)
+            .clamp(1, 300);
+        let worker = DocumentRenderWorker::new(application.clone(), worker_id).with_limits(
+            concurrency,
+            std::time::Duration::from_secs(timeout_seconds),
+            timeout_seconds.saturating_add(30).try_into().unwrap_or(330),
+        );
+        Some(tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_millis(250));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut ticks = 0_u64;
+            loop {
+                interval.tick().await;
+                ticks = ticks.wrapping_add(1);
+                match worker
+                    .run_once(i64::try_from(concurrency).unwrap_or(32))
+                    .await
+                {
+                    Ok(0) => {}
+                    Ok(count) => tracing::debug!(count, "processed document renders"),
+                    Err(error) => tracing::error!(error.type="document_render_batch", %error),
+                }
+                if ticks.is_multiple_of(240)
+                    && let Err(error) = worker.cleanup_once(25).await
+                {
+                    tracing::error!(error.type="document_artifact_cleanup", %error);
                 }
             }
         }))
@@ -490,6 +620,41 @@ fn parse_webhook_key(value: &str) -> Result<[u8; 32]> {
         .map_err(|_| anyhow::anyhow!("PIQAE_WEBHOOK_MASTER_KEY must decode to exactly 32 bytes"))
 }
 
+fn parse_document_key(value: &str) -> Result<[u8; 32]> {
+    parse_document_key_named(value, "PIQAE_DOCUMENT_MASTER_KEY")
+}
+
+fn parse_document_key_named(value: &str, name: &str) -> Result<[u8; 32]> {
+    let decoded = URL_SAFE_NO_PAD
+        .decode(value)
+        .or_else(|_| STANDARD.decode(value))
+        .with_context(|| format!("{name} must be base64"))?;
+    decoded
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("{name} must decode to exactly 32 bytes"))
+}
+
+fn parse_document_keyring(
+    active_value: &str,
+    active_key_id: String,
+    decryption_keys_json: Option<&str>,
+) -> Result<piqae_control_plane::document_crypto::DocumentSecretBox> {
+    let mut keys = std::collections::BTreeMap::new();
+    if let Some(json) = decryption_keys_json.filter(|value| !value.trim().is_empty()) {
+        let encoded: std::collections::BTreeMap<String, String> = serde_json::from_str(json)
+            .context(
+                "PIQAE_DOCUMENT_DECRYPTION_KEYS must be a JSON object of key ids to base64 keys",
+            )?;
+        for (key_id, value) in encoded {
+            let label = format!("PIQAE_DOCUMENT_DECRYPTION_KEYS[{key_id}]");
+            keys.insert(key_id, parse_document_key_named(&value, &label)?);
+        }
+    }
+    keys.insert(active_key_id.clone(), parse_document_key(active_value)?);
+    piqae_control_plane::document_crypto::DocumentSecretBox::keyring(active_key_id, keys)
+        .context("invalid document encryption keyring")
+}
+
 async fn shutdown_signal() {
     let control_c = async {
         if tokio::signal::ctrl_c().await.is_err() {
@@ -513,5 +678,28 @@ async fn shutdown_signal() {
     tokio::select! {
         () = control_c => {},
         () = terminate => {},
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decryption_key_error_identifies_the_exact_key() {
+        let active = URL_SAFE_NO_PAD.encode([7_u8; 32]);
+        let result = parse_document_keyring(
+            &active,
+            "current".into(),
+            Some(r#"{"previous-2025":"not-base64!"}"#),
+        );
+        let Err(error) = result else {
+            panic!("malformed decrypt-only key must fail");
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("PIQAE_DOCUMENT_DECRYPTION_KEYS[previous-2025]")
+        );
     }
 }

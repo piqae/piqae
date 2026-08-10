@@ -18,8 +18,10 @@ group. Workflow and shared build changes deliberately select every group.
 | --- | --- |
 | Documentation only | policy checks; no Rust, web, macOS, or Windows build |
 | Web | web only |
-| TypeScript SDK | SDK only |
-| OpenAPI contract | API contract and web/SDK |
+| TypeScript SDK | SDK plus downstream MCP and Shopify consumers |
+| MCP | MCP only |
+| Shopify app | Shopify checks, build, and PostgreSQL migration gate |
+| OpenAPI contract | API contract and all web/SDK/MCP/Shopify consumers |
 | Terraform | Terraform only |
 | macOS shell/packaging | macOS Swift or packaging validation only |
 | Windows shell/packaging | Windows tray or installer validation only |
@@ -34,7 +36,8 @@ Dependabot groups Actions and container updates and limits each ecosystem to
 three open pull requests so one weekly dependency burst does not multiply full
 CI runs.
 
-The weekly supply-chain workflow performs the slower advisory scan, source
+The supply-chain workflow is the sole owner of dependency policy and secret
+history checks. Its weekly run also performs the slower advisory scan, source
 SBOM, complete secret-history scan, and public updater-feed smoke test. PRs scan
 only their changed Git history and run dependency policy only when dependency
 or workflow files changed.
@@ -66,19 +69,65 @@ GitHub runners:
 | `PIQAE_RELEASE_MACOS_RUNNER` | `macos-15` |
 | `PIQAE_RELEASE_WINDOWS_RUNNER` | `windows-latest` |
 
-After installing the Blacksmith GitHub integration, a controlled trial can set
-only the ordinary CI variables, for example:
+Do not switch every runner class at once. A Blacksmith pilot should change only
+`PIQAE_CI_LINUX_RUNNER`; lightweight policy jobs and the macOS, Windows, and
+release jobs remain on GitHub-hosted runners. This isolates the provider change
+to the compute-heavy Linux CI jobs and leaves a useful control group.
+
+Before installing the integration or changing a variable:
+
+1. Record 20--30 recent, completed pull-request runs of `CI` from the Actions
+   UI or API. For each run, record the commit, conclusion, queue duration
+   (`started_at - created_at`), Linux job duration
+   (`completed_at - started_at`), and whether a rerun was needed.
+2. Record GitHub-hosted runner cost for the same period. Public-repository
+   usage may have no marginal Actions charge, but it is still the baseline for
+   evaluating a paid provider.
+3. Choose a current Blacksmith Ubuntu label with the same architecture and at
+   least the resources required by the Linux jobs. Confirm the label in the
+   Blacksmith installation rather than copying an example from this document.
+4. Set an end date (normally two weeks or 20--30 comparable runs) and an owner
+   responsible for rollback.
+
+Repository variables are the narrowest scope and are preferred for the pilot.
+After installing the Blacksmith GitHub integration, set the selected label:
 
 ```console
-gh variable set PIQAE_CI_LINUX_RUNNER --body blacksmith-2vcpu-ubuntu-2404
-gh variable set PIQAE_CI_WINDOWS_RUNNER --body blacksmith-2vcpu-windows-2025
-gh variable set PIQAE_CI_MACOS_RUNNER --body blacksmith-6vcpu-macos-15
+gh variable set PIQAE_CI_LINUX_RUNNER --repo OWNER/REPOSITORY --body SELECTED_RUNNER_LABEL
 ```
 
-Measure elapsed time, queue time, failure rate, and actual invoice cost for two
-weeks before setting release-runner variables. Reverting is deletion of the
-variables; no workflow edit is required. Blacksmith is available only to GitHub
-organizations. Its current runner mappings and prices must be rechecked before
+If centrally managed organization variables are required instead, restrict the
+variable to this repository during the pilot; do not expose it to every
+repository by default:
+
+```console
+gh variable set PIQAE_CI_LINUX_RUNNER --org ORGANIZATION \
+  --repos REPOSITORY --body SELECTED_RUNNER_LABEL
+```
+
+Run the same measurement for the experiment window and compare medians and
+95th percentiles, not only the fastest run. Review queue duration, Linux job
+duration, end-to-end workflow duration, provider/infrastructure failure rate,
+cache hit behavior, rerun rate, and actual invoice cost. Separate failures
+caused by the tested commit from runner or network failures. Accept the pilot
+only if the improvement is repeatable and the reliability and cost are
+acceptable; document the measured result before considering other runner
+classes or release jobs.
+
+Rollback is immediate and does not require a workflow edit. Delete the variable
+at the same scope where it was created, then rerun one failed or representative
+workflow to prove that GitHub's fallback is active:
+
+```console
+gh variable delete PIQAE_CI_LINUX_RUNNER --repo OWNER/REPOSITORY
+# For an organization-scoped pilot:
+gh variable delete PIQAE_CI_LINUX_RUNNER --org ORGANIZATION
+```
+
+The workflow expression falls back to `ubuntu-latest` when the variable is
+absent. Do not set the variable to an empty string as a rollback mechanism.
+Blacksmith is available only to GitHub organizations. Its supported runner
+labels, security model, fork behavior, and prices must be rechecked before
 enabling it:
 
 - [Blacksmith quickstart and runner labels](https://docs.blacksmith.sh/introduction/quickstart)

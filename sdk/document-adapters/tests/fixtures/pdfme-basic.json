@@ -1,0 +1,7 @@
+{
+  "basePdf": { "width": 210, "height": 297 },
+  "schemas": [[
+    { "name": "order/name", "type": "text", "fontSize": 14 },
+    { "name": "qr~value", "type": "qrcode" }
+  ]]
+}

@@ -169,7 +169,7 @@ async fn postgres_reported_complete_billing_upgrades_from_previous_schema() {
         .fetch_one(&pool)
         .await
         .expect("read latest schema version");
-    assert_eq!(latest, 31);
+    assert_eq!(latest, 37);
     let billable_index: Option<String> =
         sqlx::query_scalar("SELECT to_regclass('usage_one_billable_print_per_job_idx')::text")
             .fetch_one(&pool)
@@ -179,6 +179,429 @@ async fn postgres_reported_complete_billing_upgrades_from_previous_schema() {
         billable_index.as_deref(),
         Some("usage_one_billable_print_per_job_idx")
     );
+
+    pool.close().await;
+    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+        .execute(&admin)
+        .await
+        .expect("drop exact disposable schema");
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn documents_migrate_and_enforce_tenant_scoped_references() {
+    let Some(database_url) = env::var("PIQAE_TEST_DATABASE_URL").ok() else {
+        eprintln!("skipped: set PIQAE_TEST_DATABASE_URL to run PostgreSQL migration evidence");
+        return;
+    };
+    let schema = format!("piqae_documents_{}", ulid::Ulid::new()).to_ascii_lowercase();
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&database_url)
+        .await
+        .expect("connect PostgreSQL test database");
+    sqlx::query(&format!("CREATE SCHEMA {schema}"))
+        .execute(&admin)
+        .await
+        .expect("create disposable schema");
+    let pool = schema_pool(&database_url, &schema).await;
+    let store = PostgresStore::from_pool(pool.clone());
+    store
+        .migrate()
+        .await
+        .expect("migrate empty database through documents");
+    for suffix in ["a", "b"] {
+        sqlx::query("INSERT INTO workspaces (id,name,slug) VALUES ($1,$2,$3)")
+            .bind(format!("wsp_doc_{suffix}"))
+            .bind(suffix)
+            .bind(format!("documents-{suffix}"))
+            .execute(&pool)
+            .await
+            .expect("workspace fixture");
+        sqlx::query(
+            "INSERT INTO environments (id,workspace_id,kind,name) VALUES ($1,$2,'live','Live')",
+        )
+        .bind(format!("env_doc_{suffix}"))
+        .bind(format!("wsp_doc_{suffix}"))
+        .execute(&pool)
+        .await
+        .expect("environment fixture");
+    }
+    let ciphertext = b"authenticated-ciphertext-not-plaintext";
+    sqlx::query(
+        "INSERT INTO document_templates
+        (id,workspace_id,environment_id,name,draft_ciphertext,draft_sha256)
+        VALUES ('dtpl_doc_a','wsp_doc_a','env_doc_a','Receipt',$1,$2)",
+    )
+    .bind(ciphertext.as_slice())
+    .bind("a".repeat(64))
+    .execute(&pool)
+    .await
+    .expect("tenant document template");
+    let cross_tenant_revision = sqlx::query("INSERT INTO document_template_revisions
+        (id,workspace_id,environment_id,template_id,revision,spec_ciphertext,spec_sha256,renderer_profile)
+        VALUES ('drev_cross','wsp_doc_b','env_doc_b','dtpl_doc_a',1,$1,$2,'piqae.document/v1')")
+        .bind(ciphertext.as_slice()).bind("a".repeat(64)).execute(&pool).await;
+    assert!(
+        cross_tenant_revision.is_err(),
+        "composite tenant foreign key must reject probing"
+    );
+    sqlx::query(
+        "INSERT INTO document_template_revisions
+         (id,workspace_id,environment_id,template_id,revision,spec_ciphertext,spec_sha256,renderer_profile)
+         VALUES ('drev_doc_a','wsp_doc_a','env_doc_a','dtpl_doc_a',1,$1,$2,'piqae.document/v1')",
+    )
+    .bind(ciphertext.as_slice())
+    .bind("a".repeat(64))
+    .execute(&pool)
+    .await
+    .expect("revision fixture");
+    sqlx::query(
+        "INSERT INTO document_renders
+         (id,workspace_id,environment_id,template_revision_id,input_ciphertext,input_sha256,state,
+          artifact_object_key_ciphertext,artifact_sha256,artifact_byte_length,artifact_media_type,
+          idempotency_key,request_sha256)
+         VALUES ('drnd_doc_a','wsp_doc_a','env_doc_a','drev_doc_a',$1,$2,'completed',$1,$2,123,
+          'application/pdf','render-key-a',$2)",
+    )
+    .bind(ciphertext.as_slice())
+    .bind("a".repeat(64))
+    .execute(&pool)
+    .await
+    .expect("completed render fixture");
+    sqlx::query(
+        "INSERT INTO uploads
+         (id,workspace_id,environment_id,object_key,media_type,expected_sha256,expected_bytes,state,
+          expires_at,completed_at,source_document_render_id,acquisition_sha256)
+         VALUES ('dua_doc_a','wsp_doc_a','env_doc_a','objects/render-a','application/pdf',$1,123,
+          'complete',now()+interval '1 hour',now(),'drnd_doc_a',$1)",
+    )
+    .bind("a".repeat(64))
+    .execute(&pool)
+    .await
+    .expect("completed render artifact fixture");
+    sqlx::query(
+        "INSERT INTO agents
+         (id,workspace_id,environment_id,name,installation_id,os,architecture,version,protocol_version)
+         VALUES ('agt_doc_a','wsp_doc_a','env_doc_a','Fixture','install-doc-a','linux','x86_64','test',1)",
+    )
+    .execute(&pool)
+    .await
+    .expect("agent fixture");
+    sqlx::query(
+        "INSERT INTO printers
+         (id,workspace_id,environment_id,agent_id,native_id,name)
+         VALUES ('prn_doc_a','wsp_doc_a','env_doc_a','agt_doc_a','virtual-doc-a','Virtual')",
+    )
+    .execute(&pool)
+    .await
+    .expect("printer fixture");
+    sqlx::query(
+        "INSERT INTO jobs
+         (id,workspace_id,environment_id,printer_id,agent_id,payload,state,per_printer_sequence,expires_at)
+         VALUES ('job_doc_a','wsp_doc_a','env_doc_a','prn_doc_a','agt_doc_a',
+          '{\"content\":{\"type\":\"upload\",\"upload_id\":\"dua_doc_a\"}}'::jsonb,
+          'registered',1,now()+interval '2 hours')",
+    )
+    .execute(&pool)
+    .await
+    .expect("artifact-backed job fixture");
+    let artifact_edge: (String, String) = sqlx::query_as(
+        "SELECT upload_id,render_id FROM document_artifact_job_references
+         WHERE workspace_id='wsp_doc_a' AND environment_id='env_doc_a' AND job_id='job_doc_a'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("trigger registered exact upload and render identifiers");
+    assert_eq!(artifact_edge, ("dua_doc_a".into(), "drnd_doc_a".into()));
+    let plaintext_rows: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM document_templates
+        WHERE convert_from(draft_ciphertext, 'UTF8') LIKE '%spec_version%'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("inspect encrypted persistence");
+    assert_eq!(plaintext_rows, 0);
+    let cross_tenant_conversion = sqlx::query(
+        "INSERT INTO document_conversions
+         (id,workspace_id,environment_id,adapter_id,adapter_version,adapter_api_version,
+          source_format,source_sha256,strict,fidelity,renderer_version,result_ciphertext,
+          result_sha256,idempotency_key,request_sha256)
+         VALUES ('dcnv_cross','wsp_doc_b','env_doc_a','pdfme','1.0.0','piqae.adapter/v1',
+          'pdfme.template',$1,true,'exact','piqae-document-renderer/0.1.11',$2,$1,
+          'conversion-key-a',$1)",
+    )
+    .bind("b".repeat(64))
+    .bind(ciphertext.as_slice())
+    .execute(&pool)
+    .await;
+    assert!(
+        cross_tenant_conversion.is_err(),
+        "conversion environment must be tenant fenced"
+    );
+    let artifact_reference_constraints: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM pg_constraint c
+         JOIN pg_class t ON t.oid=c.conrelid
+         JOIN pg_namespace n ON n.oid=t.relnamespace
+         WHERE n.nspname=current_schema()
+           AND t.relname='document_artifact_job_references'
+           AND c.contype IN ('p','f','c')",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("inspect artifact ownership constraints");
+    assert_eq!(artifact_reference_constraints, 6);
+    let active_reference_index: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM pg_indexes
+         WHERE schemaname=current_schema()
+           AND indexname='document_artifact_active_references_idx'
+           AND indexdef LIKE '%released_at IS NULL%')",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("inspect active artifact reference index");
+    assert!(active_reference_index);
+    let stable_document_indexes: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM pg_indexes WHERE schemaname=current_schema()
+           AND indexname IN ('document_templates_tenant_created_idx','document_renders_tenant_created_idx')
+           AND indexdef LIKE '%created_at DESC, id%'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("inspect stable tenant pagination indexes");
+    assert_eq!(stable_document_indexes, 2);
+    let render_revision_delete_action: String = sqlx::query_scalar(
+        "SELECT confdeltype::text FROM pg_constraint
+          WHERE conrelid='document_renders'::regclass
+            AND confrelid='document_template_revisions'::regclass
+            AND contype='f'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("inspect render revision delete policy");
+    assert_eq!(render_revision_delete_action, "c");
+    let conversion_ciphertext_bound: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM pg_constraint c
+          JOIN pg_class t ON t.oid=c.conrelid
+         WHERE t.relname='document_conversions' AND c.contype='c'
+           AND pg_get_constraintdef(c.oid) LIKE '%1048704%')",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("inspect adapter conversion ciphertext bound");
+    assert!(conversion_ciphertext_bound);
+    let latest: i64 = sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations")
+        .fetch_one(&pool)
+        .await
+        .expect("read schema version");
+    assert_eq!(latest, 37);
+    pool.close().await;
+    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+        .execute(&admin)
+        .await
+        .expect("drop exact disposable schema");
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn document_key_retirement_waits_for_every_retained_ciphertext() {
+    let Some(database_url) = env::var("PIQAE_TEST_DATABASE_URL").ok() else {
+        eprintln!("skipped: set PIQAE_TEST_DATABASE_URL to run PostgreSQL migration evidence");
+        return;
+    };
+    let schema = format!("piqae_document_keys_{}", ulid::Ulid::new()).to_ascii_lowercase();
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&database_url)
+        .await
+        .expect("connect PostgreSQL test database");
+    sqlx::query(&format!("CREATE SCHEMA {schema}"))
+        .execute(&admin)
+        .await
+        .expect("create disposable schema");
+    let pool = schema_pool(&database_url, &schema).await;
+    let store = PostgresStore::from_pool(pool.clone());
+    store.migrate().await.expect("migrate empty database");
+    sqlx::query("INSERT INTO workspaces (id,name,slug) VALUES ('wsp_01J00000000000000000000000','Keys','keys-a')")
+        .execute(&pool)
+        .await
+        .expect("workspace fixture");
+    sqlx::query(
+        "INSERT INTO environments (id,workspace_id,kind,name)
+         VALUES ('env_01J00000000000000000000001','wsp_01J00000000000000000000000','live','Live')",
+    )
+    .execute(&pool)
+    .await
+    .expect("environment fixture");
+    sqlx::query("INSERT INTO workspaces (id,name,slug) VALUES ('wsp_01J00000000000000000000002','Other','keys-b')")
+        .execute(&pool)
+        .await
+        .expect("other workspace fixture");
+    sqlx::query(
+        "INSERT INTO environments (id,workspace_id,kind,name)
+         VALUES ('env_01J00000000000000000000003','wsp_01J00000000000000000000002','live','Live')",
+    )
+    .execute(&pool)
+    .await
+    .expect("other environment fixture");
+    // A pre-key-id ciphertext must remain attributed to legacy-v1.
+    sqlx::query(
+        "INSERT INTO document_templates
+         (id,workspace_id,environment_id,name,draft_ciphertext,draft_sha256)
+         VALUES ('dtpl_key_a','wsp_01J00000000000000000000000','env_01J00000000000000000000001','Receipt',$1,$2)",
+    )
+    .bind(vec![7_u8; 29])
+    .bind("a".repeat(64))
+    .execute(&pool)
+    .await
+    .expect("legacy encrypted document");
+    let missing = store
+        .update_document_template_draft(
+            "wsp_01J00000000000000000000000"
+                .parse()
+                .expect("valid workspace"),
+            "env_01J00000000000000000000001"
+                .parse()
+                .expect("valid environment"),
+            "dtpl_missing",
+            &[9_u8; 29],
+            &"b".repeat(64),
+        )
+        .await;
+    assert!(matches!(
+        missing,
+        Err(piqae_storage_postgres::StorageError::NotFound)
+    ));
+    let cross_tenant = store
+        .update_document_template_draft(
+            "wsp_01J00000000000000000000002"
+                .parse()
+                .expect("valid workspace"),
+            "env_01J00000000000000000000003"
+                .parse()
+                .expect("valid environment"),
+            "dtpl_key_a",
+            &[9_u8; 29],
+            &"b".repeat(64),
+        )
+        .await;
+    assert!(matches!(
+        cross_tenant,
+        Err(piqae_storage_postgres::StorageError::NotFound)
+    ));
+    sqlx::query("UPDATE document_templates SET state='published' WHERE id='dtpl_key_a'")
+        .execute(&pool)
+        .await
+        .expect("published template fixture");
+    let conflicting = store
+        .update_document_template_draft(
+            "wsp_01J00000000000000000000000"
+                .parse()
+                .expect("valid workspace"),
+            "env_01J00000000000000000000001"
+                .parse()
+                .expect("valid environment"),
+            "dtpl_key_a",
+            &[9_u8; 29],
+            &"b".repeat(64),
+        )
+        .await;
+    assert!(matches!(
+        conflicting,
+        Err(piqae_storage_postgres::StorageError::IdempotencyConflict)
+    ));
+    let references: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM document_encryption_key_references WHERE key_id='legacy-v1'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("audit legacy references");
+    assert_eq!(references, 1);
+    let referenced_delete =
+        sqlx::query("DELETE FROM document_encryption_keys WHERE key_id='legacy-v1'")
+            .execute(&pool)
+            .await;
+    assert!(
+        referenced_delete.is_err(),
+        "retained ciphertext must block key deletion"
+    );
+    assert!(
+        store
+            .verify_document_encryption_keyring(["new-key"])
+            .await
+            .is_err(),
+        "startup must reject a keyring missing retained work"
+    );
+    store
+        .verify_document_encryption_keyring(["legacy-v1"])
+        .await
+        .expect("complete keyring admits retained work");
+    store
+        .configure_document_encryption_keys("new-key", ["legacy-v1", "new-key"])
+        .await
+        .expect("activate new generation while retaining old decryption key");
+    store
+        .verify_persisted_document_encryption_keyring("new-key", ["legacy-v1", "new-key"])
+        .await
+        .expect("maintenance keyring matches durable lifecycle without mutation");
+    assert!(
+        store
+            .verify_persisted_document_encryption_keyring("legacy-v1", ["legacy-v1", "new-key"],)
+            .await
+            .is_err(),
+        "maintenance cannot operate with a stale configured active generation"
+    );
+    assert!(
+        store
+            .configure_document_encryption_keys("legacy-v1", ["legacy-v1", "new-key"])
+            .await
+            .is_err(),
+        "a stale process cannot roll the active generation backwards"
+    );
+    let retirement = sqlx::query(
+        "UPDATE document_encryption_keys SET lifecycle_state='retired'
+         WHERE key_id='legacy-v1'",
+    )
+    .execute(&pool)
+    .await;
+    assert!(
+        retirement.is_err(),
+        "retained ciphertext must block retirement"
+    );
+    let records = store
+        .document_ciphertexts_for_rewrap("legacy-v1", 10)
+        .await
+        .expect("claim bounded rewrap batch");
+    assert_eq!(records.len(), 1);
+    let mut replacement = b"PDOC\x02\x07new-key".to_vec();
+    replacement.extend([8_u8; 40]);
+    assert!(
+        store
+            .rewrap_document_ciphertext(&records[0], &replacement)
+            .await
+            .expect("compare-and-swap retained ciphertext")
+    );
+    assert!(
+        !store
+            .rewrap_document_ciphertext(&records[0], &replacement)
+            .await
+            .expect("restart-safe stale compare-and-swap"),
+        "a restarted batch must not overwrite its completed replacement"
+    );
+    assert_eq!(
+        store
+            .document_encryption_key_reference_count("legacy-v1")
+            .await
+            .expect("verify drained key generation"),
+        0
+    );
+    sqlx::query(
+        "UPDATE document_encryption_keys SET lifecycle_state='retired'
+         WHERE key_id='legacy-v1'",
+    )
+    .execute(&pool)
+    .await
+    .expect("zero references permit retirement");
 
     pool.close().await;
     sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
@@ -365,7 +788,7 @@ async fn agent_health_migrates_empty_and_previous_schemas_with_tenant_fencing() 
         .fetch_one(&empty_pool)
         .await
         .expect("read empty-database schema version");
-    assert_eq!(latest, 30);
+    assert_eq!(latest, 37);
     empty_pool.close().await;
     sqlx::query(&format!("DROP SCHEMA {empty_schema} CASCADE"))
         .execute(&admin)
@@ -514,7 +937,7 @@ async fn content_encryption_key_algorithm_migrates_fresh_and_legacy_schemas() {
         .fetch_one(&empty_pool)
         .await
         .expect("read empty-database schema version");
-    assert_eq!(empty_latest, 30);
+    assert_eq!(empty_latest, 37);
     empty_pool.close().await;
     sqlx::query(&format!("DROP SCHEMA {empty_schema} CASCADE"))
         .execute(&admin)
@@ -582,7 +1005,7 @@ async fn content_encryption_key_algorithm_migrates_fresh_and_legacy_schemas() {
         .fetch_one(&upgrade_pool)
         .await
         .expect("read upgraded schema version");
-    assert_eq!(latest, 30);
+    assert_eq!(latest, 37);
     let reference_guard_config: Vec<String> = sqlx::query_scalar(
         "SELECT coalesce(proconfig, ARRAY[]::text[])
          FROM pg_proc JOIN pg_namespace ON pg_namespace.oid = pg_proc.pronamespace

@@ -28,6 +28,7 @@ futures = "0.3.31"
 hex = "0.4.3"
 http = "1.3.1"
 rand = "0.8.5"
+qrcode = { version = "0.14.1", default-features = false }
 p256 = { version = "0.13.2", features = ["ecdh", "pkcs8"] }
 hkdf = "0.12.4"
 reqwest = { version = "0.12.20", default-features = false, features = ["json", "rustls-tls", "stream"] }
@@ -50,6 +51,7 @@ zeroize = { version = "1.8.1", features = ["derive"] }
 
 piqae-domain = { path = "crates/domain", version = "0.1.11" }
 piqae-protocol = { path = "crates/protocol", version = "0.1.11" }
+piqae-document-renderer = { path = "crates/document-renderer", version = "0.1.11" }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

@@ -11,7 +11,7 @@
     "config": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["environment", "authMode", "s3Bucket"],
+      "required": ["environment", "authMode", "documentActiveKeyId", "documentArtifactDownloadConcurrency", "s3Bucket"],
       "properties": {
         "environment": { "type": "string", "enum": ["staging", "production"] },
         "authMode": { "type": "string", "enum": ["api_key", "bootstrap", "hybrid", "oidc"] },
@@ -22,6 +22,13 @@
         "oidcBindingValue": { "type": "string" },
         "oidcOrganizationClaim": { "type": "string" },
         "oidcPermissionsClaim": { "type": "string" },
+        "documentActiveKeyId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[A-Za-z0-9_.-]+$"
+        },
+        "documentArtifactDownloadConcurrency": { "type": "integer", "minimum": 1, "maximum": 32 },
         "s3Endpoint": { "type": "string" },
         "s3Bucket": { "type": "string" },
         "s3Region": { "type": "string" },
@@ -40,10 +47,12 @@
         "keys": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["databaseUrl", "webhookMasterKey", "s3AccessKeyId", "s3SecretAccessKey"],
+          "required": ["databaseUrl", "webhookMasterKey", "documentMasterKey", "documentDecryptionKeys", "s3AccessKeyId", "s3SecretAccessKey"],
           "properties": {
             "databaseUrl": { "type": "string", "minLength": 1 },
             "webhookMasterKey": { "type": "string", "minLength": 1 },
+            "documentMasterKey": { "type": "string", "minLength": 1 },
+            "documentDecryptionKeys": { "type": "string", "minLength": 1 },
             "s3AccessKeyId": { "type": "string", "minLength": 1 },
             "s3SecretAccessKey": { "type": "string", "minLength": 1 }
           }

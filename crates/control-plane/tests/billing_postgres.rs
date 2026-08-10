@@ -269,6 +269,7 @@ async fn cloud_billing_is_tenant_scoped_idempotent_and_stripe_projected() {
             Arc::new(store.clone()) as Arc<dyn Repository>,
             Arc::new(authenticator),
             [5; 32],
+            piqae_control_plane::document_crypto::DocumentSecretBox::new([0; 32]),
             Arc::new(MemoryObjectStore::default()),
         )
         .with_capabilities(capabilities)

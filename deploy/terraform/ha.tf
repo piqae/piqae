@@ -1,27 +1,28 @@
 locals {
   secondary_enabled = var.enable_multi_region
   runtime_env = {
-    PIQAE_ENVIRONMENT               = var.environment
-    PIQAE_DEPLOYMENT                = "cloud"
-    PIQAE_RUN_MIGRATIONS_ON_STARTUP = "false"
-    PIQAE_IDENTITY_PROVIDER         = "workos"
-    PIQAE_BILLING_ENABLED           = "true"
-    STRIPE_METER_EVENT_NAME         = var.stripe_meter_event_name
-    PIQAE_BIND                      = "0.0.0.0:8080"
-    PIQAE_AUTH_MODE                 = var.auth_mode
-    PIQAE_OIDC_ISSUER               = var.oidc_issuer
-    PIQAE_OIDC_JWKS_URL             = var.oidc_jwks_url
-    PIQAE_OIDC_AUDIENCE             = var.oidc_audience
-    PIQAE_OIDC_BINDING_CLAIM        = var.oidc_binding_claim
-    PIQAE_OIDC_BINDING_VALUE        = var.oidc_binding_value
-    PIQAE_OIDC_ORGANIZATION_CLAIM   = var.oidc_organization_claim
-    PIQAE_OIDC_PERMISSIONS_CLAIM    = var.oidc_permissions_claim
-    PIQAE_OIDC_ALLOW_UNRESTRICTED   = "false"
-    PIQAE_OBJECT_STORE              = var.enable_managed_data_plane ? "gcs" : "s3"
-    PIQAE_GCS_BUCKET                = var.enable_managed_data_plane ? google_storage_bucket.objects[0].name : ""
-    PIQAE_S3_ENDPOINT               = var.object_store_endpoint
-    PIQAE_S3_BUCKET                 = var.object_store_bucket
-    PIQAE_S3_REGION                 = "auto"
+    PIQAE_ENVIRONMENT                            = var.environment
+    PIQAE_DEPLOYMENT                             = "cloud"
+    PIQAE_RUN_MIGRATIONS_ON_STARTUP              = "false"
+    PIQAE_IDENTITY_PROVIDER                      = "workos"
+    PIQAE_BILLING_ENABLED                        = "true"
+    STRIPE_METER_EVENT_NAME                      = var.stripe_meter_event_name
+    PIQAE_BIND                                   = "0.0.0.0:8080"
+    PIQAE_AUTH_MODE                              = var.auth_mode
+    PIQAE_OIDC_ISSUER                            = var.oidc_issuer
+    PIQAE_OIDC_JWKS_URL                          = var.oidc_jwks_url
+    PIQAE_OIDC_AUDIENCE                          = var.oidc_audience
+    PIQAE_OIDC_BINDING_CLAIM                     = var.oidc_binding_claim
+    PIQAE_OIDC_BINDING_VALUE                     = var.oidc_binding_value
+    PIQAE_OIDC_ORGANIZATION_CLAIM                = var.oidc_organization_claim
+    PIQAE_OIDC_PERMISSIONS_CLAIM                 = var.oidc_permissions_claim
+    PIQAE_OIDC_ALLOW_UNRESTRICTED                = "false"
+    PIQAE_OBJECT_STORE                           = var.enable_managed_data_plane ? "gcs" : "s3"
+    PIQAE_GCS_BUCKET                             = var.enable_managed_data_plane ? google_storage_bucket.objects[0].name : ""
+    PIQAE_S3_ENDPOINT                            = var.object_store_endpoint
+    PIQAE_S3_BUCKET                              = var.object_store_bucket
+    PIQAE_S3_REGION                              = "auto"
+    PIQAE_DOCUMENT_ARTIFACT_DOWNLOAD_CONCURRENCY = tostring(var.document_artifact_download_concurrency)
   }
 }
 
@@ -104,15 +105,21 @@ resource "google_cloud_run_v2_service" "server_secondary" {
         name  = "PIQAE_SERVICE_ROLE"
         value = each.key
       }
+      env {
+        name  = "PIQAE_DOCUMENT_ACTIVE_KEY_ID"
+        value = var.document_active_key_id
+      }
 
       dynamic "env" {
         for_each = {
-          PIQAE_DATABASE_URL         = google_secret_manager_secret.database_url.secret_id
-          PIQAE_S3_ACCESS_KEY_ID     = google_secret_manager_secret.object_access_key.secret_id
-          PIQAE_S3_SECRET_ACCESS_KEY = google_secret_manager_secret.object_secret_key.secret_id
-          PIQAE_WEBHOOK_MASTER_KEY   = google_secret_manager_secret.webhook_master_key.secret_id
-          STRIPE_SECRET_KEY          = google_secret_manager_secret.stripe_secret_key.secret_id
-          STRIPE_WEBHOOK_SECRET      = google_secret_manager_secret.stripe_webhook_secret.secret_id
+          PIQAE_DATABASE_URL             = google_secret_manager_secret.database_url.secret_id
+          PIQAE_S3_ACCESS_KEY_ID         = google_secret_manager_secret.object_access_key.secret_id
+          PIQAE_S3_SECRET_ACCESS_KEY     = google_secret_manager_secret.object_secret_key.secret_id
+          PIQAE_WEBHOOK_MASTER_KEY       = google_secret_manager_secret.webhook_master_key.secret_id
+          PIQAE_DOCUMENT_MASTER_KEY      = google_secret_manager_secret.document_master_key.secret_id
+          PIQAE_DOCUMENT_DECRYPTION_KEYS = google_secret_manager_secret.document_decryption_keys.secret_id
+          STRIPE_SECRET_KEY              = google_secret_manager_secret.stripe_secret_key.secret_id
+          STRIPE_WEBHOOK_SECRET          = google_secret_manager_secret.stripe_webhook_secret.secret_id
         }
         content {
           name = env.key

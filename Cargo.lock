@@ -2308,6 +2308,7 @@ version = "0.1.11"
 dependencies = [
  "async-trait",
  "piqae-agent-storage",
+ "piqae-document-renderer",
  "piqae-domain",
  "piqae-protocol",
  "serde",
@@ -2355,6 +2356,7 @@ dependencies = [
  "axum",
  "base64",
  "bytes",
+ "chacha20poly1305",
  "chrono",
  "ed25519-dalek",
  "futures",
@@ -2370,6 +2372,7 @@ dependencies = [
  "opentelemetry_sdk",
  "p256",
  "piqae-auth",
+ "piqae-document-renderer",
  "piqae-domain",
  "piqae-object-store",
  "piqae-protocol",
@@ -2393,6 +2396,16 @@ dependencies = [
  "ulid",
  "url",
  "uuid",
+]
+
+[[package]]
+name = "piqae-document-renderer"
+version = "0.1.11"
+dependencies = [
+ "qrcode",
+ "serde",
+ "serde_json",
+ "thiserror",
 ]
 
 [[package]]
@@ -2840,6 +2853,12 @@ dependencies = [
  "quote",
  "syn 2.0.119",
 ]
+
+[[package]]
+name = "qrcode"
+version = "0.14.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d68782463e408eb1e668cf6152704bd856c78c5b6417adaee3203d8f4c1fc9ec"
 
 [[package]]
 name = "quick-error"

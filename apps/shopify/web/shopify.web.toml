@@ -1,0 +1,7 @@
+roles = ["frontend", "backend"]
+auth_callback_path = ["/auth/callback"]
+webhooks_path = "/webhooks"
+
+[commands]
+dev = "pnpm --dir .. exec react-router dev"
+build = "pnpm --dir .. build"

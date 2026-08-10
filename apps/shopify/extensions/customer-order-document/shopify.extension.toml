@@ -1,0 +1,15 @@
+api_version = "2026-07"
+
+[[extensions]]
+type = "ui_extension"
+name = "Order PDF"
+handle = "piqae-customer-order-document"
+uid = "f1bf608c-708d-f129-839e-d065f2d812559f1583eb"
+description = "Download an invoice from an authenticated customer order"
+
+[[extensions.targeting]]
+target = "customer-account.order-status.block.render"
+module = "./src/OrderDocument.jsx"
+
+[extensions.capabilities]
+network_access = true

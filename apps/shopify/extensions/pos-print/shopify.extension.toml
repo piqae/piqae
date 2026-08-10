@@ -1,0 +1,32 @@
+api_version = "2026-07"
+
+[[extensions]]
+type = "ui_extension"
+name = "Print order documents"
+handle = "piqae-pos-print"
+uid = "fe1a7bac-75ec-0368-1139-5c90d7d578f89d655ae5"
+description = "Print receipts directly or open a PDF print dialog"
+
+[[extensions.targeting]]
+target = "pos.home.tile.render"
+module = "./src/HomeTile.jsx"
+
+[[extensions.targeting]]
+target = "pos.home.modal.render"
+module = "./src/HomeModal.jsx"
+
+[[extensions.targeting]]
+target = "pos.order-details.action.menu-item.render"
+module = "./src/ActionMenuItem.jsx"
+
+[[extensions.targeting]]
+target = "pos.order-details.action.render"
+module = "./src/PrintModal.jsx"
+
+[[extensions.targeting]]
+target = "pos.purchase.post.action.menu-item.render"
+module = "./src/ActionMenuItem.jsx"
+
+[[extensions.targeting]]
+target = "pos.purchase.post.action.render"
+module = "./src/PrintModal.jsx"

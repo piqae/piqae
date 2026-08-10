@@ -1,0 +1,25 @@
+{
+  "name": "@piqae/document-adapters",
+  "version": "0.1.0",
+  "description": "Safe adapters from third-party document templates to piqae.document/v1",
+  "license": "Apache-2.0",
+  "type": "module",
+  "sideEffects": false,
+  "engines": { "node": ">=20" },
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" },
+    "./compatibility/pdfme-v1.json": "./compatibility/pdfme-v1.json"
+  },
+  "files": ["dist", "compatibility", "README.md", "LICENSE"],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "check": "tsc --noEmit",
+    "lint": "publint",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "publint": "0.3.22",
+    "typescript": "^5.8.3",
+    "vitest": "^3.2.4"
+  }
+}

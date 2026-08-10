@@ -1,0 +1,49 @@
+{
+  "name": "@piqae/shopify-app",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": "22.x"
+  },
+  "scripts": {
+    "build": "pnpm extensions:check && react-router build",
+    "check": "tsc --noEmit && pnpm extensions:check",
+    "lint": "tsc --noEmit",
+    "test": "vitest run",
+    "test:postgres": "node scripts/test-postgres-migrations.mjs",
+    "format:check": "prettier --check .",
+    "extensions:check": "node scripts/check-extensions.mjs"
+  },
+  "dependencies": {
+    "@pdfme/common": "5.4.3",
+    "@pdfme/schemas": "5.4.3",
+    "@pdfme/ui": "5.4.3",
+    "@piqae/sdk": "workspace:*",
+    "@react-router/node": "7.12.0",
+    "@react-router/serve": "7.12.0",
+    "@shopify/shopify-app-react-router": "1.2.1",
+    "@shopify/shopify-app-session-storage-memory": "4.0.8",
+    "@shopify/shopify-app-session-storage-postgresql": "6.0.1",
+    "isbot": "5.1.32",
+    "liquidjs": "10.28.0",
+    "pg": "8.16.3",
+    "preact": "10.27.2",
+    "react": "19.2.4",
+    "react-dom": "19.2.4",
+    "react-router": "7.12.0"
+  },
+  "devDependencies": {
+    "@react-router/dev": "7.12.0",
+    "@shopify/polaris-types": "1.0.7",
+    "@types/node": "22.19.15",
+    "@types/pg": "8.16.0",
+    "@types/react": "19.2.17",
+    "@types/react-dom": "19.2.3",
+    "esbuild": "0.27.7",
+    "prettier": "3.8.2",
+    "typescript": "5.9.3",
+    "vite": "7.3.1",
+    "vitest": "4.0.18"
+  }
+}

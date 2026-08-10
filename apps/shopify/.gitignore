@@ -1,0 +1,5 @@
+.react-router/
+.shopify/
+build/
+extensions/*/dist/
+extensions/*/manifest.json

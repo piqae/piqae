@@ -44,7 +44,7 @@ const job = await account.printPdf({
   title: "Order 10428 shipping label",
   pdf,
   metadata: { order_id: "10428" },
-  idempotencyKey: "order-10428-v1",
+  idempotencyKey: "northwind-order-10428-label-v1",
 });
 
 const webhook = await account.webhooks.create({

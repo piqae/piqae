@@ -88,6 +88,7 @@ export function createPiqaeMcpServer(config: McpConfig): McpServer {
   registerTargetTool(server, config);
   registerUploadTool(server, config);
   registerJobTool(server, config);
+  registerDocumentTool(server, config);
   registerWebhookTool(server, config);
   registerPlatformTool(server, config);
   registerDocumentationTool(server);
@@ -815,6 +816,161 @@ function registerJobTool(server: McpServer, config: McpConfig): void {
         return client.jobs.cancel(jobId);
       }),
   );
+}
+
+function registerDocumentTool(server: McpServer, config: McpConfig): void {
+  server.registerTool(
+    "piqae_documents",
+    {
+      title: "Validate and operate optional Piqae Documents",
+      description:
+        "Validate declarative piqae.document/v1 templates, publish immutable revisions, register renders, inspect status, or print a completed render. Template and input content are never returned by this tool.",
+      inputSchema: z.object({
+        action: z.enum(["validate", "publish", "render", "get", "print"]),
+        template_id: z.string().min(1).optional(),
+        render_id: z.string().min(1).optional(),
+        specification: recordSchema.optional(),
+        input: recordSchema.optional(),
+        printer_id: z.string().min(1).optional(),
+        target_id: z.string().min(1).optional(),
+        title: z.string().min(1).max(255).optional(),
+        deliveries: z.number().int().min(1).max(100).optional(),
+        options: recordSchema.optional(),
+        idempotency_key: z.string().min(8).max(255).optional(),
+        confirm_destination: z.string().optional(),
+        fixture: z.string().min(3).max(300).optional(),
+        ...selectionShape,
+      }),
+      annotations: mutationAnnotations(
+        "Operate optional Piqae Documents",
+        true,
+      ),
+    },
+    (input, extra) =>
+      result(async () => {
+        const specification = input.specification;
+        if (input.action === "validate") {
+          validateDocumentSpecification(specification);
+          return {
+            valid: true,
+            spec_version: "piqae.document/v1",
+            top_level_nodes: specification.body.length,
+          };
+        }
+        const client = clientFor(config, extra, input);
+        if (input.action === "publish") {
+          const revision = await client.documents.templates.publish(
+            required(input.template_id, "template_id"),
+            required(specification, "specification") as never,
+            required(input.idempotency_key, "idempotency_key"),
+          );
+          return documentMetadata(revision);
+        }
+        if (input.action === "render") {
+          const render = await client.documents.renders.create(
+            {
+              template_revision_id: required(input.template_id, "template_id"),
+              input: required(input.input, "input"),
+            },
+            required(input.idempotency_key, "idempotency_key"),
+          );
+          return documentMetadata(render);
+        }
+        const renderId = required(input.render_id, "render_id");
+        if (input.action === "get")
+          return documentMetadata(
+            await client.documents.renders.retrieve(renderId),
+          );
+        enforceJobPolicy(config, bearer(config, extra));
+        const destination = input.printer_id ?? input.target_id;
+        if (!destination || (input.printer_id && input.target_id))
+          throw new Error(
+            "Exactly one of printer_id or target_id is required.",
+          );
+        requireConfirmation(destination, input.confirm_destination);
+        required(input.fixture, "fixture");
+        const job = await client.documents.renders.print(
+          renderId,
+          withoutUndefined({
+            printer_id: input.printer_id,
+            target_id: input.target_id,
+            title: required(input.title, "title"),
+            deliveries: input.deliveries,
+            options: input.options,
+          }) as never,
+          required(input.idempotency_key, "idempotency_key"),
+        );
+        return documentMetadata(job);
+      }),
+  );
+}
+
+function validateDocumentSpecification(
+  specification: Record<string, unknown> | undefined,
+): asserts specification is Record<string, unknown> & { body: unknown[] } {
+  if (
+    !specification ||
+    specification.spec_version !== "piqae.document/v1" ||
+    !Array.isArray(specification.body)
+  )
+    throw new Error(
+      "A bounded piqae.document/v1 specification with a body array is required.",
+    );
+  const page = specification.page;
+  if (
+    !page ||
+    typeof page !== "object" ||
+    !["a4", "a5", "letter", "four-by-six", "roll58mm", "roll80mm"].includes(
+      String((page as Record<string, unknown>).size),
+    )
+  )
+    throw new Error("Document page size is unsupported.");
+  let nodes = 0;
+  const visit = (values: unknown[], depth: number): void => {
+    if (depth > 32) throw new Error("Document nesting exceeds 32 levels.");
+    for (const value of values) {
+      nodes += 1;
+      if (nodes > 10_000 || !value || typeof value !== "object")
+        throw new Error("Document nodes exceed structural limits.");
+      const node = value as Record<string, unknown>;
+      const type = node.type;
+      if (
+        ![
+          "text",
+          "stack",
+          "row",
+          "spacer",
+          "line",
+          "page_break",
+          "when",
+          "repeat",
+          "qr",
+        ].includes(String(type))
+      )
+        throw new Error(`Unsupported document node type: ${String(type)}.`);
+      if (["stack", "row", "when", "repeat"].includes(String(type))) {
+        if (!Array.isArray(node.children))
+          throw new Error(`${String(type)} requires children.`);
+        visit(node.children, depth + 1);
+      }
+      if (
+        ["when", "repeat"].includes(String(type)) &&
+        (typeof node.pointer !== "string" || !node.pointer.startsWith("/"))
+      )
+        throw new Error(`${String(type)} requires an absolute JSON Pointer.`);
+    }
+  };
+  visit(specification.body, 0);
+}
+
+function documentMetadata(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object") return {};
+  const {
+    specification: _specification,
+    input: _input,
+    ...metadata
+  } = value as Record<string, unknown>;
+  return metadata;
 }
 
 function registerWebhookTool(server: McpServer, config: McpConfig): void {
