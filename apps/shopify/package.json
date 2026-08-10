@@ -8,6 +8,8 @@
   },
   "scripts": {
     "build": "pnpm extensions:check && react-router build",
+    "start": "react-router-serve ./build/server/index.js",
+    "migrate": "node scripts/migrate-postgres.mjs",
     "check": "tsc --noEmit && pnpm extensions:check",
     "lint": "tsc --noEmit",
     "test": "vitest run",
