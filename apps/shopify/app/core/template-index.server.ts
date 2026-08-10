@@ -5,6 +5,22 @@ import type {
 } from "./workflows.server";
 import { templateDigest } from "./template-digest.server";
 
+const ACTIVE_SYSTEM_TEMPLATE_KEYS = new Set([
+  "invoice",
+  "packing-slip",
+  "receipt",
+]);
+
+export function isActiveTemplate(template: MerchantTemplate): boolean {
+  try {
+    const key = (JSON.parse(template.source) as { system?: { key?: unknown } })
+      .system?.key;
+    return typeof key !== "string" || ACTIVE_SYSTEM_TEMPLATE_KEYS.has(key);
+  } catch {
+    return true;
+  }
+}
+
 type AdminGraphql = (
   query: string,
   options?: { variables?: Record<string, unknown> },
@@ -30,7 +46,7 @@ export function buildTemplateIndex(
   settings: MerchantSettings,
 ): TemplateIndex {
   const documents = templates
-    .filter((value) => value.state === "published")
+    .filter((value) => value.state === "published" && isActiveTemplate(value))
     .slice(0, 50)
     .map((value) => ({
       id: value.id,
@@ -106,14 +122,14 @@ export async function seedStarterTemplates(
   shop: string,
 ): Promise<void> {
   const existing = await repository.listTemplates(shop);
-  const existingSystemKeys = new Set(
+  const existingSystemTemplates = new Map(
     existing.flatMap((value) => {
       try {
         const parsed = JSON.parse(value.source) as {
           system?: { key?: unknown };
         };
         return typeof parsed.system?.key === "string"
-          ? [parsed.system.key]
+          ? [[parsed.system.key, value] as const]
           : [];
       } catch {
         return [];
@@ -122,9 +138,12 @@ export async function seedStarterTemplates(
   );
   const { starterTemplates } = await import("./starter-templates");
   for (const [position, starter] of starterTemplates.entries()) {
-    if (existingSystemKeys.has(starter.id)) continue;
+    const current = existingSystemTemplates.get(starter.id);
+    if (current?.source === starter.source) continue;
     await repository.saveTemplate(shop, {
-      id: `00000000-0000-4000-8000-${String(position + 1).padStart(12, "0")}`,
+      id:
+        current?.id ??
+        `00000000-0000-4000-8000-${String(position + 1).padStart(12, "0")}`,
       name: starter.name,
       kind: starter.kind,
       pageSize: starter.pageSize,

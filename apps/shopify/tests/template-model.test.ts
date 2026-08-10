@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  canonicalToVisual,
   visualCompatibility,
   visualFields,
   visualTemplate,
@@ -94,6 +95,7 @@ describe("PDFme visual adapter", () => {
       ],
     };
     const native = visualTemplate(source);
+    expect(native.schemas[0]![1]!.content).toBe("{{ order.name }}");
     const roundTrip = { ...source, fields: [], template: native };
     expect(
       visualFields(roundTrip).map(({ text, binding }) => ({ text, binding })),
@@ -101,5 +103,11 @@ describe("PDFme visual adapter", () => {
       { text: "Invoice", binding: undefined },
       { text: undefined, binding: "/order/name" },
     ]);
+  });
+
+  it("round-trips the canonical canvas back into PDFme data", () => {
+    const source = model();
+    const canonical = visualToCanonical(source);
+    expect(visualToCanonical(canonicalToVisual(canonical))).toEqual(canonical);
   });
 });

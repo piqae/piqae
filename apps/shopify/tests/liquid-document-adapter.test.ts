@@ -73,6 +73,41 @@ describe("bounded Liquid document adapter", () => {
     expect(decoded).toMatchObject({ ok: true, document });
   });
 
+  it("round-trips absolute PDFme canvas fields through bounded Liquid", () => {
+    const document: DocumentSpec = {
+      spec_version: "piqae.document/v1",
+      page,
+      body: [
+        {
+          type: "canvas",
+          children: [
+            {
+              type: "text",
+              value: { pointer: "/orders/0/name" },
+              font_size: 18,
+              x_mm: 10,
+              y_mm: 12,
+              width_mm: 80,
+              height_mm: 10,
+            },
+            {
+              type: "qr",
+              value: "https://example.test/order",
+              x_mm: 160,
+              y_mm: 12,
+              width_mm: 25,
+              height_mm: 25,
+            },
+          ],
+        },
+      ],
+    };
+    const encoded = canonicalToLiquid(document);
+    expect(encoded.source).toContain("piqae_canvas_text orders.0.name");
+    const decoded = liquidToCanonical(encoded.source!, page);
+    expect(decoded).toMatchObject({ ok: true, document });
+  });
+
   it("fails closed with stable line diagnostics for executable Liquid and HTML", () => {
     for (const [source, code] of [
       ["{{ order.name | escape }}", "unsupported_construct"],

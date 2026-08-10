@@ -1,4 +1,9 @@
-import type { DocumentNode, DocumentPointer, DocumentSpec } from "@piqae/sdk";
+import type {
+  DocumentCanvasElement,
+  DocumentNode,
+  DocumentPointer,
+  DocumentSpec,
+} from "@piqae/sdk";
 
 export type LiquidDiagnostic = {
   code: string;
@@ -19,7 +24,7 @@ const MAX_SOURCE_BYTES = 32_768;
 const MAX_LINES = 500;
 const MAX_DEPTH = 8;
 const MAX_NODES = 500;
-const PATH = "[a-zA-Z_][a-zA-Z0-9_]*(?:\\.[a-zA-Z_][a-zA-Z0-9_]*)*";
+const PATH = "[a-zA-Z_][a-zA-Z0-9_]*(?:\\.[a-zA-Z0-9_]+)*";
 const OUTPUT = new RegExp(`^\\{\\{\\s*(${PATH})\\s*\\}\\}$`);
 const FOR = new RegExp(
   `^\\{%\\s*for\\s+([a-zA-Z_][a-zA-Z0-9_]*)\\s+in\\s+(${PATH})\\s*%\\}$`,
@@ -29,9 +34,14 @@ const QR = new RegExp(
   `^\\{%\\s*piqae_qr\\s+(${PATH})(?:\\s+size_mm:\\s*(\\d+(?:\\.\\d+)?))?\\s*%\\}$`,
 );
 const SPACER = /^\{%\s*piqae_spacer\s+(\d+(?:\.\d+)?)\s*%\}$/;
+const CANVAS_START = /^\{%\s*piqae_canvas\s*%\}$/;
+const CANVAS_END = /^\{%\s*endpiqae_canvas\s*%\}$/;
+const CANVAS_ITEM = /^\{%\s*piqae_canvas_(text|qr|line)\s+(.+?)\s*%\}$/;
+const CANVAS_VALUE = /^("(?:[^"\\]|\\.)*"|[a-zA-Z_][a-zA-Z0-9_.]*)\s*/;
+const CANVAS_ARG = /^(x|y|width|height|font_size):\s*(\d+(?:\.\d+)?)\s*/;
 
 type Frame = {
-  kind: "root" | "for" | "if";
+  kind: "root" | "for" | "if" | "canvas";
   variable?: string;
   children: DocumentNode[];
   line: number;
@@ -159,6 +169,56 @@ export function liquidToCanonical(
       add({ type: "line" }, lineNumber);
       continue;
     }
+    if (CANVAS_START.test(text)) {
+      if (stack.some((frame) => frame.kind === "canvas"))
+        diagnostics.push({
+          code: "nested_canvas",
+          line: lineNumber,
+          message: "Canvas blocks cannot be nested.",
+        });
+      else {
+        const frame: Frame = {
+          kind: "canvas",
+          children: [],
+          line: lineNumber,
+        };
+        add(
+          {
+            type: "canvas",
+            children: frame.children as DocumentCanvasElement[],
+          },
+          lineNumber,
+        );
+        stack.push(frame);
+      }
+      continue;
+    }
+    if (CANVAS_END.test(text)) {
+      if (stack.at(-1)!.kind !== "canvas")
+        diagnostics.push({
+          code: "unmatched_end_tag",
+          line: lineNumber,
+          message: "{% endpiqae_canvas %} does not close a canvas block.",
+        });
+      else stack.pop();
+      continue;
+    }
+    const canvasItem = CANVAS_ITEM.exec(text);
+    if (canvasItem) {
+      if (stack.at(-1)!.kind !== "canvas") {
+        diagnostics.push({
+          code: "canvas_item_outside_canvas",
+          line: lineNumber,
+          message: "Canvas items must be inside a piqae_canvas block.",
+        });
+        continue;
+      }
+      const parsed = parseCanvasItem(canvasItem[1]!, canvasItem[2]!, stack);
+      if ("diagnostic" in parsed)
+        diagnostics.push({ ...parsed.diagnostic, line: lineNumber });
+      else add(parsed.node, lineNumber);
+      continue;
+    }
     if (text === "{% piqae_page_break %}") {
       add({ type: "page_break" }, lineNumber);
       continue;
@@ -271,6 +331,22 @@ export function canonicalToLiquid(document: DocumentSpec): {
         lines.push(`{% if ${pathFor(node.pointer)} %}`);
         emit(node.children, scope);
         lines.push("{% endif %}");
+      } else if (node.type === "canvas") {
+        lines.push("{% piqae_canvas %}");
+        for (const child of node.children) {
+          const box = `x: ${child.x_mm} y: ${child.y_mm} width: ${child.width_mm} height: ${child.height_mm}`;
+          if (child.type === "line")
+            lines.push(`{% piqae_canvas_line ${box} %}`);
+          else if (child.type === "text")
+            lines.push(
+              `{% piqae_canvas_text ${liquidCanvasValue(child.value, scope)} ${box} font_size: ${child.font_size ?? 10} %}`,
+            );
+          else
+            lines.push(
+              `{% piqae_canvas_qr ${liquidCanvasValue(child.value, scope)} ${box} %}`,
+            );
+        }
+        lines.push("{% endpiqae_canvas %}");
       } else
         diagnostics.push({
           code: "unsupported_node",
@@ -283,6 +359,99 @@ export function canonicalToLiquid(document: DocumentSpec): {
   return diagnostics.length
     ? { diagnostics }
     : { source: lines.join("\n"), diagnostics };
+}
+
+function liquidCanvasValue(
+  value: string | { pointer: DocumentPointer },
+  scope?: string,
+): string {
+  return typeof value === "string"
+    ? JSON.stringify(value)
+    : pathFor(value.pointer, scope);
+}
+
+function parseCanvasItem(
+  type: string,
+  source: string,
+  stack: Frame[],
+): { node: DocumentNode } | { diagnostic: Omit<LiquidDiagnostic, "line"> } {
+  let rest = source;
+  let value: string | { pointer: DocumentPointer } | undefined;
+  if (type !== "line") {
+    const match = CANVAS_VALUE.exec(rest);
+    if (!match)
+      return canvasFailure(
+        "invalid_canvas_value",
+        "Canvas text and QR require a quoted literal or variable.",
+      );
+    rest = rest.slice(match[0].length);
+    if (match[1]!.startsWith('"')) {
+      try {
+        value = JSON.parse(match[1]!) as string;
+      } catch {
+        return canvasFailure(
+          "invalid_canvas_value",
+          "Canvas literal is not valid JSON text.",
+        );
+      }
+    } else {
+      const pointer = pointerFor(match[1]!, stack);
+      if (!pointer)
+        return canvasFailure(
+          "unknown_variable",
+          `Variable '${match[1]}' is not in scope.`,
+        );
+      value = { pointer };
+    }
+  }
+  const args = new Map<string, number>();
+  while (rest.trim()) {
+    const match = CANVAS_ARG.exec(rest.trimStart());
+    if (!match)
+      return canvasFailure(
+        "invalid_canvas_argument",
+        "Canvas arguments must be x, y, width, height or font_size numbers.",
+      );
+    if (args.has(match[1]!))
+      return canvasFailure(
+        "duplicate_canvas_argument",
+        `Canvas argument '${match[1]}' is duplicated.`,
+      );
+    args.set(match[1]!, Number(match[2]));
+    rest = rest.trimStart().slice(match[0].length);
+  }
+  for (const required of ["x", "y", "width", "height"])
+    if (!args.has(required))
+      return canvasFailure(
+        "missing_canvas_argument",
+        `Canvas argument '${required}' is required.`,
+      );
+  const box = {
+    x_mm: args.get("x")!,
+    y_mm: args.get("y")!,
+    width_mm: args.get("width")!,
+    height_mm: args.get("height")!,
+  };
+  if (box.width_mm <= 0 || box.height_mm <= 0)
+    return canvasFailure(
+      "invalid_canvas_box",
+      "Canvas width and height must be positive.",
+    );
+  if (type === "line") return { node: { type: "line", ...box } };
+  if (type === "text")
+    return {
+      node: {
+        type: "text",
+        value: value!,
+        font_size: args.get("font_size") ?? 10,
+        ...box,
+      },
+    };
+  return { node: { type: "qr", value: value!, ...box } };
+}
+
+function canvasFailure(code: string, message: string) {
+  return { diagnostic: { code, message } };
 }
 
 function absolutePointer(path: string): `/${string}` {

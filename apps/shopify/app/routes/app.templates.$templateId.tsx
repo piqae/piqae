@@ -15,6 +15,7 @@ import { starterTemplates } from "../core/starter-templates";
 import {
   parseTemplateEnvelope,
   serializeTemplateEnvelope,
+  canonicalToVisual,
   visualCompatibility,
   visualToCanonical,
   type PdfmeVisualModel,
@@ -44,7 +45,8 @@ export function customizedTemplateName(name: string) {
   return `${name} — customized`.slice(0, 200);
 }
 export function editorLiquidForMode(mode: TemplateEditorMode, liquid: string) {
-  return mode === "liquid" ? liquid : "";
+  void mode;
+  return liquid;
 }
 export function removeSystemOwnership(envelope: TemplateEnvelope) {
   delete envelope.system;
@@ -141,7 +143,7 @@ export async function action({ request, params }: ActionFunctionArgs) {
     envelope.editor.mode = mode;
     envelope.editor.liquid = editorLiquidForMode(
       mode,
-      mode === "liquid" ? bounded(form, "liquid", 32768) : "",
+      bounded(form, "liquid", 32768),
     );
     if (mode === "liquid") {
       if (!envelope.editor.liquid.trim())
@@ -159,10 +161,17 @@ export async function action({ request, params }: ActionFunctionArgs) {
         );
       }
       envelope.canonical = conversion.document;
-      delete envelope.editor.pdfme;
       envelope.editor.liquid = conversion.normalizedSource;
-      envelope.editor.roundTrip = "lossless";
-      envelope.editor.warnings = [];
+      try {
+        envelope.editor.pdfme = canonicalToVisual(conversion.document);
+        envelope.editor.roundTrip = "lossless";
+        envelope.editor.warnings = [];
+      } catch (error) {
+        envelope.editor.roundTrip = "unsupported";
+        envelope.editor.warnings = [
+          error instanceof Error ? error.message : "Visual conversion failed.",
+        ];
+      }
     }
     if (mode === "visual") {
       const visual = parseVisualEditorSource(
@@ -171,6 +180,14 @@ export async function action({ request, params }: ActionFunctionArgs) {
       envelope.editor.pdfme = visual;
       envelope.canonical = visualToCanonical(visual);
       Object.assign(envelope.editor, visualCompatibility(visual));
+      const converted = canonicalToLiquid(envelope.canonical);
+      if (converted.source) envelope.editor.liquid = converted.source;
+      else {
+        envelope.editor.roundTrip = "unsupported";
+        envelope.editor.warnings.push(
+          converted.diagnostics[0]?.message ?? "Liquid conversion failed.",
+        );
+      }
     }
     source = serializeTemplateEnvelope(envelope);
     if (intent === "publish") {
@@ -226,12 +243,37 @@ export default function TemplateEditor() {
   const [workspaceView, setWorkspaceView] = useState<"editor" | "preview">(
     "editor",
   );
+  const [switchError, setSwitchError] = useState("");
   useEffect(() => {
     setMode(envelope.editor.mode);
     setVisual(envelope.editor.pdfme);
     setLiquid(envelope.editor.liquid ?? generatedLiquid.source ?? "");
   }, [source]);
   const immutable = Boolean(envelope.system?.immutable);
+  const switchMode = (next: TemplateEditorMode) => {
+    try {
+      if (mode === "visual" && visual && next === "liquid") {
+        const converted = canonicalToLiquid(visualToCanonical(visual));
+        if (!converted.source)
+          throw new Error(
+            converted.diagnostics[0]?.message ?? "Liquid conversion failed.",
+          );
+        setLiquid(converted.source);
+      } else if (mode === "liquid" && next === "visual") {
+        const converted = liquidToCanonical(liquid, envelope.canonical.page);
+        if (!converted.ok) throw new Error(converted.diagnostics[0]!.message);
+        setVisual(canonicalToVisual(converted.document));
+      }
+      setSwitchError("");
+      setMode(next);
+    } catch (error) {
+      setSwitchError(
+        error instanceof Error
+          ? error.message
+          : "Views could not be synchronized.",
+      );
+    }
+  };
   return (
     <s-page heading={template?.name ?? "New template"} inlineSize="large">
       <s-section>
@@ -314,26 +356,27 @@ export default function TemplateEditor() {
                       </select>
                     </label>
                     <label>
-                      Editing view
+                      Template editor
                       <select
                         className="piqae-input"
                         name="mode"
                         value={mode}
                         onChange={(event) =>
-                          setMode(
+                          switchMode(
                             event.currentTarget.value as TemplateEditorMode,
                           )
                         }
                         disabled={immutable}
                       >
-                        <option value="visual">
-                          Visual (PDFme-compatible)
-                        </option>
-                        <option value="liquid">Liquid</option>
+                        <option value="visual">Visual</option>
+                        <option value="liquid">Liquid code</option>
                         <option value="native">Canonical JSON</option>
                       </select>
                     </label>
                   </div>
+                  {switchError ? (
+                    <s-banner tone="critical">{switchError}</s-banner>
+                  ) : null}
                   {envelope.editor.roundTrip !== "lossless" ? (
                     <s-banner tone="warning">
                       Switching views is {envelope.editor.roundTrip}.{" "}
@@ -361,10 +404,10 @@ export default function TemplateEditor() {
                     <div className="piqae-card">
                       <s-heading>Visual layout</s-heading>
                       <s-paragraph>
-                        This client-only PDFme canvas edits the supported text,
-                        QR and line subset. The canonical preview is
-                        authoritative. Images, custom fonts and other plugins
-                        remain unsupported and are never silently discarded.
+                        This PDFme canvas and the Liquid code view edit the same
+                        document. Text and QR fields may contain bounded Liquid
+                        expressions such as {"{{ orders.0.name }}"}. The
+                        canonical preview is authoritative.
                       </s-paragraph>
                       {visual ? (
                         <input
@@ -402,7 +445,7 @@ export default function TemplateEditor() {
                       />
                     </label>
                   ) : (
-                    <input type="hidden" name="liquid" value="" />
+                    <input type="hidden" name="liquid" value={liquid} />
                   )}
                   <label>
                     Canonical Piqae document envelope

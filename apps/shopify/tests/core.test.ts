@@ -541,19 +541,15 @@ describe("Shopify document experience", () => {
       "Invoice",
       "Packing slip",
       "Receipt",
-      "Returns form",
-      "Quote / pro forma",
-      "Refund / credit note",
-      "Gift receipt",
-      "Delivery note",
     ]);
-    expect(new Set(starterTemplates.map(({ id }) => id)).size).toBe(8);
+    expect(new Set(starterTemplates.map(({ id }) => id)).size).toBe(3);
     for (const template of starterTemplates) {
       expect(template.specification.spec_version).toBe("piqae.document/v1");
       expect(template.specification.body.length).toBeGreaterThan(0);
-      expect(
-        template.specification.body.some((node) => node.type === "repeat"),
-      ).toBe(true);
+      expect(template.specification.body[0]?.type).toBe("canvas");
+      expect(parseTemplateEnvelope(template.source).editor.liquid).toContain(
+        "piqae_canvas",
+      );
     }
     expect(editorDocument.schema).toBe("piqae.document/v1");
     expect(editorDocument.nodes.some((node) => node.type === "repeat")).toBe(
@@ -601,8 +597,8 @@ describe("Shopify document experience", () => {
     expect(canSubmitTemplateMode("native", undefined)).toBe(true);
     expect(customizedTemplateName("x".repeat(200))).toHaveLength(200);
     expect(customizedTemplateName("Invoice")).toBe("Invoice — customized");
-    expect(editorLiquidForMode("visual", "{{ stale }}")).toBe("");
-    expect(editorLiquidForMode("native", "{{ stale }}")).toBe("");
+    expect(editorLiquidForMode("visual", "{{ kept }}")).toBe("{{ kept }}");
+    expect(editorLiquidForMode("native", "{{ kept }}")).toBe("{{ kept }}");
     expect(editorLiquidForMode("liquid", "{{ order.name }}")).toBe(
       "{{ order.name }}",
     );

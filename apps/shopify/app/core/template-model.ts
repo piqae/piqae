@@ -261,6 +261,67 @@ export function visualToCanonical(model: PdfmeVisualModel): DocumentSpec {
   };
 }
 
+/** Converts the exact canonical canvas subset back into editable pdfme data. */
+export function canonicalToVisual(document: DocumentSpec): PdfmeVisualModel {
+  const page =
+    document.page.size === "roll80mm"
+      ? "80mm"
+      : document.page.size === "letter"
+        ? "Letter"
+        : document.page.size.toUpperCase();
+  if (!(["A4", "A5", "Letter", "80mm"] as string[]).includes(page))
+    throw new Error(
+      `Page size '${document.page.size}' is not supported by the visual editor.`,
+    );
+  const pages: PdfmeVisualField[][] = [[]];
+  for (const node of document.body) {
+    if (node.type === "page_break") {
+      pages.push([]);
+      continue;
+    }
+    if (node.type !== "canvas")
+      throw new Error(
+        `${node.type} cannot be represented by the visual canvas.`,
+      );
+    const target = pages.at(-1)!;
+    for (const [index, child] of node.children.entries()) {
+      target.push({
+        id: `page-${pages.length}-field-${index + 1}`,
+        type: child.type === "qr" ? "qrcode" : child.type,
+        x: child.x_mm,
+        y: child.y_mm,
+        width: child.width_mm,
+        height: child.height_mm,
+        ...(child.type === "line"
+          ? {}
+          : typeof child.value === "string"
+            ? { text: child.value }
+            : { binding: child.value.pointer }),
+        ...(child.type === "text" && child.font_size !== undefined
+          ? { fontSize: child.font_size }
+          : {}),
+      });
+    }
+  }
+  const model: PdfmeVisualModel = {
+    schema: "pdfme-compatible/v1",
+    page: page as PdfmeVisualModel["page"],
+    fields: pages[0] ?? [],
+  };
+  if (pages.length > 1) {
+    const base = visualTemplate(model).basePdf;
+    model.fields = [];
+    model.template = {
+      basePdf: base,
+      schemas: pages.map(
+        (fields) =>
+          visualTemplate({ ...model, fields, template: undefined }).schemas[0]!,
+      ),
+    };
+  }
+  return model;
+}
+
 export function visualFields(model: PdfmeVisualModel): PdfmeVisualField[] {
   if (!model.template) return model.fields;
   return model.template.schemas.flatMap((_, pageIndex) =>
@@ -275,10 +336,11 @@ function visualPageFields(
   if (!model.template) return pageIndex === 0 ? model.fields : [];
   return (model.template.schemas[pageIndex] ?? []).map((schema, index) => {
     const hasBindingMetadata = Object.hasOwn(schema, "piqaeBinding");
-    const binding = hasBindingMetadata
-      ? (schema.piqaeBinding ?? undefined)
-      : schema.name
-        ? `/${schema.name.replaceAll("~", "~0").replaceAll("/", "~1")}`
+    const bindingFromContent = liquidExpressionToPointer(schema.content ?? "");
+    const binding = bindingFromContent
+      ? bindingFromContent
+      : hasBindingMetadata && !schema.content
+        ? (schema.piqaeBinding ?? undefined)
         : undefined;
     return {
       id: `${pageIndex}-${index}-${schema.name}`,
@@ -313,7 +375,9 @@ export function visualTemplate(model: PdfmeVisualModel): PdfmeTemplateSubset {
             .replaceAll("~1", "/")
             .replaceAll("~0", "~") ?? field.id,
         type: field.type,
-        content: field.text ?? "",
+        content: field.binding
+          ? `{{ ${pointerToLiquidExpression(field.binding)} }}`
+          : (field.text ?? ""),
         position: { x: field.x, y: field.y },
         width: field.width,
         height: field.height,
@@ -322,4 +386,20 @@ export function visualTemplate(model: PdfmeVisualModel): PdfmeTemplateSubset {
       })),
     ],
   };
+}
+
+function pointerToLiquidExpression(pointer: string): string {
+  return pointer
+    .replace(/^\//, "")
+    .split("/")
+    .map((part) => part.replaceAll("~1", "/").replaceAll("~0", "~"))
+    .join(".");
+}
+
+function liquidExpressionToPointer(content: string): string | undefined {
+  const match =
+    /^\s*\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*(?:\.[a-zA-Z0-9_]+)*)\s*\}\}\s*$/.exec(
+      content,
+    );
+  return match ? `/${match[1]!.replaceAll(".", "/")}` : undefined;
 }

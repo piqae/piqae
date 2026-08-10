@@ -107,12 +107,12 @@ describe("template source validation", () => {
 });
 
 describe("hybrid template authority", () => {
-  it("seeds eight immutable published defaults once", async () => {
+  it("seeds three immutable published defaults once", async () => {
     const repository = new MemoryWorkflowRepository();
     await seedStarterTemplates(repository, alpha);
     await seedStarterTemplates(repository, alpha);
     const templates = await repository.listTemplates(alpha);
-    expect(templates).toHaveLength(8);
+    expect(templates).toHaveLength(3);
     expect(
       templates.every(
         (value) => parseTemplateEnvelope(value.source).system?.immutable,
@@ -127,7 +127,7 @@ describe("hybrid template authority", () => {
       await repository.listTemplates(alpha),
       await repository.getSettings(alpha),
     );
-    expect(index.documents).toHaveLength(8);
+    expect(index.documents).toHaveLength(3);
     expect(JSON.stringify(index)).not.toContain("canonical");
     expect(index.digest).toMatch(/^[a-f0-9]{64}$/);
   });

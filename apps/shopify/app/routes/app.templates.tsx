@@ -11,6 +11,7 @@ import {
 } from "../core/workflows.server";
 import {
   seedStarterTemplates,
+  isActiveTemplate,
   syncTemplateIndex,
 } from "../core/template-index.server";
 import {
@@ -20,12 +21,7 @@ import {
 export const templates = [
   ["Invoice", "Orders · A4", "Published"],
   ["Packing slip", "Fulfillment · A4", "Published"],
-  ["Receipt", "Orders · 80 mm", "Draft"],
-  ["Returns form", "Orders · A4", "Published"],
-  ["Quote / pro forma", "Draft orders · A4", "Published"],
-  ["Refund / credit note", "Refunds · A4", "Published"],
-  ["Gift receipt", "Orders · A5", "Published"],
-  ["Delivery note", "Fulfillment · A4", "Published"],
+  ["Receipt", "Orders · 80 mm", "Published"],
 ] as const;
 export function customizedSystemDraft(
   existing: MerchantTemplate,
@@ -48,7 +44,11 @@ export function customizedSystemDraft(
 export async function loader({ request }: LoaderFunctionArgs) {
   const { session } = await shopify.authenticate.admin(request);
   await seedStarterTemplates(workflows(), session.shop);
-  return { templates: await workflows().listTemplates(session.shop) };
+  return {
+    templates: (await workflows().listTemplates(session.shop)).filter(
+      isActiveTemplate,
+    ),
+  };
 }
 export async function action({ request }: ActionFunctionArgs) {
   const { session, admin } = await shopify.authenticate.admin(request);
