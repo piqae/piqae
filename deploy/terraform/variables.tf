@@ -76,7 +76,7 @@ variable "webhook_master_key_secret" {
   description = "Base64-encoded 32-byte key used to encrypt webhook signing secrets."
   validation {
     condition     = can(regex("^[A-Za-z0-9+/]{43}=$", var.webhook_master_key_secret))
-    error_message = "webhook_master_key_secret must be canonical standard Base64 for exactly 32 bytes"
+    error_message = "webhook_master_key_secret must be base64 that decodes to exactly 32 bytes"
   }
 }
 
