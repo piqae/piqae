@@ -265,7 +265,9 @@ describe("Piqae MCP server", () => {
       },
     });
     expect(response.isError).toBe(true);
-    expect(JSON.stringify(response.structuredContent)).toContain("Job submission is disabled");
+    expect(JSON.stringify(response.structuredContent)).toContain(
+      "Job submission is disabled",
+    );
     expect(fetchMock).not.toHaveBeenCalled();
     await client.close();
     await server.close();
