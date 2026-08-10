@@ -123,117 +123,109 @@ export default function Templates() {
         Create template
       </s-button>
       <s-section padding="none" accessibilityLabel="Templates table">
-        <s-stack direction="block" gap="base">
-          {result?.ok ? (
-            <s-banner tone="success">Template imported as a draft.</s-banner>
-          ) : result?.error ? (
-            <s-banner tone="critical">{result.error}</s-banner>
-          ) : null}
-          <s-box padding="base">
-            <s-stack direction="block" gap="small">
-              <s-search-field
-                label="Search templates"
-                placeholder="Search by name, type, size, or status"
-                value={query}
-                onInput={(event) => setQuery(event.currentTarget.value)}
-              />
-              <s-text color="subdued">
-                Published revisions are immutable. Customize a system document
-                to create an editable merchant draft.
-              </s-text>
-            </s-stack>
-          </s-box>
-          {visibleTemplates.length ? (
-            <s-table>
-              <s-table-header-row>
-                <s-table-header listSlot="primary">Document</s-table-header>
-                <s-table-header>Type</s-table-header>
-                <s-table-header>Page size</s-table-header>
-                <s-table-header>Status</s-table-header>
-                <s-table-header format="numeric">Revision</s-table-header>
-                <s-table-header>Actions</s-table-header>
-              </s-table-header-row>
-              <s-table-body>
-                {visibleTemplates.map((template) => {
-                  const immutable =
-                    template.source.includes('"immutable":true');
-                  return (
-                    <s-table-row key={template.id}>
-                      <s-table-cell>
-                        <s-link href={`/app/templates/${template.id}`}>
-                          {template.name}
-                        </s-link>
-                      </s-table-cell>
-                      <s-table-cell>
-                        {template.kind.replaceAll("_", " ")}
-                      </s-table-cell>
-                      <s-table-cell>{template.pageSize}</s-table-cell>
-                      <s-table-cell>
-                        <s-badge
-                          tone={
-                            template.state === "published" ? "success" : "info"
-                          }
+        {result?.ok ? (
+          <s-banner tone="success">Template imported as a draft.</s-banner>
+        ) : result?.error ? (
+          <s-banner tone="critical">{result.error}</s-banner>
+        ) : null}
+        {visibleTemplates.length ? (
+          <s-table>
+            <s-search-field
+              slot="filters"
+              label="Search templates"
+              labelAccessibilityVisibility="exclusive"
+              placeholder="Search templates"
+              value={query}
+              onInput={(event) => setQuery(event.currentTarget.value)}
+            />
+            <s-table-header-row>
+              <s-table-header listSlot="primary">Document</s-table-header>
+              <s-table-header listSlot="inline">Status</s-table-header>
+              <s-table-header listSlot="secondary">Format</s-table-header>
+              <s-table-header listSlot="labeled">Actions</s-table-header>
+            </s-table-header-row>
+            <s-table-body>
+              {visibleTemplates.map((template) => {
+                const immutable = template.source.includes('"immutable":true');
+                return (
+                  <s-table-row key={template.id}>
+                    <s-table-cell>
+                      <s-link href={`/app/templates/${template.id}`}>
+                        {template.name}
+                      </s-link>
+                    </s-table-cell>
+                    <s-table-cell>
+                      <s-badge
+                        tone={
+                          template.state === "published" ? "success" : "info"
+                        }
+                      >
+                        {template.state}
+                      </s-badge>
+                    </s-table-cell>
+                    <s-table-cell>
+                      {template.kind.replaceAll("_", " ")} · {template.pageSize}{" "}
+                      · revision {template.revision}
+                    </s-table-cell>
+                    <s-table-cell>
+                      <s-stack direction="inline" gap="small">
+                        {immutable ? (
+                          <Form method="post">
+                            <input
+                              type="hidden"
+                              name="intent"
+                              value="customize"
+                            />
+                            <input
+                              type="hidden"
+                              name="templateId"
+                              value={template.id}
+                            />
+                            <s-button type="submit" variant="secondary">
+                              Customize
+                            </s-button>
+                          </Form>
+                        ) : (
+                          <s-link href={`/app/templates/${template.id}`}>
+                            Edit
+                          </s-link>
+                        )}
+                        <s-link
+                          download={`${template.name}.piqae-template.json`}
+                          href={`data:application/json;charset=utf-8,${encodeURIComponent(JSON.stringify(template))}`}
                         >
-                          {template.state}
-                        </s-badge>
-                      </s-table-cell>
-                      <s-table-cell>{template.revision}</s-table-cell>
-                      <s-table-cell>
-                        <div className="piqae-actions">
-                          {immutable ? (
-                            <Form method="post">
-                              <input
-                                type="hidden"
-                                name="intent"
-                                value="customize"
-                              />
-                              <input
-                                type="hidden"
-                                name="templateId"
-                                value={template.id}
-                              />
-                              <button
-                                className="piqae-link-button"
-                                type="submit"
-                              >
-                                Customize
-                              </button>
-                            </Form>
-                          ) : (
-                            <s-link href={`/app/templates/${template.id}`}>
-                              Edit
-                            </s-link>
-                          )}
-                          <a
-                            download={`${template.name}.piqae-template.json`}
-                            href={`data:application/json;charset=utf-8,${encodeURIComponent(JSON.stringify(template))}`}
-                          >
-                            Export
-                          </a>
-                        </div>
-                      </s-table-cell>
-                    </s-table-row>
-                  );
-                })}
-              </s-table-body>
-            </s-table>
-          ) : (
-            <s-box padding="large-400">
-              <s-stack direction="block" gap="small" alignItems="center">
+                          Export
+                        </s-link>
+                      </s-stack>
+                    </s-table-cell>
+                  </s-table-row>
+                );
+              })}
+            </s-table-body>
+          </s-table>
+        ) : (
+          <s-grid gap="base" justifyItems="center" paddingBlock="large-400">
+            <s-grid justifyItems="center" maxInlineSize="450px" gap="base">
+              <s-stack alignItems="center">
                 <s-heading>
                   {data.templates.length
                     ? "No templates match your search"
-                    : "No templates yet"}
+                    : "Create your first template"}
                 </s-heading>
-                <s-text color="subdued">
+                <s-paragraph>
                   {data.templates.length
                     ? "Try a different name, type, page size, or status."
-                    : "Create a template or import a portable template document."}
-                </s-text>
+                    : "Create a document template or import a portable Piqae template."}
+                </s-paragraph>
               </s-stack>
-            </s-box>
-          )}
-        </s-stack>
+              <s-button-group>
+                <s-button href="/app/templates/new" variant="primary">
+                  Create template
+                </s-button>
+              </s-button-group>
+            </s-grid>
+          </s-grid>
+        )}
       </s-section>
       <s-section heading="Import template">
         <details>
