@@ -2264,6 +2264,7 @@ dependencies = [
  "piqae-local-ipc",
  "piqae-native-logging",
  "piqae-protocol",
+ "piqae-support-packs",
  "rand 0.8.7",
  "reqwest 0.12.28",
  "serde",
@@ -2610,6 +2611,19 @@ dependencies = [
  "tokio",
  "ulid",
  "uuid",
+]
+
+[[package]]
+name = "piqae-support-packs"
+version = "0.1.11"
+dependencies = [
+ "ed25519-dalek",
+ "hex",
+ "piqae-domain",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
 ]
 
 [[package]]

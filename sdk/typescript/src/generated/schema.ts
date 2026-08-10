@@ -1120,6 +1120,103 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/printers/{printer_id}/capabilities": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                printer_id: string;
+            };
+            cookie?: never;
+        };
+        /**
+         * Retrieve the latest normalized capability document
+         * @description Returns display-safe, evidence-qualified facets. Driver-native payloads are never exposed here.
+         */
+        get: operations["getPrinterCapabilityDocument"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/print-intents/validate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Validate a capability-aware print intent without mutation */
+        post: operations["validatePrintIntent"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/print-intents/resolve": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Resolve and persist a short-lived immutable print ticket
+         * @description The response is display-safe. Native profile blobs and undocumented driver bytes are never returned.
+         */
+        post: operations["resolvePrintIntent"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/print-workflows": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List published active print workflows visible to the tenant */
+        get: operations["listPrintWorkflows"];
+        put?: never;
+        /** Create a revisioned print workflow */
+        post: operations["createPrintWorkflow"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/printers/{printer_id}/loaded-media": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                printer_id: string;
+            };
+            cookie?: never;
+        };
+        /** List loaded-media observations by source */
+        get: operations["listPrinterLoadedMedia"];
+        /** Confirm or clear an operator-observed loaded-media source */
+        put: operations["upsertPrinterLoadedMedia"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/stocks": {
         parameters: {
             query?: never;
@@ -2766,6 +2863,8 @@ export interface components {
             metadata?: {
                 [key: string]: string;
             };
+            /** @description Digest returned by resolvePrintIntent. Required when submitting a resolved professional workflow. */
+            resolved_ticket_digest?: components["schemas"]["Sha256Hex"];
         } & (unknown | unknown);
         /** @description A dedicated node content-encryption public key. This is not, and must never be substituted with, the node's Ed25519 authentication/signing key. Recipient discovery and encrypted-job submission are Preview contracts; the plaintext job endpoint does not accept this object. */
         EncryptedJobRecipientKey: {
@@ -2879,6 +2978,178 @@ export interface components {
                 [key: string]: string;
             };
         };
+        Sha256Hex: string;
+        ResourceRevision: {
+            id: string;
+            /** Format: int64 */
+            revision: number;
+        };
+        CapabilityEvidence: {
+            /** @enum {string} */
+            level: "discovered" | "mapped" | "replay_tested" | "physically_certified";
+            source: string;
+            support_pack_id?: string | null;
+            support_pack_digest?: components["schemas"]["Sha256Hex"] | null;
+        };
+        CapabilityFacet: {
+            /** @enum {string} */
+            type: "boolean" | "integer" | "number" | "string" | "enum" | "dimensions" | "object";
+            /** @enum {string} */
+            mutability: "read_only" | "job_override" | "profile_only" | "operator_only" | "unsupported";
+            supported: boolean;
+            unit?: string | null;
+            values?: (string | number | boolean)[];
+            /** @description Subset of values proven safe for job-scoped writes; absent values are display-only. */
+            writable_values?: (string | number | boolean)[];
+            minimum?: number | null;
+            maximum?: number | null;
+            default_value?: unknown;
+            dependencies?: string[];
+            conflicts?: string[];
+            evidence: components["schemas"]["CapabilityEvidence"];
+        };
+        CapabilityDocument: {
+            /** @constant */
+            schema_version: 1;
+            printer_id: string;
+            /** Format: int64 */
+            revision: number;
+            driver_fingerprint_sha256: components["schemas"]["Sha256Hex"];
+            /** @description Versioned normalized semantic facets keyed by canonical dotted name. Unknown keys must be preserved. */
+            facets: {
+                [key: string]: components["schemas"]["CapabilityFacet"];
+            };
+            /** Format: date-time */
+            created_at: string;
+        };
+        DocumentManifest: {
+            page_count: number;
+            page_boxes: {
+                width_mm: number;
+                height_mm: number;
+                bleed_mm?: number;
+            }[];
+            color_spaces: string[];
+            separations: string[];
+            /** @enum {string} */
+            scaling: "none" | "fit" | "fill";
+            pdf_version?: string | null;
+            has_transparency?: boolean | null;
+        };
+        PrintIntent: {
+            /** @constant */
+            schema_version: 1;
+            printer_id: string;
+            /** Format: int64 */
+            capability_revision: number;
+            workflow?: components["schemas"]["ResourceRevision"] | null;
+            stock?: components["schemas"]["ResourceRevision"] | null;
+            /** @default {} */
+            portable_options?: components["schemas"]["JobOptions"];
+            /**
+             * @description Values keyed only by normalized capability facet name; native driver keys are rejected.
+             * @default {}
+             */
+            semantic_options?: {
+                [key: string]: unknown;
+            };
+            document_manifest: components["schemas"]["DocumentManifest"];
+        };
+        PrintIntentValidationRequest: {
+            intent: components["schemas"]["PrintIntent"];
+        };
+        PrintIntentFinding: {
+            code: string;
+            path: string;
+            message: string;
+        };
+        PrintIntentValidation: {
+            /** @enum {string} */
+            status: "valid" | "invalid" | "operator_action_required";
+            /** Format: int64 */
+            capability_revision: number;
+            errors: components["schemas"]["PrintIntentFinding"][];
+            warnings: components["schemas"]["PrintIntentFinding"][];
+            normalized_intent?: components["schemas"]["PrintIntent"] | null;
+        };
+        ResolvedPrintTicket: {
+            digest: components["schemas"]["Sha256Hex"];
+            printer_id: string;
+            /** Format: int64 */
+            capability_revision: number;
+            workflow?: components["schemas"]["ResourceRevision"] | null;
+            stock?: components["schemas"]["ResourceRevision"] | null;
+            resolved_options: components["schemas"]["JobOptions"];
+            semantic_options: {
+                [key: string]: unknown;
+            };
+            provenance: {
+                [key: string]: string;
+            };
+            /** Format: date-time */
+            expires_at: string;
+        };
+        CreatePrintWorkflow: {
+            name: string;
+            printer_id: string;
+            /** Format: int64 */
+            capability_revision: number;
+            profile?: components["schemas"]["ResourceRevision"] | null;
+            stock?: components["schemas"]["ResourceRevision"] | null;
+            definition: components["schemas"]["PrintIntent"];
+            safe_overrides: string[];
+            /** @default false */
+            published?: boolean;
+        };
+        PrintWorkflow: {
+            id: string;
+            /** Format: int64 */
+            revision: number;
+            name: string;
+            printer_id: string;
+            /** Format: int64 */
+            capability_revision: number;
+            profile_id: string | null;
+            /** Format: int64 */
+            profile_revision: number | null;
+            stock_id: string | null;
+            /** Format: int64 */
+            stock_revision: number | null;
+            definition: components["schemas"]["PrintIntent"];
+            safe_overrides: string[];
+            published: boolean;
+            archived: boolean;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: date-time */
+            updated_at: string;
+        };
+        LoadedMediaObservation: {
+            printer_id: string;
+            source: string;
+            stock: components["schemas"]["ResourceRevision"] | null;
+            /** @enum {string} */
+            confidence: "reported" | "operator_confirmed" | "inferred" | "unknown";
+            /** @enum {string} */
+            calibration_state: "current" | "required" | "unknown";
+            remaining_amount: {
+                [key: string]: unknown;
+            } | null;
+            /** Format: date-time */
+            observed_at: string;
+            /** Format: date-time */
+            updated_at: string;
+        };
+        UpsertLoadedMediaObservation: {
+            source: string;
+            /** @description Null explicitly records that the loaded medium is unknown. */
+            stock: components["schemas"]["ResourceRevision"] | null;
+            /** @enum {string} */
+            calibration_state: "current" | "required" | "unknown";
+            remaining_amount?: {
+                [key: string]: unknown;
+            } | null;
+        };
         JobOptions: {
             bin?: string;
             collate?: boolean;
@@ -2912,6 +3183,7 @@ export interface components {
             created_at: string;
             /** Format: date-time */
             expires_at: string;
+            resolved_print_ticket?: components["schemas"]["ResolvedPrintTicket"] | null;
         };
         JobPage: {
             data: components["schemas"]["Job"][];
@@ -2947,6 +3219,8 @@ export interface components {
         };
         Stock: {
             id: string;
+            /** Format: int64 */
+            revision: number;
             name: string;
             sku: string | null;
             description: string | null;
@@ -2961,12 +3235,21 @@ export interface components {
         StockAttributes: {
             /** @enum {string} */
             kind?: "sheet" | "label" | "roll" | "continuous" | "envelope" | "card";
+            /** @enum {string} */
+            sensing?: "none" | "gap" | "black_mark" | "continuous" | "notched" | "hole";
             width_mm?: number;
             height_mm?: number;
             length_mm?: number;
+            thickness_mm?: number;
+            weight_gsm?: number;
             /** @enum {string} */
             orientation?: "portrait" | "landscape" | "either";
             gap_mm?: number;
+            black_mark?: {
+                width_mm: number;
+                height_mm: number;
+                offset_mm: number;
+            };
             mark_interval_mm?: number;
             bleed_mm?: number;
             safe_area_mm?: {
@@ -2977,6 +3260,15 @@ export interface components {
             };
             source?: string;
             media?: string;
+            /** @enum {string} */
+            feed_direction?: "short_edge" | "long_edge";
+            /** @enum {string} */
+            winding?: "face_in" | "face_out" | "not_applicable";
+            coating?: string;
+            face_material?: string;
+            liner?: string;
+            adhesive?: string;
+            compatible_icc_profile_digests?: components["schemas"]["Sha256Hex"][];
         } & {
             [key: string]: unknown;
         };
@@ -5113,6 +5405,194 @@ export interface operations {
             401: components["responses"]["Error"];
             403: components["responses"]["Error"];
             404: components["responses"]["Error"];
+        };
+    };
+    getPrinterCapabilityDocument: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                printer_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Latest capability document for the tenant-visible printer. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CapabilityDocument"];
+                };
+            };
+            401: components["responses"]["Error"];
+            403: components["responses"]["Error"];
+            404: components["responses"]["Error"];
+        };
+    };
+    validatePrintIntent: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PrintIntentValidationRequest"];
+            };
+        };
+        responses: {
+            /** @description Deterministic validation findings. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PrintIntentValidation"];
+                };
+            };
+            400: components["responses"]["Error"];
+            401: components["responses"]["Error"];
+            403: components["responses"]["Error"];
+            404: components["responses"]["Error"];
+            409: components["responses"]["Error"];
+        };
+    };
+    resolvePrintIntent: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PrintIntentValidationRequest"];
+            };
+        };
+        responses: {
+            /** @description Validated short-lived resolved ticket. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ResolvedPrintTicket"];
+                };
+            };
+            400: components["responses"]["Error"];
+            401: components["responses"]["Error"];
+            403: components["responses"]["Error"];
+            404: components["responses"]["Error"];
+            409: components["responses"]["Error"];
+        };
+    };
+    listPrintWorkflows: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Published, non-archived tenant-scoped workflows with their latest revision. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PrintWorkflow"][];
+                };
+            };
+            401: components["responses"]["Error"];
+            403: components["responses"]["Error"];
+        };
+    };
+    createPrintWorkflow: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreatePrintWorkflow"];
+            };
+        };
+        responses: {
+            /** @description Workflow and first immutable revision. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PrintWorkflow"];
+                };
+            };
+            400: components["responses"]["Error"];
+            401: components["responses"]["Error"];
+            403: components["responses"]["Error"];
+        };
+    };
+    listPrinterLoadedMedia: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                printer_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Tenant-scoped observations; absence means unknown, never a stock match. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LoadedMediaObservation"][];
+                };
+            };
+            401: components["responses"]["Error"];
+            403: components["responses"]["Error"];
+            404: components["responses"]["Error"];
+        };
+    };
+    upsertPrinterLoadedMedia: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                printer_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpsertLoadedMediaObservation"];
+            };
+        };
+        responses: {
+            /** @description Current operator-confirmed or explicitly unknown observation. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LoadedMediaObservation"];
+                };
+            };
+            400: components["responses"]["Error"];
+            401: components["responses"]["Error"];
+            403: components["responses"]["Error"];
+            404: components["responses"]["Error"];
+            409: components["responses"]["Error"];
         };
     };
     listStocks: {

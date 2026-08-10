@@ -1,0 +1,1 @@
+{"schema_version":1,"rules":[{"platform":"windows","native_capability_key":"replace-with-observed-display-safe-key","semantic_facet":"media.sensing","choices":{"replace-with-observed-native-choice":"replace-with-canonical-semantic-choice"}}]}

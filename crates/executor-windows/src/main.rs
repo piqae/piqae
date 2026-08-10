@@ -26,6 +26,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 fn sumatra_settings(options: &piqae_domain::JobOptions) -> Result<Vec<String>, ExecutorError> {
     use piqae_domain::{Duplex, Rotation};
 
+    options.validate_bounds().map_err(|error| ExecutorError {
+        code: "invalid_job_options".into(),
+        message: error.to_string(),
+        retryable: false,
+        handoff_may_have_succeeded: false,
+    })?;
+
     let mut unsupported = Vec::new();
     if options.dpi.is_some() {
         unsupported.push("dpi");
@@ -35,6 +42,9 @@ fn sumatra_settings(options: &piqae_domain::JobOptions) -> Result<Vec<String>, E
     }
     if options.nup.is_some() {
         unsupported.push("nup");
+    }
+    if !options.native_options.is_empty() {
+        unsupported.push("native_options");
     }
     if !unsupported.is_empty() {
         return Err(ExecutorError {
@@ -91,6 +101,27 @@ fn sumatra_settings(options: &piqae_domain::JobOptions) -> Result<Vec<String>, E
     Ok(settings)
 }
 
+#[cfg(any(windows, test))]
+fn raw_submission_rejection(
+    options: &piqae_domain::JobOptions,
+    has_native_profile: bool,
+) -> Option<ExecutorError> {
+    if !options.is_empty() {
+        return Some(ExecutorError {
+            code: "raw_job_options_unsupported".into(),
+            message: "RAW documents already contain device instructions and cannot request rendered or native driver options".into(),
+            retryable: false,
+            handoff_may_have_succeeded: false,
+        });
+    }
+    has_native_profile.then(|| ExecutorError {
+        code: "native_profile_backend_unavailable".into(),
+        message: "RAW jobs cannot replay a Windows driver profile".into(),
+        retryable: false,
+        handoff_may_have_succeeded: false,
+    })
+}
+
 #[cfg(windows)]
 mod platform {
     use piqae_domain::{ContentKind, PrinterCapabilities, PrinterState};
@@ -126,8 +157,17 @@ mod platform {
             }
             ExecutorOperation::GetPrinterCapabilities { native_printer_id } => {
                 ensure_printer(&native_printer_id)?;
+                let capabilities = piqae_executor_windows::windows_native::portable_capabilities(
+                    &native_printer_id,
+                )
+                .map_err(|error| ExecutorError {
+                    code: error.code,
+                    message: error.message,
+                    retryable: false,
+                    handoff_may_have_succeeded: false,
+                })?;
                 Ok(ExecutorResult::Capabilities {
-                    capabilities: PrinterCapabilities::default(),
+                    capabilities,
                     native_options: std::collections::BTreeMap::new(),
                 })
             }
@@ -140,13 +180,14 @@ mod platform {
                 title,
                 content_kind: ContentKind::Raw,
                 content_path,
+                options,
                 native_profile,
                 ..
             } => {
-                if native_profile.is_some() {
-                    Err(native_profile_backend_unavailable(
-                        "RAW jobs cannot replay a Windows driver profile",
-                    ))
+                if let Some(error) =
+                    super::raw_submission_rejection(&options, native_profile.is_some())
+                {
+                    Err(error)
                 } else {
                     submit_raw(&native_printer_id, &title, &content_path)
                 }
@@ -180,15 +221,6 @@ mod platform {
                 native_printer_id,
                 native_job_id,
             } => cancel(&native_printer_id, &native_job_id),
-        }
-    }
-
-    fn native_profile_backend_unavailable(message: &str) -> ExecutorError {
-        ExecutorError {
-            code: "native_profile_backend_unavailable".into(),
-            message: message.into(),
-            retryable: false,
-            handoff_may_have_succeeded: false,
         }
     }
 
@@ -345,6 +377,7 @@ mod platform {
                     state: PrinterState::Unknown,
                     capabilities: PrinterCapabilities::default(),
                     native_options: std::collections::BTreeMap::new(),
+                    driver_fingerprint: None,
                 })
                 .collect();
             Ok(ExecutorResult::Printers { printers })
@@ -592,6 +625,37 @@ mod tests {
         assert_eq!(error.code, "windows_pdf_option_unsupported");
         assert!(error.message.contains("dpi, media, nup"));
         assert!(!error.handoff_may_have_succeeded);
+    }
+
+    #[test]
+    fn sumatra_rejects_native_options_instead_of_ignoring_them() {
+        let mut options = JobOptions::default();
+        options
+            .native_options
+            .insert("VendorSecret".into(), "On".into());
+        let error = sumatra_settings(&options).expect_err("unsupported native option");
+        assert_eq!(error.code, "windows_pdf_option_unsupported");
+        assert!(error.message.contains("native_options"));
+        assert!(!error.handoff_may_have_succeeded);
+    }
+
+    #[test]
+    fn raw_options_report_the_specific_contract_error() {
+        let options = JobOptions {
+            copies: Some(2),
+            ..Default::default()
+        };
+        let error = raw_submission_rejection(&options, false).expect("RAW option rejection");
+        assert_eq!(error.code, "raw_job_options_unsupported");
+        assert!(!error.retryable);
+        assert!(!error.handoff_may_have_succeeded);
+    }
+
+    #[test]
+    fn raw_profile_replay_retains_the_profile_backend_error() {
+        let error =
+            raw_submission_rejection(&JobOptions::default(), true).expect("RAW profile rejection");
+        assert_eq!(error.code, "native_profile_backend_unavailable");
     }
 }
 

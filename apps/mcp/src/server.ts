@@ -7,12 +7,14 @@ import { PiqaeClient, PiqaeError } from "@piqae/sdk";
 import type {
   ApiKeyScope,
   CreateJob,
+  CreatePrintWorkflow,
   CreateStock,
   CreateTarget,
   CreateTargetBinding,
   CreateUpload,
   JobListOptions,
   JobOptions,
+  PrintIntent,
   PatchStock,
   PatchTarget,
   PlatformAccount,
@@ -81,6 +83,7 @@ export function createPiqaeMcpServer(config: McpConfig): McpServer {
   registerApiKeyTool(server, config);
   registerNodeTools(server, config);
   registerPrinterTool(server, config);
+  registerPrintIntentTools(server, config);
   registerStockTool(server, config);
   registerTargetTool(server, config);
   registerUploadTool(server, config);
@@ -418,7 +421,13 @@ function registerPrinterTool(server: McpServer, config: McpConfig): void {
       description:
         "List printers with pagination, retrieve exact synced driver capabilities/profiles, or retrieve the node content-encryption public key. This tool never submits a print.",
       inputSchema: z.object({
-        action: z.enum(["list", "get", "content_encryption_key"]),
+        action: z.enum([
+          "list",
+          "get",
+          "capabilities",
+          "loaded_media",
+          "content_encryption_key",
+        ]),
         printer_id: z.string().min(1).optional(),
         limit: z.number().int().min(1).max(100).optional(),
         after: z.string().optional(),
@@ -436,9 +445,98 @@ function registerPrinterTool(server: McpServer, config: McpConfig): void {
           });
         }
         const id = required(input.printer_id, "printer_id");
-        return input.action === "get"
-          ? client.printers.retrieve(id)
-          : client.printers.contentEncryptionKey(id);
+        if (input.action === "get") return client.printers.retrieve(id);
+        if (input.action === "capabilities")
+          return client.printers.capabilities(id);
+        if (input.action === "loaded_media")
+          return client.printers.loadedMedia(id);
+        return client.printers.contentEncryptionKey(id);
+      }),
+  );
+}
+
+function registerPrintIntentTools(server: McpServer, config: McpConfig): void {
+  server.registerTool(
+    "piqae_print_intents",
+    {
+      title: "Inspect and validate Piqae print intents",
+      description:
+        "List published workflows, or validate/resolve a normalized job-scoped print intent. These actions do not print or change printer defaults. Native driver keys and blobs are never accepted.",
+      inputSchema: z.discriminatedUnion("action", [
+        z.object({ action: z.literal("list_workflows"), ...selectionShape }),
+        z.object({
+          action: z.enum(["validate", "resolve"]),
+          intent: recordSchema,
+          ...selectionShape,
+        }),
+      ]),
+      annotations: readOnlyAnnotations(
+        "Inspect and validate Piqae print intents",
+      ),
+    },
+    (input, extra) =>
+      result(async () => {
+        const client = clientFor(config, extra, input);
+        if (input.action === "list_workflows")
+          return client.printWorkflows.list();
+        rejectNativeIntentKeys(input.intent, "intent");
+        const intent = input.intent as PrintIntent;
+        return input.action === "validate"
+          ? client.printIntents.validate(intent)
+          : client.printIntents.resolve(intent);
+      }),
+  );
+
+  server.registerTool(
+    "piqae_workflows",
+    {
+      title: "Create Piqae print workflows",
+      description:
+        "Create a revisioned professional print workflow from a normalized intent and normalized safe overrides. This is a configuration write and requires printer_id to be repeated exactly in confirm. It never submits a print or accepts native driver fields, blobs, or native-option overrides.",
+      inputSchema: z.object({
+        action: z.literal("create"),
+        name: z.string().min(1).max(255),
+        printer_id: z.string().min(1),
+        capability_revision: z.number().int().positive(),
+        profile: z
+          .object({
+            id: z.string().min(1),
+            revision: z.number().int().positive(),
+          })
+          .nullable()
+          .optional(),
+        stock: z
+          .object({
+            id: z.string().min(1),
+            revision: z.number().int().positive(),
+          })
+          .nullable()
+          .optional(),
+        definition: recordSchema,
+        safe_overrides: z.array(z.string().min(1).max(255)).max(128),
+        published: z.boolean().default(false),
+        confirm: confirmSchema,
+        ...selectionShape,
+      }),
+      annotations: mutationAnnotations("Create Piqae print workflows", false),
+    },
+    (input, extra) =>
+      result(async () => {
+        requireConfirmation(input.printer_id, input.confirm);
+        rejectNativeIntentKeys(input.definition, "definition");
+        validateSafeOverrides(input.safe_overrides);
+        return clientFor(config, extra, input).printWorkflows.create(
+          withoutUndefined({
+            name: input.name,
+            printer_id: input.printer_id,
+            capability_revision: input.capability_revision,
+            profile: input.profile,
+            stock: input.stock,
+            definition: input.definition,
+            safe_overrides: input.safe_overrides,
+            published: input.published,
+          }) as CreatePrintWorkflow,
+        );
       }),
   );
 }
@@ -1150,6 +1248,53 @@ function requireConfirmation(
 ): void {
   if (confirmation !== identifier) {
     throw new Error(`confirm must exactly equal ${identifier}.`);
+  }
+}
+
+function rejectNativeIntentKeys(
+  value: Record<string, unknown>,
+  rootPath: string,
+): void {
+  const visit = (candidate: unknown, path: string): void => {
+    if (Array.isArray(candidate)) {
+      candidate.forEach((item, index) => visit(item, `${path}[${index}]`));
+      return;
+    }
+    if (!isRecord(candidate)) return;
+    for (const [key, child] of Object.entries(candidate)) {
+      const childPath = path ? `${path}.${key}` : key;
+      if (/^native(?:$|[._-]|[A-Z])/.test(key)) {
+        throw new Error(
+          `Driver-native intent field is forbidden: ${childPath}`,
+        );
+      }
+      visit(child, childPath);
+    }
+  };
+  visit(value, rootPath);
+}
+
+function validateSafeOverrides(overrides: string[]): void {
+  const seen = new Set<string>();
+  for (const path of overrides) {
+    if (seen.has(path)) {
+      throw new Error(`Duplicate safe override is forbidden: ${path}`);
+    }
+    seen.add(path);
+    if (
+      !/^(?:portable_options|semantic_options)\.[A-Za-z0-9_.-]+$/.test(path)
+    ) {
+      throw new Error(
+        `Safe override must use a portable_options. or semantic_options. path: ${path}`,
+      );
+    }
+    if (
+      path
+        .split(".")
+        .some((segment) => /^native(?:$|[._-]|[A-Z])/.test(segment))
+    ) {
+      throw new Error(`Driver-native safe override is forbidden: ${path}`);
+    }
   }
 }
 

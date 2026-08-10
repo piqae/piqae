@@ -741,7 +741,7 @@ async fn print_render(
         )
         .await?;
     let mut metadata = std::collections::BTreeMap::new();
-    metadata.insert("piqae.document_render_id".into(), render.id);
+    metadata.insert("document_render_id".into(), render.id);
     create_job(
         State(state),
         headers,
@@ -756,6 +756,7 @@ async fn print_render(
             deliveries: request.deliveries,
             expire_after_seconds: default_print_expiry(),
             metadata,
+            resolved_ticket_digest: None,
         }),
     )
     .await

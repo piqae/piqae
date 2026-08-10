@@ -97,6 +97,7 @@ fn fake_printer() -> DiscoveredPrinter {
         state: PrinterState::Online,
         capabilities: PrinterCapabilities::default(),
         native_options: std::collections::BTreeMap::new(),
+        driver_fingerprint: None,
     }
 }
 

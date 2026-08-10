@@ -333,6 +333,7 @@ mod platform {
                         state,
                         capabilities,
                         native_options,
+                        driver_fingerprint: None,
                     }
                 })
                 .collect();
@@ -740,6 +741,15 @@ mod platform {
         requested: &JobOptions,
         profile: Option<&NativeProfilePayload>,
     ) -> Result<(String, Vec<(String, String)>), ExecutorError> {
+        requested
+            .validate_bounds()
+            .map_err(|error| profile_error("invalid_job_options", error.to_string()))?;
+        if raw && !requested.is_empty() {
+            return Err(profile_error(
+                "raw_job_options_unsupported",
+                "RAW documents already contain device instructions and cannot request rendered or native driver options",
+            ));
+        }
         let Some(profile) = profile else {
             return Ok((printer.to_owned(), cups_job_options(raw, requested)));
         };
@@ -990,6 +1000,10 @@ mod platform {
         native_profile: Option<&NativeProfilePayload>,
     ) -> Result<ExecutorResult, ExecutorError> {
         ensure_printer(printer)?;
+        if !raw && native_profile.is_none() && !options.native_options.is_empty() {
+            let (_, native_options) = capability_profile(printer);
+            validate_live_native_options(options, &native_options)?;
+        }
         if let Some(profile) = native_profile
             && profile.kind == NativeProfileKind::MacosPrintcore
         {
@@ -1038,6 +1052,34 @@ mod platform {
         Ok(ExecutorResult::Submitted {
             native_job_id: Some(job_id.to_string()),
         })
+    }
+
+    fn validate_live_native_options(
+        requested: &JobOptions,
+        advertised: &BTreeMap<String, NativePrinterOption>,
+    ) -> Result<(), ExecutorError> {
+        for (name, selected) in &requested.native_options {
+            let definition = advertised.get(name).ok_or_else(|| {
+                profile_error(
+                    "native_option_not_advertised",
+                    format!("the live driver does not advertise native option {name:?}"),
+                )
+            })?;
+            if definition.choices.is_empty()
+                || !definition
+                    .choices
+                    .iter()
+                    .any(|choice| choice.value == *selected)
+            {
+                return Err(profile_error(
+                    "native_option_value_not_advertised",
+                    format!(
+                        "the live driver does not advertise value {selected:?} for native option {name:?}"
+                    ),
+                ));
+            }
+        }
+        Ok(())
     }
 
     #[derive(Debug, Deserialize)]
@@ -1540,6 +1582,52 @@ mod platform {
             assert_eq!(
                 cups_job_options(true, &options),
                 vec![("raw".into(), "true".into())]
+            );
+        }
+
+        #[test]
+        fn raw_jobs_reject_options_before_handoff() {
+            let error = prepare_submission(
+                "fixture",
+                true,
+                &JobOptions {
+                    copies: Some(2),
+                    ..Default::default()
+                },
+                None,
+            )
+            .expect_err("RAW options are misleading and unsafe");
+            assert_eq!(error.code, "raw_job_options_unsupported");
+        }
+
+        #[test]
+        fn live_native_options_must_match_an_advertised_choice() {
+            let (_, advertised) =
+                parse_lpoptions("OKIBlackMark/Black Mark Sensor: *Off/Disabled On/Enabled\n");
+            let mut options = JobOptions::default();
+            options
+                .native_options
+                .insert("OKIBlackMark".into(), "On".into());
+            validate_live_native_options(&options, &advertised).expect("advertised choice");
+
+            options
+                .native_options
+                .insert("OKIBlackMark".into(), "Arbitrary".into());
+            assert_eq!(
+                validate_live_native_options(&options, &advertised)
+                    .expect_err("unadvertised choice")
+                    .code,
+                "native_option_value_not_advertised"
+            );
+            options.native_options.clear();
+            options
+                .native_options
+                .insert("VendorSecret".into(), "1".into());
+            assert_eq!(
+                validate_live_native_options(&options, &advertised)
+                    .expect_err("unknown option")
+                    .code,
+                "native_option_not_advertised"
             );
         }
 

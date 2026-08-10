@@ -1398,6 +1398,7 @@ mod profile_target_tests {
             },
             capability_revision: 1,
             native_options: std::collections::BTreeMap::new(),
+            semantic_capabilities: piqae_domain::SemanticPrinterCapabilities::default(),
             profiles: Vec::new(),
             updated_at: Utc::now(),
         };

@@ -2,6 +2,7 @@ use crate::native_profile::{
     NativeProfileError, WindowsDriverFingerprint, WindowsNativeProfileCapture,
     validate_devmode_bytes,
 };
+use piqae_domain::PrinterCapabilities;
 use sha2::{Digest, Sha256};
 use std::{ffi::c_void, mem, ptr, slice};
 use windows_sys::Win32::{
@@ -13,6 +14,7 @@ use windows_sys::Win32::{
             OpenPrinterW, PRINTER_INFO_5W,
         },
     },
+    Storage::Xps::{DC_COLORDEVICE, DC_COPIES, DC_DUPLEX, DC_ENUMRESOLUTIONS, DeviceCapabilitiesW},
 };
 
 const DOCUMENT_PROPERTIES_OK: i32 = 1;
@@ -81,6 +83,108 @@ pub fn current_fingerprint(
 ) -> Result<WindowsDriverFingerprint, NativeProfileError> {
     let printer = PrinterHandle::open(native_printer_id)?;
     fingerprint(&printer, native_printer_id)
+}
+
+/// Discovers portable capabilities through documented Winspool APIs without
+/// opening a driver UI or changing queue defaults. Vendor-private controls are
+/// intentionally absent until a trusted mapping/profile exists.
+pub fn portable_capabilities(
+    native_printer_id: &str,
+) -> Result<PrinterCapabilities, NativeProfileError> {
+    let printer = PrinterHandle::open(native_printer_id)?;
+    let printer_buffer = get_printer_info(&printer)?;
+    let queue = read_record::<PRINTER_INFO_5W>(&printer_buffer)?;
+    let port = bounded_wide(queue.pPortName, &printer_buffer).ok_or_else(|| {
+        NativeProfileError::new(
+            "printer_port_missing",
+            "Windows printer metadata did not contain a bounded port name",
+        )
+    })?;
+    let device = wide(native_printer_id);
+    let port = wide(&port);
+    let devmode = AlignedBuffer::from_bytes(&default_devmode(&printer, native_printer_id)?)?;
+    let scalar = |capability| {
+        // SAFETY: Device and port are NUL-terminated and the validated default
+        // DEVMODE remains alive for this non-mutating capability query.
+        unsafe {
+            DeviceCapabilitiesW(
+                device.as_ptr(),
+                port.as_ptr(),
+                capability,
+                ptr::null_mut(),
+                devmode.as_devmode(),
+            )
+        }
+    };
+    let copies = scalar(DC_COPIES);
+    let mut capabilities = PrinterCapabilities {
+        color: scalar(DC_COLORDEVICE) == 1,
+        copies: u32::try_from(copies).unwrap_or(1).max(1),
+        duplex: scalar(DC_DUPLEX) == 1,
+        ..Default::default()
+    };
+    capabilities.dpis = resolution_capabilities(&device, &port, &devmode)?;
+    Ok(capabilities)
+}
+
+fn resolution_capabilities(
+    device: &[u16],
+    port: &[u16],
+    devmode: &AlignedBuffer,
+) -> Result<Vec<String>, NativeProfileError> {
+    // SAFETY: Inputs are valid for the duration of this count query.
+    let count = unsafe {
+        DeviceCapabilitiesW(
+            device.as_ptr(),
+            port.as_ptr(),
+            DC_ENUMRESOLUTIONS,
+            ptr::null_mut(),
+            devmode.as_devmode(),
+        )
+    };
+    if count == -1 {
+        return Ok(Vec::new());
+    }
+    let count = usize::try_from(count).map_err(|_| {
+        NativeProfileError::new("windows_capability_invalid", "invalid resolution count")
+    })?;
+    if count > 4_096 {
+        return Err(NativeProfileError::new(
+            "windows_capability_too_large",
+            "driver advertised more than 4096 resolutions",
+        ));
+    }
+    let mut pairs = vec![0_i32; count.saturating_mul(2)];
+    if count > 0 {
+        // SAFETY: DC_ENUMRESOLUTIONS writes two i32 values per advertised
+        // resolution; `pairs` has exactly that bounded capacity.
+        let written = unsafe {
+            DeviceCapabilitiesW(
+                device.as_ptr(),
+                port.as_ptr(),
+                DC_ENUMRESOLUTIONS,
+                pairs.as_mut_ptr().cast(),
+                devmode.as_devmode(),
+            )
+        };
+        if written != i32::try_from(count).unwrap_or(-1) {
+            return Err(last_error(
+                "windows_capability_changed",
+                "resolution capabilities changed during discovery",
+            ));
+        }
+    }
+    Ok(pairs
+        .chunks_exact(2)
+        .filter(|pair| pair[0] > 0 && pair[1] > 0)
+        .map(|pair| {
+            if pair[0] == pair[1] {
+                pair[0].to_string()
+            } else {
+                format!("{}x{}", pair[0], pair[1])
+            }
+        })
+        .collect())
 }
 
 /// Revalidates the immutable capture against the currently installed queue and

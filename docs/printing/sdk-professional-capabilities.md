@@ -92,45 +92,67 @@ not replace current fields until SDK consumers have migrated.
   },
   "facets": {
     "media.geometry": {
+      "facet_version": 1,
       "type": "dimensions",
       "unit": "mm",
       "range": { "width": [25.4, 130], "length": [12.7, 1320] },
+      "mutability": "profile_only",
       "source": "driver",
       "confidence": "authoritative"
     },
     "media.sensing": {
+      "facet_version": 1,
       "type": "enum",
       "values": ["continuous", "gap", "black_mark"],
+      "mutability": "profile_only",
       "source": "certified_mapping",
+      "confidence": "mapped",
       "native_keys": ["OkiMediaSense"]
     },
     "color.stations": {
+      "facet_version": 1,
       "type": "set",
       "values": ["cyan", "magenta", "yellow", "black", "white"],
-      "source": "certified_mapping"
+      "mutability": "read_only",
+      "source": "certified_mapping",
+      "confidence": "mapped"
     },
     "effects.white.mode": {
+      "facet_version": 1,
       "type": "enum",
       "values": ["off", "underprint", "overprint", "spot"],
       "mutability": "profile_only",
-      "source": "certified_mapping"
+      "source": "certified_mapping",
+      "confidence": "mapped"
     }
   },
   "constraints": [
     {
       "if": { "media.sensing": "black_mark" },
-      "requires": ["stock.mark_interval_mm", "profile.registration"]
+      "requires": ["stock.mark_interval_mm", "layout.registration.offset"]
     }
   ],
   "unmapped_native_options": ["OkiVendorOption17"]
 }
 ```
 
-Each facet should include a stable semantic key/version, data type, canonical
-units/tolerance, allowed/current/default values, mutability, provenance,
-confidence, native derivation keys, optional UI metadata, and dependency or
-conflict references. Unknown facet keys and enum values must be ignored safely
-by older SDKs.
+Every facet requires `facet_version`, `type`, `mutability`, `source`, and
+`confidence`. It also requires the value domain appropriate to its type:
+`values` for enums/sets, `range` for bounded numeric/dimension values, or
+`value` for a reported scalar. Canonical units are required for physical
+quantities. `current`, `default`, `step`, `tolerance`, `native_keys`, localized
+UI metadata, and dependency/conflict references are optional and must not alter
+execution when absent. Numbers use JSON numbers in the declared unit; sets are
+unique unordered strings; dimensions use named axes rather than positional
+arrays; and `null` means reported unknown, never a default.
+
+Unknown facet keys are retained or ignored by older SDKs. An unknown `type`,
+`mutability`, `source`, `confidence`, or enum value makes that facet unsupported
+for selection/validation; consumers must not substitute an implicit default.
+Constraints may reference only canonical facet keys from the same document or
+versioned `stock.*` fields. `layout.registration.offset` is the canonical
+structured registration facet; a profile is evidence selecting its value, not
+a separate constraint namespace.
 
 ## Professional semantic vocabulary
 
@@ -221,6 +243,10 @@ behavior, ribbon overlay, or a second physical pass; those are not interchangeab
 
 ## Open-source driver support packs
 
+The executable format, trust rules and contribution template live in the
+[`driver-support` contributor guide](../../driver-support/README.md). The Rust
+loader enforces these rules independently of documentation.
+
 Make mappings data-driven and reviewable rather than accumulating vendor/model
 conditionals in executor code. A support pack should be a versioned directory:
 
@@ -256,6 +282,12 @@ Pack matching must be deterministic and fail closed:
 2. exact normalized driver identifier/version range explicitly listed by the
    pack; and
 3. optional device/firmware constraints confirmed from authoritative discovery.
+
+If more than one trusted pack satisfies every predicate, matching fails closed
+as `ambiguous_support_pack`. A deployment may select precedence only through an
+operator-pinned pack ID and digest that has passed the same schema, licence and
+evidence validation; version order, install order and friendly model names are
+never implicit precedence.
 
 Friendly model-name substring matching may suggest a pack to an operator but
 cannot enable execution mappings automatically. If no pack matches, Piqae still
@@ -309,7 +341,18 @@ const document = await account.printers.capabilityDocument(printerId);
 const workflows = await account.printWorkflows.list({ printerId });
 const validation = await account.printWorkflows.validate(workflowId, {
   stockId,
-  document: { widthMm: 80, heightMm: 102, colorants: ["cmyk", "white"] },
+  documentManifest: {
+    mediaBoxMm: { width: 80, height: 102 },
+    trimBoxMm: { width: 80, height: 102 },
+    bleedMm: { top: 2, right: 2, bottom: 2, left: 2 },
+    colorSpace: "device_cmyk",
+    colorants: ["cyan", "magenta", "yellow", "black", "white"],
+    separationNames: ["White"],
+    pdfVersion: "1.7",
+    transparency: "present",
+    contentKinds: ["vector", "raster"],
+    requestedScaling: "none",
+  },
 });
 ```
 
@@ -317,6 +360,11 @@ const validation = await account.printWorkflows.validate(workflowId, {
 default abstraction: a published, tested target/profile/stock contract with
 layout requirements, document kinds, permitted overrides, readiness and
 evidence status.
+
+The manifest is produced by trusted bounded document inspection before upload;
+browser assertions alone are not authoritative. It exposes the page boxes,
+separations, PDF features, transparency, scaling, bleed and raster/vector facts
+needed by the selected workflow without sending document bytes through MCP.
 
 Validation should be pure and non-printing. It returns errors, warnings,
 required local actions, and the exact specification revision. It must not open a

@@ -17,7 +17,7 @@ key or request is rejected. Cancellation is allowed only before approval;
 closing a client without cancelling is handled by TTL expiry. Expired and
 cancelled previews cannot be approved.
 
-Migration `0036_document_previews.sql` is append-only. Preview/render/job
+Migration `0037_document_previews.sql` is append-only. Preview/render/job
 relationships repeat `workspace_id` and `environment_id` in their foreign keys.
 Active preview gates prevent artifact cleanup, while cancellation or expiry
 releases that retention without deleting the immutable render synchronously.

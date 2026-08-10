@@ -3,11 +3,13 @@ import type {
   AgentEnrolment,
   ApiKey,
   BillingSummary,
+  CapabilityDocument,
   BootstrappedLocalOwner,
   CreateApiKey,
   CreateDeviceAuthorization,
   CreateJob,
   CreateNodeConnectSession,
+  CreatePrintWorkflow,
   CreateStock,
   CreateTarget,
   CreateTargetBinding,
@@ -37,6 +39,7 @@ import type {
   Job,
   JobEvent,
   JobListOptions,
+  LoadedMediaObservation,
   ListOptions,
   LocalOwnerSession,
   NodeConnector,
@@ -49,12 +52,17 @@ import type {
   Page,
   PlatformContext,
   Printer,
+  PrintIntent,
+  PrintIntentValidation,
+  PrintWorkflow,
+  ResolvedPrintTicket,
   Stock,
   Target,
   TargetBinding,
   TargetReadiness,
   Upload,
   UsageSummary,
+  UpsertLoadedMediaObservation,
   Webhook,
   WebhookDelivery,
   Workspace,
@@ -303,7 +311,26 @@ export class PiqaeClient {
     retrieve: (id: string) =>
       this.request<Printer>('GET', `/v1/printers/${encodeURIComponent(id)}`),
     contentEncryptionKey: (id: string) =>
-      this.request<NodeContentEncryptionKey>('GET', `/v1/printers/${encodeURIComponent(id)}/content-encryption-key`)
+      this.request<NodeContentEncryptionKey>('GET', `/v1/printers/${encodeURIComponent(id)}/content-encryption-key`),
+    capabilities: (id: string) =>
+      this.request<CapabilityDocument>('GET', `/v1/printers/${encodeURIComponent(id)}/capabilities`),
+    loadedMedia: (id: string) =>
+      this.request<LoadedMediaObservation[]>('GET', `/v1/printers/${encodeURIComponent(id)}/loaded-media`),
+    confirmLoadedMedia: (id: string, input: UpsertLoadedMediaObservation) =>
+      this.request<LoadedMediaObservation>('PUT', `/v1/printers/${encodeURIComponent(id)}/loaded-media`, { body: input })
+  };
+
+  readonly printIntents = {
+    validate: (intent: PrintIntent) =>
+      this.request<PrintIntentValidation>('POST', '/v1/print-intents/validate', { body: { intent } }),
+    resolve: (intent: PrintIntent) =>
+      this.request<ResolvedPrintTicket>('POST', '/v1/print-intents/resolve', { body: { intent } })
+  };
+
+  readonly printWorkflows = {
+    list: () => this.request<PrintWorkflow[]>('GET', '/v1/print-workflows'),
+    create: (input: CreatePrintWorkflow) =>
+      this.request<PrintWorkflow>('POST', '/v1/print-workflows', { body: input })
   };
 
   readonly stocks = {
@@ -369,7 +396,8 @@ export class PiqaeClient {
   };
 
   readonly jobs = {
-    createEncrypted: async (input: Omit<CreateJob, 'content'> & { target_id: string; printer_id?: never }, envelope: EncryptedJobEnvelope, idempotencyKey: string) => {
+    createEncrypted: async (input: Omit<CreateJob, 'content' | 'resolved_ticket_digest'> & { target_id: string; printer_id?: never; resolved_ticket_digest?: never }, envelope: EncryptedJobEnvelope, idempotencyKey: string) => {
+      if ('resolved_ticket_digest' in input) throw new TypeError('Encrypted v3 jobs cannot attach unbound ticket provenance');
       const idempotencyKeyBytes = new TextEncoder().encode(idempotencyKey).byteLength;
       if (idempotencyKeyBytes < 8 || idempotencyKeyBytes > 255) throw new TypeError('Encrypted jobs require an Idempotency-Key between 8 and 255 bytes');
       if (envelope.binding.target_id !== input.target_id || envelope.binding.content_type !== input.content_type || envelope.binding.deliveries !== (input.deliveries ?? 1) || JSON.stringify(envelope.binding.options) !== JSON.stringify(canonicalJobOptions(input.options))) throw new TypeError('Encrypted envelope does not match the job request');
@@ -378,6 +406,15 @@ export class PiqaeClient {
       const sha256 = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
       const upload = await this.uploads.createAndPut({ media_type: 'application/octet-stream', byte_length: ciphertext.byteLength, sha256 }, ciphertext);
       return this.request<Job>('POST', '/v1/jobs', { body: { ...input, content: { type: 'encrypted_upload', upload_id: upload.id, manifest: encryptedJobManifest(envelope) } }, idempotencyKey });
+    },
+    /** Submit resolved options bound by v3 AAD; ticket provenance is intentionally not attached. */
+    createEncryptedResolved: async (input: Omit<CreateJob, 'content' | 'resolved_ticket_digest'> & { target_id: string; printer_id?: never; resolved_ticket_digest?: never }, envelope: EncryptedJobEnvelope, ticket: ResolvedPrintTicket, idempotencyKey: string) => {
+      const ticketExpiry = parseApiTimestamp(ticket.expires_at);
+      if (!Number.isFinite(ticketExpiry) || ticketExpiry <= Date.now()) throw new TypeError('Resolved ticket has expired');
+      if (ticket.printer_id !== envelope.binding.printer_id) throw new TypeError('Resolved ticket and encrypted envelope target different printers');
+      if (JSON.stringify(canonicalJobOptions(ticket.resolved_options)) !== JSON.stringify(envelope.binding.options)) throw new TypeError('Resolved ticket options are not bound by the encrypted envelope');
+      if (JSON.stringify(canonicalJobOptions(input.options)) !== JSON.stringify(envelope.binding.options)) throw new TypeError('Resolved ticket options do not match the job request');
+      return this.jobs.createEncrypted(input, envelope, idempotencyKey);
     },
     list: (options?: JobListOptions) =>
       this.request<Page<Job>>('GET', '/v1/jobs', options ? { query: options } : {}),
@@ -611,4 +648,24 @@ function withoutPlatformSelectionHeaders(
       ([name]) => !PLATFORM_SELECTION_HEADERS.has(name.toLowerCase())
     )
   );
+}
+
+function parseApiTimestamp(value: string): number {
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|[+-](\d{2}):(\d{2}))$/.exec(value);
+  if (!match) return Number.NaN;
+  const [, year, month, day, hour, minute, second, offsetHour, offsetMinute] = match;
+  const parts = [year, month, day, hour, minute, second].map(Number);
+  const [yearNumber, monthNumber, dayNumber, hourNumber, minuteNumber, secondNumber] = parts;
+  const calendarDate = new Date(Date.UTC(yearNumber!, monthNumber! - 1, dayNumber!));
+  if (
+    calendarDate.getUTCFullYear() !== yearNumber ||
+    calendarDate.getUTCMonth() + 1 !== monthNumber ||
+    calendarDate.getUTCDate() !== dayNumber ||
+    hourNumber! > 23 ||
+    minuteNumber! > 59 ||
+    secondNumber! > 59 ||
+    Number(offsetHour ?? 0) > 23 ||
+    Number(offsetMinute ?? 0) > 59
+  ) return Number.NaN;
+  return Date.parse(value);
 }

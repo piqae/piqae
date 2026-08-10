@@ -344,6 +344,14 @@ pub struct DiagnosticReport {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct JobOffer {
     pub job: Job,
+    /// Capability revision against which job-scoped options were resolved.
+    /// The node must fail closed when its current revision differs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_capability_revision: Option<u64>,
+    /// Digest of the immutable display-safe resolved ticket. Executable
+    /// options remain integrity-bound in `job.options` (and encrypted v3 AAD).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_ticket_digest: Option<String>,
     pub lease_id: Uuid,
     /// Opaque, single-lease capability. It must never be logged.
     pub lease_token: String,
@@ -460,6 +468,8 @@ pub struct PrinterSnapshot {
     pub capability_revision: u64,
     #[serde(default)]
     pub native_options: BTreeMap<String, NativePrinterOption>,
+    #[serde(default)]
+    pub semantic_capabilities: piqae_domain::SemanticPrinterCapabilities,
     #[serde(default)]
     pub profiles: Vec<PrinterProfileSnapshot>,
 }

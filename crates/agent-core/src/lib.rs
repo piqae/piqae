@@ -403,6 +403,13 @@ impl<E: Executor, C: Clock> AgentEngine<E, C> {
             "{}",
         )?;
 
+        let Some(options) = self.validate_job_options(&job)? else {
+            if let Some(path) = confidential_content_path(&job.content_path) {
+                let _ = tokio::fs::remove_file(path).await;
+            }
+            return Ok(());
+        };
+
         if job.content_kind == "pdf" {
             self.transition(
                 &job.job_id,
@@ -428,13 +435,8 @@ impl<E: Executor, C: Clock> AgentEngine<E, C> {
             "{}",
         )?;
 
-        let options: JobOptions = serde_json::from_str(&job.options_json)?;
         let native_profile = self.native_profile_for_job(&job)?;
-        let confidential_path = Path::new(&job.content_path)
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.starts_with("confidential-"))
-            .then(|| PathBuf::from(&job.content_path));
+        let confidential_path = confidential_content_path(&job.content_path);
         let submission = LocalSubmission {
             job_id: job.job_id.clone(),
             submission_id: job.submission_id,
@@ -492,6 +494,32 @@ impl<E: Executor, C: Clock> AgentEngine<E, C> {
             }
         }
         Ok(())
+    }
+
+    fn validate_job_options(&mut self, job: &LocalJob) -> Result<Option<JobOptions>, AgentError> {
+        let options: JobOptions = match serde_json::from_str(&job.options_json) {
+            Ok(options) => options,
+            Err(error) => {
+                self.fail_invalid_job_options(job, &error.to_string())?;
+                return Ok(None);
+            }
+        };
+        let Err(error) = options.validate_bounds() else {
+            return Ok(Some(options));
+        };
+        self.fail_invalid_job_options(job, &error.to_string())?;
+        Ok(None)
+    }
+
+    fn fail_invalid_job_options(&mut self, job: &LocalJob, error: &str) -> Result<(), AgentError> {
+        self.transition(
+            &job.job_id,
+            "preparing",
+            JobState::FailedTerminal,
+            Some("invalid_print_options"),
+            "Print options failed local safety validation before native handoff",
+            &serde_json::json!({ "error": error }).to_string(),
+        )
     }
 
     async fn reconcile_due(&mut self) -> Result<usize, AgentError> {
@@ -851,6 +879,14 @@ impl<E: Executor, C: Clock> AgentEngine<E, C> {
     }
 }
 
+fn confidential_content_path(content_path: &str) -> Option<PathBuf> {
+    Path::new(content_path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with("confidential-"))
+        .then(|| PathBuf::from(content_path))
+}
+
 fn parse_state(value: &str) -> Result<JobState, AgentError> {
     let state = match value {
         "registered" => JobState::Registered,
@@ -1024,6 +1060,87 @@ mod tests {
                 .native_job_id
                 .as_deref(),
             Some("fake-1")
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_options_fail_terminally_without_calling_the_executor() {
+        let store = AgentStore::in_memory().expect("store");
+        let mut engine = AgentEngine::new(store, FakeExecutor::default(), FixedClock(10));
+        let mut job = accepted("invalid-options", "pdf");
+        job.options_json = serde_json::to_string(&JobOptions {
+            copies: Some(0),
+            ..Default::default()
+        })
+        .expect("options");
+        engine.accept(&job).expect("accept");
+
+        assert_eq!(engine.run_once().await.expect("run"), 1);
+        assert!(engine.executor_mut().submitted.is_empty());
+        let stored = engine
+            .store()
+            .get_job("invalid-options")
+            .expect("query")
+            .expect("job");
+        assert_eq!(stored.state, "failed_terminal");
+        let events = engine.store().pending_events(0, 20).expect("events");
+        assert_eq!(
+            events.last().and_then(|event| event.reason.as_deref()),
+            Some("invalid_print_options")
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_options_remove_confidential_plaintext_after_terminal_failure() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let confidential_path = directory.path().join("confidential-invalid-options");
+        tokio::fs::write(&confidential_path, b"sensitive print content")
+            .await
+            .expect("write confidential content");
+
+        let store = AgentStore::in_memory().expect("store");
+        let mut engine = AgentEngine::new(store, FakeExecutor::default(), FixedClock(10));
+        let mut job = accepted("invalid-confidential-options", "pdf");
+        job.content_path = confidential_path.to_string_lossy().into_owned();
+        job.options_json = serde_json::to_string(&JobOptions {
+            copies: Some(0),
+            ..Default::default()
+        })
+        .expect("options");
+        engine.accept(&job).expect("accept");
+
+        assert_eq!(engine.run_once().await.expect("run"), 1);
+        assert!(!confidential_path.exists());
+        assert!(engine.executor_mut().submitted.is_empty());
+        assert_eq!(
+            engine
+                .store()
+                .get_job("invalid-confidential-options")
+                .expect("query")
+                .expect("job")
+                .state,
+            "failed_terminal"
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_durable_option_schema_does_not_leave_a_job_preparing() {
+        let store = AgentStore::in_memory().expect("store");
+        let mut engine = AgentEngine::new(store, FakeExecutor::default(), FixedClock(10));
+        let mut job = accepted("malformed-options", "pdf");
+        job.options_json = r#"{"unrecognized_driver_instruction":true}"#.into();
+        engine.accept(&job).expect("accept");
+
+        assert_eq!(engine.run_once().await.expect("run"), 1);
+        assert!(engine.executor_mut().submitted.is_empty());
+        assert_eq!(
+            engine
+                .store()
+                .get_job("malformed-options")
+                .expect("query")
+                .expect("job")
+                .state,
+            "failed_terminal"
         );
     }
 

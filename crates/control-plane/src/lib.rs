@@ -15,6 +15,7 @@ pub mod error;
 pub mod identity;
 pub mod pairing;
 pub mod platform;
+pub mod print_intents;
 pub mod rate_limit;
 pub mod repository;
 pub mod request_id;
@@ -305,6 +306,16 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/printers", get(api::list_printers))
         .route("/v1/printers/{printer_id}", get(api::get_printer))
         .route(
+            "/v1/printers/{printer_id}/capabilities",
+            get(print_intents::capability_document),
+        )
+        .route(
+            "/v1/printers/{printer_id}/loaded-media",
+            get(print_intents::loaded_media).put(print_intents::upsert_loaded_media),
+        )
+        .route("/v1/print-intents/validate", post(print_intents::validate))
+        .route("/v1/print-intents/resolve", post(print_intents::resolve))
+        .route(
             "/v1/printers/{printer_id}/content-encryption-key",
             get(api::printer_content_encryption_key),
         )
@@ -315,6 +326,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/v1/stocks/{stock_id}",
             axum::routing::patch(routing::patch_stock),
+        )
+        .route(
+            "/v1/print-workflows",
+            get(routing::list_print_workflows).post(routing::create_print_workflow),
         )
         .route(
             "/v1/targets",
@@ -1740,6 +1755,36 @@ mod tests {
             exposed: true,
             capability_revision: 7,
             native_options,
+            semantic_capabilities: piqae_domain::SemanticPrinterCapabilities {
+                facets: BTreeMap::from([(
+                    "finishing.staple".into(),
+                    vec!["none".into(), "upper_left".into()],
+                )]),
+                native_resolutions: BTreeMap::from([(
+                    "finishing.staple".into(),
+                    BTreeMap::from([
+                        (
+                            "none".into(),
+                            piqae_domain::SemanticNativeResolution {
+                                native_option: "StapleLocation".into(),
+                                native_choice: "None".into(),
+                            },
+                        ),
+                        (
+                            "upper_left".into(),
+                            piqae_domain::SemanticNativeResolution {
+                                native_option: "StapleLocation".into(),
+                                native_choice: "UpperLeft".into(),
+                            },
+                        ),
+                    ]),
+                )]),
+                support_pack: Some(piqae_domain::SupportPackProvenance {
+                    pack_id: "pack.test.staple".into(),
+                    digest_sha256: "a".repeat(64),
+                    evidence: "replay_tested".into(),
+                }),
+            },
             profiles: vec![PrinterProfileSnapshot {
                 profile_id: "profile_shipping".into(),
                 revision: 4,
@@ -1779,6 +1824,7 @@ mod tests {
             capabilities: printer.capabilities,
             capability_revision: printer.capability_revision,
             native_options: printer.native_options,
+            semantic_capabilities: printer.semantic_capabilities,
             profiles: printer
                 .profiles
                 .into_iter()
@@ -1878,6 +1924,10 @@ mod tests {
             printer["native_options"]["StapleLocation"]["choices"][1]["value"],
             "UpperLeft"
         );
+        assert_eq!(
+            printer["semantic_capabilities"]["facets"]["finishing.staple"][1],
+            "upper_left"
+        );
         assert_eq!(printer["profiles"][0]["profile_id"], "profile_shipping");
         assert_eq!(printer["profiles"][0]["revision"], 4);
         assert_eq!(
@@ -1888,6 +1938,36 @@ mod tests {
         assert_eq!(printer["profiles"][0]["native_kind"], "cups_options");
         assert_eq!(printer["profiles"][0]["stock_id"], "stk_shipping");
         assert_eq!(printer["profiles"][0]["published"], true);
+
+        let capabilities = application
+            .router
+            .clone()
+            .oneshot(api_request(
+                "GET",
+                &format!("/v1/printers/{printer_id}/capabilities"),
+                "piq_test_integration",
+                None,
+            ))
+            .await
+            .expect("capability document response");
+        assert_eq!(capabilities.status(), StatusCode::OK);
+        let capabilities: serde_json::Value = serde_json::from_slice(
+            &capabilities
+                .into_body()
+                .collect()
+                .await
+                .expect("capability document body")
+                .to_bytes(),
+        )
+        .expect("capability document JSON");
+        assert_eq!(
+            capabilities["facets"]["finishing.staple"]["mutability"],
+            "job_override"
+        );
+        assert_eq!(
+            capabilities["facets"]["finishing.staple"]["evidence"]["support_pack_id"],
+            "pack.test.staple"
+        );
 
         let (status, compatibility_printers) = compatibility_json(
             &application.router,

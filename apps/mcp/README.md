@@ -13,7 +13,8 @@ job-submission policy and exact destination confirmation.
 
 It exposes MCP tools for deployment/workspace context, API keys, nodes and node
 onboarding, printers, stocks, targets and profile bindings, uploads, jobs,
-webhooks, billing/usage, and platform/integrator accounts. It also exposes the
+normalized printer capabilities, print-intent validation/resolution, revisioned
+workflows, webhooks, billing/usage, and platform/integrator accounts. It also exposes the
 OpenAPI contract, SDK guide, authentication guide, lifecycle guidance, a docs
 search tool, and an operator prompt.
 
@@ -106,6 +107,11 @@ confirmation, and a named fixture. Cancellation, node/connector revocation,
 target unbinding, webhook removal, rollback, key revocation, and account archive
 require an exact identifier confirmation. A successful job response means
 durable registration, not physical delivery.
+
+Capability inspection and print-intent validation never print or alter queue
+defaults. Workflow creation is a separate mutating tool and requires the exact
+printer ID as confirmation. Intent inputs containing native driver option keys
+or blobs are rejected before reaching the API.
 
 The MCP never sends binary document content through a model. It can create
 upload metadata, after which trusted application code uploads bytes directly

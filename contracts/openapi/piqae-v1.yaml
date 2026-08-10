@@ -1360,6 +1360,143 @@ paths:
         "401": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
+  /v1/printers/{printer_id}/capabilities:
+    parameters:
+      - name: printer_id
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      summary: Retrieve the latest normalized capability document
+      description: Returns display-safe, evidence-qualified facets. Driver-native payloads are never exposed here.
+      tags: [Printers]
+      operationId: getPrinterCapabilityDocument
+      responses:
+        "200":
+          description: Latest capability document for the tenant-visible printer.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CapabilityDocument" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /v1/print-intents/validate:
+    post:
+      summary: Validate a capability-aware print intent without mutation
+      tags: [Jobs]
+      operationId: validatePrintIntent
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PrintIntentValidationRequest" }
+      responses:
+        "200":
+          description: Deterministic validation findings.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PrintIntentValidation" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /v1/print-intents/resolve:
+    post:
+      summary: Resolve and persist a short-lived immutable print ticket
+      description: The response is display-safe. Native profile blobs and undocumented driver bytes are never returned.
+      tags: [Jobs]
+      operationId: resolvePrintIntent
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PrintIntentValidationRequest" }
+      responses:
+        "201":
+          description: Validated short-lived resolved ticket.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ResolvedPrintTicket" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /v1/print-workflows:
+    get:
+      summary: List published active print workflows visible to the tenant
+      tags: [Routing]
+      operationId: listPrintWorkflows
+      responses:
+        "200":
+          description: Published, non-archived tenant-scoped workflows with their latest revision.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/PrintWorkflow" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+    post:
+      summary: Create a revisioned print workflow
+      tags: [Routing]
+      operationId: createPrintWorkflow
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreatePrintWorkflow" }
+      responses:
+        "201":
+          description: Workflow and first immutable revision.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PrintWorkflow" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+  /v1/printers/{printer_id}/loaded-media:
+    parameters:
+      - name: printer_id
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      summary: List loaded-media observations by source
+      tags: [Printers, Routing]
+      operationId: listPrinterLoadedMedia
+      responses:
+        "200":
+          description: Tenant-scoped observations; absence means unknown, never a stock match.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/LoadedMediaObservation" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+    put:
+      summary: Confirm or clear an operator-observed loaded-media source
+      tags: [Printers, Routing]
+      operationId: upsertPrinterLoadedMedia
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpsertLoadedMediaObservation" }
+      responses:
+        "200":
+          description: Current operator-confirmed or explicitly unknown observation.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LoadedMediaObservation" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
   /v1/stocks:
     get:
       summary: List stocks
@@ -3988,6 +4125,9 @@ components:
           type: object
           additionalProperties:
             type: string
+        resolved_ticket_digest:
+          $ref: "#/components/schemas/Sha256Hex"
+          description: Digest returned by resolvePrintIntent. Required when submitting a resolved professional workflow.
     EncryptedJobRecipientKey:
       type: object
       additionalProperties: false
@@ -4187,6 +4327,257 @@ components:
         native_options:
           type: object
           additionalProperties: { type: string }
+    Sha256Hex:
+      type: string
+      pattern: "^[0-9a-f]{64}$"
+    ResourceRevision:
+      type: object
+      additionalProperties: false
+      required: [id, revision]
+      properties:
+        id: { type: string, minLength: 1, maxLength: 255 }
+        revision: { type: integer, format: int64, minimum: 1 }
+    CapabilityEvidence:
+      type: object
+      additionalProperties: false
+      required: [level, source]
+      properties:
+        level:
+          type: string
+          enum: [discovered, mapped, replay_tested, physically_certified]
+        source: { type: string, minLength: 1, maxLength: 255 }
+        support_pack_id: { type: [string, "null"], maxLength: 255 }
+        support_pack_digest:
+          oneOf:
+            - { $ref: "#/components/schemas/Sha256Hex" }
+            - { type: "null" }
+    CapabilityFacet:
+      type: object
+      additionalProperties: false
+      required: [type, mutability, supported, evidence]
+      properties:
+        type: { type: string, enum: [boolean, integer, number, string, enum, dimensions, object] }
+        mutability: { type: string, enum: [read_only, job_override, profile_only, operator_only, unsupported] }
+        supported: { type: boolean }
+        unit: { type: [string, "null"], maxLength: 64 }
+        values:
+          type: array
+          maxItems: 512
+          items: { type: [string, number, integer, boolean] }
+        writable_values:
+          type: array
+          maxItems: 512
+          description: Subset of values proven safe for job-scoped writes; absent values are display-only.
+          items: { type: [string, number, integer, boolean] }
+        minimum: { type: [number, "null"] }
+        maximum: { type: [number, "null"] }
+        default_value: {}
+        dependencies:
+          type: array
+          maxItems: 64
+          items: { type: string, minLength: 1, maxLength: 255 }
+        conflicts:
+          type: array
+          maxItems: 64
+          items: { type: string, minLength: 1, maxLength: 255 }
+        evidence: { $ref: "#/components/schemas/CapabilityEvidence" }
+    CapabilityDocument:
+      type: object
+      additionalProperties: false
+      required: [schema_version, printer_id, revision, driver_fingerprint_sha256, facets, created_at]
+      properties:
+        schema_version: { type: integer, const: 1 }
+        printer_id: { type: string }
+        revision: { type: integer, format: int64, minimum: 1 }
+        driver_fingerprint_sha256: { $ref: "#/components/schemas/Sha256Hex" }
+        facets:
+          type: object
+          description: Versioned normalized semantic facets keyed by canonical dotted name. Unknown keys must be preserved.
+          additionalProperties: { $ref: "#/components/schemas/CapabilityFacet" }
+        created_at: { type: string, format: date-time }
+    DocumentManifest:
+      type: object
+      additionalProperties: false
+      required: [page_count, page_boxes, color_spaces, separations, scaling]
+      properties:
+        page_count: { type: integer, minimum: 1, maximum: 100000 }
+        page_boxes:
+          type: array
+          maxItems: 100000
+          items:
+            type: object
+            additionalProperties: false
+            required: [width_mm, height_mm]
+            properties:
+              width_mm: { type: number, exclusiveMinimum: 0, maximum: 100000 }
+              height_mm: { type: number, exclusiveMinimum: 0, maximum: 100000 }
+              bleed_mm: { type: number, minimum: 0, maximum: 1000 }
+        color_spaces: { type: array, maxItems: 64, items: { type: string, maxLength: 128 } }
+        separations: { type: array, maxItems: 64, items: { type: string, maxLength: 128 } }
+        scaling: { type: string, enum: [none, fit, fill] }
+        pdf_version: { type: [string, "null"], maxLength: 32 }
+        has_transparency: { type: [boolean, "null"] }
+    PrintIntent:
+      type: object
+      additionalProperties: false
+      required: [schema_version, printer_id, capability_revision, document_manifest]
+      properties:
+        schema_version: { type: integer, const: 1 }
+        printer_id: { type: string }
+        capability_revision: { type: integer, format: int64, minimum: 1 }
+        workflow:
+          oneOf:
+            - { $ref: "#/components/schemas/ResourceRevision" }
+            - { type: "null" }
+        stock:
+          oneOf:
+            - { $ref: "#/components/schemas/ResourceRevision" }
+            - { type: "null" }
+        portable_options:
+          allOf: [{ $ref: "#/components/schemas/JobOptions" }]
+          default: {}
+        semantic_options:
+          type: object
+          default: {}
+          maxProperties: 128
+          description: Values keyed only by normalized capability facet name; native driver keys are rejected.
+          additionalProperties: true
+        document_manifest: { $ref: "#/components/schemas/DocumentManifest" }
+    PrintIntentValidationRequest:
+      type: object
+      additionalProperties: false
+      required: [intent]
+      properties:
+        intent: { $ref: "#/components/schemas/PrintIntent" }
+    PrintIntentFinding:
+      type: object
+      additionalProperties: false
+      required: [code, path, message]
+      properties:
+        code: { type: string, pattern: "^[a-z0-9_]+$" }
+        path: { type: string, maxLength: 255 }
+        message: { type: string, maxLength: 1000 }
+    PrintIntentValidation:
+      type: object
+      additionalProperties: false
+      required: [status, capability_revision, errors, warnings]
+      properties:
+        status: { type: string, enum: [valid, invalid, operator_action_required] }
+        capability_revision: { type: integer, format: int64, minimum: 1 }
+        errors: { type: array, maxItems: 128, items: { $ref: "#/components/schemas/PrintIntentFinding" } }
+        warnings: { type: array, maxItems: 128, items: { $ref: "#/components/schemas/PrintIntentFinding" } }
+        normalized_intent:
+          oneOf:
+            - { $ref: "#/components/schemas/PrintIntent" }
+            - { type: "null" }
+    ResolvedPrintTicket:
+      type: object
+      additionalProperties: false
+      required: [digest, printer_id, capability_revision, resolved_options, semantic_options, provenance, expires_at]
+      properties:
+        digest: { $ref: "#/components/schemas/Sha256Hex" }
+        printer_id: { type: string }
+        capability_revision: { type: integer, format: int64, minimum: 1 }
+        workflow:
+          oneOf:
+            - { $ref: "#/components/schemas/ResourceRevision" }
+            - { type: "null" }
+        stock:
+          oneOf:
+            - { $ref: "#/components/schemas/ResourceRevision" }
+            - { type: "null" }
+        resolved_options: { $ref: "#/components/schemas/JobOptions" }
+        semantic_options:
+          type: object
+          maxProperties: 128
+          additionalProperties: true
+        provenance:
+          type: object
+          maxProperties: 128
+          additionalProperties: { type: string }
+        expires_at: { type: string, format: date-time }
+    CreatePrintWorkflow:
+      type: object
+      additionalProperties: false
+      required: [name, printer_id, capability_revision, definition, safe_overrides]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 255 }
+        printer_id: { type: string }
+        capability_revision: { type: integer, format: int64, minimum: 1 }
+        profile:
+          oneOf:
+            - { $ref: "#/components/schemas/ResourceRevision" }
+            - { type: "null" }
+        stock:
+          oneOf:
+            - { $ref: "#/components/schemas/ResourceRevision" }
+            - { type: "null" }
+        definition: { $ref: "#/components/schemas/PrintIntent" }
+        safe_overrides:
+          type: array
+          uniqueItems: true
+          maxItems: 128
+          items: { type: string, minLength: 1, maxLength: 255 }
+        published: { type: boolean, default: false }
+    PrintWorkflow:
+      type: object
+      additionalProperties: false
+      required: [id, revision, name, printer_id, capability_revision, profile_id, profile_revision, stock_id, stock_revision, definition, safe_overrides, published, archived, created_at, updated_at]
+      properties:
+        id: { type: string, pattern: "^pwf_" }
+        revision: { type: integer, format: int64, minimum: 1 }
+        name: { type: string, minLength: 1, maxLength: 255 }
+        printer_id: { type: string }
+        capability_revision: { type: integer, format: int64, minimum: 1 }
+        profile_id: { type: [string, "null"], maxLength: 255 }
+        profile_revision: { type: [integer, "null"], format: int64, minimum: 1 }
+        stock_id: { type: [string, "null"], maxLength: 255 }
+        stock_revision: { type: [integer, "null"], format: int64, minimum: 1 }
+        definition: { $ref: "#/components/schemas/PrintIntent" }
+        safe_overrides:
+          type: array
+          uniqueItems: true
+          maxItems: 128
+          items: { type: string, minLength: 1, maxLength: 255 }
+        published: { type: boolean }
+        archived: { type: boolean }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    LoadedMediaObservation:
+      type: object
+      additionalProperties: false
+      required:
+        [printer_id, source, stock, confidence, calibration_state, remaining_amount, observed_at, updated_at]
+      properties:
+        printer_id: { type: string }
+        source: { type: string, minLength: 1, maxLength: 255 }
+        stock:
+          oneOf:
+            - { $ref: "#/components/schemas/ResourceRevision" }
+            - { type: "null" }
+        confidence: { type: string, enum: [reported, operator_confirmed, inferred, unknown] }
+        calibration_state: { type: string, enum: [current, required, unknown] }
+        remaining_amount:
+          type: [object, "null"]
+          additionalProperties: true
+        observed_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    UpsertLoadedMediaObservation:
+      type: object
+      additionalProperties: false
+      required: [source, stock, calibration_state]
+      properties:
+        source: { type: string, minLength: 1, maxLength: 255 }
+        stock:
+          oneOf:
+            - { $ref: "#/components/schemas/ResourceRevision" }
+            - { type: "null" }
+          description: Null explicitly records that the loaded medium is unknown.
+        calibration_state: { type: string, enum: [current, required, unknown] }
+        remaining_amount:
+          type: [object, "null"]
+          maxProperties: 16
+          additionalProperties: true
     JobOptions:
       type: object
       additionalProperties: false
@@ -4248,6 +4639,10 @@ components:
         expires_at:
           type: string
           format: date-time
+        resolved_print_ticket:
+          oneOf:
+            - { $ref: "#/components/schemas/ResolvedPrintTicket" }
+            - { type: "null" }
     JobPage:
       type: object
       required: [data, has_more]
@@ -4328,9 +4723,10 @@ components:
         archived: { type: boolean }
     Stock:
       type: object
-      required: [id, name, sku, description, attributes, archived, created_at, updated_at]
+      required: [id, revision, name, sku, description, attributes, archived, created_at, updated_at]
       properties:
         id: { type: string, pattern: '^stk_[0-9A-HJKMNP-TV-Z]{26}$' }
+        revision: { type: integer, format: int64, minimum: 1 }
         name: { type: string }
         sku: { type: [string, "null"] }
         description: { type: [string, "null"] }
@@ -4346,13 +4742,26 @@ components:
         kind:
           type: string
           enum: [sheet, label, roll, continuous, envelope, card]
+        sensing:
+          type: string
+          enum: [none, gap, black_mark, continuous, notched, hole]
         width_mm: { type: number, exclusiveMinimum: 0 }
         height_mm: { type: number, exclusiveMinimum: 0 }
         length_mm: { type: number, exclusiveMinimum: 0 }
+        thickness_mm: { type: number, exclusiveMinimum: 0 }
+        weight_gsm: { type: number, exclusiveMinimum: 0 }
         orientation:
           type: string
           enum: [portrait, landscape, either]
         gap_mm: { type: number, minimum: 0 }
+        black_mark:
+          type: object
+          additionalProperties: false
+          required: [width_mm, height_mm, offset_mm]
+          properties:
+            width_mm: { type: number, exclusiveMinimum: 0 }
+            height_mm: { type: number, exclusiveMinimum: 0 }
+            offset_mm: { type: number }
         mark_interval_mm: { type: number, exclusiveMinimum: 0 }
         bleed_mm: { type: number, minimum: 0 }
         safe_area_mm:
@@ -4366,6 +4775,17 @@ components:
             left: { type: number, minimum: 0 }
         source: { type: string }
         media: { type: string }
+        feed_direction: { type: string, enum: [short_edge, long_edge] }
+        winding: { type: string, enum: [face_in, face_out, not_applicable] }
+        coating: { type: string, maxLength: 255 }
+        face_material: { type: string, maxLength: 255 }
+        liner: { type: string, maxLength: 255 }
+        adhesive: { type: string, maxLength: 255 }
+        compatible_icc_profile_digests:
+          type: array
+          uniqueItems: true
+          maxItems: 64
+          items: { $ref: "#/components/schemas/Sha256Hex" }
     CreateTarget:
       type: object
       additionalProperties: false

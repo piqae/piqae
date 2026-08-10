@@ -11,11 +11,12 @@ use chrono::{DateTime, TimeDelta, Utc};
 use piqae_auth::Scope;
 use piqae_domain::{PrinterId, PrinterState};
 use piqae_storage_postgres::{
-    StoredAgent, StoredBindingReadiness, StoredStock, StoredTarget, StoredTargetBinding,
-    StoredTargetReadiness,
+    StoredAgent, StoredBindingReadiness, StoredPrintWorkflow, StoredStock, StoredTarget,
+    StoredTargetBinding, StoredTargetReadiness,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use std::str::FromStr;
 
 #[derive(Debug, Deserialize)]
@@ -67,6 +68,27 @@ pub struct CreateBindingRequest {
     enabled: bool,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CreatePrintWorkflowRequest {
+    name: String,
+    printer_id: String,
+    capability_revision: u64,
+    profile: Option<ResourceRevision>,
+    stock: Option<ResourceRevision>,
+    definition: serde_json::Value,
+    safe_overrides: Vec<String>,
+    #[serde(default)]
+    published: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResourceRevision {
+    id: String,
+    revision: u64,
+}
+
 fn empty_object() -> serde_json::Value {
     serde_json::json!({})
 }
@@ -92,6 +114,152 @@ pub async fn list_stocks(
     ))
 }
 
+pub async fn list_print_workflows(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<StoredPrintWorkflow>>, AppError> {
+    let tenant = authenticate_native(&state, &headers, Scope::PrintersRead).await?;
+    Ok(Json(
+        state
+            .repository
+            .list_print_workflows(tenant.workspace_id, tenant.environment_id)
+            .await?
+            .into_iter()
+            .filter(|workflow| workflow.published && !workflow.archived)
+            .collect(),
+    ))
+}
+
+#[allow(clippy::too_many_lines)]
+pub async fn create_print_workflow(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<CreatePrintWorkflowRequest>,
+) -> Result<Response, AppError> {
+    let tenant = authenticate_native(&state, &headers, Scope::PrintersWrite).await?;
+    let name = validate_name(&request.name, "invalid_print_workflow")?;
+    let printer_id = PrinterId::from_str(&request.printer_id)
+        .map_err(|_| AppError::invalid("invalid_print_workflow", "Printer ID is invalid."))?;
+    let printer = state
+        .repository
+        .get_printer(tenant.workspace_id, tenant.environment_id, printer_id)
+        .await?;
+    if request.capability_revision == 0
+        || printer.capability_revision != request.capability_revision
+    {
+        return Err(AppError::conflict(
+            "stale_capability_revision",
+            "The printer capability revision changed; refresh and validate again.",
+        ));
+    }
+    if !request.definition.is_object()
+        || request.safe_overrides.len() > 128
+        || invalid_safe_override_set(&request.safe_overrides)
+        || request.safe_overrides.iter().any(|value| {
+            value.is_empty()
+                || value.len() > 255
+                || !(value.starts_with("portable_options.")
+                    || value.starts_with("semantic_options."))
+                || value.starts_with("driver.")
+        })
+    {
+        return Err(AppError::invalid(
+            "invalid_print_workflow",
+            "Workflow definition and safe overrides must use bounded normalized fields.",
+        ));
+    }
+    let definition =
+        serde_json::from_value::<crate::print_intents::PrintIntent>(request.definition.clone())
+            .map_err(|_| {
+                AppError::invalid(
+                    "workflow_definition_mismatch",
+                    "Workflow definition must match the print-intent contract.",
+                )
+            })?;
+    if definition.schema_version != 1
+        || definition.printer_id != request.printer_id
+        || definition.capability_revision != request.capability_revision
+        || !definition.document_manifest.is_object()
+        || definition.workflow.is_some()
+    {
+        return Err(AppError::invalid(
+            "workflow_definition_mismatch",
+            "Workflow definition must pin this printer and capability revision and cannot reference another workflow.",
+        ));
+    }
+    if let Some(profile) = &request.profile {
+        let requested_profile_id = profile.id.as_str();
+        let requested_profile_revision = profile.revision;
+        if profile.revision == 0
+            || !printer.profiles.iter().any(|current| {
+                current.profile_id == requested_profile_id
+                    && current.revision == requested_profile_revision
+                    && current.published
+            })
+        {
+            return Err(AppError::conflict(
+                "workflow_profile_unavailable",
+                "The exact published printer profile revision is unavailable.",
+            ));
+        }
+    }
+    if let Some(stock) = &request.stock {
+        let current = state
+            .repository
+            .get_stock(tenant.workspace_id, tenant.environment_id, &stock.id)
+            .await?;
+        if stock.revision == 0 || current.revision != stock.revision || current.archived {
+            return Err(AppError::conflict(
+                "workflow_stock_unavailable",
+                "The exact active stock revision is unavailable.",
+            ));
+        }
+        if request.definition["stock"]["id"] != stock.id
+            || request.definition["stock"]["revision"] != stock.revision
+        {
+            return Err(AppError::invalid(
+                "workflow_stock_mismatch",
+                "Workflow definition stock must match the pinned stock revision.",
+            ));
+        }
+    } else if !request
+        .definition
+        .get("stock")
+        .is_none_or(serde_json::Value::is_null)
+    {
+        return Err(AppError::invalid(
+            "workflow_stock_mismatch",
+            "A workflow definition cannot use an unpinned stock.",
+        ));
+    }
+    let now = Utc::now();
+    let workflow = StoredPrintWorkflow {
+        id: format!("pwf_{}", ulid::Ulid::new()),
+        revision: 1,
+        name,
+        printer_id,
+        capability_revision: request.capability_revision,
+        profile_id: request.profile.as_ref().map(|value| value.id.clone()),
+        profile_revision: request.profile.map(|value| value.revision),
+        stock_id: request.stock.as_ref().map(|value| value.id.clone()),
+        stock_revision: request.stock.map(|value| value.revision),
+        definition: request.definition,
+        safe_overrides: request.safe_overrides,
+        published: request.published,
+        archived: false,
+        created_at: now,
+        updated_at: now,
+    };
+    let workflow = state
+        .repository
+        .create_print_workflow(tenant.workspace_id, tenant.environment_id, &workflow)
+        .await?;
+    state
+        .publish(tenant, "print_workflow.created", &workflow)
+        .await?;
+    Ok((StatusCode::CREATED, Json(workflow)).into_response())
+}
+
 pub async fn create_stock(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -108,6 +276,7 @@ pub async fn create_stock(
     let now = Utc::now();
     let stock = StoredStock {
         id: format!("stk_{}", ulid::Ulid::new()),
+        revision: 1,
         name,
         sku: clean_optional(request.sku, 120, "invalid_stock")?,
         description: clean_optional(request.description, 2_000, "invalid_stock")?,
@@ -604,6 +773,20 @@ fn validate_routing_policy(value: &str) -> Result<(), AppError> {
     Ok(())
 }
 
+fn invalid_safe_override_set(values: &[String]) -> bool {
+    let mut seen = HashSet::new();
+    values.iter().any(|value| !seen.insert(value.as_str()))
+        || values.iter().enumerate().any(|(index, left)| {
+            values.iter().skip(index + 1).any(|right| {
+                left.strip_prefix(right)
+                    .is_some_and(|suffix| suffix.starts_with('.'))
+                    || right
+                        .strip_prefix(left)
+                        .is_some_and(|suffix| suffix.starts_with('.'))
+            })
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -626,6 +809,22 @@ mod tests {
             Some(Some(valid))
         );
         assert!(clean_optional(Some("é".repeat(2_001)), 2_000, "invalid_target").is_err());
+    }
+
+    #[test]
+    fn safe_overrides_reject_duplicates_and_parent_child_ambiguity() {
+        assert!(invalid_safe_override_set(&[
+            "semantic_options.media".into(),
+            "semantic_options.media.sensing".into(),
+        ]));
+        assert!(invalid_safe_override_set(&[
+            "portable_options.copies".into(),
+            "portable_options.copies".into(),
+        ]));
+        assert!(!invalid_safe_override_set(&[
+            "portable_options.copies".into(),
+            "semantic_options.media.sensing".into(),
+        ]));
     }
 
     #[test]

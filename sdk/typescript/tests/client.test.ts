@@ -150,6 +150,30 @@ describe('PiqaeClient', () => {
     );
   });
 
+  it('confirms or clears a printer loaded-media observation', async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(JSON.stringify({ source: 'main-roll', stock: null }), { status: 200 })
+    );
+    const client = new PiqaeClient({ fetch: fetcher });
+
+    await client.printers.confirmLoadedMedia('printer / one', {
+      source: 'main-roll',
+      stock: null,
+      calibration_state: 'unknown'
+    });
+
+    const [url, init] = fetcher.mock.calls[0] ?? [];
+    expect(String(url)).toBe(
+      'https://api.piqae.com/v1/printers/printer%20%2F%20one/loaded-media'
+    );
+    expect(init?.method).toBe('PUT');
+    expect(JSON.parse(String(init?.body))).toEqual({
+      source: 'main-roll',
+      stock: null,
+      calibration_state: 'unknown'
+    });
+  });
+
   it('verifies signed webhooks and rejects stale or changed bodies', async () => {
     const timestamp = 1_700_000_000;
     const body = '{"id":"evt_1"}';
@@ -640,5 +664,30 @@ describe('PiqaeClient', () => {
     expect(new Headers(jobCall?.[1]?.headers).get('idempotency-key')).toBe('encrypted-retry-1');
     await expect(client.jobs.createEncrypted({ target_id: 'tgt_1', title: 'Private', content_type: 'pdf' }, envelope, 'short')).rejects.toThrow(/Idempotency-Key/);
     await expect(client.jobs.createEncrypted({ target_id: 'tgt_1', title: 'Private', content_type: 'pdf' }, envelope, '🔐'.repeat(64))).rejects.toThrow(/Idempotency-Key/);
+    await expect(client.jobs.createEncrypted({ target_id: 'tgt_1', title: 'Unsafe', content_type: 'pdf', resolved_ticket_digest: 'b'.repeat(64) } as never, envelope, 'encrypted-unsafe-1')).rejects.toThrow(/cannot attach unbound/);
+    await expect(client.jobs.createEncryptedResolved(
+      { target_id: 'tgt_1', title: 'Private', content_type: 'pdf' },
+      envelope,
+      { digest: 'c'.repeat(64), printer_id: 'prt_other', capability_revision: 1, resolved_options: {}, semantic_options: {}, provenance: {}, expires_at: '2099-01-01T00:00:00Z' },
+      'encrypted-resolved-1'
+    )).rejects.toThrow(/different printers/);
+    await expect(client.jobs.createEncryptedResolved(
+      { target_id: 'tgt_1', title: 'Private', content_type: 'pdf' },
+      envelope,
+      { digest: 'c'.repeat(64), printer_id: 'prt_1', capability_revision: 1, resolved_options: {}, semantic_options: {}, provenance: {}, expires_at: '2020-01-01T00:00:00Z' },
+      'encrypted-expired-1'
+    )).rejects.toThrow(/ticket has expired/);
+    await expect(client.jobs.createEncryptedResolved(
+      { target_id: 'tgt_1', title: 'Private', content_type: 'pdf' },
+      envelope,
+      { digest: 'c'.repeat(64), printer_id: 'prt_1', capability_revision: 1, resolved_options: {}, semantic_options: {}, provenance: {}, expires_at: 'not-a-date' },
+      'encrypted-invalid-expiry-1'
+    )).rejects.toThrow(/ticket has expired/);
+    await expect(client.jobs.createEncryptedResolved(
+      { target_id: 'tgt_1', title: 'Private', content_type: 'pdf' },
+      envelope,
+      { digest: 'c'.repeat(64), printer_id: 'prt_1', capability_revision: 1, resolved_options: {}, semantic_options: {}, provenance: {}, expires_at: '2099-02-30T00:00:00Z' },
+      'encrypted-invalid-calendar-1'
+    )).rejects.toThrow(/ticket has expired/);
   });
 });
