@@ -274,6 +274,8 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - name: Build the workspace SDK dependency
+        run: pnpm --filter @piqae/sdk build
       - name: Validate the MCP package
         run: |
           pnpm --filter @piqae/mcp-server check
@@ -314,6 +316,8 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - name: Build the workspace SDK dependency
+        run: pnpm --filter @piqae/sdk build
       - run: pnpm --filter @piqae/shopify-app check
       - run: pnpm --filter @piqae/shopify-app test
       - run: pnpm --filter @piqae/shopify-app test:postgres
