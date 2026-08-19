@@ -39,7 +39,9 @@ const shopify = shopifyApp({
   hooks: {
     afterAuth: async ({ session }) => {
       await recordInstallation(session.shop, session.scope ?? "");
-      await shopify.registerWebhooks({ session });
+      // Webhooks are app-specific subscriptions managed by the released
+      // shopify.app TOML. registerWebhooks is only for shop-specific runtime
+      // subscriptions and can fail an otherwise successful installation.
     },
   },
 });
