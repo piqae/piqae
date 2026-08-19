@@ -45,11 +45,14 @@ impl Default for RenderLimits {
         Self {
             max_nodes: 20_000,
             max_depth: 32,
-            max_repeat_items: 1_000,
+            // A Shopify bulk run can contain 250 orders with many line items.
+            // Keep the work strictly bounded while allowing that production
+            // case without splitting it into slower independent renders.
+            max_repeat_items: 20_000,
             max_table_columns: 32,
-            max_pages: 200,
+            max_pages: 1_000,
             max_text_bytes: 1_000_000,
-            max_output_bytes: 16 * 1024 * 1024,
+            max_output_bytes: 50 * 1024 * 1024,
             max_continuous_height_mm: 2_000.0,
         }
     }
@@ -552,6 +555,7 @@ struct State<'a> {
     text_bytes: usize,
     continuous: bool,
     in_region: bool,
+    pending_page_break: bool,
 }
 
 /// Render a validated document and its data into deterministic PDF bytes.
@@ -577,6 +581,26 @@ pub fn render_with_resources(
     resolved: &ResolvedResources,
     limits: RenderLimits,
 ) -> Result<Vec<u8>, RenderError> {
+    Ok(render_with_metrics(spec, input, resolved, limits)?.pdf)
+}
+
+#[derive(Debug, Clone)]
+pub struct RenderOutput {
+    pub pdf: Vec<u8>,
+    pub page_count: u32,
+}
+
+/// Render deterministic bytes and authoritative layout metrics in one pass.
+///
+/// # Errors
+/// Returns the same bounded validation, expression, resource, and output errors
+/// as [`render_with_resources`].
+pub fn render_with_metrics(
+    spec: &BusinessDocumentV1,
+    input: &Value,
+    resolved: &ResolvedResources,
+    limits: RenderLimits,
+) -> Result<RenderOutput, RenderError> {
     validate(spec, limits)?;
     let (width, height, margins, continuous) = media_geometry(&spec.media, limits)?;
     let mut state = State {
@@ -602,6 +626,7 @@ pub fn render_with_resources(
         text_bytes: 0,
         continuous,
         in_region: false,
+        pending_page_break: false,
     };
     reserve_regions(&mut state)?;
     render_region(&mut state, RegionKind::Header, false)?;
@@ -623,7 +648,10 @@ pub fn render_with_resources(
     if pdf.len() > limits.max_output_bytes {
         return Err(RenderError::Limit("output bytes"));
     }
-    Ok(pdf)
+    Ok(RenderOutput {
+        page_count: u32::try_from(state.pages.len()).map_err(|_| RenderError::Limit("pages"))?,
+        pdf,
+    })
 }
 
 /// Validate a business document without performing rendering or external I/O.
@@ -843,6 +871,10 @@ fn layout_nodes(nodes: &[Node], state: &mut State, depth: usize) -> Result<(), R
         return Err(RenderError::Limit("nesting depth"));
     }
     for node in nodes {
+        if state.pending_page_break && !state.in_region && !matches!(node, Node::PageBreak) {
+            state.pending_page_break = false;
+            new_page(state)?;
+        }
         state.nodes += 1;
         if state.nodes > state.limits.max_nodes {
             return Err(RenderError::Limit("nodes"));
@@ -938,7 +970,15 @@ fn layout_nodes(nodes: &[Node], state: &mut State, depth: usize) -> Result<(), R
                 )?;
                 state.y -= *width_pt + 2.0
             }
-            Node::PageBreak => new_page(state)?,
+            Node::PageBreak => {
+                if state.continuous {
+                    return Err(RenderError::Unsupported("page breaks on continuous media"));
+                }
+                // Materialize the next page only if another body node follows.
+                // This keeps the natural "break after each repeated order"
+                // template from emitting a trailing blank sheet.
+                state.pending_page_break = true;
+            }
             Node::KeepTogether { children } => {
                 let h = estimate_nodes(
                     children,
@@ -2390,6 +2430,44 @@ mod tests {
             render(&d, &json!({}), RenderLimits::default()),
             Err(RenderError::Unsupported("page breaks on continuous media"))
         );
+    }
+
+    #[test]
+    fn repeated_orders_do_not_emit_a_trailing_blank_page() {
+        let d = document(vec![Node::Repeat {
+            items: Expr::Path {
+                path: vec!["orders".into()],
+            },
+            children: vec![text("packing slip"), Node::PageBreak],
+            gap_mm: 0.0,
+        }]);
+        let orders = (0..250).map(|_| json!({})).collect::<Vec<_>>();
+        let output = render_with_metrics(
+            &d,
+            &json!({"orders": orders}),
+            &ResolvedResources::default(),
+            RenderLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(output.page_count, 250);
+    }
+
+    #[test]
+    fn deferred_page_break_does_not_reenter_footer_layout() {
+        let mut d = document(vec![text("first"), Node::PageBreak, text("second")]);
+        d.footer = Some(Region {
+            first: vec![],
+            default: vec![text("footer")],
+            last: vec![],
+        });
+        let output = render_with_metrics(
+            &d,
+            &json!({}),
+            &ResolvedResources::default(),
+            RenderLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(output.page_count, 2);
     }
 
     #[test]

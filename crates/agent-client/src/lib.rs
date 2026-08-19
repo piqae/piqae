@@ -505,6 +505,55 @@ impl AgentClient {
         Ok(response)
     }
 
+    /// Opens one lease-scoped, content-addressed document resource stream.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid digest, signing, transport, URL, header,
+    /// or HTTP status failure.
+    pub async fn download_document_resource(
+        &self,
+        identity: &DeviceIdentity,
+        job_id: JobId,
+        lease_id: Uuid,
+        lease_token: &str,
+        digest: &str,
+    ) -> Result<reqwest::Response, ClientError> {
+        if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(ClientError::Status {
+                status: 400,
+                body: "invalid document resource digest".into(),
+            });
+        }
+        let path = format!(
+            "v1/agent/jobs/{job_id}/resources/{}",
+            digest.to_ascii_lowercase()
+        );
+        let request_path = format!("/{path}");
+        let mut headers = identity.signed_headers(
+            "GET",
+            &request_path,
+            &[],
+            self.clock.signing_timestamp_ms(),
+            Uuid::new_v4(),
+        )?;
+        insert_header(&mut headers, "x-piqae-lease-id", &lease_id.to_string())?;
+        insert_header(&mut headers, "x-piqae-lease-token", lease_token)?;
+        let response = self
+            .client
+            .get(self.base_url.join(&path)?)
+            .headers(headers)
+            .send()
+            .await?;
+        self.clock.observe(response.headers());
+        let status = response.status();
+        if !status.is_success() {
+            let bytes = response.bytes().await?;
+            return Err(status_error(status.as_u16(), &bytes));
+        }
+        Ok(response)
+    }
+
     async fn post_json<Req: Serialize + Sync, Res: serde::de::DeserializeOwned>(
         &self,
         path: &str,

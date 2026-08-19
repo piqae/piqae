@@ -23,6 +23,11 @@ use piqae_agent_client::{AgentClient, ClientError, DeviceIdentity};
 use piqae_agent_core::{
     AgentEngine, ContentStore, Executor, ExecutorFailure, FakeExecutor, LocalSubmission,
     NativeAcceptance, NativeJobReference, SystemClock,
+    document_render::{
+        NodeDocumentCapabilities, NodeRenderRequirement, NodeRenderResult, RENDERER_ABI,
+        render_with_resources_or_fallback,
+    },
+    document_resources::{DocumentResourceCache, NodeResourceDescriptor, RESOURCE_ABI},
 };
 use piqae_agent_storage::{
     AcceptedJob, AgentStore, CloudAcceptIntent, NativeProfileCapture, PendingEvent, QueueCounts,
@@ -63,7 +68,7 @@ use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
     sync::{
-        Arc,
+        Arc, OnceLock,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration,
@@ -79,6 +84,9 @@ const LEASE_RENEWAL_INTERVAL: Duration = Duration::from_secs(10);
 const LEASE_RENEWAL_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const PROFILE_CAPTURE_LIFETIME: Duration = Duration::from_secs(5 * 60);
 const LOCAL_PROFILE_HOST_ID: &str = "authenticated-loopback-profile-host";
+const DOCUMENT_RESOURCE_CACHE_BYTES: u64 = 512 * 1024 * 1024;
+const DOCUMENT_RESOURCE_MAX_BYTES: u64 = 4 * 1024 * 1024;
+static DOCUMENT_RESOURCE_CACHE: OnceLock<Arc<DocumentResourceCache>> = OnceLock::new();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum AgentMode {
@@ -582,6 +590,16 @@ async fn main() -> Result<()> {
     if !store.integrity_check()? {
         anyhow::bail!("agent database integrity check failed");
     }
+    let document_resource_cache = DocumentResourceCache::open(
+        arguments.data_dir.join("document-resources"),
+        &database_path,
+        DOCUMENT_RESOURCE_CACHE_BYTES,
+        DOCUMENT_RESOURCE_MAX_BYTES,
+    )
+    .context("open document resource cache")?;
+    DOCUMENT_RESOURCE_CACHE
+        .set(Arc::new(document_resource_cache))
+        .map_err(|_| anyhow::anyhow!("document resource cache was initialized twice"))?;
     let initially_paused = store.setting("paused")?.as_deref() == Some("true");
     let support_packs = Arc::new(SupportPackRegistry::load(&SupportPackConfig {
         pack_directories: arguments.support_pack_dirs.clone(),
@@ -4356,7 +4374,202 @@ async fn materialize_descriptor(
                 )
                 .await?)
         }
+        ContentDescriptor::BusinessDocument {
+            policy: _,
+            render,
+            fallback,
+            fallback_allowed,
+            decision_reason: _,
+        } => {
+            let rendered = if render.renderer_abi == RENDERER_ABI
+                && render.resource_abi == RESOURCE_ABI
+            {
+                let specification: piqae_document_renderer::BusinessDocumentV1 =
+                    serde_json::from_value(render.specification.clone())
+                        .context("decode business document specification")?;
+                let resources = resolve_node_render_resources(
+                    cloud,
+                    job_id,
+                    lease_id,
+                    lease_token,
+                    &specification,
+                    &render.resources,
+                )
+                .await;
+                let input_bytes =
+                    u64::try_from(serde_json::to_vec(&render.input)?.len()).unwrap_or(u64::MAX);
+                let capabilities = NodeDocumentCapabilities::local()
+                    .with_persistent_resource_cache(DOCUMENT_RESOURCE_MAX_BYTES);
+                resources.map_or_else(
+                    |_| NodeRenderResult::UseServerPdf {
+                        reason:
+                            piqae_agent_core::document_render::FallbackReason::ResourceUnavailable,
+                    },
+                    |resources| {
+                        render_with_resources_or_fallback(
+                            &capabilities,
+                            &NodeRenderRequirement {
+                                negotiation_version: 1,
+                                renderer_abi: render.renderer_abi.clone(),
+                                renderer_build: piqae_document_renderer::RENDERER_VERSION.into(),
+                                spec_version: piqae_document_renderer::BUSINESS_DOCUMENT_FORMAT
+                                    .into(),
+                                input_bytes,
+                                maximum_pdf_bytes: render.expected_pdf_bytes,
+                                maximum_pages: 10_000,
+                                expected_pdf_sha256: render.expected_pdf_sha256.clone(),
+                            },
+                            &specification,
+                            &render.input,
+                            &resources,
+                        )
+                    },
+                )
+            } else {
+                NodeRenderResult::UseServerPdf {
+                    reason: piqae_agent_core::document_render::FallbackReason::ResourceUnavailable,
+                }
+            };
+            if let NodeRenderResult::Pdf(pdf) = rendered {
+                let path = content_store
+                    .put_verified(&render.expected_pdf_sha256, std::io::Cursor::new(pdf))
+                    .await?;
+                return Ok(piqae_agent_core::StoredContent {
+                    bytes: render.expected_pdf_bytes,
+                    path,
+                    sha256: render.expected_pdf_sha256,
+                });
+            }
+            if !fallback_allowed {
+                anyhow::bail!("node document rendering was required but failed closed");
+            }
+            Box::pin(materialize_descriptor(
+                cloud,
+                content_store,
+                uri_fetcher,
+                job_id,
+                lease_id,
+                lease_token,
+                *fallback,
+            ))
+            .await
+        }
     }
+}
+
+async fn resolve_node_render_resources(
+    cloud: &CloudConfiguration,
+    job_id: JobId,
+    lease_id: uuid::Uuid,
+    lease_token: &str,
+    specification: &piqae_document_renderer::BusinessDocumentV1,
+    offered: &[piqae_protocol::agent::BusinessDocumentResourceDescriptor],
+) -> Result<piqae_document_renderer::ResolvedResources> {
+    let cache = DOCUMENT_RESOURCE_CACHE
+        .get()
+        .context("document resource cache is unavailable")?;
+    let offered = offered
+        .iter()
+        .map(|resource| {
+            (
+                resource
+                    .digest
+                    .trim_start_matches("sha256:")
+                    .to_ascii_lowercase(),
+                resource,
+            )
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let mut resolved = piqae_document_renderer::ResolvedResources::default();
+    for (resource_id, resource) in &specification.resources {
+        let piqae_document_renderer::Resource::Image {
+            digest,
+            media_type,
+            byte_length,
+        } = resource;
+        let digest = digest
+            .strip_prefix("sha256:")
+            .context("document resource digest is not canonical")?
+            .to_ascii_lowercase();
+        let manifest = offered
+            .get(&digest)
+            .context("document resource was not offered")?;
+        anyhow::ensure!(
+            manifest.media_type == *media_type && manifest.byte_length == *byte_length,
+            "document resource manifest disagrees with specification"
+        );
+        let descriptor = NodeResourceDescriptor {
+            digest: digest.clone(),
+            media_type: media_type.clone(),
+            byte_length: *byte_length,
+        };
+        let now = Utc::now().timestamp_millis();
+        let path = if let Some(path) = cache.resolve_existing(&descriptor, now)? {
+            path
+        } else {
+            let bytes = download_document_resource_bounded(
+                cloud,
+                job_id,
+                lease_id,
+                lease_token,
+                &descriptor,
+            )
+            .await?;
+            cache.resolve(
+                &descriptor,
+                || Ok(std::io::Cursor::new(bytes)),
+                Utc::now().timestamp_millis(),
+            )?
+        };
+        cache.pin(&digest)?;
+        let bytes = std::fs::read(path);
+        let released = cache.unpin(&digest);
+        let bytes = bytes?;
+        released?;
+        resolved.images.insert(resource_id.clone(), bytes);
+    }
+    Ok(resolved)
+}
+
+async fn download_document_resource_bounded(
+    cloud: &CloudConfiguration,
+    job_id: JobId,
+    lease_id: uuid::Uuid,
+    lease_token: &str,
+    descriptor: &NodeResourceDescriptor,
+) -> Result<Vec<u8>> {
+    let response = cloud
+        .client
+        .download_document_resource(
+            &cloud.identity,
+            job_id,
+            lease_id,
+            lease_token,
+            &descriptor.digest,
+        )
+        .await?;
+    anyhow::ensure!(
+        response.content_length().is_none_or(|length| {
+            length == descriptor.byte_length && length <= DOCUMENT_RESOURCE_MAX_BYTES
+        }),
+        "document resource response has an invalid length"
+    );
+    let mut stream = response.bytes_stream();
+    let capacity = usize::try_from(descriptor.byte_length.min(64 * 1024)).unwrap_or(64 * 1024);
+    let mut bytes = Vec::with_capacity(capacity);
+    while let Some(chunk) = stream.try_next().await? {
+        anyhow::ensure!(
+            bytes.len().saturating_add(chunk.len())
+                <= usize::try_from(descriptor.byte_length).unwrap_or(usize::MAX),
+            "document resource response exceeds its manifest"
+        );
+        bytes.extend_from_slice(&chunk);
+    }
+    anyhow::ensure!(
+        u64::try_from(bytes.len()).unwrap_or(u64::MAX) == descriptor.byte_length,
+        "document resource response is truncated"
+    );
+    Ok(bytes)
 }
 
 fn decrypt_encrypted_content(
@@ -4516,6 +4729,7 @@ fn sync_request(
     paused: bool,
     printers: Option<Vec<PrinterSnapshot>>,
 ) -> Result<AgentSyncRequest, StorageError> {
+    let resource_cache_ready = DOCUMENT_RESOURCE_CACHE.get().is_some();
     let counts = store.queue_counts()?;
     let events = store
         .pending_cloud_events(0, 100)?
@@ -4551,6 +4765,18 @@ fn sync_request(
         printers,
         events,
         diagnostics: pending_diagnostics(store)?,
+        document_render: piqae_protocol::agent::DocumentRenderCapabilities {
+            renderer_abi: Some(RENDERER_ABI.into()),
+            resource_abi: Some(RESOURCE_ABI.into()),
+            persistent_cache: resource_cache_ready,
+            font_rendering: false,
+            image_media_types: vec!["image/jpeg".into()],
+            font_media_types: Vec::new(),
+            // A process-global CAS may contain resources used by several
+            // independently authorized connectors. Never disclose membership
+            // across those tenant boundaries; offers still get local hits.
+            cached_resource_digests: Vec::new(),
+        },
     })
 }
 
@@ -5455,6 +5681,10 @@ mod tests {
             .expect("sync request");
         assert_eq!(request.printer_revision, 42);
         assert_eq!(request.health.executor_crashes, 1);
+        assert!(
+            request.document_render.cached_resource_digests.is_empty(),
+            "connector sync must never expose process-global cache membership"
+        );
         assert_eq!(
             request.health.last_error_code.as_deref(),
             Some("executor_timed_out")

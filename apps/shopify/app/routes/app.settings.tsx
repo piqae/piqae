@@ -124,6 +124,31 @@ export default function Settings() {
               />{" "}
               Keep PDF download available
             </label>
+            <s-select
+              label="Document rendering"
+              name="renderExecutionPolicy"
+              value={settings.renderExecutionPolicy}
+            >
+              <option value="automatic">Automatic (recommended)</option>
+              <option value="cloud_only">Cloud only</option>
+              <option value="prefer_node">Prefer node (advanced)</option>
+              <option value="require_node">Require node rendering</option>
+            </s-select>
+            <s-paragraph>
+              Automatic chooses the fastest compatible path and safely falls
+              back to the exact cloud-rendered preview. Cloud only always sends
+              that preview PDF. Prefer node uses a compatible ready node when
+              possible, with safe PDF fallback. Require node blocks printing
+              unless the selected destination reports a compatible renderer that
+              can acquire every required supported resource.
+            </s-paragraph>
+            {settings.renderExecutionPolicy === "require_node" ? (
+              <s-banner tone="warning">
+                Requiring node rendering can delay or block a print while a node
+                downloads supported images or other required renderer resources.
+                PDF download remains available when enabled.
+              </s-banner>
+            ) : null}
             <label>
               Retention in days
               <input

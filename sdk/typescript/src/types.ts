@@ -22,8 +22,12 @@ export type BusinessDocumentTemplate = components['schemas']['BusinessDocumentTe
 export type BusinessDocumentTemplateRevision = components['schemas']['BusinessDocumentTemplateRevision'];
 export type CreateBusinessDocumentRender = components['schemas']['CreateBusinessDocumentRender'];
 export type BusinessDocumentRender = components['schemas']['BusinessDocumentRender'];
+export type BusinessDocumentRenderPolicy = components['schemas']['BusinessDocumentRenderPolicy'];
+export type BusinessDocumentRenderCost = components['schemas']['BusinessDocumentRenderCost'];
+export type EvaluateBusinessDocumentRenderReadiness = components['schemas']['EvaluateBusinessDocumentRenderReadiness'];
+export type BusinessDocumentRenderReadiness = components['schemas']['BusinessDocumentRenderReadiness'];
 export type PrintBusinessDocumentRender =
-  & { title: string; options?: JobOptions; deliveries?: number }
+  & { title: string; options?: JobOptions; deliveries?: number; render_policy?: BusinessDocumentRenderPolicy; render_cost?: BusinessDocumentRenderCost }
   & ({ printer_id: PiqaeId; target_id?: never } | { target_id: PiqaeId; printer_id?: never });
 export type CreateBusinessDocumentPreview = components['schemas']['CreateBusinessDocumentPreview'];
 export type BusinessDocumentPreview = components['schemas']['BusinessDocumentPreview'];

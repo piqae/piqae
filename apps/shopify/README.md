@@ -23,6 +23,20 @@ it must not imply that older orders are accessible.
 
 No real Shopify or Piqae credentials are needed for unit tests.
 
+## Render location policy
+
+Each shop has a tenant-scoped document-rendering policy. `automatic` is the
+default and lets Piqae choose the faster compatible path from bounded measured
+costs. `cloud_only` always prints the exact approved preview PDF.
+`prefer_node` uses node rendering only when the destination's renderer ABI and
+content-addressed resources are ready, otherwise it safely falls back to that
+PDF. `require_node` is an advanced fail-closed mode: printing is unavailable
+until the selected node proves compatibility and resource readiness. An online
+printer alone is never treated as node-render ready.
+
+The setting affects execution location, not delivery truth. Native spooler
+acceptance still does not prove that paper was produced.
+
 ## Piqae test runtime
 
 `PIQAE_SHOPIFY_RUNTIME` is explicit: `fake` uses only the loopback virtual

@@ -20,7 +20,10 @@ export async function fetchTemplateAsset(
     throw new Error(
       "Asset has no ingestion source; use the Piqae content-addressed asset store",
     );
-  await assertPublicHost(new URL(asset.sourceUrl).hostname);
+  const source = new URL(asset.sourceUrl);
+  if (source.origin !== "https://cdn.shopify.com")
+    throw new Error("Asset ingestion requires the exact Shopify CDN origin");
+  await assertPublicHost(source.hostname);
   const response = await fetch(asset.sourceUrl, {
     redirect: "error",
     signal: AbortSignal.timeout(5_000),

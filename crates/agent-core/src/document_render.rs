@@ -5,7 +5,8 @@
 //! the node proves that the exact deterministic renderer contract is present.
 
 use piqae_document_renderer::{
-    BUSINESS_DOCUMENT_FORMAT, BusinessDocumentV1, RENDERER_VERSION, RenderLimits, render,
+    BUSINESS_DOCUMENT_FORMAT, BusinessDocumentV1, RENDERER_VERSION, RenderLimits,
+    ResolvedResources, render, render_with_resources,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -25,6 +26,14 @@ pub struct NodeDocumentCapabilities {
     pub max_input_bytes: u64,
     pub max_output_bytes: u64,
     pub max_pages: u32,
+    pub resource_abi: String,
+    pub persistent_resource_cache: bool,
+    pub supported_image_media_types: Vec<String>,
+    /// Remains false until the deterministic renderer has a reviewed embedded
+    /// font ABI. Cached font bytes must never be mistaken for render support.
+    pub font_rendering: bool,
+    pub max_resource_bytes: u64,
+    pub max_resources: u32,
 }
 
 impl NodeDocumentCapabilities {
@@ -40,7 +49,20 @@ impl NodeDocumentCapabilities {
             max_input_bytes: 4 * 1024 * 1024,
             max_output_bytes: u64::try_from(limits.max_output_bytes).unwrap_or(u64::MAX),
             max_pages: u32::try_from(limits.max_pages).unwrap_or(u32::MAX),
+            resource_abi: crate::document_resources::RESOURCE_ABI.into(),
+            persistent_resource_cache: false,
+            supported_image_media_types: vec!["image/jpeg".into()],
+            font_rendering: false,
+            max_resource_bytes: 4 * 1024 * 1024,
+            max_resources: 100,
         }
+    }
+
+    #[must_use]
+    pub const fn with_persistent_resource_cache(mut self, maximum_resource_bytes: u64) -> Self {
+        self.persistent_resource_cache = true;
+        self.max_resource_bytes = maximum_resource_bytes;
+        self
     }
 }
 
@@ -71,6 +93,78 @@ pub enum FallbackReason {
     InvalidExpectedDigest,
     RenderFailed,
     DigestMismatch,
+    ResourceUnavailable,
+}
+
+/// Resource-aware equivalent of [`render_or_fallback`].
+///
+/// Only the renderer's explicit JPEG ABI is passed through. Fonts and all
+/// other cached byte types remain non-renderable and select the server PDF.
+#[must_use]
+pub fn render_with_resources_or_fallback(
+    capabilities: &NodeDocumentCapabilities,
+    requirement: &NodeRenderRequirement,
+    spec: &BusinessDocumentV1,
+    input: &Value,
+    resources: &ResolvedResources,
+) -> NodeRenderResult {
+    if !spec.resources.is_empty() && !capabilities.persistent_resource_cache {
+        return NodeRenderResult::UseServerPdf {
+            reason: FallbackReason::ResourceUnavailable,
+        };
+    }
+    if u32::try_from(spec.resources.len()).unwrap_or(u32::MAX) > capabilities.max_resources {
+        return NodeRenderResult::UseServerPdf {
+            reason: FallbackReason::ResourceUnavailable,
+        };
+    }
+    for resource in spec.resources.values() {
+        let piqae_document_renderer::Resource::Image {
+            media_type,
+            byte_length,
+            ..
+        } = resource;
+        if !capabilities
+            .supported_image_media_types
+            .iter()
+            .any(|supported| supported == media_type)
+            || *byte_length > capabilities.max_resource_bytes
+        {
+            return NodeRenderResult::UseServerPdf {
+                reason: FallbackReason::ResourceUnavailable,
+            };
+        }
+    }
+    if let RenderPlan::ServerPdf { reason } = negotiate(capabilities, requirement) {
+        return NodeRenderResult::UseServerPdf { reason };
+    }
+    let actual_input_bytes = serde_json::to_vec(input)
+        .ok()
+        .and_then(|encoded| u64::try_from(encoded.len()).ok());
+    if actual_input_bytes
+        .is_none_or(|bytes| bytes > requirement.input_bytes || bytes > capabilities.max_input_bytes)
+    {
+        return NodeRenderResult::UseServerPdf {
+            reason: FallbackReason::InputLimit,
+        };
+    }
+    let limits = RenderLimits {
+        max_pages: usize::try_from(requirement.maximum_pages).unwrap_or(usize::MAX),
+        max_output_bytes: usize::try_from(requirement.maximum_pdf_bytes).unwrap_or(usize::MAX),
+        ..RenderLimits::default()
+    };
+    let Ok(pdf) = render_with_resources(spec, input, resources, limits) else {
+        return NodeRenderResult::UseServerPdf {
+            reason: FallbackReason::RenderFailed,
+        };
+    };
+    let actual = format!("{:x}", Sha256::digest(&pdf));
+    if !actual.eq_ignore_ascii_case(&requirement.expected_pdf_sha256) {
+        return NodeRenderResult::UseServerPdf {
+            reason: FallbackReason::DigestMismatch,
+        };
+    }
+    NodeRenderResult::Pdf(pdf)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -261,6 +355,35 @@ mod tests {
                 NodeRenderResult::UseServerPdf { .. }
             ));
         }
+    }
+
+    #[test]
+    fn resource_capability_mismatch_falls_back_before_rendering() {
+        let input = serde_json::json!({"order":"#1001"});
+        let expected = render(&spec(), &input, RenderLimits::default()).expect("fixture render");
+        let mut document = spec();
+        document.resources.insert(
+            "logo".into(),
+            piqae_document_renderer::Resource::Image {
+                digest: format!("sha256:{}", "a".repeat(64)),
+                media_type: "image/jpeg".into(),
+                byte_length: 10,
+            },
+        );
+        let mut capabilities = NodeDocumentCapabilities::local().with_persistent_resource_cache(9);
+        capabilities.supported_image_media_types = vec!["image/jpeg".into()];
+        assert_eq!(
+            render_with_resources_or_fallback(
+                &capabilities,
+                &requirement(&expected),
+                &document,
+                &input,
+                &ResolvedResources::default(),
+            ),
+            NodeRenderResult::UseServerPdf {
+                reason: FallbackReason::ResourceUnavailable
+            }
+        );
     }
 
     #[test]

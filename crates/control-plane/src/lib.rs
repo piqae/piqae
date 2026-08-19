@@ -428,6 +428,10 @@ pub fn router(state: AppState) -> Router {
             "/v1/agent/jobs/{job_id}/content",
             get(api::get_agent_content),
         )
+        .route(
+            "/v1/agent/jobs/{job_id}/resources/{digest}",
+            get(api::get_agent_document_resource),
+        )
         .merge(compatibility_router())
         // A 50 MiB binary payload expands to roughly 66.7 MiB when Base64 is
         // carried in JSON. Direct uploads remain preferred, but compatibility
@@ -863,6 +867,7 @@ mod tests {
             printers: None,
             events: Vec::new(),
             diagnostics: Vec::new(),
+            document_render: piqae_protocol::agent::DocumentRenderCapabilities::default(),
         })
         .expect("sync body");
 
@@ -1505,6 +1510,7 @@ mod tests {
             printers: None,
             events: Vec::new(),
             diagnostics: Vec::new(),
+            document_render: piqae_protocol::agent::DocumentRenderCapabilities::default(),
         };
         let sync_response = application
             .router
@@ -1795,6 +1801,7 @@ mod tests {
             printers: None,
             events: Vec::new(),
             diagnostics: Vec::new(),
+            document_render: piqae_protocol::agent::DocumentRenderCapabilities::default(),
         };
         let body = serde_json::to_vec(&request).expect("sync JSON");
         let response = application
@@ -1980,6 +1987,7 @@ mod tests {
             printers: Some(vec![profiled_printer_snapshot(printer_id)]),
             events: Vec::new(),
             diagnostics: Vec::new(),
+            document_render: piqae_protocol::agent::DocumentRenderCapabilities::default(),
         };
         let body = serde_json::to_vec(&request).expect("sync JSON");
         let sync = application
@@ -2149,6 +2157,7 @@ mod tests {
             printers: Some(vec![profiled_printer_snapshot(printer_id)]),
             events: Vec::new(),
             diagnostics: Vec::new(),
+            document_render: piqae_protocol::agent::DocumentRenderCapabilities::default(),
         };
         let body = serde_json::to_vec(&sync_request).expect("sync JSON");
         let response = application
@@ -2324,6 +2333,7 @@ mod tests {
             printers: Some(vec![profiled_printer_snapshot(printer_id)]),
             events: Vec::new(),
             diagnostics: Vec::new(),
+            document_render: piqae_protocol::agent::DocumentRenderCapabilities::default(),
         };
         let reconnect_body = serde_json::to_vec(&reconnect).expect("reconnect JSON");
         let reconnect_response = application
@@ -2411,6 +2421,7 @@ mod tests {
                     executor_crashes: 0,
                     last_error_code: None,
                 },
+                &piqae_protocol::agent::DocumentRenderCapabilities::default(),
                 Some(std::slice::from_ref(&standby_snapshot)),
             )
             .await
@@ -3369,6 +3380,7 @@ mod tests {
             printers: None,
             events: Vec::new(),
             diagnostics: Vec::new(),
+            document_render: piqae_protocol::agent::DocumentRenderCapabilities::default(),
         };
         let sync_body = serde_json::to_vec(&sync).expect("sync JSON");
         let sync_response = application

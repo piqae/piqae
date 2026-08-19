@@ -32,6 +32,7 @@ piqae-agent-client = { path = "../agent-client", version = "0.1.2" }
 piqae-agent-core = { path = "../agent-core", version = "0.1.2" }
 piqae-agent-storage = { path = "../agent-storage", version = "0.1.2" }
 piqae-domain.workspace = true
+piqae-document-renderer.workspace = true
 piqae-executor-supervisor = { path = "../executor-supervisor", version = "0.1.2" }
 piqae-local-api = { path = "../local-api", version = "0.1.2" }
 piqae-local-ipc = { path = "../local-ipc", version = "0.1.2" }

@@ -22,6 +22,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use uuid::Uuid;
 
 pub mod document_render;
+pub mod document_resources;
 
 #[derive(Debug, Error)]
 pub enum AgentError {

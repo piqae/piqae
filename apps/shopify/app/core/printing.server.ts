@@ -1,5 +1,9 @@
 import { createHash } from "node:crypto";
-import { PiqaeClient, type BusinessDocumentRender } from "@piqae/sdk";
+import {
+  PiqaeClient,
+  type BusinessDocumentRender,
+  type BusinessDocumentRenderCost,
+} from "@piqae/sdk";
 import type { ShopRepository } from "./model";
 import { normalizeShopDomain } from "./model";
 import type { CredentialVault } from "./credentials.server";
@@ -55,10 +59,11 @@ export class ShopifyPrintingService {
     const client = this.clientFactory(
       this.vault.open(link.encryptedCredential, shop),
     );
+    const renderInput = { shop, orders };
     const render = await client.businessDocuments.renders.create(
       {
         template_revision_id: templateRevisionId,
-        input: { shop, orders },
+        input: renderInput,
       },
       `shopify-preview-render-${digest}`,
     );
@@ -81,6 +86,7 @@ export class ShopifyPrintingService {
       previewId: preview.id,
       renderId: completed.id,
       expiresAt: preview.expires_at,
+      renderCost: measuredRenderCost(completed, renderInput, orders.length),
       artifactUrl: this.previewTokens
         ? `${this.appUrl}/api/public/previews/artifact?token=${encodeURIComponent(this.previewTokens.issuePreview({ shop, renderId: completed.id, previewId: preview.id }))}`
         : `${this.appUrl}/api/print/previews/${encodeURIComponent(preview.id)}/artifact?renderId=${encodeURIComponent(completed.id)}`,
@@ -93,6 +99,7 @@ export class ShopifyPrintingService {
     renderId: string;
     printerId: string;
     requestKey: string;
+    renderCost?: BusinessDocumentRenderCost;
   }) {
     const shop = normalizeShopDomain(input.shop);
     if (!(await this.shops.ownsRender(shop, input.renderId)))
@@ -102,6 +109,7 @@ export class ShopifyPrintingService {
     const client = this.clientFactory(
       this.vault.open(link.encryptedCredential, shop),
     );
+    const settings = await this.workflow.getSettings(shop);
     const preview = await client.businessDocuments.previews.retrieve(
       input.previewId,
     );
@@ -109,10 +117,37 @@ export class ShopifyPrintingService {
       throw new Error("Preview not found");
     const approved = await client.businessDocuments.previews.approve(
       input.previewId,
-      { printer_id: input.printerId, title: "Shopify order documents" },
+      {
+        printer_id: input.printerId,
+        title: "Shopify order documents",
+        render_policy: settings.renderExecutionPolicy,
+        render_cost: input.renderCost,
+      },
       input.requestKey,
     );
     return { jobId: approved.job.id, state: approved.preview.state };
+  }
+
+  async renderReadiness(input: {
+    shop: string;
+    renderId: string;
+    printerId: string;
+    renderCost?: BusinessDocumentRenderCost;
+  }) {
+    const shop = normalizeShopDomain(input.shop);
+    if (!(await this.shops.ownsRender(shop, input.renderId)))
+      throw new Error("Preview not found");
+    const link = await this.shops.get(shop);
+    if (!link) throw new Error("Connect a Piqae account before printing");
+    const settings = await this.workflow.getSettings(shop);
+    const client = this.clientFactory(
+      this.vault.open(link.encryptedCredential, shop),
+    );
+    return client.businessDocuments.renders.readiness(input.renderId, {
+      printer_id: input.printerId,
+      render_policy: settings.renderExecutionPolicy,
+      render_cost: input.renderCost,
+    });
   }
 
   async cancelPreview(input: {
@@ -191,10 +226,11 @@ export class ShopifyPrintingService {
     const client = this.clientFactory(
       this.vault.open(link.encryptedCredential, shop),
     );
+    const renderInput = { shop, orders };
     const render = await client.businessDocuments.renders.create(
       {
         template_revision_id: templateRevisionId,
-        input: { shop, orders },
+        input: renderInput,
       },
       `shopify-render-${digest}`,
     );
@@ -212,6 +248,7 @@ export class ShopifyPrintingService {
       ownership,
     );
     if (input.printerId) {
+      const settings = await this.workflow.getSettings(shop);
       const completed = await waitForRender(client, render);
       if (completed.state !== "completed")
         throw new Error(
@@ -222,6 +259,12 @@ export class ShopifyPrintingService {
         {
           printer_id: input.printerId,
           title: `Shopify orders ${orders.map((o) => o.name).join(", ")}`,
+          render_policy: settings.renderExecutionPolicy,
+          render_cost: measuredRenderCost(
+            completed,
+            renderInput,
+            orders.length,
+          ),
         },
         `shopify-print-${digest}-${input.printerId}`,
       );
@@ -247,6 +290,64 @@ export class ShopifyPrintingService {
       downloadUrl: `${this.appUrl}/api/renders/${encodeURIComponent(render.id)}/download`,
     };
   }
+}
+
+function measuredRenderCost(
+  render: BusinessDocumentRender,
+  input: Record<string, unknown>,
+  documentCount: number,
+): BusinessDocumentRenderCost | undefined {
+  const pdfBytes = render.artifact_byte_length;
+  const pageCount = render.page_count;
+  if (
+    !Number.isSafeInteger(pdfBytes) ||
+    !Number.isSafeInteger(pageCount) ||
+    !pdfBytes ||
+    !pageCount
+  )
+    return undefined;
+  return {
+    document_count: documentCount,
+    page_count: pageCount,
+    pdf_bytes: pdfBytes,
+    input_bytes: new TextEncoder().encode(JSON.stringify(input)).byteLength,
+  };
+}
+
+export function parseRenderCost(
+  value: unknown,
+): BusinessDocumentRenderCost | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    throw new Error("render cost is invalid");
+  const candidate = value as Record<string, unknown>;
+  const fields = [
+    "document_count",
+    "page_count",
+    "pdf_bytes",
+    "input_bytes",
+  ] as const;
+  const maxima = {
+    document_count: 10_000,
+    page_count: 100_000,
+    pdf_bytes: 524_288_000,
+    input_bytes: 52_428_800,
+  } as const;
+  if (
+    fields.some(
+      (field) =>
+        !Number.isSafeInteger(candidate[field]) ||
+        Number(candidate[field]) < 1 ||
+        Number(candidate[field]) > maxima[field],
+    )
+  )
+    throw new Error("render cost is invalid");
+  return {
+    document_count: Number(candidate.document_count),
+    page_count: Number(candidate.page_count),
+    pdf_bytes: Number(candidate.pdf_bytes),
+    input_bytes: Number(candidate.input_bytes),
+  };
 }
 
 function stableActivityId(hexDigest: string): string {

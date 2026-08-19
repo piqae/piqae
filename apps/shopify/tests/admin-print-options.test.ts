@@ -42,5 +42,6 @@ describe("admin print options", () => {
     ]);
     expect(result.destinations).toEqual([]);
     expect(result.setupDestinationUrl).toBe("/app/settings");
+    expect(result.renderExecutionPolicy).toBe("automatic");
   });
 });

@@ -11,7 +11,13 @@ export type MerchantSettings = {
   offerPdf: boolean;
   metafieldAllowlist: string[];
   retentionDays: number;
+  renderExecutionPolicy: RenderExecutionPolicy;
 };
+export type RenderExecutionPolicy =
+  | "automatic"
+  | "cloud_only"
+  | "prefer_node"
+  | "require_node";
 export type MerchantTemplate = {
   id: string;
   name: string;
@@ -59,6 +65,7 @@ const DEFAULT_SETTINGS: MerchantSettings = {
   offerPdf: true,
   metafieldAllowlist: [],
   retentionDays: 30,
+  renderExecutionPolicy: "automatic",
 };
 const DEFAULT_BILLING: BillingState = {
   mode: "existing_piqae",
@@ -211,7 +218,7 @@ export class PostgresWorkflowRepository implements WorkflowRepository {
   constructor(private pool: Pool) {}
   async getSettings(shop: string) {
     const result = await this.pool.query(
-      "SELECT default_printer_id,default_template_id,prefer_direct,offer_pdf,metafield_allowlist,retention_days FROM shopify_merchant_settings WHERE shop=$1",
+      "SELECT default_printer_id,default_template_id,prefer_direct,offer_pdf,metafield_allowlist,retention_days,render_execution_policy FROM shopify_merchant_settings WHERE shop=$1",
       [normalizeShopDomain(shop)],
     );
     const r = result.rows[0];
@@ -223,12 +230,15 @@ export class PostgresWorkflowRepository implements WorkflowRepository {
           offerPdf: r.offer_pdf,
           metafieldAllowlist: r.metafield_allowlist ?? [],
           retentionDays: r.retention_days,
+          renderExecutionPolicy: parseRenderExecutionPolicy(
+            r.render_execution_policy,
+          ),
         }
       : structuredClone(DEFAULT_SETTINGS);
   }
   async saveSettings(shop: string, v: MerchantSettings) {
     await this.pool.query(
-      "INSERT INTO shopify_merchant_settings(shop,default_printer_id,default_template_id,prefer_direct,offer_pdf,metafield_allowlist,retention_days) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(shop) DO UPDATE SET default_printer_id=EXCLUDED.default_printer_id,default_template_id=EXCLUDED.default_template_id,prefer_direct=EXCLUDED.prefer_direct,offer_pdf=EXCLUDED.offer_pdf,metafield_allowlist=EXCLUDED.metafield_allowlist,retention_days=EXCLUDED.retention_days,updated_at=now()",
+      "INSERT INTO shopify_merchant_settings(shop,default_printer_id,default_template_id,prefer_direct,offer_pdf,metafield_allowlist,retention_days,render_execution_policy) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(shop) DO UPDATE SET default_printer_id=EXCLUDED.default_printer_id,default_template_id=EXCLUDED.default_template_id,prefer_direct=EXCLUDED.prefer_direct,offer_pdf=EXCLUDED.offer_pdf,metafield_allowlist=EXCLUDED.metafield_allowlist,retention_days=EXCLUDED.retention_days,render_execution_policy=EXCLUDED.render_execution_policy,updated_at=now()",
       [
         normalizeShopDomain(shop),
         v.defaultPrinterId || null,
@@ -237,6 +247,7 @@ export class PostgresWorkflowRepository implements WorkflowRepository {
         v.offerPdf,
         v.metafieldAllowlist,
         v.retentionDays,
+        v.renderExecutionPolicy,
       ],
     );
   }
@@ -454,7 +465,25 @@ export function parseSettings(form: FormData): MerchantSettings {
     offerPdf: form.get("offerPdf") === "on",
     metafieldAllowlist: [...new Set(fields)],
     retentionDays: retention,
+    renderExecutionPolicy: parseRenderExecutionPolicy(
+      form.get("renderExecutionPolicy"),
+    ),
   };
+}
+export function parseRenderExecutionPolicy(
+  value: FormDataEntryValue | string | null | undefined,
+): RenderExecutionPolicy {
+  if (value === null || value === undefined || value === "") return "automatic";
+  if (
+    value === "automatic" ||
+    value === "cloud_only" ||
+    value === "prefer_node" ||
+    value === "require_node"
+  )
+    return value;
+  throw new Error(
+    "Render location must be Automatic, Cloud only, Prefer node, or Require node",
+  );
 }
 export function bounded(
   form: FormData,

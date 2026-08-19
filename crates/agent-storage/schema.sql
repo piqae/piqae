@@ -15,6 +15,25 @@ VALUES (3, CAST(unixepoch('subsec') * 1000 AS INTEGER));
 INSERT OR IGNORE INTO schema_migrations (version, applied_unix_ms)
 VALUES (4, CAST(unixepoch('subsec') * 1000 AS INTEGER));
 
+INSERT OR IGNORE INTO schema_migrations (version, applied_unix_ms)
+VALUES (5, CAST(unixepoch('subsec') * 1000 AS INTEGER));
+
+CREATE TABLE IF NOT EXISTS document_resources (
+  digest TEXT PRIMARY KEY CHECK (
+    length(digest) = 64 AND digest NOT GLOB '*[^0-9a-f]*'
+  ),
+  media_type TEXT NOT NULL CHECK (length(trim(media_type)) > 0),
+  byte_length INTEGER NOT NULL CHECK (byte_length >= 0),
+  relative_path TEXT NOT NULL UNIQUE CHECK (length(trim(relative_path)) > 0),
+  verified_unix_ms INTEGER NOT NULL,
+  last_accessed_unix_ms INTEGER NOT NULL,
+  reference_count INTEGER NOT NULL DEFAULT 0 CHECK (reference_count >= 0),
+  evicting INTEGER NOT NULL DEFAULT 0 CHECK (evicting IN (0, 1))
+);
+
+CREATE INDEX IF NOT EXISTS document_resources_lru
+  ON document_resources (reference_count, last_accessed_unix_ms, digest);
+
 CREATE TABLE IF NOT EXISTS identity (
   key TEXT PRIMARY KEY,
   value BLOB NOT NULL,
