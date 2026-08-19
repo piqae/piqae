@@ -99,6 +99,25 @@ Railway injects `RAILWAY_GIT_COMMIT_SHA`. `/healthz` returns that revision, and
 the GitHub deploy workflow refuses to update Shopify until it equals the
 reviewed source commit.
 
+## One-time Piqae platform setup
+
+The production operator role account is `admin@piqae.com`. This is an identity
+reference only; passwords, recovery material, sessions and platform keys never
+belong in this repository or an operations ticket.
+
+1. Sign in to `https://app.piqae.com/dashboard/settings` as that role account.
+2. Enable the Advanced platform integration and capture its one-time
+   `piq_platform_…` service-account key.
+3. Store it only as the protected Railway Shopify-service variable
+   `PIQAE_SHOPIFY_PLATFORM_KEY`.
+4. Verify an installed Dev Store receives an isolated child workspace, Live and
+   Test environments, starter templates, and a short-lived node connection
+   session without asking the merchant for a Piqae credential.
+
+The role account owns the integration; individual Shopify merchants do not
+create Piqae accounts. Use `/auth/logout?return_to=/login` to change dashboard
+operator identity.
+
 ## Daily development
 
 ```console
