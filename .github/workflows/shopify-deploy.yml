@@ -1,0 +1,201 @@
+name: Deploy Shopify app
+
+on:
+  workflow_call:
+    inputs:
+      target:
+        description: GitHub/Railway/Shopify environment name
+        required: true
+        type: string
+      source_ref:
+        description: Full reviewed commit SHA
+        required: true
+        type: string
+      version:
+        description: SemVer release label
+        required: true
+        type: string
+      confirm:
+        description: Production confirmation phrase
+        required: false
+        default: ""
+        type: string
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Deployment target
+        required: true
+        default: production
+        type: choice
+        options:
+          - production
+          - staging
+      source_ref:
+        description: Full 40-character reviewed main commit SHA
+        required: true
+        type: string
+      version:
+        description: SemVer release label, for example 0.2.0-beta.1
+        required: true
+        type: string
+      confirm:
+        description: Type RELEASE-SHOPIFY for production
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: shopify-${{ inputs.target }}-deployment
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy Shopify ${{ inputs.target }}
+    if: inputs.target != 'production' || inputs.confirm == 'RELEASE-SHOPIFY'
+    environment: shopify-${{ inputs.target }}
+    runs-on: ${{ vars.PIQAE_CI_LINUX_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 45
+    env:
+      SHOPIFY_APP_AUTOMATION_TOKEN: ${{ secrets.SHOPIFY_APP_AUTOMATION_TOKEN }}
+      SHOPIFY_CLIENT_ID: ${{ vars.SHOPIFY_CLIENT_ID }}
+      SHOPIFY_APP_URL: ${{ vars.SHOPIFY_APP_URL }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.source_ref }}
+          fetch-depth: 0
+      - name: Resolve and validate the reviewed release identity
+        id: release
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          REQUESTED_SHA: ${{ inputs.source_ref }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$REQUESTED_SHA" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo 'source_ref must be a full 40-character commit SHA.' >&2
+            exit 1
+          fi
+          if [[ ! "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Version must be SemVer-like; received '$RELEASE_VERSION'." >&2
+            exit 1
+          fi
+          sha=$(git rev-parse HEAD)
+          if [[ "${REQUESTED_SHA,,}" != "$sha" ]]; then
+            echo "Checked out $sha but release requested $REQUESTED_SHA." >&2
+            exit 1
+          fi
+          git fetch origin main --no-tags
+          if ! git merge-base --is-ancestor "$sha" origin/main; then
+            echo "Shopify releases must use a commit already merged to main." >&2
+            exit 1
+          fi
+          short_sha=${sha:0:12}
+          shopify_version="${RELEASE_VERSION}-${short_sha}"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "short_sha=$short_sha" >> "$GITHUB_OUTPUT"
+          echo "shopify_version=$shopify_version" >> "$GITHUB_OUTPUT"
+      - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
+        with:
+          version: 11.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Re-run the bounded Shopify release gate
+        run: |
+          pnpm --filter @piqae/sdk build
+          pnpm --filter @piqae/shopify-app check
+          pnpm --filter @piqae/shopify-app test
+          pnpm --filter @piqae/shopify-app build
+      - name: Require the exact reviewed runtime to be healthy
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ steps.release.outputs.sha }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$SHOPIFY_APP_URL" || "$SHOPIFY_APP_URL" != https://* ]]; then
+            echo 'SHOPIFY_APP_URL must be a protected HTTPS environment variable.' >&2
+            exit 1
+          fi
+          for attempt in {1..60}; do
+            body=$(curl --fail --silent --show-error --max-time 10 \
+              "$SHOPIFY_APP_URL/healthz" || true)
+            if jq -e --arg sha "$EXPECTED_SHA" \
+              '.status == "ok" and .service == "piqae-shopify" and .revision == $sha' \
+              <<<"$body" >/dev/null 2>&1; then
+              exit 0
+            fi
+            sleep 15
+          done
+          echo "Railway did not expose reviewed Shopify commit $EXPECTED_SHA." >&2
+          exit 1
+      - name: Render and validate the protected Shopify configuration
+        working-directory: apps/shopify
+        run: |
+          pnpm release:config
+          pnpm --package=@shopify/cli@4.6.1 dlx shopify app config validate \
+            --config release --no-color
+      - name: Create an unreleased Shopify app version
+        working-directory: apps/shopify
+        env:
+          SHOPIFY_VERSION: ${{ steps.release.outputs.shopify_version }}
+          SOURCE_URL: https://github.com/${{ github.repository }}/commit/${{ steps.release.outputs.sha }}
+        run: |
+          pnpm --package=@shopify/cli@4.6.1 dlx shopify app deploy \
+            --config release \
+            --no-release \
+            --no-color \
+            --version "$SHOPIFY_VERSION" \
+            --message "Piqae ${{ inputs.target }} from ${{ steps.release.outputs.short_sha }}" \
+            --source-control-url "$SOURCE_URL"
+      - name: Release the verified Shopify app version
+        working-directory: apps/shopify
+        env:
+          SHOPIFY_VERSION: ${{ steps.release.outputs.shopify_version }}
+        run: |
+          pnpm --package=@shopify/cli@4.6.1 dlx shopify app release \
+            --config release \
+            --allow-updates \
+            --no-color \
+            --version "$SHOPIFY_VERSION"
+      - name: Record non-secret deployment evidence
+        env:
+          RELEASE_SHA: ${{ steps.release.outputs.sha }}
+          SHOPIFY_VERSION: ${{ steps.release.outputs.shopify_version }}
+          TARGET: ${{ inputs.target }}
+        run: |
+          mkdir -p artifacts/shopify
+          jq -n \
+            --arg target "$TARGET" \
+            --arg commit "$RELEASE_SHA" \
+            --arg version "$SHOPIFY_VERSION" \
+            --arg run "https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            --arg deployed_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '{schema: 1, target: $target, commit: $commit, shopify_version: $version, workflow_run: $run, deployed_at: $deployed_at}' \
+            > artifacts/shopify/deployment.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: shopify-${{ inputs.target }}-${{ steps.release.outputs.shopify_version }}
+          path: artifacts/shopify/deployment.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: Tag a successful production release
+        if: inputs.target == 'production'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ steps.release.outputs.sha }}
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          tag="shopify-v${RELEASE_VERSION}"
+          if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1; then
+            echo "Release tag $tag already exists; leaving it unchanged."
+            exit 0
+          fi
+          git tag "$tag" "$RELEASE_SHA"
+          git push origin "refs/tags/$tag"
+          gh release create "$tag" --verify-tag --generate-notes \
+            --title "Piqae Shopify ${RELEASE_VERSION}"

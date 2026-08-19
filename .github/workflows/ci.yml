@@ -322,6 +322,15 @@ jobs:
       - run: pnpm --filter @piqae/shopify-app test
       - run: pnpm --filter @piqae/shopify-app test:postgres
       - run: pnpm --filter @piqae/shopify-app format:check
+      - name: Verify fail-closed release configuration rendering
+        working-directory: apps/shopify
+        env:
+          SHOPIFY_CLIENT_ID: ci-client-id
+          SHOPIFY_APP_URL: https://shopify-ci.example.com
+        run: |
+          pnpm release:config
+          ! grep -Eq 'example\.invalid|development-client-id' shopify.app.release.toml
+          grep -F 'https://shopify-ci.example.com/auth/callback' shopify.app.release.toml
       - run: pnpm --filter @piqae/shopify-app build
 
   openapi:
