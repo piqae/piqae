@@ -42,6 +42,14 @@ const shopify = shopifyApp({
       // Webhooks are app-specific subscriptions managed by the released
       // shopify.app TOML. registerWebhooks is only for shop-specific runtime
       // subscriptions and can fail an otherwise successful installation.
+      try {
+        const { createProductionServices } = await import("./services.server");
+        await createProductionServices().managedAccounts.ensure(session.shop);
+      } catch {
+        // Installation must remain recoverable during a transient Piqae outage.
+        // Authenticated app loaders retry the idempotent provisioning operation.
+        console.error("Managed Piqae account provisioning was deferred");
+      }
     },
   },
 });

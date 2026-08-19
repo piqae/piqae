@@ -6,7 +6,6 @@ import {
   hostedPricingUrl,
   MANAGED_PLANS,
 } from "../core/shopify-app-pricing.server";
-import { createProductionServices } from "../services.server";
 const DISPLAY_PLANS = ["starter", "growth", "scale"] as const;
 function required(name: string) {
   const value = process.env[name];
@@ -23,26 +22,6 @@ export async function loader({ request }: LoaderFunctionArgs) {
 export async function action({ request }: ActionFunctionArgs) {
   const { session, redirect } = await shopify.authenticate.admin(request);
   const plan = String((await request.formData()).get("plan") ?? "");
-  if (plan === "free") {
-    const link = await createProductionServices().repository.get(session.shop);
-    if (!link)
-      return Response.json(
-        {
-          error:
-            "Connect an active Piqae subscription before selecting the free existing-account option.",
-        },
-        { status: 409 },
-      );
-    const previous = await workflows().getBilling(session.shop);
-    await workflows().saveBilling(session.shop, {
-      mode: "existing_piqae",
-      plan: "free",
-      used: previous.used,
-      limit: 50,
-      status: "active",
-    });
-    return redirect("/app/settings");
-  }
   if (!(plan in MANAGED_PLANS))
     return Response.json({ error: "Unknown plan" }, { status: 400 });
   return redirect(
@@ -67,10 +46,6 @@ export default function Billing() {
             {billing.status}.
           </s-paragraph>
           <div className="piqae-grid">
-            <Form method="post">
-              <input type="hidden" name="plan" value="free" />
-              <s-button type="submit">Use existing Piqae subscription</s-button>
-            </Form>
             {DISPLAY_PLANS.map((plan) => (
               <Form method="post" key={plan}>
                 <input type="hidden" name="plan" value={plan} />
@@ -82,8 +57,8 @@ export default function Billing() {
           </div>
           <s-paragraph>
             Paid plans are selected and approved on Shopify's hosted pricing
-            page. Configure each plan welcome link as `/app/billing/confirm`;
-            activation requires a separate authenticated POST confirmation.
+            page. Your isolated Piqae printing workspace is included and does
+            not require a separate account or subscription.
           </s-paragraph>
         </s-stack>
       </s-section>

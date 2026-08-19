@@ -1,5 +1,5 @@
 import { PiqaeClient } from "@piqae/sdk";
-import type { ShopRepository } from "./model";
+import type { ShopLink, ShopRepository } from "./model";
 import type { CredentialVault } from "./credentials.server";
 import {
   parseTemplateEnvelope,
@@ -16,6 +16,7 @@ export async function publishCanonicalTemplate(input: {
   vault: CredentialVault;
   baseUrl: string;
   clientFactory?: (token: string) => PiqaeClient;
+  managedClientFactory?: (link: ShopLink) => PiqaeClient;
   assetFetcher?: typeof fetchTemplateAsset;
 }): Promise<string> {
   const link = await input.shops.get(input.shop);
@@ -23,13 +24,20 @@ export async function publishCanonicalTemplate(input: {
     throw new Error("Connect a Piqae account before publishing a document");
   const envelope = parseTemplateEnvelope(input.source);
   const canonicalDigest = templateDigest(JSON.stringify(envelope.document));
-  const token = input.vault.open(link.encryptedCredential, input.shop);
-  const client = input.clientFactory
-    ? input.clientFactory(token)
-    : new PiqaeClient({
-        baseUrl: input.baseUrl,
-        accessToken: () => token,
-      });
+  const token =
+    link.entitlementMode === "shopify_child"
+      ? null
+      : input.vault.open(link.encryptedCredential, input.shop);
+  const client =
+    link.entitlementMode === "shopify_child"
+      ? input.managedClientFactory?.(link)
+      : input.clientFactory
+        ? input.clientFactory(token!)
+        : new PiqaeClient({
+            baseUrl: input.baseUrl,
+            accessToken: () => token!,
+          });
+  if (!client) throw new Error("PIQAE_MANAGED_ACCOUNT_NOT_READY");
   const fetchAsset = input.assetFetcher ?? fetchTemplateAsset;
   await mapWithConcurrency(envelope.assets, 4, async (asset) => {
     const bytes = await fetchAsset(asset);

@@ -8,28 +8,52 @@ import { createProductionServices } from "../services.server";
 export async function loader({ request }: LoaderFunctionArgs) {
   const { session } = await shopify.authenticate.admin(request);
   const services = createProductionServices();
-  return {
-    settings: await workflows().getSettings(session.shop),
-    connected: Boolean(await services.repository.get(session.shop)),
-    runtime: services.runtime.mode,
-  };
+  try {
+    const link = await services.managedAccounts.ensure(session.shop);
+    const client = services.managedAccounts.client(link);
+    const [nodes, printers] = await Promise.all([
+      client.nodes.list(),
+      client.printers.list(),
+    ]);
+    return {
+      settings: await workflows().getSettings(session.shop),
+      connected: true,
+      runtime: services.runtime.mode,
+      nodes,
+      printers: printers.data,
+      setupError: "",
+    };
+  } catch {
+    return {
+      settings: await workflows().getSettings(session.shop),
+      connected: false,
+      runtime: services.runtime.mode,
+      nodes: [],
+      printers: [],
+      setupError:
+        "Your managed printing workspace is still being prepared. Retry shortly.",
+    };
+  }
 }
 export async function action({ request }: ActionFunctionArgs) {
   const { session, admin } = await shopify.authenticate.admin(request);
   try {
     const form = await request.formData();
-    if (form.get("intent") === "link-piqae") {
-      await createProductionServices().accountLinker.linkExisting(
-        session.shop,
-        String(form.get("credential") ?? ""),
-      );
-      await syncTemplateIndex(admin, workflows(), session.shop);
-      return { ok: true, error: "", linked: true };
+    if (form.get("intent") === "connect-node") {
+      const services = createProductionServices();
+      const link = await services.managedAccounts.ensure(session.shop);
+      const connection = await services.managedAccounts
+        .client(link)
+        .connectSessions.create({
+          return_url: `${process.env.SHOPIFY_APP_URL}/app/settings`,
+          expires_in_seconds: 600,
+        });
+      return { ok: true, error: "", connection };
     }
     const settings = parseSettings(form);
     await workflows().saveSettings(session.shop, settings);
     await syncTemplateIndex(admin, workflows(), session.shop);
-    return { ok: true, error: "", linked: false };
+    return { ok: true, error: "", connection: null };
   } catch (error) {
     return Response.json(
       {
@@ -44,41 +68,48 @@ export async function action({ request }: ActionFunctionArgs) {
   }
 }
 export default function Settings() {
-  const { settings, connected, runtime } = useLoaderData<typeof loader>();
+  const { settings, connected, runtime, nodes, printers, setupError } =
+    useLoaderData<typeof loader>();
   const result = useActionData<typeof action>();
   return (
     <s-page heading="Settings">
-      <s-section heading="Piqae connection">
+      <s-section heading="Printers">
         <s-stack direction="block" gap="base">
           <s-banner tone={connected ? "success" : "warning"}>
             {connected
-              ? `Connected to the ${runtime} Piqae environment.`
-              : `No account is connected to the ${runtime} Piqae environment.`}
+              ? `${nodes.length} node${nodes.length === 1 ? "" : "s"} and ${printers.length} printer${printers.length === 1 ? "" : "s"} connected.`
+              : setupError}
           </s-banner>
-          {!connected ? (
-            <Form method="post">
-              <input type="hidden" name="intent" value="link-piqae" />
-              <label>
-                Piqae API key
-                <input
-                  className="piqae-input"
-                  type="password"
-                  name="credential"
-                  minLength={16}
-                  maxLength={4096}
-                  autoComplete="off"
-                  required
-                />
-              </label>
+          <s-paragraph>
+            Your Piqae workspace is managed automatically by this Shopify app.
+            No separate Piqae account or API key is required.
+          </s-paragraph>
+          <Form method="post">
+            <input type="hidden" name="intent" value="connect-node" />
+            <s-button type="submit" variant="primary" disabled={!connected}>
+              Connect this computer
+            </s-button>
+          </Form>
+          {result?.connection ? (
+            <s-stack direction="block" gap="base">
+              {result.connection.connect_url ? (
+                <s-button
+                  href={result.connection.connect_url}
+                  variant="primary"
+                >
+                  Open Piqae Node
+                </s-button>
+              ) : null}
+              {result.connection.downloads.map((download) => (
+                <s-button key={download.platform} href={download.url}>
+                  Download for {download.platform}
+                </s-button>
+              ))}
               <s-paragraph>
-                The key is verified against Piqae, encrypted for this shop, and
-                never returned to Shopify Admin. Linking also publishes the
-                default invoice so preview works immediately.
+                This connection link expires in 10 minutes and can connect only
+                to this store's isolated printing workspace.
               </s-paragraph>
-              <s-button type="submit" variant="primary">
-                Connect Piqae
-              </s-button>
-            </Form>
+            </s-stack>
           ) : null}
         </s-stack>
       </s-section>

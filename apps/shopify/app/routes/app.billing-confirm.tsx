@@ -7,6 +7,7 @@ import {
   MANAGED_PLANS,
 } from "../core/shopify-app-pricing.server";
 import { workflows } from "../core/workflows.server";
+import { createProductionServices } from "../services.server";
 function required(name: string) {
   const value = process.env[name];
   if (!value) throw new Error(`${name} is required`);
@@ -50,6 +51,9 @@ export async function action({ request }: ActionFunctionArgs) {
     returnedHandle: planHandle,
   });
   const previous = await workflows().getBilling(session.shop);
+  const services = createProductionServices();
+  const link = await services.managedAccounts.ensure(session.shop);
+  await services.repository.put({ ...link, planHandle: plan });
   await workflows().saveBilling(session.shop, {
     mode: "shopify_child",
     plan,

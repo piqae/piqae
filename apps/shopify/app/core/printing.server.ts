@@ -4,7 +4,7 @@ import {
   type BusinessDocumentRender,
   type BusinessDocumentRenderCost,
 } from "@piqae/sdk";
-import type { ShopRepository } from "./model";
+import type { ShopLink, ShopRepository } from "./model";
 import { normalizeShopDomain } from "./model";
 import type { CredentialVault } from "./credentials.server";
 import {
@@ -29,7 +29,19 @@ export class ShopifyPrintingService {
     private readonly appUrl: string,
     private readonly previewTokens?: Pick<DownloadTokenVault, "issuePreview">,
     private readonly workflow: WorkflowRepository = workflows(),
+    private readonly managedClientFactory?: (link: ShopLink) => Client,
   ) {}
+
+  private clientFor(link: ShopLink, shop: string): Client {
+    if (link.entitlementMode === "shopify_child") {
+      if (!this.managedClientFactory)
+        throw new Error("PIQAE_MANAGED_ACCOUNT_NOT_READY");
+      return this.managedClientFactory(link);
+    }
+    if (!link.encryptedCredential)
+      throw new Error("PIQAE_ACCOUNT_CREDENTIAL_MISSING");
+    return this.clientFactory(this.vault.open(link.encryptedCredential, shop));
+  }
   async previewOrders(input: {
     admin: AdminGraphql;
     shop: string;
@@ -56,9 +68,7 @@ export class ShopifyPrintingService {
         }),
       )
       .digest("hex");
-    const client = this.clientFactory(
-      this.vault.open(link.encryptedCredential, shop),
-    );
+    const client = this.clientFor(link, shop);
     const renderInput = { shop, orders };
     const render = await client.businessDocuments.renders.create(
       {
@@ -106,9 +116,7 @@ export class ShopifyPrintingService {
       throw new Error("Preview not found");
     const link = await this.shops.get(shop);
     if (!link) throw new Error("Connect a Piqae account before printing");
-    const client = this.clientFactory(
-      this.vault.open(link.encryptedCredential, shop),
-    );
+    const client = this.clientFor(link, shop);
     const settings = await this.workflow.getSettings(shop);
     const preview = await client.businessDocuments.previews.retrieve(
       input.previewId,
@@ -140,9 +148,7 @@ export class ShopifyPrintingService {
     const link = await this.shops.get(shop);
     if (!link) throw new Error("Connect a Piqae account before printing");
     const settings = await this.workflow.getSettings(shop);
-    const client = this.clientFactory(
-      this.vault.open(link.encryptedCredential, shop),
-    );
+    const client = this.clientFor(link, shop);
     return client.businessDocuments.renders.readiness(input.renderId, {
       printer_id: input.printerId,
       render_policy: settings.renderExecutionPolicy,
@@ -161,9 +167,7 @@ export class ShopifyPrintingService {
       throw new Error("Preview not found");
     const link = await this.shops.get(shop);
     if (!link) throw new Error("Preview not found");
-    const client = this.clientFactory(
-      this.vault.open(link.encryptedCredential, shop),
-    );
+    const client = this.clientFor(link, shop);
     const preview = await client.businessDocuments.previews.retrieve(
       input.previewId,
     );
@@ -223,9 +227,7 @@ export class ShopifyPrintingService {
         }),
       )
       .digest("hex");
-    const client = this.clientFactory(
-      this.vault.open(link.encryptedCredential, shop),
-    );
+    const client = this.clientFor(link, shop);
     const renderInput = { shop, orders };
     const render = await client.businessDocuments.renders.create(
       {

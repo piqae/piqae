@@ -2,6 +2,8 @@ export interface ShopLink {
   shop: string;
   piqaeAccountId: string;
   encryptedCredential: string;
+  piqaeLiveEnvironmentId?: string | null;
+  piqaeTestEnvironmentId?: string | null;
   templateRevisionId: string;
   entitlementMode?: "existing_piqae" | "shopify_child";
   planHandle?: string | null;

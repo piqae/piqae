@@ -30,6 +30,10 @@ const migration3 = await readFile(
   path.join(root, "migrations/0003_render_execution_policy.sql"),
   "utf8",
 );
+const migration4 = await readFile(
+  path.join(root, "migrations/0004_managed_piqae_accounts.sql"),
+  "utf8",
+);
 const suffix = randomBytes(8).toString("hex");
 const schemas = [
   `piqae_shopify_fresh_${suffix}`,
@@ -90,6 +94,32 @@ async function assertions(client) {
   );
   if (link.rowCount !== 0)
     throw new Error("settings unexpectedly created a Piqae link");
+  await client.query(
+    "INSERT INTO shopify_shop_links(shop,piqae_account_id,encrypted_credential,template_revision_id,entitlement_mode,plan_handle,piqae_live_environment_id,piqae_test_environment_id) VALUES($1,$2,NULL,$3,'shopify_child','development',$4,$5)",
+    [
+      "alpha.myshopify.com",
+      "acct_alpha",
+      "rev_alpha",
+      "env_live_alpha",
+      "env_test_alpha",
+    ],
+  );
+  const managed = await client.query(
+    "SELECT encrypted_credential,piqae_live_environment_id,piqae_test_environment_id FROM shopify_shop_links WHERE shop=$1",
+    ["alpha.myshopify.com"],
+  );
+  if (
+    managed.rows[0]?.encrypted_credential !== null ||
+    managed.rows[0]?.piqae_live_environment_id !== "env_live_alpha" ||
+    managed.rows[0]?.piqae_test_environment_id !== "env_test_alpha"
+  )
+    throw new Error("managed Piqae account context was not retained");
+  await rejects(
+    client,
+    "INSERT INTO shopify_shop_links(shop,piqae_account_id,encrypted_credential,template_revision_id,entitlement_mode,plan_handle) VALUES($1,$2,NULL,$3,'shopify_child','development')",
+    ["beta.myshopify.com", "acct_beta", "rev_beta"],
+    "23514",
+  );
 
   const templateId = "11111111-1111-4111-8111-111111111111";
   await client.query(
@@ -129,6 +159,7 @@ try {
       }
       await client.query(migration2);
       await client.query(migration3);
+      await client.query(migration4);
       if (index === 1) {
         const retained = await client.query(
           "SELECT state FROM shopify_installations WHERE shop=$1",

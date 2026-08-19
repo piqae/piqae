@@ -16,19 +16,10 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
       { error: "Piqae account is not connected" },
       { status: 409 },
     );
-  const credential = services.vault.open(
-    link.encryptedCredential,
-    session.shop,
-  );
+  const client = services.clientForLink(link);
   let upstream: Response | undefined;
   for (let attempt = 0; attempt < 20; attempt += 1) {
-    upstream = await fetch(
-      `${services.baseUrl}/v1/document-renders/${encodeURIComponent(renderId)}/artifact`,
-      {
-        headers: { authorization: `Bearer ${credential}` },
-        signal: AbortSignal.timeout(10_000),
-      },
-    );
+    upstream = await client.businessDocuments.renders.download(renderId);
     if (upstream.ok || upstream.status !== 409) break;
     await new Promise((resolve) =>
       setTimeout(resolve, Math.min(2_000, 100 * 2 ** attempt)),

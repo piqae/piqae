@@ -7,4 +7,7 @@ process.env.PIQAE_SHOPIFY_CREDENTIAL_KEY ??= Buffer.alloc(32, 1).toString(
 process.env.PIQAE_SHOPIFY_DOWNLOAD_KEY ??= Buffer.alloc(32, 2).toString(
   "base64",
 );
+process.env.PIQAE_SHOPIFY_PLATFORM_KEY ??= ["piq", "platform", "fixture"].join(
+  "_",
+);
 process.env.NODE_ENV = "test";
