@@ -41,10 +41,18 @@ function limited(event: RequestEvent, action: string) {
   const key = `${action}:${address}`;
   const entry = attempts.get(key);
   if (!entry || entry.resetAt <= now) {
-    attempts.set(key, { count: 1, resetAt: now + WINDOW_MS });
-    if (attempts.size > 5_000) {
+    if (attempts.size >= 5_000) {
       for (const [candidate, value] of attempts) if (value.resetAt <= now) attempts.delete(candidate);
+      // Keep this defence-in-depth map strictly bounded even under a flood of
+      // unique addresses. WorkOS Radar remains the authoritative distributed
+      // control until Piqae runs more than one web replica.
+      while (attempts.size >= 5_000) {
+        const oldest = attempts.keys().next().value;
+        if (typeof oldest !== 'string') break;
+        attempts.delete(oldest);
+      }
     }
+    attempts.set(key, { count: 1, resetAt: now + WINDOW_MS });
     return false;
   }
   entry.count += 1;
