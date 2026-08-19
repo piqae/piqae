@@ -22,6 +22,7 @@ jobs:
   candidate:
     name: Universal macOS candidate
     runs-on: ${{ vars.PIQAE_RELEASE_MACOS_RUNNER || 'macos-15' }}
+    timeout-minutes: 60
     environment: native-signing
     outputs:
       artifact_name: ${{ steps.gate.outputs.artifact_name }}
@@ -565,6 +566,7 @@ jobs:
     # publish_verified below so normal and recovery promotions cannot diverge.
     if: false
     runs-on: ${{ vars.PIQAE_RELEASE_LINUX_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 30
     environment: native-release
     permissions:
       contents: write

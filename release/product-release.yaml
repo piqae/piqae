@@ -1,0 +1,66 @@
+schema_version: 1
+
+# One product release is built from one reviewed commit. Package versions may
+# advance independently, but the API and node protocol compatibility declared
+# here must be true before a v* product tag can publish.
+contracts:
+  api:
+    current: 1
+    supported: [1]
+  node:
+    current: 1
+    supported: [1]
+
+components:
+  control_plane:
+    version_file: Cargo.toml
+    version_kind: cargo_workspace
+    consumes:
+      api: 1
+      node: 1
+  web:
+    version_file: apps/web/package.json
+    version_kind: npm
+    consumes:
+      api: 1
+  sdk:
+    version_file: sdk/typescript/package.json
+    version_kind: npm
+    consumes:
+      api: 1
+  mcp:
+    version_file: apps/mcp/package.json
+    version_kind: npm
+    consumes:
+      api: 1
+    depends_on: [sdk]
+  node:
+    version_file: Cargo.toml
+    version_kind: cargo_workspace
+    consumes:
+      node: 1
+  shopify:
+    version_file: apps/shopify/package.json
+    version_kind: npm
+    consumes:
+      api: 1
+    depends_on: [control_plane]
+    # Structural CI can validate this manifest before the Shopify worktree is
+    # merged. A product release is fail-closed until the component is present.
+    required_for_product_release: true
+
+deployment:
+  order:
+    - migrations
+    - control_plane
+    - workers
+    - web
+    - shopify
+    - node_canary
+  health_gates:
+    control_plane: /v1/ready
+    web: /healthz
+  rollback:
+    application: previous_immutable_digest
+    database: forward_only
+

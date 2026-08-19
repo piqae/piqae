@@ -37,10 +37,24 @@ three open pull requests so one weekly dependency burst does not multiply full
 CI runs.
 
 The supply-chain workflow is the sole owner of dependency policy and secret
-history checks. Its weekly run also performs the slower advisory scan, source
+history checks.
+
+Both required workflows also subscribe to GitHub's `merge_group` event. This is
+required when merge queue is enabled: otherwise the queue creates a synthetic
+merge commit for which the required contexts are never reported. The
+classifier uses the merge group's explicit base and head SHAs, so queue runs
+remain path-scoped instead of falling back to the full matrix.
+
+The weekly supply-chain workflow performs the slower advisory scan, source
 SBOM, complete secret-history scan, and public updater-feed smoke test. PRs scan
 only their changed Git history and run dependency policy only when dependency
 or workflow files changed.
+
+Dependency license/source policy has one owner: `Supply-chain policy`. Do not
+add `cargo deny` back to the ordinary CI workflow. Running it in both workflows
+duplicated the tool installation and dependency graph scan without adding an
+independent gate. The aggregate `Supply-chain result` carries that result into
+branch protection.
 
 Only `CI result` and `Supply-chain result` should be required after the first
 green `main` run containing the aggregate jobs. Individual platform jobs are
@@ -134,6 +148,14 @@ enabling it:
 - [Blacksmith pricing](https://www.blacksmith.sh/pricing)
 - [GitHub Actions billing](https://docs.github.com/en/billing/concepts/product-billing/github-actions)
 
+Start the Blacksmith trial with `PIQAE_CI_LINUX_RUNNER`; Rust, web, and package
+verification account for most Linux compute and benefit from colocated caches.
+Keep `PIQAE_CI_LIGHT_RUNNER` on GitHub initially because the classifier and
+aggregate jobs are only a few seconds long, and move macOS/Windows only after
+their runner labels and signing tooling have passed an unsigned candidate run.
+Blacksmith transparently accelerates the standard cache actions used here, so
+do not replace them with archived provider-specific cache actions.
+
 ## Release flow
 
 Shopify follows an independent hosted-app release lane using one public app.
@@ -143,6 +165,19 @@ Railway `/healthz` to report the exact reviewed commit, then creates and
 releases one Shopify app version. Successful
 production releases use `shopify-v*` tags and do not trigger the native `v*`
 release workflow. See [Shopify release operations](shopify-release.md).
+
+`release/product-release.yaml` is the machine-readable product release set.
+It binds the web, API/control plane, SDK, MCP server, desktop node, and Shopify
+app to explicit API/node contracts and a single deployment order. Structural
+CI validates it before the Shopify component lands; a `v*` product release is
+fail-closed unless every required component is present and the tag version
+matches the Cargo workspace version.
+
+The release workflow is a dependency graph, not a chain of workflows that
+dispatch and poll one another. Reusable workflows return to their direct
+caller. Environment approvals protect promotion jobs only; build and audit
+jobs must finish before an approval is requested so approval time does not
+consume a runner or trigger recursive `workflow_run`/`gh run watch` loops.
 
 The `Piqae release` workflow is the sole `v*` tag trigger:
 
@@ -157,6 +192,27 @@ The `Piqae release` workflow is the sole `v*` tag trigger:
 6. Dereference the public feeds.
 7. Publish the draft GitHub release as a prerelease only after every platform
    stage succeeds.
+
+The platform `v*` release is a coordinated unit: server, web, migration image,
+native applications, manifest, and appcasts are all built from the same commit
+and version by `release.yml`. A consumer requiring a new API must not be
+released before that platform tag completes. The TypeScript SDK and MCP server
+remain independently versioned with `sdk-v*` and `mcp-v*`; publish them only
+after the compatible platform release and express their minimum supported API
+contract in code and release notes. Do not create all three tags concurrently.
+
+Production deployment is a separate protected `production` environment. Keep
+required reviewers, prevent self-review, restrict deployment branches/tags,
+and store production-only secrets on that environment. Release publication and
+production promotion share no workflow-wait polling: approval is represented
+by the GitHub environment gate, and deployment serialization by the
+`piqae-production-promotion` concurrency group.
+
+The only branch-protection contexts should be `CI result` and
+`Supply-chain result`. Requiring leaf jobs or an entire path-filtered workflow
+causes permanently pending checks when a job is intentionally skipped. Both
+aggregate jobs use `always()` and explicitly reject failed or cancelled selected
+jobs, so dependency failures cannot skip the required result.
 
 Desktop nodes discover updates from the signed platform appcasts below
 `https://downloads.piqae.com/releases/stable/`. GitHub Releases improves human

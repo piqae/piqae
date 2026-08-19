@@ -32,6 +32,29 @@
     </div>
   </section>
 
+  <section class="encryption m-section">
+    <div class="m-container encryption-grid">
+      <div>
+        <span class="m-eyebrow">Encryption boundaries</span>
+        <h2 class="m-heading">Protection matched to each part of the print path.</h2>
+        <p class="m-lede">
+          Piqae layers transport, storage, and optional payload encryption without hiding where
+          plaintext must exist for the operating system, driver, and printer to do their work.
+        </p>
+      </div>
+      <div class="encryption-levels">
+        <article><strong>01 · In transit</strong><h3>Authenticated TLS</h3><p>Remote API, upload, and agent connections use TLS with hostname and trust-root validation.</p></article>
+        <article><strong>02 · At rest</strong><h3>Object-level encryption</h3><p>Hosted document content uses a random data-encryption key, with short retention and deletion controls.</p></article>
+        <article><strong>03 · Confidential printing Preview</strong><h3>AES-256-GCM per job</h3><p>The SDK can encrypt PDF or RAW content before upload and wrap its one-time key separately for each permitted node.</p></article>
+      </div>
+      <p class="m-note">
+        <strong>Precisely scoped:</strong> confidential printing is a Preview path and is not yet
+        an independently audited zero-knowledge or end-to-end encrypted service. Routing metadata
+        remains visible, and the destination system must decrypt content to print it.
+      </p>
+    </div>
+  </section>
+
   <section class="data m-section">
     <div class="m-container">
       <span class="m-eyebrow">Data path</span>
@@ -75,7 +98,23 @@
   .trust-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
   .trust-grid article { min-height: 220px; }
   .trust-grid h2 { margin-top: 60px; font-size: 19px; }
+  .encryption { background: #07111f; color: white; }
+  .encryption-grid { display: grid; grid-template-columns: .8fr 1.2fr; gap: clamp(42px, 8vw, 110px); }
+  .encryption .m-eyebrow { color: #71adff; }
+  .encryption .m-heading { color: white; }
+  .encryption .m-lede { color: #9eacbd; font-size: 18px; }
+  .encryption-levels { border-top: 1px solid rgb(255 255 255 / .14); }
+  .encryption-levels article { padding: 22px 0; border-bottom: 1px solid rgb(255 255 255 / .14); }
+  .encryption-levels strong { color: #71adff; font: 10px var(--font-mono); text-transform: uppercase; }
+  .encryption-levels h3 { margin: 10px 0 5px; color: white; font-size: 20px; }
+  .encryption-levels p { margin: 0; color: #9eacbd; }
+  .encryption .m-note { grid-column: 1 / -1; border-color: rgb(255 255 255 / .14); background: rgb(255 255 255 / .05); color: #9eacbd; }
+  .encryption .m-note strong { color: white; }
   .data { background: #eeece6; }
-  @media (max-width: 900px) { .trust-grid { grid-template-columns: repeat(2, 1fr); } }
+  @media (max-width: 900px) {
+    .trust-grid { grid-template-columns: repeat(2, 1fr); }
+    .encryption-grid { grid-template-columns: 1fr; }
+    .encryption .m-note { grid-column: auto; }
+  }
   @media (max-width: 620px) { .trust-grid { grid-template-columns: 1fr; } }
 </style>

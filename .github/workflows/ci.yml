@@ -243,7 +243,7 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
-      - run: pnpm install --frozen-lockfile
+      - run: pnpm install --frozen-lockfile --prefer-offline
       - run: pnpm --filter @piqae/web check
       - run: pnpm --filter @piqae/web test
       - name: Build the Node web artifact
@@ -269,7 +269,7 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
-      - run: pnpm install --frozen-lockfile
+      - run: pnpm install --frozen-lockfile --prefer-offline
       - run: pnpm --filter @piqae/sdk generate:check
       - run: pnpm --filter @piqae/sdk check
       - run: pnpm --filter @piqae/sdk test
@@ -295,7 +295,7 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
-      - run: pnpm install --frozen-lockfile
+      - run: pnpm install --frozen-lockfile --prefer-offline
       - name: Build the workspace SDK dependency
         run: pnpm --filter @piqae/sdk build
       - name: Validate the MCP package
@@ -337,7 +337,7 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
-      - run: pnpm install --frozen-lockfile
+      - run: pnpm install --frozen-lockfile --prefer-offline
       - name: Build the workspace SDK dependency
         run: pnpm --filter @piqae/sdk build
       - run: pnpm --filter @piqae/shopify-app check

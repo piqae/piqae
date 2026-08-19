@@ -55,6 +55,14 @@ do not block the controlled Railway private beta.
 Railway is the canonical current web, API, and worker host. Promotion is
 staging-first:
 
+The reviewed `release/product-release.yaml` is authoritative for coupled
+component order. A Shopify release that consumes a new API contract cannot be
+promoted independently: migrations and the compatible control plane go first,
+then workers and web, then Shopify, and finally a desktop-node canary. Every
+component records the same source commit and immutable artifact/deployment ID
+in the release evidence. Rollback restores application digests; database
+migrations are forward-only and must remain compatible with N and N-1.
+
 1. Build and attest the web and server candidate from one reviewed commit.
 2. Deploy that commit to the isolated Railway `staging` environment.
 3. Run backward-compatible migrations exactly once, then deploy staging API,

@@ -76,6 +76,8 @@ jobs:
             echo "Version must be a safe SemVer-like value without a leading v." >&2
             exit 2
           fi
+          ruby release/tools/check_product_release.rb \
+            --release-version "$version"
           if [[ ! "$build_number" =~ ^[1-9][0-9]*$ ]]; then
             echo "Build number must be a positive integer." >&2
             exit 2
@@ -89,6 +91,8 @@ jobs:
             exit 1
           fi
           if [[ "$publish" == true ]]; then
+            ruby release/tools/check_product_release.rb \
+              --product --release-version "$version"
             if [[ "$GITHUB_REPOSITORY" != "$CANONICAL_REPOSITORY" ]]; then
               echo "Release publishing is enabled only in $CANONICAL_REPOSITORY." >&2
               exit 1

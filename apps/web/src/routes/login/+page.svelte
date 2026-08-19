@@ -1,9 +1,9 @@
 <script lang="ts">
   import Icon from '$lib/components/Icon.svelte';
-  import { createAuthBoundary } from '$lib/auth';
   import type { ActionData, PageData } from './$types';
   let { data, form }: { data: PageData; form: ActionData } = $props();
-  const auth = createAuthBoundary('hosted');
+  let chosenStep = $state<string | null>(null);
+  let step = $derived(chosenStep ?? form?.step ?? data.initialStep);
 </script>
 
 <svelte:head><title>Sign in · Piqae</title></svelte:head>
@@ -19,7 +19,7 @@
       <p>Manage your print fleet, queues, API keys, and live delivery state.</p>
     </div>
     {#if data.authMode === 'local'}
-      <form method="POST">
+      <form method="POST" action="?/local">
         <input type="hidden" name="return_to" value={data.returnTo} />
         <label for="credential">Owner credential</label>
         <input
@@ -40,16 +40,96 @@
       </form>
       <p class="local-note">Your credential is exchanged server-side and stored only in an HttpOnly session cookie.</p>
     {:else}
-      <a class="button primary sign-in" href={auth.signInUrl(data.returnTo)}>
-        Continue with WorkOS <Icon name="arrow-right" size={13} />
-      </a>
-      <div class="divider"><span>or</span></div>
-      <a class="button self-host" href={`/auth/signup?return_to=${encodeURIComponent(data.returnTo)}`}>
-        Create a Piqae account <Icon name="arrow-right" size={12} />
-      </a>
-      <a class="button self-host" href="/docs/self-host">
-        Configure self-hosted identity <Icon name="external" size={12} />
-      </a>
+      {#if form?.notice}<p class="notice" role="status">{form.notice}</p>{/if}
+      {#if step === 'password' || step === 'signup'}
+        <form method="POST" action={step === 'signup' ? '?/signup' : '?/password'}>
+          <input type="hidden" name="return_to" value={data.returnTo} />
+          <label for="email">Email</label>
+          <input id="email" name="email" type="email" autocomplete="email" required maxlength="320" />
+          <label for="password">Password</label>
+          <input
+            id="password"
+            name="password"
+            type="password"
+            autocomplete={step === 'signup' ? 'new-password' : 'current-password'}
+            minlength={step === 'signup' ? 12 : undefined}
+            required
+          />
+          {#if form?.invalid}
+            <p class="form-error" role="alert">We couldn’t complete that request. Check the details and try again.</p>
+          {/if}
+          <button class="button primary sign-in" type="submit">
+            {step === 'signup' ? 'Create account' : 'Sign in'} <Icon name="arrow-right" size={13} />
+          </button>
+        </form>
+        <div class="inline-actions">
+          <button type="button" onclick={() => (chosenStep = step === 'signup' ? 'password' : 'signup')}>
+            {step === 'signup' ? 'Already have an account?' : 'Create account'}
+          </button>
+          {#if step === 'password'}
+            <button type="button" onclick={() => (chosenStep = 'forgot')}>Forgot password?</button>
+          {/if}
+        </div>
+        <div class="divider"><span>or</span></div>
+        <button class="button self-host" type="button" onclick={() => (chosenStep = 'magic')}>
+          Email me a sign-in code <Icon name="arrow-right" size={12} />
+        </button>
+      {:else if step === 'magic'}
+        <form method="POST" action="?/magicStart">
+          <input type="hidden" name="return_to" value={data.returnTo} />
+          <label for="magic-email">Email</label>
+          <input id="magic-email" name="email" type="email" autocomplete="email" required maxlength="320" />
+          {#if form?.invalid}<p class="form-error" role="alert">We couldn’t send a code. Try again.</p>{/if}
+          <button class="button primary sign-in" type="submit">Send code</button>
+        </form>
+        <button class="text-action" type="button" onclick={() => (chosenStep = 'password')}>Back to password</button>
+      {:else if step === 'magic-code' || step === 'verify'}
+        <form method="POST" action={step === 'verify' ? '?/verify' : '?/magicComplete'}>
+          <input type="hidden" name="return_to" value={data.returnTo} />
+          <label for="code">Six-digit code</label>
+          <input id="code" name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required />
+          {#if form?.invalid}<p class="form-error" role="alert">That code was not accepted. Request a new code and try again.</p>{/if}
+          <button class="button primary sign-in" type="submit">Verify and continue</button>
+        </form>
+        <button class="text-action" type="button" onclick={() => (chosenStep = 'password')}>Start again</button>
+      {:else if step === 'mfa' || step === 'mfa-enroll'}
+        {#if step === 'mfa-enroll' && form?.enrollment}
+          <div class="mfa-enrollment">
+            <img src={form.enrollment.qrCode} alt="QR code for adding Piqae to an authenticator app" width="160" height="160" />
+            <p>Can’t scan it? Enter this setup key:</p>
+            <code>{form.enrollment.secret}</code>
+          </div>
+        {/if}
+        <form method="POST" action="?/mfa">
+          <input type="hidden" name="return_to" value={data.returnTo} />
+          <label for="mfa-code">Authenticator code</label>
+          <input id="mfa-code" name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required />
+          {#if form?.invalid}<p class="form-error" role="alert">That code was not accepted. Check your authenticator and try again.</p>{/if}
+          <button class="button primary sign-in" type="submit">Verify and continue</button>
+        </form>
+        <button class="text-action" type="button" onclick={() => (chosenStep = 'password')}>Start again</button>
+      {:else if step === 'forgot'}
+        <form method="POST" action="?/resetRequest">
+          <input type="hidden" name="return_to" value={data.returnTo} />
+          <label for="reset-email">Email</label>
+          <input id="reset-email" name="email" type="email" autocomplete="email" required maxlength="320" />
+          <button class="button primary sign-in" type="submit">Send reset instructions</button>
+        </form>
+        <button class="text-action" type="button" onclick={() => (chosenStep = 'password')}>Back to sign in</button>
+      {:else if step === 'reset'}
+        <form method="POST" action="?/reset">
+          <input type="hidden" name="return_to" value={data.returnTo} />
+          <input type="hidden" name="token" value={data.resetToken} />
+          <label for="new-password">New password</label>
+          <input id="new-password" name="password" type="password" autocomplete="new-password" minlength="12" required />
+          {#if form?.invalid}<p class="form-error" role="alert">This reset link may have expired. Request another and try again.</p>{/if}
+          <button class="button primary sign-in" type="submit">Update password</button>
+        </form>
+      {/if}
+      <p class="hosted-fallback">
+        Need SSO or additional verification?
+        <a href={`/auth/login?hosted=1&return_to=${encodeURIComponent(data.returnTo)}`}>Use secure sign-in</a>
+      </p>
     {/if}
     <p class="terms">
       By continuing, you agree to the service terms and acknowledge the privacy policy.
@@ -159,6 +239,67 @@
     color: var(--danger, #d14b4b);
     font-size: 9px;
   }
+
+  .notice {
+    margin: 0 0 12px;
+    padding: 9px 10px;
+    color: var(--text-secondary);
+    background: var(--surface-subtle);
+    border-radius: 7px;
+    font-size: 9px;
+    line-height: 14px;
+  }
+
+  .inline-actions {
+    display: flex;
+    justify-content: space-between;
+    gap: 10px;
+    margin-top: 10px;
+  }
+
+  .inline-actions button,
+  .text-action {
+    padding: 0;
+    color: var(--accent);
+    background: none;
+    border: 0;
+    font: inherit;
+    font-size: 9px;
+    cursor: pointer;
+  }
+
+  .text-action {
+    display: block;
+    margin: 13px auto 0;
+  }
+
+  .hosted-fallback {
+    margin: 14px 0 0;
+    color: var(--text-tertiary);
+    font-size: 8px;
+    line-height: 13px;
+    text-align: center;
+  }
+
+  .hosted-fallback a { color: var(--accent); }
+
+  .mfa-enrollment {
+    display: grid;
+    justify-items: center;
+    gap: 8px;
+    margin-bottom: 14px;
+    text-align: center;
+  }
+
+  .mfa-enrollment img {
+    width: 160px;
+    height: 160px;
+    background: white;
+    border-radius: 8px;
+  }
+
+  .mfa-enrollment p { margin: 0; color: var(--text-secondary); font-size: 9px; }
+  .mfa-enrollment code { overflow-wrap: anywhere; font-size: 10px; }
 
   .local-note {
     margin: 11px 4px 0;
