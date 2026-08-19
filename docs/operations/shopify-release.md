@@ -135,7 +135,9 @@ only after the aggregate checks pass.
    version, independently verifies that Shopify reports it active, uploads
    non-secret evidence, then creates `shopify-v<version>` and a GitHub release.
    Shopify CLI can render a release error while exiting successfully, so its
-   process exit status alone is never accepted as release evidence.
+   process exit status alone is never accepted as release evidence. A retry
+   resumes an exact-name inactive candidate and still requires that candidate
+   to become active before publishing evidence.
 7. Verify install/reopen, one synthetic order, duplicate submission behavior,
    webhook receipt, and authenticated PDF fallback. Record only opaque IDs and
    outcomes—never documents, credentials, customer data, or signed URLs.

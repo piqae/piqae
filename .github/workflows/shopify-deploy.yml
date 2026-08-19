@@ -118,6 +118,14 @@ jobs:
           SHOPIFY_VERSION: ${{ steps.release.outputs.shopify_version }}
           SOURCE_URL: https://github.com/${{ github.repository }}/commit/${{ steps.release.outputs.sha }}
         run: |
+          set -euo pipefail
+          versions=$(pnpm --package=@shopify/cli@4.6.1 dlx shopify app versions list \
+            --config release --json)
+          if jq -e --arg version "$SHOPIFY_VERSION" \
+            'any(.[]; .versionTag == $version)' <<<"$versions" >/dev/null; then
+            echo "Shopify version $SHOPIFY_VERSION already exists; resuming it."
+            exit 0
+          fi
           pnpm --package=@shopify/cli@4.6.1 dlx shopify app deploy \
             --config release \
             --no-release \
@@ -125,6 +133,13 @@ jobs:
             --version "$SHOPIFY_VERSION" \
             --message "Piqae production from ${{ steps.release.outputs.short_sha }}" \
             --source-control-url "$SOURCE_URL"
+          versions=$(pnpm --package=@shopify/cli@4.6.1 dlx shopify app versions list \
+            --config release --json)
+          if ! jq -e --arg version "$SHOPIFY_VERSION" \
+            'any(.[]; .versionTag == $version)' <<<"$versions" >/dev/null; then
+            echo "Shopify did not create version $SHOPIFY_VERSION." >&2
+            exit 1
+          fi
       - name: Release the verified Shopify app version
         working-directory: apps/shopify
         env:
