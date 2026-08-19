@@ -13,44 +13,44 @@ surfaces and must identify the same reviewed commit.
 
 | Target | Shopify app | Railway environment/service | Store and data |
 | --- | --- | --- | --- |
-| Local | developer-selected app | local Shopify CLI tunnel | development store, synthetic data, fake printer |
-| Staging | separate development/staging app | `staging` / `piqae-shopify` | development store, isolated PostgreSQL, fake printer |
-| Pilot/production | production app registration | `production` / `piqae-shopify` | explicitly approved real store, production PostgreSQL, live Piqae account |
+| Development/pilot | the public app registration in CLI dev-preview mode | local Shopify CLI tunnel | Shopify Dev Store, synthetic data, fake printer |
+| Production | the same public app registration, released app version | `production` / `piqae-shopify` | approved merchant stores, production PostgreSQL, live Piqae account |
 
 Do not copy a production API secret, session database, encryption key, Piqae
-credential, App Automation Token, or customer document into staging or a pull
-request environment. Extension UIDs are source-defined and intentionally shared
-between Shopify app instances; app client IDs and secrets are not.
+credential, App Automation Token, or customer document into a local or pull
+request environment. The hosted runtime uses `SHOPIFY_DISTRIBUTION=app_store`.
 
-The temporary single-store pilot may use Custom distribution. The permanent
-App Store registration must use Public distribution because Shopify does not
-allow changing the selected distribution method later. Custom distribution is
-not an App Store publication path and cannot use Shopify billing. Set
-`SHOPIFY_DISTRIBUTION=single_merchant` only on the custom pilot service; staging
-and the permanent public app use `SHOPIFY_DISTRIBUTION=app_store`.
+This is deliberately a one-app lifecycle. A draft public app can be installed
+on a Dev Store owned by the same developer organization, but not on an ordinary
+paid merchant store. Testing on a paid store before App Store approval would
+require a separate Custom-distribution app, and Shopify does not permit changing
+that app to Public distribution later. For a solo developer, use one public app
+and one Dev Store, submit it for review, then use Limited visibility for the
+first approved live-store pilot.
 
 ## One-time Shopify setup
 
-1. In Shopify Dev Dashboard, create or select the staging and production app
-   registrations. Use a dedicated development store for staging.
-2. For a one-store pre-review pilot, choose Custom distribution on the pilot
-   registration and restrict its installation link to the exact
-   `*.myshopify.com` store. Keep the future public registration separate.
+1. In Shopify Dev Dashboard, create or select the single permanent app and
+   choose Public distribution. This choice cannot be changed later.
+2. Create a Dev Store in the Dev Dashboard and install the draft app there.
+   Do not use a client-transfer store; draft public apps are not installable on
+   that store type.
 3. Set the application, callback, webhook, app-proxy, and customer extension
    origins to the matching HTTPS Railway origin.
 4. Select only the protected customer fields required to render the supported
    documents. `read_all_orders` remains absent until Shopify separately approves
    it and the product documents the expanded history.
-5. In each app's **Settings → App Automation Token**, create an app-scoped
-   token. Store it once in the matching GitHub environment as
+5. In the app's **Settings → App Automation Token**, create an app-scoped
+   token. Store it once in the GitHub production environment as
    `SHOPIFY_APP_AUTOMATION_TOKEN`. Tokens expire after at most six months;
-   create the replacement, update GitHub, prove a staging deploy, then revoke
+   create the replacement, update GitHub, validate a no-release version, then revoke
    the old token.
 6. Link the app once with Shopify CLI to verify that the checked-in extension
    handles/UIDs map as updates. Stop if a deploy proposes removing and
    re-creating an extension.
-7. Generate the install link for the pilot app. The store owner must review the
-   scopes and approve installation interactively.
+7. Before review, install only through the app's **Installs** section or
+   `shopify app dev` onto the Dev Store. After approval, set the listing to
+   Limited visibility and share its App Store URL with the first pilot merchant.
 
 The repository deliberately keeps the client ID out of the checked-in default
 configuration. GitHub environments contain non-secret `SHOPIFY_CLIENT_ID` and
@@ -59,28 +59,23 @@ configuration. GitHub environments contain non-secret `SHOPIFY_CLIENT_ID` and
 
 ## One-time GitHub setup
 
-Create `shopify-staging` and `shopify-production` environments.
+Create only the `shopify-production` environment.
 
-| Setting | Staging | Production |
-| --- | --- | --- |
-| `SHOPIFY_CLIENT_ID` variable | staging app client ID | production/pilot app client ID |
-| `SHOPIFY_APP_URL` variable | staging HTTPS origin | `https://shopify.piqae.com` |
-| `SHOPIFY_APP_AUTOMATION_TOKEN` secret | staging token | production/pilot token |
-| Required reviewers | none | release owner |
-| Deployment branches | `main` | `main` and `shopify-v*` tags only |
+| Setting | Value |
+| --- | --- |
+| `SHOPIFY_CLIENT_ID` variable | permanent public app client ID |
+| `SHOPIFY_APP_URL` variable | `https://shopify.piqae.com` |
+| `SHOPIFY_APP_AUTOMATION_TOKEN` secret | permanent public app token |
+| Required reviewers | release owner |
+| Deployment branches | `main` and `shopify-v*` tags only |
 
 `main` remains protected by `CI result` and `Supply-chain result`. Do not add
 the path-scoped `Shopify` job as an independently required check because it is
 correctly skipped for unrelated changes.
 
-Keep repository variable `SHOPIFY_STAGING_ENABLED=false` until the staging
-Shopify app, Railway service, domain, database, variables, and automation token
-are all healthy. Set it to `true` only after a manual staging deployment passes;
-the post-CI workflow otherwise skips cleanly.
-
 ## One-time Railway setup
 
-Both environments use `/railway.shopify.toml`,
+The production service uses `/railway.shopify.toml`,
 `deploy/docker/Dockerfile.shopify`, `/healthz`, one always-running replica, and
 the repository source. Enable GitHub check-suite waiting and these watch paths:
 
@@ -95,8 +90,7 @@ the repository source. Enable GitHub check-suite waiting and these watch paths:
 ```
 
 Required protected runtime variables are documented in
-[`apps/shopify/.env.example`](../../apps/shopify/.env.example). Staging uses an
-isolated database and `PIQAE_SHOPIFY_RUNTIME=fake`. Production uses
+[`apps/shopify/.env.example`](../../apps/shopify/.env.example). Production uses
 `PIQAE_SHOPIFY_RUNTIME=live`, but that setting is not authorization for a
 physical print. Do not enable autosleep: OAuth callbacks, webhooks, and customer
 document links require an available service.
@@ -120,19 +114,20 @@ cd apps/shopify
 pnpm --package=@shopify/cli@4.6.1 dlx shopify app dev --config development
 ```
 
-Use synthetic orders and fake/virtual printers. Commit with DCO sign-off, open a
-pull request, and merge only after the aggregate checks pass. A successful
-post-merge `CI` run invokes **Deploy Shopify staging** for that exact SHA.
+`app dev` applies development configuration only to the selected Dev Store and
+does not create a released production version. Use synthetic orders and
+fake/virtual printers. Commit with DCO sign-off, open a pull request, and merge
+only after the aggregate checks pass.
 
 ## Production/pilot release
 
-1. Confirm the intended commit is merged to `main` and its staging deployment
-   passed.
+1. Confirm the intended commit is merged to `main` and was tested through
+   `shopify app dev` on the Dev Store.
 2. Confirm Railway production has deployed that same commit and `/healthz`
    reports it. Source changes are backward compatible with the currently
    released Shopify extensions.
 3. Open **Actions → Deploy Shopify app → Run workflow**.
-4. Select `production`, enter the full 40-character reviewed commit SHA, enter a SemVer such as
+4. Enter the full 40-character reviewed commit SHA, enter a SemVer such as
    `0.2.0-beta.1`, and type `RELEASE-SHOPIFY`.
 5. Approve the protected `shopify-production` environment.
 6. The workflow re-runs bounded tests, verifies runtime identity, renders and
@@ -185,8 +180,8 @@ shop repository and sessions; `shop/redact` removes installation/session data;
 `customers/data_request` is handled according to the documented no-profile
 storage model.
 
-Before App Store submission, prove all four flows on a development store and
-the pilot, publish privacy/terms/support URLs, complete protected-customer-data
+Before App Store submission, prove all four flows on the Dev Store, publish
+privacy/terms/support URLs, complete protected-customer-data
 review, configure Shopify App Pricing, supply reviewer credentials and an
 English demo, run Shopify's automated checks, and keep the initial listing at
 Limited visibility during the soft launch.
