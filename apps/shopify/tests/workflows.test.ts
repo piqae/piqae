@@ -9,8 +9,8 @@ import {
   ASSET_LIMITS,
   parseTemplateEnvelope,
   serializeTemplateEnvelope,
-  visualCompatibility,
 } from "../app/core/template-model";
+import { starterTemplates } from "../app/core/starter-templates";
 import { templateDigest } from "../app/core/template-digest.server";
 import {
   buildTemplateIndex,
@@ -30,7 +30,7 @@ describe("merchant workflow persistence", () => {
       kind: "invoice",
       pageSize: "A4",
       state: "draft",
-      source: '{"schema":"piqae.document/v1"}',
+      source: starterTemplates[0]!.source,
       revision: 1,
     });
     expect(await repository.getTemplate(alpha, id)).not.toBeNull();
@@ -48,7 +48,7 @@ describe("merchant workflow persistence", () => {
       kind: "packing_slip",
       pageSize: "A4",
       state: "published",
-      source: '{"schema":"piqae.document/v1"}',
+      source: starterTemplates[1]!.source,
       revision: 1,
     });
     expect((await repository.getTemplate(alpha, id))?.state).toBe("published");
@@ -95,24 +95,24 @@ describe("settings validation", () => {
 });
 
 describe("template source validation", () => {
-  it("accepts only the bounded native schema", () => {
-    expect(
-      validateDocumentSource('{"schema":"piqae.document/v1","nodes":[]}'),
-    ).toContain("piqae.document/v1");
-    expect(() => validateDocumentSource('{"schema":"pdfme"}')).toThrow(
-      "piqae.shopify-template/v1",
+  it("accepts only the bounded business-document envelope", () => {
+    expect(validateDocumentSource(starterTemplates[0]!.source)).toContain(
+      "piqae.business-document/v1",
+    );
+    expect(() => validateDocumentSource('{"schema":"legacy"}')).toThrow(
+      "Legacy templates are not supported",
     );
     expect(() => validateDocumentSource("not json")).toThrow("valid JSON");
   });
 });
 
 describe("hybrid template authority", () => {
-  it("seeds three immutable published defaults once", async () => {
+  it("seeds four immutable published defaults once", async () => {
     const repository = new MemoryWorkflowRepository();
     await seedStarterTemplates(repository, alpha);
     await seedStarterTemplates(repository, alpha);
     const templates = await repository.listTemplates(alpha);
-    expect(templates).toHaveLength(3);
+    expect(templates).toHaveLength(4);
     expect(
       templates.every(
         (value) => parseTemplateEnvelope(value.source).system?.immutable,
@@ -127,57 +127,34 @@ describe("hybrid template authority", () => {
       await repository.listTemplates(alpha),
       await repository.getSettings(alpha),
     );
-    expect(index.documents).toHaveLength(3);
+    expect(index.documents).toHaveLength(4);
     expect(JSON.stringify(index)).not.toContain("canonical");
     expect(index.digest).toMatch(/^[a-f0-9]{64}$/);
   });
 
-  it("accepts native documents through a compatibility envelope", () => {
-    const source =
-      '{"spec_version":"piqae.document/v1","page":{"size":"a4","margin_mm":10},"body":[]}';
-    const envelope = parseTemplateEnvelope(source);
-    expect(envelope.editor.mode).toBe("native");
+  it("accepts the new business-document envelope", () => {
+    const envelope = parseTemplateEnvelope(starterTemplates[0]!.source);
+    expect(envelope.editor.mode).toBe("visual");
     expect(templateDigest(serializeTemplateEnvelope(envelope))).toMatch(
       /^[a-f0-9]{64}$/,
     );
   });
 
-  it("reports exact supported visual mappings and rejects unpinned assets", () => {
-    expect(
-      visualCompatibility({
-        schema: "pdfme-compatible/v1",
-        page: "A4",
-        fields: [
-          {
-            id: "qr",
-            type: "qrcode",
-            x: 0,
-            y: 0,
-            width: 20,
-            height: 20,
-            binding: "/order/id",
-          },
-        ],
-      }).roundTrip,
-    ).toBe("lossless");
+  it("rejects unpinned and non-Shopify asset ingestion", () => {
+    const envelope = parseTemplateEnvelope(starterTemplates[0]!.source);
     expect(() =>
       serializeTemplateEnvelope({
-        schema: "piqae.shopify-template/v1",
-        canonical: {
-          spec_version: "piqae.document/v1",
-          page: { size: "a4", margin_mm: 10 },
-          body: [],
-        },
-        editor: { mode: "native", roundTrip: "lossless", warnings: [] },
+        ...envelope,
         assets: [
           {
-            url: "http://cdn.shopify.com/font.woff2",
-            sha256: "0".repeat(64),
-            contentType: "font/woff2",
+            id: "logo",
+            sourceUrl: "http://cdn.shopify.com/logo.jpg",
+            digest: "0".repeat(64),
+            mediaType: "image/jpeg",
             bytes: ASSET_LIMITS.maxBytes,
           },
         ],
       }),
-    ).toThrow("allowlisted HTTPS CDN");
+    ).toThrow("Shopify CDN HTTPS");
   });
 });

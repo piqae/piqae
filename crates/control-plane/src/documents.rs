@@ -15,7 +15,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use bytes::BytesMut;
 use futures::StreamExt as _;
 use piqae_auth::Scope;
-use piqae_document_renderer::DocumentSpecV1;
+use piqae_document_renderer::BusinessDocumentV1;
 use piqae_domain::{ContentKind, ContentSource, JobOptions};
 use piqae_storage_postgres::{CreateDocumentResult, StoredDocumentPreview, StoredDocumentRender};
 use serde::{Deserialize, Serialize};
@@ -28,43 +28,47 @@ const MAX_JSON_NODES: usize = 50_000;
 
 pub fn router() -> Router<AppState> {
     Router::new()
-        .route("/v1/document-templates", post(create_template))
-        .route("/v1/document-templates/{template_id}", get(get_template))
+        .route("/v1/business-document-templates", post(create_template))
         .route(
-            "/v1/document-templates/{template_id}/publish",
+            "/v1/business-document-templates/{template_id}",
+            get(get_template),
+        )
+        .route(
+            "/v1/business-document-templates/{template_id}/publish",
             post(publish_template),
         )
         .route(
-            "/v1/document-template-revisions/{revision_id}",
+            "/v1/business-document-template-revisions/{revision_id}",
             get(get_revision),
         )
-        .route("/v1/document-renders", post(register_render))
-        .route("/v1/document-conversions", post(create_conversion))
+        .route("/v1/business-document-renders", post(register_render))
+        .route("/v1/business-document-renders/{render_id}", get(get_render))
         .route(
-            "/v1/document-conversions/{conversion_id}",
-            get(get_conversion),
-        )
-        .route("/v1/document-renders/{render_id}", get(get_render))
-        .route(
-            "/v1/document-renders/{render_id}/artifact",
+            "/v1/business-document-renders/{render_id}/artifact",
             get(download_render_artifact),
         )
-        .route("/v1/document-renders/{render_id}/print", post(print_render))
         .route(
-            "/v1/document-renders/{render_id}/previews",
+            "/v1/business-document-renders/{render_id}/print",
+            post(print_render),
+        )
+        .route(
+            "/v1/business-document-renders/{render_id}/previews",
             post(create_preview),
         )
-        .route("/v1/document-previews/{preview_id}", get(get_preview))
         .route(
-            "/v1/document-previews/{preview_id}/artifact",
+            "/v1/business-document-previews/{preview_id}",
+            get(get_preview),
+        )
+        .route(
+            "/v1/business-document-previews/{preview_id}/artifact",
             get(download_preview_artifact),
         )
         .route(
-            "/v1/document-previews/{preview_id}/approve",
+            "/v1/business-document-previews/{preview_id}/approve",
             post(approve_preview),
         )
         .route(
-            "/v1/document-previews/{preview_id}/cancel",
+            "/v1/business-document-previews/{preview_id}/cancel",
             post(cancel_preview),
         )
 }
@@ -329,206 +333,6 @@ impl From<StoredDocumentRender> for RenderResponse {
             updated_at: value.updated_at,
         }
     }
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CreateConversionRequest {
-    adapter: String,
-    adapter_version: String,
-    source: Value,
-    strict: bool,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct PersistedConversionResult {
-    document: Value,
-    warnings: Value,
-}
-
-#[derive(Debug, Serialize)]
-struct ConversionResponse {
-    id: String,
-    adapter: String,
-    adapter_version: String,
-    adapter_api_version: String,
-    source_format: String,
-    source_sha256: String,
-    strict: bool,
-    fidelity: String,
-    renderer_version: String,
-    document: Value,
-    warnings: Value,
-    created_at: chrono::DateTime<chrono::Utc>,
-}
-
-#[allow(clippy::too_many_lines)]
-async fn create_conversion(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(request): Json<CreateConversionRequest>,
-) -> Result<Response, AppError> {
-    let tenant = authenticate_native(&state, &headers, Scope::JobsWrite).await?;
-    let key = required_idempotency_key(&headers)?;
-    if request.adapter != "pdfme"
-        || ![
-            crate::document_adapters::PDFME_ADAPTER_VERSION,
-            crate::document_adapters::PDFME_LEGACY_ADAPTER_VERSION,
-        ]
-        .contains(&request.adapter_version.as_str())
-    {
-        return Err(AppError::invalid(
-            "unsupported_document_adapter",
-            "Only exact adapters pdfme@1.0.0 and pdfme@1.1.0 are supported.",
-        ));
-    }
-    let mut canonical_source = request.source.clone();
-    canonical_source.sort_all_objects();
-    let source = validate_json(&canonical_source, true)?;
-    let source_sha256 = hex::encode(Sha256::digest(&source));
-    let converted =
-        if request.adapter_version == crate::document_adapters::PDFME_LEGACY_ADAPTER_VERSION {
-            crate::document_adapters::convert_pdfme_legacy(&canonical_source, request.strict)
-        } else {
-            crate::document_adapters::convert_pdfme(&canonical_source, request.strict)
-        }
-        .map_err(|_| {
-            AppError::invalid(
-                "document_conversion_incompatible",
-                "The source uses unsupported or lossy adapter features.",
-            )
-        })?;
-    validate_document_spec(&converted.document)?;
-    let warnings = serde_json::to_value(converted.warnings).map_err(|_| {
-        AppError::invalid(
-            "invalid_document_payload",
-            "Conversion diagnostics are invalid.",
-        )
-    })?;
-    let result = PersistedConversionResult {
-        document: converted.document,
-        warnings,
-    };
-    let result_plaintext = serde_json::to_vec(&result).map_err(|_| {
-        AppError::invalid("invalid_document_payload", "Converted document is invalid.")
-    })?;
-    if result_plaintext.len() > MAX_DOCUMENT_BYTES {
-        return Err(AppError::payload_too_large(
-            "document_conversion_too_large",
-            "Converted document and diagnostics exceed 1 MiB.",
-        ));
-    }
-    let result_sha256 = hex::encode(Sha256::digest(&result_plaintext));
-    let request_sha256 = hex::encode(Sha256::digest(
-        [
-            request.adapter.as_bytes(),
-            b"\0",
-            request.adapter_version.as_bytes(),
-            b"\0",
-            if request.strict {
-                b"strict".as_slice()
-            } else {
-                b"lossy".as_slice()
-            },
-            b"\0",
-            &source,
-        ]
-        .concat(),
-    ));
-    let id = stable_id(
-        "dcnv",
-        &tenant.workspace_id.to_string(),
-        &tenant.environment_id.to_string(),
-        &key,
-    );
-    let aad = conversion_result_aad(
-        &tenant.workspace_id.to_string(),
-        &tenant.environment_id.to_string(),
-        &id,
-    );
-    let ciphertext = state
-        .document_secrets
-        .encrypt(&aad, &result_plaintext)
-        .map_err(|_| AppError::service_unavailable("document_encryption_failed"))?;
-    let stored_result = state
-        .repository
-        .create_document_conversion(
-            tenant.workspace_id,
-            tenant.environment_id,
-            &id,
-            &request.adapter,
-            &request.adapter_version,
-            &source_sha256,
-            request.strict,
-            converted.fidelity,
-            piqae_document_renderer::RENDERER_VERSION,
-            &ciphertext,
-            &result_sha256,
-            &key,
-            &request_sha256,
-        )
-        .await?;
-    let (status, stored) = match stored_result {
-        CreateDocumentResult::Created(v) => (StatusCode::CREATED, v),
-        CreateDocumentResult::Existing(v) => (StatusCode::OK, v),
-    };
-    let response = conversion_response(
-        &state,
-        &tenant.workspace_id.to_string(),
-        &tenant.environment_id.to_string(),
-        stored,
-    )?;
-    Ok((status, Json(response)).into_response())
-}
-
-async fn get_conversion(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(id): Path<String>,
-) -> Result<Json<ConversionResponse>, AppError> {
-    let tenant = authenticate_native(&state, &headers, Scope::JobsRead).await?;
-    let stored = state
-        .repository
-        .get_document_conversion(tenant.workspace_id, tenant.environment_id, &id)
-        .await?;
-    Ok(Json(conversion_response(
-        &state,
-        &tenant.workspace_id.to_string(),
-        &tenant.environment_id.to_string(),
-        stored,
-    )?))
-}
-
-fn conversion_response(
-    state: &AppState,
-    workspace: &str,
-    environment: &str,
-    stored: piqae_storage_postgres::StoredDocumentConversion,
-) -> Result<ConversionResponse, AppError> {
-    let aad = conversion_result_aad(workspace, environment, &stored.id);
-    let plaintext = state
-        .document_secrets
-        .decrypt(&aad, &stored.result_ciphertext)
-        .map_err(|_| AppError::service_unavailable("document_decryption_failed"))?;
-    if hex::encode(Sha256::digest(&plaintext)) != stored.result_sha256 {
-        return Err(AppError::service_unavailable("invalid_stored_document"));
-    }
-    let result: PersistedConversionResult = serde_json::from_slice(&plaintext)
-        .map_err(|_| AppError::service_unavailable("invalid_stored_document"))?;
-    Ok(ConversionResponse {
-        id: stored.id,
-        adapter: stored.adapter_id,
-        adapter_version: stored.adapter_version,
-        adapter_api_version: stored.adapter_api_version,
-        source_format: stored.source_format,
-        source_sha256: stored.source_sha256,
-        strict: stored.strict,
-        fidelity: stored.fidelity,
-        renderer_version: stored.renderer_version,
-        document: result.document,
-        warnings: result.warnings,
-        created_at: stored.created_at,
-    })
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1012,26 +816,19 @@ pub(crate) fn render_input_aad(workspace: &str, environment: &str, resource: &st
 pub(crate) fn artifact_key_aad(workspace: &str, environment: &str, resource: &str) -> Vec<u8> {
     document_aad_for("render-artifact-key", workspace, environment, resource)
 }
-pub(crate) fn conversion_result_aad(workspace: &str, environment: &str, resource: &str) -> Vec<u8> {
-    document_aad_for(
-        "adapter-conversion-result",
-        workspace,
-        environment,
-        resource,
-    )
-}
 fn document_aad_for(domain: &str, workspace: &str, environment: &str, resource: &str) -> Vec<u8> {
-    format!("piqae.documents/v1\0{domain}\0{workspace}\0{environment}\0{resource}").into_bytes()
+    format!("piqae.business-documents/v1\0{domain}\0{workspace}\0{environment}\0{resource}")
+        .into_bytes()
 }
 fn validate_document_spec(value: &Value) -> Result<Vec<u8>, AppError> {
-    if value.get("spec_version").and_then(Value::as_str) != Some("piqae.document/v1") {
+    if value.get("format").and_then(Value::as_str) != Some("piqae.business-document/v1") {
         return Err(AppError::invalid(
             "invalid_document_spec",
-            "spec_version must be piqae.document/v1.",
+            "format must be piqae.business-document/v1.",
         ));
     }
     let encoded = validate_json(value, true)?;
-    serde_json::from_slice::<DocumentSpecV1>(&encoded).map_err(|_| {
+    serde_json::from_slice::<BusinessDocumentV1>(&encoded).map_err(|_| {
         AppError::invalid("invalid_document_spec", "Document structure is invalid.")
     })?;
     Ok(encoded)
@@ -1096,19 +893,19 @@ mod tests {
     fn document_specs_are_bounded_and_reject_runtime_urls() {
         assert!(
             validate_document_spec(&serde_json::json!({
-                "spec_version": "piqae.document/v1", "page": {"size": "a4"},
-                "body": [{"type": "text", "value": "Receipt"}]
+                "format": "piqae.business-document/v1", "media": {"kind": "paged", "size": "a4"},
+                "body": [{"type": "paragraph", "content": [{"type": "text", "value": "Receipt"}]}]
             }))
             .is_ok()
         );
         assert!(
             validate_document_spec(&serde_json::json!({
-                "spec_version": "piqae.document/v1", "page": {"size": "a4"},
-                "body": [{"type": "text", "value": "https://example.test/logo.png"}]
+                "format": "piqae.business-document/v1", "media": {"kind": "paged", "size": "a4"},
+                "body": [{"type": "paragraph", "content": [{"type": "text", "value": "https://example.test/logo.png"}]}]
             }))
             .is_err()
         );
-        assert!(validate_document_spec(&serde_json::json!({"spec_version": "other/v1"})).is_err());
+        assert!(validate_document_spec(&serde_json::json!({"format": "other/v1"})).is_err());
     }
 
     #[test]

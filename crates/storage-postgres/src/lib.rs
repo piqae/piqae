@@ -669,24 +669,6 @@ pub struct StoredDocumentPreview {
     pub approval_idempotency_key: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize)]
-pub struct StoredDocumentConversion {
-    pub id: String,
-    pub adapter_id: String,
-    pub adapter_version: String,
-    pub adapter_api_version: String,
-    pub source_format: String,
-    pub source_sha256: String,
-    pub strict: bool,
-    pub fidelity: String,
-    pub renderer_version: String,
-    pub created_at: DateTime<Utc>,
-    #[serde(skip)]
-    pub result_ciphertext: Vec<u8>,
-    #[serde(skip)]
-    pub result_sha256: String,
-}
-
 /// A tenant-scoped render claimed by exactly one worker until its lease expires.
 #[derive(Clone, Debug)]
 pub struct DocumentRenderWork {
@@ -728,7 +710,6 @@ pub enum DocumentCiphertextField {
     TemplateRevision,
     RenderInput,
     RenderArtifactReference,
-    AdapterConversionResult,
 }
 
 #[derive(Clone, Debug)]
@@ -6993,7 +6974,7 @@ impl PostgresStore {
         let row = sqlx::query(
             "INSERT INTO document_template_revisions
              (id,workspace_id,environment_id,template_id,revision,spec_ciphertext,spec_sha256,renderer_profile)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,'piqae.document/v1') RETURNING *",
+             VALUES ($1,$2,$3,$4,$5,$6,$7,'piqae.business-document/v1') RETURNING *",
         ).bind(revision_id).bind(workspace_id.to_string()).bind(environment_id.to_string())
         .bind(template_id).bind(revision).bind(template.try_get::<Vec<u8>, _>("draft_ciphertext")?)
         .bind(template.try_get::<String, _>("draft_sha256")?).fetch_one(&mut *transaction).await?;
@@ -7242,87 +7223,6 @@ impl PostgresStore {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub async fn create_document_conversion(
-        &self,
-        workspace_id: WorkspaceId,
-        environment_id: EnvironmentId,
-        id: &str,
-        adapter_id: &str,
-        adapter_version: &str,
-        source_sha256: &str,
-        strict: bool,
-        fidelity: &str,
-        renderer_version: &str,
-        result_ciphertext: &[u8],
-        result_sha256: &str,
-        idempotency_key: &str,
-        request_sha256: &str,
-    ) -> Result<CreateDocumentResult<StoredDocumentConversion>, StorageError> {
-        let inserted = sqlx::query(
-            "INSERT INTO document_conversions
-             (id,workspace_id,environment_id,adapter_id,adapter_version,adapter_api_version,
-              source_format,source_sha256,strict,fidelity,renderer_version,result_ciphertext,
-              result_sha256,idempotency_key,request_sha256)
-             VALUES ($1,$2,$3,$4,$5,'piqae.adapter/v1','pdfme.template',$6,$7,$8,$9,$10,$11,$12,$13)
-             ON CONFLICT (workspace_id,environment_id,idempotency_key) DO NOTHING RETURNING *",
-        )
-        .bind(id)
-        .bind(workspace_id.to_string())
-        .bind(environment_id.to_string())
-        .bind(adapter_id)
-        .bind(adapter_version)
-        .bind(source_sha256)
-        .bind(strict)
-        .bind(fidelity)
-        .bind(renderer_version)
-        .bind(result_ciphertext)
-        .bind(result_sha256)
-        .bind(idempotency_key)
-        .bind(request_sha256)
-        .fetch_optional(&self.pool)
-        .await?;
-        if let Some(row) = inserted {
-            return Ok(CreateDocumentResult::Created(document_conversion_from_row(
-                &row,
-            )?));
-        }
-        let row = sqlx::query(
-            "SELECT * FROM document_conversions
-             WHERE workspace_id=$1 AND environment_id=$2 AND idempotency_key=$3",
-        )
-        .bind(workspace_id.to_string())
-        .bind(environment_id.to_string())
-        .bind(idempotency_key)
-        .fetch_one(&self.pool)
-        .await?;
-        if row.try_get::<String, _>("request_sha256")? != request_sha256 {
-            return Err(StorageError::IdempotencyConflict);
-        }
-        Ok(CreateDocumentResult::Existing(
-            document_conversion_from_row(&row)?,
-        ))
-    }
-
-    pub async fn get_document_conversion(
-        &self,
-        workspace_id: WorkspaceId,
-        environment_id: EnvironmentId,
-        id: &str,
-    ) -> Result<StoredDocumentConversion, StorageError> {
-        let row = sqlx::query(
-            "SELECT * FROM document_conversions
-             WHERE id=$1 AND workspace_id=$2 AND environment_id=$3",
-        )
-        .bind(id)
-        .bind(workspace_id.to_string())
-        .bind(environment_id.to_string())
-        .fetch_optional(&self.pool)
-        .await?
-        .ok_or(StorageError::NotFound)?;
-        document_conversion_from_row(&row)
-    }
-
     pub async fn complete_document_render(
         &self,
         workspace_id: WorkspaceId,
@@ -7491,15 +7391,6 @@ impl PostgresStore {
                   WHERE reference.resource_type='render_input'
                     AND NOT (render.state='rendering' AND render.lease_expires_at > now())
                  UNION ALL
-                 SELECT reference.workspace_id,reference.environment_id,conversion.id,conversion.id,
-                        reference.resource_type,conversion.result_ciphertext
-                   FROM key_refs reference
-                   JOIN document_conversions conversion
-                     ON conversion.workspace_id=reference.workspace_id
-                    AND conversion.environment_id=reference.environment_id
-                    AND conversion.id=reference.resource_id
-                  WHERE reference.resource_type='adapter_conversion_result'
-                 UNION ALL
                  SELECT reference.workspace_id,reference.environment_id,render.id,render.id,
                         reference.resource_type,render.artifact_object_key_ciphertext
                    FROM key_refs reference
@@ -7553,12 +7444,6 @@ impl PostgresStore {
                    AND artifact_object_key_ciphertext=$4
                    AND document_ciphertext_key_id(artifact_object_key_ciphertext)=$5
                    AND NOT (state='rendering' AND lease_expires_at > now())"
-            }
-            DocumentCiphertextField::AdapterConversionResult => {
-                "UPDATE document_conversions SET result_ciphertext=$6
-                 WHERE id=$1 AND workspace_id=$2 AND environment_id=$3
-                   AND result_ciphertext=$4
-                   AND document_ciphertext_key_id(result_ciphertext)=$5"
             }
         };
         let old_key_id: String = sqlx::query_scalar("SELECT document_ciphertext_key_id($1::bytea)")
@@ -7763,7 +7648,6 @@ fn document_ciphertext_record_from_row(
         "template_revision" => DocumentCiphertextField::TemplateRevision,
         "render_input" => DocumentCiphertextField::RenderInput,
         "render_artifact_reference" => DocumentCiphertextField::RenderArtifactReference,
-        "adapter_conversion_result" => DocumentCiphertextField::AdapterConversionResult,
         value => {
             return Err(StorageError::InvalidData(format!(
                 "unknown ciphertext field {value}"
@@ -7793,23 +7677,6 @@ fn document_revision_from_row(row: &PgRow) -> Result<StoredDocumentTemplateRevis
         created_at: row.try_get("created_at")?,
         spec_ciphertext: row.try_get("spec_ciphertext")?,
         spec_sha256: row.try_get("spec_sha256")?,
-    })
-}
-
-fn document_conversion_from_row(row: &PgRow) -> Result<StoredDocumentConversion, StorageError> {
-    Ok(StoredDocumentConversion {
-        id: row.try_get("id")?,
-        adapter_id: row.try_get("adapter_id")?,
-        adapter_version: row.try_get("adapter_version")?,
-        adapter_api_version: row.try_get("adapter_api_version")?,
-        source_format: row.try_get("source_format")?,
-        source_sha256: row.try_get("source_sha256")?,
-        strict: row.try_get("strict")?,
-        fidelity: row.try_get("fidelity")?,
-        renderer_version: row.try_get("renderer_version")?,
-        created_at: row.try_get("created_at")?,
-        result_ciphertext: row.try_get("result_ciphertext")?,
-        result_sha256: row.try_get("result_sha256")?,
     })
 }
 

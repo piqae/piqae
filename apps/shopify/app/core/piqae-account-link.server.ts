@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
 import type {
-  CreateDocumentTemplate,
-  DocumentTemplate,
-  DocumentTemplateRevision,
+  CreateBusinessDocumentTemplate,
+  BusinessDocumentTemplate,
+  BusinessDocumentTemplateRevision,
   Workspace,
 } from "@piqae/sdk";
 import type { CredentialVault } from "./credentials.server";
@@ -18,17 +18,17 @@ import type { WorkflowRepository } from "./workflows.server";
 
 interface LinkClient {
   workspaces: { current(): Promise<Workspace> };
-  documents: {
+  businessDocuments: {
     templates: {
       create(
-        input: CreateDocumentTemplate,
+        input: CreateBusinessDocumentTemplate,
         idempotencyKey: string,
-      ): Promise<DocumentTemplate>;
+      ): Promise<BusinessDocumentTemplate>;
       publish(
         id: string,
-        specification: CreateDocumentTemplate["specification"],
+        specification: CreateBusinessDocumentTemplate["specification"],
         idempotencyKey: string,
-      ): Promise<DocumentTemplateRevision>;
+      ): Promise<BusinessDocumentTemplateRevision>;
     };
   };
 }
@@ -59,14 +59,14 @@ export class PiqaeAccountLinker {
       const digest = createHash("sha256")
         .update(`${shop}\0${starter.id}`)
         .digest("hex");
-      const template = await client.documents.templates.create(
+      const template = await client.businessDocuments.templates.create(
         {
           name: `Shopify ${starter.name}`,
           specification: starter.specification,
         },
         `shopify-link-template-${digest}`,
       );
-      const revision = await client.documents.templates.publish(
+      const revision = await client.businessDocuments.templates.publish(
         template.id,
         starter.specification,
         `shopify-link-publish-${digest}`,

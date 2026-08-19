@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { PiqaeClient, type DocumentRender } from "@piqae/sdk";
+import { PiqaeClient, type BusinessDocumentRender } from "@piqae/sdk";
 import type { ShopRepository } from "./model";
 import { normalizeShopDomain } from "./model";
 import type { CredentialVault } from "./credentials.server";
@@ -15,7 +15,7 @@ import type { DownloadTokenVault } from "./download-token.server";
 export type PrintResult =
   | { mode: "direct"; renderId: string; jobId: string }
   | { mode: "download"; renderId: string; downloadUrl: string };
-type Client = Pick<PiqaeClient, "documents">;
+type Client = Pick<PiqaeClient, "businessDocuments">;
 
 export class ShopifyPrintingService {
   constructor(
@@ -55,7 +55,7 @@ export class ShopifyPrintingService {
     const client = this.clientFactory(
       this.vault.open(link.encryptedCredential, shop),
     );
-    const render = await client.documents.renders.create(
+    const render = await client.businessDocuments.renders.create(
       {
         template_revision_id: templateRevisionId,
         input: { shop, orders },
@@ -72,7 +72,7 @@ export class ShopifyPrintingService {
       throw new Error(
         `document render failed: ${completed.failure_code ?? completed.state}`,
       );
-    const preview = await client.documents.previews.create(
+    const preview = await client.businessDocuments.previews.create(
       completed.id,
       { expires_in_seconds: 900 },
       `shopify-preview-${digest}`,
@@ -102,10 +102,12 @@ export class ShopifyPrintingService {
     const client = this.clientFactory(
       this.vault.open(link.encryptedCredential, shop),
     );
-    const preview = await client.documents.previews.retrieve(input.previewId);
+    const preview = await client.businessDocuments.previews.retrieve(
+      input.previewId,
+    );
     if (preview.render_id !== input.renderId)
       throw new Error("Preview not found");
-    const approved = await client.documents.previews.approve(
+    const approved = await client.businessDocuments.previews.approve(
       input.previewId,
       { printer_id: input.printerId, title: "Shopify order documents" },
       input.requestKey,
@@ -127,10 +129,15 @@ export class ShopifyPrintingService {
     const client = this.clientFactory(
       this.vault.open(link.encryptedCredential, shop),
     );
-    const preview = await client.documents.previews.retrieve(input.previewId);
+    const preview = await client.businessDocuments.previews.retrieve(
+      input.previewId,
+    );
     if (preview.render_id !== input.renderId)
       throw new Error("Preview not found");
-    return client.documents.previews.cancel(input.previewId, input.requestKey);
+    return client.businessDocuments.previews.cancel(
+      input.previewId,
+      input.requestKey,
+    );
   }
 
   private async resolveTemplateRevision(
@@ -184,7 +191,7 @@ export class ShopifyPrintingService {
     const client = this.clientFactory(
       this.vault.open(link.encryptedCredential, shop),
     );
-    const render = await client.documents.renders.create(
+    const render = await client.businessDocuments.renders.create(
       {
         template_revision_id: templateRevisionId,
         input: { shop, orders },
@@ -210,7 +217,7 @@ export class ShopifyPrintingService {
         throw new Error(
           `document render failed: ${completed.failure_code ?? completed.state}`,
         );
-      const job = await client.documents.renders.print(
+      const job = await client.businessDocuments.renders.print(
         completed.id,
         {
           printer_id: input.printerId,
@@ -251,8 +258,8 @@ function stableActivityId(hexDigest: string): string {
 
 async function waitForRender(
   client: Client,
-  initial: DocumentRender,
-): Promise<DocumentRender> {
+  initial: BusinessDocumentRender,
+): Promise<BusinessDocumentRender> {
   let render = initial;
   for (
     let attempt = 0;
@@ -261,7 +268,7 @@ async function waitForRender(
     attempt += 1
   ) {
     await new Promise((resolve) => setTimeout(resolve, 250));
-    render = await client.documents.renders.retrieve(render.id);
+    render = await client.businessDocuments.renders.retrieve(render.id);
   }
   if (render.state === "registered" || render.state === "rendering")
     throw new Error("document render timed out");

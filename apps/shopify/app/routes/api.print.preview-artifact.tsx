@@ -21,10 +21,10 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     accessToken: () =>
       services.vault.open(link.encryptedCredential, session.shop),
   });
-  const preview = await client.documents.previews.retrieve(previewId);
+  const preview = await client.businessDocuments.previews.retrieve(previewId);
   if (preview.render_id !== renderId)
     return new Response(null, { status: 404 });
-  const artifact = await client.documents.previews.download(previewId);
+  const artifact = await client.businessDocuments.previews.download(previewId);
   if (!artifact.ok || !artifact.body)
     return new Response(null, { status: artifact.status });
   return cors(

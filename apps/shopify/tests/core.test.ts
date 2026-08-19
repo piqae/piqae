@@ -21,14 +21,15 @@ import {
   customizedTemplateName,
   editorLiquidForMode,
   liquidCompatibilityNotice,
-  parseVisualEditorSource,
-  removeSystemOwnership,
 } from "../app/routes/app.templates.$templateId";
 import { customizedSystemDraft, templates } from "../app/routes/app.templates";
 import { selectedOrderIds } from "../app/routes/app.print";
 import { starterTemplates } from "../app/core/starter-templates";
 import { MemoryWorkflowRepository } from "../app/core/workflows.server";
-import { parseTemplateEnvelope } from "../app/core/template-model";
+import {
+  parseTemplateEnvelope,
+  removeSystemOwnership,
+} from "../app/core/template-model";
 
 const shop = "fixture-shop.myshopify.com";
 const order = {
@@ -164,7 +165,7 @@ describe("Shopify boundary", () => {
       vault,
       () =>
         ({
-          documents: {
+          businessDocuments: {
             renders: { create, print, retrieve: vi.fn() },
             templates: {},
             conversions: {},
@@ -209,7 +210,7 @@ describe("Shopify boundary", () => {
     const service = new ShopifyPrintingService(
       repository,
       vault,
-      () => ({ documents: {} }) as never,
+      () => ({ businessDocuments: {} }) as never,
       "https://app.example",
       undefined,
       workflow,
@@ -250,7 +251,7 @@ describe("Shopify boundary", () => {
       job: { id: "job_preview" },
     }));
     const client = {
-      documents: {
+      businessDocuments: {
         renders: { create: createRender, retrieve: vi.fn(), print: vi.fn() },
         previews: {
           create: createPreview,
@@ -380,7 +381,9 @@ describe("customer download grants", () => {
       customerGid: "gid://shopify/Customer/7",
     });
     expect(vault.open(token).renderId).toBe("render_1");
-    expect(() => vault.open(`${token.slice(0, -1)}A`)).toThrow();
+    const middle = Math.floor(token.length / 2);
+    const tampered = `${token.slice(0, middle)}${token[middle] === "A" ? "B" : "A"}${token.slice(middle + 1)}`;
+    expect(() => vault.open(tampered)).toThrow();
     const previewToken = vault.issuePreview({
       shop,
       renderId: "render_2",
@@ -541,20 +544,17 @@ describe("Shopify document experience", () => {
       "Invoice",
       "Packing slip",
       "Receipt",
+      "Credit Note",
     ]);
-    expect(new Set(starterTemplates.map(({ id }) => id)).size).toBe(3);
+    expect(new Set(starterTemplates.map(({ id }) => id)).size).toBe(4);
     for (const template of starterTemplates) {
-      expect(template.specification.spec_version).toBe("piqae.document/v1");
+      expect(template.specification.format).toBe("piqae.business-document/v1");
       expect(template.specification.body.length).toBeGreaterThan(0);
-      expect(template.specification.body[0]?.type).toBe("canvas");
-      expect(parseTemplateEnvelope(template.source).editor.liquid).toContain(
-        "piqae_canvas",
-      );
+      expect(
+        template.specification.body.some((node) => node.type === "table"),
+      ).toBe(true);
     }
-    expect(editorDocument.schema).toBe("piqae.document/v1");
-    expect(editorDocument.nodes.some((node) => node.type === "repeat")).toBe(
-      true,
-    );
+    expect(editorDocument.format).toBe("piqae.business-document/v1");
   });
 
   it("customizes an immutable system document into an editable draft", () => {
@@ -590,33 +590,18 @@ describe("Shopify document experience", () => {
   it("keeps advanced Liquid explicitly compatibility-gated", () => {
     expect(liquidCompatibilityNotice("visual")).toBeNull();
     expect(liquidCompatibilityNotice("liquid")).toContain(
-      "Unsupported tags or filters",
+      "Unsupported constructs",
     );
     expect(canSubmitTemplateMode("visual", undefined)).toBe(false);
     expect(canSubmitTemplateMode("visual", {})).toBe(true);
-    expect(canSubmitTemplateMode("native", undefined)).toBe(true);
+    expect(canSubmitTemplateMode("source", undefined)).toBe(false);
     expect(customizedTemplateName("x".repeat(200))).toHaveLength(200);
     expect(customizedTemplateName("Invoice")).toBe("Invoice — customized");
     expect(editorLiquidForMode("visual", "{{ kept }}")).toBe("{{ kept }}");
-    expect(editorLiquidForMode("native", "{{ kept }}")).toBe("{{ kept }}");
+    expect(editorLiquidForMode("source", "{{ kept }}")).toBe("{{ kept }}");
     expect(editorLiquidForMode("liquid", "{{ order.name }}")).toBe(
       "{{ order.name }}",
     );
-    expect(() => parseVisualEditorSource("not json")).toThrow(
-      "Visual source must be valid JSON",
-    );
-    expect(() => parseVisualEditorSource("{}")).toThrow(
-      "pdfme-compatible/v1 shape",
-    );
-    expect(
-      parseVisualEditorSource(
-        JSON.stringify({
-          schema: "pdfme-compatible/v1",
-          page: "A4",
-          fields: [],
-        }),
-      ).page,
-    ).toBe("A4");
     const ownedEnvelope = parseTemplateEnvelope(starterTemplates[0]!.source);
     expect(ownedEnvelope.system).toBeDefined();
     expect(removeSystemOwnership(ownedEnvelope).system).toBeUndefined();

@@ -10,16 +10,13 @@ import {
   type MerchantTemplate,
 } from "../core/workflows.server";
 import { TemplatePreview } from "../components/shopify-ui";
-import { PdfmeDesigner } from "../components/PdfmeDesigner";
+import { BusinessDocumentEditor } from "../components/BusinessDocumentEditor";
 import { starterTemplates } from "../core/starter-templates";
 import {
   parseTemplateEnvelope,
+  removeSystemOwnership,
   serializeTemplateEnvelope,
-  canonicalToVisual,
-  visualCompatibility,
-  visualToCanonical,
-  type PdfmeVisualModel,
-  type TemplateEnvelope,
+  type BusinessDocument,
   type TemplateEditorMode,
 } from "../core/template-model";
 import { syncTemplateIndex } from "../core/template-index.server";
@@ -30,58 +27,28 @@ import {
   liquidToCanonical,
 } from "../core/liquid-document-adapter";
 export type EditorMode = TemplateEditorMode;
-export function liquidCompatibilityNotice(mode: EditorMode) {
-  return mode === "liquid"
-    ? "Advanced Liquid is compatibility-gated. Unsupported tags or filters must be resolved before publishing."
+export const liquidCompatibilityNotice = (mode: EditorMode) =>
+  mode === "liquid"
+    ? "Advanced Liquid is compatibility-gated. Unsupported constructs must be resolved before publishing."
     : null;
-}
-export function canSubmitTemplateMode(
-  mode: TemplateEditorMode,
-  visual: unknown,
-) {
-  return mode !== "visual" || visual != null;
-}
-export function customizedTemplateName(name: string) {
-  return `${name} — customized`.slice(0, 200);
-}
-export function editorLiquidForMode(mode: TemplateEditorMode, liquid: string) {
-  void mode;
-  return liquid;
-}
-export function removeSystemOwnership(envelope: TemplateEnvelope) {
-  delete envelope.system;
-  return envelope;
-}
-export function parseVisualEditorSource(source: string): PdfmeVisualModel {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(source);
-  } catch {
-    throw new Error("Visual source must be valid JSON");
-  }
-  if (
-    !parsed ||
-    typeof parsed !== "object" ||
-    (parsed as { schema?: unknown }).schema !== "pdfme-compatible/v1" ||
-    !["A4", "A5", "Letter", "80mm"].includes(
-      String((parsed as { page?: unknown }).page ?? ""),
-    ) ||
-    !Array.isArray((parsed as { fields?: unknown }).fields) ||
-    ((parsed as { template?: { schemas?: unknown } }).template != null &&
-      !Array.isArray(
-        (parsed as { template?: { schemas?: unknown } }).template?.schemas,
-      ))
-  )
-    throw new Error(
-      "Visual source must use the supported pdfme-compatible/v1 shape",
-    );
-  return parsed as PdfmeVisualModel;
-}
+export const canSubmitTemplateMode = (
+  _mode: TemplateEditorMode,
+  document: unknown,
+) => document != null;
+export const customizedTemplateName = (name: string) =>
+  `${name} — customized`.slice(0, 200);
+export const editorLiquidForMode = (
+  _mode: TemplateEditorMode,
+  liquid: string,
+) => liquid;
 export async function loader({ request, params }: LoaderFunctionArgs) {
   const { session } = await shopify.authenticate.admin(request);
-  const id = params.templateId;
-  if (!id || id === "new") return { template: null };
-  return { template: await workflows().getTemplate(session.shop, id) };
+  return {
+    template:
+      !params.templateId || params.templateId === "new"
+        ? null
+        : await workflows().getTemplate(session.shop, params.templateId),
+  };
 }
 export async function action({ request, params }: ActionFunctionArgs) {
   const { session, admin } = await shopify.authenticate.admin(request);
@@ -104,7 +71,7 @@ export async function action({ request, params }: ActionFunctionArgs) {
       if (!existing) throw new Error("System document was not found");
       const envelope = parseTemplateEnvelope(existing.source);
       if (!envelope.system?.immutable)
-        throw new Error("Only system documents are customized this way");
+        throw new Error("Only system documents can be customized");
       removeSystemOwnership(envelope);
       const saved = await workflows().saveTemplate(session.shop, {
         id: newWorkflowId(),
@@ -134,62 +101,33 @@ export async function action({ request, params }: ActionFunctionArgs) {
       throw new Error("Template format is invalid");
     if (existing && parseTemplateEnvelope(existing.source).system?.immutable)
       throw new Error("System documents are immutable; choose Customize first");
-    let source = validateDocumentSource(bounded(form, "source", 65536, true));
-    const envelope = parseTemplateEnvelope(source);
+    const envelope = parseTemplateEnvelope(
+      validateDocumentSource(bounded(form, "source", 262144, true)),
+    );
     removeSystemOwnership(envelope);
     const mode = bounded(form, "mode", 10) as TemplateEditorMode;
-    if (!["visual", "liquid", "native"].includes(mode))
+    if (!["visual", "liquid", "source"].includes(mode))
       throw new Error("Editor mode is invalid");
     envelope.editor.mode = mode;
-    envelope.editor.liquid = editorLiquidForMode(
-      mode,
-      bounded(form, "liquid", 32768),
-    );
     if (mode === "liquid") {
-      if (!envelope.editor.liquid.trim())
-        throw new Error(
-          "Liquid source is required in the Liquid editing view.",
-        );
-      const conversion = liquidToCanonical(
-        envelope.editor.liquid,
-        envelope.canonical.page,
-      );
+      const liquid = bounded(form, "liquid", 65536, true);
+      const conversion = liquidToCanonical(liquid, envelope.document);
       if (!conversion.ok) {
-        const diagnostic = conversion.diagnostics[0]!;
+        const d = conversion.diagnostics[0]!;
         throw new Error(
-          `Liquid ${diagnostic.code} on line ${diagnostic.line}: ${diagnostic.message}`,
+          `Liquid ${d.code} at ${d.line}:${d.column}: ${d.message}`,
         );
       }
-      envelope.canonical = conversion.document;
+      envelope.document = conversion.document;
       envelope.editor.liquid = conversion.normalizedSource;
-      try {
-        envelope.editor.pdfme = canonicalToVisual(conversion.document);
-        envelope.editor.roundTrip = "lossless";
-        envelope.editor.warnings = [];
-      } catch (error) {
-        envelope.editor.roundTrip = "unsupported";
-        envelope.editor.warnings = [
-          error instanceof Error ? error.message : "Visual conversion failed.",
-        ];
-      }
+    } else {
+      const document = JSON.parse(
+        bounded(form, "document", 196608, true),
+      ) as BusinessDocument;
+      envelope.document = document;
+      envelope.editor.liquid = canonicalToLiquid(document).source;
     }
-    if (mode === "visual") {
-      const visual = parseVisualEditorSource(
-        bounded(form, "visual", 32768, true),
-      );
-      envelope.editor.pdfme = visual;
-      envelope.canonical = visualToCanonical(visual);
-      Object.assign(envelope.editor, visualCompatibility(visual));
-      const converted = canonicalToLiquid(envelope.canonical);
-      if (converted.source) envelope.editor.liquid = converted.source;
-      else {
-        envelope.editor.roundTrip = "unsupported";
-        envelope.editor.warnings.push(
-          converted.diagnostics[0]?.message ?? "Liquid conversion failed.",
-        );
-      }
-    }
-    source = serializeTemplateEnvelope(envelope);
+    let source = serializeTemplateEnvelope(envelope);
     if (intent === "publish") {
       const services = createProductionServices();
       source = await publishCanonicalTemplate({
@@ -228,52 +166,40 @@ export async function action({ request, params }: ActionFunctionArgs) {
 export default function TemplateEditor() {
   const { template } = useLoaderData<typeof loader>();
   const result = useActionData<typeof action>();
-  const initialEnvelope = parseTemplateEnvelope(
+  const initial = parseTemplateEnvelope(
     template?.source ?? starterTemplates[0]!.source,
   );
-  if (!template) delete initialEnvelope.system;
-  const source = template?.source ?? serializeTemplateEnvelope(initialEnvelope);
-  const envelope = parseTemplateEnvelope(source);
-  const [mode, setMode] = useState<TemplateEditorMode>(envelope.editor.mode);
-  const [visual, setVisual] = useState(envelope.editor.pdfme);
-  const generatedLiquid = canonicalToLiquid(envelope.canonical);
-  const [liquid, setLiquid] = useState(
-    envelope.editor.liquid ?? generatedLiquid.source ?? "",
-  );
-  const [workspaceView, setWorkspaceView] = useState<"editor" | "preview">(
-    "editor",
-  );
-  const [switchError, setSwitchError] = useState("");
+  if (!template) removeSystemOwnership(initial);
+  const [document, setDocument] = useState(initial.document);
+  const [mode, setMode] = useState(initial.editor.mode);
+  const [liquid, setLiquid] = useState(initial.editor.liquid);
+  const [view, setView] = useState<"edit" | "preview">("edit");
+  const [error, setError] = useState("");
+  const immutable = Boolean(initial.system?.immutable);
   useEffect(() => {
-    setMode(envelope.editor.mode);
-    setVisual(envelope.editor.pdfme);
-    setLiquid(envelope.editor.liquid ?? generatedLiquid.source ?? "");
-  }, [source]);
-  const immutable = Boolean(envelope.system?.immutable);
+    setDocument(initial.document);
+    setMode(initial.editor.mode);
+    setLiquid(initial.editor.liquid);
+  }, [template?.source]);
   const switchMode = (next: TemplateEditorMode) => {
-    try {
-      if (mode === "visual" && visual && next === "liquid") {
-        const converted = canonicalToLiquid(visualToCanonical(visual));
-        if (!converted.source)
-          throw new Error(
-            converted.diagnostics[0]?.message ?? "Liquid conversion failed.",
-          );
-        setLiquid(converted.source);
-      } else if (mode === "liquid" && next === "visual") {
-        const converted = liquidToCanonical(liquid, envelope.canonical.page);
-        if (!converted.ok) throw new Error(converted.diagnostics[0]!.message);
-        setVisual(canonicalToVisual(converted.document));
+    if (mode === "liquid" && next !== "liquid") {
+      const conversion = liquidToCanonical(liquid, document);
+      if (!conversion.ok) {
+        const d = conversion.diagnostics[0]!;
+        setError(`${d.message} (${d.line}:${d.column})`);
+        return;
       }
-      setSwitchError("");
-      setMode(next);
-    } catch (error) {
-      setSwitchError(
-        error instanceof Error
-          ? error.message
-          : "Views could not be synchronized.",
-      );
-    }
+      setDocument(conversion.document);
+    } else if (mode !== "liquid" && next === "liquid")
+      setLiquid(canonicalToLiquid(document).source);
+    setError("");
+    setMode(next);
   };
+  const source = serializeTemplateEnvelope({
+    ...initial,
+    document,
+    editor: { mode, liquid, roundTrip: "lossless", warnings: [] },
+  });
   return (
     <s-page heading={template?.name ?? "New template"} inlineSize="large">
       <s-section>
@@ -287,225 +213,182 @@ export default function TemplateEditor() {
               <s-banner tone="critical">{result.error}</s-banner>
             ) : null}
             <s-banner tone="info">
-              Publishing converts and pins the canonical Piqae document revision
-              used by preview, download and print. Arbitrary Liquid, PDFme
-              plugins and HTML are not executed.
+              This structured document reflows line items, tables and text
+              automatically. Preview, download and print use the same published
+              Piqae revision.
             </s-banner>
             {immutable ? (
               <s-banner tone="info">
-                This is a read-only system document. Customize it to create a
-                merchant-owned draft.
+                This starter is read-only. Customize it to create your own
+                document.
               </s-banner>
             ) : null}
-            <s-button-group accessibilityLabel="Template workspace view">
+            <s-button-group accessibilityLabel="Document view">
               <s-button
                 type="button"
-                variant={workspaceView === "editor" ? "primary" : "secondary"}
-                onClick={() => setWorkspaceView("editor")}
+                variant={view === "edit" ? "primary" : "secondary"}
+                onClick={() => setView("edit")}
               >
-                Editor
+                Edit
               </s-button>
               <s-button
                 type="button"
-                variant={workspaceView === "preview" ? "primary" : "secondary"}
-                onClick={() => setWorkspaceView("preview")}
+                variant={view === "preview" ? "primary" : "secondary"}
+                onClick={() => setView("preview")}
               >
                 Preview
               </s-button>
             </s-button-group>
-            {workspaceView === "editor" ? (
+            {view === "preview" ? (
+              <TemplatePreview />
+            ) : (
               <div className="piqae-editor-surface">
-                <s-stack direction="block" gap="base">
-                  <div className="piqae-editor-settings">
-                    <label>
-                      Name
-                      <input
-                        className="piqae-input"
-                        name="name"
-                        required
-                        maxLength={200}
-                        defaultValue={template?.name ?? "Invoice"}
-                      />
-                    </label>
-                    <label>
-                      Document type
-                      <select
-                        className="piqae-input"
-                        name="kind"
-                        defaultValue={template?.kind ?? "invoice"}
-                      >
-                        <option value="invoice">Invoice</option>
-                        <option value="packing_slip">Packing slip</option>
-                        <option value="receipt">Receipt</option>
-                        <option value="returns">Returns form</option>
-                        <option value="credit_note">Credit note</option>
-                        <option value="custom">Custom</option>
-                      </select>
-                    </label>
-                    <label>
-                      Page size
-                      <select
-                        className="piqae-input"
-                        name="pageSize"
-                        defaultValue={template?.pageSize ?? "A4"}
-                      >
-                        <option>A4</option>
-                        <option>A5</option>
-                        <option>Letter</option>
-                        <option value="80mm">80 mm receipt</option>
-                      </select>
-                    </label>
-                    <label>
-                      Template editor
-                      <select
-                        className="piqae-input"
-                        name="mode"
-                        value={mode}
-                        onChange={(event) =>
-                          switchMode(
-                            event.currentTarget.value as TemplateEditorMode,
-                          )
-                        }
-                        disabled={immutable}
-                      >
-                        <option value="visual">Visual</option>
-                        <option value="liquid">Liquid code</option>
-                        <option value="native">Canonical JSON</option>
-                      </select>
-                    </label>
-                  </div>
-                  {switchError ? (
-                    <s-banner tone="critical">{switchError}</s-banner>
-                  ) : null}
-                  {envelope.editor.roundTrip !== "lossless" ? (
-                    <s-banner tone="warning">
-                      Switching views is {envelope.editor.roundTrip}.{" "}
-                      {envelope.editor.warnings.join(" ") ||
-                        "This source cannot be represented by the visual editor without losing unsupported constructs."}
-                    </s-banner>
-                  ) : null}
-                  {mode === "liquid" ? (
-                    generatedLiquid.diagnostics.length ? (
-                      <s-banner tone="warning">
-                        This canonical document cannot switch losslessly to the
-                        bounded Liquid view:{" "}
-                        {generatedLiquid.diagnostics[0]!.message}
-                      </s-banner>
-                    ) : (
-                      <s-banner tone="info">
-                        This safe Liquid subset maps directly to the canonical
-                        document. Whole-line variables, for/if blocks, QR,
-                        lines, spacers and page breaks are supported. HTML,
-                        filters, includes and plugins are never executed.
-                      </s-banner>
-                    )
-                  ) : null}
-                  {mode === "visual" ? (
-                    <div className="piqae-card">
-                      <s-heading>Visual layout</s-heading>
-                      <s-paragraph>
-                        This PDFme canvas and the Liquid code view edit the same
-                        document. Text and QR fields may contain bounded Liquid
-                        expressions such as {"{{ orders.0.name }}"}. The
-                        canonical preview is authoritative.
-                      </s-paragraph>
-                      {visual ? (
-                        <input
-                          type="hidden"
-                          name="visual"
-                          value={JSON.stringify(visual)}
-                        />
-                      ) : null}
-                      {visual ? (
-                        <PdfmeDesigner
-                          value={visual}
-                          disabled={immutable}
-                          onChange={setVisual}
-                        />
-                      ) : (
-                        <s-banner tone="critical">
-                          This template has no visual source. Continue in the
-                          canonical or Liquid editor.
-                        </s-banner>
-                      )}
-                    </div>
-                  ) : null}
-                  {mode === "liquid" ? (
-                    <label>
-                      Bounded Liquid source
-                      <textarea
-                        className="piqae-code"
-                        name="liquid"
-                        maxLength={32768}
-                        value={liquid}
-                        onChange={(event) =>
-                          setLiquid(event.currentTarget.value)
-                        }
-                        disabled={immutable}
-                      />
-                    </label>
-                  ) : (
-                    <input type="hidden" name="liquid" value={liquid} />
-                  )}
+                <div className="piqae-editor-settings">
                   <label>
-                    Canonical Piqae document envelope
-                    <textarea
-                      key={source}
-                      className="piqae-code"
-                      name="source"
+                    Name
+                    <input
+                      className="piqae-input"
+                      name="name"
                       required
-                      maxLength={65536}
-                      defaultValue={source}
-                      readOnly={immutable || mode !== "native"}
+                      maxLength={200}
+                      defaultValue={template?.name ?? "Invoice"}
                     />
                   </label>
-                  <div className="piqae-actions">
-                    {immutable ? (
+                  <label>
+                    Document type
+                    <select
+                      className="piqae-input"
+                      name="kind"
+                      defaultValue={template?.kind ?? "invoice"}
+                    >
+                      <option value="invoice">Invoice</option>
+                      <option value="packing_slip">Packing slip</option>
+                      <option value="receipt">Receipt</option>
+                      <option value="credit_note">Credit note</option>
+                      <option value="returns">Returns form</option>
+                      <option value="custom">Custom</option>
+                    </select>
+                  </label>
+                  <label>
+                    Media
+                    <select
+                      className="piqae-input"
+                      name="pageSize"
+                      defaultValue={template?.pageSize ?? "A4"}
+                    >
+                      <option>A4</option>
+                      <option>A5</option>
+                      <option>Letter</option>
+                      <option value="80mm">80 mm receipt</option>
+                    </select>
+                  </label>
+                  <label>
+                    Editor
+                    <select
+                      className="piqae-input"
+                      name="mode"
+                      value={mode}
+                      onChange={(event) =>
+                        switchMode(
+                          event.currentTarget.value as TemplateEditorMode,
+                        )
+                      }
+                      disabled={immutable}
+                    >
+                      <option value="visual">Document editor</option>
+                      <option value="liquid">Advanced Liquid</option>
+                      <option value="source">Piqae source</option>
+                    </select>
+                  </label>
+                </div>
+                {error ? <s-banner tone="critical">{error}</s-banner> : null}
+                {mode === "visual" ? (
+                  <BusinessDocumentEditor
+                    value={document}
+                    disabled={immutable}
+                    onChange={setDocument}
+                  />
+                ) : mode === "liquid" ? (
+                  <label>
+                    Shopify Liquid
+                    <textarea
+                      className="piqae-code"
+                      name="liquid"
+                      maxLength={65536}
+                      value={liquid}
+                      onChange={(e) => setLiquid(e.currentTarget.value)}
+                      disabled={immutable}
+                    />
+                  </label>
+                ) : (
+                  <label>
+                    Piqae business-document source
+                    <textarea
+                      className="piqae-code"
+                      name="document"
+                      maxLength={196608}
+                      value={JSON.stringify(document, null, 2)}
+                      onChange={(e) => {
+                        try {
+                          setDocument(JSON.parse(e.currentTarget.value));
+                          setError("");
+                        } catch {
+                          setError("Source must be valid JSON");
+                        }
+                      }}
+                      disabled={immutable}
+                    />
+                  </label>
+                )}
+                {mode !== "source" ? (
+                  <input
+                    type="hidden"
+                    name="document"
+                    value={JSON.stringify(document)}
+                  />
+                ) : null}
+                <input type="hidden" name="source" value={source} />
+                {mode !== "liquid" ? (
+                  <input type="hidden" name="liquid" value={liquid} />
+                ) : null}
+                <div className="piqae-actions">
+                  {immutable ? (
+                    <button
+                      className="piqae-link-button"
+                      name="intent"
+                      value="customize"
+                    >
+                      Customize
+                    </button>
+                  ) : (
+                    <>
                       <button
                         className="piqae-link-button"
-                        type="submit"
                         name="intent"
-                        value="customize"
+                        value="draft"
                       >
-                        Customize
+                        Save draft
                       </button>
-                    ) : (
-                      <>
-                        <button
-                          className="piqae-link-button"
-                          type="submit"
-                          name="intent"
-                          value="draft"
-                          disabled={!canSubmitTemplateMode(mode, visual)}
-                        >
-                          Save draft
-                        </button>
-                        <button
-                          className="piqae-link-button"
-                          type="submit"
-                          name="intent"
-                          value="publish"
-                          disabled={!canSubmitTemplateMode(mode, visual)}
-                        >
-                          Publish revision
-                        </button>
-                      </>
-                    )}
-                    {template?.state === "draft" ? (
                       <button
                         className="piqae-link-button"
-                        type="submit"
                         name="intent"
-                        value="delete"
+                        value="publish"
                       >
-                        Delete draft
+                        Publish revision
                       </button>
-                    ) : null}
-                  </div>
-                </s-stack>
+                    </>
+                  )}
+                  {template?.state === "draft" ? (
+                    <button
+                      className="piqae-link-button"
+                      name="intent"
+                      value="delete"
+                    >
+                      Delete draft
+                    </button>
+                  ) : null}
+                </div>
               </div>
-            ) : (
-              <TemplatePreview />
             )}
           </s-stack>
         </Form>

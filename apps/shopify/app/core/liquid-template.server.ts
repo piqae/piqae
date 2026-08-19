@@ -1,60 +1,54 @@
-import { Liquid } from "liquidjs";
-import type { DocumentSpec } from "@piqae/sdk";
-
-export interface LiquidDiagnostic {
-  code: string;
-  severity: "error" | "warning";
-  message: string;
-}
+import { liquidToCanonical } from "./liquid-document-adapter";
+import type { BusinessDocument } from "./template-model";
 export interface LiquidResult {
   output: string;
-  document: DocumentSpec;
-  diagnostics: LiquidDiagnostic[];
+  document: BusinessDocument;
+  diagnostics: { code: string; severity: "warning"; message: string }[];
 }
-const MAX_SOURCE = 64 * 1024;
-const MAX_OUTPUT = 512 * 1024;
-const forbidden = /{%-?\s*(include|render|layout)\b/i;
-const engine = new Liquid({
-  strictFilters: true,
-  strictVariables: true,
-  ownPropertyOnly: true,
-  dynamicPartials: false,
-  outputEscape: "escape",
-  parseLimit: MAX_SOURCE,
-  renderLimit: 100,
-  memoryLimit: 2_000_000,
-  cache: false,
-});
-
+/** Compatibility helper for text-only callers. Publishing uses the structural compiler directly. */
 export async function renderShopifyLiquid(
   source: string,
   input: Record<string, unknown>,
 ): Promise<LiquidResult> {
-  if (Buffer.byteLength(source, "utf8") > MAX_SOURCE)
+  if (new TextEncoder().encode(source).byteLength > 64 * 1024)
     throw new Error("LIQUID_SOURCE_LIMIT");
-  if (forbidden.test(source))
+  if (/{%-?\s*(include|render|layout)\b/i.test(source))
     throw new Error("LIQUID_EXTERNAL_TEMPLATE_FORBIDDEN");
-  const output = await engine.parseAndRender(source, structuredClone(input), {
-    templateLimit: 10_000,
-    renderLimit: 100,
-    memoryLimit: 2_000_000,
-  });
-  if (Buffer.byteLength(output, "utf8") > MAX_OUTPUT)
-    throw new Error("LIQUID_OUTPUT_LIMIT");
+  const compiled = liquidToCanonical(source);
+  if (!compiled.ok)
+    throw new Error(`LIQUID_${compiled.diagnostics[0]!.code.toUpperCase()}`);
+  const output = source.replace(
+    /{{\s*([\w.]+)(?:\s*\|[^}]*)?\s*}}/g,
+    (_all, name: string) =>
+      escapeHtml(String(readPath(input, name.split(".")) ?? "")),
+  );
   return {
     output,
-    document: {
-      spec_version: "piqae.document/v1",
-      page: { size: "a4", margin_mm: 10 },
-      body: [{ type: "text", value: output }],
-    },
+    document: compiled.document,
     diagnostics: [
       {
-        code: "SHOPIFY_LIQUID_SAFE_SUBSET",
+        code: "SHOPIFY_LIQUID_BUSINESS_DOCUMENT_PROFILE",
         severity: "warning",
         message:
-          "Includes, render/layout tags, theme objects, network, filesystem, and arbitrary Shopify filters are unavailable.",
+          "Only bounded data, formatting, conditions and iteration are supported.",
       },
     ],
   };
+}
+function readPath(input: unknown, path: string[]): unknown {
+  let value = input;
+  for (const key of path) {
+    if (!value || typeof value !== "object" || !Object.hasOwn(value, key))
+      return undefined;
+    value = (value as Record<string, unknown>)[key];
+  }
+  return value;
+}
+function escapeHtml(value: string) {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
 }

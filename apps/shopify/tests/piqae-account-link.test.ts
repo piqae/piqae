@@ -30,7 +30,7 @@ describe("existing Piqae account linking", () => {
           workspaces: {
             current: async () => ({ id: "ws_fixture", status: "active" }),
           },
-          documents: { templates: { create, publish } },
+          businessDocuments: { templates: { create, publish } },
         }) as never,
     );
 
@@ -48,7 +48,7 @@ describe("existing Piqae account linking", () => {
     expect(create.mock.calls[0]?.[1]).toMatch(/^shopify-link-template-/);
     expect(publish.mock.calls[0]?.[2]).toMatch(/^shopify-link-publish-/);
     const packingSlip = (await workflows.listTemplates(shop)).find((value) =>
-      value.name.includes("Packing slip"),
+      value.name.toLowerCase().includes("packing slip"),
     );
     expect(
       parseTemplateEnvelope(packingSlip?.source ?? "").published,
@@ -73,7 +73,9 @@ describe("existing Piqae account linking", () => {
           workspaces: {
             current: async () => ({ id: "ws_fixture", status: "suspended" }),
           },
-          documents: { templates: { create: vi.fn(), publish: vi.fn() } },
+          businessDocuments: {
+            templates: { create: vi.fn(), publish: vi.fn() },
+          },
         }) as never,
     );
     await expect(

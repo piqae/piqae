@@ -820,11 +820,11 @@ function registerJobTool(server: McpServer, config: McpConfig): void {
 
 function registerDocumentTool(server: McpServer, config: McpConfig): void {
   server.registerTool(
-    "piqae_documents",
+    "piqae_business_documents",
     {
-      title: "Validate and operate optional Piqae Documents",
+      title: "Validate and operate Piqae Business Documents",
       description:
-        "Validate declarative piqae.document/v1 templates, publish immutable revisions, register renders, inspect status, or print a completed render. Template and input content are never returned by this tool.",
+        "Validate piqae.business-document/v1 templates, publish immutable revisions, register renders, inspect metadata, or print a completed render. Template and input content are never returned by this tool.",
       inputSchema: z.object({
         action: z.enum(["validate", "publish", "render", "get", "print"]),
         template_id: z.string().min(1).optional(),
@@ -842,7 +842,7 @@ function registerDocumentTool(server: McpServer, config: McpConfig): void {
         ...selectionShape,
       }),
       annotations: mutationAnnotations(
-        "Operate optional Piqae Documents",
+        "Operate Piqae Business Documents",
         true,
       ),
     },
@@ -853,13 +853,13 @@ function registerDocumentTool(server: McpServer, config: McpConfig): void {
           validateDocumentSpecification(specification);
           return {
             valid: true,
-            spec_version: "piqae.document/v1",
+            format: "piqae.business-document/v1",
             top_level_nodes: specification.body.length,
           };
         }
         const client = clientFor(config, extra, input);
         if (input.action === "publish") {
-          const revision = await client.documents.templates.publish(
+          const revision = await client.businessDocuments.templates.publish(
             required(input.template_id, "template_id"),
             required(specification, "specification") as never,
             required(input.idempotency_key, "idempotency_key"),
@@ -867,7 +867,7 @@ function registerDocumentTool(server: McpServer, config: McpConfig): void {
           return documentMetadata(revision);
         }
         if (input.action === "render") {
-          const render = await client.documents.renders.create(
+          const render = await client.businessDocuments.renders.create(
             {
               template_revision_id: required(input.template_id, "template_id"),
               input: required(input.input, "input"),
@@ -879,7 +879,7 @@ function registerDocumentTool(server: McpServer, config: McpConfig): void {
         const renderId = required(input.render_id, "render_id");
         if (input.action === "get")
           return documentMetadata(
-            await client.documents.renders.retrieve(renderId),
+            await client.businessDocuments.renders.retrieve(renderId),
           );
         enforceJobPolicy(config, bearer(config, extra));
         const destination = input.printer_id ?? input.target_id;
@@ -889,7 +889,7 @@ function registerDocumentTool(server: McpServer, config: McpConfig): void {
           );
         requireConfirmation(destination, input.confirm_destination);
         required(input.fixture, "fixture");
-        const job = await client.documents.renders.print(
+        const job = await client.businessDocuments.renders.print(
           renderId,
           withoutUndefined({
             printer_id: input.printer_id,
@@ -910,21 +910,21 @@ function validateDocumentSpecification(
 ): asserts specification is Record<string, unknown> & { body: unknown[] } {
   if (
     !specification ||
-    specification.spec_version !== "piqae.document/v1" ||
+    specification.format !== "piqae.business-document/v1" ||
     !Array.isArray(specification.body)
   )
     throw new Error(
-      "A bounded piqae.document/v1 specification with a body array is required.",
+      "A bounded piqae.business-document/v1 specification with a body array is required.",
     );
-  const page = specification.page;
+  const page = specification.media;
   if (
     !page ||
     typeof page !== "object" ||
-    !["a4", "a5", "letter", "four-by-six", "roll58mm", "roll80mm"].includes(
-      String((page as Record<string, unknown>).size),
+    !["paged", "continuous", "label"].includes(
+      String((page as Record<string, unknown>).kind),
     )
   )
-    throw new Error("Document page size is unsupported.");
+    throw new Error("Business-document media kind is unsupported.");
   let nodes = 0;
   const visit = (values: unknown[], depth: number): void => {
     if (depth > 32) throw new Error("Document nesting exceeds 32 levels.");
@@ -936,28 +936,46 @@ function validateDocumentSpecification(
       const type = node.type;
       if (
         ![
-          "text",
+          "section",
+          "paragraph",
+          "heading",
           "stack",
           "row",
+          "grid",
+          "table",
+          "conditional",
           "spacer",
-          "line",
+          "divider",
           "page_break",
-          "when",
+          "keep_together",
           "repeat",
+          "image",
           "qr",
+          "barcode",
         ].includes(String(type))
       )
         throw new Error(`Unsupported document node type: ${String(type)}.`);
-      if (["stack", "row", "when", "repeat"].includes(String(type))) {
+      if (
+        ["section", "stack", "row", "grid", "repeat", "keep_together"].includes(
+          String(type),
+        )
+      ) {
         if (!Array.isArray(node.children))
           throw new Error(`${String(type)} requires children.`);
         visit(node.children, depth + 1);
       }
-      if (
-        ["when", "repeat"].includes(String(type)) &&
-        (typeof node.pointer !== "string" || !node.pointer.startsWith("/"))
-      )
-        throw new Error(`${String(type)} requires an absolute JSON Pointer.`);
+      if (type === "conditional") {
+        if (!Array.isArray(node.then))
+          throw new Error("conditional requires then.");
+        visit(node.then, depth + 1);
+        if (node.else !== undefined) {
+          if (!Array.isArray(node.else))
+            throw new Error("conditional else must be an array.");
+          visit(node.else, depth + 1);
+        }
+      }
+      if (type === "table" && Array.isArray(node.empty))
+        visit(node.empty, depth + 1);
     }
   };
   visit(specification.body, 0);

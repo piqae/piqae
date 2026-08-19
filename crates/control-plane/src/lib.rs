@@ -7,7 +7,6 @@ pub mod billing;
 pub mod billing_usage_worker;
 pub mod compatibility;
 pub mod device_auth;
-pub mod document_adapters;
 pub mod document_crypto;
 pub mod document_render_worker;
 pub mod documents;
@@ -1148,14 +1147,14 @@ mod tests {
             &application.router,
             idempotent_api_request(
                 "POST",
-                "/v1/document-templates",
+                "/v1/business-document-templates",
                 "piq_test_integration",
                 "template-receipt-v1",
                 Some(
                     &serde_json::json!({
                         "name": "Receipt",
-                        "specification": {"spec_version":"piqae.document/v1","page":{"size":"a4"},
-                            "body":[{"type":"text","value":{"pointer":"/number"}}]}
+                        "specification": {"format":"piqae.business-document/v1","media":{"kind":"paged","size":"a4"},
+                            "body":[{"type":"paragraph","content":[{"type":"value","value":{"type":"path","path":["number"]}}]}]}
                     })
                     .to_string(),
                 ),
@@ -1167,7 +1166,7 @@ mod tests {
             &application.router,
             idempotent_api_request(
                 "POST",
-                &format!("/v1/document-templates/{template_id}/publish"),
+                &format!("/v1/business-document-templates/{template_id}/publish"),
                 "piq_test_integration",
                 "publish-receipt-v1",
                 Some(&serde_json::json!({"specification": template["specification"]}).to_string()),
@@ -1179,7 +1178,7 @@ mod tests {
             &application.router,
             idempotent_api_request(
                 "POST",
-                &format!("/v1/document-templates/{template_id}/publish"),
+                &format!("/v1/business-document-templates/{template_id}/publish"),
                 "piq_test_integration",
                 "publish-receipt-v1",
                 Some(&serde_json::json!({"specification": template["specification"]}).to_string()),
@@ -1192,13 +1191,13 @@ mod tests {
             .clone()
             .oneshot(idempotent_api_request(
                 "POST",
-                &format!("/v1/document-templates/{template_id}/publish"),
+                &format!("/v1/business-document-templates/{template_id}/publish"),
                 "piq_test_integration",
                 "publish-receipt-v1",
                 Some(
                     &serde_json::json!({"specification": {
-                        "spec_version":"piqae.document/v1","page":{"size":"a4"},
-                        "body":[{"type":"text","value":"different"}]
+                        "format":"piqae.business-document/v1","media":{"kind":"paged","size":"a4"},
+                        "body":[{"type":"paragraph","content":[{"type":"text","value":"different"}]}]
                     }})
                     .to_string(),
                 ),
@@ -1210,7 +1209,7 @@ mod tests {
             &application.router,
             idempotent_api_request(
                 "POST",
-                "/v1/document-renders",
+                "/v1/business-document-renders",
                 "piq_test_integration",
                 "render-receipt-1042",
                 Some(
@@ -1239,7 +1238,7 @@ mod tests {
             .clone()
             .oneshot(idempotent_api_request(
                 "POST",
-                "/v1/document-renders",
+                "/v1/business-document-renders",
                 "piq_test_integration",
                 "render-receipt-1042",
                 Some(
@@ -1258,7 +1257,7 @@ mod tests {
             .oneshot(api_request(
                 "GET",
                 &format!(
-                    "/v1/document-renders/{}/artifact",
+                    "/v1/business-document-renders/{}/artifact",
                     render["id"].as_str().expect("render id")
                 ),
                 "piq_test_integration",
@@ -1277,7 +1276,7 @@ mod tests {
             api_request(
                 "GET",
                 &format!(
-                    "/v1/document-renders/{}",
+                    "/v1/business-document-renders/{}",
                     render["id"].as_str().expect("render id")
                 ),
                 "piq_test_integration",
@@ -1306,7 +1305,7 @@ mod tests {
             .oneshot(api_request(
                 "GET",
                 &format!(
-                    "/v1/document-renders/{}/artifact",
+                    "/v1/business-document-renders/{}/artifact",
                     render["id"].as_str().expect("render id")
                 ),
                 "piq_test_integration",
@@ -1322,7 +1321,7 @@ mod tests {
             .oneshot(api_request(
                 "GET",
                 &format!(
-                    "/v1/document-renders/{}/artifact",
+                    "/v1/business-document-renders/{}/artifact",
                     render["id"].as_str().expect("render id")
                 ),
                 "piq_test_integration",
@@ -1366,16 +1365,58 @@ mod tests {
                     .encode(sha2::Sha256::digest(&artifact_body))
             )
         );
-        let job = json_response(
+        let object_key = format!(
+            "{}/{}/documents/{}.pdf",
+            application.tenant.workspace_id,
+            application.tenant.environment_id,
+            render["id"].as_str().expect("render id")
+        );
+        let preview = json_response(
             &application.router,
             idempotent_api_request(
                 "POST",
                 &format!(
-                    "/v1/document-renders/{}/print",
+                    "/v1/business-document-renders/{}/previews",
                     render["id"].as_str().expect("render id")
                 ),
                 "piq_test_integration",
-                "print-receipt-1042",
+                "preview-receipt-1042",
+                Some(r#"{"expires_in_seconds":600}"#),
+            ),
+        )
+        .await;
+        assert_eq!(preview["state"], "awaiting_approval");
+        let preview_id = preview["id"].as_str().expect("preview id");
+        let preview_artifact = application
+            .router
+            .clone()
+            .oneshot(api_request(
+                "GET",
+                &format!("/v1/business-document-previews/{preview_id}/artifact"),
+                "piq_test_integration",
+                None,
+            ))
+            .await
+            .expect("preview artifact response");
+        assert_eq!(preview_artifact.status(), StatusCode::OK);
+        let preview_bytes = preview_artifact
+            .into_body()
+            .collect()
+            .await
+            .expect("preview PDF body")
+            .to_bytes();
+        assert_eq!(preview_bytes, artifact_body);
+
+        // Construct the public idempotency fixture from low-entropy components
+        // so secret scanners do not mistake the non-secret example for a key.
+        let approval_key = ["approve", "receipt", "1042"].join("-");
+        let approval = json_response(
+            &application.router,
+            idempotent_api_request(
+                "POST",
+                &format!("/v1/business-document-previews/{preview_id}/approve"),
+                "piq_test_integration",
+                &approval_key,
                 Some(
                     &serde_json::json!({
                         "printer_id": application.printer_id.to_string(),
@@ -1386,15 +1427,171 @@ mod tests {
             ),
         )
         .await;
+        assert_eq!(approval["preview"]["state"], "approved");
+        let job = &approval["job"];
         assert_eq!(job["content_type"], "pdf");
         assert_eq!(job["state"], "waiting_for_agent");
+        let approval_replay = json_response(
+            &application.router,
+            idempotent_api_request(
+                "POST",
+                &format!("/v1/business-document-previews/{preview_id}/approve"),
+                "piq_test_integration",
+                &approval_key,
+                Some(
+                    &serde_json::json!({
+                        "printer_id": application.printer_id.to_string(),
+                        "title": "Receipt R-1042"
+                    })
+                    .to_string(),
+                ),
+            ),
+        )
+        .await;
+        assert_eq!(approval_replay["job"]["id"], job["id"]);
+
+        // Printing acquires a durable upload reference to the exact immutable
+        // preview object; it must not copy or regenerate the PDF.
+        let acquisition_sha256 = hex::encode(sha2::Sha256::digest(
+            [
+                render["id"].as_str().expect("render id").as_bytes(),
+                b"\0",
+                approval_key.as_bytes(),
+            ]
+            .concat(),
+        ));
+        let artifact_upload = application
+            .repository
+            .get_upload(
+                application.tenant.workspace_id,
+                application.tenant.environment_id,
+                &format!("dua_{acquisition_sha256}"),
+            )
+            .await
+            .expect("zero-copy artifact upload");
+        assert_eq!(artifact_upload.object_key, object_key);
+        assert_eq!(
+            artifact_upload.expected_sha256,
+            render["artifact_sha256"]
+                .as_str()
+                .expect("render artifact digest")
+        );
+        assert_eq!(
+            artifact_upload.expected_bytes,
+            i64::try_from(artifact_body.len()).expect("bounded artifact bytes")
+        );
+
+        let now = Utc::now();
+        let sync = AgentSyncRequest {
+            agent_id: application.agent_id,
+            protocol_version: 1,
+            agent_version: "virtual-document-node".into(),
+            printer_revision: 0,
+            acknowledged_command_cursor: None,
+            event_cursor: None,
+            queue: QueueSnapshot {
+                queued_jobs: 0,
+                active_jobs: 0,
+                content_bytes: 0,
+                accepts_jobs: true,
+            },
+            health: AgentHealth {
+                started_at: now,
+                observed_at: now,
+                sqlite_integrity_ok: true,
+                executor_crashes: 0,
+                last_error_code: None,
+            },
+            printers: None,
+            events: Vec::new(),
+            diagnostics: Vec::new(),
+        };
+        let sync_response = application
+            .router
+            .clone()
+            .oneshot(signed_request(
+                &application,
+                "POST",
+                "/v1/agent/sync",
+                serde_json::to_vec(&sync).expect("virtual node sync JSON"),
+            ))
+            .await
+            .expect("virtual node sync response");
+        assert_eq!(sync_response.status(), StatusCode::OK);
+        let sync: AgentSyncResponse = serde_json::from_slice(
+            &sync_response
+                .into_body()
+                .collect()
+                .await
+                .expect("virtual node sync body")
+                .to_bytes(),
+        )
+        .expect("virtual node sync response JSON");
+        let approved_job_id = job["id"]
+            .as_str()
+            .expect("approved job id")
+            .parse::<piqae_domain::JobId>()
+            .expect("typed approved job id");
+        let offer = sync
+            .candidate_jobs
+            .iter()
+            .find(|offer| offer.job.id == approved_job_id)
+            .unwrap_or_else(|| {
+                panic!(
+                    "approved document {} was not offered; candidates={:?}",
+                    job["id"],
+                    sync.candidate_jobs
+                        .iter()
+                        .map(|offer| offer.job.id)
+                        .collect::<Vec<_>>()
+                )
+            });
+        let piqae_protocol::agent::ContentDescriptor::Download {
+            sha256: offered_sha256,
+            ..
+        } = &offer.content
+        else {
+            panic!("business-document print must use immutable download content");
+        };
+        assert_eq!(offered_sha256, &artifact_upload.expected_sha256);
+        let accept = AgentAcceptJobRequest {
+            lease_id: offer.lease_id,
+            lease_token: offer.lease_token.clone(),
+            content_sha256: offered_sha256.clone(),
+            local_sequence: 1,
+        };
+        let accepted = application
+            .router
+            .clone()
+            .oneshot(signed_request(
+                &application,
+                "POST",
+                &format!("/v1/agent/jobs/{}/accept", offer.job.id),
+                serde_json::to_vec(&accept).expect("virtual acceptance JSON"),
+            ))
+            .await
+            .expect("virtual acceptance response");
+        assert_eq!(accepted.status(), StatusCode::OK);
+        assert_eq!(
+            application
+                .repository
+                .get_job(
+                    application.tenant.workspace_id,
+                    application.tenant.environment_id,
+                    offer.job.id,
+                )
+                .await
+                .expect("accepted virtual document job")
+                .state,
+            piqae_domain::JobState::AgentAccepted
+        );
         let probe = application
             .router
             .clone()
             .oneshot(api_request(
                 "GET",
                 &format!(
-                    "/v1/document-renders/{}",
+                    "/v1/business-document-renders/{}",
                     render["id"].as_str().expect("render id")
                 ),
                 "piq_test_other",
@@ -1409,7 +1606,7 @@ mod tests {
             .oneshot(api_request(
                 "GET",
                 &format!(
-                    "/v1/document-renders/{}/artifact",
+                    "/v1/business-document-renders/{}/artifact",
                     render["id"].as_str().expect("render id")
                 ),
                 "piq_test_other",
@@ -1418,12 +1615,6 @@ mod tests {
             .await
             .expect("cross tenant artifact probe");
         assert_eq!(artifact_probe.status(), StatusCode::NOT_FOUND);
-        let object_key = format!(
-            "{}/{}/documents/{}.pdf",
-            application.tenant.workspace_id,
-            application.tenant.environment_id,
-            render["id"].as_str().expect("render id")
-        );
         application
             .state
             .object_store
@@ -1440,7 +1631,7 @@ mod tests {
             .oneshot(api_request(
                 "GET",
                 &format!(
-                    "/v1/document-renders/{}/artifact",
+                    "/v1/business-document-renders/{}/artifact",
                     render["id"].as_str().expect("render id")
                 ),
                 "piq_test_integration",
@@ -1461,7 +1652,7 @@ mod tests {
             .oneshot(api_request(
                 "GET",
                 &format!(
-                    "/v1/document-renders/{}/artifact",
+                    "/v1/business-document-renders/{}/artifact",
                     render["id"].as_str().expect("render id")
                 ),
                 "piq_test_integration",
@@ -1470,98 +1661,6 @@ mod tests {
             .await
             .expect("missing artifact response");
         assert_eq!(missing.status(), StatusCode::SERVICE_UNAVAILABLE);
-    }
-
-    #[tokio::test]
-    async fn hosted_pdfme_conversion_is_reproducible_and_tenant_scoped() {
-        let application = application().await;
-        let body = serde_json::json!({
-            "adapter":"pdfme", "adapter_version":"1.0.0", "strict":true,
-            "source":{"basePdf":{"width":210,"height":297},
-                "schemas":[[{"type":"text","name":"order/name","fontSize":12}]]}
-        })
-        .to_string();
-        let created = json_response(
-            &application.router,
-            idempotent_api_request(
-                "POST",
-                "/v1/document-conversions",
-                "piq_test_integration",
-                "convert-pdfme-v1",
-                Some(&body),
-            ),
-        )
-        .await;
-        assert_eq!(created["adapter_version"], "1.0.0");
-        assert_eq!(
-            created["document"]["body"][0]["value"]["pointer"],
-            "/order~1name"
-        );
-        let replay = json_response(
-            &application.router,
-            idempotent_api_request(
-                "POST",
-                "/v1/document-conversions",
-                "piq_test_integration",
-                "convert-pdfme-v1",
-                Some(&body),
-            ),
-        )
-        .await;
-        assert_eq!(created, replay);
-        let conflict_body = serde_json::json!({
-            "adapter":"pdfme", "adapter_version":"1.0.0", "strict":false,
-            "source":{"basePdf":{"width":210,"height":297},"schemas":[[]]}
-        })
-        .to_string();
-        let conflict = application
-            .router
-            .clone()
-            .oneshot(idempotent_api_request(
-                "POST",
-                "/v1/document-conversions",
-                "piq_test_integration",
-                "convert-pdfme-v1",
-                Some(&conflict_body),
-            ))
-            .await
-            .expect("conflicting replay");
-        assert_eq!(conflict.status(), StatusCode::CONFLICT);
-        let id = created["id"].as_str().expect("conversion id");
-        let probe = application
-            .router
-            .clone()
-            .oneshot(api_request(
-                "GET",
-                &format!("/v1/document-conversions/{id}"),
-                "piq_test_other",
-                None,
-            ))
-            .await
-            .expect("cross tenant response");
-        assert_eq!(probe.status(), StatusCode::NOT_FOUND);
-
-        let canvas_body = serde_json::json!({
-            "adapter":"pdfme", "adapter_version":"1.1.0", "strict":true,
-            "source":{"basePdf":{"width":210,"height":297}, "schemas":[[
-                {"type":"text","name":"order/name","position":{"x":12,"y":18},"width":80,"height":10}
-            ]]}
-        }).to_string();
-        let canvas = json_response(
-            &application.router,
-            idempotent_api_request(
-                "POST",
-                "/v1/document-conversions",
-                "piq_test_integration",
-                "convert-pdfme-v1-1",
-                Some(&canvas_body),
-            ),
-        )
-        .await;
-        assert_eq!(canvas["adapter_version"], "1.1.0");
-        assert_eq!(canvas["fidelity"], "exact");
-        assert_eq!(canvas["document"]["body"][0]["type"], "canvas");
-        assert_eq!(canvas["document"]["body"][0]["children"][0]["x_mm"], 12.0);
     }
 
     #[tokio::test]

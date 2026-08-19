@@ -5,14 +5,14 @@
 //! the node proves that the exact deterministic renderer contract is present.
 
 use piqae_document_renderer::{
-    DocumentSpecV1, RENDERER_VERSION, RenderLimits, SPEC_VERSION, render,
+    BUSINESS_DOCUMENT_FORMAT, BusinessDocumentV1, RENDERER_VERSION, RenderLimits, render,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 
 /// Changes whenever otherwise-valid input could produce different PDF bytes.
-pub const RENDERER_ABI: &str = "piqae.compact-pdf/v1";
+pub const RENDERER_ABI: &str = "piqae.business-document-pdf/v1";
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -35,7 +35,7 @@ impl NodeDocumentCapabilities {
             negotiation_version: 1,
             renderer_abi: RENDERER_ABI.into(),
             renderer_build: RENDERER_VERSION.into(),
-            spec_versions: vec![SPEC_VERSION.into()],
+            spec_versions: vec![BUSINESS_DOCUMENT_FORMAT.into()],
             deterministic: true,
             max_input_bytes: 4 * 1024 * 1024,
             max_output_bytes: u64::try_from(limits.max_output_bytes).unwrap_or(u64::MAX),
@@ -132,7 +132,7 @@ pub enum NodeRenderResult {
 pub fn render_or_fallback(
     capabilities: &NodeDocumentCapabilities,
     requirement: &NodeRenderRequirement,
-    spec: &DocumentSpecV1,
+    spec: &BusinessDocumentV1,
     input: &Value,
 ) -> NodeRenderResult {
     if let RenderPlan::ServerPdf { reason } = negotiate(capabilities, requirement) {
@@ -178,21 +178,37 @@ fn is_sha256(value: &str) -> bool {
 )]
 mod tests {
     use super::*;
-    use piqae_document_renderer::{Node, Page, PageSize, TextValue};
+    use piqae_document_renderer::{
+        Edges, Expr, Inline, Media, Node, Orientation, PageSize, TextStyle, Theme,
+    };
+    use std::collections::BTreeMap;
 
-    fn spec() -> DocumentSpecV1 {
-        DocumentSpecV1 {
-            spec_version: SPEC_VERSION.into(),
-            page: Page {
+    fn spec() -> BusinessDocumentV1 {
+        BusinessDocumentV1 {
+            format: BUSINESS_DOCUMENT_FORMAT.into(),
+            media: Media::Paged {
                 size: PageSize::A5,
-                margin_mm: 10.0,
-            },
-            body: vec![Node::Text {
-                value: TextValue::Binding {
-                    pointer: "/order".into(),
+                orientation: Orientation::Portrait,
+                margins: Edges {
+                    top_mm: 10.0,
+                    right_mm: 10.0,
+                    bottom_mm: 10.0,
+                    left_mm: 10.0,
                 },
-                font_size: 10.0,
+            },
+            theme: Theme::default(),
+            resources: BTreeMap::new(),
+            header: None,
+            body: vec![Node::Paragraph {
+                content: vec![Inline::Value {
+                    value: Expr::Path {
+                        path: vec!["order".into()],
+                    },
+                    style: TextStyle::default(),
+                }],
+                style: TextStyle::default(),
             }],
+            footer: None,
         }
     }
 
@@ -201,7 +217,7 @@ mod tests {
             negotiation_version: 1,
             renderer_abi: RENDERER_ABI.into(),
             renderer_build: RENDERER_VERSION.into(),
-            spec_version: SPEC_VERSION.into(),
+            spec_version: BUSINESS_DOCUMENT_FORMAT.into(),
             input_bytes: 32,
             maximum_pdf_bytes: 1024 * 1024,
             maximum_pages: 2,

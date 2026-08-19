@@ -1,483 +1,461 @@
 import type {
-  DocumentCanvasElement,
-  DocumentNode,
-  DocumentPointer,
-  DocumentSpec,
-} from "@piqae/sdk";
-
+  Block,
+  BusinessDocument,
+  Expression,
+  Inline,
+} from "./template-model";
 export type LiquidDiagnostic = {
   code: string;
   line: number;
+  column: number;
   message: string;
 };
-
 export type LiquidConversion =
   | {
       ok: true;
-      document: DocumentSpec;
+      document: BusinessDocument;
       normalizedSource: string;
       diagnostics: [];
     }
   | { ok: false; diagnostics: LiquidDiagnostic[] };
-
-const MAX_SOURCE_BYTES = 32_768;
-const MAX_LINES = 500;
-const MAX_DEPTH = 8;
-const MAX_NODES = 500;
-const PATH = "[a-zA-Z_][a-zA-Z0-9_]*(?:\\.[a-zA-Z0-9_]+)*";
-const OUTPUT = new RegExp(`^\\{\\{\\s*(${PATH})\\s*\\}\\}$`);
-const FOR = new RegExp(
-  `^\\{%\\s*for\\s+([a-zA-Z_][a-zA-Z0-9_]*)\\s+in\\s+(${PATH})\\s*%\\}$`,
-);
-const IF = new RegExp(`^\\{%\\s*if\\s+(${PATH})\\s*%\\}$`);
-const QR = new RegExp(
-  `^\\{%\\s*piqae_qr\\s+(${PATH})(?:\\s+size_mm:\\s*(\\d+(?:\\.\\d+)?))?\\s*%\\}$`,
-);
-const SPACER = /^\{%\s*piqae_spacer\s+(\d+(?:\.\d+)?)\s*%\}$/;
-const CANVAS_START = /^\{%\s*piqae_canvas\s*%\}$/;
-const CANVAS_END = /^\{%\s*endpiqae_canvas\s*%\}$/;
-const CANVAS_ITEM = /^\{%\s*piqae_canvas_(text|qr|line)\s+(.+?)\s*%\}$/;
-const CANVAS_VALUE = /^("(?:[^"\\]|\\.)*"|[a-zA-Z_][a-zA-Z0-9_.]*)\s*/;
-const CANVAS_ARG = /^(x|y|width|height|font_size):\s*(\d+(?:\.\d+)?)\s*/;
-
+const TOKEN = /({{[-]?[\s\S]*?[-]?}}|{%[-]?[\s\S]*?[-]?%})/g;
+const IDENT = /^[a-z_]\w*(?:\.[a-z_]\w*)*$/i;
 type Frame = {
-  kind: "root" | "for" | "if" | "canvas";
+  kind: "root" | "repeat" | "conditional";
+  blocks: Block[];
   variable?: string;
-  children: DocumentNode[];
-  line: number;
+  node?: Extract<Block, { type: "conditional" }>;
+  otherwise?: boolean;
 };
-
-/**
- * Compiles a non-executing Liquid subset into the canonical Piqae document.
- * There are intentionally no filters, HTML, includes, assignments or plugins.
- */
 export function liquidToCanonical(
   source: string,
-  page: DocumentSpec["page"],
+  base?: BusinessDocument | BusinessDocument["media"],
 ): LiquidConversion {
-  const diagnostics: LiquidDiagnostic[] = [];
-  if (new TextEncoder().encode(source).byteLength > MAX_SOURCE_BYTES)
-    return failure("source_too_large", 1, "Liquid source exceeds 32 KiB.");
-  const lines = source.replaceAll("\r\n", "\n").split("\n");
-  if (lines.length > MAX_LINES)
-    return failure(
-      "too_many_lines",
-      MAX_LINES + 1,
-      `Liquid source supports at most ${MAX_LINES} lines.`,
+  if (new TextEncoder().encode(source).byteLength > 65_536)
+    return fail(source, 0, "source_too_large", "Liquid source exceeds 64 KiB");
+  if (/<[a-z!/][^>]*>/i.test(source))
+    return fail(
+      source,
+      source.search(/<[a-z!/]/i),
+      "html_unsupported",
+      "HTML and CSS are not part of the business-document profile",
     );
-  const root: Frame = { kind: "root", children: [], line: 1 };
-  const stack: Frame[] = [root];
-  let nodes = 0;
-  const add = (node: DocumentNode, line: number) => {
-    nodes += 1;
-    if (nodes > MAX_NODES)
-      diagnostics.push({
-        code: "too_many_nodes",
-        line,
-        message: `Liquid source supports at most ${MAX_NODES} nodes.`,
-      });
-    else stack.at(-1)!.children.push(node);
+  const root: Block[] = [];
+  const stack: Frame[] = [{ kind: "root", blocks: root }];
+  const tokens = [...source.matchAll(TOKEN)];
+  if (tokens.length > 4_000)
+    return fail(
+      source,
+      0,
+      "too_many_tokens",
+      "Liquid source exceeds 4,000 tokens",
+    );
+  let cursor = 0;
+  const appendText = (raw: string) => {
+    for (const value of raw
+      .split(/\n\s*\n/)
+      .map((x) => x.trim())
+      .filter(Boolean))
+      stack
+        .at(-1)!
+        .blocks.push({ type: "paragraph", content: [{ type: "text", value }] });
   };
-  for (
-    let index = 0;
-    index < lines.length && diagnostics.length === 0;
-    index += 1
-  ) {
-    const lineNumber = index + 1;
-    const text = lines[index]!.trim();
-    if (
-      !text ||
-      (text.startsWith("{% comment %}") && text.endsWith("{% endcomment %}"))
-    )
-      continue;
-    const output = OUTPUT.exec(text);
-    if (output) {
-      const pointer = pointerFor(output[1]!, stack);
-      if (!pointer)
-        diagnostics.push({
-          code: "unknown_variable",
-          line: lineNumber,
-          message: `Variable '${output[1]}' is not in the document or current loop scope.`,
-        });
-      else add({ type: "text", value: { pointer } }, lineNumber);
-      continue;
-    }
-    const loop = FOR.exec(text);
-    if (loop) {
-      if (stack.length > MAX_DEPTH)
-        diagnostics.push({
-          code: "nesting_too_deep",
-          line: lineNumber,
-          message: `Liquid blocks support at most ${MAX_DEPTH} levels.`,
-        });
-      else {
-        const pointer = absolutePointer(loop[2]!);
-        const frame: Frame = {
-          kind: "for",
-          variable: loop[1],
-          children: [],
-          line: lineNumber,
-        };
-        add({ type: "repeat", pointer, children: frame.children }, lineNumber);
-        stack.push(frame);
-      }
-      continue;
-    }
-    const condition = IF.exec(text);
-    if (condition) {
-      if (stack.length > MAX_DEPTH)
-        diagnostics.push({
-          code: "nesting_too_deep",
-          line: lineNumber,
-          message: `Liquid blocks support at most ${MAX_DEPTH} levels.`,
-        });
-      else {
-        const pointer = pointerFor(condition[1]!, stack);
-        if (!pointer || pointer === "." || pointer.startsWith("./"))
-          diagnostics.push({
-            code: "unsupported_condition",
-            line: lineNumber,
-            message: "Conditions must use a root document variable.",
-          });
-        else {
-          const frame: Frame = { kind: "if", children: [], line: lineNumber };
-          add(
-            {
-              type: "when",
-              pointer: pointer as `/${string}`,
-              children: frame.children,
-            },
-            lineNumber,
-          );
-          stack.push(frame);
-        }
-      }
-      continue;
-    }
-    if (text === "{% endfor %}" || text === "{% endif %}") {
-      const expected = text === "{% endfor %}" ? "for" : "if";
-      if (stack.at(-1)!.kind !== expected)
-        diagnostics.push({
-          code: "unmatched_end_tag",
-          line: lineNumber,
-          message: `${text} does not close the current block.`,
-        });
-      else stack.pop();
-      continue;
-    }
-    if (text === "{% piqae_line %}") {
-      add({ type: "line" }, lineNumber);
-      continue;
-    }
-    if (CANVAS_START.test(text)) {
-      if (stack.some((frame) => frame.kind === "canvas"))
-        diagnostics.push({
-          code: "nested_canvas",
-          line: lineNumber,
-          message: "Canvas blocks cannot be nested.",
-        });
-      else {
-        const frame: Frame = {
-          kind: "canvas",
-          children: [],
-          line: lineNumber,
-        };
-        add(
-          {
-            type: "canvas",
-            children: frame.children as DocumentCanvasElement[],
-          },
-          lineNumber,
+  for (const match of tokens) {
+    appendText(source.slice(cursor, match.index));
+    cursor = match.index! + match[0].length;
+    const raw = match[0];
+    const inner = raw.slice(2, -2).replace(/^-|-$/g, "").trim();
+    if (raw.startsWith("{{")) {
+      const expression = parseOutput(inner, stack);
+      if (!expression)
+        return fail(
+          source,
+          match.index!,
+          "unsupported_output",
+          `Unsupported output expression '${inner}'`,
         );
-        stack.push(frame);
-      }
-      continue;
-    }
-    if (CANVAS_END.test(text)) {
-      if (stack.at(-1)!.kind !== "canvas")
-        diagnostics.push({
-          code: "unmatched_end_tag",
-          line: lineNumber,
-          message: "{% endpiqae_canvas %} does not close a canvas block.",
-        });
-      else stack.pop();
-      continue;
-    }
-    const canvasItem = CANVAS_ITEM.exec(text);
-    if (canvasItem) {
-      if (stack.at(-1)!.kind !== "canvas") {
-        diagnostics.push({
-          code: "canvas_item_outside_canvas",
-          line: lineNumber,
-          message: "Canvas items must be inside a piqae_canvas block.",
-        });
-        continue;
-      }
-      const parsed = parseCanvasItem(canvasItem[1]!, canvasItem[2]!, stack);
-      if ("diagnostic" in parsed)
-        diagnostics.push({ ...parsed.diagnostic, line: lineNumber });
-      else add(parsed.node, lineNumber);
-      continue;
-    }
-    if (text === "{% piqae_page_break %}") {
-      add({ type: "page_break" }, lineNumber);
-      continue;
-    }
-    const qr = QR.exec(text);
-    if (qr) {
-      const pointer = pointerFor(qr[1]!, stack);
-      const size = qr[2] === undefined ? undefined : Number(qr[2]);
-      if (!pointer)
-        diagnostics.push({
-          code: "unknown_variable",
-          line: lineNumber,
-          message: `Variable '${qr[1]}' is not in the document or current loop scope.`,
-        });
-      else if (size !== undefined && (size < 5 || size > 100))
-        diagnostics.push({
-          code: "invalid_qr_size",
-          line: lineNumber,
-          message: "QR size must be between 5 and 100 mm.",
-        });
+      const blocks = stack.at(-1)!.blocks;
+      const previous = blocks.at(-1);
+      if (previous?.type === "paragraph")
+        previous.content.push({ type: "value", value: expression });
       else
-        add(
-          {
-            type: "qr",
-            value: { pointer },
-            ...(size === undefined ? {} : { size_mm: size }),
-          },
-          lineNumber,
-        );
-      continue;
-    }
-    const spacer = SPACER.exec(text);
-    if (spacer) {
-      const height = Number(spacer[1]);
-      if (height > 100)
-        diagnostics.push({
-          code: "invalid_spacer",
-          line: lineNumber,
-          message: "Spacer height must be at most 100 mm.",
+        blocks.push({
+          type: "paragraph",
+          content: [{ type: "value", value: expression }],
         });
-      else add({ type: "spacer", height_mm: height }, lineNumber);
       continue;
     }
-    if (text.includes("{{") || text.includes("{%") || /<[^>]+>/.test(text)) {
-      diagnostics.push({
-        code: "unsupported_construct",
-        line: lineNumber,
-        message:
-          "Only whole-line variables, for/if blocks, and documented piqae_* tags are supported; HTML, filters and other Liquid are disabled.",
+    const tag = inner.split(/\s+/, 1)[0];
+    if (tag === "for") {
+      const m =
+        /^for\s+([a-z_]\w*)\s+in\s+([\w.]+)(?:\s+limit:\s*(\d+))?$/i.exec(
+          inner,
+        );
+      if (!m)
+        return fail(
+          source,
+          match.index!,
+          "invalid_for",
+          "Use: {% for item in order.lineItems limit: 1000 %}",
+        );
+      const limit = Number(m[3] ?? 1000);
+      if (limit < 1 || limit > 1000)
+        return fail(
+          source,
+          match.index!,
+          "repeat_limit",
+          "Loop limit must be between 1 and 1,000",
+        );
+      const node: Extract<Block, { type: "repeat" }> = {
+        type: "repeat",
+        items: path(m[2]!),
+        children: [],
+      };
+      stack.at(-1)!.blocks.push(node);
+      stack.push({ kind: "repeat", blocks: node.children, variable: m[1] });
+    } else if (tag === "endfor") {
+      if (stack.at(-1)?.kind !== "repeat")
+        return fail(
+          source,
+          match.index!,
+          "unexpected_endfor",
+          "endfor has no matching for",
+        );
+      stack.pop();
+    } else if (tag === "if" || tag === "unless") {
+      const condition = parseCondition(
+        inner.slice(tag.length).trim(),
+        tag === "unless",
+        stack,
+      );
+      if (!condition)
+        return fail(
+          source,
+          match.index!,
+          "invalid_condition",
+          "Conditions support paths and bounded comparisons",
+        );
+      const node: Extract<Block, { type: "conditional" }> = {
+        type: "conditional",
+        condition,
+        then: [],
+      };
+      stack.at(-1)!.blocks.push(node);
+      stack.push({ kind: "conditional", blocks: node.then, node });
+    } else if (tag === "else") {
+      const frame = stack.at(-1);
+      if (frame?.kind !== "conditional" || !frame.node || frame.otherwise)
+        return fail(
+          source,
+          match.index!,
+          "unexpected_else",
+          "else has no matching condition",
+        );
+      frame.node.else = [];
+      frame.blocks = frame.node.else;
+      frame.otherwise = true;
+    } else if (tag === "endif" || tag === "endunless") {
+      if (stack.at(-1)?.kind !== "conditional")
+        return fail(
+          source,
+          match.index!,
+          "unexpected_end_condition",
+          `${tag} has no matching condition`,
+        );
+      stack.pop();
+    } else if (tag === "piqae_table") {
+      const m = /^piqae_table\s+([\w.]+)\s+as:\s*([a-z_]\w*)$/i.exec(inner);
+      if (!m)
+        return fail(
+          source,
+          match.index!,
+          "invalid_table",
+          "Use: {% piqae_table order.lineItems as: line %}",
+        );
+      stack.at(-1)!.blocks.push(table(path(m[1]!), m[2]!));
+    } else if (tag === "piqae_qr") {
+      const m = /^piqae_qr\s+([\w.]+)$/i.exec(inner);
+      if (!m)
+        return fail(
+          source,
+          match.index!,
+          "invalid_qr",
+          "QR requires a value path",
+        );
+      stack.at(-1)!.blocks.push({
+        type: "qr",
+        value: scopedPath(m[1]!, stack),
+        size_mm: 24,
       });
-      continue;
-    }
-    add({ type: "text", value: text }, lineNumber);
+    } else if (tag === "piqae_barcode") {
+      const m = /^piqae_barcode\s+([\w.]+)(?:\s+symbology:\s*code128)?$/i.exec(
+        inner,
+      );
+      if (!m)
+        return fail(
+          source,
+          match.index!,
+          "invalid_barcode",
+          "Barcode requires a Code 128 value path",
+        );
+      stack.at(-1)!.blocks.push({
+        type: "barcode",
+        value: scopedPath(m[1]!, stack),
+        symbology: "code128",
+        width_mm: 48,
+        height_mm: 16,
+        human_readable: true,
+      });
+    } else if (tag === "piqae_divider")
+      stack.at(-1)!.blocks.push({ type: "divider" });
+    else if (tag === "piqae_page_break")
+      stack.at(-1)!.blocks.push({ type: "page_break" });
+    else
+      return fail(
+        source,
+        match.index!,
+        "unsupported_tag",
+        `Tag '${tag}' is not supported; includes, render, assign, capture and plugins are disabled`,
+      );
+    if (stack.length > 12)
+      return fail(
+        source,
+        match.index!,
+        "nesting_limit",
+        "Liquid nesting exceeds 12 levels",
+      );
   }
-  if (diagnostics.length === 0 && stack.length > 1) {
-    const frame = stack.at(-1)!;
-    diagnostics.push({
-      code: "unclosed_block",
-      line: frame.line,
-      message: `The ${frame.kind} block is not closed.`,
-    });
-  }
-  if (diagnostics.length) return { ok: false, diagnostics };
-  const document: DocumentSpec = {
-    spec_version: "piqae.document/v1",
-    page,
-    body: root.children,
+  appendText(source.slice(cursor));
+  if (stack.length !== 1)
+    return fail(
+      source,
+      source.length,
+      "unclosed_block",
+      `Unclosed ${stack.at(-1)!.kind} block`,
+    );
+  const media = base && "format" in base ? base.media : base;
+  const document: BusinessDocument = {
+    ...(base && "format" in base
+      ? base
+      : {
+          format: "piqae.business-document/v1" as const,
+          theme: {
+            font_size_pt: 10,
+            line_height: 1.35,
+            text_color: { red: 32, green: 34, blue: 35 },
+          },
+          resources: {},
+        }),
+    format: "piqae.business-document/v1",
+    media: media ?? {
+      kind: "paged",
+      size: "a4",
+      orientation: "portrait",
+      margins: { top_mm: 14, right_mm: 14, bottom_mm: 16, left_mm: 14 },
+    },
+    body: root,
   };
   return {
     ok: true,
     document,
-    normalizedSource: canonicalToLiquid(document).source!,
+    normalizedSource: canonicalToLiquid(document).source,
     diagnostics: [],
   };
 }
-
-export function canonicalToLiquid(document: DocumentSpec): {
-  source?: string;
-  diagnostics: LiquidDiagnostic[];
-} {
-  const diagnostics: LiquidDiagnostic[] = [];
+export function canonicalToLiquid(document: BusinessDocument) {
   const lines: string[] = [];
-  let loopIndex = 0;
-  const emit = (nodes: DocumentNode[], scope?: string) => {
-    for (const node of nodes) {
-      if (node.type === "text") {
-        if (typeof node.value === "string") lines.push(node.value);
-        else lines.push(`{{ ${pathFor(node.value.pointer, scope)} }}`);
-      } else if (node.type === "line") lines.push("{% piqae_line %}");
-      else if (node.type === "page_break") lines.push("{% piqae_page_break %}");
-      else if (node.type === "spacer")
-        lines.push(`{% piqae_spacer ${node.height_mm} %}`);
-      else if (node.type === "qr") {
-        if (typeof node.value === "string")
-          diagnostics.push({
-            code: "literal_qr_unsupported",
-            line: lines.length + 1,
-            message: "Liquid QR tags require a variable binding.",
-          });
-        else
-          lines.push(
-            `{% piqae_qr ${pathFor(node.value.pointer, scope)}${node.size_mm === undefined ? "" : ` size_mm: ${node.size_mm}`} %}`,
-          );
-      } else if (node.type === "repeat") {
-        const variable = `item${loopIndex++}`;
-        lines.push(`{% for ${variable} in ${pathFor(node.pointer)} %}`);
-        emit(node.children, variable);
-        lines.push("{% endfor %}");
-      } else if (node.type === "when") {
-        lines.push(`{% if ${pathFor(node.pointer)} %}`);
-        emit(node.children, scope);
-        lines.push("{% endif %}");
-      } else if (node.type === "canvas") {
-        lines.push("{% piqae_canvas %}");
-        for (const child of node.children) {
-          const box = `x: ${child.x_mm} y: ${child.y_mm} width: ${child.width_mm} height: ${child.height_mm}`;
-          if (child.type === "line")
-            lines.push(`{% piqae_canvas_line ${box} %}`);
-          else if (child.type === "text")
-            lines.push(
-              `{% piqae_canvas_text ${liquidCanvasValue(child.value, scope)} ${box} font_size: ${child.font_size ?? 10} %}`,
-            );
-          else
-            lines.push(
-              `{% piqae_canvas_qr ${liquidCanvasValue(child.value, scope)} ${box} %}`,
-            );
+  const inline = (items: Inline[]) =>
+    items
+      .map((item) =>
+        item.type === "text"
+          ? item.value
+          : item.type === "line_break"
+            ? "\n"
+            : `{{ ${toLiquid(item.value)} }}`,
+      )
+      .join("");
+  const emit = (blocks: Block[], depth = 0) => {
+    const pad = "  ".repeat(depth);
+    for (const block of blocks) {
+      if (block.type === "paragraph" || block.type === "heading")
+        lines.push(pad + inline(block.content));
+      else if (block.type === "repeat") {
+        lines.push(
+          `${pad}{% for item in ${toLiquid(block.items)} limit: 1000 %}`,
+        );
+        emit(block.children, depth + 1);
+        lines.push(`${pad}{% endfor %}`);
+      } else if (block.type === "conditional") {
+        const negated = block.condition.type === "not";
+        const condition =
+          negated && "value" in block.condition
+            ? (block.condition.value as Expression)
+            : block.condition;
+        lines.push(
+          `${pad}{% ${negated ? "unless" : "if"} ${toLiquid(condition)} %}`,
+        );
+        emit(block.then, depth + 1);
+        if (block.else?.length) {
+          lines.push(`${pad}{% else %}`);
+          emit(block.else, depth + 1);
         }
-        lines.push("{% endpiqae_canvas %}");
-      } else
-        diagnostics.push({
-          code: "unsupported_node",
-          line: lines.length + 1,
-          message: `${node.type} cannot be represented by bounded Liquid.`,
-        });
+        lines.push(`${pad}{% ${negated ? "endunless" : "endif"} %}`);
+      } else if (block.type === "table")
+        lines.push(`${pad}{% piqae_table ${toLiquid(block.items)} as: line %}`);
+      else if (block.type === "qr")
+        lines.push(`${pad}{% piqae_qr ${toLiquid(block.value)} %}`);
+      else if (block.type === "barcode")
+        lines.push(
+          `${pad}{% piqae_barcode ${toLiquid(block.value)} symbology: code128 %}`,
+        );
+      else if (block.type === "divider")
+        lines.push(`${pad}{% piqae_divider %}`);
+      else if (block.type === "page_break")
+        lines.push(`${pad}{% piqae_page_break %}`);
+      else if ("children" in block) emit(block.children, depth);
     }
   };
   emit(document.body);
-  return diagnostics.length
-    ? { diagnostics }
-    : { source: lines.join("\n"), diagnostics };
+  return { source: lines.join("\n"), diagnostics: [] as LiquidDiagnostic[] };
 }
-
-function liquidCanvasValue(
-  value: string | { pointer: DocumentPointer },
-  scope?: string,
-): string {
-  return typeof value === "string"
-    ? JSON.stringify(value)
-    : pathFor(value.pointer, scope);
+function parseOutput(input: string, stack: Frame[]): Expression | null {
+  const [name, ...filters] = input.split("|").map((x) => x.trim());
+  if (!IDENT.test(name!)) return null;
+  let value = scopedPath(name!, stack);
+  for (const raw of filters) {
+    const filter = raw.split(":")[0]!.trim();
+    if (filter === "number") value = { type: "format_number", value };
+    else if (filter === "money")
+      value = {
+        type: "format_money",
+        amount: value,
+        currency: path("order.currencyCode"),
+      };
+    else if (filter === "date")
+      value = { type: "format_date", value, format: "day_month_year" };
+    else return null;
+  }
+  return value;
 }
-
-function parseCanvasItem(
-  type: string,
-  source: string,
+function parseCondition(
+  input: string,
+  negate: boolean,
   stack: Frame[],
-): { node: DocumentNode } | { diagnostic: Omit<LiquidDiagnostic, "line"> } {
-  let rest = source;
-  let value: string | { pointer: DocumentPointer } | undefined;
-  if (type !== "line") {
-    const match = CANVAS_VALUE.exec(rest);
-    if (!match)
-      return canvasFailure(
-        "invalid_canvas_value",
-        "Canvas text and QR require a quoted literal or variable.",
-      );
-    rest = rest.slice(match[0].length);
-    if (match[1]!.startsWith('"')) {
-      try {
-        value = JSON.parse(match[1]!) as string;
-      } catch {
-        return canvasFailure(
-          "invalid_canvas_value",
-          "Canvas literal is not valid JSON text.",
-        );
-      }
-    } else {
-      const pointer = pointerFor(match[1]!, stack);
-      if (!pointer)
-        return canvasFailure(
-          "unknown_variable",
-          `Variable '${match[1]}' is not in scope.`,
-        );
-      value = { pointer };
-    }
-  }
-  const args = new Map<string, number>();
-  while (rest.trim()) {
-    const match = CANVAS_ARG.exec(rest.trimStart());
-    if (!match)
-      return canvasFailure(
-        "invalid_canvas_argument",
-        "Canvas arguments must be x, y, width, height or font_size numbers.",
-      );
-    if (args.has(match[1]!))
-      return canvasFailure(
-        "duplicate_canvas_argument",
-        `Canvas argument '${match[1]}' is duplicated.`,
-      );
-    args.set(match[1]!, Number(match[2]));
-    rest = rest.trimStart().slice(match[0].length);
-  }
-  for (const required of ["x", "y", "width", "height"])
-    if (!args.has(required))
-      return canvasFailure(
-        "missing_canvas_argument",
-        `Canvas argument '${required}' is required.`,
-      );
-  const box = {
-    x_mm: args.get("x")!,
-    y_mm: args.get("y")!,
-    width_mm: args.get("width")!,
-    height_mm: args.get("height")!,
-  };
-  if (box.width_mm <= 0 || box.height_mm <= 0)
-    return canvasFailure(
-      "invalid_canvas_box",
-      "Canvas width and height must be positive.",
+): Expression | null {
+  const m =
+    /^([\w.]+)(?:\s*(==|!=|>=|<=|>|<)\s*("[^"]*"|'[^']*'|true|false|null|-?\d+(?:\.\d+)?|[\w.]+))?$/.exec(
+      input,
     );
-  if (type === "line") return { node: { type: "line", ...box } };
-  if (type === "text")
-    return {
-      node: {
-        type: "text",
-        value: value!,
-        font_size: args.get("font_size") ?? 10,
-        ...box,
+  if (!m) return null;
+  let value: Expression = m[2]
+    ? {
+        type: "compare",
+        operator: (
+          {
+            "==": "equal",
+            "!=": "not_equal",
+            ">": "greater",
+            ">=": "greater_or_equal",
+            "<": "less",
+            "<=": "less_or_equal",
+          } as const
+        )[m[2] as "=="],
+        left: scopedPath(m[1]!, stack),
+        right: literalOrPath(m[3]!, stack),
+      }
+    : scopedPath(m[1]!, stack);
+  return negate ? { type: "not", value } : value;
+}
+function scopedPath(input: string, stack: Frame[]): Expression {
+  const parts = input.split(".");
+  const variable = [...stack]
+    .reverse()
+    .find((frame) => frame.variable === parts[0])?.variable;
+  return variable
+    ? ({ type: "current_path", path: parts.slice(1) } as Expression)
+    : { type: "path", path: parts };
+}
+function path(input: string): Expression {
+  return { type: "path", path: input.split(".") };
+}
+function literalOrPath(value: string, stack: Frame[]): Expression {
+  if (/^['"]/.test(value))
+    return { type: "literal", value: value.slice(1, -1) };
+  if (["true", "false"].includes(value))
+    return { type: "literal", value: value === "true" };
+  if (value === "null") return { type: "literal", value: null };
+  if (/^-?\d/.test(value)) return { type: "literal", value: Number(value) };
+  return scopedPath(value, stack);
+}
+function toLiquid(value: Expression): string {
+  if (value.type === "path") return value.path.join(".");
+  if (value.type === "current_path") return `item.${value.path.join(".")}`;
+  if (value.type === "literal")
+    return typeof value.value === "string"
+      ? JSON.stringify(value.value)
+      : String(value.value);
+  if (value.type === "format_number")
+    return `${toLiquid(value.value)} | number`;
+  if (value.type === "format_money") return `${toLiquid(value.amount)} | money`;
+  if (value.type === "format_date") return `${toLiquid(value.value)} | date`;
+  if (value.type === "not") return `not ${toLiquid(value.value)}`;
+  if (value.type === "compare")
+    return `${toLiquid(value.left)} ${{ equal: "==", not_equal: "!=", greater: ">", greater_or_equal: ">=", less: "<", less_or_equal: "<=" }[value.operator]} ${toLiquid(value.right)}`;
+  return "unsupported";
+}
+function table(
+  items: Expression,
+  variable: string,
+): Extract<Block, { type: "table" }> {
+  const current = (name: string): Expression =>
+    ({ type: "current_path", path: [name] }) as Expression;
+  void variable;
+  return {
+    type: "table",
+    items,
+    repeat_header: true,
+    empty: [],
+    columns: [
+      {
+        header: [{ type: "text", value: "Item" }],
+        cell: [{ type: "value", value: current("title") }],
+        width: 5,
       },
-    };
-  return { node: { type: "qr", value: value!, ...box } };
+      {
+        header: [{ type: "text", value: "Qty" }],
+        cell: [{ type: "value", value: current("quantity") }],
+        width: 1,
+        align: "right",
+      },
+      {
+        header: [{ type: "text", value: "Total" }],
+        cell: [
+          {
+            type: "value",
+            value: {
+              type: "format_money",
+              amount: current("total"),
+              currency: path("order.currencyCode"),
+            },
+          },
+        ],
+        width: 2,
+        align: "right",
+      },
+    ],
+  };
 }
-
-function canvasFailure(code: string, message: string) {
-  return { diagnostic: { code, message } };
-}
-
-function absolutePointer(path: string): `/${string}` {
-  return `/${path.replaceAll(".", "/")}`;
-}
-function pointerFor(path: string, stack: Frame[]): DocumentPointer | undefined {
-  const loop = [...stack].reverse().find((frame) => frame.kind === "for");
-  if (
-    loop?.variable &&
-    (path === loop.variable || path.startsWith(`${loop.variable}.`))
-  ) {
-    const rest = path.slice(loop.variable.length).replace(/^\./, "");
-    return rest ? `./${rest.replaceAll(".", "/")}` : ".";
-  }
-  return absolutePointer(path);
-}
-function pathFor(pointer: DocumentPointer, scope?: string): string {
-  if (pointer === ".") return scope ?? "item";
-  if (pointer.startsWith("./"))
-    return `${scope ?? "item"}.${pointer.slice(2).replaceAll("/", ".")}`;
-  return pointer.slice(1).replaceAll("/", ".");
-}
-function failure(
+function fail(
+  source: string,
+  index: number,
   code: string,
-  line: number,
   message: string,
 ): LiquidConversion {
-  return { ok: false, diagnostics: [{ code, line, message }] };
+  const before = source.slice(0, index).split("\n");
+  return {
+    ok: false,
+    diagnostics: [
+      { code, line: before.length, column: before.at(-1)!.length + 1, message },
+    ],
+  };
 }

@@ -1,108 +1,237 @@
-//! Deterministic, provider-neutral PDF document rendering.
+//! Capability-free renderer for the Piqae Business Document open format.
 //!
-//! The renderer is deliberately capability-free: it accepts in-memory templates
-//! and JSON, performs no I/O, and emits PDF bytes. `DocumentSpecV1` is the stable
-//! boundary; the compact PDF backend can be replaced without changing callers.
+//! The crate deliberately performs no file, font, or network I/O. It accepts a
+//! bounded semantic document and JSON data and produces deterministic PDF bytes.
+//! Renderer ABI v1 uses deterministic PDF Base-14 Helvetica with Windows-1252
+//! encoding. Characters outside that exact profile fail explicitly rather than
+//! being substituted. A later embedded-font ABI can extend scripts without
+//! changing the business-document semantics.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::semicolon_if_nothing_returned,
+    clippy::suboptimal_flops,
+    clippy::too_many_lines
+)]
 
-use std::fmt::Write as _;
+use std::{collections::BTreeMap, fmt::Write as _};
 
 use qrcode::{EcLevel, QrCode};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 
-pub const SPEC_VERSION: &str = "piqae.document/v1";
-/// Exact native renderer implementation version persisted with conversions.
-pub const RENDERER_VERSION: &str = concat!("piqae-document-renderer/", env!("CARGO_PKG_VERSION"));
+pub const BUSINESS_DOCUMENT_FORMAT: &str = "piqae.business-document/v1";
+pub const RENDERER_VERSION: &str = concat!(
+    "piqae-business-document-renderer/",
+    env!("CARGO_PKG_VERSION")
+);
 
 #[derive(Debug, Clone, Copy)]
 pub struct RenderLimits {
     pub max_nodes: usize,
     pub max_depth: usize,
     pub max_repeat_items: usize,
+    pub max_table_columns: usize,
     pub max_pages: usize,
     pub max_text_bytes: usize,
     pub max_output_bytes: usize,
+    pub max_continuous_height_mm: f32,
 }
 impl Default for RenderLimits {
     fn default() -> Self {
         Self {
-            max_nodes: 10_000,
+            max_nodes: 20_000,
             max_depth: 32,
             max_repeat_items: 1_000,
+            max_table_columns: 32,
             max_pages: 200,
             max_text_bytes: 1_000_000,
             max_output_bytes: 16 * 1024 * 1024,
+            max_continuous_height_mm: 2_000.0,
         }
     }
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum RenderError {
-    #[error("unsupported document spec version: {0}")]
+    #[error("unsupported business-document format: {0}")]
     UnsupportedVersion(String),
+    #[error("invalid document: {0}")]
+    Invalid(&'static str),
     #[error("resource limit exceeded: {0}")]
     Limit(&'static str),
-    #[error("invalid JSON pointer: {0}")]
-    InvalidPointer(String),
-    #[error("QR value is too large")]
+    #[error("expression path was not found: {0}")]
+    MissingPath(String),
+    #[error("expression type mismatch: {0}")]
+    Expression(&'static str),
+    #[error("unsupported feature: {0}")]
+    Unsupported(&'static str),
+    #[error("unsupported character U+{code:04X} in Base-14 typography profile")]
+    UnsupportedCharacter { code: u32 },
+    #[error("QR payload cannot be encoded")]
     QrTooLarge,
-    #[error("page has no printable area")]
-    InvalidPage,
+    #[error("invalid barcode value: {0}")]
+    InvalidBarcode(&'static str),
 }
 
+/// Canonical public business-document model.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct DocumentSpecV1 {
-    pub spec_version: String,
-    pub page: Page,
+pub struct BusinessDocumentV1 {
+    pub format: String,
+    pub media: Media,
+    #[serde(default)]
+    pub theme: Theme,
+    #[serde(default)]
+    pub resources: BTreeMap<String, Resource>,
+    #[serde(default)]
+    pub header: Option<Region>,
     #[serde(default)]
     pub body: Vec<Node>,
+    #[serde(default)]
+    pub footer: Option<Region>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Page {
-    pub size: PageSize,
-    #[serde(default = "default_margin")]
-    pub margin_mm: f32,
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Media {
+    Paged {
+        size: PageSize,
+        #[serde(default)]
+        orientation: Orientation,
+        #[serde(default = "default_margins")]
+        margins: Edges,
+    },
+    Continuous {
+        width_mm: f32,
+        #[serde(default = "default_margins")]
+        margins: Edges,
+    },
+    Label {
+        width_mm: f32,
+        height_mm: f32,
+        #[serde(default = "default_margins")]
+        margins: Edges,
+    },
 }
-
-const fn default_margin() -> f32 {
-    10.0
-}
-
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
+#[serde(rename_all = "snake_case")]
 pub enum PageSize {
     A4,
     A5,
     Letter,
-    FourBySix,
-    Roll58mm,
-    Roll80mm,
+}
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Orientation {
+    #[default]
+    Portrait,
+    Landscape,
+}
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Edges {
+    pub top_mm: f32,
+    pub right_mm: f32,
+    pub bottom_mm: f32,
+    pub left_mm: f32,
+}
+const fn default_margins() -> Edges {
+    Edges {
+        top_mm: 10.0,
+        right_mm: 10.0,
+        bottom_mm: 10.0,
+        left_mm: 10.0,
+    }
 }
 
-impl PageSize {
-    const fn points(self) -> (f32, f32) {
-        match self {
-            Self::A4 => (595.28, 841.89),
-            Self::A5 => (419.53, 595.28),
-            Self::Letter => (612.0, 792.0),
-            Self::FourBySix => (288.0, 432.0),
-            Self::Roll58mm => (164.41, 841.89),
-            Self::Roll80mm => (226.77, 841.89),
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Theme {
+    #[serde(default = "default_font_size")]
+    pub font_size_pt: f32,
+    #[serde(default = "default_line_height")]
+    pub line_height: f32,
+    #[serde(default)]
+    pub text_color: Color,
+}
+impl Default for Theme {
+    fn default() -> Self {
+        Self {
+            font_size_pt: 10.0,
+            line_height: 1.25,
+            text_color: Color::default(),
         }
     }
+}
+const fn default_font_size() -> f32 {
+    10.0
+}
+const fn default_line_height() -> f32 {
+    1.25
+}
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Color {
+    pub red: u8,
+    pub green: u8,
+    pub blue: u8,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Resource {
+    /// Content-addressed assets are resolved by the host before rendering. This
+    /// renderer intentionally rejects image nodes until bytes are supplied by a
+    /// future capability-free embedded-resource ABI.
+    Image {
+        digest: String,
+        media_type: String,
+        byte_length: u64,
+    },
+}
+
+/// Verified, in-memory asset bytes supplied by the host. The renderer never
+/// fetches assets and verifies these bytes against the published resource
+/// digest before use.
+#[derive(Debug, Clone, Default)]
+pub struct ResolvedResources {
+    pub images: BTreeMap<String, Vec<u8>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Region {
+    #[serde(default)]
+    pub first: Vec<Node>,
+    #[serde(default)]
+    pub default: Vec<Node>,
+    #[serde(default)]
+    pub last: Vec<Node>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Node {
-    Text {
-        value: TextValue,
-        #[serde(default = "default_font_size")]
-        font_size: f32,
+    Section {
+        children: Vec<Node>,
+        #[serde(default)]
+        gap_mm: f32,
+    },
+    Paragraph {
+        content: Vec<Inline>,
+        #[serde(default)]
+        style: TextStyle,
+    },
+    Heading {
+        content: Vec<Inline>,
+        #[serde(default = "default_heading_level")]
+        level: u8,
+        #[serde(default)]
+        style: TextStyle,
     },
     Stack {
         children: Vec<Node>,
@@ -114,115 +243,259 @@ pub enum Node {
         #[serde(default)]
         gap_mm: f32,
     },
+    Grid {
+        columns: Vec<f32>,
+        children: Vec<Node>,
+        #[serde(default)]
+        gap_mm: f32,
+    },
+    Table {
+        items: Expr,
+        columns: Vec<TableColumn>,
+        #[serde(default)]
+        repeat_header: bool,
+        #[serde(default)]
+        empty: Vec<Node>,
+    },
+    Repeat {
+        items: Expr,
+        children: Vec<Node>,
+        #[serde(default)]
+        gap_mm: f32,
+    },
+    Conditional {
+        condition: Expr,
+        then: Vec<Node>,
+        #[serde(rename = "else", default)]
+        otherwise: Vec<Node>,
+    },
     Spacer {
         height_mm: f32,
     },
-    Line,
+    Divider {
+        #[serde(default = "default_divider_width")]
+        width_pt: f32,
+    },
     PageBreak,
-    When {
-        pointer: String,
+    KeepTogether {
         children: Vec<Node>,
     },
-    Repeat {
-        pointer: String,
-        children: Vec<Node>,
+    Image {
+        resource: String,
+        width_mm: f32,
+        height_mm: f32,
+        #[serde(default)]
+        fit: ImageFit,
     },
     Qr {
-        value: TextValue,
-        #[serde(default = "default_qr_size")]
+        value: Expr,
         size_mm: f32,
-    },
-    /// A bounded, flow-layout table. Cell values are resolved relative to each
-    /// array item; no HTML, script, font, file, or network capability exists.
-    Table {
-        pointer: String,
-        columns: Vec<TableColumn>,
-        #[serde(default = "default_font_size")]
-        font_size: f32,
         #[serde(default)]
-        header: bool,
+        error_correction: QrCorrection,
     },
-    /// Absolute, top-left-origin page elements in millimetres. Each element is
-    /// clipped to its declared box. This deliberately small primitive set is
-    /// suitable for data-only visual-editor adapters without HTML or plugins.
-    Canvas {
-        children: Vec<CanvasElement>,
+    Barcode {
+        value: Expr,
+        symbology: BarcodeSymbology,
+        width_mm: f32,
+        height_mm: f32,
+        #[serde(default)]
+        human_readable: bool,
     },
 }
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
-pub enum CanvasElement {
-    Text {
-        value: TextValue,
-        x_mm: f32,
-        y_mm: f32,
-        width_mm: f32,
-        height_mm: f32,
-        #[serde(default = "default_font_size")]
-        font_size: f32,
-    },
-    Qr {
-        value: TextValue,
-        x_mm: f32,
-        y_mm: f32,
-        width_mm: f32,
-        height_mm: f32,
-    },
-    Line {
-        x_mm: f32,
-        y_mm: f32,
-        width_mm: f32,
-        height_mm: f32,
-    },
+const fn default_heading_level() -> u8 {
+    1
+}
+const fn default_divider_width() -> f32 {
+    0.5
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TableColumn {
-    pub heading: String,
-    pub pointer: String,
+    pub header: Vec<Inline>,
+    pub cell: Vec<Inline>,
     #[serde(default = "default_column_weight")]
-    pub width_weight: f32,
+    pub width: f32,
+    #[serde(default)]
+    pub align: TextAlign,
 }
-
 const fn default_column_weight() -> f32 {
     1.0
 }
 
-const fn default_font_size() -> f32 {
-    10.0
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Inline {
+    Text {
+        value: String,
+        #[serde(default)]
+        style: TextStyle,
+    },
+    Value {
+        value: Expr,
+        #[serde(default)]
+        style: TextStyle,
+    },
+    LineBreak,
 }
-const fn default_qr_size() -> f32 {
-    24.0
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TextStyle {
+    #[serde(default)]
+    pub bold: bool,
+    #[serde(default)]
+    pub italic: bool,
+    #[serde(default)]
+    pub underline: bool,
+    #[serde(default)]
+    pub font_size_pt: Option<f32>,
+    #[serde(default)]
+    pub align: TextAlign,
+}
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TextAlign {
+    #[default]
+    Left,
+    Center,
+    Right,
+}
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageFit {
+    #[default]
+    Contain,
+    Cover,
+    Fill,
+    ScaleDown,
+}
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub enum QrCorrection {
+    L,
+    #[default]
+    M,
+    Q,
+    H,
+}
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BarcodeSymbology {
+    Code128,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum TextValue {
-    Literal(String),
-    Binding { pointer: String },
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Expr {
+    Literal {
+        value: Value,
+    },
+    Path {
+        path: Vec<String>,
+    },
+    CurrentPath {
+        path: Vec<String>,
+    },
+    Coalesce {
+        values: Vec<Expr>,
+    },
+    Concat {
+        values: Vec<Expr>,
+    },
+    Compare {
+        operator: CompareOperator,
+        left: Box<Expr>,
+        right: Box<Expr>,
+    },
+    Boolean {
+        operator: BooleanOperator,
+        values: Vec<Expr>,
+    },
+    Not {
+        value: Box<Expr>,
+    },
+    Arithmetic {
+        operator: ArithmeticOperator,
+        left: Box<Expr>,
+        right: Box<Expr>,
+    },
+    FormatNumber {
+        value: Box<Expr>,
+        #[serde(default)]
+        decimals: u8,
+    },
+    FormatMoney {
+        amount: Box<Expr>,
+        currency: Box<Expr>,
+        #[serde(default = "default_money_decimals")]
+        decimals: u8,
+    },
+    FormatDate {
+        value: Box<Expr>,
+        format: DateFormat,
+    },
+    FormatString {
+        value: Box<Expr>,
+        operation: StringOperation,
+    },
+}
+const fn default_money_decimals() -> u8 {
+    2
+}
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompareOperator {
+    Equal,
+    NotEqual,
+    Less,
+    LessOrEqual,
+    Greater,
+    GreaterOrEqual,
+}
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BooleanOperator {
+    And,
+    Or,
+}
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArithmeticOperator {
+    Add,
+    Subtract,
+    Multiply,
+    Divide,
+}
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DateFormat {
+    IsoDate,
+    DayMonthYear,
+    MonthDayYear,
+}
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StringOperation {
+    Trim,
+    UppercaseAscii,
+    LowercaseAscii,
 }
 
 #[derive(Debug, Clone)]
 enum Draw {
-    ClipStart {
-        x: f32,
-        y: f32,
-        width: f32,
-        height: f32,
-    },
-    ClipEnd,
     Text {
         x: f32,
         y: f32,
         size: f32,
         text: String,
+        face: FontFace,
+        underline: bool,
     },
     Line {
         x1: f32,
         y: f32,
         x2: f32,
+        width: f32,
     },
     Qr {
         x: f32,
@@ -230,959 +503,1968 @@ enum Draw {
         size: f32,
         modules: Vec<Vec<bool>>,
     },
+    Bars {
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        bits: Vec<bool>,
+    },
+    Jpeg {
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        pixel_width: u16,
+        pixel_height: u16,
+        bytes: Vec<u8>,
+    },
 }
-
-#[derive(Debug)]
-struct State {
-    pages: Vec<Vec<Draw>>,
-    x: f32,
-    y: f32,
+#[derive(Debug, Clone, Copy)]
+enum FontFace {
+    Regular,
+    Bold,
+    Italic,
+    BoldItalic,
+}
+#[derive(Debug, Clone)]
+struct PageDraw {
     width: f32,
     height: f32,
-    margin: f32,
+    draws: Vec<Draw>,
+}
+struct State<'a> {
+    doc: &'a BusinessDocumentV1,
+    limits: RenderLimits,
+    root: &'a Value,
+    current: Value,
+    resolved: &'a ResolvedResources,
+    pages: Vec<PageDraw>,
+    width: f32,
+    nominal_height: f32,
+    margins: Edges,
+    x: f32,
+    y: f32,
+    content_width: f32,
+    bottom: f32,
     nodes: usize,
+    repeats: usize,
     text_bytes: usize,
-    repeated: usize,
+    continuous: bool,
+    in_region: bool,
 }
 
-/// Renders a v1 specification and JSON input to deterministic PDF bytes.
+/// Render a validated document and its data into deterministic PDF bytes.
 ///
 /// # Errors
-///
-/// Returns [`RenderError`] when the spec is invalid, a binding cannot be
-/// resolved, QR data cannot be represented, or a configured limit is exceeded.
+/// Returns a stable validation, capability, expression, or resource-limit error.
 pub fn render(
-    spec: &DocumentSpecV1,
+    spec: &BusinessDocumentV1,
     input: &Value,
     limits: RenderLimits,
 ) -> Result<Vec<u8>, RenderError> {
-    if spec.spec_version != SPEC_VERSION {
-        return Err(RenderError::UnsupportedVersion(spec.spec_version.clone()));
-    }
-    let (width, height) = spec.page.size.points();
-    let margin = spec.page.margin_mm * 72.0 / 25.4;
-    if !margin.is_finite() || margin < 0.0 || width <= margin * 2.0 || height <= margin * 2.0 {
-        return Err(RenderError::InvalidPage);
-    }
+    render_with_resources(spec, input, &ResolvedResources::default(), limits)
+}
+
+/// Render with host-resolved, content-addressed in-memory resources.
+///
+/// # Errors
+/// Returns an error if an asset is absent, has a digest mismatch, is malformed,
+/// uses an unsupported media type, or if ordinary rendering fails.
+pub fn render_with_resources(
+    spec: &BusinessDocumentV1,
+    input: &Value,
+    resolved: &ResolvedResources,
+    limits: RenderLimits,
+) -> Result<Vec<u8>, RenderError> {
+    validate(spec, limits)?;
+    let (width, height, margins, continuous) = media_geometry(&spec.media, limits)?;
     let mut state = State {
-        pages: vec![Vec::new()],
-        x: margin,
-        y: height - margin,
+        doc: spec,
+        limits,
+        root: input,
+        current: input.clone(),
+        resolved,
+        pages: vec![PageDraw {
+            width,
+            height,
+            draws: vec![],
+        }],
         width,
-        height,
-        margin,
+        nominal_height: height,
+        margins,
+        x: mm(margins.left_mm),
+        y: height - mm(margins.top_mm),
+        content_width: width - mm(margins.left_mm + margins.right_mm),
+        bottom: mm(margins.bottom_mm),
         nodes: 0,
+        repeats: 0,
         text_bytes: 0,
-        repeated: 0,
+        continuous,
+        in_region: false,
     };
-    layout(&spec.body, input, input, &mut state, limits, 0)?;
-    let pdf = write_pdf(&state);
+    reserve_regions(&mut state)?;
+    render_region(&mut state, RegionKind::Header, false)?;
+    layout_nodes(&spec.body, &mut state, 0)?;
+    render_region(&mut state, RegionKind::Footer, true)?;
+    if continuous {
+        let used = (state.nominal_height - state.y + mm(state.margins.bottom_mm)).max(mm(10.0));
+        if used > mm(limits.max_continuous_height_mm) {
+            return Err(RenderError::Limit("continuous height"));
+        }
+        let delta = state.nominal_height - used;
+        let page = &mut state.pages[0];
+        page.height = used;
+        for draw in &mut page.draws {
+            translate_y(draw, -delta);
+        }
+    }
+    let pdf = write_pdf(&state.pages);
     if pdf.len() > limits.max_output_bytes {
         return Err(RenderError::Limit("output bytes"));
     }
     Ok(pdf)
 }
 
-#[allow(
-    clippy::too_many_lines,
-    clippy::cast_precision_loss,
-    clippy::suboptimal_flops
-)]
-fn layout(
+/// Validate a business document without performing rendering or external I/O.
+///
+/// # Errors
+/// Returns the first deterministic schema, capability, or configured-limit error.
+pub fn validate(spec: &BusinessDocumentV1, limits: RenderLimits) -> Result<(), RenderError> {
+    if spec.format != BUSINESS_DOCUMENT_FORMAT {
+        return Err(RenderError::UnsupportedVersion(spec.format.clone()));
+    }
+    if !(4.0..=72.0).contains(&spec.theme.font_size_pt)
+        || !(1.0..=3.0).contains(&spec.theme.line_height)
+    {
+        return Err(RenderError::Invalid("theme typography"));
+    }
+    if spec.resources.len() > 100 {
+        return Err(RenderError::Limit("resources"));
+    }
+    for resource in spec.resources.values() {
+        let Resource::Image {
+            digest,
+            media_type,
+            byte_length,
+        } = resource;
+        let hash = digest.strip_prefix("sha256:").unwrap_or_default();
+        if hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(RenderError::Invalid("resource digest"));
+        }
+        if media_type != "image/jpeg" || *byte_length == 0 || *byte_length > 4 * 1024 * 1024 {
+            return Err(RenderError::Invalid("resource metadata"));
+        }
+    }
+    let mut count = 0;
+    validate_nodes(&spec.body, 0, &mut count, limits)?;
+    if let Some(r) = &spec.header {
+        validate_nodes(&r.first, 1, &mut count, limits)?;
+        validate_nodes(&r.default, 1, &mut count, limits)?;
+    }
+    if let Some(r) = &spec.footer {
+        validate_nodes(&r.default, 1, &mut count, limits)?;
+        validate_nodes(&r.last, 1, &mut count, limits)?;
+    }
+    Ok(())
+}
+fn validate_nodes(
     nodes: &[Node],
-    root: &Value,
-    current: &Value,
-    state: &mut State,
-    limits: RenderLimits,
     depth: usize,
+    count: &mut usize,
+    limits: RenderLimits,
 ) -> Result<(), RenderError> {
     if depth > limits.max_depth {
         return Err(RenderError::Limit("nesting depth"));
     }
+    for n in nodes {
+        *count += 1;
+        if *count > limits.max_nodes {
+            return Err(RenderError::Limit("nodes"));
+        }
+        match n {
+            Node::Section { children, .. }
+            | Node::Stack { children, .. }
+            | Node::Row { children, .. }
+            | Node::Repeat { children, .. }
+            | Node::KeepTogether { children } => {
+                validate_nodes(children, depth + 1, count, limits)?
+            }
+            Node::Grid {
+                columns, children, ..
+            } => {
+                if columns.is_empty() || columns.iter().any(|v| !v.is_finite() || *v <= 0.0) {
+                    return Err(RenderError::Invalid("grid columns"));
+                }
+                validate_nodes(children, depth + 1, count, limits)?
+            }
+            Node::Conditional {
+                then, otherwise, ..
+            } => {
+                validate_nodes(then, depth + 1, count, limits)?;
+                validate_nodes(otherwise, depth + 1, count, limits)?
+            }
+            Node::Table { columns, .. } => {
+                if columns.is_empty()
+                    || columns.len() > limits.max_table_columns
+                    || columns
+                        .iter()
+                        .any(|c| !c.width.is_finite() || c.width <= 0.0)
+                {
+                    return Err(RenderError::Invalid("table columns"));
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn media_geometry(
+    media: &Media,
+    limits: RenderLimits,
+) -> Result<(f32, f32, Edges, bool), RenderError> {
+    let (w, h, m, c) = match media {
+        Media::Paged {
+            size,
+            orientation,
+            margins,
+        } => {
+            let (mut w, mut h) = match size {
+                PageSize::A4 => (595.28, 841.89),
+                PageSize::A5 => (419.53, 595.28),
+                PageSize::Letter => (612.0, 792.0),
+            };
+            if matches!(orientation, Orientation::Landscape) {
+                std::mem::swap(&mut w, &mut h);
+            }
+            (w, h, *margins, false)
+        }
+        Media::Continuous { width_mm, margins } => (
+            mm(*width_mm),
+            mm(limits.max_continuous_height_mm),
+            *margins,
+            true,
+        ),
+        Media::Label {
+            width_mm,
+            height_mm,
+            margins,
+        } => (mm(*width_mm), mm(*height_mm), *margins, false),
+    };
+    if !w.is_finite()
+        || !h.is_finite()
+        || w <= mm(20.0)
+        || h <= mm(10.0)
+        || [m.top_mm, m.right_mm, m.bottom_mm, m.left_mm]
+            .iter()
+            .any(|v| !v.is_finite() || *v < 0.0)
+        || w <= mm(m.left_mm + m.right_mm)
+        || h <= mm(m.top_mm + m.bottom_mm)
+    {
+        return Err(RenderError::Invalid("media geometry"));
+    }
+    Ok((w, h, m, c))
+}
+
+#[derive(Clone, Copy)]
+enum RegionKind {
+    Header,
+    Footer,
+}
+fn reserve_regions(state: &mut State) -> Result<(), RenderError> {
+    if state.continuous {
+        return Ok(());
+    }
+    let header = estimate_region(state.doc.header.as_ref(), state)?;
+    let footer = estimate_region(state.doc.footer.as_ref(), state)?;
+    state.y -= header;
+    state.bottom += footer;
+    if state.y <= state.bottom {
+        return Err(RenderError::Invalid("header and footer leave no body area"));
+    }
+    Ok(())
+}
+fn estimate_region(region: Option<&Region>, state: &State) -> Result<f32, RenderError> {
+    let Some(r) = region else { return Ok(0.0) };
+    Ok(estimate_nodes(
+        &r.default,
+        state.content_width,
+        state.doc.theme.font_size_pt,
+        state.doc.theme.line_height,
+    )?
+    .min(mm(60.0)))
+}
+fn render_region(state: &mut State, kind: RegionKind, last: bool) -> Result<(), RenderError> {
+    let nodes = match kind {
+        RegionKind::Header => state.doc.header.as_ref().map(|r| {
+            if state.pages.len() == 1 && !r.first.is_empty() {
+                &r.first
+            } else {
+                &r.default
+            }
+        }),
+        RegionKind::Footer => state.doc.footer.as_ref().map(|r| {
+            if last && !r.last.is_empty() {
+                &r.last
+            } else {
+                &r.default
+            }
+        }),
+    };
+    let Some(nodes) = nodes.cloned() else {
+        return Ok(());
+    };
+    let old = (state.x, state.y, state.bottom, state.in_region);
+    state.in_region = true;
+    state.x = mm(state.margins.left_mm);
+    state.y = match kind {
+        RegionKind::Header => state.nominal_height - mm(state.margins.top_mm),
+        RegionKind::Footer => {
+            state.bottom
+                + estimate_nodes(
+                    &nodes,
+                    state.content_width,
+                    state.doc.theme.font_size_pt,
+                    state.doc.theme.line_height,
+                )?
+        }
+    };
+    layout_nodes(&nodes, state, 1)?;
+    state.x = old.0;
+    state.y = old.1;
+    state.bottom = old.2;
+    state.in_region = old.3;
+    Ok(())
+}
+
+fn layout_nodes(nodes: &[Node], state: &mut State, depth: usize) -> Result<(), RenderError> {
+    if depth > state.limits.max_depth {
+        return Err(RenderError::Limit("nesting depth"));
+    }
     for node in nodes {
         state.nodes += 1;
-        if state.nodes > limits.max_nodes {
+        if state.nodes > state.limits.max_nodes {
             return Err(RenderError::Limit("nodes"));
         }
         match node {
-            Node::Text { value, font_size } => {
-                let text = resolve_text(value, root, current)?;
-                draw_text(state, &text, *font_size, limits)?;
+            Node::Paragraph { content, style } => paragraph(content, style, state)?,
+            Node::Heading {
+                content,
+                level,
+                style,
+            } => {
+                if !(1..=6).contains(level) {
+                    return Err(RenderError::Invalid("heading level"));
+                }
+                let mut s = style.clone();
+                if s.font_size_pt.is_none() {
+                    s.font_size_pt = Some(match level {
+                        1 => 22.0,
+                        2 => 18.0,
+                        3 => 15.0,
+                        _ => 12.0,
+                    })
+                }
+                s.bold = true;
+                paragraph(content, &s, state)?
             }
-            Node::Spacer { height_mm } => {
-                ensure_space(state, mm(*height_mm), limits)?;
-                state.y -= mm(*height_mm).max(0.0);
-            }
-            Node::Line => {
-                ensure_space(state, 4.0, limits)?;
-                state
-                    .pages
-                    .last_mut()
-                    .ok_or(RenderError::Limit("pages"))?
-                    .push(Draw::Line {
-                        x1: state.margin,
-                        y: state.y,
-                        x2: state.width - state.margin,
-                    });
-                state.y -= 4.0;
-            }
-            Node::PageBreak => new_page(state, limits)?,
-            Node::Stack { children, gap_mm } => {
-                layout(children, root, current, state, limits, depth + 1)?;
-                state.y -= mm(*gap_mm).max(0.0);
+            Node::Section { children, gap_mm } | Node::Stack { children, gap_mm } => {
+                layout_nodes(children, state, depth + 1)?;
+                state.y -= checked_mm(*gap_mm, "gap")?
             }
             Node::Row { children, gap_mm } => {
-                let start_y = state.y;
-                let available = state.width - state.margin * 2.0;
-                let count = children.len().max(1) as f32;
-                let cell = (available - mm(*gap_mm).max(0.0) * (count - 1.0)) / count;
-                let mut low_y = start_y;
-                for (index, child) in children.iter().enumerate() {
-                    state.x = state.margin + index as f32 * (cell + mm(*gap_mm).max(0.0));
-                    state.y = start_y;
-                    layout(
-                        std::slice::from_ref(child),
-                        root,
-                        current,
-                        state,
-                        limits,
-                        depth + 1,
-                    )?;
-                    low_y = low_y.min(state.y);
-                }
-                state.x = state.margin;
-                state.y = low_y;
+                columns(children, &vec![1.0; children.len()], *gap_mm, state, depth)?
             }
-            Node::When { pointer, children } => {
-                if truthy(resolve(pointer, root, current)?) {
-                    layout(children, root, current, state, limits, depth + 1)?;
-                }
-            }
-            Node::Repeat { pointer, children } => {
-                if let Some(items) = resolve(pointer, root, current)?.as_array() {
-                    state.repeated = state.repeated.saturating_add(items.len());
-                    if state.repeated > limits.max_repeat_items {
-                        return Err(RenderError::Limit("repeat items"));
-                    }
-                    for item in items {
-                        layout(children, root, item, state, limits, depth + 1)?;
-                    }
-                }
-            }
-            Node::Qr { value, size_mm } => {
-                let text = resolve_text(value, root, current)?;
-                account_text(state, &text, limits)?;
-                if !size_mm.is_finite() {
-                    return Err(RenderError::Limit("QR size"));
-                }
-                let code = QrCode::with_error_correction_level(text.as_bytes(), EcLevel::M)
-                    .map_err(|_| RenderError::QrTooLarge)?;
-                let size = mm(*size_mm).clamp(mm(10.0), mm(100.0));
-                ensure_space(state, size, limits)?;
-                let width = code.width();
-                let colors = code.into_colors();
-                let modules = colors
-                    .chunks(width)
-                    .map(|row| row.iter().map(|c| c == &qrcode::Color::Dark).collect())
-                    .collect();
-                state
-                    .pages
-                    .last_mut()
-                    .ok_or(RenderError::Limit("pages"))?
-                    .push(Draw::Qr {
-                        x: state.x,
-                        y: state.y - size,
-                        size,
-                        modules,
-                    });
-                state.y -= size + 4.0;
-            }
+            Node::Grid {
+                columns: weights,
+                children,
+                gap_mm,
+            } => columns(children, weights, *gap_mm, state, depth)?,
             Node::Table {
-                pointer,
+                items,
                 columns,
-                font_size,
-                header,
+                repeat_header,
+                empty,
+            } => table(items, columns, *repeat_header, empty, state)?,
+            Node::Repeat {
+                items,
+                children,
+                gap_mm,
             } => {
-                if columns.is_empty() || columns.len() > 64 {
-                    return Err(RenderError::Limit("table columns"));
-                }
-                let weights = columns
-                    .iter()
-                    .map(|column| column.width_weight)
-                    .collect::<Vec<_>>();
-                if weights
-                    .iter()
-                    .any(|weight| !weight.is_finite() || *weight <= 0.0)
-                {
-                    return Err(RenderError::Limit("table column weights"));
-                }
-                let total_weight: f32 = weights.iter().sum();
-                if !total_weight.is_finite() {
-                    return Err(RenderError::Limit("table column weights"));
-                }
-                let width = state.width - state.margin * 2.0;
-                let rows = resolve(pointer, root, current)?
+                let value = eval(items, state.root, &state.current)?;
+                let arr = value
                     .as_array()
-                    .ok_or_else(|| RenderError::InvalidPointer(pointer.clone()))?;
-                state.repeated = state.repeated.saturating_add(rows.len());
-                if state.repeated > limits.max_repeat_items {
-                    return Err(RenderError::Limit("repeat items"));
+                    .ok_or(RenderError::Expression("repeat items must be an array"))?
+                    .clone();
+                account_repeat(state, arr.len())?;
+                let old = state.current.clone();
+                for item in &arr {
+                    state.current = item.clone();
+                    layout_nodes(children, state, depth + 1)?;
+                    state.y -= checked_mm(*gap_mm, "gap")?
                 }
-                if *header {
-                    state.nodes = state.nodes.saturating_add(columns.len());
-                    if state.nodes > limits.max_nodes {
-                        return Err(RenderError::Limit("nodes"));
-                    }
-                    draw_table_row(
-                        state,
-                        columns.iter().map(|column| column.heading.clone()),
-                        &weights,
-                        total_weight,
-                        width,
-                        *font_size,
-                        limits,
-                    )?;
-                }
-                for row in rows {
-                    state.nodes = state.nodes.saturating_add(columns.len());
-                    if state.nodes > limits.max_nodes {
-                        return Err(RenderError::Limit("nodes"));
-                    }
-                    let values = columns
-                        .iter()
-                        .map(|column| resolve(&column.pointer, root, row).map(value_to_text))
-                        .collect::<Result<Vec<_>, _>>()?;
-                    draw_table_row(
-                        state,
-                        values,
-                        &weights,
-                        total_weight,
-                        width,
-                        *font_size,
-                        limits,
-                    )?;
+                state.current = old;
+            }
+            Node::Conditional {
+                condition,
+                then,
+                otherwise,
+            } => {
+                if truthy(&eval(condition, state.root, &state.current)?) {
+                    layout_nodes(then, state, depth + 1)?
+                } else {
+                    layout_nodes(otherwise, state, depth + 1)?
                 }
             }
-            Node::Canvas { children } => {
-                state.nodes = state.nodes.saturating_add(children.len());
-                if state.nodes > limits.max_nodes {
-                    return Err(RenderError::Limit("nodes"));
+            Node::Spacer { height_mm } => {
+                let h = checked_mm(*height_mm, "spacer height")?;
+                ensure_space(state, h)?;
+                state.y -= h
+            }
+            Node::Divider { width_pt } => {
+                if !width_pt.is_finite() || *width_pt <= 0.0 || *width_pt > 10.0 {
+                    return Err(RenderError::Invalid("divider width"));
                 }
-                for child in children {
-                    draw_canvas_element(child, root, current, state, limits)?;
+                ensure_space(state, *width_pt + 2.0)?;
+                push(
+                    state,
+                    Draw::Line {
+                        x1: state.x,
+                        y: state.y,
+                        x2: state.x + state.content_width,
+                        width: *width_pt,
+                    },
+                )?;
+                state.y -= *width_pt + 2.0
+            }
+            Node::PageBreak => new_page(state)?,
+            Node::KeepTogether { children } => {
+                let h = estimate_nodes(
+                    children,
+                    state.content_width,
+                    state.doc.theme.font_size_pt,
+                    state.doc.theme.line_height,
+                )?;
+                if h <= state.y - state.bottom {
+                    layout_nodes(children, state, depth + 1)?
+                } else if h
+                    <= state.nominal_height - mm(state.margins.top_mm + state.margins.bottom_mm)
+                {
+                    new_page(state)?;
+                    layout_nodes(children, state, depth + 1)?
+                } else {
+                    return Err(RenderError::Limit("keep-together block height"));
                 }
             }
+            Node::Image {
+                resource,
+                width_mm,
+                height_mm,
+                fit,
+            } => image(resource, *width_mm, *height_mm, *fit, state)?,
+            Node::Qr {
+                value,
+                size_mm,
+                error_correction,
+            } => qr(value, *size_mm, *error_correction, state)?,
+            Node::Barcode {
+                value,
+                symbology,
+                width_mm,
+                height_mm,
+                human_readable,
+            } => barcode(
+                value,
+                *symbology,
+                *width_mm,
+                *height_mm,
+                *human_readable,
+                state,
+            )?,
         }
     }
     Ok(())
 }
 
-fn canvas_box(
-    x_mm: f32,
-    y_mm: f32,
-    width_mm: f32,
-    height_mm: f32,
-    state: &State,
-) -> Result<(f32, f32, f32, f32), RenderError> {
-    if [x_mm, y_mm, width_mm, height_mm]
-        .iter()
-        .any(|v| !v.is_finite())
-        || x_mm < 0.0
-        || y_mm < 0.0
-        || width_mm <= 0.0
-        || height_mm <= 0.0
-        || width_mm > 2_000.0
-        || height_mm > 2_000.0
-    {
-        return Err(RenderError::Limit("canvas bounds"));
+fn columns(
+    children: &[Node],
+    weights: &[f32],
+    gap_mm: f32,
+    state: &mut State,
+    depth: usize,
+) -> Result<(), RenderError> {
+    if children.is_empty() {
+        return Ok(());
     }
-    let (x, top, width, height) = (mm(x_mm), mm(y_mm), mm(width_mm), mm(height_mm));
-    if x >= state.width || top >= state.height {
-        return Err(RenderError::Limit("canvas bounds"));
+    if weights.len() != children.len() {
+        return Err(RenderError::Invalid("column count"));
     }
-    Ok((
-        x,
-        (state.height - top - height).max(0.0),
-        width.min(state.width - x),
-        height.min(state.height - top),
-    ))
+    let gap = checked_mm(gap_mm, "column gap")?;
+    let total: f32 = weights.iter().sum();
+    let available = state.content_width - gap * (children.len() - 1) as f32;
+    if available <= 0.0 {
+        return Err(RenderError::Invalid("column width"));
+    }
+    let old = (state.x, state.y, state.content_width);
+    let starting_page = state.pages.len();
+    let mut low = state.y;
+    for (i, child) in children.iter().enumerate() {
+        let prior: f32 = weights[..i].iter().sum();
+        state.x = old.0 + available * prior / total + gap * i as f32;
+        state.content_width = available * weights[i] / total;
+        state.y = old.1;
+        layout_nodes(std::slice::from_ref(child), state, depth + 1)?;
+        if state.pages.len() != starting_page {
+            return Err(RenderError::Unsupported(
+                "row and grid children cannot paginate in renderer ABI v1",
+            ));
+        }
+        low = low.min(state.y)
+    }
+    state.x = old.0;
+    state.content_width = old.2;
+    state.y = low;
+    Ok(())
 }
 
-fn draw_canvas_element(
-    element: &CanvasElement,
+fn paragraph(content: &[Inline], style: &TextStyle, state: &mut State) -> Result<(), RenderError> {
+    let size = style.font_size_pt.unwrap_or(state.doc.theme.font_size_pt);
+    if !size.is_finite() || !(4.0..=72.0).contains(&size) {
+        return Err(RenderError::Invalid("font size"));
+    }
+    let runs = resolve_runs(content, state.root, &state.current, style, size)?;
+    let lines = wrap_runs(runs, state.content_width)?;
+    for line in lines {
+        let line_h = line
+            .iter()
+            .map(|run| run.size * state.doc.theme.line_height)
+            .fold(size * state.doc.theme.line_height, f32::max);
+        ensure_space(state, line_h)?;
+        let width = line
+            .iter()
+            .map(|run| text_width(&run.text, run.size))
+            .sum::<f32>();
+        let x = match style.align {
+            TextAlign::Left => state.x,
+            TextAlign::Center => state.x + (state.content_width - width) / 2.0,
+            TextAlign::Right => state.x + state.content_width - width,
+        };
+        let mut run_x = x;
+        for run in line {
+            account_text(state, &run.text)?;
+            validate_text(&run.text)?;
+            let run_width = text_width(&run.text, run.size);
+            push(
+                state,
+                Draw::Text {
+                    x: run_x,
+                    y: state.y - run.size,
+                    size: run.size,
+                    text: run.text,
+                    face: run.face,
+                    underline: run.underline,
+                },
+            )?;
+            run_x += run_width;
+        }
+        state.y -= line_h
+    }
+    Ok(())
+}
+
+#[derive(Clone)]
+struct StyledRun {
+    text: String,
+    size: f32,
+    face: FontFace,
+    underline: bool,
+    line_break: bool,
+}
+
+fn resolve_runs(
+    content: &[Inline],
     root: &Value,
     current: &Value,
-    state: &mut State,
-    limits: RenderLimits,
-) -> Result<(), RenderError> {
-    let (x, y, width, height) = match element {
-        CanvasElement::Text {
-            x_mm,
-            y_mm,
-            width_mm,
-            height_mm,
-            ..
+    block: &TextStyle,
+    default_size: f32,
+) -> Result<Vec<StyledRun>, RenderError> {
+    let mut out = Vec::new();
+    for inline in content {
+        if matches!(inline, Inline::LineBreak) {
+            out.push(StyledRun {
+                text: String::new(),
+                size: default_size,
+                face: FontFace::Regular,
+                underline: false,
+                line_break: true,
+            });
+            continue;
         }
-        | CanvasElement::Qr {
-            x_mm,
-            y_mm,
-            width_mm,
-            height_mm,
-            ..
+        let (text, style) = match inline {
+            Inline::Text { value, style } => (value.clone(), style),
+            Inline::Value { value, style } => (value_text(&eval(value, root, current)?), style),
+            Inline::LineBreak => unreachable!(),
+        };
+        let size = style.font_size_pt.unwrap_or(default_size);
+        if !size.is_finite() || !(4.0..=72.0).contains(&size) {
+            return Err(RenderError::Invalid("inline font size"));
         }
-        | CanvasElement::Line {
-            x_mm,
-            y_mm,
-            width_mm,
-            height_mm,
-        } => canvas_box(*x_mm, *y_mm, *width_mm, *height_mm, state)?,
-    };
-    state
-        .pages
-        .last_mut()
-        .ok_or(RenderError::Limit("pages"))?
-        .push(Draw::ClipStart {
-            x,
-            y,
-            width,
-            height,
+        out.push(StyledRun {
+            text,
+            size,
+            face: match (block.bold || style.bold, block.italic || style.italic) {
+                (false, false) => FontFace::Regular,
+                (true, false) => FontFace::Bold,
+                (false, true) => FontFace::Italic,
+                (true, true) => FontFace::BoldItalic,
+            },
+            underline: block.underline || style.underline,
+            line_break: false,
         });
-    match element {
-        CanvasElement::Text {
-            value, font_size, ..
-        } => {
-            let text = resolve_text(value, root, current)?;
-            account_text(state, &text, limits)?;
-            if !font_size.is_finite() {
-                return Err(RenderError::Limit("font size"));
+    }
+    Ok(out)
+}
+
+fn wrap_runs(runs: Vec<StyledRun>, width: f32) -> Result<Vec<Vec<StyledRun>>, RenderError> {
+    let mut lines = vec![Vec::new()];
+    let mut used = 0.0;
+    for run in runs {
+        if run.line_break {
+            lines.push(Vec::new());
+            used = 0.0;
+            continue;
+        }
+        for word in run.text.split_whitespace() {
+            let leading_space = used > 0.0;
+            let text = if leading_space {
+                format!(" {word}")
+            } else {
+                word.to_owned()
+            };
+            let word_width = text_width(&text, run.size);
+            if word_width > width {
+                return Err(RenderError::Limit("unbreakable inline run width"));
             }
-            let size = font_size.clamp(4.0, 96.0);
-            state
-                .pages
+            if used + word_width > width && used > 0.0 {
+                lines.push(Vec::new());
+                used = 0.0;
+            }
+            let text = if used == 0.0 {
+                text.trim_start().to_owned()
+            } else {
+                text
+            };
+            used += text_width(&text, run.size);
+            lines
                 .last_mut()
-                .ok_or(RenderError::Limit("pages"))?
-                .push(Draw::Text {
-                    x,
-                    y: y + height - size,
-                    size,
+                .ok_or(RenderError::Invalid("inline line"))?
+                .push(StyledRun {
                     text,
-                });
-        }
-        CanvasElement::Qr { value, .. } => {
-            let text = resolve_text(value, root, current)?;
-            account_text(state, &text, limits)?;
-            let code = QrCode::with_error_correction_level(text.as_bytes(), EcLevel::M)
-                .map_err(|_| RenderError::QrTooLarge)?;
-            let count = code.width();
-            let modules = code
-                .into_colors()
-                .chunks(count)
-                .map(|row| row.iter().map(|c| c == &qrcode::Color::Dark).collect())
-                .collect();
-            let size = width.min(height);
-            state
-                .pages
-                .last_mut()
-                .ok_or(RenderError::Limit("pages"))?
-                .push(Draw::Qr {
-                    x,
-                    y: y + height - size,
-                    size,
-                    modules,
-                });
-        }
-        CanvasElement::Line { .. } => {
-            state
-                .pages
-                .last_mut()
-                .ok_or(RenderError::Limit("pages"))?
-                .push(Draw::Line {
-                    x1: x,
-                    y: y + height / 2.0,
-                    x2: x + width,
+                    ..run.clone()
                 });
         }
     }
-    state
-        .pages
-        .last_mut()
-        .ok_or(RenderError::Limit("pages"))?
-        .push(Draw::ClipEnd);
+    Ok(lines)
+}
+fn table(
+    items: &Expr,
+    cols: &[TableColumn],
+    repeat_header: bool,
+    empty: &[Node],
+    state: &mut State,
+) -> Result<(), RenderError> {
+    let value = eval(items, state.root, &state.current)?;
+    let rows = value
+        .as_array()
+        .ok_or(RenderError::Expression("table items must be an array"))?
+        .clone();
+    account_repeat(state, rows.len())?;
+    if rows.is_empty() {
+        return layout_nodes(empty, state, 1);
+    }
+    let weights: Vec<f32> = cols.iter().map(|c| c.width).collect();
+    let default_style = TextStyle::default();
+    let header: Vec<Vec<StyledRun>> = cols
+        .iter()
+        .map(|c| {
+            resolve_runs(
+                &c.header,
+                state.root,
+                &state.current,
+                &default_style,
+                state.doc.theme.font_size_pt,
+            )
+        })
+        .collect::<Result<_, _>>()?;
+    draw_table_row(&header, cols, &weights, state)?;
+    let old = state.current.clone();
+    for row in &rows {
+        state.current = row.clone();
+        let cells: Vec<Vec<StyledRun>> = cols
+            .iter()
+            .map(|c| {
+                resolve_runs(
+                    &c.cell,
+                    state.root,
+                    row,
+                    &default_style,
+                    state.doc.theme.font_size_pt,
+                )
+            })
+            .collect::<Result<_, _>>()?;
+        let needed = table_row_height(&cells, cols, &weights, state);
+        if !state.continuous && state.y - needed < state.bottom {
+            new_page(state)?;
+            if repeat_header {
+                draw_table_row(&header, cols, &weights, state)?
+            }
+        }
+        draw_table_row(&cells, cols, &weights, state)?;
+    }
+    state.current = old;
+    Ok(())
+}
+fn table_row_height(
+    cells: &[Vec<StyledRun>],
+    _cols: &[TableColumn],
+    weights: &[f32],
+    state: &State,
+) -> f32 {
+    let total: f32 = weights.iter().sum();
+    let max = cells
+        .iter()
+        .zip(weights)
+        .map(|(s, w)| {
+            let width = state.content_width * *w / total;
+            wrap_runs(s.clone(), width)
+                .map(|lines| {
+                    lines
+                        .iter()
+                        .map(|line| {
+                            line.iter()
+                                .map(|run| run.size * state.doc.theme.line_height)
+                                .fold(
+                                    state.doc.theme.font_size_pt * state.doc.theme.line_height,
+                                    f32::max,
+                                )
+                        })
+                        .sum::<f32>()
+                })
+                .unwrap_or(f32::INFINITY)
+        })
+        .fold(0.0_f32, f32::max);
+    max + 6.0
+}
+fn draw_table_row(
+    cells: &[Vec<StyledRun>],
+    cols: &[TableColumn],
+    weights: &[f32],
+    state: &mut State,
+) -> Result<(), RenderError> {
+    let h = table_row_height(cells, cols, weights, state);
+    ensure_space(state, h)?;
+    let total: f32 = weights.iter().sum();
+    let mut x = state.x;
+    for ((cell, col), weight) in cells.iter().zip(cols).zip(weights) {
+        let width = state.content_width * *weight / total;
+        let lines = wrap_runs(cell.clone(), width)?;
+        let mut offset_y = 0.0;
+        for line in lines {
+            let tw = line
+                .iter()
+                .map(|run| text_width(&run.text, run.size))
+                .sum::<f32>();
+            let tx = match col.align {
+                TextAlign::Left => x,
+                TextAlign::Center => x + (width - tw) / 2.0,
+                TextAlign::Right => x + width - tw,
+            };
+            let line_height = line
+                .iter()
+                .map(|run| run.size * state.doc.theme.line_height)
+                .fold(
+                    state.doc.theme.font_size_pt * state.doc.theme.line_height,
+                    f32::max,
+                );
+            let mut run_x = tx;
+            for run in line {
+                account_text(state, &run.text)?;
+                validate_text(&run.text)?;
+                let run_width = text_width(&run.text, run.size);
+                push(
+                    state,
+                    Draw::Text {
+                        x: run_x,
+                        y: state.y - run.size - offset_y,
+                        size: run.size,
+                        text: run.text,
+                        face: run.face,
+                        underline: run.underline,
+                    },
+                )?;
+                run_x += run_width;
+            }
+            offset_y += line_height;
+        }
+        x += width
+    }
+    state.y -= h;
+    push(
+        state,
+        Draw::Line {
+            x1: state.x,
+            y: state.y,
+            x2: state.x + state.content_width,
+            width: 0.25,
+        },
+    )?;
     Ok(())
 }
 
-fn value_to_text(value: &Value) -> String {
-    match value {
-        Value::Null => String::new(),
-        Value::String(value) => value.clone(),
-        other => other.to_string(),
+fn qr(expr: &Expr, size_mm: f32, ec: QrCorrection, state: &mut State) -> Result<(), RenderError> {
+    let text = value_text(&eval(expr, state.root, &state.current)?);
+    account_text(state, &text)?;
+    let size = checked_mm(size_mm, "QR size")?;
+    if !(mm(10.0)..=mm(100.0)).contains(&size) {
+        return Err(RenderError::Invalid("QR size"));
     }
+    ensure_space(state, size + 4.0)?;
+    let level = match ec {
+        QrCorrection::L => EcLevel::L,
+        QrCorrection::M => EcLevel::M,
+        QrCorrection::Q => EcLevel::Q,
+        QrCorrection::H => EcLevel::H,
+    };
+    let code = QrCode::with_error_correction_level(text.as_bytes(), level)
+        .map_err(|_| RenderError::QrTooLarge)?;
+    let n = code.width();
+    let modules = code
+        .into_colors()
+        .chunks(n)
+        .map(|r| r.iter().map(|c| *c == qrcode::Color::Dark).collect())
+        .collect();
+    push(
+        state,
+        Draw::Qr {
+            x: state.x,
+            y: state.y - size,
+            size,
+            modules,
+        },
+    )?;
+    state.y -= size + 4.0;
+    Ok(())
 }
-
-const fn account_text(
+fn barcode(
+    expr: &Expr,
+    _sym: BarcodeSymbology,
+    width_mm: f32,
+    height_mm: f32,
+    human: bool,
     state: &mut State,
-    text: &str,
-    limits: RenderLimits,
 ) -> Result<(), RenderError> {
-    state.text_bytes = state.text_bytes.saturating_add(text.len());
-    if state.text_bytes > limits.max_text_bytes {
-        Err(RenderError::Limit("text bytes"))
+    let text = value_text(&eval(expr, state.root, &state.current)?);
+    if text.is_empty() || text.len() > 80 || !text.bytes().all(|b| (32..=126).contains(&b)) {
+        return Err(RenderError::InvalidBarcode(
+            "Code 128 supports 1-80 printable ASCII characters",
+        ));
+    }
+    let width = checked_mm(width_mm, "barcode width")?;
+    let height = checked_mm(height_mm, "barcode height")?;
+    if width < mm(20.0) || height < mm(8.0) {
+        return Err(RenderError::InvalidBarcode(
+            "dimensions are below the supported minimum",
+        ));
+    }
+    let bits = code128_bits(&text);
+    if width / (bits.len() as f32) < 0.45 {
+        return Err(RenderError::InvalidBarcode("module width is too small"));
+    }
+    ensure_space(
+        state,
+        height
+            + if human {
+                state.doc.theme.font_size_pt * 1.4
+            } else {
+                4.0
+            },
+    )?;
+    push(
+        state,
+        Draw::Bars {
+            x: state.x,
+            y: state.y - height,
+            width,
+            height,
+            bits,
+        },
+    )?;
+    state.y -= height + 4.0;
+    if human {
+        paragraph(
+            &[Inline::Text {
+                value: text,
+                style: TextStyle {
+                    align: TextAlign::Center,
+                    ..Default::default()
+                },
+            }],
+            &TextStyle {
+                align: TextAlign::Center,
+                ..Default::default()
+            },
+            state,
+        )
     } else {
         Ok(())
     }
 }
 
-fn draw_text(
+fn image(
+    resource_id: &str,
+    width_mm: f32,
+    height_mm: f32,
+    fit: ImageFit,
     state: &mut State,
-    text: &str,
-    font_size: f32,
-    limits: RenderLimits,
 ) -> Result<(), RenderError> {
-    account_text(state, text, limits)?;
-    if !font_size.is_finite() {
-        return Err(RenderError::Limit("font size"));
+    let declared = state
+        .doc
+        .resources
+        .get(resource_id)
+        .ok_or(RenderError::Invalid("image resource is not declared"))?;
+    let Resource::Image {
+        digest,
+        media_type,
+        byte_length,
+    } = declared;
+    if media_type != "image/jpeg" {
+        return Err(RenderError::Unsupported(
+            "renderer ABI v1 supports resolved JPEG images only",
+        ));
     }
-    let size = font_size.clamp(4.0, 96.0);
-    ensure_space(state, size * 1.25, limits)?;
-    state
-        .pages
-        .last_mut()
-        .ok_or(RenderError::Limit("pages"))?
-        .push(Draw::Text {
-            x: state.x,
-            y: state.y - size,
-            size,
-            text: text.to_owned(),
-        });
-    state.y -= size * 1.25;
-    Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-fn draw_table_row(
-    state: &mut State,
-    values: impl IntoIterator<Item = String>,
-    weights: &[f32],
-    total_weight: f32,
-    width: f32,
-    font_size: f32,
-    limits: RenderLimits,
-) -> Result<(), RenderError> {
-    if !font_size.is_finite() {
-        return Err(RenderError::Limit("font size"));
+    let bytes = state
+        .resolved
+        .images
+        .get(resource_id)
+        .ok_or(RenderError::Unsupported(
+            "image bytes must be supplied through ResolvedResources",
+        ))?;
+    if u64::try_from(bytes.len()).ok() != Some(*byte_length) {
+        return Err(RenderError::Invalid("image byte length mismatch"));
     }
-    let size = font_size.clamp(4.0, 96.0);
-    ensure_space(state, size * 1.65, limits)?;
-    let y = state.y - size;
-    let mut x = state.margin;
-    for (value, weight) in values.into_iter().zip(weights) {
-        account_text(state, &value, limits)?;
-        state
-            .pages
-            .last_mut()
-            .ok_or(RenderError::Limit("pages"))?
-            .push(Draw::Text {
-                x,
-                y,
-                size,
-                text: value,
-            });
-        x += width * *weight / total_weight;
+    let actual = format!("sha256:{:x}", Sha256::digest(bytes));
+    if !actual.eq_ignore_ascii_case(digest) {
+        return Err(RenderError::Invalid("image digest mismatch"));
     }
-    state.y -= size * 1.35;
-    state
-        .pages
-        .last_mut()
-        .ok_or(RenderError::Limit("pages"))?
-        .push(Draw::Line {
-            x1: state.margin,
-            y: state.y,
-            x2: state.width - state.margin,
-        });
-    state.y -= size * 0.3;
-    Ok(())
-}
-
-fn mm(value: f32) -> f32 {
-    if value.is_finite() {
-        value * 72.0 / 25.4
+    let (pixel_width, pixel_height) = jpeg_dimensions(bytes)?;
+    let box_width = checked_mm(width_mm, "image width")?;
+    let box_height = checked_mm(height_mm, "image height")?;
+    if box_width == 0.0 || box_height == 0.0 {
+        return Err(RenderError::Invalid("image dimensions"));
+    }
+    if matches!(fit, ImageFit::Cover) {
+        return Err(RenderError::Unsupported(
+            "image cover cropping is not available in renderer ABI v1",
+        ));
+    }
+    let (width, height) = if matches!(fit, ImageFit::Fill) {
+        (box_width, box_height)
     } else {
-        0.0
-    }
-}
-fn ensure_space(state: &mut State, required: f32, limits: RenderLimits) -> Result<(), RenderError> {
-    if !required.is_finite()
-        || required < 0.0
-        || required > state.margin.mul_add(-2.0, state.height)
-    {
-        return Err(RenderError::Limit("element height"));
-    }
-    if state.y - required < state.margin {
-        new_page(state, limits)?;
-    }
-    Ok(())
-}
-fn new_page(state: &mut State, limits: RenderLimits) -> Result<(), RenderError> {
-    if state.pages.len() >= limits.max_pages {
-        return Err(RenderError::Limit("pages"));
-    }
-    state.pages.push(Vec::new());
-    state.x = state.margin;
-    state.y = state.height - state.margin;
-    Ok(())
-}
-
-fn resolve<'a>(
-    pointer: &str,
-    root: &'a Value,
-    current: &'a Value,
-) -> Result<&'a Value, RenderError> {
-    let (base, path) = if let Some(path) = pointer.strip_prefix("./") {
-        (current, format!("/{path}"))
-    } else if pointer == "." {
-        return Ok(current);
-    } else {
-        (root, pointer.to_owned())
+        let scale = (box_width / f32::from(pixel_width)).min(box_height / f32::from(pixel_height));
+        (
+            f32::from(pixel_width) * scale,
+            f32::from(pixel_height) * scale,
+        )
     };
-    if !path.is_empty() && !path.starts_with('/') {
-        return Err(RenderError::InvalidPointer(pointer.to_owned()));
-    }
-    base.pointer(&path)
-        .ok_or_else(|| RenderError::InvalidPointer(pointer.to_owned()))
+    ensure_space(state, box_height)?;
+    push(
+        state,
+        Draw::Jpeg {
+            x: state.x,
+            y: state.y - height,
+            width,
+            height,
+            pixel_width,
+            pixel_height,
+            bytes: bytes.clone(),
+        },
+    )?;
+    state.y -= box_height;
+    Ok(())
 }
-fn resolve_text(value: &TextValue, root: &Value, current: &Value) -> Result<String, RenderError> {
-    match value {
-        TextValue::Literal(v) => Ok(v.clone()),
-        TextValue::Binding { pointer } => {
-            let value = resolve(pointer, root, current)?;
-            Ok(value_to_text(value))
+
+fn jpeg_dimensions(bytes: &[u8]) -> Result<(u16, u16), RenderError> {
+    if bytes.len() < 4 || !bytes.starts_with(&[0xFF, 0xD8]) || !bytes.ends_with(&[0xFF, 0xD9]) {
+        return Err(RenderError::Invalid("malformed JPEG"));
+    }
+    let mut offset = 2usize;
+    while offset + 4 <= bytes.len() {
+        if bytes[offset] != 0xFF {
+            return Err(RenderError::Invalid("malformed JPEG marker"));
+        }
+        while offset < bytes.len() && bytes[offset] == 0xFF {
+            offset += 1;
+        }
+        let marker = *bytes
+            .get(offset)
+            .ok_or(RenderError::Invalid("malformed JPEG marker"))?;
+        offset += 1;
+        if marker == 0xD9 || marker == 0xDA {
+            break;
+        }
+        let length = bytes
+            .get(offset..offset + 2)
+            .map(|value| usize::from(u16::from_be_bytes([value[0], value[1]])))
+            .ok_or(RenderError::Invalid("malformed JPEG segment"))?;
+        if length < 2 || offset + length > bytes.len() {
+            return Err(RenderError::Invalid("malformed JPEG segment"));
+        }
+        if matches!(marker, 0xC0..=0xC2) {
+            let segment = &bytes[offset + 2..offset + length];
+            if segment.len() < 6 || segment[0] != 8 || segment[5] != 3 {
+                return Err(RenderError::Unsupported(
+                    "JPEG must use 8-bit baseline/progressive RGB samples",
+                ));
+            }
+            let height = u16::from_be_bytes([segment[1], segment[2]]);
+            let width = u16::from_be_bytes([segment[3], segment[4]]);
+            if width == 0 || height == 0 {
+                return Err(RenderError::Invalid("JPEG has zero dimensions"));
+            }
+            if u32::from(width) * u32::from(height) > 50_000_000 {
+                return Err(RenderError::Limit("JPEG pixels"));
+            }
+            return Ok((width, height));
+        }
+        offset += length;
+    }
+    Err(RenderError::Invalid("JPEG dimensions were not found"))
+}
+
+fn eval(expr: &Expr, root: &Value, current: &Value) -> Result<Value, RenderError> {
+    match expr {
+        Expr::Literal { value } => Ok(value.clone()),
+        Expr::Path { path } => walk(root, path),
+        Expr::CurrentPath { path } => walk(current, path),
+        Expr::Coalesce { values } => {
+            for e in values {
+                let v = eval(e, root, current)?;
+                if !v.is_null() {
+                    return Ok(v);
+                }
+            }
+            Ok(Value::Null)
+        }
+        Expr::Concat { values } => Ok(Value::String(
+            values
+                .iter()
+                .map(|e| eval(e, root, current).map(|v| value_text(&v)))
+                .collect::<Result<Vec<_>, _>>()?
+                .join(""),
+        )),
+        Expr::Compare {
+            operator,
+            left,
+            right,
+        } => {
+            let l = eval(left, root, current)?;
+            let r = eval(right, root, current)?;
+            Ok(Value::Bool(compare(&l, &r, *operator)?))
+        }
+        Expr::Boolean { operator, values } => {
+            if values.len() > 64 {
+                return Err(RenderError::Limit("boolean operands"));
+            }
+            let vals = values
+                .iter()
+                .map(|e| eval(e, root, current).map(|v| truthy(&v)))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(Value::Bool(match operator {
+                BooleanOperator::And => vals.iter().all(|v| *v),
+                BooleanOperator::Or => vals.iter().any(|v| *v),
+            }))
+        }
+        Expr::Not { value } => Ok(Value::Bool(!truthy(&eval(value, root, current)?))),
+        Expr::Arithmetic {
+            operator,
+            left,
+            right,
+        } => {
+            let l = number(&eval(left, root, current)?)?;
+            let r = number(&eval(right, root, current)?)?;
+            let n = match operator {
+                ArithmeticOperator::Add => l + r,
+                ArithmeticOperator::Subtract => l - r,
+                ArithmeticOperator::Multiply => l * r,
+                ArithmeticOperator::Divide => {
+                    if r == 0.0 {
+                        return Err(RenderError::Expression("division by zero"));
+                    }
+                    l / r
+                }
+            };
+            serde_json::Number::from_f64(n)
+                .map(Value::Number)
+                .ok_or(RenderError::Expression("non-finite arithmetic"))
+        }
+        Expr::FormatNumber { value, decimals } => {
+            if *decimals > 12 {
+                return Err(RenderError::Invalid("number decimals"));
+            }
+            Ok(Value::String(format!(
+                "{:.*}",
+                *decimals as usize,
+                number(&eval(value, root, current)?)?
+            )))
+        }
+        Expr::FormatMoney {
+            amount,
+            currency,
+            decimals,
+        } => {
+            if *decimals > 6 {
+                return Err(RenderError::Invalid("money decimals"));
+            }
+            let n = number(&eval(amount, root, current)?)?;
+            let c = value_text(&eval(currency, root, current)?);
+            if c.len() != 3 || !c.bytes().all(|b| b.is_ascii_uppercase()) {
+                return Err(RenderError::Expression(
+                    "currency must be a three-letter uppercase code",
+                ));
+            }
+            Ok(Value::String(format!("{} {:.*}", c, *decimals as usize, n)))
+        }
+        Expr::FormatDate { value, format } => {
+            let raw = value_text(&eval(value, root, current)?);
+            let date =
+                raw.get(..10)
+                    .filter(|value| {
+                        value.as_bytes().get(4) == Some(&b'-')
+                            && value.as_bytes().get(7) == Some(&b'-')
+                            && value.bytes().enumerate().all(|(index, byte)| {
+                                index == 4 || index == 7 || byte.is_ascii_digit()
+                            })
+                    })
+                    .ok_or(RenderError::Expression("date must start with YYYY-MM-DD"))?;
+            let year = &date[0..4];
+            let month = &date[5..7];
+            let day = &date[8..10];
+            Ok(Value::String(match format {
+                DateFormat::IsoDate => date.to_owned(),
+                DateFormat::DayMonthYear => format!("{day}/{month}/{year}"),
+                DateFormat::MonthDayYear => format!("{month}/{day}/{year}"),
+            }))
+        }
+        Expr::FormatString { value, operation } => {
+            let raw = value_text(&eval(value, root, current)?);
+            Ok(Value::String(match operation {
+                StringOperation::Trim => raw.trim().to_owned(),
+                StringOperation::UppercaseAscii => raw.to_ascii_uppercase(),
+                StringOperation::LowercaseAscii => raw.to_ascii_lowercase(),
+            }))
         }
     }
 }
-fn truthy(value: &Value) -> bool {
-    match value {
+fn walk(base: &Value, path: &[String]) -> Result<Value, RenderError> {
+    if path.len() > 64 {
+        return Err(RenderError::Limit("expression path depth"));
+    }
+    let mut v = base;
+    for p in path {
+        v = match v {
+            Value::Object(m) => m.get(p),
+            Value::Array(a) => p.parse::<usize>().ok().and_then(|i| a.get(i)),
+            _ => None,
+        }
+        .ok_or_else(|| RenderError::MissingPath(path.join(".")))?;
+    }
+    Ok(v.clone())
+}
+fn compare(l: &Value, r: &Value, op: CompareOperator) -> Result<bool, RenderError> {
+    match op {
+        CompareOperator::Equal => Ok(l == r),
+        CompareOperator::NotEqual => Ok(l != r),
+        _ => {
+            let (a, b) = if l.is_number() && r.is_number() {
+                (number(l)?, number(r)?)
+            } else {
+                return Err(RenderError::Expression(
+                    "ordered comparison requires numbers",
+                ));
+            };
+            Ok(match op {
+                CompareOperator::Less => a < b,
+                CompareOperator::LessOrEqual => a <= b,
+                CompareOperator::Greater => a > b,
+                CompareOperator::GreaterOrEqual => a >= b,
+                _ => false,
+            })
+        }
+    }
+}
+fn number(v: &Value) -> Result<f64, RenderError> {
+    v.as_f64()
+        .filter(|n| n.is_finite())
+        .ok_or(RenderError::Expression("number required"))
+}
+fn truthy(v: &Value) -> bool {
+    match v {
         Value::Null => false,
-        Value::Bool(v) => *v,
-        Value::String(v) => !v.is_empty(),
-        Value::Array(v) => !v.is_empty(),
-        Value::Object(v) => !v.is_empty(),
-        Value::Number(_) => true,
+        Value::Bool(b) => *b,
+        Value::String(s) => !s.is_empty(),
+        Value::Array(a) => !a.is_empty(),
+        Value::Object(o) => !o.is_empty(),
+        Value::Number(n) => n.as_f64() != Some(0.0),
+    }
+}
+fn value_text(v: &Value) -> String {
+    match v {
+        Value::Null => String::new(),
+        Value::String(s) => s.clone(),
+        Value::Bool(b) => b.to_string(),
+        Value::Number(n) => n.to_string(),
+        other => other.to_string(),
+    }
+}
+fn ensure_space(state: &mut State, h: f32) -> Result<(), RenderError> {
+    if !h.is_finite() || h < 0.0 {
+        return Err(RenderError::Invalid("element height"));
+    }
+    if state.continuous {
+        return Ok(());
+    }
+    if state.y - h < state.bottom {
+        if state.in_region {
+            return Err(RenderError::Limit("header/footer overflow"));
+        }
+        new_page(state)?;
+    }
+    if state.y - h < state.bottom {
+        return Err(RenderError::Limit("element exceeds page"));
+    }
+    Ok(())
+}
+fn new_page(state: &mut State) -> Result<(), RenderError> {
+    if state.continuous {
+        return Err(RenderError::Unsupported("page breaks on continuous media"));
+    }
+    if state.pages.len() >= state.limits.max_pages {
+        return Err(RenderError::Limit("pages"));
+    }
+    // Close the current page with its ordinary repeated footer before creating
+    // the next page. The final page is closed by `render` with its last/default
+    // footer, so a footer is emitted exactly once per page.
+    render_region(state, RegionKind::Footer, false)?;
+    state.pages.push(PageDraw {
+        width: state.width,
+        height: state.nominal_height,
+        draws: vec![],
+    });
+    state.x = mm(state.margins.left_mm);
+    state.y = state.nominal_height - mm(state.margins.top_mm);
+    reserve_regions(state)?;
+    render_region(state, RegionKind::Header, false)
+}
+fn push(state: &mut State, draw: Draw) -> Result<(), RenderError> {
+    state
+        .pages
+        .last_mut()
+        .ok_or(RenderError::Invalid("no page"))?
+        .draws
+        .push(draw);
+    Ok(())
+}
+const fn account_repeat(state: &mut State, n: usize) -> Result<(), RenderError> {
+    state.repeats = state.repeats.saturating_add(n);
+    if state.repeats > state.limits.max_repeat_items {
+        Err(RenderError::Limit("repeat items"))
+    } else {
+        Ok(())
+    }
+}
+const fn account_text(state: &mut State, s: &str) -> Result<(), RenderError> {
+    state.text_bytes = state.text_bytes.saturating_add(s.len());
+    if state.text_bytes > state.limits.max_text_bytes {
+        Err(RenderError::Limit("text bytes"))
+    } else {
+        Ok(())
+    }
+}
+fn validate_text(s: &str) -> Result<(), RenderError> {
+    for c in s.chars() {
+        if c != '\n' && c != '\r' && c != '\t' && (encode_win_ansi(c).is_none() || c.is_control()) {
+            return Err(RenderError::UnsupportedCharacter { code: c as u32 });
+        }
+    }
+    Ok(())
+}
+fn text_width(s: &str, size: f32) -> f32 {
+    s.len() as f32 * size * 0.52
+}
+fn checked_mm(v: f32, label: &'static str) -> Result<f32, RenderError> {
+    if !v.is_finite() || !(0.0..=2_000.0).contains(&v) {
+        Err(RenderError::Invalid(label))
+    } else {
+        Ok(mm(v))
+    }
+}
+fn mm(v: f32) -> f32 {
+    v * 72.0 / 25.4
+}
+fn estimate_nodes(nodes: &[Node], width: f32, size: f32, line: f32) -> Result<f32, RenderError> {
+    let mut h = 0.0;
+    for n in nodes {
+        h += match n {
+            Node::Paragraph { content, .. } | Node::Heading { content, .. } => {
+                let literal = content
+                    .iter()
+                    .map(|i| match i {
+                        Inline::Text { value, .. } => value.len(),
+                        _ => 8,
+                    })
+                    .sum::<usize>();
+                let chars = ((width / (size * 0.52)).floor() as usize).max(1);
+                literal.div_ceil(chars) as f32 * size * line
+            }
+            Node::Spacer { height_mm } => checked_mm(*height_mm, "spacer")?,
+            Node::Divider { .. } => 3.0,
+            Node::Qr { size_mm, .. } => checked_mm(*size_mm, "QR")?,
+            Node::Barcode { height_mm, .. } => checked_mm(*height_mm, "barcode")? + size * line,
+            Node::Section { children, .. }
+            | Node::Stack { children, .. }
+            | Node::KeepTogether { children } => estimate_nodes(children, width, size, line)?,
+            _ => size * line,
+        };
+    }
+    Ok(h)
+}
+fn translate_y(draw: &mut Draw, delta: f32) {
+    match draw {
+        Draw::Text { y, .. }
+        | Draw::Line { y, .. }
+        | Draw::Qr { y, .. }
+        | Draw::Bars { y, .. }
+        | Draw::Jpeg { y, .. } => *y += delta,
     }
 }
 
-fn write_pdf(state: &State) -> Vec<u8> {
-    let page_count = state.pages.len();
+// Code 128-B patterns, including start-B/checksum/stop. Each digit is a module width.
+const CODE128: &[&str] = &[
+    "212222", "222122", "222221", "121223", "121322", "131222", "122213", "122312", "132212",
+    "221213", "221312", "231212", "112232", "122132", "122231", "113222", "123122", "123221",
+    "223211", "221132", "221231", "213212", "223112", "312131", "311222", "321122", "321221",
+    "312212", "322112", "322211", "212123", "212321", "232121", "111323", "131123", "131321",
+    "112313", "132113", "132311", "211313", "231113", "231311", "112133", "112331", "132131",
+    "113123", "113321", "133121", "313121", "211331", "231131", "213113", "213311", "213131",
+    "311123", "311321", "331121", "312113", "312311", "332111", "314111", "221411", "431111",
+    "111224", "111422", "121124", "121421", "141122", "141221", "112214", "112412", "122114",
+    "122411", "142112", "142211", "241211", "221114", "413111", "241112", "134111", "111242",
+    "121142", "121241", "114212", "124112", "124211", "411212", "421112", "421211", "212141",
+    "214121", "412121", "111143", "111341", "131141", "114113", "114311", "411113", "411311",
+    "113141", "114131", "311141", "411131", "211412", "211214", "211232", "2331112",
+];
+fn code128_bits(s: &str) -> Vec<bool> {
+    let mut codes = vec![104usize];
+    codes.extend(s.bytes().map(|b| (b - 32) as usize));
+    let sum = codes
+        .iter()
+        .enumerate()
+        .skip(1)
+        .fold(104usize, |a, (i, c)| a + i * c)
+        % 103;
+    codes.push(sum);
+    codes.push(106);
+    let mut bits = Vec::new();
+    for code in codes {
+        let mut bar = true;
+        for d in CODE128[code].bytes() {
+            for _ in 0..(d - b'0') {
+                bits.push(bar)
+            }
+            bar = !bar
+        }
+    }
+    bits
+}
+
+fn pdf_escape(s: &str) -> String {
+    let mut output = String::new();
+    for character in s.chars().filter(|character| *character != '\r') {
+        let Some(byte) = encode_win_ansi(character) else {
+            continue;
+        };
+        match byte {
+            b'\\' => output.push_str("\\\\"),
+            b'(' => output.push_str("\\("),
+            b')' => output.push_str("\\)"),
+            32..=126 => output.push(char::from(byte)),
+            _ => {
+                let _ = write!(output, "\\{byte:03o}");
+            }
+        }
+    }
+    output
+}
+
+fn encode_win_ansi(character: char) -> Option<u8> {
+    match u32::from(character) {
+        0x20..=0x7e | 0xa0..=0xff => u8::try_from(u32::from(character)).ok(),
+        0x20ac => Some(0x80),
+        0x201a => Some(0x82),
+        0x0192 => Some(0x83),
+        0x201e => Some(0x84),
+        0x2026 => Some(0x85),
+        0x2020 => Some(0x86),
+        0x2021 => Some(0x87),
+        0x02c6 => Some(0x88),
+        0x2030 => Some(0x89),
+        0x0160 => Some(0x8a),
+        0x2039 => Some(0x8b),
+        0x0152 => Some(0x8c),
+        0x017d => Some(0x8e),
+        0x2018 => Some(0x91),
+        0x2019 => Some(0x92),
+        0x201c => Some(0x93),
+        0x201d => Some(0x94),
+        0x2022 => Some(0x95),
+        0x2013 => Some(0x96),
+        0x2014 => Some(0x97),
+        0x02dc => Some(0x98),
+        0x2122 => Some(0x99),
+        0x0161 => Some(0x9a),
+        0x203a => Some(0x9b),
+        0x0153 => Some(0x9c),
+        0x017e => Some(0x9e),
+        0x0178 => Some(0x9f),
+        _ => None,
+    }
+}
+
+fn write_pdf(pages: &[PageDraw]) -> Vec<u8> {
+    let page_count = pages.len();
     let font_id = 3 + page_count * 2;
-    let mut objects = vec![String::new(); font_id];
-    objects[0] = "<< /Type /Catalog /Pages 2 0 R >>".into();
+    let first_image_id = font_id + 4;
+    let image_positions = pages
+        .iter()
+        .enumerate()
+        .flat_map(|(page, value)| {
+            value
+                .draws
+                .iter()
+                .enumerate()
+                .filter_map(move |(draw, value)| {
+                    matches!(value, Draw::Jpeg { .. }).then_some((page, draw))
+                })
+        })
+        .collect::<Vec<_>>();
+    let image_id = |page, draw| {
+        image_positions
+            .iter()
+            .position(|value| *value == (page, draw))
+            .map(|index| first_image_id + index)
+    };
+    let mut objects = vec![b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()];
     let kids = (0..page_count)
-        .map(|i| format!("{} 0 R", 3 + i * 2))
+        .map(|index| format!("{} 0 R", 3 + index * 2))
         .collect::<Vec<_>>()
         .join(" ");
-    objects[1] = format!("<< /Type /Pages /Count {page_count} /Kids [{kids}] >>");
-    for (i, draws) in state.pages.iter().enumerate() {
-        let page_id = 3 + i * 2;
+    objects.push(format!("<< /Type /Pages /Kids [{kids}] /Count {page_count} >>").into_bytes());
+    for (page_index, page) in pages.iter().enumerate() {
+        let page_id = 3 + page_index * 2;
         let content_id = page_id + 1;
-        objects[page_id - 1] = format!(
-            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {:.2} {:.2}] /Resources << /Font << /F1 {font_id} 0 R >> >> /Contents {content_id} 0 R >>",
-            state.width, state.height
-        );
-        let stream = content(draws);
-        objects[content_id - 1] = format!(
-            "<< /Length {} >>\nstream\n{}endstream",
-            stream.len(),
-            stream
+        let xobjects = page
+            .draws
+            .iter()
+            .enumerate()
+            .filter_map(|(draw_index, draw)| {
+                matches!(draw, Draw::Jpeg { .. })
+                    .then(|| {
+                        image_id(page_index, draw_index)
+                            .map(|id| format!("/Im{draw_index} {id} 0 R"))
+                    })
+                    .flatten()
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        objects.push(format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {:.2} {:.2}] /Resources << /Font << /F1 {font_id} 0 R /F2 {} 0 R /F3 {} 0 R /F4 {} 0 R >> /XObject << {xobjects} >> >> /Contents {content_id} 0 R >>",page.width,page.height,font_id+1,font_id+2,font_id+3).into_bytes());
+        let mut stream = String::new();
+        for (draw_index, draw) in page.draws.iter().enumerate() {
+            match draw {
+                Draw::Text {
+                    x,
+                    y,
+                    size,
+                    text,
+                    face,
+                    underline,
+                } => {
+                    let font = match face {
+                        FontFace::Regular => "F1",
+                        FontFace::Bold => "F2",
+                        FontFace::Italic => "F3",
+                        FontFace::BoldItalic => "F4",
+                    };
+                    let _ = writeln!(
+                        stream,
+                        "BT /{font} {size:.2} Tf {x:.2} {y:.2} Td ({}) Tj ET",
+                        pdf_escape(text)
+                    );
+                    if *underline {
+                        let x2 = *x + text_width(text, *size);
+                        let line_y = *y - 1.2;
+                        let _ =
+                            writeln!(stream, "0.5 w {x:.2} {line_y:.2} m {x2:.2} {line_y:.2} l S");
+                    }
+                }
+                Draw::Line { x1, y, x2, width } => {
+                    let _ = writeln!(stream, "{width:.2} w {x1:.2} {y:.2} m {x2:.2} {y:.2} l S");
+                }
+                Draw::Qr {
+                    x,
+                    y,
+                    size,
+                    modules,
+                } => {
+                    let count = modules.len() as f32;
+                    let module = *size / (count + 8.0);
+                    for (row, values) in modules.iter().enumerate() {
+                        for (col, dark) in values.iter().enumerate() {
+                            if *dark {
+                                let px = *x + (col as f32 + 4.0) * module;
+                                let py = *y + (count - row as f32 + 3.0) * module;
+                                let _ = writeln!(
+                                    stream,
+                                    "{px:.3} {py:.3} {module:.3} {module:.3} re f"
+                                );
+                            }
+                        }
+                    }
+                }
+                Draw::Bars {
+                    x,
+                    y,
+                    width,
+                    height,
+                    bits,
+                } => {
+                    let module = *width / bits.len() as f32;
+                    for (index, dark) in bits.iter().enumerate() {
+                        if *dark {
+                            let px = *x + index as f32 * module;
+                            let _ = writeln!(stream, "{px:.3} {y:.3} {module:.3} {height:.3} re f");
+                        }
+                    }
+                }
+                Draw::Jpeg {
+                    x,
+                    y,
+                    width,
+                    height,
+                    ..
+                } => {
+                    let _ = writeln!(
+                        stream,
+                        "q {width:.3} 0 0 {height:.3} {x:.3} {y:.3} cm /Im{draw_index} Do Q"
+                    );
+                }
+            }
+        }
+        objects.push(
+            format!(
+                "<< /Length {} >>\nstream\n{}endstream",
+                stream.len(),
+                stream
+            )
+            .into_bytes(),
         );
     }
-    objects[font_id - 1] =
-        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>".into();
-    let mut out = b"%PDF-1.7\n%\xE2\xE3\xCF\xD3\n".to_vec();
+    for name in [
+        "Helvetica",
+        "Helvetica-Bold",
+        "Helvetica-Oblique",
+        "Helvetica-BoldOblique",
+    ] {
+        objects.push(
+            format!(
+                "<< /Type /Font /Subtype /Type1 /BaseFont /{name} /Encoding /WinAnsiEncoding >>"
+            )
+            .into_bytes(),
+        );
+    }
+    for (page, draw) in &image_positions {
+        let Draw::Jpeg {
+            pixel_width,
+            pixel_height,
+            bytes,
+            ..
+        } = &pages[*page].draws[*draw]
+        else {
+            continue;
+        };
+        let mut object=format!("<< /Type /XObject /Subtype /Image /Width {pixel_width} /Height {pixel_height} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length {} >>\nstream\n",bytes.len()).into_bytes();
+        object.extend_from_slice(bytes);
+        object.extend_from_slice(b"\nendstream");
+        objects.push(object);
+    }
+    let mut pdf = b"%PDF-1.4\n% Piqae Business Document\n".to_vec();
     let mut offsets = vec![0usize];
-    for (i, object) in objects.iter().enumerate() {
-        offsets.push(out.len());
-        out.extend_from_slice(format!("{} 0 obj\n{}\nendobj\n", i + 1, object).as_bytes());
+    for (index, object) in objects.iter().enumerate() {
+        offsets.push(pdf.len());
+        pdf.extend_from_slice(format!("{} 0 obj\n", index + 1).as_bytes());
+        pdf.extend_from_slice(object);
+        pdf.extend_from_slice(b"\nendobj\n");
     }
-    let xref = out.len();
-    out.extend_from_slice(
+    let xref = pdf.len();
+    pdf.extend_from_slice(
         format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes(),
     );
     for offset in offsets.iter().skip(1) {
-        out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        pdf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
     }
-    out.extend_from_slice(
+    pdf.extend_from_slice(
         format!(
             "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
             objects.len() + 1
         )
         .as_bytes(),
     );
-    out
-}
-
-#[allow(clippy::cast_precision_loss, clippy::suboptimal_flops)]
-fn content(draws: &[Draw]) -> String {
-    let mut out = String::new();
-    for draw in draws {
-        match draw {
-            Draw::ClipStart {
-                x,
-                y,
-                width,
-                height,
-            } => {
-                let _ = writeln!(out, "q {x:.2} {y:.2} {width:.2} {height:.2} re W n");
-            }
-            Draw::ClipEnd => out.push_str("Q\n"),
-            Draw::Text { x, y, size, text } => {
-                let _ = writeln!(
-                    out,
-                    "BT /F1 {:.2} Tf {:.2} {:.2} Td ({}) Tj ET",
-                    size,
-                    x,
-                    y,
-                    escape_pdf(text)
-                );
-            }
-            Draw::Line { x1, y, x2 } => {
-                let _ = writeln!(out, "0.5 w {x1:.2} {y:.2} m {x2:.2} {y:.2} l S");
-            }
-            Draw::Qr {
-                x,
-                y,
-                size,
-                modules,
-            } => {
-                let module = size / modules.len() as f32;
-                out.push_str("0 g\n");
-                for (row, values) in modules.iter().enumerate() {
-                    for (column, dark) in values.iter().enumerate() {
-                        if *dark {
-                            let _ = writeln!(
-                                out,
-                                "{:.3} {:.3} {:.3} {:.3} re f",
-                                x + column as f32 * module,
-                                y + (modules.len() - row - 1) as f32 * module,
-                                module,
-                                module
-                            );
-                        }
-                    }
-                }
-            }
-        }
-    }
-    out
-}
-fn escape_pdf(value: &str) -> String {
-    value
-        .chars()
-        .map(|c| match c {
-            '(' => "\\(".into(),
-            ')' => "\\)".into(),
-            '\\' => "\\\\".into(),
-            '\n' | '\r' => " ".into(),
-            c if (' '..='~').contains(&c) => c.to_string(),
-            _ => "?".into(),
-        })
-        .collect()
+    pdf
 }
 
 #[cfg(test)]
+#[allow(clippy::field_reassign_with_default, clippy::unwrap_used)]
 mod tests {
     use super::*;
-    fn spec(body: Vec<Node>) -> DocumentSpecV1 {
-        DocumentSpecV1 {
-            spec_version: SPEC_VERSION.into(),
-            page: Page {
+    use serde_json::json;
+    fn text(s: &str) -> Node {
+        Node::Paragraph {
+            content: vec![Inline::Text {
+                value: s.into(),
+                style: TextStyle::default(),
+            }],
+            style: TextStyle::default(),
+        }
+    }
+    fn document(body: Vec<Node>) -> BusinessDocumentV1 {
+        BusinessDocumentV1 {
+            format: BUSINESS_DOCUMENT_FORMAT.into(),
+            media: Media::Paged {
                 size: PageSize::A4,
-                margin_mm: 10.0,
+                orientation: Orientation::Portrait,
+                margins: default_margins(),
             },
+            theme: Theme::default(),
+            resources: BTreeMap::new(),
+            header: None,
             body,
+            footer: None,
+        }
+    }
+    fn path(name: &str) -> Expr {
+        Expr::CurrentPath {
+            path: vec![name.into()],
         }
     }
     #[test]
-    fn output_is_a_deterministic_pdf() {
-        let doc = spec(vec![Node::Text {
-            value: TextValue::Binding {
-                pointer: "/name".into(),
-            },
-            font_size: 12.0,
-        }]);
-        let input = serde_json::json!({"name":"Invoice (safe)"});
-        let one = render(&doc, &input, RenderLimits::default()).unwrap_or_default();
-        let two = render(&doc, &input, RenderLimits::default()).unwrap_or_default();
-        assert_eq!(one, two);
-        assert!(one.starts_with(b"%PDF-1.7"));
-        assert!(String::from_utf8_lossy(&one).contains("Invoice \\(safe\\)"));
+    fn rejects_old_format() {
+        let mut d = document(vec![]);
+        d.format = "piqae.document/v1".into();
+        assert!(matches!(
+            render(&d, &json!({}), RenderLimits::default()),
+            Err(RenderError::UnsupportedVersion(_))
+        ))
     }
     #[test]
-    fn canvas_is_absolute_clipped_and_ordered() {
-        let doc = spec(vec![Node::Canvas {
-            children: vec![
-                CanvasElement::Text {
-                    value: TextValue::Literal("placed".into()),
-                    x_mm: 10.0,
-                    y_mm: 20.0,
-                    width_mm: 30.0,
-                    height_mm: 8.0,
-                    font_size: 10.0,
-                },
-                CanvasElement::Line {
-                    x_mm: 2.0,
-                    y_mm: 4.0,
-                    width_mm: 40.0,
-                    height_mm: 1.0,
-                },
-            ],
-        }]);
-        let Ok(pdf) = render(&doc, &Value::Null, RenderLimits::default()) else {
-            panic!("canvas render failed")
+    fn wraps_and_paginates() {
+        let d=document((0..200).map(|_|text("A long invoice line with enough words to wrap predictably across the available page width.")).collect());
+        let pdf = render(&d, &json!({}), RenderLimits::default()).unwrap();
+        assert!(String::from_utf8_lossy(&pdf).contains("/Count 4"));
+    }
+    #[test]
+    fn fails_closed_when_a_column_would_paginate() {
+        let child = Node::Stack {
+            children: (0..100)
+                .map(|_| text("A deliberately tall column row."))
+                .collect(),
+            gap_mm: 0.0,
         };
-        let source = String::from_utf8_lossy(&pdf);
-        assert!(source.contains("q 28.35 762.52 85.04 22.68 re W n"));
-        assert!(source.contains("(placed) Tj"));
-        assert_eq!(source.matches("Q\n").count(), 2);
+        let d = document(vec![Node::Row {
+            children: vec![child, text("Second column")],
+            gap_mm: 2.0,
+        }]);
+        assert_eq!(
+            render(&d, &json!({}), RenderLimits::default()),
+            Err(RenderError::Unsupported(
+                "row and grid children cannot paginate in renderer ABI v1"
+            ))
+        );
     }
-
     #[test]
-    fn canvas_rejects_non_finite_and_off_page_boxes() {
-        for x_mm in [f32::NAN, -1.0, 500.0] {
-            let doc = spec(vec![Node::Canvas {
-                children: vec![CanvasElement::Line {
-                    x_mm,
-                    y_mm: 1.0,
-                    width_mm: 1.0,
-                    height_mm: 1.0,
+    fn table_rows_zero_one_fifty_two_hundred() {
+        for count in [0, 1, 50, 200, 1_000] {
+            let d = document(vec![Node::Table {
+                items: Expr::Path {
+                    path: vec!["items".into()],
+                },
+                columns: vec![TableColumn {
+                    header: vec![Inline::Text {
+                        value: "Item".into(),
+                        style: TextStyle::default(),
+                    }],
+                    cell: vec![Inline::Value {
+                        value: path("name"),
+                        style: TextStyle::default(),
+                    }],
+                    width: 1.0,
+                    align: TextAlign::Left,
                 }],
+                repeat_header: true,
+                empty: vec![text("No items")],
             }]);
-            assert_eq!(
-                render(&doc, &Value::Null, RenderLimits::default()),
-                Err(RenderError::Limit("canvas bounds"))
+            let data = json!({"items":(0..count).map(|i|json!({"name":format!("Line {i}")})).collect::<Vec<_>>()});
+            assert!(
+                render(&d, &data, RenderLimits::default())
+                    .unwrap()
+                    .starts_with(b"%PDF")
             );
         }
     }
     #[test]
-    fn repeat_is_bounded() {
-        let doc = spec(vec![Node::Repeat {
-            pointer: "/items".into(),
-            children: vec![Node::Text {
-                value: TextValue::Binding {
-                    pointer: ".".into(),
+    fn continuous_receipt_has_natural_height() {
+        let mut d = document(vec![
+            text("Receipt"),
+            Node::Repeat {
+                items: Expr::Path {
+                    path: vec!["items".into()],
                 },
-                font_size: 10.0,
-            }],
-        }]);
-        let err = render(
-            &doc,
-            &serde_json::json!({"items":[1,2,3]}),
-            RenderLimits {
-                max_repeat_items: 2,
-                ..RenderLimits::default()
+                children: vec![Node::Paragraph {
+                    content: vec![Inline::Value {
+                        value: path("name"),
+                        style: TextStyle::default(),
+                    }],
+                    style: TextStyle::default(),
+                }],
+                gap_mm: 1.0,
             },
-        );
-        assert_eq!(err, Err(RenderError::Limit("repeat items")));
+        ]);
+        d.media = Media::Continuous {
+            width_mm: 80.0,
+            margins: default_margins(),
+        };
+        let pdf = render(
+            &d,
+            &json!({"items":[{"name":"Coffee"},{"name":"Tea"}]}),
+            RenderLimits::default(),
+        )
+        .unwrap();
+        assert!(String::from_utf8_lossy(&pdf).contains("/MediaBox [0 0 226.77"));
     }
     #[test]
-    fn pages_and_nodes_are_bounded() {
-        let doc = spec(vec![Node::PageBreak, Node::PageBreak]);
-        assert_eq!(
-            render(
-                &doc,
-                &Value::Null,
-                RenderLimits {
-                    max_pages: 2,
-                    ..RenderLimits::default()
-                }
-            ),
-            Err(RenderError::Limit("pages"))
-        );
-        let doc = spec(vec![Node::Line]);
-        assert_eq!(
-            render(
-                &doc,
-                &Value::Null,
-                RenderLimits {
-                    max_nodes: 0,
-                    ..RenderLimits::default()
-                }
-            ),
-            Err(RenderError::Limit("nodes"))
-        );
-        let doc = spec(vec![Node::Stack {
-            children: vec![Node::Stack {
-                children: vec![Node::Line],
-                gap_mm: 0.0,
-            }],
+    fn qr_and_code128_render() {
+        let d = document(vec![
+            Node::Qr {
+                value: Expr::Literal {
+                    value: json!("https://piqae.com"),
+                },
+                size_mm: 20.0,
+                error_correction: QrCorrection::M,
+            },
+            Node::Barcode {
+                value: Expr::Literal {
+                    value: json!("SKU-123"),
+                },
+                symbology: BarcodeSymbology::Code128,
+                width_mm: 50.0,
+                height_mm: 15.0,
+                human_readable: true,
+            },
+        ]);
+        assert!(
+            render(&d, &json!({}), RenderLimits::default())
+                .unwrap()
+                .len()
+                > 1_000
+        )
+    }
+    #[test]
+    fn bounded_and_explicit_unsupported() {
+        let d = document(vec![text("\u{65e5}\u{672c}")]);
+        assert!(matches!(
+            render(&d, &json!({}), RenderLimits::default()),
+            Err(RenderError::UnsupportedCharacter { .. })
+        ));
+        let mut limits = RenderLimits::default();
+        limits.max_repeat_items = 1;
+        let d = document(vec![Node::Repeat {
+            items: Expr::Path {
+                path: vec!["x".into()],
+            },
+            children: vec![text("x")],
             gap_mm: 0.0,
         }]);
         assert_eq!(
-            render(
-                &doc,
-                &Value::Null,
-                RenderLimits {
-                    max_depth: 1,
-                    ..RenderLimits::default()
-                }
-            ),
-            Err(RenderError::Limit("nesting depth"))
-        );
-    }
-    #[test]
-    fn rejects_bad_version_and_pointer() {
-        let mut doc = spec(Vec::new());
-        doc.spec_version = "other".into();
-        assert!(matches!(
-            render(&doc, &Value::Null, RenderLimits::default()),
-            Err(RenderError::UnsupportedVersion(_))
-        ));
-        let doc = spec(vec![Node::Text {
-            value: TextValue::Binding {
-                pointer: "relative".into(),
-            },
-            font_size: 10.0,
-        }]);
-        assert!(matches!(
-            render(&doc, &Value::Null, RenderLimits::default()),
-            Err(RenderError::InvalidPointer(_))
-        ));
-    }
-    #[test]
-    fn renders_qr_without_external_io() {
-        let doc = spec(vec![Node::Qr {
-            value: TextValue::Literal("https://piqae.com/jobs/1".into()),
-            size_mm: 24.0,
-        }]);
-        let pdf = render(&doc, &Value::Null, RenderLimits::default()).unwrap_or_default();
-        assert!(String::from_utf8_lossy(&pdf).contains(" re f"));
-    }
-    #[test]
-    fn serde_rejects_unknown_capabilities() {
-        let json = r#"{"spec_version":"piqae.document/v1","page":{"size":"a4"},"body":[],"remote_url":"https://example.com"}"#;
-        assert!(serde_json::from_str::<DocumentSpecV1>(json).is_err());
-    }
-
-    #[test]
-    fn table_is_bounded_and_uses_item_relative_pointers() {
-        let doc = spec(vec![Node::Table {
-            pointer: "/items".into(),
-            columns: vec![
-                TableColumn {
-                    heading: "SKU".into(),
-                    pointer: "./sku".into(),
-                    width_weight: 1.0,
-                },
-                TableColumn {
-                    heading: "Qty".into(),
-                    pointer: "./quantity".into(),
-                    width_weight: 1.0,
-                },
-            ],
-            font_size: 9.0,
-            header: true,
-        }]);
-        let pdf = render(
-            &doc,
-            &serde_json::json!({"items":[{"sku":"A-1","quantity":2}]}),
-            RenderLimits::default(),
-        )
-        .unwrap_or_default();
-        let text = String::from_utf8_lossy(&pdf);
-        assert!(text.contains("SKU"));
-        assert!(text.contains("A-1"));
-        assert_eq!(
-            render(
-                &doc,
-                &serde_json::json!({"items":[{},{}]}),
-                RenderLimits {
-                    max_repeat_items: 1,
-                    ..RenderLimits::default()
-                }
-            ),
+            render(&d, &json!({"x":[1,2]}), limits),
             Err(RenderError::Limit("repeat items"))
         );
     }
 
     #[test]
-    fn rejects_non_finite_and_overheight_programmatic_values() {
-        let nan_text = spec(vec![Node::Text {
-            value: TextValue::Literal("x".into()),
-            font_size: f32::NAN,
+    fn repeated_headers_and_footers_are_emitted_per_page() {
+        let mut d = document((0..180).map(|_| text("flowing body line")).collect());
+        d.header = Some(Region {
+            first: vec![text("FIRST HEADER")],
+            default: vec![text("PAGE HEADER")],
+            last: vec![],
+        });
+        d.footer = Some(Region {
+            first: vec![],
+            default: vec![text("PAGE FOOTER")],
+            last: vec![text("LAST FOOTER")],
+        });
+        let pdf =
+            String::from_utf8(render(&d, &json!({}), RenderLimits::default()).unwrap()).unwrap();
+        assert!(pdf.matches("( FOOTER)").count() >= 3);
+        assert_eq!(pdf.matches("(LAST)").count(), 1);
+        assert_eq!(pdf.matches("(FIRST)").count(), 1);
+        assert!(pdf.contains("( HEADER)"));
+    }
+
+    #[test]
+    fn label_and_expression_profile() {
+        let mut d = document(vec![Node::Conditional {
+            condition: Expr::Compare {
+                operator: CompareOperator::Greater,
+                left: Box::new(Expr::Path {
+                    path: vec!["quantity".into()],
+                }),
+                right: Box::new(Expr::Literal { value: json!(1) }),
+            },
+            then: vec![Node::Paragraph {
+                content: vec![Inline::Value {
+                    value: Expr::Concat {
+                        values: vec![
+                            Expr::Literal {
+                                value: json!("Batch "),
+                            },
+                            Expr::Path {
+                                path: vec!["batch".into()],
+                            },
+                        ],
+                    },
+                    style: TextStyle::default(),
+                }],
+                style: TextStyle::default(),
+            }],
+            otherwise: vec![],
         }]);
+        d.media = Media::Label {
+            width_mm: 50.0,
+            height_mm: 30.0,
+            margins: Edges {
+                top_mm: 2.0,
+                right_mm: 2.0,
+                bottom_mm: 2.0,
+                left_mm: 2.0,
+            },
+        };
+        let pdf = render(
+            &d,
+            &json!({"quantity": 2, "batch": "LOT-42"}),
+            RenderLimits::default(),
+        )
+        .unwrap();
+        let pdf = String::from_utf8_lossy(&pdf);
+        assert!(pdf.contains("(Batch)"));
+        assert!(pdf.contains("( LOT-42)"));
+    }
+
+    #[test]
+    fn continuous_media_rejects_explicit_page_break() {
+        let mut d = document(vec![Node::PageBreak]);
+        d.media = Media::Continuous {
+            width_mm: 58.0,
+            margins: default_margins(),
+        };
         assert_eq!(
-            render(&nan_text, &Value::Null, RenderLimits::default()),
-            Err(RenderError::Limit("font size"))
-        );
-        let nan_qr = spec(vec![Node::Qr {
-            value: TextValue::Literal("x".into()),
-            size_mm: f32::NAN,
-        }]);
-        assert_eq!(
-            render(&nan_qr, &Value::Null, RenderLimits::default()),
-            Err(RenderError::Limit("QR size"))
-        );
-        let huge_spacer = spec(vec![Node::Spacer {
-            height_mm: 10_000.0,
-        }]);
-        assert_eq!(
-            render(&huge_spacer, &Value::Null, RenderLimits::default()),
-            Err(RenderError::Limit("element height"))
+            render(&d, &json!({}), RenderLimits::default()),
+            Err(RenderError::Unsupported("page breaks on continuous media"))
         );
     }
 
     #[test]
-    fn arbitrary_text_cannot_inject_pdf_operators() {
-        for value in [") Tj ET\n0 0 999 999 re f\nBT (", "\\()\r\n", "\0\u{7f}🔥"] {
-            let doc = spec(vec![Node::Text {
-                value: TextValue::Literal(value.into()),
-                font_size: 10.0,
-            }]);
-            let pdf = render(&doc, &Value::Null, RenderLimits::default()).unwrap_or_default();
-            let body = String::from_utf8_lossy(&pdf);
-            assert!(!body.contains("\n0 0 999 999 re f"));
-            assert_eq!(
-                body.lines().filter(|line| line.starts_with("BT ")).count(),
-                1
-            );
-        }
-    }
-
-    #[test]
-    fn all_low_unicode_scalars_preserve_one_text_operation() {
-        // Deterministic property-style coverage for control bytes, PDF
-        // delimiters, Latin text, combining marks, and non-WinAnsi input.
-        for scalar in (0..=0x2ff).filter_map(char::from_u32) {
-            let value = format!("prefix{scalar}()\\\r\nsuffix");
-            let doc = spec(vec![Node::Text {
-                value: TextValue::Literal(value),
-                font_size: 10.0,
-            }]);
-            let one = render(&doc, &Value::Null, RenderLimits::default()).unwrap_or_default();
-            let two = render(&doc, &Value::Null, RenderLimits::default()).unwrap_or_default();
-            assert_eq!(one, two);
-            let body = String::from_utf8_lossy(&one);
-            assert_eq!(
-                body.lines().filter(|line| line.starts_with("BT ")).count(),
-                1
-            );
-        }
-    }
-
-    #[test]
-    fn qr_payload_counts_towards_the_shared_text_budget() {
-        let doc = spec(vec![Node::Qr {
-            value: TextValue::Literal("12345".into()),
-            size_mm: 20.0,
+    fn mixed_inline_styles_and_date_format_are_preserved() {
+        let d = document(vec![Node::Paragraph {
+            content: vec![
+                Inline::Text {
+                    value: "Issued ".into(),
+                    style: TextStyle::default(),
+                },
+                Inline::Value {
+                    value: Expr::FormatDate {
+                        value: Box::new(Expr::Path {
+                            path: vec!["issued_at".into()],
+                        }),
+                        format: DateFormat::DayMonthYear,
+                    },
+                    style: TextStyle {
+                        bold: true,
+                        underline: true,
+                        font_size_pt: Some(12.0),
+                        ..Default::default()
+                    },
+                },
+            ],
+            style: TextStyle::default(),
         }]);
-        assert_eq!(
+        let pdf = String::from_utf8(
             render(
-                &doc,
-                &Value::Null,
-                RenderLimits {
-                    max_text_bytes: 4,
-                    ..RenderLimits::default()
-                }
-            ),
-            Err(RenderError::Limit("text bytes"))
+                &d,
+                &json!({"issued_at":"2026-08-19T10:00:00Z"}),
+                RenderLimits::default(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(pdf.contains("Issued"));
+        assert!(pdf.contains("19/08/2026"));
+        assert!(pdf.contains("/F2 12.00 Tf"));
+    }
+
+    #[test]
+    fn resolved_jpeg_is_digest_verified_and_embedded() {
+        // Minimal bounded SOF fixture. The renderer treats JPEG entropy as an
+        // opaque DCT stream; production hosts additionally decode at ingestion.
+        let jpeg = vec![
+            0xff, 0xd8, 0xff, 0xc0, 0x00, 0x11, 0x08, 0x00, 0x01, 0x00, 0x01, 0x03, 0x01, 0x11,
+            0x00, 0x02, 0x11, 0x00, 0x03, 0x11, 0x00, 0xff, 0xd9,
+        ];
+        let digest = format!("sha256:{:x}", Sha256::digest(&jpeg));
+        let mut d = document(vec![Node::Image {
+            resource: "logo".into(),
+            width_mm: 20.0,
+            height_mm: 10.0,
+            fit: ImageFit::Contain,
+        }]);
+        d.resources.insert(
+            "logo".into(),
+            Resource::Image {
+                digest,
+                media_type: "image/jpeg".into(),
+                byte_length: jpeg.len() as u64,
+            },
+        );
+        let resolved = ResolvedResources {
+            images: BTreeMap::from([("logo".into(), jpeg)]),
+        };
+        let pdf =
+            render_with_resources(&d, &json!({}), &resolved, RenderLimits::default()).unwrap();
+        assert!(pdf.windows(10).any(|window| window == b"/DCTDecode"));
+        let mut wrong = resolved;
+        wrong.images.get_mut("logo").unwrap()[2] = 0;
+        assert_eq!(
+            render_with_resources(&d, &json!({}), &wrong, RenderLimits::default()),
+            Err(RenderError::Invalid("image digest mismatch"))
         );
     }
 }

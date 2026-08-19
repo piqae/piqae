@@ -1,28 +1,27 @@
 import { describe, expect, it } from "vitest";
-import type { DocumentSpec } from "../src/index.js";
+import type { BusinessDocumentV1 } from "../src/index.js";
 
-describe("document pointer contract", () => {
-  it("types root and repeat-relative value bindings", () => {
+describe("business-document expression contract", () => {
+  it("types root and current-item paths", () => {
     const specification = {
-      spec_version: "piqae.document/v1",
-      page: { size: "a4" },
+      format: "piqae.business-document/v1",
+      media: { kind: "paged", size: "a4" },
       body: [
         {
           type: "repeat",
-          pointer: "/items",
+          items: { type: "path", path: ["items"] },
           children: [
-            { type: "text", value: { pointer: "." } },
-            { type: "text", value: { pointer: "./title" } },
-            { type: "text", value: { pointer: "/shop/name" } },
+            {
+              type: "paragraph",
+              content: [{ type: "value", value: { type: "current_path", path: ["title"] } }]
+            }
           ],
         },
       ],
-    } satisfies DocumentSpec;
+    } satisfies BusinessDocumentV1;
 
     const [repeat] = specification.body;
     if (!repeat) throw new Error("repeat fixture is missing");
-    expect(repeat.children[1]?.value).toEqual({
-      pointer: "./title",
-    });
+    expect(repeat.children[0]).toMatchObject({ type: "paragraph" });
   });
 });
