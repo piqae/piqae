@@ -82,19 +82,20 @@ jobs:
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
-          for source_file in /etc/apt/sources.list /etc/apt/sources.list.d/ubuntu.sources; do
-            if [ -f "$source_file" ]; then
-              sudo sed -i \
-                's|http://azure.archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' \
-                "$source_file"
-            fi
-          done
+          . /etc/os-release
+          printf 'deb https://archive.ubuntu.com/ubuntu %s main universe\ndeb https://archive.ubuntu.com/ubuntu %s-updates main universe\ndeb https://security.ubuntu.com/ubuntu %s-security main universe\n' \
+            "$VERSION_CODENAME" "$VERSION_CODENAME" "$VERSION_CODENAME" \
+            | sudo tee /etc/apt/piqae-ci.list >/dev/null
           sudo apt-get \
+            -o Dir::Etc::sourcelist=/etc/apt/piqae-ci.list \
+            -o Dir::Etc::sourceparts=- \
             -o Acquire::Retries=3 \
             -o Acquire::http::Timeout=20 \
             -o Acquire::https::Timeout=20 \
             update
           sudo apt-get \
+            -o Dir::Etc::sourcelist=/etc/apt/piqae-ci.list \
+            -o Dir::Etc::sourceparts=- \
             -o Acquire::Retries=3 \
             -o Acquire::http::Timeout=20 \
             -o Acquire::https::Timeout=20 \
