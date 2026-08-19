@@ -182,7 +182,7 @@ try {
         & $versionResolver `
             -RefType tag `
             -RefName "v0.1.11-windows-preview.1" `
-            -RequestedVersion "0.1.12" `
+            -RequestedVersion "0.1.13" `
             -UnsignedPreview
     } "Preview tag must fail when it differs from the requested package version."
     Assert-Throws {

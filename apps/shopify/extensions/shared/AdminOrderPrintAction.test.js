@@ -9,6 +9,7 @@ import {
   canUseDestinationForPolicy,
   renderPolicySummary,
   nodeReadinessMessage,
+  nodeFallbackWarning,
 } from "./AdminOrderPrintAction.jsx";
 
 describe("admin print action state", () => {
@@ -88,5 +89,23 @@ describe("admin print action state", () => {
         missing_resources: [],
       }),
     ).toContain("compatible document renderer");
+  });
+
+  it("warns while safely falling back for an older node renderer", () => {
+    const olderNode = {
+      ready: false,
+      reason: "renderer_abi_unavailable",
+      missing_resources: [],
+    };
+    expect(nodeFallbackWarning(olderNode, "automatic")).toContain(
+      "continue using the exact cloud-rendered preview PDF",
+    );
+    expect(nodeFallbackWarning(olderNode, "prefer_node")).toContain(
+      "latest Piqae document renderer",
+    );
+    expect(nodeFallbackWarning(olderNode, "require_node")).toBeNull();
+    expect(
+      nodeFallbackWarning({ ...olderNode, ready: true }, "automatic"),
+    ).toBeNull();
   });
 });

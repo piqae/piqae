@@ -89,6 +89,19 @@ export function nodeReadinessMessage(readiness) {
   return readiness.reason ?? "Node rendering readiness is unavailable";
 }
 
+export function nodeFallbackWarning(readiness, policy) {
+  if (
+    !readiness ||
+    readiness.ready ||
+    policy === "cloud_only" ||
+    policy === "require_node"
+  )
+    return null;
+  if (readiness.reason === "renderer_abi_unavailable")
+    return "This node needs the latest Piqae document renderer. This print will continue using the exact cloud-rendered preview PDF.";
+  return "Node rendering is unavailable for this document. This print will continue using the exact cloud-rendered preview PDF.";
+}
+
 export async function loadWithTimeout(
   load,
   timeoutMs = ADMIN_OPTIONS_TIMEOUT_MS,
@@ -395,6 +408,11 @@ function AdminOrderPrintActionContent({ bulk = false }) {
               <s-text>
                 Node renderer: {nodeReadinessMessage(effectiveNodeRendering)}
               </s-text>
+            )}
+            {nodeFallbackWarning(nodeReadiness?.destination, policy) && (
+              <s-banner tone="warning">
+                {nodeFallbackWarning(nodeReadiness.destination, policy)}
+              </s-banner>
             )}
             {selectedDestination &&
               policy === "require_node" &&
