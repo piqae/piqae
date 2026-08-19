@@ -14,8 +14,8 @@ import {
   resolvePiqaeRuntime,
   resolveShopifyStorage,
 } from "./core/piqae-runtime.server";
-import { PiqaeAccountLinker } from "./core/piqae-account-link.server";
 import { workflows } from "./core/workflows.server";
+import { ManagedPiqaeAccountService } from "./core/managed-piqae-account.server";
 
 let injected: ShopRepository | undefined;
 let memoizedProduction: ReturnType<typeof buildServices> | undefined;
@@ -58,19 +58,31 @@ function buildServices() {
   );
   const runtime = resolvePiqaeRuntime();
   const baseUrl = runtime.baseUrl;
+  const managedAccounts = new ManagedPiqaeAccountService(
+    repository,
+    workflows(),
+    required("PIQAE_SHOPIFY_PLATFORM_KEY"),
+    baseUrl,
+  );
   const printing = new ShopifyPrintingService(
     repository,
     vault,
     (token) => new PiqaeClient({ baseUrl, accessToken: () => token }),
     required("SHOPIFY_APP_URL"),
     downloadTokens,
-  );
-  const accountLinker = new PiqaeAccountLinker(
-    repository,
     workflows(),
-    vault,
-    (credential) => new PiqaeClient({ baseUrl, accessToken: () => credential }),
+    (link) => managedAccounts.client(link),
   );
+  const clientForLink = (link: Awaited<ReturnType<typeof repository.get>>) => {
+    if (!link) throw new Error("PIQAE_LINK_NOT_FOUND");
+    if (link.entitlementMode === "shopify_child")
+      return managedAccounts.client(link);
+    if (!link.encryptedCredential) throw new Error("PIQAE_CREDENTIAL_MISSING");
+    return new PiqaeClient({
+      baseUrl,
+      accessToken: () => vault.open(link.encryptedCredential, link.shop),
+    });
+  };
   const emailConfigured =
     process.env.CLOUDFLARE_ACCOUNT_ID &&
     process.env.CLOUDFLARE_EMAIL_API_TOKEN &&
@@ -90,15 +102,10 @@ function buildServices() {
           load: async (shop, renderId) => {
             const link = await repository.get(shop);
             if (!link) throw new Error("PIQAE_LINK_NOT_FOUND");
-            const credential = vault.open(link.encryptedCredential, shop);
+            const client = clientForLink(link);
             for (let attempt = 0; attempt < 20; attempt += 1) {
-              const response = await fetch(
-                `${baseUrl}/v1/document-renders/${encodeURIComponent(renderId)}/artifact`,
-                {
-                  headers: { authorization: `Bearer ${credential}` },
-                  signal: AbortSignal.timeout(10_000),
-                },
-              );
+              const response =
+                await client.businessDocuments.renders.download(renderId);
               if (response.ok)
                 return new Uint8Array(await response.arrayBuffer());
               if (response.status !== 409)
@@ -127,7 +134,8 @@ function buildServices() {
     runtime,
     storage,
     printing,
-    accountLinker,
+    managedAccounts,
+    clientForLink,
     automationDelivery,
   };
 }

@@ -25,14 +25,9 @@ export async function loader({ request }: LoaderFunctionArgs) {
     return Response.json({ error: "PDF not found" }, { status: 404 });
   const link = await services.repository.get(grant.shop);
   if (!link) return Response.json({ error: "PDF not found" }, { status: 404 });
-  const credential = services.vault.open(link.encryptedCredential, grant.shop);
-  const upstream = await fetch(
-    `${services.baseUrl}/v1/document-renders/${encodeURIComponent(grant.renderId)}/artifact`,
-    {
-      headers: { authorization: `Bearer ${credential}` },
-      signal: AbortSignal.timeout(10_000),
-    },
-  );
+  const upstream = await services
+    .clientForLink(link)
+    .businessDocuments.renders.download(grant.renderId);
   if (!upstream.ok || !upstream.body)
     return Response.json(
       { error: "PDF unavailable" },

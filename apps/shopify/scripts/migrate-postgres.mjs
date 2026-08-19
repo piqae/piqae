@@ -14,6 +14,7 @@ const migrationFiles = [
   "0001_shopify_core.sql",
   "0002_merchant_workflows.sql",
   "0003_render_execution_policy.sql",
+  "0004_managed_piqae_accounts.sql",
 ];
 const client = new pg.Client({
   connectionString: databaseUrl,

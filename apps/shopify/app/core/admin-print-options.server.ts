@@ -2,6 +2,7 @@ import { PiqaeClient } from "@piqae/sdk";
 
 import type { CredentialVault } from "./credentials.server";
 import type { ShopRepository } from "./model";
+import type { ShopLink } from "./model";
 import { normalizeShopDomain } from "./model";
 import type { WorkflowRepository } from "./workflows.server";
 import type { RenderExecutionPolicy } from "./workflows.server";
@@ -39,6 +40,7 @@ export async function loadAdminPrintOptions(input: {
   workflows: WorkflowRepository;
   vault: CredentialVault;
   baseUrl: string;
+  managedClientFactory?: (link: ShopLink) => PiqaeClient;
 }): Promise<AdminPrintOptions> {
   const shop = normalizeShopDomain(input.shop);
   const [link, settings, templates] = await Promise.all([
@@ -67,11 +69,14 @@ export async function loadAdminPrintOptions(input: {
     };
   }
 
-  const token = input.vault.open(link.encryptedCredential, shop);
-  const client = new PiqaeClient({
-    baseUrl: input.baseUrl,
-    accessToken: () => token,
-  });
+  const client =
+    link.entitlementMode === "shopify_child"
+      ? input.managedClientFactory?.(link)
+      : new PiqaeClient({
+          baseUrl: input.baseUrl,
+          accessToken: () => input.vault.open(link.encryptedCredential, shop),
+        });
+  if (!client) throw new Error("PIQAE_MANAGED_ACCOUNT_NOT_READY");
   let destinations: AdminPrintOptions["destinations"] = [];
   let destinationError: string | undefined;
   try {

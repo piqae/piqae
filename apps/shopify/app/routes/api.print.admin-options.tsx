@@ -9,12 +9,14 @@ export async function loader({ request }: LoaderFunctionArgs) {
   const { session, cors } = await shopify.authenticate.admin(request);
   const services = createProductionServices();
   try {
+    await services.managedAccounts.ensure(session.shop);
     const result = await loadAdminPrintOptions({
       shop: session.shop,
       shops: services.repository,
       workflows: workflows(),
       vault: services.vault,
       baseUrl: services.baseUrl,
+      managedClientFactory: (link) => services.managedAccounts.client(link),
     });
     return cors(Response.json(result));
   } catch (error) {

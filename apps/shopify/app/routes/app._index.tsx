@@ -6,7 +6,13 @@ import { createProductionServices } from "../services.server";
 
 export async function loader({ request }: LoaderFunctionArgs) {
   const { session } = await shopify.authenticate.admin(request);
-  const link = await createProductionServices().repository.get(session.shop);
+  const services = createProductionServices();
+  let link = await services.repository.get(session.shop);
+  try {
+    link = await services.managedAccounts.ensure(session.shop);
+  } catch {
+    // The home page remains useful while idempotent provisioning is retried.
+  }
   return {
     connected: Boolean(link),
     templateRevisionId: link?.templateRevisionId ?? null,
@@ -36,11 +42,11 @@ export default function Home() {
                   state={state.connected ? "ready" : "not_connected"}
                 />
                 <s-paragraph>
-                  Connect a printer once, then print from Shopify Admin or POS
+                  Connect a computer once, then print from Shopify Admin or POS
                   without downloading files.
                 </s-paragraph>
                 <s-button href="/app/settings">
-                  {state.connected ? "Manage connection" : "Connect Piqae"}
+                  {state.connected ? "Manage printers" : "Finish setup"}
                 </s-button>
               </s-stack>
             </div>
@@ -60,14 +66,12 @@ export default function Home() {
                 <s-heading>This month</s-heading>
                 <s-heading>
                   {state.planHandle ??
-                    (state.entitlementMode === "existing_piqae"
-                      ? "Existing Piqae plan"
-                      : "No active plan")}
+                    (state.connected ? "Development" : "Preparing")}
                 </s-heading>
                 <s-paragraph>
                   {state.connected
                     ? "View authoritative usage and billing details."
-                    : "Connect an account to begin."}
+                    : "Your managed printing workspace is being prepared."}
                 </s-paragraph>
                 <s-button href="/app/billing">View plan</s-button>
               </s-stack>
@@ -76,12 +80,12 @@ export default function Home() {
           <s-heading>Get ready to print</s-heading>
           <div className="piqae-grid">
             <EmptyHint
-              heading="1. Connect a printer"
-              action="Connect Piqae"
+              heading="1. Connect a computer"
+              action="Set up printing"
               href="/app/settings"
             >
-              Use an existing Piqae account or activate the included
-              Shopify-only account.
+              Download Piqae Node and connect it directly to this store. No
+              separate Piqae account is required.
             </EmptyHint>
             <EmptyHint
               heading="2. Choose templates"

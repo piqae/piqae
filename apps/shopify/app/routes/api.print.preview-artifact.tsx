@@ -1,6 +1,5 @@
 import type { LoaderFunctionArgs } from "react-router";
 
-import { PiqaeClient } from "@piqae/sdk";
 import { createProductionServices } from "../services.server";
 import shopify from "../shopify.server";
 
@@ -16,11 +15,7 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     return new Response(null, { status: 404 });
   const link = await services.repository.get(session.shop);
   if (!link) return new Response(null, { status: 404 });
-  const client = new PiqaeClient({
-    baseUrl: services.baseUrl,
-    accessToken: () =>
-      services.vault.open(link.encryptedCredential, session.shop),
-  });
+  const client = services.clientForLink(link);
   const preview = await client.businessDocuments.previews.retrieve(previewId);
   if (preview.render_id !== renderId)
     return new Response(null, { status: 404 });

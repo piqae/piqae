@@ -7,7 +7,7 @@ export class PostgresShopRepository implements ShopRepository {
   async get(rawShop: string): Promise<ShopLink | null> {
     const shop = normalizeShopDomain(rawShop);
     const result = await this.pool.query(
-      "SELECT shop, piqae_account_id, encrypted_credential, template_revision_id, entitlement_mode, plan_handle, created_at FROM shopify_shop_links WHERE shop = $1",
+      "SELECT shop, piqae_account_id, encrypted_credential, piqae_live_environment_id, piqae_test_environment_id, template_revision_id, entitlement_mode, plan_handle, created_at FROM shopify_shop_links WHERE shop = $1",
       [shop],
     );
     const row = result.rows[0];
@@ -15,7 +15,9 @@ export class PostgresShopRepository implements ShopRepository {
       ? {
           shop: row.shop,
           piqaeAccountId: row.piqae_account_id,
-          encryptedCredential: row.encrypted_credential,
+          encryptedCredential: row.encrypted_credential ?? "",
+          piqaeLiveEnvironmentId: row.piqae_live_environment_id,
+          piqaeTestEnvironmentId: row.piqae_test_environment_id,
           templateRevisionId: row.template_revision_id,
           entitlementMode: row.entitlement_mode,
           planHandle: row.plan_handle,
@@ -26,12 +28,30 @@ export class PostgresShopRepository implements ShopRepository {
   async put(link: ShopLink) {
     const shop = normalizeShopDomain(link.shop);
     await this.pool.query(
-      "INSERT INTO shopify_shop_links (shop, piqae_account_id, encrypted_credential, template_revision_id) VALUES ($1,$2,$3,$4) ON CONFLICT (shop) DO UPDATE SET piqae_account_id=EXCLUDED.piqae_account_id, encrypted_credential=EXCLUDED.encrypted_credential, template_revision_id=EXCLUDED.template_revision_id, updated_at=now()",
+      `INSERT INTO shopify_shop_links
+        (shop, piqae_account_id, encrypted_credential, piqae_live_environment_id,
+         piqae_test_environment_id, template_revision_id, entitlement_mode, plan_handle)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+       ON CONFLICT (shop) DO UPDATE SET
+         piqae_account_id=EXCLUDED.piqae_account_id,
+         encrypted_credential=EXCLUDED.encrypted_credential,
+         piqae_live_environment_id=EXCLUDED.piqae_live_environment_id,
+         piqae_test_environment_id=EXCLUDED.piqae_test_environment_id,
+         template_revision_id=EXCLUDED.template_revision_id,
+         entitlement_mode=EXCLUDED.entitlement_mode,
+         plan_handle=EXCLUDED.plan_handle,
+         updated_at=now()`,
       [
         shop,
         link.piqaeAccountId,
-        link.encryptedCredential,
+        link.entitlementMode === "shopify_child"
+          ? null
+          : link.encryptedCredential,
+        link.piqaeLiveEnvironmentId ?? null,
+        link.piqaeTestEnvironmentId ?? null,
         link.templateRevisionId,
+        link.entitlementMode ?? "existing_piqae",
+        link.planHandle ?? null,
       ],
     );
   }

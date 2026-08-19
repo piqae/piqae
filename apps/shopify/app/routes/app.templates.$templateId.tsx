@@ -137,6 +137,7 @@ export async function action({ request, params }: ActionFunctionArgs) {
         shops: services.repository,
         vault: services.vault,
         baseUrl: services.baseUrl,
+        managedClientFactory: (link) => services.managedAccounts.client(link),
       });
     }
     const saved = await workflows().saveTemplate(session.shop, {
