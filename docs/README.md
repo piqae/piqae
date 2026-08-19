@@ -28,7 +28,6 @@ print jobs through the same API used by the dashboard.
 - [Authentication](api/authentication.md)
 - [Uploads and design applications](api/uploads-and-design-apps.md)
 - [Declarative documents](api/declarative-documents.md)
-- [Document format adapters](api/document-format-adapters.md)
 - [End-to-end web design platform integration](api/web-design-platform-integration.md)
 - [Multi-integrator node connectors](api/multi-integrator-node-connectors.md)
 - [Content-confidential printing](api/content-confidential-printing.md)

@@ -14,17 +14,21 @@ export async function fetchTemplateAsset(
   asset: ExternalAsset,
 ): Promise<Uint8Array> {
   validateAssets([asset]);
-  const cached = cache.get(asset.sha256);
+  const cached = cache.get(asset.digest);
   if (cached && cached.expiresAt > Date.now()) return cached.bytes.slice();
-  await assertPublicHost(new URL(asset.url).hostname);
-  const response = await fetch(asset.url, {
+  if (!asset.sourceUrl)
+    throw new Error(
+      "Asset has no ingestion source; use the Piqae content-addressed asset store",
+    );
+  await assertPublicHost(new URL(asset.sourceUrl).hostname);
+  const response = await fetch(asset.sourceUrl, {
     redirect: "error",
     signal: AbortSignal.timeout(5_000),
-    headers: { accept: asset.contentType },
+    headers: { accept: asset.mediaType },
   });
   if (
     !response.ok ||
-    response.headers.get("content-type")?.split(";", 1)[0] !== asset.contentType
+    response.headers.get("content-type")?.split(";", 1)[0] !== asset.mediaType
   )
     throw new Error(
       "Published template asset is unavailable or has changed type",
@@ -57,10 +61,10 @@ export async function fetchTemplateAsset(
     bytes.set(chunk, offset);
     offset += chunk.byteLength;
   }
-  if (createHash("sha256").update(bytes).digest("hex") !== asset.sha256)
+  if (createHash("sha256").update(bytes).digest("hex") !== asset.digest)
     throw new Error("Published template asset digest does not match its pin");
   pruneCache();
-  cache.set(asset.sha256, {
+  cache.set(asset.digest, {
     expiresAt: Date.now() + ASSET_LIMITS.cacheSeconds * 1_000,
     bytes,
   });

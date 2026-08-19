@@ -6,7 +6,7 @@ use crate::{
     repository::RepositoryError,
 };
 use bytes::Bytes;
-use piqae_document_renderer::{DocumentSpecV1, RenderLimits, render};
+use piqae_document_renderer::{BusinessDocumentV1, RenderLimits, render};
 use piqae_storage_postgres::DocumentRenderWork;
 use serde_json::Value;
 use std::{sync::Arc, time::Duration};
@@ -200,7 +200,7 @@ impl DocumentRenderWorker {
             .document_secrets
             .decrypt(&input_aad, &work.render.input_ciphertext)
             .map_err(|_| ("document_decryption_failed", false))?;
-        let spec: DocumentSpecV1 =
+        let spec: BusinessDocumentV1 =
             serde_json::from_slice(&spec_bytes).map_err(|_| ("invalid_document_spec", false))?;
         let input: Value =
             serde_json::from_slice(&input_bytes).map_err(|_| ("invalid_document_input", false))?;
@@ -280,7 +280,7 @@ mod tests {
             .with_document_key([7; 32]);
         let w = WorkspaceId::from_str("wsp_01J00000000000000000000000")?;
         let e = EnvironmentId::from_str("env_01J00000000000000000000000")?;
-        let spec = br#"{"spec_version":"piqae.document/v1","page":{"size":"a4"},"body":[{"type":"text","value":"Hello"}]}"#;
+        let spec = br#"{"format":"piqae.business-document/v1","media":{"kind":"paged","size":"a4"},"body":[{"type":"paragraph","content":[{"type":"text","value":"Hello"}]}]}"#;
         let tpl_aad = document_aad(&w.to_string(), &e.to_string(), "tpl_test01");
         let enc = state.document_secrets.encrypt(&tpl_aad, spec)?;
         repo.create_document_template(

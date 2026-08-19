@@ -78,7 +78,11 @@ async function assertions(client) {
   const templateId = "11111111-1111-4111-8111-111111111111";
   await client.query(
     "INSERT INTO shopify_workflow_templates(id,shop,name,kind,page_size,state,source) VALUES($1,$2,'Invoice','invoice','A4','published',$3)",
-    [templateId, "alpha.myshopify.com", '{"schema":"piqae.document/v1"}'],
+    [
+      templateId,
+      "alpha.myshopify.com",
+      '{"schema":"piqae.shopify-business-template/v1","document":{"format":"piqae.business-document/v1","media":{"kind":"paged","size":"a4","margins":{"top_mm":10,"right_mm":10,"bottom_mm":10,"left_mm":10}},"theme":{"font_size_pt":10,"line_height":1.25,"text_color":{"red":0,"green":0,"blue":0}},"resources":{},"body":[]},"editor":{"mode":"visual","liquid":"","roundTrip":"lossless","warnings":[]},"assets":[]}',
+    ],
   );
   const crossRead = await client.query(
     "SELECT 1 FROM shopify_workflow_templates WHERE shop=$1 AND id=$2",

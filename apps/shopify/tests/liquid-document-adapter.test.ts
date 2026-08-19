@@ -1,145 +1,50 @@
 import { describe, expect, it } from "vitest";
-import type { DocumentSpec } from "@piqae/sdk";
 import {
   canonicalToLiquid,
   liquidToCanonical,
 } from "../app/core/liquid-document-adapter";
-
-const page: DocumentSpec["page"] = { size: "a4", margin_mm: 10 };
-
-describe("bounded Liquid document adapter", () => {
-  it("converts supported variables, loops, conditions and document tags", () => {
+import { starterTemplates } from "../app/core/starter-templates";
+describe("bounded Shopify Liquid profile", () => {
+  it("compiles mixed text, filters, loops, conditions and tables", () => {
     const result = liquidToCanonical(
-      [
-        "Invoice",
-        "{{ order.name }}",
-        "{% if order.note %}",
-        "{{ order.note }}",
-        "{% endif %}",
-        "{% for item in order.line_items %}",
-        "{{ item.title }}",
-        "{{ item.quantity }}",
-        "{% endfor %}",
-        "{% piqae_line %}",
-        "{% piqae_qr order.status_url size_mm: 24 %}",
-        "{% piqae_spacer 4 %}",
-        "{% piqae_page_break %}",
-      ].join("\n"),
-      page,
+      "Invoice {{ order.name }}\n{% if order.taxTotal > 0 %}Tax {{ order.taxTotal | money }}{% endif %}\n{% piqae_table order.lineItems as: line %}",
     );
     expect(result.ok).toBe(true);
-    if (!result.ok) return;
-    expect(result.document.body).toMatchObject([
-      { type: "text", value: "Invoice" },
-      { type: "text", value: { pointer: "/order/name" } },
-      { type: "when", pointer: "/order/note" },
-      {
-        type: "repeat",
-        pointer: "/order/line_items",
-        children: [
-          { type: "text", value: { pointer: "./title" } },
-          { type: "text", value: { pointer: "./quantity" } },
-        ],
-      },
-      { type: "line" },
-      { type: "qr", value: { pointer: "/order/status_url" }, size_mm: 24 },
-      { type: "spacer", height_mm: 4 },
-      { type: "page_break" },
-    ]);
+    if (result.ok)
+      expect(result.document.body.map((x) => x.type)).toContain("table");
   });
-
-  it("round-trips every representable canonical node deterministically", () => {
-    const document: DocumentSpec = {
-      spec_version: "piqae.document/v1",
-      page,
-      body: [
-        { type: "text", value: "Packing slip" },
-        {
-          type: "repeat",
-          pointer: "/order/line_items",
-          children: [{ type: "text", value: { pointer: "./title" } }],
-        },
-        {
-          type: "when",
-          pointer: "/order/note",
-          children: [{ type: "text", value: { pointer: "/order/note" } }],
-        },
-        { type: "qr", value: { pointer: "/order/status_url" }, size_mm: 20 },
-      ],
-    };
-    const encoded = canonicalToLiquid(document);
-    expect(encoded.diagnostics).toEqual([]);
-    const decoded = liquidToCanonical(encoded.source!, page);
-    expect(decoded).toMatchObject({ ok: true, document });
-  });
-
-  it("round-trips absolute PDFme canvas fields through bounded Liquid", () => {
-    const document: DocumentSpec = {
-      spec_version: "piqae.document/v1",
-      page,
-      body: [
-        {
-          type: "canvas",
-          children: [
-            {
-              type: "text",
-              value: { pointer: "/orders/0/name" },
-              font_size: 18,
-              x_mm: 10,
-              y_mm: 12,
-              width_mm: 80,
-              height_mm: 10,
-            },
-            {
-              type: "qr",
-              value: "https://example.test/order",
-              x_mm: 160,
-              y_mm: 12,
-              width_mm: 25,
-              height_mm: 25,
-            },
-          ],
-        },
-      ],
-    };
-    const encoded = canonicalToLiquid(document);
-    expect(encoded.source).toContain("piqae_canvas_text orders.0.name");
-    const decoded = liquidToCanonical(encoded.source!, page);
-    expect(decoded).toMatchObject({ ok: true, document });
-  });
-
-  it("fails closed with stable line diagnostics for executable Liquid and HTML", () => {
-    for (const [source, code] of [
-      ["{{ order.name | escape }}", "unsupported_construct"],
-      ["{% include 'remote' %}", "unsupported_construct"],
-      ["<img src=https://example.test/a.png>", "unsupported_construct"],
-      ["{% assign x = 1 %}", "unsupported_construct"],
-    ]) {
-      expect(liquidToCanonical(source, page)).toEqual({
-        ok: false,
-        diagnostics: [expect.objectContaining({ code, line: 1 })],
-      });
+  it("round trips all dynamic starters", () => {
+    for (const starter of starterTemplates) {
+      const liquid = canonicalToLiquid(starter.specification);
+      const parsed = liquidToCanonical(
+        liquid.source,
+        starter.specification.media,
+      );
+      expect(parsed.ok).toBe(true);
     }
   });
-
-  it("reports canonical structures that cannot be represented", () => {
-    const document: DocumentSpec = {
-      spec_version: "piqae.document/v1",
-      page,
-      body: [
-        {
-          type: "row",
-          children: [{ type: "text", value: "not silently flattened" }],
-        },
-      ],
-    };
-    expect(canonicalToLiquid(document)).toEqual({
-      diagnostics: [
-        expect.objectContaining({
-          code: "unsupported_node",
-          message: expect.stringContaining("row"),
-        }),
-      ],
-    });
+  it("round trips unless without reversing its meaning", () => {
+    const compiled = liquidToCanonical(
+      "{% unless order.taxTotal %}No tax{% endunless %}",
+    );
+    expect(compiled.ok).toBe(true);
+    if (!compiled.ok) return;
+    expect(compiled.normalizedSource).toContain("{% unless order.taxTotal %}");
+    const again = liquidToCanonical(compiled.normalizedSource);
+    expect(again.ok).toBe(true);
+    if (again.ok) expect(again.document).toEqual(compiled.document);
+  });
+  it("rejects executable and presentation constructs precisely", () => {
+    const html = liquidToCanonical("<style>*{}</style>");
+    expect(html.ok).toBe(false);
+    if (!html.ok)
+      expect(html.diagnostics[0]).toMatchObject({
+        code: "html_unsupported",
+        line: 1,
+      });
+    const include = liquidToCanonical("{% render 'secret' %}");
+    expect(include.ok).toBe(false);
+    if (!include.ok)
+      expect(include.diagnostics[0]?.code).toBe("unsupported_tag");
   });
 });

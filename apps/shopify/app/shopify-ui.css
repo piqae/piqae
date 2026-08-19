@@ -25,6 +25,85 @@
   gap: 1rem;
   align-items: end;
 }
+.piqae-word-editor {
+  margin-top: 1rem;
+  background: #f1f1f1;
+  border-radius: 0.75rem;
+  overflow: hidden;
+}
+.piqae-word-toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  padding: 0.75rem;
+  border-bottom: 1px solid #d5d5d5;
+  background: Canvas;
+}
+.piqae-word-toolbar button,
+.piqae-word-toolbar select {
+  padding: 0.45rem 0.65rem;
+  border: 1px solid color-mix(in srgb, currentColor 22%, transparent);
+  border-radius: 0.45rem;
+  background: Canvas;
+  color: CanvasText;
+}
+.piqae-page-sheet {
+  box-sizing: border-box;
+  width: min(210mm, calc(100% - 2rem));
+  min-height: 297mm;
+  margin: 1rem auto;
+  padding: 14mm;
+  background: white;
+  color: #202223;
+  box-shadow: 0 2px 14px rgb(0 0 0 / 14%);
+}
+.piqae-page-sheet .ProseMirror {
+  min-height: 260mm;
+  outline: 0;
+}
+.piqae-variable {
+  display: inline-block;
+  padding: 0.08rem 0.3rem;
+  border-radius: 0.3rem;
+  background: #e8f0fe;
+  color: #174ea6;
+  font-size: 0.9em;
+}
+.piqae-structured-block {
+  margin: 0.75rem 0;
+  padding: 0.8rem;
+  border: 1px solid #b7c7e8;
+  border-radius: 0.5rem;
+  background: #f5f8ff;
+  color: #253858;
+}
+.piqae-region-editors,
+.piqae-block-properties {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
+  gap: 0.75rem;
+  padding: 0.75rem;
+  border-bottom: 1px solid #d5d5d5;
+  background: Canvas;
+}
+.piqae-region-editors label,
+.piqae-block-properties label {
+  display: grid;
+  gap: 0.25rem;
+}
+.piqae-region-editors input,
+.piqae-block-properties input {
+  box-sizing: border-box;
+  width: 100%;
+  padding: 0.45rem;
+  border: 1px solid color-mix(in srgb, currentColor 22%, transparent);
+  border-radius: 0.4rem;
+  background: Canvas;
+  color: CanvasText;
+}
 .piqae-toolbar {
   display: flex;
   flex-wrap: wrap;

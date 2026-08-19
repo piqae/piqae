@@ -105,6 +105,86 @@ async fn schema_pool(database_url: &str, schema: &str) -> PgPool {
         .expect("connect disposable PostgreSQL schema")
 }
 
+#[tokio::test]
+async fn business_document_cutover_resets_only_prerelease_document_rows() {
+    let Some(database_url) = env::var("PIQAE_TEST_DATABASE_URL").ok() else {
+        eprintln!("skipped: set PIQAE_TEST_DATABASE_URL to run PostgreSQL migration evidence");
+        return;
+    };
+    let schema = format!("piqae_business_cutover_{}", ulid::Ulid::new()).to_ascii_lowercase();
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&database_url)
+        .await
+        .expect("connect PostgreSQL test database");
+    sqlx::query(&format!("CREATE SCHEMA {schema}"))
+        .execute(&admin)
+        .await
+        .expect("create disposable schema");
+    let pool = schema_pool(&database_url, &schema).await;
+    let all = sqlx::migrate!("../../migrations/postgres");
+    let previous = Migrator {
+        migrations: Cow::Owned(
+            all.iter()
+                .filter(|migration| migration.version < 38)
+                .cloned()
+                .collect(),
+        ),
+        ignore_missing: false,
+        locking: true,
+        no_tx: false,
+    };
+    previous
+        .run(&pool)
+        .await
+        .expect("apply prerelease document schema");
+    sqlx::query("INSERT INTO workspaces (id,name,slug) VALUES ('wsp_cutover','Cutover','cutover')")
+        .execute(&pool)
+        .await
+        .expect("workspace fixture");
+    sqlx::query("INSERT INTO environments (id,workspace_id,kind,name) VALUES ('env_cutover','wsp_cutover','live','Live')")
+        .execute(&pool).await.expect("environment fixture");
+    sqlx::query("INSERT INTO agents (id,workspace_id,environment_id,name,installation_id,os,architecture,version,protocol_version) VALUES ('agt_cutover','wsp_cutover','env_cutover','Node','install-cutover','linux','x86_64','test',1)")
+        .execute(&pool).await.expect("agent fixture");
+    sqlx::query("INSERT INTO printers (id,workspace_id,environment_id,agent_id,native_id,name) VALUES ('prn_cutover','wsp_cutover','env_cutover','agt_cutover','virtual','Virtual')")
+        .execute(&pool).await.expect("printer fixture");
+    sqlx::query("INSERT INTO jobs (id,workspace_id,environment_id,printer_id,agent_id,payload,state,per_printer_sequence,expires_at) VALUES ('job_cutover','wsp_cutover','env_cutover','prn_cutover','agt_cutover','{}'::jsonb,'registered',1,now()+interval '1 hour')")
+        .execute(&pool).await.expect("unrelated job fixture");
+    let ciphertext = vec![7_u8; 29];
+    sqlx::query("INSERT INTO document_templates (id,workspace_id,environment_id,name,draft_ciphertext,draft_sha256) VALUES ('dtpl_cutover','wsp_cutover','env_cutover','Old',$1,$2)")
+        .bind(&ciphertext).bind("a".repeat(64)).execute(&pool).await.expect("old template fixture");
+    sqlx::query("INSERT INTO document_conversions (id,workspace_id,environment_id,adapter_id,adapter_version,adapter_api_version,source_format,source_sha256,strict,fidelity,renderer_version,result_ciphertext,result_sha256,idempotency_key,request_sha256) VALUES ('dcnv_cutover','wsp_cutover','env_cutover','pdfme','1.0.0','piqae.adapter/v1','pdfme.template',$1,true,'exact','old',$2,$1,'conversion-cutover',$1)")
+        .bind("a".repeat(64)).bind(&ciphertext).execute(&pool).await.expect("old conversion fixture");
+    PostgresStore::from_pool(pool.clone())
+        .migrate()
+        .await
+        .expect("apply hard cutover");
+    let documents: i64 = sqlx::query_scalar("SELECT count(*) FROM document_templates")
+        .fetch_one(&pool)
+        .await
+        .expect("count reset templates");
+    let unrelated_jobs: i64 = sqlx::query_scalar("SELECT count(*) FROM jobs WHERE id='job_cutover' AND workspace_id='wsp_cutover' AND environment_id='env_cutover'")
+        .fetch_one(&pool).await.expect("count retained job");
+    let account: i64 = sqlx::query_scalar("SELECT count(*) FROM workspaces WHERE id='wsp_cutover'")
+        .fetch_one(&pool)
+        .await
+        .expect("count retained workspace");
+    let conversion_table_removed: bool =
+        sqlx::query_scalar("SELECT to_regclass('document_conversions') IS NULL")
+            .fetch_one(&pool)
+            .await
+            .expect("inspect removed conversion table");
+    assert_eq!(documents, 0);
+    assert_eq!(unrelated_jobs, 1);
+    assert_eq!(account, 1);
+    assert!(conversion_table_removed);
+    pool.close().await;
+    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+        .execute(&admin)
+        .await
+        .expect("drop exact disposable schema");
+}
+
 async fn wait_for_database_blocker(pool: &PgPool, pid: i32) {
     for _ in 0..50 {
         let blocked: bool = sqlx::query_scalar(
@@ -169,7 +249,7 @@ async fn postgres_reported_complete_billing_upgrades_from_previous_schema() {
         .fetch_one(&pool)
         .await
         .expect("read latest schema version");
-    assert_eq!(latest, 37);
+    assert_eq!(latest, 38);
     let billable_index: Option<String> =
         sqlx::query_scalar("SELECT to_regclass('usage_one_billable_print_per_job_idx')::text")
             .fetch_one(&pool)
@@ -240,7 +320,7 @@ async fn documents_migrate_and_enforce_tenant_scoped_references() {
     .expect("tenant document template");
     let cross_tenant_revision = sqlx::query("INSERT INTO document_template_revisions
         (id,workspace_id,environment_id,template_id,revision,spec_ciphertext,spec_sha256,renderer_profile)
-        VALUES ('drev_cross','wsp_doc_b','env_doc_b','dtpl_doc_a',1,$1,$2,'piqae.document/v1')")
+        VALUES ('drev_cross','wsp_doc_b','env_doc_b','dtpl_doc_a',1,$1,$2,'piqae.business-document/v1')")
         .bind(ciphertext.as_slice()).bind("a".repeat(64)).execute(&pool).await;
     assert!(
         cross_tenant_revision.is_err(),
@@ -249,7 +329,7 @@ async fn documents_migrate_and_enforce_tenant_scoped_references() {
     sqlx::query(
         "INSERT INTO document_template_revisions
          (id,workspace_id,environment_id,template_id,revision,spec_ciphertext,spec_sha256,renderer_profile)
-         VALUES ('drev_doc_a','wsp_doc_a','env_doc_a','dtpl_doc_a',1,$1,$2,'piqae.document/v1')",
+         VALUES ('drev_doc_a','wsp_doc_a','env_doc_a','dtpl_doc_a',1,$1,$2,'piqae.business-document/v1')",
     )
     .bind(ciphertext.as_slice())
     .bind("a".repeat(64))
@@ -322,23 +402,6 @@ async fn documents_migrate_and_enforce_tenant_scoped_references() {
     .await
     .expect("inspect encrypted persistence");
     assert_eq!(plaintext_rows, 0);
-    let cross_tenant_conversion = sqlx::query(
-        "INSERT INTO document_conversions
-         (id,workspace_id,environment_id,adapter_id,adapter_version,adapter_api_version,
-          source_format,source_sha256,strict,fidelity,renderer_version,result_ciphertext,
-          result_sha256,idempotency_key,request_sha256)
-         VALUES ('dcnv_cross','wsp_doc_b','env_doc_a','pdfme','1.0.0','piqae.adapter/v1',
-          'pdfme.template',$1,true,'exact','piqae-document-renderer/0.1.11',$2,$1,
-          'conversion-key-a',$1)",
-    )
-    .bind("b".repeat(64))
-    .bind(ciphertext.as_slice())
-    .execute(&pool)
-    .await;
-    assert!(
-        cross_tenant_conversion.is_err(),
-        "conversion environment must be tenant fenced"
-    );
     let artifact_reference_constraints: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM pg_constraint c
          JOIN pg_class t ON t.oid=c.conrelid
@@ -380,21 +443,17 @@ async fn documents_migrate_and_enforce_tenant_scoped_references() {
     .await
     .expect("inspect render revision delete policy");
     assert_eq!(render_revision_delete_action, "c");
-    let conversion_ciphertext_bound: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM pg_constraint c
-          JOIN pg_class t ON t.oid=c.conrelid
-         WHERE t.relname='document_conversions' AND c.contype='c'
-           AND pg_get_constraintdef(c.oid) LIKE '%1048704%')",
-    )
-    .fetch_one(&pool)
-    .await
-    .expect("inspect adapter conversion ciphertext bound");
-    assert!(conversion_ciphertext_bound);
+    let hosted_conversion_removed: bool =
+        sqlx::query_scalar("SELECT to_regclass('document_conversions') IS NULL")
+            .fetch_one(&pool)
+            .await
+            .expect("inspect hosted conversion removal");
+    assert!(hosted_conversion_removed);
     let latest: i64 = sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations")
         .fetch_one(&pool)
         .await
         .expect("read schema version");
-    assert_eq!(latest, 37);
+    assert_eq!(latest, 38);
     pool.close().await;
     sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
         .execute(&admin)
@@ -788,7 +847,7 @@ async fn agent_health_migrates_empty_and_previous_schemas_with_tenant_fencing() 
         .fetch_one(&empty_pool)
         .await
         .expect("read empty-database schema version");
-    assert_eq!(latest, 37);
+    assert_eq!(latest, 38);
     empty_pool.close().await;
     sqlx::query(&format!("DROP SCHEMA {empty_schema} CASCADE"))
         .execute(&admin)
@@ -937,7 +996,7 @@ async fn content_encryption_key_algorithm_migrates_fresh_and_legacy_schemas() {
         .fetch_one(&empty_pool)
         .await
         .expect("read empty-database schema version");
-    assert_eq!(empty_latest, 37);
+    assert_eq!(empty_latest, 38);
     empty_pool.close().await;
     sqlx::query(&format!("DROP SCHEMA {empty_schema} CASCADE"))
         .execute(&admin)
@@ -1005,7 +1064,7 @@ async fn content_encryption_key_algorithm_migrates_fresh_and_legacy_schemas() {
         .fetch_one(&upgrade_pool)
         .await
         .expect("read upgraded schema version");
-    assert_eq!(latest, 37);
+    assert_eq!(latest, 38);
     let reference_guard_config: Vec<String> = sqlx::query_scalar(
         "SELECT coalesce(proconfig, ARRAY[]::text[])
          FROM pg_proc JOIN pg_namespace ON pg_namespace.oid = pg_proc.pronamespace

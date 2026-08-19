@@ -12,11 +12,11 @@ describe('PiqaeClient', () => {
       .mockResolvedValueOnce(Response.json({ id: 'rnd_1', template_revision_id: 'rev_1', state: 'completed', created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z' }, { status: 202 }))
       .mockResolvedValueOnce(Response.json({ id: 'job_1', state: 'registered' }, { status: 201 }));
     const client = new PiqaeClient({ fetch: fetcher });
-    const render = await client.documents.renders.create({ template_revision_id: 'rev_1', input: { invoice_number: 'redacted' } }, 'render-0001');
-    await client.documents.renders.print(render.id, { target_id: 'tgt_1', title: 'Invoice' }, 'print-0001');
-    expect(String(fetcher.mock.calls[0]?.[0])).toBe('https://api.piqae.com/v1/document-renders');
+    const render = await client.businessDocuments.renders.create({ template_revision_id: 'rev_1', input: { invoice_number: 'redacted' } }, 'render-0001');
+    await client.businessDocuments.renders.print(render.id, { target_id: 'tgt_1', title: 'Invoice' }, 'print-0001');
+    expect(String(fetcher.mock.calls[0]?.[0])).toBe('https://api.piqae.com/v1/business-document-renders');
     expect(new Headers(fetcher.mock.calls[0]?.[1]?.headers).get('idempotency-key')).toBe('render-0001');
-    expect(String(fetcher.mock.calls[1]?.[0])).toBe('https://api.piqae.com/v1/document-renders/rnd_1/print');
+    expect(String(fetcher.mock.calls[1]?.[0])).toBe('https://api.piqae.com/v1/business-document-renders/rnd_1/print');
     expect(new Headers(fetcher.mock.calls[1]?.[1]?.headers).get('idempotency-key')).toBe('print-0001');
   });
 
@@ -26,28 +26,16 @@ describe('PiqaeClient', () => {
       .mockResolvedValueOnce(new Response(pdf, { headers: { 'content-type': 'application/pdf' } }))
       .mockResolvedValueOnce(new Response(pdf, { headers: { 'content-type': 'application/pdf' } }));
     const client = new PiqaeClient({ apiKey: 'piq_test_redacted', fetch: fetcher });
-    const response = await client.documents.renders.download('drnd_1');
+    const response = await client.businessDocuments.renders.download('drnd_1');
     expect(response.headers.get('content-type')).toBe('application/pdf');
-    expect(await client.documents.renders.downloadBytes('drnd_1')).toEqual(pdf);
+    expect(await client.businessDocuments.renders.downloadBytes('drnd_1')).toEqual(pdf);
     expect(String(fetcher.mock.calls[0]?.[0])).toBe(
-      'https://api.piqae.com/v1/document-renders/drnd_1/artifact'
+      'https://api.piqae.com/v1/business-document-renders/drnd_1/artifact'
     );
     expect(new Headers(fetcher.mock.calls[0]?.[1]?.headers).get('accept')).toBe('application/pdf');
     expect(new Headers(fetcher.mock.calls[0]?.[1]?.headers).get('authorization')).toBe(
       'Bearer piq_test_redacted'
     );
-  });
-
-  it('maps the conversion SDK camelCase version to the wire contract', async () => {
-    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(Response.json({ id: 'dcnv_1' }, { status: 201 }));
-    const client = new PiqaeClient({ fetch: fetcher });
-    await client.documents.conversions.create({
-      adapter: 'pdfme', adapterVersion: '1.0.0', strict: true,
-      source: { basePdf: { width: 210, height: 297 }, schemas: [] }
-    }, 'conversion-template-v1');
-    const [, init] = fetcher.mock.calls[0] ?? [];
-    expect(JSON.parse(String(init?.body))).toMatchObject({ adapter_version: '1.0.0' });
-    expect(new Headers(init?.headers).get('idempotency-key')).toBe('conversion-template-v1');
   });
 
   it('sends auth, idempotency, and JSON for job creation', async () => {

@@ -17,7 +17,7 @@ use piqae_storage_postgres::{
     NewDeviceAuthorization, NodeUpdatePolicy, NodeUpdateState, PostgresStore, StorageError,
     StoredAgent, StoredAgentCommandBatch, StoredApiKey, StoredBillingSummary,
     StoredConnectSessionPreview, StoredContentEncryptionKey, StoredDeviceAuthorization,
-    StoredDocumentConversion, StoredDocumentPreview, StoredDocumentRender, StoredDocumentTemplate,
+    StoredDocumentPreview, StoredDocumentRender, StoredDocumentTemplate,
     StoredDocumentTemplateRevision, StoredLoadedMedia, StoredNodeConnector, StoredNodeDiagnostic,
     StoredNodeUpdate, StoredPlatformAccount, StoredPrintWorkflow, StoredPrinter,
     StoredResolvedPrintTicket, StoredStock, StoredTarget, StoredTargetBinding, StoredTenantEvent,
@@ -178,29 +178,6 @@ pub trait Repository: Send + Sync + 'static {
         environment_id: EnvironmentId,
         id: &str,
     ) -> Result<StoredDocumentPreview, RepositoryError>;
-    #[allow(clippy::too_many_arguments)]
-    async fn create_document_conversion(
-        &self,
-        workspace_id: WorkspaceId,
-        environment_id: EnvironmentId,
-        id: &str,
-        adapter_id: &str,
-        adapter_version: &str,
-        source_sha256: &str,
-        strict: bool,
-        fidelity: &str,
-        renderer_version: &str,
-        result_ciphertext: &[u8],
-        result_sha256: &str,
-        idempotency_key: &str,
-        request_sha256: &str,
-    ) -> Result<CreateDocumentResult<StoredDocumentConversion>, RepositoryError>;
-    async fn get_document_conversion(
-        &self,
-        workspace_id: WorkspaceId,
-        environment_id: EnvironmentId,
-        id: &str,
-    ) -> Result<StoredDocumentConversion, RepositoryError>;
     async fn complete_document_render(
         &self,
         workspace_id: WorkspaceId,
@@ -1281,53 +1258,6 @@ impl Repository for PostgresStore {
         id: &str,
     ) -> Result<StoredDocumentRender, RepositoryError> {
         PostgresStore::get_document_render(self, workspace_id, environment_id, id)
-            .await
-            .map_err(Into::into)
-    }
-
-    async fn create_document_conversion(
-        &self,
-        workspace_id: WorkspaceId,
-        environment_id: EnvironmentId,
-        id: &str,
-        adapter_id: &str,
-        adapter_version: &str,
-        source_sha256: &str,
-        strict: bool,
-        fidelity: &str,
-        renderer_version: &str,
-        result_ciphertext: &[u8],
-        result_sha256: &str,
-        idempotency_key: &str,
-        request_sha256: &str,
-    ) -> Result<CreateDocumentResult<StoredDocumentConversion>, RepositoryError> {
-        PostgresStore::create_document_conversion(
-            self,
-            workspace_id,
-            environment_id,
-            id,
-            adapter_id,
-            adapter_version,
-            source_sha256,
-            strict,
-            fidelity,
-            renderer_version,
-            result_ciphertext,
-            result_sha256,
-            idempotency_key,
-            request_sha256,
-        )
-        .await
-        .map_err(Into::into)
-    }
-
-    async fn get_document_conversion(
-        &self,
-        workspace_id: WorkspaceId,
-        environment_id: EnvironmentId,
-        id: &str,
-    ) -> Result<StoredDocumentConversion, RepositoryError> {
-        PostgresStore::get_document_conversion(self, workspace_id, environment_id, id)
             .await
             .map_err(Into::into)
     }
@@ -2887,16 +2817,6 @@ struct MemoryState {
         ),
     >,
     document_previews: HashMap<String, (WorkspaceId, EnvironmentId, String, StoredDocumentPreview)>,
-    document_conversions: HashMap<
-        String,
-        (
-            WorkspaceId,
-            EnvironmentId,
-            String,
-            String,
-            StoredDocumentConversion,
-        ),
-    >,
     platform_managers: HashMap<WorkspaceId, String>,
     api_keys: HashMap<String, (WorkspaceId, EnvironmentId, StoredApiKey, String)>,
     jobs: HashMap<JobId, MemoryJob>,
@@ -3268,7 +3188,7 @@ impl Repository for MemoryRepository {
             id: revision_id.into(),
             template_id: template_id.into(),
             revision: 1,
-            renderer_profile: "piqae.document/v1".into(),
+            renderer_profile: "piqae.business-document/v1".into(),
             created_at: Utc::now(),
             spec_ciphertext: template.draft_ciphertext.clone(),
             spec_sha256: template.draft_sha256.clone(),
@@ -3518,79 +3438,6 @@ impl Repository for MemoryRepository {
             return Err(RepositoryError::ConcurrentStateChange);
         }
         Ok(p.clone())
-    }
-
-    async fn create_document_conversion(
-        &self,
-        workspace_id: WorkspaceId,
-        environment_id: EnvironmentId,
-        id: &str,
-        adapter_id: &str,
-        adapter_version: &str,
-        source_sha256: &str,
-        strict: bool,
-        fidelity: &str,
-        renderer_version: &str,
-        result_ciphertext: &[u8],
-        result_sha256: &str,
-        idempotency_key: &str,
-        request_sha256: &str,
-    ) -> Result<CreateDocumentResult<StoredDocumentConversion>, RepositoryError> {
-        let mut state = self.state.write().await;
-        if let Some((_, _, _, hash, value)) =
-            state
-                .document_conversions
-                .values()
-                .find(|(w, e, key, _, _)| {
-                    *w == workspace_id && *e == environment_id && key == idempotency_key
-                })
-        {
-            if hash != request_sha256 {
-                return Err(RepositoryError::IdempotencyConflict);
-            }
-            return Ok(CreateDocumentResult::Existing(value.clone()));
-        }
-        let value = StoredDocumentConversion {
-            id: id.into(),
-            adapter_id: adapter_id.into(),
-            adapter_version: adapter_version.into(),
-            adapter_api_version: "piqae.adapter/v1".into(),
-            source_format: "pdfme.template".into(),
-            source_sha256: source_sha256.into(),
-            strict,
-            fidelity: fidelity.into(),
-            renderer_version: renderer_version.into(),
-            created_at: Utc::now(),
-            result_ciphertext: result_ciphertext.to_vec(),
-            result_sha256: result_sha256.into(),
-        };
-        state.document_conversions.insert(
-            id.into(),
-            (
-                workspace_id,
-                environment_id,
-                idempotency_key.into(),
-                request_sha256.into(),
-                value.clone(),
-            ),
-        );
-        Ok(CreateDocumentResult::Created(value))
-    }
-
-    async fn get_document_conversion(
-        &self,
-        workspace_id: WorkspaceId,
-        environment_id: EnvironmentId,
-        id: &str,
-    ) -> Result<StoredDocumentConversion, RepositoryError> {
-        self.state
-            .read()
-            .await
-            .document_conversions
-            .get(id)
-            .filter(|(w, e, _, _, _)| *w == workspace_id && *e == environment_id)
-            .map(|(_, _, _, _, value)| value.clone())
-            .ok_or(RepositoryError::NotFound)
     }
 
     async fn has_platform_manager(

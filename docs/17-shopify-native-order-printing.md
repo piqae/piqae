@@ -4,15 +4,15 @@
 
 The current implementation includes Shopify Admin order/detail and bulk print
 actions, a preview approval gate, PDF fallback, direct Piqae destinations,
-durable tenant-scoped templates, eight starters, a bounded Liquid adapter and a
-client-only PDFme editor for the exact text/QR/line canvas subset. Preview,
+durable tenant-scoped templates, four dynamic starters, a bounded Liquid adapter
+and a ProseMirror semantic business-document editor. Preview,
 download and print reuse one verified immutable artifact. The Shopify app can
 explicitly target fake, local or live Piqae; selecting live does not authorize a
 physical-printer test.
 
 Public release remains blocked on Shopify approvals and real development-store
 evidence, including protected customer data/scopes, extension placement,
-customer-account network access, POS/mobile behavior, PDFme CSP/browser loading,
+customer-account network access, POS/mobile behavior, editor browser testing,
 live Piqae/node delivery, and physical printer fixtures. Document packs,
 full-fidelity images/custom fonts/barcodes, full Liquid/HTML/CSS, multilingual
 and jurisdiction-specific documents are not implemented parity claims.
@@ -226,9 +226,9 @@ Pipeline:
 Shopify IDs from authenticated action
   -> bulk GraphQL fetch with bounded pagination/cost
   -> normalized immutable document model
-  -> bounded Liquid evaluation into typed pdfme schemas
-  -> deterministic pdfme layout + pinned fonts/assets/plugins
-  -> native PDF generation per order (parallel, bounded)
+  -> Shopify Liquid/visual source compiled into typed business-document nodes
+  -> deterministic Piqae flow layout with content-addressed assets
+  -> business-document PDF generation per order (parallel, bounded)
   -> PDF structural and visual preflight
   -> immutable object + SHA-256
   -> preview/download/email and/or idempotent Piqae print attempt
@@ -239,7 +239,8 @@ and forbid arbitrary remote images or scripts in templates. Preflight rasterizes
 at the destination's effective DPI, decodes every expected symbol from the
 rendered page, and compares the decoded payload with the source. A missing or
 incorrect symbol fails that document before printing. Maintain golden visual
-tests across pdfme, plugin, PDF-library, font and renderer-profile upgrades.
+tests across business-document format, PDF-library, font and renderer-profile
+upgrades.
 
 ## Performance contract
 
@@ -432,12 +433,9 @@ listing quality, and the app must apply after prerequisite criteria are met.
 
 The detailed editor evaluation and verified surface-by-surface competitor matrix
 are in [Order Printer Pro parity and editor assessment](research/order-printer-pro-parity.md).
-The proposed language, render plane, monorepo structure, performance budgets and
-benchmark gates are in
-[ADR-0003: Shopify document rendering architecture](architecture/adr-0003-shopify-document-rendering.md).
-The proposed provider-neutral Piqae Documents capability, open bundle, hosted and
-local rendering boundaries, and thin Shopify profile are in
-[ADR-0004: A core Piqae document engine with a thin Shopify profile](architecture/adr-0004-core-document-engine.md).
+The accepted provider-neutral format, rendering boundary, and thin Shopify
+profile are in
+[ADR-0004: Portable business-document format](architecture/adr-0004-core-document-engine.md).
 
 ## Sources checked for this concept
 

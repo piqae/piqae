@@ -232,13 +232,6 @@ impl DocumentSecretBox {
                             &record.aad_resource_id,
                         )
                     }
-                    DocumentCiphertextField::AdapterConversionResult => {
-                        crate::documents::conversion_result_aad(
-                            &workspace,
-                            &environment,
-                            &record.aad_resource_id,
-                        )
-                    }
                 };
                 let Some(replacement) = self.rewrap_payload(&aad, &record.ciphertext) else {
                     unreadable += 1;

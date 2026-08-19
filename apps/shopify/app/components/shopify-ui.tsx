@@ -13,16 +13,20 @@ export type OrderRow = {
 };
 
 export const editorDocument = {
-  schema: "piqae.document/v1",
-  page: { size: "A4", margin: 36 },
-  nodes: [
+  format: "piqae.business-document/v1",
+  media: {
+    kind: "paged",
+    size: "A4",
+    marginsMm: { top: 14, right: 14, bottom: 16, left: 14 },
+  },
+  body: [
     {
-      type: "text",
-      content: "Invoice",
-      style: { fontSize: 24, fontWeight: 700 },
+      type: "heading",
+      level: 1,
+      content: [{ type: "text", value: "Invoice" }],
     },
     {
-      type: "row",
+      type: "section",
       children: [
         { type: "text", content: "Order {{ order.name }}" },
         { type: "text", content: "{{ order.created_at }}" },
@@ -30,7 +34,7 @@ export const editorDocument = {
     },
     {
       type: "repeat",
-      source: "/order/line_items",
+      items: { type: "path", path: ["order", "lineItems"] },
       as: "item",
       children: [
         {

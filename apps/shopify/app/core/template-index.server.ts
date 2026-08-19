@@ -9,6 +9,7 @@ const ACTIVE_SYSTEM_TEMPLATE_KEYS = new Set([
   "invoice",
   "packing-slip",
   "receipt",
+  "credit-note",
 ]);
 
 export function isActiveTemplate(template: MerchantTemplate): boolean {

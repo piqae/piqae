@@ -19,18 +19,18 @@ export async function publishCanonicalTemplate(input: {
   if (!link)
     throw new Error("Connect a Piqae account before publishing a document");
   const envelope = parseTemplateEnvelope(input.source);
-  const canonicalDigest = templateDigest(JSON.stringify(envelope.canonical));
+  const canonicalDigest = templateDigest(JSON.stringify(envelope.document));
   const client = new PiqaeClient({
     baseUrl: input.baseUrl,
     accessToken: () => input.vault.open(link.encryptedCredential, input.shop),
   });
-  const template = await client.documents.templates.create(
-    { name: input.name, specification: envelope.canonical },
+  const template = await client.businessDocuments.templates.create(
+    { name: input.name, specification: envelope.document },
     `shopify-template-${canonicalDigest}`,
   );
-  const revision = await client.documents.templates.publish(
+  const revision = await client.businessDocuments.templates.publish(
     template.id,
-    envelope.canonical,
+    envelope.document,
     `shopify-template-publish-${canonicalDigest}`,
   );
   envelope.published = {

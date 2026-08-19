@@ -22,6 +22,7 @@ export const templates = [
   ["Invoice", "Orders · A4", "Published"],
   ["Packing slip", "Fulfillment · A4", "Published"],
   ["Receipt", "Orders · 80 mm", "Published"],
+  ["Credit Note", "Refunds · A4", "Published"],
 ] as const;
 export function customizedSystemDraft(
   existing: MerchantTemplate,

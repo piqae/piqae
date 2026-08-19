@@ -189,7 +189,7 @@ describe("Piqae MCP server", () => {
         "piqae_targets",
         "piqae_uploads",
         "piqae_jobs",
-        "piqae_documents",
+        "piqae_business_documents",
         "piqae_webhooks",
         "piqae_platform_accounts",
         "piqae_search_docs",
@@ -253,7 +253,7 @@ describe("Piqae MCP server", () => {
     globalThis.fetch = fetchMock as typeof fetch;
     const { client, server } = await linked(config());
     const response = await client.callTool({
-      name: "piqae_documents",
+      name: "piqae_business_documents",
       arguments: {
         action: "print",
         render_id: "drnd_test",
