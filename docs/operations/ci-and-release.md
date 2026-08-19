@@ -136,10 +136,11 @@ enabling it:
 
 ## Release flow
 
-Shopify follows an independent hosted-app release lane. A successful `main` CI
-run deploys the exact reviewed commit to Shopify staging. Production is a
-manual, protected deployment that first requires Railway `/healthz` to report
-the same commit, then creates and releases one Shopify app version. Successful
+Shopify follows an independent hosted-app release lane using one public app.
+Development uses Shopify CLI previews on a Dev Store; it does not release an
+app version. Production is a manual, protected deployment that first requires
+Railway `/healthz` to report the exact reviewed commit, then creates and
+releases one Shopify app version. Successful
 production releases use `shopify-v*` tags and do not trigger the native `v*`
 release workflow. See [Shopify release operations](shopify-release.md).
 

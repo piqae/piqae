@@ -30,7 +30,8 @@ printer environment, `local` targets a loopback or HTTPS self-hosted control
 plane, and `live` requires an HTTPS Piqae endpoint. Live mode exercises the real
 network and enrolled nodes, but it does not bypass Piqae's separate explicit
 physical-printer authorization and destination confirmation controls. CI and
-ordinary development use `fake`; staging may deliberately select `live`.
+ordinary development use `fake`; only an explicitly approved hosted pilot uses
+`live`.
 `PIQAE_SHOPIFY_STORAGE` defaults to durable PostgreSQL outside tests; the
 in-memory repository is allowed only for explicit development fixtures and unit
 tests, and is rejected in production.
@@ -38,9 +39,9 @@ tests, and is rejected in production.
 ## Production Shopify configuration
 
 `shopify.app.toml` deliberately contains non-deployable placeholder values.
-Extension UIDs are source-defined and checked in so the same extension maps
-across development, staging, and production app instances. App client IDs and
-origins live as GitHub environment variables; API secrets and app-scoped
+Extension UIDs are source-defined and checked in so CLI Dev Store previews and
+released versions update the same permanent public app. Its client ID and
+origin live as GitHub environment variables; API secrets and app-scoped
 automation tokens live as protected secrets. `scripts/render-release-config.mjs`
 creates a temporary mode-`0600` configuration during deployment. Its
 `application_url` must exactly match `SHOPIFY_APP_URL`, and its redirect,

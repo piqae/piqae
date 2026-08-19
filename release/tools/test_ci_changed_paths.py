@@ -41,11 +41,9 @@ class CiChangedPathsTests(unittest.TestCase):
         self.assertTrue(selected["mcp"] and selected["release_tooling"])
 
     def test_shopify_workflows_select_shopify_checks(self) -> None:
-        for workflow in ("shopify-deploy.yml", "shopify-staging.yml"):
-            with self.subTest(workflow=workflow):
-                selected = classify([f".github/workflows/{workflow}"])
-                self.assertTrue(selected["shopify"] and selected["release_tooling"])
-                self.assertFalse(selected["sdk"])
+        selected = classify([".github/workflows/shopify-deploy.yml"])
+        self.assertTrue(selected["shopify"] and selected["release_tooling"])
+        self.assertFalse(selected["sdk"])
 
     def test_every_checked_in_crate_selects_linux_rust(self) -> None:
         repository_root = Path(__file__).resolve().parents[2]

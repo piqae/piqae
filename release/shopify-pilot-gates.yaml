@@ -1,5 +1,5 @@
 version: 1
-target: shopify_single_store_pilot
+target: shopify_public_app_dev_store_pilot
 classification: preview
 gates:
   - id: source_ci
@@ -23,9 +23,12 @@ gates:
   - id: shopify_app_configuration
     status: open
     evidence: Dev Dashboard distribution, URL, scope, protected-data, and automation-token record
-  - id: real_store_installation
+  - id: dev_store_installation
     status: open
-    evidence: store-owner-approved install/reopen/uninstall/reinstall record using opaque identifiers
+    evidence: Dev Store install/reopen/uninstall/reinstall record using opaque identifiers
+  - id: approved_live_store_installation
+    status: open
+    evidence: after App Store approval, merchant-approved install via limited-visibility listing
   - id: live_webhook_lifecycle
     status: open
     evidence: HMAC, deduplication, scope-update, uninstall, data-request, customer-redact, and shop-redact record
