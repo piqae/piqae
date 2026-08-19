@@ -78,9 +78,20 @@ jobs:
           shared-key: ci-linux
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install CUPS development libraries
+        timeout-minutes: 3
+        env:
+          DEBIAN_FRONTEND: noninteractive
         run: |
-          sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends libcups2-dev
+          sudo apt-get \
+            -o Acquire::Retries=3 \
+            -o Acquire::http::Timeout=20 \
+            -o Acquire::https::Timeout=20 \
+            update
+          sudo apt-get \
+            -o DPkg::Lock::Timeout=60 \
+            --yes \
+            --no-install-recommends \
+            install libcups2-dev
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
