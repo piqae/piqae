@@ -110,6 +110,9 @@
       >
         <Icon name={theme === 'dark' ? 'sun' : 'moon'} size={14} />
       </button>
+      {#if mode === 'live'}
+        <a class="sign-out" href="/auth/logout?return_to=/login">Sign out</a>
+      {/if}
     </div>
   </header>
 
@@ -239,6 +242,23 @@
   .service small {
     color: var(--text-tertiary);
     font-size: var(--text-meta);
+  }
+
+  .sign-out {
+    height: var(--control-compact);
+    display: inline-flex;
+    align-items: center;
+    padding: 0 10px;
+    color: var(--text-secondary);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-md);
+    font-size: var(--text-compact);
+    font-weight: 500;
+  }
+
+  .sign-out:hover {
+    color: var(--text-primary);
+    background: var(--surface-hover);
   }
 
   .demo-banner {
