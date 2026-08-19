@@ -92,11 +92,28 @@ impl ExecutorSupervisor {
         let deadline = tokio::time::Instant::now()
             + request_timeout(request.deadline_unix_ms, self.hard_timeout);
         if let Err(source) = write_frame_async(&mut stdin, request).await {
-            terminate(&mut child).await;
-            return Err(SupervisorError::Frame {
-                source,
-                evidence: stderr_evidence(stderr_task, &stderr_state).await,
-            });
+            let status = timeout(
+                deadline.saturating_duration_since(tokio::time::Instant::now()),
+                child.wait(),
+            )
+            .await;
+            return match status {
+                Ok(Ok(status)) if !status.success() => Err(SupervisorError::Exit(
+                    status,
+                    stderr_evidence(stderr_task, &stderr_state).await,
+                )),
+                Ok(Ok(_)) => Err(SupervisorError::Frame {
+                    source,
+                    evidence: stderr_evidence(stderr_task, &stderr_state).await,
+                }),
+                Ok(Err(error)) => Err(SupervisorError::Spawn(error)),
+                Err(_) => {
+                    terminate(&mut child).await;
+                    Err(SupervisorError::TimedOut(
+                        stderr_evidence(stderr_task, &stderr_state).await,
+                    ))
+                }
+            };
         }
         drop(stdin);
 
