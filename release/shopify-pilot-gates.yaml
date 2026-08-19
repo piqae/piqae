@@ -1,0 +1,46 @@
+version: 1
+target: shopify_single_store_pilot
+classification: preview
+gates:
+  - id: source_ci
+    status: implemented
+    evidence: .github/workflows/ci.yml Shopify job and aggregate CI result
+  - id: postgres_upgrade_and_tenant_isolation
+    status: tested
+    evidence: apps/shopify/scripts/test-postgres-migrations.mjs
+  - id: virtual_printing
+    status: tested
+    evidence: repository fake-print suite; never physical hardware
+  - id: commit_bound_runtime_health
+    status: implemented
+    evidence: apps/shopify/app/routes/healthz.ts and .github/workflows/shopify-deploy.yml
+  - id: protected_shopify_promotion
+    status: implemented
+    evidence: .github/workflows/shopify-deploy.yml; external environment approval and token still required
+  - id: production_runtime_configuration
+    status: external
+    evidence: Railway production deployment and protected variable audit
+  - id: shopify_app_configuration
+    status: open
+    evidence: Dev Dashboard distribution, URL, scope, protected-data, and automation-token record
+  - id: real_store_installation
+    status: open
+    evidence: store-owner-approved install/reopen/uninstall/reinstall record using opaque identifiers
+  - id: live_webhook_lifecycle
+    status: open
+    evidence: HMAC, deduplication, scope-update, uninstall, data-request, customer-redact, and shop-redact record
+  - id: live_order_document_flow
+    status: open
+    evidence: synthetic pilot order, idempotent submission, status propagation, and authenticated PDF fallback
+  - id: app_store_review
+    status: open
+    evidence: public distribution, listing, protected customer data, pricing, automated checks, and Shopify approval
+  - id: physical_printing
+    status: open
+    evidence: requires separate active authorization naming printer and fixture
+  - id: independent_security_review
+    status: open
+    evidence: external review record
+  - id: production_soak
+    status: open
+    evidence: bounded pilot observation report

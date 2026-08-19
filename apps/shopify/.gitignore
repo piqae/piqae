@@ -3,3 +3,4 @@
 build/
 extensions/*/dist/
 extensions/*/manifest.json
+shopify.app.release.toml

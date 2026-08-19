@@ -1,6 +1,7 @@
 # Operations guides
 
 - [Production release and promotion](production-release.md)
+- [Shopify development, pilot, and release operations](shopify-release.md)
 - [CI and release operations](ci-and-release.md)
 - [Package publishing](package-publishing.md)
 - [Configuration](configuration.md)

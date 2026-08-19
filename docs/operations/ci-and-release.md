@@ -136,6 +136,13 @@ enabling it:
 
 ## Release flow
 
+Shopify follows an independent hosted-app release lane. A successful `main` CI
+run deploys the exact reviewed commit to Shopify staging. Production is a
+manual, protected deployment that first requires Railway `/healthz` to report
+the same commit, then creates and releases one Shopify app version. Successful
+production releases use `shopify-v*` tags and do not trigger the native `v*`
+release workflow. See [Shopify release operations](shopify-release.md).
+
 The `Piqae release` workflow is the sole `v*` tag trigger:
 
 1. Resolve and validate the version, build number, tag, and membership of the

@@ -1,6 +1,6 @@
 {
   "name": "@piqae/shopify-app",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "engines": {
@@ -15,6 +15,7 @@
     "test": "vitest run",
     "test:postgres": "node scripts/test-postgres-migrations.mjs",
     "format:check": "prettier --check .",
+    "release:config": "node scripts/render-release-config.mjs",
     "extensions:check": "node scripts/check-extensions.mjs"
   },
   "dependencies": {
@@ -47,6 +48,7 @@
     "@types/react-dom": "19.2.3",
     "esbuild": "0.27.7",
     "prettier": "3.8.2",
+    "smol-toml": "1.8.0",
     "typescript": "5.9.3",
     "vite": "7.3.1",
     "vitest": "4.0.18"

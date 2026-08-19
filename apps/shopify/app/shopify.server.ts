@@ -1,11 +1,11 @@
 import {
   ApiVersion,
-  AppDistribution,
   shopifyApp,
 } from "@shopify/shopify-app-react-router/server";
 import { MemorySessionStorage } from "@shopify/shopify-app-session-storage-memory";
 import { PostgreSQLSessionStorage } from "@shopify/shopify-app-session-storage-postgresql";
 import { recordInstallation } from "./core/installations.server";
+import { configuredShopifyDistribution } from "./core/shopify-distribution.server";
 
 function required(name: string): string {
   const value = process.env[name];
@@ -34,7 +34,7 @@ const shopify = shopifyApp({
     .split(",")
     .map((scope) => scope.trim())
     .filter(Boolean),
-  distribution: AppDistribution.AppStore,
+  distribution: configuredShopifyDistribution(),
   sessionStorage,
   hooks: {
     afterAuth: async ({ session }) => {

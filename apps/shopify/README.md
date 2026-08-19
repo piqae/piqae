@@ -37,14 +37,18 @@ tests, and is rejected in production.
 
 ## Production Shopify configuration
 
-`shopify.app.toml` deliberately contains non-deployable placeholder values. Do
-not invent or commit a Partner app client ID, extension UID, or production URL.
-Before a release, link the repository to the real Partner app and generate the
-environment-specific Shopify configuration. Its `application_url` must exactly
-match `SHOPIFY_APP_URL`, and its redirect, webhook, app-proxy and customer
-extension origins must use that same deployed HTTPS origin. The release owner
-must retain the resulting Partner/CLI validation evidence without committing
-credentials.
+`shopify.app.toml` deliberately contains non-deployable placeholder values.
+Extension UIDs are source-defined and checked in so the same extension maps
+across development, staging, and production app instances. App client IDs and
+origins live as GitHub environment variables; API secrets and app-scoped
+automation tokens live as protected secrets. `scripts/render-release-config.mjs`
+creates a temporary mode-`0600` configuration during deployment. Its
+`application_url` must exactly match `SHOPIFY_APP_URL`, and its redirect,
+webhook, app-proxy, and customer extension origins use the same HTTPS origin.
+
+The authoritative daily development, Railway, pilot, production, rollback,
+privacy, and App Store process is in
+[`docs/operations/shopify-release.md`](../../docs/operations/shopify-release.md).
 
 ## PostgreSQL migration gate
 
