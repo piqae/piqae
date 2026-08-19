@@ -132,8 +132,10 @@ only after the aggregate checks pass.
 5. Approve the protected `shopify-production` environment.
 6. The workflow re-runs bounded tests, verifies runtime identity, renders and
    validates config, creates an unreleased app version, releases that exact
-   version, uploads non-secret evidence, then creates `shopify-v<version>` and a
-   GitHub release.
+   version, independently verifies that Shopify reports it active, uploads
+   non-secret evidence, then creates `shopify-v<version>` and a GitHub release.
+   Shopify CLI can render a release error while exiting successfully, so its
+   process exit status alone is never accepted as release evidence.
 7. Verify install/reopen, one synthetic order, duplicate submission behavior,
    webhook receipt, and authenticated PDF fallback. Record only opaque IDs and
    outcomes—never documents, credentials, customer data, or signed URLs.

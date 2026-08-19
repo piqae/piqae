@@ -130,11 +130,25 @@ jobs:
         env:
           SHOPIFY_VERSION: ${{ steps.release.outputs.shopify_version }}
         run: |
-          pnpm --package=@shopify/cli@4.6.1 dlx shopify app release \
+          set -euo pipefail
+          release_output=$(pnpm --package=@shopify/cli@4.6.1 dlx shopify app release \
             --config release \
             --allow-updates \
             --no-color \
-            --version "$SHOPIFY_VERSION"
+            --version "$SHOPIFY_VERSION" 2>&1)
+          printf '%s\n' "$release_output"
+          if grep -Fq "Version couldn't be released" <<<"$release_output"; then
+            echo 'Shopify CLI reported a release failure with a zero exit status.' >&2
+            exit 1
+          fi
+          versions=$(pnpm --package=@shopify/cli@4.6.1 dlx shopify app versions list \
+            --config release --json)
+          if ! jq -e --arg version "$SHOPIFY_VERSION" \
+            'any(.[]; .versionTag == $version and .status == "active")' \
+            <<<"$versions" >/dev/null; then
+            echo "Shopify version $SHOPIFY_VERSION is not active after release." >&2
+            exit 1
+          fi
       - name: Record non-secret deployment evidence
         env:
           RELEASE_SHA: ${{ steps.release.outputs.sha }}
