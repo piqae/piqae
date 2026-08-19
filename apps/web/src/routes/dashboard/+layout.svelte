@@ -6,4 +6,9 @@
   let { data, children }: { data: LayoutData; children: Snippet } = $props();
 </script>
 
-<AppShell mode={data.dashboardMode ?? 'live'} meta={data.meta}>{@render children()}</AppShell>
+<AppShell
+  mode={data.dashboardMode ?? 'live'}
+  meta={data.meta}
+  viewer={data.viewer}
+  workspaces={data.workspaces}
+>{@render children()}</AppShell>

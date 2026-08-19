@@ -16,4 +16,8 @@ describe('safeReturnTo', () => {
       '/dashboard/jobs?state=queued#latest'
     );
   });
+
+  it('uses a route-specific fallback without accepting an external target', () => {
+    expect(safeReturnTo('https://attacker.example', '/login')).toBe('/login');
+  });
 });

@@ -164,6 +164,52 @@
     </div>
   </section>
 
+  <section class="platform-section m-section">
+    <div class="m-container platform-grid">
+      <article class="platform-intro">
+        <span class="m-eyebrow">For platforms and integrators</span>
+        <h2 class="m-heading">Put printing inside the account your users already have.</h2>
+        <p class="m-lede">
+          Create an isolated Piqae customer account for each organisation from your backend,
+          connect their printers, and keep the whole print experience inside your product.
+        </p>
+        <ul class="m-list">
+          <li>One server-side platform credential manages your customer accounts</li>
+          <li>Each customer gets separate workspaces, environments, printers, jobs, and usage</li>
+          <li>Your users connect a local agent without needing a separate Piqae login</li>
+        </ul>
+        <div class="m-actions">
+          <a class="m-button primary" href="/docs/platform-accounts">Explore platform accounts</a>
+          <a class="m-button" href="/pricing">See integrator pricing</a>
+        </div>
+      </article>
+
+      <article class="security-card">
+        <span class="m-eyebrow">Protected at every handoff</span>
+        <h2>Clear encryption boundaries, from cloud to printer.</h2>
+        <div class="security-levels">
+          <div>
+            <strong>TLS in transit</strong>
+            <p>Remote API, upload, and agent traffic travels over authenticated TLS.</p>
+          </div>
+          <div>
+            <strong>Encrypted at rest</strong>
+            <p>Hosted document content uses object-level encryption and short retention controls.</p>
+          </div>
+          <div>
+            <strong>AES-256-GCM payload encryption</strong>
+            <p>Preview confidential printing encrypts each job for its permitted nodes before upload.</p>
+          </div>
+        </div>
+        <p class="security-note">
+          Confidential printing is a Preview feature, not yet an independently audited end-to-end
+          encryption claim. The destination operating system and printer must receive plaintext to print.
+        </p>
+        <a href="/security">See the security model <span>→</span></a>
+      </article>
+    </div>
+  </section>
+
   <section class="decisions-section m-section">
     <div class="m-container decisions-grid">
       <div>
@@ -554,6 +600,32 @@
     box-shadow: 0 0 10px rgb(62 187 129 / 0.6);
   }
   .api-result strong { color: #777681; font-weight: 500; }
+  .platform-section { background: white; }
+  .platform-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    align-items: stretch;
+    gap: clamp(40px, 7vw, 96px);
+  }
+  .platform-intro .m-lede { max-width: 610px; font-size: 18px; }
+  .platform-intro .m-list { max-width: 610px; }
+  .security-card {
+    padding: clamp(30px, 5vw, 56px);
+    border-radius: 24px;
+    background:
+      radial-gradient(circle at 100% 0%, rgb(0 106 255 / .24), transparent 40%),
+      #07111f;
+    color: white;
+  }
+  .security-card .m-eyebrow { color: #71adff; }
+  .security-card h2 { max-width: 560px; margin: 18px 0 34px; font-size: clamp(30px, 3.4vw, 46px); }
+  .security-levels { display: grid; border-top: 1px solid rgb(255 255 255 / .14); }
+  .security-levels > div { padding: 20px 0; border-bottom: 1px solid rgb(255 255 255 / .14); }
+  .security-levels strong { font-size: 14px; }
+  .security-levels p,
+  .security-note { margin: 5px 0 0; color: #9eacbd; font-size: 12px; }
+  .security-note { margin-top: 22px; }
+  .security-card > a { display: inline-flex; gap: 10px; margin-top: 24px; color: white; font-size: 13px; font-weight: 680; }
   .decisions-section { background: #c9e0ff; }
   .decisions-grid {
     display: grid;
@@ -798,6 +870,7 @@
   }
   @media (max-width: 900px) {
     .headless-grid,
+    .platform-grid,
     .decisions-grid,
     .switch-grid,
     .open-source-grid { grid-template-columns: 1fr; }

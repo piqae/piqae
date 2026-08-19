@@ -4,6 +4,7 @@ import type { LayoutServerLoad } from './$types';
 import { authMode } from '$lib/server/auth-config';
 import { dashboardMeta, dashboardMode } from '$lib/server/dashboard-data';
 import { currentLocalIdentity } from '$lib/server/local-owner-auth';
+import { listUserMemberships } from '$lib/server/workos-admin';
 
 export const load: LayoutServerLoad = async (event) => {
   const mode = dashboardMode();
@@ -18,7 +19,10 @@ export const load: LayoutServerLoad = async (event) => {
         name: 'Piqae Developer',
         organizationId: 'org_demo',
         role: 'owner'
-      }
+      },
+      workspaces: [
+        { organizationId: 'org_demo', organizationName: 'Demo workspace', role: 'owner' as const }
+      ]
     };
   }
 
@@ -31,6 +35,7 @@ export const load: LayoutServerLoad = async (event) => {
     if (!event.locals.auth?.organizationId) {
       redirect(303, '/onboarding');
     }
+    const workspaces = await listUserMemberships(user.id).catch(() => []);
     return {
       dashboardMode: mode,
       meta,
@@ -40,7 +45,8 @@ export const load: LayoutServerLoad = async (event) => {
         name: `${user.firstName ?? ''} ${user.lastName ?? ''}`.trim() || null,
         organizationId: event.locals.auth.organizationId,
         role: event.locals.auth?.role ?? null
-      }
+      },
+      workspaces
     };
   }
 
@@ -57,6 +63,13 @@ export const load: LayoutServerLoad = async (event) => {
       name: user.name,
       organizationId: user.workspaceId,
       role: 'owner'
-    }
+    },
+    workspaces: [
+      {
+        organizationId: user.workspaceId,
+        organizationName: 'Local workspace',
+        role: 'owner' as const
+      }
+    ]
   };
 };

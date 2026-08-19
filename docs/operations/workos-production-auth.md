@@ -22,9 +22,46 @@ The production AuthKit application is `Piqae Admin`:
 - inactivity timeout: 14 days;
 - maximum session lifetime: 30 days.
 
-The application uses the WorkOS-hosted AuthKit domain until a production custom
-domain is supported and its DNS ownership is verified. Do not publish
-`auth.piqae.com` before WorkOS and Cloudflare both report the domain verified.
+The WorkOS team and production-environment administrative account is
+`admin@piqae.com`. Keep at least one separately secured break-glass
+administrator during ownership changes, require MFA for every WorkOS team
+administrator, and never record credentials or recovery codes in this
+repository.
+
+Piqae has selected a first-party authentication UI on `app.piqae.com` backed by
+the WorkOS Authentication API. The WorkOS-hosted AuthKit page remains the
+temporary production flow until that UI passes the acceptance gates below; do
+not weaken or remove the hosted fallback before cutover. This avoids making the
+paid WorkOS custom-domain add-on a launch dependency while retaining WorkOS as
+the identity and session authority.
+
+The first-party UI must use server-only WorkOS calls and sealed, Secure,
+HttpOnly, SameSite cookies. It must implement password sign-in and sign-up,
+email verification, password reset, Magic Auth, MFA enrollment and challenge,
+bounded anti-automation controls, rotated refresh sessions, terminal versus
+transient refresh handling, safe return URLs, organization selection, and
+generic non-enumerating errors. Browser code must never receive the WorkOS API
+key, client secret, access token, refresh token, or pending authentication
+token. Passkeys remain disabled until the final relying-party domain and a
+supported first-party passkey flow are proven.
+
+The login route currently adds a bounded, in-memory attempt window as defence
+in depth for the single web instance. It is not a distributed production rate
+limiter and must not be described as one. WorkOS/Radar remains the upstream
+anti-automation boundary. Before scaling the web service beyond one replica,
+put the login POSTs behind a shared edge or datastore-backed limiter and prove
+the limit across separate instances. Never key a durable limiter using a raw
+email address or store submitted credentials.
+
+Authentication pages and action responses use `Cache-Control: private,
+no-store`. This is mandatory for first-time TOTP enrollment because the QR code
+and manual setup key are necessarily shown once in the browser. Pending
+authentication tokens, factor IDs, and challenge IDs remain only in the
+short-lived sealed HttpOnly challenge cookie and must never be placed in page
+data, URLs, logs, or client storage.
+
+Do not publish `auth.piqae.com` unless a future decision returns to WorkOS
+hosted AuthKit and both WorkOS and Cloudflare report the custom domain verified.
 
 Every role includes `usage_read`. The other permission slugs are
 `api_keys_read`, `api_keys_write`, `agents_read`, `agents_write`,
@@ -116,6 +153,12 @@ Run with synthetic accounts and empty workspaces only:
 9. probe known resource IDs from the other workspace and receive denial or
    not-found without disclosing resource details;
 10. run the self-hosted local-owner login/session/logout test unchanged.
+
+For the first-party UI cutover, also prove password recovery, email
+verification, Magic Auth expiry/replay rejection, first-time MFA enrollment,
+MFA challenge failure limits, refresh-token rotation and replay behavior,
+transient WorkOS outage handling, session revocation, user-enumeration
+resistance, CSRF rejection, and rate limiting before moving production traffic.
 
 Record the immutable commit, deployment IDs, WorkOS environment ID, webhook
 endpoint ID, test timestamps, and redacted pass/fail evidence. Do not record

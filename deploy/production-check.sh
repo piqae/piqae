@@ -13,6 +13,7 @@ fi
 python3 "${root}/release/tools/check_workflow_pins.py" "${root}"/.github/workflows/*.yml
 python3 -m unittest discover -s "${root}/release/tools" -p 'test_*.py' -v
 ruby "${root}/release/tools/check_release_policy.rb"
+ruby "${root}/release/tools/check_product_release.rb"
 
 if [[ "${mode}" == "release" || "${mode}" == "managed-ha" ]]; then
   : "${PIQAE_PRODUCTION_RAILWAY_ENV_FILE:?set to a protected exported Railway web environment file}"

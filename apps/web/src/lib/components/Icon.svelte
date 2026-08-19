@@ -12,6 +12,7 @@
     | 'docs'
     | 'external'
     | 'jobs'
+    | 'logout'
     | 'menu'
     | 'moon'
     | 'more'
@@ -69,6 +70,8 @@
   {:else if name === 'jobs'}
     <path d="M7 3.5h10a2 2 0 0 1 2 2v15l-3-2-4 2-4-2-3 2v-15a2 2 0 0 1 2-2Z" />
     <path d="M8.5 8h7M8.5 12h5" />
+  {:else if name === 'logout'}
+    <path d="M10 4H5a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h5M14 8l4 4-4 4M8 12h10" />
   {:else if name === 'menu'}
     <path d="M4 7h16M4 12h16M4 17h16" />
   {:else if name === 'moon'}

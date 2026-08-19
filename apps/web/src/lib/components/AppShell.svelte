@@ -10,12 +10,41 @@
   let {
     mode,
     meta,
+    viewer,
+    workspaces,
     children
-  }: { mode: 'live' | 'demo'; meta: DashboardMeta; children: Snippet } = $props();
+  }: {
+    mode: 'live' | 'demo';
+    meta: DashboardMeta;
+    viewer: {
+      email: string;
+      name: string | null;
+      organizationId: string;
+      role: string | null;
+    } | null;
+    workspaces: Array<{
+      organizationId: string;
+      organizationName: string;
+      role: string;
+    }>;
+    children: Snippet;
+  } = $props();
   let interactive = $state(false);
   let theme = $state<'dark' | 'light'>('dark');
 
   const nav = $derived(dashboardNavigation(meta));
+  const currentWorkspace = $derived(
+    workspaces.find((workspace) => workspace.organizationId === viewer?.organizationId) ?? null
+  );
+  const displayName = $derived(viewer?.name || viewer?.email || 'Account');
+  const initials = $derived(
+    displayName
+      .split(/\s+/)
+      .filter(Boolean)
+      .slice(0, 2)
+      .map((part) => part[0]?.toUpperCase())
+      .join('') || 'P'
+  );
 
   function isActive(href: string): boolean {
     return href === '/dashboard'
@@ -78,10 +107,53 @@
 
 <div class="shell">
   <header class="topbar">
-    <a class="brand" href="/dashboard" aria-label="Piqae operations">
-      <span class="logo"><Icon name="printers" size={14} strokeWidth={1.9} /></span>
-      <strong>Piqae</strong>
-    </a>
+    <details class="account-switcher">
+      <summary aria-label={`Account and workspace: ${currentWorkspace?.organizationName ?? 'Piqae'}`}>
+        <span class="avatar" aria-hidden="true">{initials}</span>
+        <span class="account-label">
+          <strong>{currentWorkspace?.organizationName ?? 'Piqae'}</strong>
+          <small>{workspaces.length > 1 ? `${workspaces.length} workspaces` : 'Workspace'}</small>
+        </span>
+        <Icon name="chevron-down" size={13} />
+      </summary>
+      <div class="account-menu">
+        <div class="viewer">
+          <span class="avatar large" aria-hidden="true">{initials}</span>
+          <span>
+            <strong>{displayName}</strong>
+            <small>{viewer?.email}</small>
+          </span>
+        </div>
+        <div class="menu-section" aria-label="Workspaces">
+          <p>Workspaces</p>
+          {#each workspaces as workspace}
+            {#if workspace.organizationId === viewer?.organizationId}
+              <div class="workspace current" aria-current="true">
+                <span class="workspace-mark">{workspace.organizationName.slice(0, 1).toUpperCase()}</span>
+                <span><strong>{workspace.organizationName}</strong><small>{workspace.role} · Current</small></span>
+                <Icon name="check" size={13} />
+              </div>
+            {:else}
+              <form method="POST" action="/auth/switch">
+                <input type="hidden" name="organization_id" value={workspace.organizationId} />
+                <input type="hidden" name="return_to" value={page.url.pathname} />
+                <button class="workspace" type="submit">
+                  <span class="workspace-mark">{workspace.organizationName.slice(0, 1).toUpperCase()}</span>
+                  <span><strong>{workspace.organizationName}</strong><small>{workspace.role}</small></span>
+                </button>
+              </form>
+            {/if}
+          {/each}
+          {#if meta.auth.workspaceSwitching}
+            <a class="menu-link" href="/onboarding"><Icon name="plus" size={13} /> Create workspace</a>
+          {/if}
+        </div>
+        <div class="menu-actions">
+          <a class="menu-link" href="/dashboard/settings"><Icon name="settings" size={13} /> Settings</a>
+          <a class="menu-link" href="/auth/logout?return_to=/login"><Icon name="logout" size={13} /> Sign out</a>
+        </div>
+      </div>
+    </details>
 
     <nav aria-label="Main navigation">
       {#each nav as item}
@@ -146,30 +218,96 @@
     border-bottom: 1px solid var(--border-subtle);
   }
 
-  .brand {
-    display: flex;
-    align-items: center;
-    gap: 9px;
+  .account-switcher {
+    position: relative;
     flex: 0 0 auto;
   }
 
-  .logo {
-    width: 24px;
-    height: 24px;
-    display: inline-grid;
-    place-items: center;
-    color: white;
-    background: var(--accent);
-    border-radius: 6px;
-    box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.12);
+  .account-switcher summary {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    min-width: 190px;
+    padding: 5px 8px 5px 5px;
+    border-radius: var(--radius-md);
+    cursor: pointer;
+    list-style: none;
   }
 
-  .brand strong {
-    font-family: var(--font-display);
-    font-size: var(--text-section);
-    font-weight: 560;
-    letter-spacing: -0.018em;
+  .account-switcher summary::-webkit-details-marker { display: none; }
+  .account-switcher summary:hover,
+  .account-switcher[open] summary { background: var(--surface-hover); }
+
+  .avatar,
+  .workspace-mark {
+    width: 26px;
+    height: 26px;
+    display: grid;
+    place-items: center;
+    flex: 0 0 auto;
+    color: white;
+    background: var(--accent);
+    border-radius: 7px;
+    font-size: 10px;
+    font-weight: 700;
   }
+
+  .avatar.large { width: 34px; height: 34px; border-radius: 9px; font-size: 12px; }
+
+  .account-label,
+  .viewer span,
+  .workspace span:not(.workspace-mark) {
+    display: grid;
+    min-width: 0;
+  }
+
+  .account-label { flex: 1; }
+  .account-label strong { font-size: var(--text-compact); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .account-label small,
+  .viewer small,
+  .workspace small { color: var(--text-tertiary); font-size: var(--text-meta); }
+
+  .account-menu {
+    position: absolute;
+    top: calc(100% + 8px);
+    left: 0;
+    z-index: 50;
+    width: 300px;
+    padding: 8px;
+    color: var(--text-primary);
+    background: var(--surface-raised);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-lg);
+    box-shadow: 0 16px 40px rgb(0 0 0 / 0.3);
+  }
+
+  .viewer { display: flex; align-items: center; gap: 10px; padding: 8px; }
+  .viewer strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--text-compact); }
+  .menu-section,
+  .menu-actions { padding-top: 7px; margin-top: 7px; border-top: 1px solid var(--border-subtle); }
+  .menu-section > p { margin: 3px 8px 6px; color: var(--text-tertiary); font-size: var(--text-meta); font-weight: 600; text-transform: uppercase; letter-spacing: .06em; }
+  .workspace,
+  .menu-link {
+    width: 100%;
+    min-height: 38px;
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    padding: 6px 8px;
+    color: var(--text-secondary);
+    background: transparent;
+    border: 0;
+    border-radius: var(--radius-md);
+    text-align: left;
+    font: inherit;
+  }
+  button.workspace { cursor: pointer; }
+  .workspace:hover,
+  .menu-link:hover { color: var(--text-primary); background: var(--surface-hover); }
+  .workspace.current { color: var(--text-primary); }
+  .workspace > span:nth-child(2) { flex: 1; }
+  .workspace strong { font-size: var(--text-compact); font-weight: 550; }
+  .workspace-mark { width: 24px; height: 24px; background: var(--surface-selected); color: var(--text-secondary); }
 
   nav {
     display: flex;
@@ -289,10 +427,13 @@
       padding: 0 12px;
     }
 
-    .brand strong,
+    .account-label,
     .service {
       display: none;
     }
+
+    .account-switcher summary { min-width: auto; padding-right: 5px; }
+    .account-menu { width: min(300px, calc(100vw - 24px)); }
 
     nav a span {
       display: none;

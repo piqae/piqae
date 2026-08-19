@@ -208,6 +208,12 @@ importers:
       '@sveltejs/kit':
         specifier: ^2.22.5
         version: 2.70.1(@opentelemetry/api@1.9.1)(@sveltejs/vite-plugin-svelte@5.1.1(svelte@5.56.8)(vite@6.4.3(@types/node@22.20.1)(sass@1.77.4)(tsx@4.22.4)))(svelte@5.56.8)(typescript@5.9.3)(vite@6.4.3(@types/node@22.20.1)(sass@1.77.4)(tsx@4.22.4))
+      '@workos-inc/node':
+        specifier: 10.8.0
+        version: 10.8.0
+      '@workos/authkit-session':
+        specifier: 0.5.4
+        version: 0.5.4(@workos-inc/node@10.8.0)(typescript@5.9.3)
       '@workos/authkit-sveltekit':
         specifier: 0.3.0
         version: 0.3.0(@sveltejs/kit@2.70.1(@opentelemetry/api@1.9.1)(@sveltejs/vite-plugin-svelte@5.1.1(svelte@5.56.8)(vite@6.4.3(@types/node@22.20.1)(sass@1.77.4)(tsx@4.22.4)))(svelte@5.56.8)(typescript@5.9.3)(vite@6.4.3(@types/node@22.20.1)(sass@1.77.4)(tsx@4.22.4)))(@workos-inc/node@10.8.0)(typescript@5.9.3)

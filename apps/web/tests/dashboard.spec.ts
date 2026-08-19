@@ -6,6 +6,12 @@ test('operations surface exposes state with semantic navigation', async ({ page 
   await expect(page.getByRole('heading', { name: 'Operations' })).toBeVisible();
   await expect(page.getByText('Demo data — no control-plane requests are being made.')).toBeVisible();
   await expect(page.getByRole('navigation', { name: 'Main navigation' })).toBeVisible();
+  await page.getByLabel('Account and workspace: Demo workspace').click();
+  const accountMenu = page.locator('.account-menu');
+  await expect(accountMenu.getByText('developer@piqae.local')).toBeVisible();
+  await expect(accountMenu.getByText('Demo workspace', { exact: true })).toBeVisible();
+  await expect(accountMenu.getByRole('link', { name: 'Settings' })).toBeVisible();
+  await expect(accountMenu.getByRole('link', { name: 'Sign out' })).toBeVisible();
   await expect(page.getByText('1 uncertain handoff')).toBeVisible();
   await expect(page.getByRole('table')).toBeVisible();
 
