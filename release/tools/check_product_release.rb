@@ -74,7 +74,7 @@ module ProductRelease
       end
       absolute = File.join(root, file)
       if !File.file?(absolute)
-        if product && component["required_for_product_release"] == true
+        if product
           failures << "#{path}: product release requires #{file} for component #{name}"
         end
       elsif version(absolute, kind).to_s.empty?
