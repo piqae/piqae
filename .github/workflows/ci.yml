@@ -86,8 +86,6 @@ jobs:
             -o Acquire::Retries=3 \
             -o Acquire::http::Timeout=20 \
             -o Acquire::https::Timeout=20 \
-            update
-          sudo apt-get \
             -o DPkg::Lock::Timeout=60 \
             --yes \
             --no-install-recommends \
