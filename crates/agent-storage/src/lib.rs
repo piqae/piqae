@@ -50,10 +50,51 @@ pub enum StorageError {
     InvalidCaptureToken,
     #[error("native profile blob exceeds the {0} byte limit")]
     NativeBlobTooLarge(usize),
+    #[error("document resource {0} was not found")]
+    DocumentResourceNotFound(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredDocumentResource {
+    pub digest: String,
+    pub media_type: String,
+    pub byte_length: u64,
+    pub relative_path: String,
+    pub verified_unix_ms: i64,
+    pub last_accessed_unix_ms: i64,
+    pub reference_count: u64,
 }
 
 pub const MAX_NATIVE_PROFILE_BLOB_BYTES: usize = 1024 * 1024;
 const MAX_PROFILE_CAPTURE_SESSION_LIFETIME_MS: i64 = 10 * 60 * 1000;
+
+fn map_document_resource(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredDocumentResource> {
+    let byte_length: i64 = row.get(2)?;
+    let reference_count: i64 = row.get(6)?;
+    let byte_length = u64::try_from(byte_length).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            2,
+            rusqlite::types::Type::Integer,
+            Box::new(error),
+        )
+    })?;
+    let reference_count = u64::try_from(reference_count).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            6,
+            rusqlite::types::Type::Integer,
+            Box::new(error),
+        )
+    })?;
+    Ok(StoredDocumentResource {
+        digest: row.get(0)?,
+        media_type: row.get(1)?,
+        byte_length,
+        relative_path: row.get(3)?,
+        verified_unix_ms: row.get(4)?,
+        last_accessed_unix_ms: row.get(5)?,
+        reference_count,
+    })
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AcceptedJob {
@@ -297,6 +338,221 @@ pub struct AgentStore {
 }
 
 impl AgentStore {
+    /// Records a digest-verified document resource. Callers must publish the
+    /// corresponding file atomically before this transaction commits.
+    ///
+    /// # Errors
+    /// Returns an error when `SQLite` cannot persist the metadata.
+    pub fn upsert_document_resource(
+        &self,
+        resource: &StoredDocumentResource,
+    ) -> Result<(), StorageError> {
+        self.connection.execute(
+            "INSERT INTO document_resources(
+               digest, media_type, byte_length, relative_path, verified_unix_ms,
+               last_accessed_unix_ms, reference_count
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(digest) DO UPDATE SET
+               media_type=excluded.media_type,
+               byte_length=excluded.byte_length,
+               relative_path=excluded.relative_path,
+               verified_unix_ms=excluded.verified_unix_ms,
+               last_accessed_unix_ms=excluded.last_accessed_unix_ms,
+               evicting=0",
+            params![
+                resource.digest,
+                resource.media_type,
+                i64::try_from(resource.byte_length).unwrap_or(i64::MAX),
+                resource.relative_path,
+                resource.verified_unix_ms,
+                resource.last_accessed_unix_ms,
+                i64::try_from(resource.reference_count).unwrap_or(i64::MAX),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Loads resource metadata by digest.
+    ///
+    /// # Errors
+    /// Returns an error when `SQLite` cannot query the metadata.
+    pub fn document_resource(
+        &self,
+        digest: &str,
+    ) -> Result<Option<StoredDocumentResource>, StorageError> {
+        self.connection
+            .query_row(
+                "SELECT digest, media_type, byte_length, relative_path,
+                        verified_unix_ms, last_accessed_unix_ms, reference_count
+                 FROM document_resources WHERE digest=?1",
+                [digest],
+                map_document_resource,
+            )
+            .optional()
+            .map_err(StorageError::from)
+    }
+
+    /// Updates LRU access time.
+    ///
+    /// # Errors
+    /// Returns an error for an unknown digest or `SQLite` failure.
+    pub fn touch_document_resource(&self, digest: &str, now: i64) -> Result<(), StorageError> {
+        let changed = self.connection.execute(
+            "UPDATE document_resources SET last_accessed_unix_ms=?2 WHERE digest=?1",
+            params![digest, now],
+        )?;
+        if changed == 0 {
+            return Err(StorageError::DocumentResourceNotFound(digest.into()));
+        }
+        Ok(())
+    }
+
+    /// Pins a resource against eviction.
+    ///
+    /// # Errors
+    /// Returns an error for an unknown digest or `SQLite` failure.
+    pub fn retain_document_resource(&self, digest: &str) -> Result<(), StorageError> {
+        let changed = self.connection.execute(
+            "UPDATE document_resources SET reference_count=reference_count+1
+             WHERE digest=?1 AND evicting=0",
+            [digest],
+        )?;
+        if changed == 0 {
+            return Err(StorageError::DocumentResourceNotFound(digest.into()));
+        }
+        Ok(())
+    }
+
+    /// Releases one durable eviction pin.
+    ///
+    /// # Errors
+    /// Returns an error for an unknown/unpinned digest or `SQLite` failure.
+    pub fn release_document_resource(&self, digest: &str) -> Result<(), StorageError> {
+        let changed = self.connection.execute(
+            "UPDATE document_resources SET reference_count=reference_count-1
+             WHERE digest=?1 AND reference_count>0",
+            [digest],
+        )?;
+        if changed == 0 {
+            return Err(StorageError::DocumentResourceNotFound(digest.into()));
+        }
+        Ok(())
+    }
+
+    /// Returns the total persisted cache byte count.
+    ///
+    /// # Errors
+    /// Returns an error when `SQLite` cannot calculate usage.
+    pub fn document_resource_usage(&self) -> Result<u64, StorageError> {
+        let value: i64 = self.connection.query_row(
+            "SELECT COALESCE(SUM(byte_length), 0) FROM document_resources",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(u64::try_from(value).unwrap_or_default())
+    }
+
+    /// Lists eviction candidates oldest first.
+    ///
+    /// # Errors
+    /// Returns an error when `SQLite` cannot query candidates.
+    pub fn unreferenced_document_resources_lru(
+        &self,
+    ) -> Result<Vec<StoredDocumentResource>, StorageError> {
+        let mut statement = self.connection.prepare(
+            "SELECT digest, media_type, byte_length, relative_path,
+                    verified_unix_ms, last_accessed_unix_ms, reference_count
+             FROM document_resources WHERE reference_count=0
+             ORDER BY last_accessed_unix_ms, digest",
+        )?;
+        statement
+            .query_map([], map_document_resource)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StorageError::from)
+    }
+
+    /// Lists recent cache entries for a bounded readiness snapshot.
+    ///
+    /// # Errors
+    /// Returns an error when `SQLite` cannot query the cache.
+    pub fn recent_document_resources(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<StoredDocumentResource>, StorageError> {
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let mut statement = self.connection.prepare(
+            "SELECT digest, media_type, byte_length, relative_path,
+                    verified_unix_ms, last_accessed_unix_ms, reference_count
+             FROM document_resources WHERE evicting=0
+             ORDER BY last_accessed_unix_ms DESC, digest LIMIT ?1",
+        )?;
+        statement
+            .query_map([limit], map_document_resource)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StorageError::from)
+    }
+
+    /// Deletes metadata only when no durable reference protects it.
+    ///
+    /// # Errors
+    /// Returns an error when `SQLite` cannot perform the conditional delete.
+    pub fn delete_unreferenced_document_resource(
+        &self,
+        digest: &str,
+    ) -> Result<bool, StorageError> {
+        Ok(self.connection.execute(
+            "DELETE FROM document_resources WHERE digest=?1 AND reference_count=0",
+            [digest],
+        )? == 1)
+    }
+
+    /// Claims an unreferenced resource for filesystem eviction.
+    ///
+    /// # Errors
+    /// Returns an error when `SQLite` cannot perform the atomic claim.
+    pub fn claim_document_resource_eviction(&self, digest: &str) -> Result<bool, StorageError> {
+        Ok(self.connection.execute(
+            "UPDATE document_resources SET evicting=1
+             WHERE digest=?1 AND reference_count=0 AND evicting=0",
+            [digest],
+        )? == 1)
+    }
+
+    /// Cancels a failed filesystem eviction claim.
+    ///
+    /// # Errors
+    /// Returns an error when `SQLite` cannot clear the claim.
+    pub fn cancel_document_resource_eviction(&self, digest: &str) -> Result<(), StorageError> {
+        self.connection.execute(
+            "UPDATE document_resources SET evicting=0 WHERE digest=?1",
+            [digest],
+        )?;
+        Ok(())
+    }
+
+    /// Deletes metadata after a claimed resource file is gone.
+    ///
+    /// # Errors
+    /// Returns an error when `SQLite` cannot finalize eviction.
+    pub fn finish_document_resource_eviction(&self, digest: &str) -> Result<bool, StorageError> {
+        Ok(self.connection.execute(
+            "DELETE FROM document_resources
+             WHERE digest=?1 AND reference_count=0 AND evicting=1",
+            [digest],
+        )? == 1)
+    }
+
+    /// Clears process-local cache guards once, when the cache owner starts.
+    ///
+    /// # Errors
+    /// Returns an error when `SQLite` cannot reset stale guards.
+    pub fn reset_document_resource_transient_state(&self) -> Result<(), StorageError> {
+        self.connection.execute(
+            "UPDATE document_resources SET reference_count=0, evicting=0",
+            [],
+        )?;
+        Ok(())
+    }
     /// Opens or creates the durable agent database and applies its schema.
     ///
     /// # Errors
@@ -324,6 +580,12 @@ impl AgentStore {
         connection.pragma_update(None, "journal_mode", "WAL")?;
         connection.pragma_update(None, "synchronous", "FULL")?;
         connection.execute_batch(SCHEMA)?;
+        ensure_column(
+            &connection,
+            "document_resources",
+            "evicting",
+            "INTEGER NOT NULL DEFAULT 0 CHECK (evicting IN (0, 1))",
+        )?;
         let has_cloud_managed: bool = connection.query_row(
             "SELECT EXISTS (
                SELECT 1 FROM pragma_table_info('jobs') WHERE name = 'cloud_managed'
@@ -4858,5 +5120,38 @@ mod tests {
         let second = store.local_job_history(1, 1).unwrap();
         assert_eq!(first[0].job_id, "newer");
         assert_eq!(second[0].job_id, "older");
+    }
+
+    #[test]
+    fn resource_digest_is_canonical_and_upsert_recovers_eviction_claim() {
+        let store = AgentStore::in_memory().unwrap();
+        let digest = "a".repeat(64);
+        let resource = StoredDocumentResource {
+            digest: digest.clone(),
+            media_type: "image/jpeg".into(),
+            byte_length: 4,
+            relative_path: format!("sha256/aa/{digest}"),
+            verified_unix_ms: 1,
+            last_accessed_unix_ms: 1,
+            reference_count: 0,
+        };
+        store.upsert_document_resource(&resource).unwrap();
+        assert!(store.claim_document_resource_eviction(&digest).unwrap());
+        store.upsert_document_resource(&resource).unwrap();
+        store.retain_document_resource(&digest).unwrap();
+
+        let uppercase = "A".repeat(64);
+        assert!(
+            store
+                .connection
+                .execute(
+                    "INSERT INTO document_resources(
+               digest, media_type, byte_length, relative_path, verified_unix_ms,
+               last_accessed_unix_ms, reference_count, evicting
+             ) VALUES (?1, 'image/jpeg', 1, ?2, 1, 1, 0, 0)",
+                    params![uppercase, "sha256/AA/uppercase"],
+                )
+                .is_err()
+        );
     }
 }

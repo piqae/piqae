@@ -1986,6 +1986,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/business-document-resources/{digest}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Store an immutable content-addressed business-document resource */
+        put: operations["putBusinessDocumentResource"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/business-document-renders/{render_id}": {
         parameters: {
             query?: never;
@@ -1997,6 +2014,23 @@ export interface paths {
         get: operations["retrieveBusinessDocumentRender"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/business-document-renders/{render_id}/render-readiness": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Evaluate exact destination readiness and render policy */
+        post: operations["evaluateBusinessDocumentRenderReadiness"];
         delete?: never;
         options?: never;
         head?: never;
@@ -2673,6 +2707,18 @@ export interface components {
             events: components["schemas"]["JobEvent"][];
             /** @default [] */
             diagnostics?: components["schemas"]["DiagnosticReport"][];
+            document_render?: components["schemas"]["DocumentRenderCapabilities"];
+        };
+        DocumentRenderCapabilities: {
+            renderer_abi?: string | null;
+            resource_abi?: string | null;
+            /** @default false */
+            persistent_cache?: boolean;
+            /** @default false */
+            font_rendering?: boolean;
+            image_media_types?: "image/jpeg"[];
+            font_media_types?: string[];
+            cached_resource_digests?: components["schemas"]["Sha256Hex"][];
         };
         AgentSyncResponse: {
             /** Format: date-time */
@@ -2726,6 +2772,27 @@ export interface components {
             content: components["schemas"]["ContentDescriptor"];
         };
         ContentDescriptor: {
+            /** @constant */
+            type: "business_document";
+            policy: components["schemas"]["BusinessDocumentRenderPolicy"];
+            render: {
+                /** @constant */
+                renderer_abi: "piqae.business-document-pdf/v1";
+                /** @constant */
+                resource_abi: "piqae.document-resources/v1";
+                specification: components["schemas"]["BusinessDocumentV1"];
+                input: {
+                    [key: string]: unknown;
+                };
+                resources: components["schemas"]["BusinessDocumentResourceDescriptor"][];
+                expected_pdf_sha256: components["schemas"]["Sha256Hex"];
+                /** Format: int64 */
+                expected_pdf_bytes: number;
+            };
+            fallback: components["schemas"]["ContentDescriptor"];
+            fallback_allowed: boolean;
+            decision_reason: string;
+        } | {
             /** @constant */
             type: "download";
             url: string;
@@ -3775,6 +3842,7 @@ export interface components {
             artifact_byte_length?: number | null;
             /** @enum {string|null} */
             artifact_media_type?: "application/pdf" | null;
+            page_count?: number | null;
             failure_code?: string | null;
             /** Format: date-time */
             created_at: string;
@@ -3788,7 +3856,56 @@ export interface components {
             options?: components["schemas"]["JobOptions"];
             /** @default 1 */
             deliveries?: number;
+            render_policy?: components["schemas"]["BusinessDocumentRenderPolicy"];
+            render_cost?: components["schemas"]["BusinessDocumentRenderCost"];
         } & (unknown | unknown);
+        /**
+         * @description automatic uses bounded measured costs; cloud_only always delivers the approved PDF; prefer_node uses exact node rendering only when compatible and otherwise delivers the approved PDF; require_node fails closed when exact compatibility is unavailable.
+         * @default automatic
+         * @enum {string}
+         */
+        BusinessDocumentRenderPolicy: "automatic" | "cloud_only" | "prefer_node" | "require_node";
+        BusinessDocumentRenderCost: {
+            document_count: number;
+            page_count: number;
+            /** Format: int64 */
+            pdf_bytes: number;
+            /** Format: int64 */
+            input_bytes: number;
+        };
+        BusinessDocumentResourceDescriptor: {
+            digest: components["schemas"]["Sha256Hex"];
+            /**
+             * @description Renderer ABI v1 intentionally supports resolved JPEG resources only; fonts remain built-in Base-14/Windows-1252.
+             * @enum {string}
+             */
+            media_type: "image/jpeg";
+            /** Format: int64 */
+            byte_length: number;
+        };
+        BusinessDocumentRenderReadiness: {
+            requested_policy: components["schemas"]["BusinessDocumentRenderPolicy"];
+            /** @enum {string} */
+            selected_mode: "cloud_pdf" | "node_render";
+            reason: string;
+            destination: {
+                supported: boolean;
+                ready: boolean;
+                missing_resources: components["schemas"]["Sha256Hex"][];
+                reason: string | null;
+            };
+            estimates: {
+                /** Format: int64 */
+                cloud_ms: number;
+                /** Format: int64 */
+                node_ms: number;
+            };
+        };
+        EvaluateBusinessDocumentRenderReadiness: {
+            printer_id: string;
+            render_policy?: components["schemas"]["BusinessDocumentRenderPolicy"];
+            render_cost?: components["schemas"]["BusinessDocumentRenderCost"];
+        };
         CreateBusinessDocumentPreview: {
             /** @default 600 */
             expires_in_seconds?: number;
@@ -7009,6 +7126,32 @@ export interface operations {
             409: components["responses"]["Error"];
         };
     };
+    putBusinessDocumentResource: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                digest: components["schemas"]["Sha256Hex"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "image/jpeg": string;
+            };
+        };
+        responses: {
+            /** @description Resource verified and stored idempotently. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: components["responses"]["Error"];
+            401: components["responses"]["Error"];
+        };
+    };
     retrieveBusinessDocumentRender: {
         parameters: {
             query?: never;
@@ -7029,6 +7172,35 @@ export interface operations {
                     "application/json": components["schemas"]["BusinessDocumentRender"];
                 };
             };
+            404: components["responses"]["Error"];
+        };
+    };
+    evaluateBusinessDocumentRenderReadiness: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                render_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["EvaluateBusinessDocumentRenderReadiness"];
+            };
+        };
+        responses: {
+            /** @description Auditable policy decision using the destination's last authenticated capability report. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BusinessDocumentRenderReadiness"];
+                };
+            };
+            400: components["responses"]["Error"];
+            401: components["responses"]["Error"];
             404: components["responses"]["Error"];
         };
     };

@@ -249,7 +249,7 @@ async fn postgres_reported_complete_billing_upgrades_from_previous_schema() {
         .fetch_one(&pool)
         .await
         .expect("read latest schema version");
-    assert_eq!(latest, 38);
+    assert_eq!(latest, 39);
     let billable_index: Option<String> =
         sqlx::query_scalar("SELECT to_regclass('usage_one_billable_print_per_job_idx')::text")
             .fetch_one(&pool)
@@ -453,7 +453,7 @@ async fn documents_migrate_and_enforce_tenant_scoped_references() {
         .fetch_one(&pool)
         .await
         .expect("read schema version");
-    assert_eq!(latest, 38);
+    assert_eq!(latest, 39);
     pool.close().await;
     sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
         .execute(&admin)
@@ -847,7 +847,7 @@ async fn agent_health_migrates_empty_and_previous_schemas_with_tenant_fencing() 
         .fetch_one(&empty_pool)
         .await
         .expect("read empty-database schema version");
-    assert_eq!(latest, 38);
+    assert_eq!(latest, 39);
     empty_pool.close().await;
     sqlx::query(&format!("DROP SCHEMA {empty_schema} CASCADE"))
         .execute(&admin)
@@ -996,7 +996,7 @@ async fn content_encryption_key_algorithm_migrates_fresh_and_legacy_schemas() {
         .fetch_one(&empty_pool)
         .await
         .expect("read empty-database schema version");
-    assert_eq!(empty_latest, 38);
+    assert_eq!(empty_latest, 39);
     empty_pool.close().await;
     sqlx::query(&format!("DROP SCHEMA {empty_schema} CASCADE"))
         .execute(&admin)
@@ -1064,7 +1064,7 @@ async fn content_encryption_key_algorithm_migrates_fresh_and_legacy_schemas() {
         .fetch_one(&upgrade_pool)
         .await
         .expect("read upgraded schema version");
-    assert_eq!(latest, 38);
+    assert_eq!(latest, 39);
     let reference_guard_config: Vec<String> = sqlx::query_scalar(
         "SELECT coalesce(proconfig, ARRAY[]::text[])
          FROM pg_proc JOIN pg_namespace ON pg_namespace.oid = pg_proc.pronamespace

@@ -2570,6 +2570,25 @@ paths:
         "400": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
+  /v1/business-document-resources/{digest}:
+    put:
+      summary: Store an immutable content-addressed business-document resource
+      tags: [Documents]
+      operationId: putBusinessDocumentResource
+      parameters:
+        - name: digest
+          in: path
+          required: true
+          schema: { $ref: "#/components/schemas/Sha256Hex" }
+      requestBody:
+        required: true
+        content:
+          image/jpeg:
+            schema: { type: string, format: binary, maxLength: 4194304 }
+      responses:
+        "204": { description: Resource verified and stored idempotently. }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
   /v1/business-document-renders/{render_id}:
     get:
       summary: Retrieve a document render
@@ -2586,6 +2605,30 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/BusinessDocumentRender" }
+        "404": { $ref: "#/components/responses/Error" }
+  /v1/business-document-renders/{render_id}/render-readiness:
+    post:
+      summary: Evaluate exact destination readiness and render policy
+      tags: [Documents]
+      operationId: evaluateBusinessDocumentRenderReadiness
+      parameters:
+        - name: render_id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/EvaluateBusinessDocumentRenderReadiness" }
+      responses:
+        "200":
+          description: Auditable policy decision using the destination's last authenticated capability report.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BusinessDocumentRenderReadiness" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
   /v1/business-document-renders/{render_id}/artifact:
     get:
@@ -3790,6 +3833,30 @@ components:
           maxItems: 8
           default: []
           items: { $ref: "#/components/schemas/DiagnosticReport" }
+        document_render:
+          $ref: "#/components/schemas/DocumentRenderCapabilities"
+    DocumentRenderCapabilities:
+      type: object
+      additionalProperties: false
+      properties:
+        renderer_abi: { type: [string, "null"], maxLength: 128 }
+        resource_abi: { type: [string, "null"], maxLength: 128 }
+        persistent_cache: { type: boolean, default: false }
+        font_rendering: { type: boolean, default: false }
+        image_media_types:
+          type: array
+          maxItems: 16
+          uniqueItems: true
+          items: { type: string, enum: [image/jpeg] }
+        font_media_types:
+          type: array
+          maxItems: 0
+          items: { type: string }
+        cached_resource_digests:
+          type: array
+          maxItems: 256
+          uniqueItems: true
+          items: { $ref: "#/components/schemas/Sha256Hex" }
     AgentSyncResponse:
       type: object
       required:
@@ -3870,6 +3937,30 @@ components:
           $ref: "#/components/schemas/ContentDescriptor"
     ContentDescriptor:
       oneOf:
+        - type: object
+          additionalProperties: false
+          required: [type, policy, render, fallback, fallback_allowed, decision_reason]
+          properties:
+            type: { const: business_document }
+            policy: { $ref: "#/components/schemas/BusinessDocumentRenderPolicy" }
+            render:
+              type: object
+              additionalProperties: false
+              required: [renderer_abi, resource_abi, specification, input, resources, expected_pdf_sha256, expected_pdf_bytes]
+              properties:
+                renderer_abi: { type: string, const: piqae.business-document-pdf/v1 }
+                resource_abi: { type: string, const: piqae.document-resources/v1 }
+                specification: { $ref: "#/components/schemas/BusinessDocumentV1" }
+                input: { type: object, additionalProperties: true }
+                resources:
+                  type: array
+                  maxItems: 64
+                  items: { $ref: "#/components/schemas/BusinessDocumentResourceDescriptor" }
+                expected_pdf_sha256: { $ref: "#/components/schemas/Sha256Hex" }
+                expected_pdf_bytes: { type: integer, format: int64, minimum: 1 }
+            fallback: { $ref: "#/components/schemas/ContentDescriptor" }
+            fallback_allowed: { type: boolean }
+            decision_reason: { type: string, maxLength: 128 }
         - type: object
           additionalProperties: false
           required: [type, url, sha256, bytes]
@@ -5355,6 +5446,7 @@ components:
         artifact_sha256: { type: [string, "null"], pattern: '^[a-f0-9]{64}$' }
         artifact_byte_length: { type: [integer, "null"], minimum: 1 }
         artifact_media_type: { type: [string, "null"], enum: [application/pdf, null] }
+        page_count: { type: [integer, "null"], minimum: 1, maximum: 100000 }
         failure_code: { type: [string, "null"] }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
@@ -5368,11 +5460,76 @@ components:
         title: { type: string, minLength: 1, maxLength: 255 }
         options: { $ref: "#/components/schemas/JobOptions" }
         deliveries: { type: integer, minimum: 1, maximum: 100, default: 1 }
+        render_policy: { $ref: "#/components/schemas/BusinessDocumentRenderPolicy" }
+        render_cost: { $ref: "#/components/schemas/BusinessDocumentRenderCost" }
       oneOf:
         - required: [printer_id]
           not: { required: [target_id] }
         - required: [target_id]
           not: { required: [printer_id] }
+    BusinessDocumentRenderPolicy:
+      type: string
+      enum: [automatic, cloud_only, prefer_node, require_node]
+      default: automatic
+      description: >-
+        automatic uses bounded measured costs; cloud_only always delivers the approved PDF;
+        prefer_node uses exact node rendering only when compatible and otherwise delivers the
+        approved PDF; require_node fails closed when exact compatibility is unavailable.
+    BusinessDocumentRenderCost:
+      type: object
+      additionalProperties: false
+      required: [document_count, page_count, pdf_bytes, input_bytes]
+      properties:
+        document_count: { type: integer, minimum: 1, maximum: 10000 }
+        page_count: { type: integer, minimum: 1, maximum: 100000 }
+        pdf_bytes: { type: integer, format: int64, minimum: 1, maximum: 524288000 }
+        input_bytes: { type: integer, format: int64, minimum: 1, maximum: 52428800 }
+    BusinessDocumentResourceDescriptor:
+      type: object
+      additionalProperties: false
+      required: [digest, media_type, byte_length]
+      properties:
+        digest: { $ref: "#/components/schemas/Sha256Hex" }
+        media_type:
+          type: string
+          enum: [image/jpeg]
+          description: Renderer ABI v1 intentionally supports resolved JPEG resources only; fonts remain built-in Base-14/Windows-1252.
+        byte_length: { type: integer, format: int64, minimum: 1, maximum: 4194304 }
+    BusinessDocumentRenderReadiness:
+      type: object
+      additionalProperties: false
+      required: [requested_policy, selected_mode, reason, destination, estimates]
+      properties:
+        requested_policy: { $ref: "#/components/schemas/BusinessDocumentRenderPolicy" }
+        selected_mode: { type: string, enum: [cloud_pdf, node_render] }
+        reason: { type: string, maxLength: 128 }
+        destination:
+          type: object
+          additionalProperties: false
+          required: [supported, ready, missing_resources, reason]
+          properties:
+            supported: { type: boolean }
+            ready: { type: boolean }
+            missing_resources:
+              type: array
+              maxItems: 64
+              items: { $ref: "#/components/schemas/Sha256Hex" }
+            reason: { type: [string, "null"], maxLength: 128 }
+        estimates:
+          type: object
+          additionalProperties: false
+          required: [cloud_ms, node_ms]
+          properties:
+            cloud_ms: { type: integer, format: int64, minimum: 0 }
+            node_ms: { type: integer, format: int64, minimum: 0 }
+    EvaluateBusinessDocumentRenderReadiness:
+      type: object
+      additionalProperties: false
+      required: [printer_id]
+      properties:
+        printer_id: { type: string }
+        render_policy: { $ref: "#/components/schemas/BusinessDocumentRenderPolicy" }
+        render_cost: { $ref: "#/components/schemas/BusinessDocumentRenderCost" }
     CreateBusinessDocumentPreview:
       type: object
       additionalProperties: false

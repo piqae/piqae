@@ -309,6 +309,59 @@ pub struct AgentSyncRequest {
     pub events: Vec<JobEvent>,
     #[serde(default)]
     pub diagnostics: Vec<DiagnosticReport>,
+    /// Bounded, non-secret renderer/cache capability snapshot. The control
+    /// plane uses this only to make an auditable delivery decision; the node
+    /// still validates every offered manifest and fails closed.
+    #[serde(default)]
+    pub document_render: DocumentRenderCapabilities,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DocumentRenderCapabilities {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub renderer_abi: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_abi: Option<String>,
+    #[serde(default)]
+    pub persistent_cache: bool,
+    #[serde(default)]
+    pub font_rendering: bool,
+    #[serde(default)]
+    pub image_media_types: Vec<String>,
+    #[serde(default)]
+    pub font_media_types: Vec<String>,
+    /// At most 256 lowercase SHA-256 values. This is scoped to the authenticated
+    /// tenant/node sync and must never be exposed to another tenant.
+    #[serde(default)]
+    pub cached_resource_digests: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BusinessDocumentRenderPolicy {
+    #[default]
+    Automatic,
+    CloudOnly,
+    PreferNode,
+    RequireNode,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct BusinessDocumentResourceDescriptor {
+    pub digest: String,
+    pub media_type: String,
+    pub byte_length: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct BusinessDocumentNodeRender {
+    pub renderer_abi: String,
+    pub resource_abi: String,
+    pub specification: serde_json::Value,
+    pub input: serde_json::Value,
+    pub resources: Vec<BusinessDocumentResourceDescriptor>,
+    pub expected_pdf_sha256: String,
+    pub expected_pdf_bytes: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -383,6 +436,16 @@ pub enum ContentDescriptor {
         authentication: Option<UriAuthentication>,
         sha256: Option<String>,
         bytes: Option<u64>,
+    },
+    /// Exact node-render input with the already approved server PDF as a
+    /// mandatory fallback. `require_node` is represented by `fallback_allowed`
+    /// false and must fail closed instead of printing the fallback.
+    BusinessDocument {
+        policy: BusinessDocumentRenderPolicy,
+        render: Box<BusinessDocumentNodeRender>,
+        fallback: Box<ContentDescriptor>,
+        fallback_allowed: bool,
+        decision_reason: String,
     },
 }
 

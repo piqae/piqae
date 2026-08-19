@@ -1,6 +1,6 @@
 use crate::{
     AppState,
-    api::{CreateJobRequest, authenticate_native, create_job},
+    api::{CreateJobRequest, authenticate_native, create_job_internal},
     error::AppError,
 };
 use axum::{
@@ -9,7 +9,7 @@ use axum::{
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{get, post, put},
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use bytes::BytesMut;
@@ -17,10 +17,99 @@ use futures::StreamExt as _;
 use piqae_auth::Scope;
 use piqae_document_renderer::BusinessDocumentV1;
 use piqae_domain::{ContentKind, ContentSource, JobOptions};
+use piqae_protocol::agent::{BusinessDocumentNodeRender, BusinessDocumentResourceDescriptor};
 use piqae_storage_postgres::{CreateDocumentResult, StoredDocumentPreview, StoredDocumentRender};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum RenderPolicy {
+    #[default]
+    Automatic,
+    CloudOnly,
+    PreferNode,
+    RequireNode,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RenderCost {
+    document_count: u32,
+    page_count: u32,
+    pdf_bytes: u64,
+    input_bytes: u64,
+}
+
+fn render_decision(
+    policy: RenderPolicy,
+    cost: Option<&RenderCost>,
+) -> (&'static str, &'static str) {
+    match policy {
+        RenderPolicy::CloudOnly => ("cloud_pdf", "policy_cloud_only"),
+        RenderPolicy::PreferNode => ("node_render", "policy_prefer_node"),
+        RenderPolicy::RequireNode => ("node_render", "policy_require_node"),
+        RenderPolicy::Automatic => {
+            let Some(cost) = cost else {
+                return ("cloud_pdf", "automatic_missing_measurements");
+            };
+            // Conservative deterministic model: a warm node saves transfer
+            // only when the approved PDF is materially larger than compact
+            // input. Constants are bounded and versioned here, not guessed
+            // from ambient network state.
+            let cloud_ms = 20_u64.saturating_add(cost.pdf_bytes.saturating_mul(1000) / 12_500_000);
+            let node_ms = 35_u64
+                .saturating_add(cost.input_bytes.saturating_mul(1000) / 12_500_000)
+                .saturating_add(u64::from(cost.page_count).saturating_mul(4))
+                .saturating_add(u64::from(cost.document_count).saturating_mul(2));
+            if cost.pdf_bytes >= 2 * 1024 * 1024
+                && cost.input_bytes.saturating_mul(2) < cost.pdf_bytes
+                && node_ms.saturating_add(50) < cloud_ms
+            {
+                ("node_render", "automatic_measured_node_faster")
+            } else {
+                ("cloud_pdf", "automatic_measured_cloud_faster")
+            }
+        }
+    }
+}
+
+fn normalized_resource_digest(value: &str) -> Option<String> {
+    let value = value.strip_prefix("sha256:").unwrap_or(value);
+    (value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .then(|| value.to_ascii_lowercase())
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RenderReadinessRequest {
+    printer_id: String,
+    #[serde(default)]
+    render_policy: RenderPolicy,
+    #[serde(default)]
+    render_cost: Option<RenderCost>,
+}
+#[derive(Debug, Serialize)]
+struct RenderReadinessResponse {
+    requested_policy: RenderPolicy,
+    selected_mode: &'static str,
+    reason: &'static str,
+    destination: DestinationReadiness,
+    estimates: RenderEstimates,
+}
+#[derive(Debug, Serialize)]
+struct DestinationReadiness {
+    supported: bool,
+    ready: bool,
+    missing_resources: Vec<String>,
+    reason: Option<&'static str>,
+}
+#[derive(Debug, Serialize)]
+struct RenderEstimates {
+    cloud_ms: u64,
+    node_ms: u64,
+}
 
 const MAX_DOCUMENT_BYTES: usize = 1024 * 1024;
 const MAX_JSON_DEPTH: usize = 64;
@@ -29,6 +118,10 @@ const MAX_JSON_NODES: usize = 50_000;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/v1/business-document-templates", post(create_template))
+        .route(
+            "/v1/business-document-resources/{digest}",
+            put(put_document_resource),
+        )
         .route(
             "/v1/business-document-templates/{template_id}",
             get(get_template),
@@ -43,6 +136,10 @@ pub fn router() -> Router<AppState> {
         )
         .route("/v1/business-document-renders", post(register_render))
         .route("/v1/business-document-renders/{render_id}", get(get_render))
+        .route(
+            "/v1/business-document-renders/{render_id}/render-readiness",
+            post(render_readiness),
+        )
         .route(
             "/v1/business-document-renders/{render_id}/artifact",
             get(download_render_artifact),
@@ -71,6 +168,79 @@ pub fn router() -> Router<AppState> {
             "/v1/business-document-previews/{preview_id}/cancel",
             post(cancel_preview),
         )
+}
+
+async fn put_document_resource(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(digest): Path<String>,
+    body: axum::body::Body,
+) -> Result<StatusCode, AppError> {
+    let tenant = authenticate_native(&state, &headers, Scope::JobsWrite).await?;
+    if digest.len() != 64
+        || !digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+        || digest != digest.to_ascii_lowercase()
+    {
+        return Err(AppError::invalid(
+            "invalid_document_resource",
+            "Resource digest is invalid.",
+        ));
+    }
+    let media_type = headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .map(str::trim);
+    if media_type != Some("image/jpeg") {
+        return Err(AppError::invalid(
+            "unsupported_document_resource",
+            "Renderer ABI v1 accepts image/jpeg resources only.",
+        ));
+    }
+    let bytes = axum::body::to_bytes(body, 4 * 1024 * 1024)
+        .await
+        .map_err(|_| AppError::invalid("document_resource_too_large", "Resource exceeds 4 MiB."))?;
+    if bytes.is_empty() || hex::encode(Sha256::digest(&bytes)) != digest.to_ascii_lowercase() {
+        return Err(AppError::invalid(
+            "document_resource_digest_mismatch",
+            "Resource bytes do not match the URL digest.",
+        ));
+    }
+    let object_key = document_resource_object_key(
+        &tenant.workspace_id.to_string(),
+        &tenant.environment_id.to_string(),
+        &digest,
+    );
+    let byte_length = i64::try_from(bytes.len())
+        .map_err(|_| AppError::invalid("document_resource_too_large", "Resource exceeds 4 MiB."))?;
+    state
+        .object_store
+        .put(&object_key, bytes, Some(&digest))
+        .await
+        .map_err(|_| AppError::service_unavailable("object_store_unavailable"))?;
+    if let Err(error) = state
+        .repository
+        .register_business_document_resource(
+            tenant.workspace_id,
+            tenant.environment_id,
+            &digest.to_ascii_lowercase(),
+            "image/jpeg",
+            byte_length,
+        )
+        .await
+    {
+        let _ = state.object_store.delete(&object_key).await;
+        return Err(error.into());
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub(crate) fn document_resource_object_key(
+    workspace: &str,
+    environment: &str,
+    digest: &str,
+) -> String {
+    format!("business-document-resources/{workspace}/{environment}/{digest}")
 }
 
 #[derive(Debug, Deserialize)]
@@ -314,6 +484,7 @@ struct RenderResponse {
     artifact_sha256: Option<String>,
     artifact_byte_length: Option<i64>,
     artifact_media_type: Option<String>,
+    page_count: Option<i32>,
     failure_code: Option<String>,
     created_at: chrono::DateTime<chrono::Utc>,
     updated_at: chrono::DateTime<chrono::Utc>,
@@ -328,6 +499,7 @@ impl From<StoredDocumentRender> for RenderResponse {
             artifact_sha256: value.artifact_sha256,
             artifact_byte_length: value.artifact_byte_length,
             artifact_media_type: value.artifact_media_type,
+            page_count: value.page_count,
             failure_code: value.failure_code,
             created_at: value.created_at,
             updated_at: value.updated_at,
@@ -381,6 +553,46 @@ async fn register_render(
         CreateDocumentResult::Created(value) => (StatusCode::ACCEPTED, value),
         CreateDocumentResult::Existing(value) => (StatusCode::OK, value),
     };
+    let revision = state
+        .repository
+        .get_document_revision(
+            tenant.workspace_id,
+            tenant.environment_id,
+            &stored.template_revision_id,
+        )
+        .await?;
+    let specification = state
+        .document_secrets
+        .decrypt(
+            &document_aad(
+                &tenant.workspace_id.to_string(),
+                &tenant.environment_id.to_string(),
+                &revision.template_id,
+            ),
+            &revision.spec_ciphertext,
+        )
+        .map_err(|_| AppError::service_unavailable("document_decryption_failed"))?;
+    let specification: BusinessDocumentV1 = serde_json::from_slice(&specification)
+        .map_err(|_| AppError::service_unavailable("invalid_stored_document"))?;
+    let resource_digests = specification
+        .resources
+        .values()
+        .map(|resource| match resource {
+            piqae_document_renderer::Resource::Image { digest, .. } => {
+                normalized_resource_digest(digest)
+                    .ok_or_else(|| AppError::service_unavailable("invalid_stored_document"))
+            }
+        })
+        .collect::<Result<Vec<_>, AppError>>()?;
+    state
+        .repository
+        .link_business_document_render_resources(
+            tenant.workspace_id,
+            tenant.environment_id,
+            &stored.id,
+            &resource_digests,
+        )
+        .await?;
     Ok((status, Json(RenderResponse::from(stored))).into_response())
 }
 
@@ -396,6 +608,128 @@ async fn get_render(
             .get_document_render(tenant.workspace_id, tenant.environment_id, &id)
             .await?,
     )))
+}
+
+async fn evaluate_readiness(
+    state: &AppState,
+    workspace_id: piqae_domain::WorkspaceId,
+    environment_id: piqae_domain::EnvironmentId,
+    printer_id: &str,
+    render_id: &str,
+    policy: RenderPolicy,
+    cost: Option<&RenderCost>,
+) -> Result<RenderReadinessResponse, AppError> {
+    validate_render_cost(cost)?;
+    let printer_id = printer_id
+        .parse()
+        .map_err(|_| AppError::invalid("invalid_printer_id", "Printer ID is invalid."))?;
+    let capabilities = state
+        .repository
+        .document_render_capabilities_for_printer(workspace_id, environment_id, printer_id)
+        .await?;
+    let payload = node_render_payload(state, workspace_id, environment_id, render_id).await?;
+    let stored_render = state
+        .repository
+        .get_document_render(workspace_id, environment_id, render_id)
+        .await?;
+    let input_bytes = u64::try_from(
+        serde_json::to_vec(&payload.input)
+            .map_err(|_| AppError::service_unavailable("invalid_stored_document"))?
+            .len(),
+    )
+    .map_err(|_| AppError::service_unavailable("invalid_stored_content_length"))?;
+    let measured = RenderCost {
+        document_count: cost.map_or(1, |value| value.document_count),
+        page_count: stored_render
+            .page_count
+            .and_then(|value| u32::try_from(value).ok())
+            .unwrap_or(0),
+        pdf_bytes: payload.expected_pdf_bytes,
+        input_bytes,
+    };
+    let abi_supported = capabilities.renderer_abi.as_deref() == Some(payload.renderer_abi.as_str())
+        && capabilities.resource_abi.as_deref() == Some(payload.resource_abi.as_str());
+    let media_supported = payload.resources.iter().all(|resource| {
+        capabilities
+            .image_media_types
+            .contains(&resource.media_type)
+    });
+    let missing_resources = payload
+        .resources
+        .iter()
+        .filter(|resource| {
+            !capabilities
+                .cached_resource_digests
+                .contains(&resource.digest)
+        })
+        .map(|resource| resource.digest.clone())
+        .collect::<Vec<_>>();
+    // Missing cache entries are downloadable through the authenticated lease;
+    // they mean a cold/warming node, not an incompatible node.
+    let ready = abi_supported && media_supported;
+    let (mut selected_mode, mut reason) =
+        if measured.page_count == 0 && matches!(policy, RenderPolicy::Automatic) {
+            ("cloud_pdf", "automatic_missing_authoritative_page_count")
+        } else {
+            render_decision(policy, Some(&measured))
+        };
+    if selected_mode == "node_render" && !ready && !matches!(policy, RenderPolicy::RequireNode) {
+        selected_mode = "cloud_pdf";
+        reason = "node_not_ready_pdf_fallback";
+    }
+    let (cloud_ms, node_ms) = Some(&measured).map_or((0, 0), |value| {
+        (
+            20_u64.saturating_add(value.pdf_bytes.saturating_mul(1000) / 12_500_000),
+            35_u64
+                .saturating_add(value.input_bytes.saturating_mul(1000) / 12_500_000)
+                .saturating_add(u64::from(value.page_count).saturating_mul(4))
+                .saturating_add(u64::from(value.document_count).saturating_mul(2)),
+        )
+    });
+    let destination_reason = if ready && missing_resources.is_empty() {
+        None
+    } else if ready {
+        Some("resources_warming")
+    } else if !abi_supported {
+        Some("renderer_abi_unavailable")
+    } else if !media_supported {
+        Some("resource_media_type_unsupported")
+    } else {
+        Some("resources_not_cached")
+    };
+    Ok(RenderReadinessResponse {
+        requested_policy: policy,
+        selected_mode,
+        reason,
+        destination: DestinationReadiness {
+            supported: abi_supported && media_supported,
+            ready,
+            missing_resources,
+            reason: destination_reason,
+        },
+        estimates: RenderEstimates { cloud_ms, node_ms },
+    })
+}
+
+async fn render_readiness(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(request): Json<RenderReadinessRequest>,
+) -> Result<Json<RenderReadinessResponse>, AppError> {
+    let tenant = authenticate_native(&state, &headers, Scope::JobsRead).await?;
+    Ok(Json(
+        evaluate_readiness(
+            &state,
+            tenant.workspace_id,
+            tenant.environment_id,
+            &request.printer_id,
+            &id,
+            request.render_policy,
+            request.render_cost.as_ref(),
+        )
+        .await?,
+    ))
 }
 
 async fn download_render_artifact(
@@ -486,6 +820,7 @@ async fn download_render_artifact(
         .map_err(|_| AppError::service_unavailable("content_response_failed"))
 }
 
+#[allow(clippy::too_many_lines)]
 async fn print_render(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -494,6 +829,7 @@ async fn print_render(
 ) -> Result<Response, AppError> {
     let tenant = authenticate_native(&state, &headers, Scope::JobsWrite).await?;
     let idempotency_key = required_idempotency_key(&headers)?;
+    validate_render_cost(request.render_cost.as_ref())?;
     let render = state
         .repository
         .get_document_render(tenant.workspace_id, tenant.environment_id, &id)
@@ -526,6 +862,75 @@ async fn print_render(
     let artifact_bytes = render
         .artifact_byte_length
         .ok_or_else(|| AppError::service_unavailable("document_artifact_unavailable"))?;
+    let measured_cost =
+        if matches!(request.render_policy, RenderPolicy::CloudOnly) {
+            None
+        } else {
+            let payload = node_render_payload(
+                &state,
+                tenant.workspace_id,
+                tenant.environment_id,
+                &render.id,
+            )
+            .await?;
+            let input_bytes = u64::try_from(
+                serde_json::to_vec(&payload.input)
+                    .map_err(|_| AppError::service_unavailable("invalid_stored_document"))?
+                    .len(),
+            )
+            .map_err(|_| AppError::service_unavailable("invalid_stored_content_length"))?;
+            Some(RenderCost {
+                // The caller may describe how many Shopify orders were combined,
+                // but byte and page measurements always come from the immutable
+                // completed render held by the control plane.
+                document_count: request
+                    .render_cost
+                    .as_ref()
+                    .map_or(1, |cost| cost.document_count),
+                page_count: u32::try_from(render.page_count.ok_or_else(|| {
+                    AppError::service_unavailable("document_page_count_unavailable")
+                })?)
+                .map_err(|_| AppError::service_unavailable("document_page_count_invalid"))?,
+                pdf_bytes: u64::try_from(artifact_bytes)
+                    .map_err(|_| AppError::service_unavailable("invalid_stored_content_length"))?,
+                input_bytes,
+            })
+        };
+    let (mut selected_mode, mut decision_reason) =
+        render_decision(request.render_policy, measured_cost.as_ref());
+    if !matches!(request.render_policy, RenderPolicy::CloudOnly) {
+        if let Some(printer_id) = request.printer_id.as_deref() {
+            let readiness = evaluate_readiness(
+                &state,
+                tenant.workspace_id,
+                tenant.environment_id,
+                printer_id,
+                &render.id,
+                request.render_policy,
+                measured_cost.as_ref(),
+            )
+            .await?;
+            selected_mode = readiness.selected_mode;
+            decision_reason = readiness.reason;
+            if !readiness.destination.ready
+                && matches!(request.render_policy, RenderPolicy::RequireNode)
+            {
+                return Err(AppError::conflict(
+                    "node_render_not_ready",
+                    "The selected node cannot render this exact document and require_node fails closed.",
+                ));
+            }
+        } else {
+            if matches!(request.render_policy, RenderPolicy::RequireNode) {
+                return Err(AppError::conflict(
+                    "node_render_destination_unresolved",
+                    "Node rendering requires an exact printer destination before approval.",
+                ));
+            }
+            selected_mode = "cloud_pdf";
+            decision_reason = "node_destination_unresolved_pdf_fallback";
+        }
+    }
     let acquisition_sha256 = hex::encode(Sha256::digest(
         [render.id.as_bytes(), b"\0", idempotency_key.as_bytes()].concat(),
     ));
@@ -545,11 +950,41 @@ async fn print_render(
         )
         .await?;
     let mut metadata = std::collections::BTreeMap::new();
-    metadata.insert("document_render_id".into(), render.id);
-    create_job(
-        State(state),
+    metadata.insert("piqae.document.render_id".into(), render.id);
+    metadata.insert(
+        "piqae.document.render_policy".into(),
+        serde_json::to_string(&request.render_policy)
+            .unwrap_or_else(|_| "\"automatic\"".into())
+            .trim_matches('"')
+            .to_owned(),
+    );
+    metadata.insert("piqae.document.render_mode".into(), selected_mode.into());
+    metadata.insert(
+        "piqae.document.render_decision_reason".into(),
+        decision_reason.into(),
+    );
+    metadata.insert(
+        "piqae.document.pdf_bytes".into(),
+        artifact_bytes.to_string(),
+    );
+    if let Some(cost) = &measured_cost {
+        metadata.insert(
+            "piqae.document.input_bytes".into(),
+            cost.input_bytes.to_string(),
+        );
+        metadata.insert(
+            "piqae.document.page_count".into(),
+            cost.page_count.to_string(),
+        );
+        metadata.insert(
+            "piqae.document.document_count".into(),
+            cost.document_count.to_string(),
+        );
+    }
+    create_job_internal(
+        state,
         headers,
-        Json(CreateJobRequest {
+        CreateJobRequest {
             printer_id: request.printer_id,
             target_id: request.target_id,
             title: request.title,
@@ -561,9 +996,26 @@ async fn print_render(
             expire_after_seconds: default_print_expiry(),
             metadata,
             resolved_ticket_digest: None,
-        }),
+        },
     )
     .await
+}
+
+fn validate_render_cost(cost: Option<&RenderCost>) -> Result<(), AppError> {
+    let Some(cost) = cost else {
+        return Ok(());
+    };
+    if !(1..=10_000).contains(&cost.document_count)
+        || !(1..=100_000).contains(&cost.page_count)
+        || !(1..=524_288_000).contains(&cost.pdf_bytes)
+        || !(1..=52_428_800).contains(&cost.input_bytes)
+    {
+        return Err(AppError::invalid(
+            "invalid_document_render_cost",
+            "Render cost measurements are outside the supported limits.",
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -576,6 +1028,10 @@ struct PrintRenderRequest {
     options: JobOptions,
     #[serde(default = "default_print_deliveries")]
     deliveries: u16,
+    #[serde(default)]
+    render_policy: RenderPolicy,
+    #[serde(default)]
+    render_cost: Option<RenderCost>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -722,6 +1178,34 @@ async fn approve_preview(
 ) -> Result<Response, AppError> {
     let t = authenticate_native(&state, &headers, Scope::JobsWrite).await?;
     let key = required_idempotency_key(&headers)?;
+    if matches!(request.render_policy, RenderPolicy::RequireNode) {
+        let pending = state
+            .repository
+            .get_document_preview(t.workspace_id, t.environment_id, &id)
+            .await?;
+        let printer_id = request.printer_id.as_deref().ok_or_else(|| {
+            AppError::conflict(
+                "node_render_destination_unresolved",
+                "require_node requires an exact printer destination.",
+            )
+        })?;
+        let readiness = evaluate_readiness(
+            &state,
+            t.workspace_id,
+            t.environment_id,
+            printer_id,
+            &pending.render_id,
+            request.render_policy,
+            request.render_cost.as_ref(),
+        )
+        .await?;
+        if !readiness.destination.ready {
+            return Err(AppError::conflict(
+                "node_render_not_ready",
+                "The selected node cannot render this exact document and require_node fails closed.",
+            ));
+        }
+    }
     let encoded = serde_json::to_vec(&request)
         .map_err(|_| AppError::invalid("invalid_document_preview", "Approval is invalid."))?;
     let hash = hex::encode(Sha256::digest(&encoded));
@@ -816,6 +1300,80 @@ pub(crate) fn render_input_aad(workspace: &str, environment: &str, resource: &st
 pub(crate) fn artifact_key_aad(workspace: &str, environment: &str, resource: &str) -> Vec<u8> {
     document_aad_for("render-artifact-key", workspace, environment, resource)
 }
+
+pub(crate) async fn node_render_payload(
+    state: &AppState,
+    workspace_id: piqae_domain::WorkspaceId,
+    environment_id: piqae_domain::EnvironmentId,
+    render_id: &str,
+) -> Result<BusinessDocumentNodeRender, AppError> {
+    let render = state
+        .repository
+        .get_document_render(workspace_id, environment_id, render_id)
+        .await?;
+    let revision = state
+        .repository
+        .get_document_revision(workspace_id, environment_id, &render.template_revision_id)
+        .await?;
+    let spec_bytes = state
+        .document_secrets
+        .decrypt(
+            &document_aad(
+                &workspace_id.to_string(),
+                &environment_id.to_string(),
+                &revision.template_id,
+            ),
+            &revision.spec_ciphertext,
+        )
+        .map_err(|_| AppError::service_unavailable("document_decryption_failed"))?;
+    let input_bytes = state
+        .document_secrets
+        .decrypt(
+            &render_input_aad(
+                &workspace_id.to_string(),
+                &environment_id.to_string(),
+                &render.id,
+            ),
+            &render.input_ciphertext,
+        )
+        .map_err(|_| AppError::service_unavailable("document_decryption_failed"))?;
+    let specification: BusinessDocumentV1 = serde_json::from_slice(&spec_bytes)
+        .map_err(|_| AppError::service_unavailable("invalid_stored_document"))?;
+    let resources = specification
+        .resources
+        .values()
+        .map(|resource| match resource {
+            piqae_document_renderer::Resource::Image {
+                digest,
+                media_type,
+                byte_length,
+            } => Ok(BusinessDocumentResourceDescriptor {
+                digest: normalized_resource_digest(digest)
+                    .ok_or_else(|| AppError::service_unavailable("invalid_stored_document"))?,
+                media_type: media_type.clone(),
+                byte_length: *byte_length,
+            }),
+        })
+        .collect::<Result<Vec<_>, AppError>>()?;
+    Ok(BusinessDocumentNodeRender {
+        renderer_abi: "piqae.business-document-pdf/v1".into(),
+        resource_abi: "piqae.document-resources/v1".into(),
+        specification: serde_json::from_slice(&spec_bytes)
+            .map_err(|_| AppError::service_unavailable("invalid_stored_document"))?,
+        input: serde_json::from_slice(&input_bytes)
+            .map_err(|_| AppError::service_unavailable("invalid_stored_document"))?,
+        resources,
+        expected_pdf_sha256: render
+            .artifact_sha256
+            .ok_or_else(|| AppError::service_unavailable("document_artifact_unavailable"))?,
+        expected_pdf_bytes: u64::try_from(
+            render
+                .artifact_byte_length
+                .ok_or_else(|| AppError::service_unavailable("document_artifact_unavailable"))?,
+        )
+        .map_err(|_| AppError::service_unavailable("invalid_stored_content_length"))?,
+    })
+}
 fn document_aad_for(domain: &str, workspace: &str, environment: &str, resource: &str) -> Vec<u8> {
     format!("piqae.business-documents/v1\0{domain}\0{workspace}\0{environment}\0{resource}")
         .into_bytes()
@@ -880,6 +1438,28 @@ mod tests {
     use super::*;
     use crate::repository::{MemoryRepository, Repository};
     use piqae_domain::{EnvironmentId, WorkspaceId};
+
+    #[test]
+    fn resource_digest_normalization_rejects_malformed_values() {
+        assert_eq!(
+            normalized_resource_digest(&format!("sha256:{}", "a".repeat(64))),
+            Some("a".repeat(64))
+        );
+        assert_eq!(
+            normalized_resource_digest(&"A".repeat(64)),
+            Some("a".repeat(64))
+        );
+        assert_eq!(normalized_resource_digest("sha256:not-a-digest"), None);
+        assert_eq!(normalized_resource_digest(""), None);
+    }
+
+    #[test]
+    fn automatic_policy_requires_measured_costs() {
+        assert_eq!(
+            render_decision(RenderPolicy::Automatic, None),
+            ("cloud_pdf", "automatic_missing_measurements")
+        );
+    }
 
     #[test]
     fn preview_ids_are_environment_scoped() {

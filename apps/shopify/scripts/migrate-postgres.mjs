@@ -10,7 +10,11 @@ if (!databaseUrl) {
 }
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const migrationFiles = ["0001_shopify_core.sql", "0002_merchant_workflows.sql"];
+const migrationFiles = [
+  "0001_shopify_core.sql",
+  "0002_merchant_workflows.sql",
+  "0003_render_execution_policy.sql",
+];
 const client = new pg.Client({
   connectionString: databaseUrl,
   connectionTimeoutMillis: 10_000,

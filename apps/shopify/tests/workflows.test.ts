@@ -77,10 +77,12 @@ describe("settings validation", () => {
     form.set("metafields", "custom.vat\ncustom.vat\nlogistics.route");
     form.set("retentionDays", "45");
     form.set("preferDirect", "on");
+    form.set("renderExecutionPolicy", "prefer_node");
     expect(parseSettings(form)).toMatchObject({
       retentionDays: 45,
       preferDirect: true,
       metafieldAllowlist: ["custom.vat", "logistics.route"],
+      renderExecutionPolicy: "prefer_node",
     });
   });
 
@@ -91,6 +93,9 @@ describe("settings validation", () => {
     const retention = new FormData();
     retention.set("retentionDays", "366");
     expect(() => parseSettings(retention)).toThrow("between 1 and 365");
+    const policy = new FormData();
+    policy.set("renderExecutionPolicy", "fastest_at_any_cost");
+    expect(() => parseSettings(policy)).toThrow("Render location");
   });
 });
 
@@ -156,5 +161,39 @@ describe("hybrid template authority", () => {
         ],
       }),
     ).toThrow("Shopify CDN HTTPS");
+    for (const sourceUrl of [
+      "https://cdn.shopify.com.attacker.example/logo.jpg",
+      "https://cdn.shopify.com:8443/logo.jpg",
+      "https://127.0.0.1/logo.jpg",
+      "https://shopify.com/logo.jpg",
+    ])
+      expect(() =>
+        serializeTemplateEnvelope({
+          ...envelope,
+          assets: [
+            {
+              id: "logo",
+              sourceUrl,
+              digest: "0".repeat(64),
+              mediaType: "image/jpeg",
+              bytes: 100,
+            },
+          ],
+        }),
+      ).toThrow("Shopify CDN HTTPS");
+    expect(() =>
+      serializeTemplateEnvelope({
+        ...envelope,
+        assets: [
+          {
+            id: "logo",
+            sourceUrl: "https://cdn.shopify.com/logo.jpg",
+            digest: "A".repeat(64),
+            mediaType: "image/jpeg",
+            bytes: 100,
+          },
+        ],
+      }),
+    ).toThrow("SHA-256 digest");
   });
 });

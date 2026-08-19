@@ -59,6 +59,36 @@ export function chooseDefault(items) {
   );
 }
 
+export function renderPolicySummary(policy) {
+  if (policy === "cloud_only")
+    return "Cloud rendering is required. The exact preview PDF is sent to the printer.";
+  if (policy === "prefer_node")
+    return "A ready compatible node is preferred. Piqae safely falls back to the exact preview PDF.";
+  if (policy === "require_node")
+    return "Node rendering is required. Printing stays blocked until a compatible selected node can accept the exact render.";
+  return "Piqae automatically selects the fastest compatible path for this document and destination.";
+}
+
+export function canUseDestinationForPolicy(destination, policy) {
+  if (!destination?.eligible) return false;
+  return policy !== "require_node" || destination.nodeRendering?.ready === true;
+}
+
+export function nodeReadinessMessage(readiness) {
+  if (!readiness) return "Checking node renderer and resources…";
+  const missing = readiness.missing_resources?.length ?? 0;
+  if (missing > 0)
+    return `Warming ${missing} required ${missing === 1 ? "resource" : "resources"}`;
+  if (readiness.ready) return "Ready · required resources cached";
+  if (readiness.reason === "renderer_abi_unavailable")
+    return "This node needs a compatible document renderer";
+  if (readiness.reason === "resource_media_type_unsupported")
+    return "This node does not support a required image type";
+  if (readiness.reason === "resources_not_cached")
+    return "Required renderer resources are not cached yet";
+  return readiness.reason ?? "Node rendering readiness is unavailable";
+}
+
 export async function loadWithTimeout(
   load,
   timeoutMs = ADMIN_OPTIONS_TIMEOUT_MS,
@@ -92,6 +122,7 @@ function AdminOrderPrintActionContent({ bulk = false }) {
   const [error, setError] = useState("");
   const [result, setResult] = useState("");
   const [preview, setPreview] = useState(null);
+  const [nodeReadiness, setNodeReadiness] = useState(null);
   const requestSequence = useRef(0);
   const previewSequence = useRef(0);
   const interactionId = useRef(newInteractionId(orderIds));
@@ -171,6 +202,39 @@ function AdminOrderPrintActionContent({ bulk = false }) {
   const src = preview?.artifactUrl ?? PRINT_PLACEHOLDER_URL;
 
   useEffect(() => {
+    setNodeReadiness(null);
+    const policy = options?.renderExecutionPolicy ?? "automatic";
+    if (!preview || !destinationId || policy === "cloud_only") return;
+    const sequence = ++requestSequence.current;
+    loadWithTimeout((signal) =>
+      authorizedJson("/api/print/admin/readiness", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          renderId: preview.renderId,
+          printerId: destinationId,
+          renderCost: preview.renderCost,
+        }),
+        signal,
+      }),
+    )
+      .then((value) => {
+        if (sequence === requestSequence.current) setNodeReadiness(value);
+      })
+      .catch((cause) => {
+        if (sequence !== requestSequence.current) return;
+        setNodeReadiness({
+          destination: {
+            supported: false,
+            ready: false,
+            reason: messageForLoadError(cause),
+            missing_resources: [],
+          },
+        });
+      });
+  }, [preview?.renderId, destinationId, options?.renderExecutionPolicy]);
+
+  useEffect(() => {
     if (!preview) return;
     return () => {
       if (approvedPreview.current === preview.previewId) return;
@@ -205,6 +269,7 @@ function AdminOrderPrintActionContent({ bulk = false }) {
           body: JSON.stringify({
             renderId: preview.renderId,
             printerId: destinationId,
+            renderCost: preview.renderCost,
           }),
         },
       );
@@ -222,7 +287,24 @@ function AdminOrderPrintActionContent({ bulk = false }) {
   }
 
   const eligible = options?.destinations?.filter((item) => item.eligible) ?? [];
-  const canPrint = Boolean(preview && destinationId && state === "ready");
+  const selectedDestination = eligible.find(({ id }) => id === destinationId);
+  const policy = options?.renderExecutionPolicy ?? "automatic";
+  const effectiveNodeRendering = nodeReadiness?.destination ??
+    selectedDestination?.nodeRendering ?? {
+      supported: false,
+      ready: false,
+      reason: "Checking node renderer and resources…",
+      cacheState: "unknown",
+    };
+  const canPrint = Boolean(
+    preview &&
+    destinationId &&
+    state === "ready" &&
+    canUseDestinationForPolicy(
+      { ...selectedDestination, nodeRendering: effectiveNodeRendering },
+      policy,
+    ),
+  );
 
   return (
     <s-admin-print-action src={src}>
@@ -280,6 +362,9 @@ function AdminOrderPrintActionContent({ bulk = false }) {
             </s-button>
 
             <s-text type="strong">Destination</s-text>
+            <s-banner tone={policy === "require_node" ? "warning" : "info"}>
+              {renderPolicySummary(policy)}
+            </s-banner>
             {options.destinationError && (
               <s-banner tone="warning">{options.destinationError}</s-banner>
             )}
@@ -306,6 +391,20 @@ function AdminOrderPrintActionContent({ bulk = false }) {
                 </s-button>
               </s-banner>
             )}
+            {selectedDestination && policy !== "cloud_only" && (
+              <s-text>
+                Node renderer: {nodeReadinessMessage(effectiveNodeRendering)}
+              </s-text>
+            )}
+            {selectedDestination &&
+              policy === "require_node" &&
+              !effectiveNodeRendering.ready && (
+                <s-banner tone="critical">
+                  This printer cannot be used while node rendering is required.
+                  Choose Automatic in Settings for safe cloud-PDF fallback, or
+                  wait for this node's renderer and resources to become ready.
+                </s-banner>
+              )}
             {error && <s-banner tone="critical">{error}</s-banner>}
             {result && <s-banner tone="success">{result}</s-banner>}
             <s-button

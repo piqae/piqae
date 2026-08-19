@@ -6,6 +6,9 @@ import {
   messageForLoadError,
   newInteractionId,
   PRINT_PLACEHOLDER_URL,
+  canUseDestinationForPolicy,
+  renderPolicySummary,
+  nodeReadinessMessage,
 } from "./AdminOrderPrintAction.jsx";
 
 describe("admin print action state", () => {
@@ -52,5 +55,38 @@ describe("admin print action state", () => {
     await vi.advanceTimersByTimeAsync(50);
     await assertion;
     vi.useRealTimers();
+  });
+
+  it("fails closed when node rendering is required", () => {
+    const destination = {
+      eligible: true,
+      nodeRendering: { supported: true, ready: false },
+    };
+    expect(canUseDestinationForPolicy(destination, "automatic")).toBe(true);
+    expect(canUseDestinationForPolicy(destination, "prefer_node")).toBe(true);
+    expect(canUseDestinationForPolicy(destination, "require_node")).toBe(false);
+    destination.nodeRendering.ready = true;
+    expect(canUseDestinationForPolicy(destination, "require_node")).toBe(true);
+  });
+
+  it("explains fallback without claiming an unverified node is ready", () => {
+    expect(renderPolicySummary("prefer_node")).toContain("falls back");
+    expect(renderPolicySummary("require_node")).toContain("stays blocked");
+  });
+
+  it("turns bounded cache readiness into merchant-facing status", () => {
+    expect(
+      nodeReadinessMessage({
+        ready: false,
+        missing_resources: ["a".repeat(64), "b".repeat(64)],
+      }),
+    ).toBe("Warming 2 required resources");
+    expect(
+      nodeReadinessMessage({
+        ready: false,
+        reason: "renderer_abi_unavailable",
+        missing_resources: [],
+      }),
+    ).toContain("compatible document renderer");
   });
 });

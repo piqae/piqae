@@ -72,6 +72,14 @@ pub struct JobLease {
 }
 
 #[derive(Clone, Debug)]
+pub struct ExpiredBusinessDocumentResource {
+    pub workspace_id: WorkspaceId,
+    pub environment_id: EnvironmentId,
+    pub digest: String,
+    pub cleanup_lease_token: Uuid,
+}
+
+#[derive(Clone, Debug)]
 pub struct AgentAuthenticationRecord {
     pub workspace_id: WorkspaceId,
     pub environment_id: EnvironmentId,
@@ -633,6 +641,7 @@ pub struct StoredDocumentRender {
     pub artifact_sha256: Option<String>,
     pub artifact_byte_length: Option<i64>,
     pub artifact_media_type: Option<String>,
+    pub page_count: Option<i32>,
     pub failure_code: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -2985,6 +2994,7 @@ impl PostgresStore {
         agent_id: AgentId,
         version: &str,
         health: &piqae_protocol::agent::AgentHealth,
+        document_render: &piqae_protocol::agent::DocumentRenderCapabilities,
         printers: Option<&[SyncedPrinter]>,
     ) -> Result<(), StorageError> {
         let mut transaction = self.pool.begin().await?;
@@ -2992,7 +3002,7 @@ impl PostgresStore {
             "UPDATE agents SET state = 'connected', version = $4, last_seen_at = now(),
                  health_started_at = $5, health_observed_at = $6,
                  sqlite_integrity_ok = $7, executor_crashes = $8,
-                 last_error_code = $9
+                 last_error_code = $9, document_render_capabilities = $10
              WHERE id = $1 AND workspace_id = $2 AND environment_id = $3
                AND revoked_at IS NULL
                AND (
@@ -3005,7 +3015,8 @@ impl PostgresStore {
                  OR last_error_code IS DISTINCT FROM $9
                  OR last_seen_at IS NULL
                  OR last_seen_at < now() - interval '55 seconds'
-                 OR $10::boolean
+                 OR document_render_capabilities IS DISTINCT FROM $10
+                 OR $11::boolean
                )",
         )
         .bind(agent_id.to_string())
@@ -3019,6 +3030,9 @@ impl PostgresStore {
             StorageError::InvalidData(format!("executor crash count overflow: {error}"))
         })?)
         .bind(&health.last_error_code)
+        .bind(serde_json::to_value(document_render).map_err(|error| {
+            StorageError::InvalidData(format!("invalid document render capabilities: {error}"))
+        })?)
         .bind(printers.is_some())
         .execute(&mut *transaction)
         .await?;
@@ -3087,6 +3101,148 @@ impl PostgresStore {
         }
         transaction.commit().await?;
         Ok(())
+    }
+
+    pub async fn document_render_capabilities_for_printer(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        printer_id: PrinterId,
+    ) -> Result<piqae_protocol::agent::DocumentRenderCapabilities, StorageError> {
+        let value: serde_json::Value = sqlx::query_scalar(
+            "SELECT agent.document_render_capabilities
+             FROM printers printer
+             JOIN agents agent ON agent.id=printer.agent_id
+               AND agent.workspace_id=printer.workspace_id
+               AND agent.environment_id=printer.environment_id
+             WHERE printer.id=$1 AND printer.workspace_id=$2 AND printer.environment_id=$3
+               AND printer.removed_at IS NULL AND agent.revoked_at IS NULL
+               AND agent.state='connected' AND agent.last_seen_at > now()-interval '90 seconds'",
+        )
+        .bind(printer_id.to_string())
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(StorageError::NotFound)?;
+        serde_json::from_value(value).map_err(|error| {
+            StorageError::InvalidData(format!("invalid document render capabilities: {error}"))
+        })
+    }
+
+    pub async fn register_business_document_resource(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        digest: &str,
+        media_type: &str,
+        byte_length: i64,
+    ) -> Result<(), StorageError> {
+        let result = sqlx::query(
+            "INSERT INTO business_document_resources(workspace_id,environment_id,digest,media_type,byte_length)
+             VALUES($1,$2,$3,$4,$5)
+             ON CONFLICT(workspace_id,environment_id,digest) DO UPDATE SET
+               last_used_at=now(), expires_at=GREATEST(business_document_resources.expires_at,now()+interval '30 days'),
+               cleanup_state='active', cleanup_lease_until=NULL, cleanup_lease_token=NULL
+             WHERE business_document_resources.media_type=EXCLUDED.media_type
+               AND business_document_resources.byte_length=EXCLUDED.byte_length",
+        )
+        .bind(workspace_id.to_string()).bind(environment_id.to_string()).bind(digest)
+        .bind(media_type).bind(byte_length).execute(&self.pool).await?;
+        if result.rows_affected() == 1 {
+            Ok(())
+        } else {
+            Err(StorageError::IdempotencyConflict)
+        }
+    }
+
+    pub async fn link_business_document_render_resources(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        render_id: &str,
+        digests: &[String],
+    ) -> Result<(), StorageError> {
+        let mut transaction = self.pool.begin().await?;
+        for digest in digests {
+            sqlx::query(
+                "INSERT INTO business_document_resource_references(workspace_id,environment_id,render_id,resource_digest)
+                 VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING",
+            ).bind(workspace_id.to_string()).bind(environment_id.to_string()).bind(render_id)
+                .bind(digest).execute(&mut *transaction).await?;
+            sqlx::query(
+                "UPDATE business_document_resources SET last_used_at=now(),expires_at=GREATEST(expires_at,now()+interval '30 days'),
+                   cleanup_state='active',cleanup_lease_until=NULL,cleanup_lease_token=NULL
+                 WHERE workspace_id=$1 AND environment_id=$2 AND digest=$3",
+            ).bind(workspace_id.to_string()).bind(environment_id.to_string()).bind(digest)
+                .execute(&mut *transaction).await?;
+        }
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    pub async fn claim_expired_business_document_resources(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<ExpiredBusinessDocumentResource>, StorageError> {
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query(
+            "DELETE FROM business_document_resource_references reference
+             USING document_renders render
+             WHERE reference.render_id=render.id AND reference.workspace_id=render.workspace_id
+               AND reference.environment_id=render.environment_id AND render.state='expired'",
+        )
+        .execute(&mut *transaction)
+        .await?;
+        let rows = sqlx::query(
+            "UPDATE business_document_resources resource SET cleanup_state='expiring',cleanup_lease_until=now()+interval '5 minutes',cleanup_lease_token=gen_random_uuid()
+             WHERE (resource.workspace_id,resource.environment_id,resource.digest) IN (
+               SELECT candidate.workspace_id,candidate.environment_id,candidate.digest
+               FROM business_document_resources candidate
+               WHERE candidate.expires_at < now()
+                 AND (candidate.cleanup_state='active' OR candidate.cleanup_lease_until < now())
+                 AND NOT EXISTS (SELECT 1 FROM business_document_resource_references reference
+                   WHERE reference.workspace_id=candidate.workspace_id
+                     AND reference.environment_id=candidate.environment_id
+                     AND reference.resource_digest=candidate.digest)
+               ORDER BY candidate.expires_at LIMIT $1 FOR UPDATE SKIP LOCKED)
+             RETURNING resource.workspace_id,resource.environment_id,resource.digest,resource.cleanup_lease_token",
+        )
+        .bind(limit.clamp(1, 100))
+        .fetch_all(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(ExpiredBusinessDocumentResource {
+                    workspace_id: row.try_get::<String, _>("workspace_id")?.parse().map_err(
+                        |error| StorageError::InvalidData(format!("invalid workspace id: {error}")),
+                    )?,
+                    environment_id: row
+                        .try_get::<String, _>("environment_id")?
+                        .parse()
+                        .map_err(|error| {
+                            StorageError::InvalidData(format!("invalid environment id: {error}"))
+                        })?,
+                    digest: row.try_get("digest")?,
+                    cleanup_lease_token: row.try_get("cleanup_lease_token")?,
+                })
+            })
+            .collect()
+    }
+
+    pub async fn complete_expired_business_document_resource(
+        &self,
+        resource: &ExpiredBusinessDocumentResource,
+    ) -> Result<(), StorageError> {
+        let result = sqlx::query("DELETE FROM business_document_resources resource WHERE workspace_id=$1 AND environment_id=$2 AND digest=$3 AND cleanup_state='expiring' AND cleanup_lease_token=$4 AND NOT EXISTS (SELECT 1 FROM business_document_resource_references reference WHERE reference.workspace_id=resource.workspace_id AND reference.environment_id=resource.environment_id AND reference.resource_digest=resource.digest)")
+            .bind(resource.workspace_id.to_string()).bind(resource.environment_id.to_string()).bind(&resource.digest)
+            .bind(resource.cleanup_lease_token).execute(&self.pool).await?;
+        if result.rows_affected() == 1 {
+            Ok(())
+        } else {
+            Err(StorageError::ConcurrentStateChange)
+        }
     }
 
     pub async fn create_node_diagnostic(
@@ -7252,6 +7408,22 @@ impl PostgresStore {
         .ok_or(StorageError::ConcurrentStateChange)?;
         document_render_from_row(&row)
     }
+    pub async fn set_document_render_page_count(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        render_id: &str,
+        page_count: i32,
+    ) -> Result<(), StorageError> {
+        let result = sqlx::query("UPDATE document_renders SET page_count=$4 WHERE id=$1 AND workspace_id=$2 AND environment_id=$3 AND state='completed' AND (page_count IS NULL OR page_count=$4)")
+            .bind(render_id).bind(workspace_id.to_string()).bind(environment_id.to_string()).bind(page_count)
+            .execute(&self.pool).await?;
+        if result.rows_affected() == 1 {
+            Ok(())
+        } else {
+            Err(StorageError::ConcurrentStateChange)
+        }
+    }
 
     /// Synchronizes the configured document keyring lifecycle without storing
     /// key material. Existing active keys become decrypt-only before the new
@@ -7519,10 +7691,12 @@ impl PostgresStore {
         object_key_ciphertext: &[u8],
         artifact_sha256: &str,
         byte_length: i64,
+        page_count: i32,
     ) -> Result<StoredDocumentRender, StorageError> {
         let row = sqlx::query(
             "UPDATE document_renders SET state='completed', artifact_object_key_ciphertext=$5,
              artifact_sha256=$6, artifact_byte_length=$7, artifact_media_type='application/pdf',
+             page_count=$8,
              failure_code=NULL,last_failure_code=NULL,completed_at=now(),lease_owner=NULL,
              lease_token=NULL,lease_expires_at=NULL,updated_at=now()
              WHERE id=$1 AND workspace_id=$2 AND environment_id=$3 AND state='rendering'
@@ -7535,6 +7709,7 @@ impl PostgresStore {
         .bind(object_key_ciphertext)
         .bind(artifact_sha256)
         .bind(byte_length)
+        .bind(page_count)
         .fetch_optional(&self.pool)
         .await?
         .ok_or(StorageError::ConcurrentStateChange)?;
@@ -7688,6 +7863,7 @@ fn document_render_from_row(row: &PgRow) -> Result<StoredDocumentRender, Storage
         artifact_sha256: row.try_get("artifact_sha256")?,
         artifact_byte_length: row.try_get("artifact_byte_length")?,
         artifact_media_type: row.try_get("artifact_media_type")?,
+        page_count: row.try_get("page_count")?,
         failure_code: row.try_get("failure_code")?,
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,

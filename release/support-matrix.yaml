@@ -54,10 +54,10 @@ features:
     reason: encrypted transport and local decryption are implemented for evaluation but lack independent cryptographic review, hardware-backed keys and physical release evidence
   declarative_document_generation:
     tier: disabled
-    reason: the new bounded business-document renderer, encrypted tenant persistence, SDK/MCP contracts, PostgreSQL cutover tests, and virtual tests exist; international Unicode shaping, styled table cells, PNG/SVG, production soak, independent security review, and physical release gates remain open
+    reason: the bounded business-document renderer, encrypted tenant persistence, SDK/MCP contracts, content-addressed JPEG resources, optional exact node rendering, PostgreSQL cutover tests, virtual lifecycle tests, and a 250-page local synthetic benchmark exist; international Unicode shaping, downloadable fonts, PNG/SVG, production fleet soak, independent security review, and physical release gates remain open
   shopify_order_printing:
     tier: disabled
-    reason: the embedded app, Word-like semantic editor, Liquid compiler, Admin/POS/customer extensions, direct-node path, and PDF fallback pass local and virtual gates; richer visual block controls, international typography, deployment of the new API, Shopify approvals, live store/POS validation, Web Vitals evidence, and physical printing remain open
+    reason: the embedded app, Word-like semantic editor, Liquid compiler, Admin/POS/customer extensions, render-policy/readiness controls, verified asset publication, direct-node path, and PDF fallback pass local and virtual gates; international typography, deployment of the new API, Shopify approvals, live bulk store/POS validation, Web Vitals evidence, production fleet soak, and physical printing remain open
   macos_embedded_node_onboarding:
     tier: preview
     reason: Piqae-branded application-link consent and proof-of-possession are tested in source and included in signed/notarised v0.1.11 Preview packaging; clean-install, update/rollback and fleet evidence remain open

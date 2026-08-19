@@ -20,6 +20,8 @@ import type {
   CreateBusinessDocumentRender,
   CreateBusinessDocumentTemplate,
   BusinessDocumentRender,
+  BusinessDocumentRenderReadiness,
+  EvaluateBusinessDocumentRenderReadiness,
   BusinessDocumentTemplate,
   BusinessDocumentTemplateRevision,
   PrintBusinessDocumentRender,
@@ -431,6 +433,9 @@ export class PiqaeClient {
 
   /** Portable business-document generation. PDF and RAW job APIs remain independent. */
   readonly businessDocuments = {
+    resources: {
+      putJpeg: (digest: string, content: BodyInit) => this.putDocumentResource(digest, content)
+    },
     templates: {
       create: (input: CreateBusinessDocumentTemplate, idempotencyKey: string) => this.request<BusinessDocumentTemplate>('POST', '/v1/business-document-templates', { body: input, idempotencyKey }),
       retrieve: (id: string) => this.request<BusinessDocumentTemplate>('GET', `/v1/business-document-templates/${encodeURIComponent(id)}`),
@@ -440,6 +445,7 @@ export class PiqaeClient {
     renders: {
       create: (input: CreateBusinessDocumentRender, idempotencyKey: string) => this.request<BusinessDocumentRender>('POST', '/v1/business-document-renders', { body: input, idempotencyKey }),
       retrieve: (id: string) => this.request<BusinessDocumentRender>('GET', `/v1/business-document-renders/${encodeURIComponent(id)}`),
+      readiness: (id: string, input: EvaluateBusinessDocumentRenderReadiness) => this.request<BusinessDocumentRenderReadiness>('POST', `/v1/business-document-renders/${encodeURIComponent(id)}/render-readiness`, { body: input }),
       /** Preserves headers/body streaming for a same-origin Admin or POS proxy. */
       download: (id: string) => this.requestBinary(`/v1/business-document-renders/${encodeURIComponent(id)}/artifact`),
       downloadBytes: async (id: string) => new Uint8Array(await (await this.requestBinary(`/v1/business-document-renders/${encodeURIComponent(id)}/artifact`)).arrayBuffer()),
@@ -581,6 +587,33 @@ export class PiqaeClient {
       );
     }
     return response;
+  }
+
+  private async putDocumentResource(digest: string, content: BodyInit): Promise<void> {
+    const dynamicToken = await this.accessToken?.();
+    const authorization = this.platformKey ?? this.apiKey ?? dynamicToken;
+    const headers: Record<string, string> = { ...this.defaultHeaders, 'content-type': 'image/jpeg' };
+    if (this.platformContext) {
+      headers['x-piqae-workspace-id'] = this.platformContext.workspaceId;
+      headers['x-piqae-environment-id'] = this.platformContext.environmentId;
+    }
+    if (authorization) headers.authorization = `Bearer ${authorization}`;
+    const response = await this.fetcher(new URL(`${this.baseUrl}/v1/business-document-resources/${encodeURIComponent(digest)}`), {
+      method: 'PUT', headers, body: content
+    });
+    if (!response.ok) {
+      let body: ErrorEnvelope | undefined;
+      try {
+        body = (await response.json()) as ErrorEnvelope;
+      } catch {
+        // Preserve a stable error when a proxy emits no JSON body.
+      }
+      throw new PiqaeError(response.status, body?.error ?? {
+        code: 'document_resource_upload_failed',
+        message: response.statusText || 'Business-document resource upload failed',
+        retryable: response.status >= 500
+      });
+    }
   }
 
   private async putUpload(upload: CreatedUpload, content: BodyInit): Promise<Upload | undefined> {

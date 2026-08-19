@@ -187,6 +187,13 @@ pub trait Repository: Send + Sync + 'static {
         artifact_sha256: &str,
         byte_length: i64,
     ) -> Result<StoredDocumentRender, RepositoryError>;
+    async fn set_document_render_page_count(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        render_id: &str,
+        page_count: i32,
+    ) -> Result<(), RepositoryError>;
     async fn claim_document_renders(
         &self,
         worker_id: &str,
@@ -199,6 +206,7 @@ pub trait Repository: Send + Sync + 'static {
         object_key_ciphertext: &[u8],
         artifact_sha256: &str,
         byte_length: i64,
+        page_count: i32,
     ) -> Result<StoredDocumentRender, RepositoryError>;
     async fn fail_claimed_document_render(
         &self,
@@ -336,7 +344,37 @@ pub trait Repository: Send + Sync + 'static {
         agent_id: AgentId,
         version: &str,
         health: &piqae_protocol::agent::AgentHealth,
+        document_render: &piqae_protocol::agent::DocumentRenderCapabilities,
         printers: Option<&[SyncedPrinter]>,
+    ) -> Result<(), RepositoryError>;
+    async fn document_render_capabilities_for_printer(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        printer_id: PrinterId,
+    ) -> Result<piqae_protocol::agent::DocumentRenderCapabilities, RepositoryError>;
+    async fn register_business_document_resource(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        digest: &str,
+        media_type: &str,
+        byte_length: i64,
+    ) -> Result<(), RepositoryError>;
+    async fn link_business_document_render_resources(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        render_id: &str,
+        digests: &[String],
+    ) -> Result<(), RepositoryError>;
+    async fn claim_expired_business_document_resources(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<piqae_storage_postgres::ExpiredBusinessDocumentResource>, RepositoryError>;
+    async fn complete_expired_business_document_resource(
+        &self,
+        resource: &piqae_storage_postgres::ExpiredBusinessDocumentResource,
     ) -> Result<(), RepositoryError>;
     async fn create_node_diagnostic(
         &self,
@@ -1107,6 +1145,7 @@ impl Repository for PostgresStore {
         object_key_ciphertext: &[u8],
         artifact_sha256: &str,
         byte_length: i64,
+        page_count: i32,
     ) -> Result<StoredDocumentRender, RepositoryError> {
         PostgresStore::complete_claimed_document_render(
             self,
@@ -1117,6 +1156,7 @@ impl Repository for PostgresStore {
             object_key_ciphertext,
             artifact_sha256,
             byte_length,
+            page_count,
         )
         .await
         .map_err(Into::into)
@@ -1195,6 +1235,23 @@ impl Repository for PostgresStore {
             object_key_ciphertext,
             artifact_sha256,
             byte_length,
+        )
+        .await
+        .map_err(Into::into)
+    }
+    async fn set_document_render_page_count(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        render_id: &str,
+        page_count: i32,
+    ) -> Result<(), RepositoryError> {
+        Self::set_document_render_page_count(
+            self,
+            workspace_id,
+            environment_id,
+            render_id,
+            page_count,
         )
         .await
         .map_err(Into::into)
@@ -1596,6 +1653,7 @@ impl Repository for PostgresStore {
         agent_id: AgentId,
         version: &str,
         health: &piqae_protocol::agent::AgentHealth,
+        document_render: &piqae_protocol::agent::DocumentRenderCapabilities,
         printers: Option<&[SyncedPrinter]>,
     ) -> Result<(), RepositoryError> {
         Self::sync_agent_presence(
@@ -1605,10 +1663,79 @@ impl Repository for PostgresStore {
             agent_id,
             version,
             health,
+            document_render,
             printers,
         )
         .await
         .map_err(Into::into)
+    }
+
+    async fn document_render_capabilities_for_printer(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        printer_id: PrinterId,
+    ) -> Result<piqae_protocol::agent::DocumentRenderCapabilities, RepositoryError> {
+        Self::document_render_capabilities_for_printer(
+            self,
+            workspace_id,
+            environment_id,
+            printer_id,
+        )
+        .await
+        .map_err(Into::into)
+    }
+    async fn register_business_document_resource(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        digest: &str,
+        media_type: &str,
+        byte_length: i64,
+    ) -> Result<(), RepositoryError> {
+        Self::register_business_document_resource(
+            self,
+            workspace_id,
+            environment_id,
+            digest,
+            media_type,
+            byte_length,
+        )
+        .await
+        .map_err(Into::into)
+    }
+    async fn link_business_document_render_resources(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        render_id: &str,
+        digests: &[String],
+    ) -> Result<(), RepositoryError> {
+        Self::link_business_document_render_resources(
+            self,
+            workspace_id,
+            environment_id,
+            render_id,
+            digests,
+        )
+        .await
+        .map_err(Into::into)
+    }
+    async fn claim_expired_business_document_resources(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<piqae_storage_postgres::ExpiredBusinessDocumentResource>, RepositoryError> {
+        Self::claim_expired_business_document_resources(self, limit)
+            .await
+            .map_err(Into::into)
+    }
+    async fn complete_expired_business_document_resource(
+        &self,
+        resource: &piqae_storage_postgres::ExpiredBusinessDocumentResource,
+    ) -> Result<(), RepositoryError> {
+        Self::complete_expired_business_document_resource(self, resource)
+            .await
+            .map_err(Into::into)
     }
 
     async fn enqueue_agent_command(
@@ -3054,6 +3181,24 @@ impl Repository for MemoryRepository {
         }
         Ok(render.clone())
     }
+    async fn set_document_render_page_count(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        render_id: &str,
+        page_count: i32,
+    ) -> Result<(), RepositoryError> {
+        let mut state = self.state.write().await;
+        let (_, _, _, _, render) = state
+            .document_renders
+            .get_mut(render_id)
+            .filter(|(workspace, environment, _, _, _)| {
+                *workspace == workspace_id && *environment == environment_id
+            })
+            .ok_or(RepositoryError::NotFound)?;
+        render.page_count = Some(page_count);
+        Ok(())
+    }
     async fn claim_document_renders(
         &self,
         _worker_id: &str,
@@ -3095,6 +3240,7 @@ impl Repository for MemoryRepository {
         object_key_ciphertext: &[u8],
         artifact_sha256: &str,
         byte_length: i64,
+        page_count: i32,
     ) -> Result<StoredDocumentRender, RepositoryError> {
         let mut state = self.state.write().await;
         let (_, _, _, _, render) = state
@@ -3109,6 +3255,7 @@ impl Repository for MemoryRepository {
         render.artifact_sha256 = Some(artifact_sha256.into());
         render.artifact_byte_length = Some(byte_length);
         render.artifact_media_type = Some("application/pdf".into());
+        render.page_count = Some(page_count);
         render.failure_code = None;
         render.lease_token = None;
         render.lease_expires_at = None;
@@ -3255,6 +3402,7 @@ impl Repository for MemoryRepository {
             artifact_sha256: None,
             artifact_byte_length: None,
             artifact_media_type: None,
+            page_count: None,
             failure_code: None,
             created_at: now,
             updated_at: now,
@@ -3690,6 +3838,7 @@ impl Repository for MemoryRepository {
         agent_id: AgentId,
         version: &str,
         health: &piqae_protocol::agent::AgentHealth,
+        _document_render: &piqae_protocol::agent::DocumentRenderCapabilities,
         printers: Option<&[SyncedPrinter]>,
     ) -> Result<(), RepositoryError> {
         let mut state = self.state.write().await;
@@ -3734,6 +3883,58 @@ impl Repository for MemoryRepository {
                 );
             }
         }
+        Ok(())
+    }
+
+    async fn document_render_capabilities_for_printer(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        printer_id: PrinterId,
+    ) -> Result<piqae_protocol::agent::DocumentRenderCapabilities, RepositoryError> {
+        let state = self.state.read().await;
+        let (_, _, printer) = state
+            .printers
+            .get(&printer_id)
+            .filter(|(workspace, environment, _)| {
+                *workspace == workspace_id && *environment == environment_id
+            })
+            .ok_or(RepositoryError::NotFound)?;
+        let _agent = state
+            .agents
+            .get(&printer.agent_id)
+            .ok_or(RepositoryError::NotFound)?;
+        Ok(piqae_protocol::agent::DocumentRenderCapabilities::default())
+    }
+    async fn register_business_document_resource(
+        &self,
+        _workspace_id: WorkspaceId,
+        _environment_id: EnvironmentId,
+        _digest: &str,
+        _media_type: &str,
+        _byte_length: i64,
+    ) -> Result<(), RepositoryError> {
+        Ok(())
+    }
+    async fn link_business_document_render_resources(
+        &self,
+        _workspace_id: WorkspaceId,
+        _environment_id: EnvironmentId,
+        _render_id: &str,
+        _digests: &[String],
+    ) -> Result<(), RepositoryError> {
+        Ok(())
+    }
+    async fn claim_expired_business_document_resources(
+        &self,
+        _limit: i64,
+    ) -> Result<Vec<piqae_storage_postgres::ExpiredBusinessDocumentResource>, RepositoryError> {
+        Ok(Vec::new())
+    }
+    async fn complete_expired_business_document_resource(
+        &self,
+        _resource: &piqae_storage_postgres::ExpiredBusinessDocumentResource,
+    ) -> Result<(), RepositoryError> {
         Ok(())
     }
 
@@ -6148,6 +6349,7 @@ mod routing_repository_tests {
                 artifact_sha256: Some("a".repeat(64)),
                 artifact_byte_length: Some(1),
                 artifact_media_type: Some("application/pdf".into()),
+                page_count: Some(1),
                 failure_code: None,
                 created_at: now,
                 updated_at: now,
@@ -6268,6 +6470,7 @@ mod routing_repository_tests {
             artifact_sha256: Some("a".repeat(64)),
             artifact_byte_length: Some(123),
             artifact_media_type: Some("application/pdf".into()),
+            page_count: Some(1),
             failure_code: None,
             created_at: now,
             updated_at: now,

@@ -1,6 +1,7 @@
 import type { ActionFunctionArgs } from "react-router";
 
 import { createProductionServices } from "../services.server";
+import { parseRenderCost } from "../core/printing.server";
 import shopify from "../shopify.server";
 
 const ID = /^[A-Za-z0-9_-]{1,128}$/;
@@ -19,12 +20,14 @@ export async function action({ request, params }: ActionFunctionArgs) {
       Response.json({ error: "invalid approval request" }, { status: 400 }),
     );
   try {
+    const renderCost = parseRenderCost(body.renderCost);
     const result = await createProductionServices().printing.approvePreview({
       shop: session.shop,
       previewId,
       renderId,
       printerId,
       requestKey,
+      renderCost,
     });
     return cors(Response.json(result, { status: 202 }));
   } catch (error) {

@@ -1569,8 +1569,29 @@ pub async fn create_job(
     headers: HeaderMap,
     Json(request): Json<CreateJobRequest>,
 ) -> Result<Response, AppError> {
+    create_job_impl(state, headers, request, false).await
+}
+
+/// Creates a job from a trusted control-plane workflow that may attach
+/// reserved `piqae.*` metadata. This is deliberately not an HTTP handler;
+/// public callers always pass through [`create_job`] and cannot set these
+/// routing keys.
+pub(crate) async fn create_job_internal(
+    state: AppState,
+    headers: HeaderMap,
+    request: CreateJobRequest,
+) -> Result<Response, AppError> {
+    create_job_impl(state, headers, request, true).await
+}
+
+async fn create_job_impl(
+    state: AppState,
+    headers: HeaderMap,
+    request: CreateJobRequest,
+    allow_reserved_metadata: bool,
+) -> Result<Response, AppError> {
     let tenant = authenticate_native(&state, &headers, Scope::JobsWrite).await?;
-    validate_create(&request)?;
+    validate_create(&request, allow_reserved_metadata)?;
     let destination = resolve_job_destination(&state, tenant, &request).await?;
     let resolved_ticket = validate_resolved_ticket(&state, tenant, &request, &destination).await?;
     validate_encrypted_job(&state, tenant, &request, &destination).await?;
@@ -2423,6 +2444,7 @@ pub async fn agent_sync(
             request.agent_id,
             &request.agent_version,
             &request.health,
+            validate_document_render_capabilities(&request.document_render)?,
             printers.as_deref(),
         )
         .await?;
@@ -2490,7 +2512,7 @@ pub async fn agent_sync(
     };
     let mut candidate_jobs = Vec::with_capacity(leases.len());
     for lease in leases {
-        let content = match &lease.job.content {
+        let mut content = match &lease.job.content {
             ContentSource::Upload { upload_id } => {
                 let upload = state
                     .repository
@@ -2547,6 +2569,83 @@ pub async fn agent_sync(
                 bytes: None,
             },
         };
+        if lease
+            .job
+            .metadata
+            .get("piqae.document.render_mode")
+            .is_some_and(|mode| mode == "node_render")
+        {
+            let render_id = lease
+                .job
+                .metadata
+                .get("piqae.document.render_id")
+                .ok_or_else(|| AppError::service_unavailable("document_render_metadata_missing"))?;
+            let policy = match lease
+                .job
+                .metadata
+                .get("piqae.document.render_policy")
+                .map(String::as_str)
+            {
+                Some("cloud_only") => {
+                    piqae_protocol::agent::BusinessDocumentRenderPolicy::CloudOnly
+                }
+                Some("prefer_node") => {
+                    piqae_protocol::agent::BusinessDocumentRenderPolicy::PreferNode
+                }
+                Some("require_node") => {
+                    piqae_protocol::agent::BusinessDocumentRenderPolicy::RequireNode
+                }
+                _ => piqae_protocol::agent::BusinessDocumentRenderPolicy::Automatic,
+            };
+            let fallback_allowed =
+                policy != piqae_protocol::agent::BusinessDocumentRenderPolicy::RequireNode;
+            if matches!(content, ContentDescriptor::EncryptedDownload { .. }) {
+                if !fallback_allowed {
+                    return Err(AppError::service_unavailable(
+                        "node_render_encrypted_content_unsupported",
+                    ));
+                }
+                // Never attach cleartext specification/input beside encrypted
+                // job content. Prefer/automatic keep the encrypted PDF offer.
+                candidate_jobs.push(JobOffer {
+                    expected_capability_revision: lease
+                        .job
+                        .metadata
+                        .get("piqae.capability_revision")
+                        .and_then(|revision| revision.parse().ok()),
+                    resolved_ticket_digest: lease
+                        .job
+                        .metadata
+                        .get("piqae.resolved_ticket_digest")
+                        .cloned(),
+                    job: lease.job,
+                    lease_id: lease.lease_id,
+                    lease_token: lease.lease_token,
+                    lease_expires_at: lease.lease_until,
+                    content,
+                });
+                continue;
+            }
+            let render = crate::documents::node_render_payload(
+                &state,
+                tenant.workspace_id,
+                tenant.environment_id,
+                render_id,
+            )
+            .await?;
+            content = ContentDescriptor::BusinessDocument {
+                policy,
+                render: Box::new(render),
+                fallback: Box::new(content),
+                fallback_allowed,
+                decision_reason: lease
+                    .job
+                    .metadata
+                    .get("piqae.document.render_decision_reason")
+                    .cloned()
+                    .unwrap_or_else(|| "unspecified".into()),
+            };
+        }
         candidate_jobs.push(JobOffer {
             expected_capability_revision: lease
                 .job
@@ -2580,6 +2679,41 @@ pub async fn agent_sync(
         next_poll_after_ms,
         acknowledged_diagnostics,
     }))
+}
+
+fn validate_document_render_capabilities(
+    value: &piqae_protocol::agent::DocumentRenderCapabilities,
+) -> Result<&piqae_protocol::agent::DocumentRenderCapabilities, AppError> {
+    let valid_text = |value: &Option<String>| {
+        value
+            .as_ref()
+            .is_none_or(|v| !v.is_empty() && v.len() <= 128 && v.is_ascii())
+    };
+    let valid_media = |values: &[String]| {
+        values.len() <= 16 && values.iter().all(|v| v.len() <= 64 && v.is_ascii())
+    };
+    if !valid_text(&value.renderer_abi)
+        || !valid_text(&value.resource_abi)
+        || !valid_media(&value.image_media_types)
+        || value
+            .image_media_types
+            .iter()
+            .any(|media| media != "image/jpeg")
+        || !value.font_media_types.is_empty()
+        || value.font_rendering
+        || value.cached_resource_digests.len() > 256
+        || value.cached_resource_digests.iter().any(|digest| {
+            digest.len() != 64
+                || !digest.bytes().all(|b| b.is_ascii_hexdigit())
+                || digest != &digest.to_ascii_lowercase()
+        })
+    {
+        return Err(AppError::invalid(
+            "invalid_document_render_capabilities",
+            "Document render capabilities exceed protocol limits.",
+        ));
+    }
+    Ok(value)
 }
 
 fn adaptive_poll_after_ms(request: &AgentSyncRequest, has_immediate_work: bool) -> u64 {
@@ -2622,7 +2756,29 @@ fn adaptive_poll_with_jitter(uptime_seconds: i64, has_immediate_work: bool, seed
     reason = "adaptive polling tests stay adjacent to the private policy helper"
 )]
 mod adaptive_poll_tests {
-    use super::adaptive_poll_with_jitter;
+    use super::{adaptive_poll_with_jitter, validate_document_render_capabilities};
+    use piqae_protocol::agent::DocumentRenderCapabilities;
+
+    #[test]
+    fn document_renderer_capabilities_are_truthful_and_bounded() {
+        let supported = DocumentRenderCapabilities {
+            renderer_abi: Some("piqae.business-document-pdf/v1".into()),
+            resource_abi: Some("piqae.document-resources/v1".into()),
+            persistent_cache: true,
+            font_rendering: false,
+            image_media_types: vec!["image/jpeg".into()],
+            font_media_types: vec![],
+            cached_resource_digests: vec!["a".repeat(64)],
+        };
+        assert!(validate_document_render_capabilities(&supported).is_ok());
+        let mut unsupported = supported.clone();
+        unsupported.font_rendering = true;
+        unsupported.font_media_types = vec!["font/ttf".into()];
+        assert!(validate_document_render_capabilities(&unsupported).is_err());
+        let mut unsupported = supported;
+        unsupported.image_media_types = vec!["image/png".into()];
+        assert!(validate_document_render_capabilities(&unsupported).is_err());
+    }
 
     #[test]
     fn active_work_always_returns_the_fast_interval() {
@@ -2800,6 +2956,93 @@ pub async fn get_agent_content(
         .map_err(|_| AppError::service_unavailable("content_response_failed"))
 }
 
+pub async fn get_agent_document_resource(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((job_id, digest)): Path<(String, String)>,
+) -> Result<Response, AppError> {
+    let path = format!("/v1/agent/jobs/{job_id}/resources/{digest}");
+    let identity = authenticate_agent(&state, &headers, "GET", &path, &[]).await?;
+    let lease_id = headers
+        .get("x-piqae-lease-id")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| uuid::Uuid::parse_str(value).ok())
+        .ok_or_else(|| AppError::device_unauthorized("missing_agent_lease"))?;
+    let lease_token = headers
+        .get("x-piqae-lease-token")
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| AppError::device_unauthorized("missing_agent_lease"))?;
+    let parsed_job_id = parse_job_id(&job_id)?;
+    state
+        .repository
+        .validate_agent_lease(
+            identity.tenant.workspace_id,
+            identity.tenant.environment_id,
+            identity.agent_id,
+            parsed_job_id,
+            lease_id,
+            lease_token,
+        )
+        .await
+        .map_err(|_| AppError::device_unauthorized("invalid_agent_lease"))?;
+    let job = state
+        .repository
+        .get_job(
+            identity.tenant.workspace_id,
+            identity.tenant.environment_id,
+            parsed_job_id,
+        )
+        .await?;
+    let render_id = job
+        .metadata
+        .get("piqae.document.render_id")
+        .ok_or_else(|| {
+            AppError::invalid(
+                "resource_not_authorized",
+                "Job does not reference a business document.",
+            )
+        })?;
+    let payload = crate::documents::node_render_payload(
+        &state,
+        identity.tenant.workspace_id,
+        identity.tenant.environment_id,
+        render_id,
+    )
+    .await?;
+    let resource = payload
+        .resources
+        .iter()
+        .find(|resource| resource.digest == digest)
+        .ok_or_else(|| {
+            AppError::invalid(
+                "document_resource_not_found",
+                "Resource is not referenced by this job.",
+            )
+        })?;
+    let object_key = crate::documents::document_resource_object_key(
+        &identity.tenant.workspace_id.to_string(),
+        &identity.tenant.environment_id.to_string(),
+        &digest,
+    );
+    let stream = state
+        .object_store
+        .get_stream(&object_key)
+        .await
+        .map_err(|_| AppError::service_unavailable("document_resource_unavailable"))?;
+    let stream =
+        stream.map(|result| result.map_err(|error| std::io::Error::other(error.to_string())));
+    Response::builder()
+        .header(
+            axum::http::header::CONTENT_TYPE,
+            resource.media_type.as_str(),
+        )
+        .header("x-content-sha256", digest)
+        .header("x-content-type-options", "nosniff")
+        .body(Body::from_stream(stream))
+        .map_err(|_| AppError::service_unavailable("content_response_failed"))
+}
+
 pub async fn stream_events(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -2926,8 +3169,11 @@ pub(crate) async fn authenticate_compatibility(
     Ok(tenant)
 }
 
-fn validate_create(request: &CreateJobRequest) -> Result<(), AppError> {
-    if request.metadata.keys().any(|key| key.starts_with("piqae.")) {
+fn validate_create(
+    request: &CreateJobRequest,
+    allow_reserved_metadata: bool,
+) -> Result<(), AppError> {
+    if !allow_reserved_metadata && request.metadata.keys().any(|key| key.starts_with("piqae.")) {
         return Err(AppError::invalid(
             "reserved_metadata_key",
             "Metadata keys beginning with piqae. are reserved by the control plane.",

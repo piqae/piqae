@@ -6,7 +6,9 @@ use crate::{
     repository::RepositoryError,
 };
 use bytes::Bytes;
-use piqae_document_renderer::{BusinessDocumentV1, RenderLimits, render};
+use piqae_document_renderer::{
+    BusinessDocumentV1, RenderLimits, ResolvedResources, render_with_metrics,
+};
 use piqae_storage_postgres::DocumentRenderWork;
 use serde_json::Value;
 use std::{sync::Arc, time::Duration};
@@ -102,6 +104,32 @@ impl DocumentRenderWorker {
         let mut completed = 0;
         for item in work {
             completed += usize::from(self.cleanup_item(&item).await);
+        }
+        let resources = self
+            .state
+            .repository
+            .claim_expired_business_document_resources(limit)
+            .await?;
+        for resource in resources {
+            let object_key = crate::documents::document_resource_object_key(
+                &resource.workspace_id.to_string(),
+                &resource.environment_id.to_string(),
+                &resource.digest,
+            );
+            if let Err(error) = self.state.object_store.delete(&object_key).await {
+                tracing::warn!(digest=%resource.digest, %error, "resource object expiry will retry");
+                continue;
+            }
+            if let Err(error) = self
+                .state
+                .repository
+                .complete_expired_business_document_resource(&resource)
+                .await
+            {
+                tracing::warn!(digest=%resource.digest, %error, "resource expiry finalization will retry");
+                continue;
+            }
+            completed += 1;
         }
         Ok(completed)
     }
@@ -213,9 +241,14 @@ impl DocumentRenderWorker {
                 .map_err(|_| ("renderer_unavailable", true))?;
         let task = tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            render(&spec, &input, RenderLimits::default())
+            render_with_metrics(
+                &spec,
+                &input,
+                &ResolvedResources::default(),
+                RenderLimits::default(),
+            )
         });
-        let pdf = tokio::time::timeout(self.timeout, task)
+        let output = tokio::time::timeout(self.timeout, task)
             .await
             .map_err(|_| ("render_timeout", true))?
             .map_err(|_| ("render_worker_panic", true))?
@@ -227,7 +260,7 @@ impl DocumentRenderWorker {
         let artifact = self
             .state
             .object_store
-            .put(&object_key, Bytes::from(pdf), None)
+            .put(&object_key, Bytes::from(output.pdf), None)
             .await
             .map_err(|_| ("document_artifact_store_failed", true))?;
         let encrypted_key = self
@@ -246,7 +279,14 @@ impl DocumentRenderWorker {
             i64::try_from(artifact.bytes).map_err(|_| ("document_artifact_too_large", false))?;
         self.state
             .repository
-            .complete_claimed_document_render(work, &encrypted_key, &artifact.sha256, byte_length)
+            .complete_claimed_document_render(
+                work,
+                &encrypted_key,
+                &artifact.sha256,
+                byte_length,
+                i32::try_from(output.page_count)
+                    .map_err(|_| ("document_page_count_invalid", false))?,
+            )
             .await
             .map_err(|_| ("render_lease_lost", true))?;
         Ok(())
@@ -348,7 +388,8 @@ mod tests {
                 &first,
                 b"key",
                 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                10
+                10,
+                1
             )
             .await,
             Err(RepositoryError::ConcurrentStateChange)

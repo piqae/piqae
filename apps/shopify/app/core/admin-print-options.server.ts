@@ -4,6 +4,7 @@ import type { CredentialVault } from "./credentials.server";
 import type { ShopRepository } from "./model";
 import { normalizeShopDomain } from "./model";
 import type { WorkflowRepository } from "./workflows.server";
+import type { RenderExecutionPolicy } from "./workflows.server";
 
 export type AdminPrintOptions = {
   linked: boolean;
@@ -19,10 +20,17 @@ export type AdminPrintOptions = {
     state: string;
     eligible: boolean;
     isDefault: boolean;
+    nodeRendering: {
+      supported: boolean;
+      ready: boolean;
+      cacheState: "ready" | "warming" | "missing" | "unknown";
+      reason: string;
+    };
   }>;
   manageDocumentsUrl: string;
   setupDestinationUrl: string;
   destinationError?: string;
+  renderExecutionPolicy: RenderExecutionPolicy;
 };
 
 export async function loadAdminPrintOptions(input: {
@@ -55,6 +63,7 @@ export async function loadAdminPrintOptions(input: {
       destinations: [],
       manageDocumentsUrl: "/app/templates",
       setupDestinationUrl: "/app/settings",
+      renderExecutionPolicy: settings.renderExecutionPolicy,
     };
   }
 
@@ -73,6 +82,15 @@ export async function loadAdminPrintOptions(input: {
       state: printer.state,
       eligible: printer.state === "online",
       isDefault: printer.id === settings.defaultPrinterId,
+      // Readiness is deliberately fail-closed until the platform's signed
+      // per-destination renderer decision is available. Printer online state
+      // alone does not prove renderer ABI or resource-cache compatibility.
+      nodeRendering: {
+        supported: false,
+        ready: false,
+        cacheState: "unknown",
+        reason: "Node renderer capability has not been verified",
+      },
     }));
   } catch {
     // A printer-list outage must not hide document preview or PDF download.
@@ -95,5 +113,6 @@ export async function loadAdminPrintOptions(input: {
     manageDocumentsUrl: "/app/templates",
     setupDestinationUrl: "/app/settings",
     destinationError,
+    renderExecutionPolicy: settings.renderExecutionPolicy,
   };
 }

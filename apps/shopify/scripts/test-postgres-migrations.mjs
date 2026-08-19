@@ -26,6 +26,10 @@ const migration2 = await readFile(
   path.join(root, "migrations/0002_merchant_workflows.sql"),
   "utf8",
 );
+const migration3 = await readFile(
+  path.join(root, "migrations/0003_render_execution_policy.sql"),
+  "utf8",
+);
 const suffix = randomBytes(8).toString("hex");
 const schemas = [
   `piqae_shopify_fresh_${suffix}`,
@@ -65,8 +69,20 @@ async function assertions(client) {
     "23514",
   );
   await client.query(
-    "INSERT INTO shopify_merchant_settings(shop,retention_days) VALUES($1,30)",
+    "INSERT INTO shopify_merchant_settings(shop,retention_days,render_execution_policy) VALUES($1,30,'require_node')",
     ["alpha.myshopify.com"],
+  );
+  const settings = await client.query(
+    "SELECT render_execution_policy FROM shopify_merchant_settings WHERE shop=$1",
+    ["alpha.myshopify.com"],
+  );
+  if (settings.rows[0]?.render_execution_policy !== "require_node")
+    throw new Error("render execution policy was not retained");
+  await rejects(
+    client,
+    "UPDATE shopify_merchant_settings SET render_execution_policy='unsafe' WHERE shop=$1",
+    ["alpha.myshopify.com"],
+    "23514",
   );
   const link = await client.query(
     "SELECT 1 FROM shopify_shop_links WHERE shop=$1",
@@ -112,6 +128,7 @@ try {
         );
       }
       await client.query(migration2);
+      await client.query(migration3);
       if (index === 1) {
         const retained = await client.query(
           "SELECT state FROM shopify_installations WHERE shop=$1",

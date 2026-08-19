@@ -2,7 +2,10 @@ import { describe, expect, it, vi } from "vitest";
 import { CredentialVault } from "../app/core/credentials.server";
 import { fetchOrders, normalizeOrderGid } from "../app/core/orders.server";
 import { MemoryShopRepository, normalizeShopDomain } from "../app/core/model";
-import { ShopifyPrintingService } from "../app/core/printing.server";
+import {
+  parseRenderCost,
+  ShopifyPrintingService,
+} from "../app/core/printing.server";
 import { renderShopifyLiquid } from "../app/core/liquid-template.server";
 import { EntitlementService } from "../app/core/entitlements.server";
 import { DownloadTokenVault } from "../app/core/download-token.server";
@@ -190,6 +193,9 @@ describe("Shopify boundary", () => {
     expect(print.mock.calls[0]?.[2]).toMatch(
       /^shopify-print-[a-f0-9]{64}-printer_1$/,
     );
+    expect(print.mock.calls[0]?.[1]).toMatchObject({
+      render_policy: "automatic",
+    });
   });
   it("fails closed when a selected published document has no pinned Piqae revision", async () => {
     const repository = new MemoryShopRepository();
@@ -239,6 +245,8 @@ describe("Shopify boundary", () => {
       id: "render_preview",
       state: "completed",
       failure_code: null,
+      artifact_byte_length: 48_000,
+      page_count: 2,
     }));
     const createPreview = vi.fn(async () => ({
       id: "preview_1",
@@ -250,9 +258,26 @@ describe("Shopify boundary", () => {
       preview: { state: "approved" },
       job: { id: "job_preview" },
     }));
+    const readiness = vi.fn(async () => ({
+      requested_policy: "automatic",
+      selected_mode: "cloud_pdf",
+      reason: "automatic_missing_measurements",
+      destination: {
+        supported: true,
+        ready: false,
+        missing_resources: ["a".repeat(64)],
+        reason: "resources_not_cached",
+      },
+      estimates: { cloud_ms: 0, node_ms: 0 },
+    }));
     const client = {
       businessDocuments: {
-        renders: { create: createRender, retrieve: vi.fn(), print: vi.fn() },
+        renders: {
+          create: createRender,
+          retrieve: vi.fn(),
+          print: vi.fn(),
+          readiness,
+        },
         previews: {
           create: createPreview,
           retrieve: vi.fn(async () => ({ render_id: "render_preview" })),
@@ -278,6 +303,7 @@ describe("Shopify boundary", () => {
       renderId: preview.renderId,
       printerId: "printer_1",
       requestKey: "approve-click",
+      renderCost: preview.renderCost,
     });
     expect(result).toEqual({ jobId: "job_preview", state: "approved" });
     expect(createRender).toHaveBeenCalledTimes(1);
@@ -288,9 +314,55 @@ describe("Shopify boundary", () => {
     );
     expect(approve).toHaveBeenCalledWith(
       "preview_1",
-      expect.objectContaining({ printer_id: "printer_1" }),
+      expect.objectContaining({
+        printer_id: "printer_1",
+        render_policy: "automatic",
+        render_cost: expect.objectContaining({
+          document_count: 1,
+          page_count: 2,
+          pdf_bytes: 48_000,
+        }),
+      }),
       "approve-click",
     );
+    await expect(
+      service.renderReadiness({
+        shop,
+        renderId: preview.renderId,
+        printerId: "printer_1",
+        renderCost: preview.renderCost,
+      }),
+    ).resolves.toMatchObject({
+      destination: { ready: false, reason: "resources_not_cached" },
+    });
+    expect(readiness).toHaveBeenCalledWith("render_preview", {
+      printer_id: "printer_1",
+      render_policy: "automatic",
+      render_cost: expect.objectContaining({
+        document_count: 1,
+        page_count: 2,
+        pdf_bytes: 48_000,
+      }),
+    });
+  });
+
+  it("accepts only bounded integral render measurements", () => {
+    expect(
+      parseRenderCost({
+        document_count: 250,
+        page_count: 300,
+        pdf_bytes: 12_000_000,
+        input_bytes: 800_000,
+      }),
+    ).toMatchObject({ document_count: 250, page_count: 300 });
+    expect(() =>
+      parseRenderCost({
+        document_count: 10_001,
+        page_count: 1,
+        pdf_bytes: 1,
+        input_bytes: 1,
+      }),
+    ).toThrow("render cost is invalid");
   });
 });
 

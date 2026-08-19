@@ -2258,6 +2258,7 @@ dependencies = [
  "piqae-agent-client",
  "piqae-agent-core",
  "piqae-agent-storage",
+ "piqae-document-renderer",
  "piqae-domain",
  "piqae-executor-supervisor",
  "piqae-local-api",

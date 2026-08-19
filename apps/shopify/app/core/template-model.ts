@@ -93,7 +93,7 @@ export function validateAssets(assets: ExternalAsset[]) {
       throw new Error("Asset type is unsupported");
     if (asset.sourceUrl) {
       const url = new URL(asset.sourceUrl);
-      if (url.protocol !== "https:" || url.hostname !== "cdn.shopify.com")
+      if (url.origin !== "https://cdn.shopify.com")
         throw new Error("Asset ingestion requires Shopify CDN HTTPS");
     }
   }
