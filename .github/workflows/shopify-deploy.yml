@@ -197,5 +197,8 @@ jobs:
           fi
           git tag "$tag" "$RELEASE_SHA"
           git push origin "refs/tags/$tag"
-          gh release create "$tag" --verify-tag --generate-notes \
-            --title "Piqae Shopify ${RELEASE_VERSION}"
+          release_args=(--verify-tag --generate-notes --title "Piqae Shopify ${RELEASE_VERSION}")
+          if [[ "$RELEASE_VERSION" == *-* ]]; then
+            release_args+=(--prerelease)
+          fi
+          gh release create "$tag" "${release_args[@]}"
