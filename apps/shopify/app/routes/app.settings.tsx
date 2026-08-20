@@ -93,14 +93,6 @@ export default function Settings() {
     (download) => download.platform === detectedPlatform,
   );
 
-  useEffect(() => {
-    if (!connection?.native_connect_url) return;
-    setShowInstaller(false);
-    window.location.assign(connection.native_connect_url);
-    const timer = window.setTimeout(() => setShowInstaller(true), 1800);
-    return () => window.clearTimeout(timer);
-  }, [connection?.native_connect_url]);
-
   const hasPrinters = printers.length > 0;
   return (
     <s-page heading="Settings">
@@ -136,12 +128,20 @@ export default function Settings() {
             <s-stack direction="block" gap="base">
               {connection.native_connect_url ? (
                 <s-button
-                  onClick={() =>
-                    window.location.assign(connection.native_connect_url!)
-                  }
+                  href={connection.native_connect_url}
+                  target="_top"
+                  onClick={() => {
+                    setShowInstaller(false);
+                    window.setTimeout(() => setShowInstaller(true), 1800);
+                  }}
                 >
-                  Try opening Piqae again
+                  Open Piqae
                 </s-button>
+              ) : null}
+              {connection.connect_url ? (
+                <s-link href={connection.connect_url} target="_blank">
+                  Connection help and downloads
+                </s-link>
               ) : null}
               {showInstaller && installer ? (
                 <s-button href={installer.url} target="_top">
