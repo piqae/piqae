@@ -22,6 +22,7 @@ import {
 import { syncTemplateIndex } from "../core/template-index.server";
 import { publishCanonicalTemplate } from "../core/template-publisher.server";
 import { createProductionServices } from "../services.server";
+import { shopifyCustomDocumentFields } from "../core/shopify-document-fields";
 import {
   canonicalToLiquid,
   liquidToCanonical,
@@ -43,11 +44,38 @@ export const editorLiquidForMode = (
 ) => liquid;
 export async function loader({ request, params }: LoaderFunctionArgs) {
   const { session } = await shopify.authenticate.admin(request);
+  const template =
+    !params.templateId || params.templateId === "new"
+      ? null
+      : await workflows().getTemplate(session.shop, params.templateId);
+  let initialTemplate: MerchantTemplate | null = template;
+  if (!template && params.templateId === "new") {
+    const sourceId = new URL(request.url).searchParams.get("from");
+    const customSource = sourceId
+      ? await workflows().getTemplate(session.shop, sourceId)
+      : null;
+    const starterSource = starterTemplates.find(
+      (candidate) => candidate.id === sourceId,
+    );
+    if (customSource) initialTemplate = customSource;
+    else if (starterSource)
+      initialTemplate = {
+        id: starterSource.id,
+        name: starterSource.name,
+        kind: starterSource.kind,
+        pageSize: starterSource.pageSize,
+        state: "draft",
+        source: starterSource.source,
+        revision: 1,
+        updatedAt: new Date(0).toISOString(),
+      };
+  }
   return {
-    template:
-      !params.templateId || params.templateId === "new"
-        ? null
-        : await workflows().getTemplate(session.shop, params.templateId),
+    template,
+    initialTemplate,
+    customFields: shopifyCustomDocumentFields(
+      (await workflows().getSettings(session.shop)).metafieldAllowlist,
+    ),
   };
 }
 export async function action({ request, params }: ActionFunctionArgs) {
@@ -55,10 +83,13 @@ export async function action({ request, params }: ActionFunctionArgs) {
   const form = await request.formData();
   try {
     const intent = String(form.get("intent") ?? "draft");
-    const existing =
+    let existing =
       params.templateId && params.templateId !== "new"
         ? await workflows().getTemplate(session.shop, params.templateId)
         : null;
+    const savingFromStarter = Boolean(
+      existing && parseTemplateEnvelope(existing.source).system?.immutable,
+    );
     if (intent === "delete") {
       if (
         !existing ||
@@ -99,8 +130,9 @@ export async function action({ request, params }: ActionFunctionArgs) {
       !["A4", "A5", "Letter", "80mm"].includes(pageSize)
     )
       throw new Error("Template format is invalid");
-    if (existing && parseTemplateEnvelope(existing.source).system?.immutable)
-      throw new Error("System documents are immutable; choose Customize first");
+    // Starter documents remain pristine. Editing one transparently creates a
+    // merchant-owned copy so the first edit feels like editing a normal file.
+    if (savingFromStarter) existing = null;
     const envelope = parseTemplateEnvelope(
       validateDocumentSource(bounded(form, "source", 262144, true)),
     );
@@ -150,6 +182,8 @@ export async function action({ request, params }: ActionFunctionArgs) {
       revision: existing?.revision ?? 1,
     });
     await syncTemplateIndex(admin, workflows(), session.shop);
+    if (savingFromStarter)
+      return redirect(`/app/templates/${encodeURIComponent(saved.id)}`, 303);
     return { ok: true, error: "", deleted: false, id: saved.id };
   } catch (error) {
     return Response.json(
@@ -165,10 +199,11 @@ export async function action({ request, params }: ActionFunctionArgs) {
   }
 }
 export default function TemplateEditor() {
-  const { template } = useLoaderData<typeof loader>();
+  const { template, initialTemplate, customFields } =
+    useLoaderData<typeof loader>();
   const result = useActionData<typeof action>();
   const initial = parseTemplateEnvelope(
-    template?.source ?? starterTemplates[0]!.source,
+    initialTemplate?.source ?? starterTemplates[0]!.source,
   );
   if (!template) removeSystemOwnership(initial);
   const [document, setDocument] = useState(initial.document);
@@ -176,12 +211,12 @@ export default function TemplateEditor() {
   const [liquid, setLiquid] = useState(initial.editor.liquid);
   const [view, setView] = useState<"edit" | "preview">("edit");
   const [error, setError] = useState("");
-  const immutable = Boolean(initial.system?.immutable);
+  const starter = Boolean(initial.system?.immutable);
   useEffect(() => {
     setDocument(initial.document);
     setMode(initial.editor.mode);
     setLiquid(initial.editor.liquid);
-  }, [template?.source]);
+  }, [initialTemplate?.source]);
   const switchMode = (next: TemplateEditorMode) => {
     if (mode === "liquid" && next !== "liquid") {
       const conversion = liquidToCanonical(liquid, document);
@@ -218,10 +253,10 @@ export default function TemplateEditor() {
               automatically. Preview, download and print use the same published
               Piqae revision.
             </s-banner>
-            {immutable ? (
+            {starter ? (
               <s-banner tone="info">
-                This starter is read-only. Customize it to create your own
-                document.
+                You are editing a starter. Saving creates your own copy and
+                keeps the original available for future documents.
               </s-banner>
             ) : null}
             <s-button-group accessibilityLabel="Document view">
@@ -252,7 +287,12 @@ export default function TemplateEditor() {
                       name="name"
                       required
                       maxLength={200}
-                      defaultValue={template?.name ?? "Invoice"}
+                      defaultValue={
+                        template?.name ??
+                        (initialTemplate
+                          ? `${initialTemplate.name} — copy`.slice(0, 200)
+                          : "Untitled document")
+                      }
                     />
                   </label>
                   <label>
@@ -260,7 +300,7 @@ export default function TemplateEditor() {
                     <select
                       className="piqae-input"
                       name="kind"
-                      defaultValue={template?.kind ?? "invoice"}
+                      defaultValue={initialTemplate?.kind ?? "invoice"}
                     >
                       <option value="invoice">Invoice</option>
                       <option value="packing_slip">Packing slip</option>
@@ -275,7 +315,7 @@ export default function TemplateEditor() {
                     <select
                       className="piqae-input"
                       name="pageSize"
-                      defaultValue={template?.pageSize ?? "A4"}
+                      defaultValue={initialTemplate?.pageSize ?? "A4"}
                     >
                       <option>A4</option>
                       <option>A5</option>
@@ -294,7 +334,7 @@ export default function TemplateEditor() {
                           event.currentTarget.value as TemplateEditorMode,
                         )
                       }
-                      disabled={immutable}
+                      disabled={false}
                     >
                       <option value="visual">Document editor</option>
                       <option value="liquid">Advanced Liquid</option>
@@ -306,7 +346,8 @@ export default function TemplateEditor() {
                 {mode === "visual" ? (
                   <BusinessDocumentEditor
                     value={document}
-                    disabled={immutable}
+                    disabled={false}
+                    customFields={customFields}
                     onChange={setDocument}
                   />
                 ) : mode === "liquid" ? (
@@ -318,7 +359,7 @@ export default function TemplateEditor() {
                       maxLength={65536}
                       value={liquid}
                       onChange={(e) => setLiquid(e.currentTarget.value)}
-                      disabled={immutable}
+                      disabled={false}
                     />
                   </label>
                 ) : (
@@ -337,7 +378,7 @@ export default function TemplateEditor() {
                           setError("Source must be valid JSON");
                         }
                       }}
-                      disabled={immutable}
+                      disabled={false}
                     />
                   </label>
                 )}
@@ -353,32 +394,22 @@ export default function TemplateEditor() {
                   <input type="hidden" name="liquid" value={liquid} />
                 ) : null}
                 <div className="piqae-actions">
-                  {immutable ? (
+                  <>
                     <button
                       className="piqae-link-button"
                       name="intent"
-                      value="customize"
+                      value="draft"
                     >
-                      Customize
+                      {starter ? "Save as new template" : "Save draft"}
                     </button>
-                  ) : (
-                    <>
-                      <button
-                        className="piqae-link-button"
-                        name="intent"
-                        value="draft"
-                      >
-                        Save draft
-                      </button>
-                      <button
-                        className="piqae-link-button"
-                        name="intent"
-                        value="publish"
-                      >
-                        Publish revision
-                      </button>
-                    </>
-                  )}
+                    <button
+                      className="piqae-link-button"
+                      name="intent"
+                      value="publish"
+                    >
+                      Publish revision
+                    </button>
+                  </>
                   {template?.state === "draft" ? (
                     <button
                       className="piqae-link-button"

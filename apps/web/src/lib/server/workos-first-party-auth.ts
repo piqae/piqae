@@ -256,3 +256,13 @@ export function clearAuthFlow(cookies: Cookies) {
   cookies.delete(CHALLENGE_COOKIE, { path: '/' });
   cookies.delete(MAGIC_COOKIE, { path: '/' });
 }
+
+export async function revokeWorkosSession(event: RequestEvent) {
+  const sessionId = event.locals.auth?.sessionId;
+  try {
+    if (sessionId) await workos().userManagement.revokeSession({ sessionId });
+  } finally {
+    event.cookies.delete(SESSION_COOKIE, { path: '/' });
+    clearAuthFlow(event.cookies);
+  }
+}

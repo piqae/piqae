@@ -450,10 +450,15 @@ export function parseSettings(form: FormData): MerchantSettings {
     .filter(Boolean);
   if (
     fields.length > 50 ||
-    fields.some((v) => !/^[a-z0-9_-]{1,64}\.[a-z0-9_-]{1,64}$/i.test(v))
+    fields.some(
+      (v) =>
+        !/^(?:(?:order|product|variant):)?[a-z0-9_-]{1,64}\.[a-z0-9_-]{1,64}(?:\.[a-z0-9_-]{1,64})?$/i.test(
+          v,
+        ),
+    )
   )
     throw new Error(
-      "Metafields must use namespace.key and contain at most 50 entries",
+      "Metafields must use [order:|product:|variant:]namespace.key[.metaobject_field] and contain at most 50 entries",
     );
   const retention = Number(form.get("retentionDays") ?? 30);
   if (!Number.isInteger(retention) || retention < 1 || retention > 365)

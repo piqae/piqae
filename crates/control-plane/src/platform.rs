@@ -7,8 +7,10 @@ use axum::{
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
 };
-use piqae_auth::{Scope, generate_platform_service_account_key};
-use piqae_storage_postgres::StoredPlatformAccount;
+use piqae_auth::{
+    Scope, generate_platform_service_account_key, rotate_platform_service_account_key,
+};
+use piqae_storage_postgres::{StoredPlatformAccount, StoredPlatformCredential};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -31,20 +33,27 @@ pub struct PlatformEnableResponse {
     secret: String,
 }
 
-impl std::fmt::Debug for PlatformEnableResponse {
+#[derive(Serialize)]
+pub struct PlatformCredentialSecretResponse {
+    #[serde(flatten)]
+    credential: StoredPlatformCredential,
+    secret: String,
+}
+
+impl std::fmt::Debug for PlatformCredentialSecretResponse {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
-            .debug_struct("PlatformEnableResponse")
-            .field("enabled", &self.enabled)
+            .debug_struct("PlatformCredentialSecretResponse")
+            .field("credential", &self.credential)
             .field("secret", &"[REDACTED]")
             .finish()
     }
 }
 
-pub async fn enable(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Result<Response, AppError> {
+async fn authenticate_human_manager(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<crate::authentication::TenantContext, AppError> {
     if headers.contains_key("x-piqae-workspace-id")
         || headers.contains_key("x-piqae-environment-id")
         || headers.contains_key("x-spool-workspace-id")
@@ -64,6 +73,24 @@ pub async fn enable(
     if !tenant.allows(Scope::ApiKeysWrite) {
         return Err(AppError::forbidden());
     }
+    Ok(tenant)
+}
+
+impl std::fmt::Debug for PlatformEnableResponse {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PlatformEnableResponse")
+            .field("enabled", &self.enabled)
+            .field("secret", &"[REDACTED]")
+            .finish()
+    }
+}
+
+pub async fn enable(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let tenant = authenticate_human_manager(&state, &headers).await?;
     let credential = generate_platform_service_account_key()
         .map_err(|_| AppError::service_unavailable("credential_generation_failed"))?;
     state
@@ -91,6 +118,64 @@ pub async fn enable(
         .headers_mut()
         .insert(header::PRAGMA, HeaderValue::from_static("no-cache"));
     Ok(response)
+}
+
+pub async fn credential(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<StoredPlatformCredential>, AppError> {
+    let tenant = authenticate_human_manager(&state, &headers).await?;
+    Ok(Json(
+        state
+            .repository
+            .get_platform_credential(tenant.workspace_id)
+            .await?,
+    ))
+}
+
+pub async fn rotate_credential(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let tenant = authenticate_human_manager(&state, &headers).await?;
+    let current = state
+        .repository
+        .get_platform_credential(tenant.workspace_id)
+        .await?;
+    let id = current
+        .id
+        .parse()
+        .map_err(|_| AppError::service_unavailable("invalid_platform_credential_id"))?;
+    let generated = rotate_platform_service_account_key(id)
+        .map_err(|_| AppError::service_unavailable("credential_generation_failed"))?;
+    let credential = state
+        .repository
+        .rotate_platform_manager(tenant.workspace_id, &generated.password_hash)
+        .await?;
+    let mut response = Json(PlatformCredentialSecretResponse {
+        credential,
+        secret: generated.plaintext,
+    })
+    .into_response();
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
+        .headers_mut()
+        .insert(header::PRAGMA, HeaderValue::from_static("no-cache"));
+    Ok(response)
+}
+
+pub async fn revoke_credential(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<StatusCode, AppError> {
+    let tenant = authenticate_human_manager(&state, &headers).await?;
+    state
+        .repository
+        .revoke_platform_manager(tenant.workspace_id)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 pub async fn status(

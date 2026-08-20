@@ -539,6 +539,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/platform/credential": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Inspect the active platform credential for the current workspace
+         * @description Returns safe metadata only. The secret is never returned. This operation
+         *     accepts only an authorised human dashboard bearer; ordinary API keys and
+         *     platform credentials are rejected.
+         */
+        get: operations["getPlatformCredential"];
+        put?: never;
+        /**
+         * Rotate the active platform credential
+         * @description Atomically replaces the secret for the current workspace's platform
+         *     credential. The previous secret stops authenticating immediately. The
+         *     replacement secret is returned once and cannot be retrieved later.
+         */
+        post: operations["rotatePlatformCredential"];
+        /**
+         * Revoke the active platform credential
+         * @description Immediately disables platform authentication for this workspace. Customer
+         *     account data is retained, but cannot be managed until platform mode is
+         *     enabled again with a new credential.
+         */
+        delete: operations["revokePlatformCredential"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/platform/accounts/{external_id}": {
         parameters: {
             query?: never;
@@ -2229,6 +2263,30 @@ export interface components {
             /** @description One-time platform credential for server-side storage. */
             secret: string;
         };
+        PlatformCredential: {
+            /** Format: uuid */
+            id: string;
+            name: string;
+            /** @description Non-secret credential prefix suitable for identification. */
+            lookup_prefix: string;
+            /** Format: date-time */
+            last_used_at?: string | null;
+            /** Format: date-time */
+            created_at: string;
+        };
+        PlatformCredentialSecret: {
+            /** Format: uuid */
+            id: string;
+            name: string;
+            /** @description Non-secret credential prefix suitable for identification. */
+            lookup_prefix: string;
+            /** Format: date-time */
+            last_used_at?: string | null;
+            /** Format: date-time */
+            created_at: string;
+            /** @description One-time replacement platform credential. */
+            secret: string;
+        };
         PlatformAccountEnvironment: {
             id: string;
             /** @enum {string} */
@@ -2448,9 +2506,11 @@ export interface components {
             node_id: string | null;
             /**
              * Format: uri
-             * @description Associated Domains verified HTTPS Universal Link returned only at creation.
+             * @description HTTPS handoff and installer fallback returned only at creation.
              */
             connect_url?: string | null;
+            /** @description One-time piqae:// native-app handoff returned only at creation. Launch only from an explicit user gesture and fall back to connect_url. */
+            native_connect_url?: string | null;
             /**
              * Format: uri
              * @description Returned only at creation.
@@ -3578,6 +3638,15 @@ export interface components {
             value: components["schemas"]["BusinessDocumentExpression"];
         } | {
             /** @constant */
+            type: "exists";
+            value: components["schemas"]["BusinessDocumentExpression"];
+        } | {
+            /** @constant */
+            type: "contains";
+            collection: components["schemas"]["BusinessDocumentExpression"];
+            value: components["schemas"]["BusinessDocumentExpression"];
+        } | {
+            /** @constant */
             type: "arithmetic";
             /** @enum {unknown} */
             operator: "add" | "subtract" | "multiply" | "divide";
@@ -3622,6 +3691,29 @@ export interface components {
              * @enum {unknown}
              */
             align?: "left" | "center" | "right";
+            color?: components["schemas"]["BusinessDocumentColor"];
+        };
+        BusinessDocumentColor: {
+            red: number;
+            green: number;
+            blue: number;
+        };
+        BusinessDocumentBoxStyle: {
+            /** @default 0 */
+            padding_mm?: number;
+            background?: components["schemas"]["BusinessDocumentColor"];
+            border_color?: components["schemas"]["BusinessDocumentColor"];
+            /** @default 0 */
+            border_width_pt?: number;
+        };
+        BusinessDocumentTableStyle: {
+            /** @default 1 */
+            cell_padding_mm?: number;
+            header_background?: components["schemas"]["BusinessDocumentColor"];
+            header_text_color?: components["schemas"]["BusinessDocumentColor"];
+            border_color?: components["schemas"]["BusinessDocumentColor"];
+            /** @default 0.25 */
+            border_width_pt?: number;
         };
         BusinessDocumentInline: {
             /** @constant */
@@ -3643,6 +3735,11 @@ export interface components {
             children: components["schemas"]["BusinessDocumentNode"][];
             /** @default 0 */
             gap_mm?: number;
+        } | {
+            /** @constant */
+            type: "box";
+            children: components["schemas"]["BusinessDocumentNode"][];
+            style?: components["schemas"]["BusinessDocumentBoxStyle"];
         } | {
             /** @constant */
             type: "paragraph";
@@ -3670,6 +3767,7 @@ export interface components {
             /** @default false */
             repeat_header?: boolean;
             empty?: components["schemas"]["BusinessDocumentNode"][];
+            style?: components["schemas"]["BusinessDocumentTableStyle"];
         } | {
             /** @constant */
             type: "repeat";
@@ -4764,6 +4862,75 @@ export interface operations {
             403: components["responses"]["Error"];
             404: components["responses"]["Error"];
             409: components["responses"]["Error"];
+        };
+    };
+    getPlatformCredential: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Active platform credential metadata. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PlatformCredential"];
+                };
+            };
+            401: components["responses"]["Error"];
+            403: components["responses"]["Error"];
+            404: components["responses"]["Error"];
+        };
+    };
+    rotatePlatformCredential: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Credential rotated and one-time replacement secret issued. */
+            200: {
+                headers: {
+                    "Cache-Control"?: string;
+                    Pragma?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PlatformCredentialSecret"];
+                };
+            };
+            401: components["responses"]["Error"];
+            403: components["responses"]["Error"];
+            404: components["responses"]["Error"];
+        };
+    };
+    revokePlatformCredential: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Platform credential revoked. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Error"];
+            403: components["responses"]["Error"];
+            404: components["responses"]["Error"];
         };
     };
     getPlatformAccount: {

@@ -519,6 +519,8 @@ pub struct NodeConnectSessionResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     connect_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    native_connect_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     return_url: Option<String>,
     downloads: Vec<NodeConnectDownload>,
 }
@@ -576,6 +578,7 @@ pub async fn create_node_connect_session(
         expires_at,
         node_id: None,
         connect_url: Some(format!("https://app.piqae.com/connect#{fragment}")),
+        native_connect_url: Some(format!("piqae://connect#{fragment}")),
         return_url,
         downloads: connect_downloads(),
     };
@@ -615,6 +618,7 @@ pub async fn get_node_connect_session(
         expires_at,
         node_id,
         connect_url: None,
+        native_connect_url: None,
         return_url: None,
         downloads: connect_downloads(),
     }))
@@ -710,15 +714,15 @@ fn connect_downloads() -> Vec<NodeConnectDownload> {
     vec![
         NodeConnectDownload {
             platform: "macos",
-            url: "/downloads?platform=macos",
+            url: "https://app.piqae.com/downloads?platform=macos",
         },
         NodeConnectDownload {
             platform: "windows",
-            url: "/downloads?platform=windows",
+            url: "https://app.piqae.com/downloads?platform=windows",
         },
         NodeConnectDownload {
             platform: "linux",
-            url: "/downloads?platform=linux",
+            url: "https://app.piqae.com/downloads?platform=linux",
         },
     ]
 }

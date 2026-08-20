@@ -80,7 +80,7 @@ export const load: PageServerLoad = async (event) => {
       },
       portalAvailable: stripePortalAvailable()
     },
-    apiKeys: loadApiKeys(event),
+    apiKeys: loadApiKeys(event, meta.platform.accounts),
     platform: meta.platform.accounts ? loadPlatform(event) : null,
     webhooks: loadWebhooks(event),
     team: meta.auth.invitations && authMode === 'workos' ? loadTeam(event) : null,
@@ -112,10 +112,17 @@ function preferredInterval(event: RequestEvent): 'monthly' | 'annual' {
   }
 }
 
-async function loadApiKeys(event: RequestEvent) {
+async function loadApiKeys(event: RequestEvent, includePlatform: boolean) {
   try {
-    const apiKeys = await dashboardSource(event).api.apiKeys();
-    return { items: apiKeys.data, dataError: null };
+    const source = dashboardSource(event).api;
+    const [apiKeys, platformCredential] = await Promise.all([
+      source.apiKeys(),
+      includePlatform ? source.platformCredential() : Promise.resolve(null)
+    ]);
+    return {
+      items: platformCredential ? [platformCredential, ...apiKeys.data] : apiKeys.data,
+      dataError: null
+    };
   } catch (error) {
     return { items: [], dataError: presentDashboardError(error) };
   }
@@ -211,6 +218,59 @@ export const actions: Actions = {
     } catch (error) {
       return fail(502, {
         mutation: 'enablePlatform',
+        error: { message: presentDashboardError(error).message }
+      });
+    }
+  },
+
+  rotatePlatformCredential: async (event) => {
+    preventSecretCaching(event);
+    if (dashboardMode() !== 'live') {
+      return fail(400, {
+        mutation: 'rotatePlatformCredential',
+        error: { message: 'Platform credential rotation is disabled while demo data is active.' }
+      });
+    }
+    const current = actor(event);
+    if (authMode === 'workos' && (!current || !canManage(current.role))) {
+      return fail(403, {
+        mutation: 'rotatePlatformCredential',
+        error: { message: 'Only workspace owners and admins can rotate this credential.' }
+      });
+    }
+    try {
+      return {
+        mutation: 'rotatePlatformCredential',
+        platformCredential: await dashboardSource(event).api.rotatePlatformCredential()
+      };
+    } catch (error) {
+      return fail(502, {
+        mutation: 'rotatePlatformCredential',
+        error: { message: presentDashboardError(error).message }
+      });
+    }
+  },
+
+  revokePlatformCredential: async (event) => {
+    if (dashboardMode() !== 'live') {
+      return fail(400, {
+        mutation: 'revokePlatformCredential',
+        error: { message: 'Platform credential revocation is disabled while demo data is active.' }
+      });
+    }
+    const current = actor(event);
+    if (authMode === 'workos' && (!current || !canManage(current.role))) {
+      return fail(403, {
+        mutation: 'revokePlatformCredential',
+        error: { message: 'Only workspace owners and admins can revoke this credential.' }
+      });
+    }
+    try {
+      await dashboardSource(event).api.revokePlatformCredential();
+      return { mutation: 'revokePlatformCredential', revokedPlatformCredential: true };
+    } catch (error) {
+      return fail(502, {
+        mutation: 'revokePlatformCredential',
         error: { message: presentDashboardError(error).message }
       });
     }

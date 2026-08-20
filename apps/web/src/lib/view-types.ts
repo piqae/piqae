@@ -132,7 +132,8 @@ export interface DashboardApiKey {
   id: string;
   name: string;
   prefix: string;
-  environment: 'test' | 'live';
+  environment: 'test' | 'live' | 'platform';
+  kind?: 'api_key' | 'platform';
   scopes: string[];
   lastUsedAt: string | null;
   createdAt: string;

@@ -74,14 +74,21 @@ describe("merchant workflow persistence", () => {
 describe("settings validation", () => {
   it("deduplicates valid allowlisted metafields", () => {
     const form = new FormData();
-    form.set("metafields", "custom.vat\ncustom.vat\nlogistics.route");
+    form.set(
+      "metafields",
+      "custom.vat\ncustom.vat\nlogistics.route\nproduct:custom.origin.country",
+    );
     form.set("retentionDays", "45");
     form.set("preferDirect", "on");
     form.set("renderExecutionPolicy", "prefer_node");
     expect(parseSettings(form)).toMatchObject({
       retentionDays: 45,
       preferDirect: true,
-      metafieldAllowlist: ["custom.vat", "logistics.route"],
+      metafieldAllowlist: [
+        "custom.vat",
+        "logistics.route",
+        "product:custom.origin.country",
+      ],
       renderExecutionPolicy: "prefer_node",
     });
   });
@@ -112,12 +119,12 @@ describe("template source validation", () => {
 });
 
 describe("hybrid template authority", () => {
-  it("seeds four immutable published defaults once", async () => {
+  it("seeds the focused immutable published defaults once", async () => {
     const repository = new MemoryWorkflowRepository();
     await seedStarterTemplates(repository, alpha);
     await seedStarterTemplates(repository, alpha);
     const templates = await repository.listTemplates(alpha);
-    expect(templates).toHaveLength(4);
+    expect(templates).toHaveLength(2);
     expect(
       templates.every(
         (value) => parseTemplateEnvelope(value.source).system?.immutable,
@@ -132,7 +139,7 @@ describe("hybrid template authority", () => {
       await repository.listTemplates(alpha),
       await repository.getSettings(alpha),
     );
-    expect(index.documents).toHaveLength(4);
+    expect(index.documents).toHaveLength(2);
     expect(JSON.stringify(index)).not.toContain("canonical");
     expect(index.digest).toMatch(/^[a-f0-9]{64}$/);
   });

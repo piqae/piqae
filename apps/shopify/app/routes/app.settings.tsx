@@ -1,5 +1,6 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
-import { Form, useActionData, useLoaderData } from "react-router";
+import { Form, useActionData, useFetcher, useLoaderData } from "react-router";
+import { useEffect, useState } from "react";
 import shopify from "../shopify.server";
 import { parseSettings, workflows } from "../core/workflows.server";
 import { syncTemplateIndex } from "../core/template-index.server";
@@ -71,49 +72,91 @@ export default function Settings() {
   const { settings, connected, runtime, nodes, printers, setupError } =
     useLoaderData<typeof loader>();
   const result = useActionData<typeof action>();
+  const connector = useFetcher<typeof action>();
+  const [showInstaller, setShowInstaller] = useState(false);
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const connection = connector.data?.connection;
+  const [detectedPlatform, setDetectedPlatform] = useState<
+    "macos" | "windows" | "linux"
+  >("macos");
+  useEffect(() => {
+    const value = navigator.userAgent.toLowerCase();
+    setDetectedPlatform(
+      value.includes("win")
+        ? "windows"
+        : value.includes("linux")
+          ? "linux"
+          : "macos",
+    );
+  }, []);
+  const installer = connection?.downloads.find(
+    (download) => download.platform === detectedPlatform,
+  );
+
+  useEffect(() => {
+    if (!connection?.native_connect_url) return;
+    setShowInstaller(false);
+    window.location.assign(connection.native_connect_url);
+    const timer = window.setTimeout(() => setShowInstaller(true), 1800);
+    return () => window.clearTimeout(timer);
+  }, [connection?.native_connect_url]);
+
+  const hasPrinters = printers.length > 0;
   return (
     <s-page heading="Settings">
-      <s-section heading="Printers">
+      <s-section heading={hasPrinters ? "Printers" : "Connect a printer"}>
         <s-stack direction="block" gap="base">
-          <s-banner tone={connected ? "success" : "warning"}>
-            {connected
-              ? `${nodes.length} node${nodes.length === 1 ? "" : "s"} and ${printers.length} printer${printers.length === 1 ? "" : "s"} connected.`
-              : setupError}
-          </s-banner>
-          <s-paragraph>
-            Your Piqae workspace is managed automatically by this Shopify app.
-            No separate Piqae account or API key is required.
-          </s-paragraph>
-          <Form method="post">
+          {!connected ? <s-banner tone="warning">{setupError}</s-banner> : null}
+          {hasPrinters ? (
+            <s-paragraph>
+              {printers.length} printer{printers.length === 1 ? "" : "s"}{" "}
+              connected across {nodes.length} computer
+              {nodes.length === 1 ? "" : "s"}.
+            </s-paragraph>
+          ) : (
+            <s-paragraph>
+              Install or open Piqae on the computer connected to your printer.
+              This store manages the secure connection automatically—no Piqae
+              account or API key is needed.
+            </s-paragraph>
+          )}
+          <connector.Form method="post">
             <input type="hidden" name="intent" value="connect-node" />
-            <s-button type="submit" variant="primary" disabled={!connected}>
-              Connect this computer
+            <s-button
+              type="submit"
+              variant="primary"
+              disabled={!connected || connector.state !== "idle"}
+            >
+              {connector.state === "idle"
+                ? "Connect this computer"
+                : "Preparing connection…"}
             </s-button>
-          </Form>
-          {result?.connection ? (
+          </connector.Form>
+          {connection ? (
             <s-stack direction="block" gap="base">
-              {result.connection.connect_url ? (
+              {connection.native_connect_url ? (
                 <s-button
-                  href={result.connection.connect_url}
-                  variant="primary"
+                  onClick={() =>
+                    window.location.assign(connection.native_connect_url!)
+                  }
                 >
-                  Open Piqae Node
+                  Try opening Piqae again
                 </s-button>
               ) : null}
-              {result.connection.downloads.map((download) => (
-                <s-button key={download.platform} href={download.url}>
-                  Download for {download.platform}
+              {showInstaller && installer ? (
+                <s-button href={installer.url} target="_top">
+                  Download Piqae for {installer.platform}
                 </s-button>
-              ))}
+              ) : null}
               <s-paragraph>
-                This connection link expires in 10 minutes and can connect only
-                to this store's isolated printing workspace.
+                The secure connection expires in 10 minutes and can be used
+                once.
               </s-paragraph>
             </s-stack>
           ) : null}
         </s-stack>
       </s-section>
-      <s-section heading="Printing defaults">
+      <s-section heading="Documents and printing">
         <Form method="post">
           <s-stack direction="block" gap="base">
             {result?.ok ? (
@@ -121,32 +164,49 @@ export default function Settings() {
             ) : result?.error ? (
               <s-banner tone="critical">{result.error}</s-banner>
             ) : null}
-            <label>
-              Default printer ID
-              <input
-                className="piqae-input"
-                name="defaultPrinterId"
-                maxLength={200}
-                defaultValue={settings.defaultPrinterId}
-              />
-            </label>
-            <label>
-              Default template ID
-              <input
-                className="piqae-input"
-                name="defaultTemplateId"
-                maxLength={200}
-                defaultValue={settings.defaultTemplateId}
-              />
-            </label>
-            <label className="piqae-check">
-              <input
-                type="checkbox"
-                name="preferDirect"
-                defaultChecked={settings.preferDirect}
-              />{" "}
-              Prefer direct printing when a node is ready
-            </label>
+            {hasPrinters ? (
+              <>
+                <s-select
+                  label="Default printer"
+                  name="defaultPrinterId"
+                  value={settings.defaultPrinterId}
+                >
+                  <option value="">Ask each time</option>
+                  {settings.defaultPrinterId &&
+                  !printers.some(
+                    (printer) => printer.id === settings.defaultPrinterId,
+                  ) ? (
+                    <option value={settings.defaultPrinterId} disabled>
+                      Previously selected printer (unavailable)
+                    </option>
+                  ) : null}
+                  {printers.map((printer) => (
+                    <option key={printer.id} value={printer.id}>
+                      {printer.name}
+                      {printer.state === "online" ? "" : ` (${printer.state})`}
+                    </option>
+                  ))}
+                </s-select>
+                <label className="piqae-check">
+                  <input
+                    type="checkbox"
+                    name="preferDirect"
+                    defaultChecked={settings.preferDirect}
+                  />{" "}
+                  Prefer direct printing when a node is ready
+                </label>
+              </>
+            ) : (
+              <input type="hidden" name="defaultPrinterId" value="" />
+            )}
+            <input
+              type="hidden"
+              name="defaultTemplateId"
+              value={settings.defaultTemplateId}
+            />
+            {!hasPrinters && settings.preferDirect ? (
+              <input type="hidden" name="preferDirect" value="on" />
+            ) : null}
             <label className="piqae-check">
               <input
                 type="checkbox"
@@ -155,56 +215,57 @@ export default function Settings() {
               />{" "}
               Keep PDF download available
             </label>
-            <s-select
-              label="Document rendering"
-              name="renderExecutionPolicy"
-              value={settings.renderExecutionPolicy}
+            <s-button
+              type="button"
+              onClick={() => setShowAdvanced((value) => !value)}
             >
-              <option value="automatic">Automatic (recommended)</option>
-              <option value="cloud_only">Cloud only</option>
-              <option value="prefer_node">Prefer node (advanced)</option>
-              <option value="require_node">Require node rendering</option>
-            </s-select>
-            <s-paragraph>
-              Automatic chooses the fastest compatible path and safely falls
-              back to the exact cloud-rendered preview. Cloud only always sends
-              that preview PDF. Prefer node uses a compatible ready node when
-              possible, with safe PDF fallback. Require node blocks printing
-              unless the selected destination reports a compatible renderer that
-              can acquire every required supported resource.
-            </s-paragraph>
-            {settings.renderExecutionPolicy === "require_node" ? (
-              <s-banner tone="warning">
-                Requiring node rendering can delay or block a print while a node
-                downloads supported images or other required renderer resources.
-                PDF download remains available when enabled.
-              </s-banner>
-            ) : null}
-            <label>
-              Retention in days
-              <input
-                className="piqae-input"
-                type="number"
-                name="retentionDays"
-                min={1}
-                max={365}
-                defaultValue={settings.retentionDays}
-              />
-            </label>
-            <label>
-              Allowed Shopify metafields{" "}
-              <span className="piqae-muted">(one namespace.key per line)</span>
-              <textarea
-                className="piqae-code piqae-code-short"
-                name="metafields"
-                defaultValue={settings.metafieldAllowlist.join("\n")}
-              />
-            </label>
-            <s-paragraph>
-              Only allowlisted metafields are requested and exposed to
-              templates. Secrets and protected customer data should never be
-              allowlisted.
-            </s-paragraph>
+              {showAdvanced ? "Hide advanced settings" : "Advanced settings"}
+            </s-button>
+            <div hidden={!showAdvanced}>
+              <s-stack direction="block" gap="base">
+                <s-select
+                  label="Where documents are prepared"
+                  name="renderExecutionPolicy"
+                  value={settings.renderExecutionPolicy}
+                >
+                  <option value="automatic">Automatic (recommended)</option>
+                  <option value="cloud_only">Piqae Cloud</option>
+                  <option value="prefer_node">
+                    This computer when compatible
+                  </option>
+                  <option value="require_node">Only this computer</option>
+                </s-select>
+                <s-paragraph>
+                  Automatic uses the fastest compatible option and always falls
+                  back to the exact preview PDF when the connected app is older.
+                </s-paragraph>
+                <label>
+                  Keep completed documents for (days)
+                  <input
+                    className="piqae-input"
+                    type="number"
+                    name="retentionDays"
+                    min={1}
+                    max={365}
+                    defaultValue={settings.retentionDays}
+                  />
+                </label>
+                <label>
+                  Template metafields
+                  <textarea
+                    className="piqae-code piqae-code-short"
+                    name="metafields"
+                    defaultValue={settings.metafieldAllowlist.join("\n")}
+                  />
+                </label>
+                <s-paragraph>
+                  Optional. Add one field per line as namespace.key for an
+                  order, or product:namespace.key / variant:namespace.key. Add a
+                  final .field to expose an allowlisted referenced metaobject
+                  field.
+                </s-paragraph>
+              </s-stack>
+            </div>
             <s-button type="submit" variant="primary">
               Save settings
             </s-button>

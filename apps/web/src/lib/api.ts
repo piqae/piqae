@@ -17,6 +17,9 @@ export interface DashboardApi {
   meta(): Promise<DashboardMeta>;
   platformEnabled(): Promise<boolean>;
   enablePlatform(): Promise<{ enabled: true; secret: string }>;
+  platformCredential(): Promise<DashboardApiKey | null>;
+  rotatePlatformCredential(): Promise<DashboardApiKey & { secret: string }>;
+  revokePlatformCredential(): Promise<void>;
   overview(): Promise<DashboardOverview>;
   agents(): Promise<DashboardPage<DashboardAgent>>;
   printers(): Promise<DashboardPage<DashboardPrinter>>;
@@ -45,6 +48,23 @@ export const mockApi: DashboardApi = {
     }),
   platformEnabled: () => delay(true),
   enablePlatform: () => delay({ enabled: true, secret: 'demo-platform-secret' }),
+  platformCredential: () =>
+    delay({
+      id: '00000000-0000-7000-8000-000000000001',
+      name: 'Piqae platform integration',
+      prefix: 'piq_platform_00000000-0000-7000-8000-000000000001',
+      environment: 'platform',
+      kind: 'platform',
+      scopes: [],
+      lastUsedAt: null,
+      createdAt: '2026-08-20T00:00:00.000Z'
+    }),
+  rotatePlatformCredential: async () => {
+    throw new Error('Demo mode does not rotate credentials.');
+  },
+  revokePlatformCredential: async () => {
+    throw new Error('Demo mode does not revoke credentials.');
+  },
   overview: () =>
     delay({
       agents: {
@@ -334,6 +354,31 @@ export function createLiveApi(
       }
       return { enabled: true, secret: value.secret };
     },
+    platformCredential: async () => {
+      const response = await platformRequest('/v1/platform/credential');
+      if (response.status === 404) return null;
+      if (!response.ok) {
+        throw new Error(`Piqae platform credential request failed with HTTP ${response.status}.`);
+      }
+      return parsePlatformCredential(await response.json());
+    },
+    rotatePlatformCredential: async () => {
+      const response = await platformRequest('/v1/platform/credential', { method: 'POST' });
+      if (!response.ok) {
+        throw new Error(`Piqae platform rotation failed with HTTP ${response.status}.`);
+      }
+      const value: unknown = await response.json();
+      if (!isRecord(value) || typeof value.secret !== 'string') {
+        throw new Error('Piqae platform rotation response was invalid.');
+      }
+      return { ...parsePlatformCredential(value), secret: value.secret };
+    },
+    revokePlatformCredential: async () => {
+      const response = await platformRequest('/v1/platform/credential', { method: 'DELETE' });
+      if (!response.ok) {
+        throw new Error(`Piqae platform revocation failed with HTTP ${response.status}.`);
+      }
+    },
     accounts: async () => {
       const response = await platformRequest('/v1/platform/accounts');
       if (!response.ok) {
@@ -427,6 +472,27 @@ export function parseDashboardAccount(value: unknown): DashboardAccount {
     },
     createdAt: value.created_at as string,
     updatedAt: value.updated_at as string
+  };
+}
+
+export function parsePlatformCredential(value: unknown): DashboardApiKey {
+  if (!isRecord(value)) throw new Error('Piqae platform credential response was invalid.');
+  const required = [value.id, value.name, value.lookup_prefix, value.created_at];
+  if (required.some((item) => typeof item !== 'string' || item === '')) {
+    throw new Error('Piqae platform credential response was invalid.');
+  }
+  if (value.last_used_at !== null && typeof value.last_used_at !== 'string') {
+    throw new Error('Piqae platform credential response was invalid.');
+  }
+  return {
+    id: value.id as string,
+    name: value.name as string,
+    prefix: value.lookup_prefix as string,
+    environment: 'platform',
+    kind: 'platform',
+    scopes: [],
+    lastUsedAt: value.last_used_at as string | null,
+    createdAt: value.created_at as string
   };
 }
 

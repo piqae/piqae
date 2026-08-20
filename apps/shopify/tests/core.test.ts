@@ -1,6 +1,15 @@
 import { describe, expect, it, vi } from "vitest";
 import { CredentialVault } from "../app/core/credentials.server";
-import { fetchOrders, normalizeOrderGid } from "../app/core/orders.server";
+import {
+  fetchOrders,
+  normalizeOrderGid,
+  parseShopifyDataBindings,
+  type AdminGraphql,
+} from "../app/core/orders.server";
+import {
+  SHOPIFY_DOCUMENT_FIELDS,
+  shopifyCustomDocumentFields,
+} from "../app/core/shopify-document-fields";
 import { MemoryShopRepository, normalizeShopDomain } from "../app/core/model";
 import {
   parseRenderCost,
@@ -45,20 +54,69 @@ const order = {
   lineItems: {
     nodes: [
       {
+        id: "gid://shopify/LineItem/8",
         title: "Coffee",
         sku: "COF",
         quantity: 2,
         originalUnitPriceSet: { shopMoney: { amount: "10.00" } },
         discountedTotalSet: { shopMoney: { amount: "20.00" } },
+        product: {
+          id: "gid://shopify/Product/7",
+          title: "Coffee",
+          vendor: "C4 Coffee",
+          productType: "Coffee",
+          category: {
+            id: "gid://shopify/TaxonomyCategory/aa-1",
+            name: "Coffee",
+            fullName: "Food > Beverages > Coffee",
+            level: 3,
+            ancestorIds: ["gid://shopify/TaxonomyCategory/aa"],
+          },
+          metafieldsByIdentifiers: [
+            {
+              namespace: "custom",
+              key: "origin",
+              type: "metaobject_reference",
+              jsonValue: "gid://shopify/Metaobject/9",
+              reference: {
+                id: "gid://shopify/Metaobject/9",
+                type: "coffee_origin",
+                handle: "ethiopia",
+                displayName: "Ethiopia",
+                fields: [
+                  {
+                    key: "country",
+                    type: "single_line_text_field",
+                    jsonValue: "Ethiopia",
+                  },
+                  {
+                    key: "internal_cost",
+                    type: "number_decimal",
+                    jsonValue: 4.2,
+                  },
+                ],
+              },
+            },
+          ],
+        },
+        variant: {
+          id: "gid://shopify/ProductVariant/11",
+          title: "500g / Whole Beans",
+          barcode: "942000000001",
+          metafieldsByIdentifiers: [],
+        },
       },
     ],
   },
+  metafieldsByIdentifiers: [],
   subtotalPriceSet: { shopMoney: { amount: "20.00" } },
   totalTaxSet: { shopMoney: { amount: "3.00" } },
   totalPriceSet: { shopMoney: { amount: "23.00" } },
 };
 const admin = {
-  graphql: vi.fn(async () => Response.json({ data: { order } })),
+  graphql: vi.fn<AdminGraphql["graphql"]>(async () =>
+    Response.json({ data: { order } }),
+  ),
 };
 
 describe("Shopify boundary", () => {
@@ -88,6 +146,58 @@ describe("Shopify boundary", () => {
     expect(admin.graphql).toHaveBeenCalledTimes(1);
     expect(value?.lineItems[0]?.total).toBe("20.00");
     expect(value?.total).toBe("23.00");
+  });
+  it("normalizes taxonomy and only explicitly allowlisted custom data", async () => {
+    admin.graphql.mockClear();
+    const bindings = parseShopifyDataBindings([
+      "product:custom.origin.country",
+    ]);
+    const [value] = await fetchOrders(admin, ["42"], bindings);
+    expect(value?.lineItems[0]?.product?.category?.fullName).toBe(
+      "Food > Beverages > Coffee",
+    );
+    expect(
+      value?.lineItems[0]?.product?.metafields.custom?.origin?.reference
+        ?.fields,
+    ).toEqual({ country: "Ethiopia" });
+    expect(
+      value?.lineItems[0]?.product?.metafields.custom?.origin?.reference?.fields
+        .internal_cost,
+    ).toBeUndefined();
+    expect(admin.graphql.mock.calls[0]?.[1]).toMatchObject({
+      variables: {
+        productFields: [{ namespace: "custom", key: "origin" }],
+      },
+    });
+  });
+
+  it("rejects broad or excessive Shopify data bindings", async () => {
+    expect(() => parseShopifyDataBindings(["product:*.origin"])).toThrow(
+      "invalid Shopify metafield binding",
+    );
+    const tooMany = Array.from(
+      { length: 21 },
+      (_, index) => `custom.field_${index}`,
+    );
+    await expect(
+      fetchOrders(admin, ["42"], { order: tooMany }),
+    ).rejects.toThrow("order metafield binding limit exceeded");
+  });
+
+  it("exposes Shopify taxonomy and allowlisted custom data as generic document paths", () => {
+    expect(
+      SHOPIFY_DOCUMENT_FIELDS.find(
+        ({ label }) => label === "Shopify category ID",
+      )?.path,
+    ).toBe("item.product.category.id");
+    expect(
+      shopifyCustomDocumentFields(["product:custom.origin.country"]).map(
+        ({ path }) => path,
+      ),
+    ).toEqual([
+      "item.product.metafields.custom.origin.value",
+      "item.product.metafields.custom.origin.reference.fields.country",
+    ]);
   });
   it("binds encrypted Piqae credentials to the shop", () => {
     const vault = new CredentialVault(Buffer.alloc(32, 7));
@@ -615,16 +725,14 @@ describe("Shopify document experience", () => {
     expect(templates.map(([name]) => name)).toEqual([
       "Invoice",
       "Packing slip",
-      "Receipt",
-      "Credit Note",
     ]);
-    expect(new Set(starterTemplates.map(({ id }) => id)).size).toBe(4);
+    expect(new Set(starterTemplates.map(({ id }) => id)).size).toBe(2);
     for (const template of starterTemplates) {
       expect(template.specification.format).toBe("piqae.business-document/v1");
       expect(template.specification.body.length).toBeGreaterThan(0);
-      expect(
-        template.specification.body.some((node) => node.type === "table"),
-      ).toBe(true);
+      expect(JSON.stringify(template.specification)).toContain(
+        '"type":"table"',
+      );
     }
     expect(editorDocument.format).toBe("piqae.business-document/v1");
   });

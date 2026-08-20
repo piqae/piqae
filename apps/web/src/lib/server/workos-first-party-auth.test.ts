@@ -1,18 +1,19 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { authenticateWithPassword, authenticateWithTotp, createMagicAuth, createUserAuthFactor, challengeFactor, sealData, unsealData } = vi.hoisted(() => ({
+const { authenticateWithPassword, authenticateWithTotp, createMagicAuth, createUserAuthFactor, challengeFactor, revokeSession, sealData, unsealData } = vi.hoisted(() => ({
   authenticateWithPassword: vi.fn(),
   authenticateWithTotp: vi.fn(),
   createMagicAuth: vi.fn(),
   createUserAuthFactor: vi.fn(),
   challengeFactor: vi.fn(),
+  revokeSession: vi.fn(),
   sealData: vi.fn(),
   unsealData: vi.fn()
 }));
 
 vi.mock('@workos-inc/node', () => ({
   WorkOS: class {
-    userManagement = { authenticateWithPassword, authenticateWithTotp, createMagicAuth };
+    userManagement = { authenticateWithPassword, authenticateWithTotp, createMagicAuth, revokeSession };
     multiFactorAuth = { createUserAuthFactor, challengeFactor };
   }
 }));
@@ -34,6 +35,7 @@ import {
   beginTotpChallenge,
   completeTotp,
   isAdvancedChallenge,
+  revokeWorkosSession,
   saveWorkosSession
 } from './workos-first-party-auth';
 
@@ -51,6 +53,7 @@ function event(protocol = 'https:') {
       get: (name: string) => values.get(name)?.value,
       delete: (name: string) => values.delete(name)
     },
+    locals: {},
     values
   };
 }
@@ -82,6 +85,21 @@ describe('first-party WorkOS authentication boundary', () => {
       value: 'sealed-session',
       options: expect.objectContaining({ httpOnly: true, secure: true, sameSite: 'lax', path: '/' })
     });
+  });
+
+  it('revokes the provider session and clears every local authentication cookie', async () => {
+    const request = event();
+    request.locals = { auth: { sessionId: 'session_1' } };
+    request.values.set('wos-session', { value: 'sealed-session', options: {} });
+    request.values.set('piqae-auth-challenge', { value: 'opaque-mfa-state', options: {} });
+    request.values.set('piqae-magic-auth', { value: 'opaque-magic-state', options: {} });
+
+    await revokeWorkosSession(request as never);
+
+    expect(revokeSession).toHaveBeenCalledWith({ sessionId: 'session_1' });
+    expect(request.values.has('wos-session')).toBe(false);
+    expect(request.values.has('piqae-auth-challenge')).toBe(false);
+    expect(request.values.has('piqae-magic-auth')).toBe(false);
   });
 
   it('seals Magic Auth state server-side and never puts an email in the cookie', async () => {

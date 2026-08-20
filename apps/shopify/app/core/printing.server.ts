@@ -10,6 +10,7 @@ import type { CredentialVault } from "./credentials.server";
 import {
   fetchDraftOrders,
   fetchOrders,
+  parseShopifyDataBindings,
   type AdminGraphql,
 } from "./orders.server";
 import { workflows, type WorkflowRepository } from "./workflows.server";
@@ -57,7 +58,12 @@ export class ShopifyPrintingService {
       link.templateRevisionId,
       input.templateId,
     );
-    const orders = await fetchOrders(input.admin, input.orderIds);
+    const settings = await this.workflow.getSettings(shop);
+    const orders = await fetchOrders(
+      input.admin,
+      input.orderIds,
+      parseShopifyDataBindings(settings.metafieldAllowlist),
+    );
     const digest = createHash("sha256")
       .update(
         JSON.stringify({
@@ -213,10 +219,12 @@ export class ShopifyPrintingService {
       link.templateRevisionId,
       input.templateId,
     );
+    const settings = await this.workflow.getSettings(shop);
+    const bindings = parseShopifyDataBindings(settings.metafieldAllowlist);
     const orders =
       input.resourceType === "draft_orders"
-        ? await fetchDraftOrders(input.admin, input.orderIds)
-        : await fetchOrders(input.admin, input.orderIds);
+        ? await fetchDraftOrders(input.admin, input.orderIds, bindings)
+        : await fetchOrders(input.admin, input.orderIds, bindings);
     const digest = createHash("sha256")
       .update(
         JSON.stringify({

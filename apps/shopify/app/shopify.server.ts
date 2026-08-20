@@ -29,7 +29,7 @@ const shopify = shopifyApp({
   apiVersion: ApiVersion.July26,
   scopes: (
     process.env.SCOPES ??
-    "read_orders,read_draft_orders,read_products,read_customers"
+    "read_orders,read_draft_orders,read_products,read_customers,read_metaobjects"
   )
     .split(",")
     .map((scope) => scope.trim())

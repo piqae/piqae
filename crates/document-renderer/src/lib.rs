@@ -176,7 +176,7 @@ const fn default_font_size() -> f32 {
 const fn default_line_height() -> f32 {
     1.25
 }
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Color {
     pub red: u8,
@@ -224,6 +224,11 @@ pub enum Node {
         #[serde(default)]
         gap_mm: f32,
     },
+    Box {
+        children: Vec<Node>,
+        #[serde(default)]
+        style: BoxStyle,
+    },
     Paragraph {
         content: Vec<Inline>,
         #[serde(default)]
@@ -259,6 +264,8 @@ pub enum Node {
         repeat_header: bool,
         #[serde(default)]
         empty: Vec<Node>,
+        #[serde(default)]
+        style: TableStyle,
     },
     Repeat {
         items: Expr,
@@ -355,6 +362,53 @@ pub struct TextStyle {
     pub font_size_pt: Option<f32>,
     #[serde(default)]
     pub align: TextAlign,
+    #[serde(default)]
+    pub color: Option<Color>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BoxStyle {
+    #[serde(default)]
+    pub padding_mm: f32,
+    #[serde(default)]
+    pub background: Option<Color>,
+    #[serde(default)]
+    pub border_color: Option<Color>,
+    #[serde(default)]
+    pub border_width_pt: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TableStyle {
+    #[serde(default = "default_cell_padding")]
+    pub cell_padding_mm: f32,
+    #[serde(default)]
+    pub header_background: Option<Color>,
+    #[serde(default)]
+    pub header_text_color: Option<Color>,
+    #[serde(default)]
+    pub border_color: Option<Color>,
+    #[serde(default = "default_table_border_width")]
+    pub border_width_pt: f32,
+}
+impl Default for TableStyle {
+    fn default() -> Self {
+        Self {
+            cell_padding_mm: 1.0,
+            header_background: None,
+            header_text_color: None,
+            border_color: None,
+            border_width_pt: 0.25,
+        }
+    }
+}
+const fn default_cell_padding() -> f32 {
+    1.0
+}
+const fn default_table_border_width() -> f32 {
+    0.25
 }
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -415,6 +469,13 @@ pub enum Expr {
         values: Vec<Expr>,
     },
     Not {
+        value: Box<Expr>,
+    },
+    Exists {
+        value: Box<Expr>,
+    },
+    Contains {
+        collection: Box<Expr>,
         value: Box<Expr>,
     },
     Arithmetic {
@@ -493,12 +554,23 @@ enum Draw {
         text: String,
         face: FontFace,
         underline: bool,
+        color: Color,
     },
     Line {
         x1: f32,
         y: f32,
         x2: f32,
         width: f32,
+        color: Color,
+    },
+    Rect {
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        fill: Option<Color>,
+        stroke: Option<Color>,
+        stroke_width: f32,
     },
     Qr {
         x: f32,
@@ -718,6 +790,16 @@ fn validate_nodes(
             | Node::KeepTogether { children } => {
                 validate_nodes(children, depth + 1, count, limits)?
             }
+            Node::Box { children, style } => {
+                if !style.padding_mm.is_finite()
+                    || !(0.0..=50.0).contains(&style.padding_mm)
+                    || !style.border_width_pt.is_finite()
+                    || !(0.0..=10.0).contains(&style.border_width_pt)
+                {
+                    return Err(RenderError::Invalid("box style"));
+                }
+                validate_nodes(children, depth + 1, count, limits)?
+            }
             Node::Grid {
                 columns, children, ..
             } => {
@@ -732,7 +814,7 @@ fn validate_nodes(
                 validate_nodes(then, depth + 1, count, limits)?;
                 validate_nodes(otherwise, depth + 1, count, limits)?
             }
-            Node::Table { columns, .. } => {
+            Node::Table { columns, style, .. } => {
                 if columns.is_empty()
                     || columns.len() > limits.max_table_columns
                     || columns
@@ -740,6 +822,13 @@ fn validate_nodes(
                         .any(|c| !c.width.is_finite() || c.width <= 0.0)
                 {
                     return Err(RenderError::Invalid("table columns"));
+                }
+                if !style.cell_padding_mm.is_finite()
+                    || !(0.0..=20.0).contains(&style.cell_padding_mm)
+                    || !style.border_width_pt.is_finite()
+                    || !(0.0..=10.0).contains(&style.border_width_pt)
+                {
+                    return Err(RenderError::Invalid("table style"));
                 }
             }
             _ => {}
@@ -905,6 +994,7 @@ fn layout_nodes(nodes: &[Node], state: &mut State, depth: usize) -> Result<(), R
                 layout_nodes(children, state, depth + 1)?;
                 state.y -= checked_mm(*gap_mm, "gap")?
             }
+            Node::Box { children, style } => box_node(children, style, state, depth)?,
             Node::Row { children, gap_mm } => {
                 columns(children, &vec![1.0; children.len()], *gap_mm, state, depth)?
             }
@@ -918,7 +1008,8 @@ fn layout_nodes(nodes: &[Node], state: &mut State, depth: usize) -> Result<(), R
                 columns,
                 repeat_header,
                 empty,
-            } => table(items, columns, *repeat_header, empty, state)?,
+                style,
+            } => table(items, columns, *repeat_header, empty, style, state)?,
             Node::Repeat {
                 items,
                 children,
@@ -966,6 +1057,7 @@ fn layout_nodes(nodes: &[Node], state: &mut State, depth: usize) -> Result<(), R
                         y: state.y,
                         x2: state.x + state.content_width,
                         width: *width_pt,
+                        color: state.doc.theme.text_color,
                     },
                 )?;
                 state.y -= *width_pt + 2.0
@@ -1068,12 +1160,65 @@ fn columns(
     Ok(())
 }
 
+fn box_node(
+    children: &[Node],
+    style: &BoxStyle,
+    state: &mut State,
+    depth: usize,
+) -> Result<(), RenderError> {
+    let padding = checked_mm(style.padding_mm, "box padding")?;
+    if state.content_width <= padding * 2.0 {
+        return Err(RenderError::Invalid("box content width"));
+    }
+    let estimated = estimate_nodes(
+        children,
+        state.content_width - padding * 2.0,
+        state.doc.theme.font_size_pt,
+        state.doc.theme.line_height,
+    )? + padding * 2.0;
+    ensure_space(state, estimated)?;
+    let page = state.pages.len();
+    let draw_index = state.pages[page - 1].draws.len();
+    let old = (state.x, state.content_width);
+    let top = state.y;
+    state.x += padding;
+    state.content_width -= padding * 2.0;
+    state.y -= padding;
+    layout_nodes(children, state, depth + 1)?;
+    if state.pages.len() != page {
+        return Err(RenderError::Unsupported(
+            "box children cannot paginate in renderer ABI v1",
+        ));
+    }
+    state.y -= padding;
+    state.x = old.0;
+    state.content_width = old.1;
+    let height = top - state.y;
+    state.pages[page - 1].draws.insert(
+        draw_index,
+        Draw::Rect {
+            x: state.x,
+            y: state.y,
+            width: state.content_width,
+            height,
+            fill: style.background,
+            stroke: style.border_color,
+            stroke_width: style.border_width_pt,
+        },
+    );
+    Ok(())
+}
+
 fn paragraph(content: &[Inline], style: &TextStyle, state: &mut State) -> Result<(), RenderError> {
     let size = style.font_size_pt.unwrap_or(state.doc.theme.font_size_pt);
     if !size.is_finite() || !(4.0..=72.0).contains(&size) {
         return Err(RenderError::Invalid("font size"));
     }
-    let runs = resolve_runs(content, state.root, &state.current, style, size)?;
+    let mut resolved_style = style.clone();
+    if resolved_style.color.is_none() {
+        resolved_style.color = Some(state.doc.theme.text_color);
+    }
+    let runs = resolve_runs(content, state.root, &state.current, &resolved_style, size)?;
     let lines = wrap_runs(runs, state.content_width)?;
     for line in lines {
         let line_h = line
@@ -1104,6 +1249,7 @@ fn paragraph(content: &[Inline], style: &TextStyle, state: &mut State) -> Result
                     text: run.text,
                     face: run.face,
                     underline: run.underline,
+                    color: run.color,
                 },
             )?;
             run_x += run_width;
@@ -1120,6 +1266,7 @@ struct StyledRun {
     face: FontFace,
     underline: bool,
     line_break: bool,
+    color: Color,
 }
 
 fn resolve_runs(
@@ -1138,6 +1285,7 @@ fn resolve_runs(
                 face: FontFace::Regular,
                 underline: false,
                 line_break: true,
+                color: block.color.unwrap_or_default(),
             });
             continue;
         }
@@ -1161,6 +1309,7 @@ fn resolve_runs(
             },
             underline: block.underline || style.underline,
             line_break: false,
+            color: style.color.or(block.color).unwrap_or_default(),
         });
     }
     Ok(out)
@@ -1212,6 +1361,7 @@ fn table(
     cols: &[TableColumn],
     repeat_header: bool,
     empty: &[Node],
+    style: &TableStyle,
     state: &mut State,
 ) -> Result<(), RenderError> {
     let value = eval(items, state.root, &state.current)?;
@@ -1224,7 +1374,14 @@ fn table(
         return layout_nodes(empty, state, 1);
     }
     let weights: Vec<f32> = cols.iter().map(|c| c.width).collect();
-    let default_style = TextStyle::default();
+    let default_style = TextStyle {
+        color: Some(state.doc.theme.text_color),
+        ..TextStyle::default()
+    };
+    let header_style = TextStyle {
+        color: style.header_text_color.or(Some(state.doc.theme.text_color)),
+        ..TextStyle::default()
+    };
     let header: Vec<Vec<StyledRun>> = cols
         .iter()
         .map(|c| {
@@ -1232,12 +1389,12 @@ fn table(
                 &c.header,
                 state.root,
                 &state.current,
-                &default_style,
+                &header_style,
                 state.doc.theme.font_size_pt,
             )
         })
         .collect::<Result<_, _>>()?;
-    draw_table_row(&header, cols, &weights, state)?;
+    draw_table_row(&header, cols, &weights, true, style, state)?;
     let old = state.current.clone();
     for row in &rows {
         state.current = row.clone();
@@ -1253,14 +1410,14 @@ fn table(
                 )
             })
             .collect::<Result<_, _>>()?;
-        let needed = table_row_height(&cells, cols, &weights, state);
+        let needed = table_row_height(&cells, cols, &weights, style, state);
         if !state.continuous && state.y - needed < state.bottom {
             new_page(state)?;
             if repeat_header {
-                draw_table_row(&header, cols, &weights, state)?
+                draw_table_row(&header, cols, &weights, true, style, state)?
             }
         }
-        draw_table_row(&cells, cols, &weights, state)?;
+        draw_table_row(&cells, cols, &weights, false, style, state)?;
     }
     state.current = old;
     Ok(())
@@ -1269,6 +1426,7 @@ fn table_row_height(
     cells: &[Vec<StyledRun>],
     _cols: &[TableColumn],
     weights: &[f32],
+    style: &TableStyle,
     state: &State,
 ) -> f32 {
     let total: f32 = weights.iter().sum();
@@ -1276,7 +1434,7 @@ fn table_row_height(
         .iter()
         .zip(weights)
         .map(|(s, w)| {
-            let width = state.content_width * *w / total;
+            let width = state.content_width * *w / total - mm(style.cell_padding_mm) * 2.0;
             wrap_runs(s.clone(), width)
                 .map(|lines| {
                     lines
@@ -1294,21 +1452,38 @@ fn table_row_height(
                 .unwrap_or(f32::INFINITY)
         })
         .fold(0.0_f32, f32::max);
-    max + 6.0
+    max + mm(style.cell_padding_mm) * 2.0
 }
 fn draw_table_row(
     cells: &[Vec<StyledRun>],
     cols: &[TableColumn],
     weights: &[f32],
+    header: bool,
+    style: &TableStyle,
     state: &mut State,
 ) -> Result<(), RenderError> {
-    let h = table_row_height(cells, cols, weights, state);
+    let h = table_row_height(cells, cols, weights, style, state);
     ensure_space(state, h)?;
+    let padding = mm(style.cell_padding_mm);
+    if header && style.header_background.is_some() {
+        push(
+            state,
+            Draw::Rect {
+                x: state.x,
+                y: state.y - h,
+                width: state.content_width,
+                height: h,
+                fill: style.header_background,
+                stroke: None,
+                stroke_width: 0.0,
+            },
+        )?;
+    }
     let total: f32 = weights.iter().sum();
     let mut x = state.x;
     for ((cell, col), weight) in cells.iter().zip(cols).zip(weights) {
         let width = state.content_width * *weight / total;
-        let lines = wrap_runs(cell.clone(), width)?;
+        let lines = wrap_runs(cell.clone(), width - padding * 2.0)?;
         let mut offset_y = 0.0;
         for line in lines {
             let tw = line
@@ -1316,9 +1491,9 @@ fn draw_table_row(
                 .map(|run| text_width(&run.text, run.size))
                 .sum::<f32>();
             let tx = match col.align {
-                TextAlign::Left => x,
+                TextAlign::Left => x + padding,
                 TextAlign::Center => x + (width - tw) / 2.0,
-                TextAlign::Right => x + width - tw,
+                TextAlign::Right => x + width - tw - padding,
             };
             let line_height = line
                 .iter()
@@ -1336,11 +1511,12 @@ fn draw_table_row(
                     state,
                     Draw::Text {
                         x: run_x,
-                        y: state.y - run.size - offset_y,
+                        y: state.y - padding - run.size - offset_y,
                         size: run.size,
                         text: run.text,
                         face: run.face,
                         underline: run.underline,
+                        color: run.color,
                     },
                 )?;
                 run_x += run_width;
@@ -1356,7 +1532,8 @@ fn draw_table_row(
             x1: state.x,
             y: state.y,
             x2: state.x + state.content_width,
-            width: 0.25,
+            width: style.border_width_pt,
+            color: style.border_color.unwrap_or(state.doc.theme.text_color),
         },
     )?;
     Ok(())
@@ -1589,7 +1766,11 @@ fn eval(expr: &Expr, root: &Value, current: &Value) -> Result<Value, RenderError
         Expr::CurrentPath { path } => walk(current, path),
         Expr::Coalesce { values } => {
             for e in values {
-                let v = eval(e, root, current)?;
+                let v = match eval(e, root, current) {
+                    Ok(value) => value,
+                    Err(RenderError::MissingPath(_)) => continue,
+                    Err(error) => return Err(error),
+                };
                 if !v.is_null() {
                     return Ok(v);
                 }
@@ -1626,6 +1807,30 @@ fn eval(expr: &Expr, root: &Value, current: &Value) -> Result<Value, RenderError
             }))
         }
         Expr::Not { value } => Ok(Value::Bool(!truthy(&eval(value, root, current)?))),
+        Expr::Exists { value } => match eval(value, root, current) {
+            Ok(value) => Ok(Value::Bool(!value.is_null())),
+            Err(RenderError::MissingPath(_)) => Ok(Value::Bool(false)),
+            Err(error) => Err(error),
+        },
+        Expr::Contains { collection, value } => {
+            let collection = eval(collection, root, current)?;
+            let value = eval(value, root, current)?;
+            let contains = match collection {
+                Value::Array(values) => values.iter().any(|candidate| candidate == &value),
+                Value::String(text) => value
+                    .as_str()
+                    .map(|candidate| text.contains(candidate))
+                    .ok_or(RenderError::Expression(
+                        "string contains requires a string value",
+                    ))?,
+                _ => {
+                    return Err(RenderError::Expression(
+                        "contains requires an array or string collection",
+                    ));
+                }
+            };
+            Ok(Value::Bool(contains))
+        }
         Expr::Arithmetic {
             operator,
             left,
@@ -1874,6 +2079,10 @@ fn estimate_nodes(nodes: &[Node], width: f32, size: f32, line: f32) -> Result<f3
             Node::Section { children, .. }
             | Node::Stack { children, .. }
             | Node::KeepTogether { children } => estimate_nodes(children, width, size, line)?,
+            Node::Box { children, style } => {
+                let padding = checked_mm(style.padding_mm, "box padding")?;
+                estimate_nodes(children, width - padding * 2.0, size, line)? + padding * 2.0
+            }
             _ => size * line,
         };
     }
@@ -1883,6 +2092,7 @@ fn translate_y(draw: &mut Draw, delta: f32) {
     match draw {
         Draw::Text { y, .. }
         | Draw::Line { y, .. }
+        | Draw::Rect { y, .. }
         | Draw::Qr { y, .. }
         | Draw::Bars { y, .. }
         | Draw::Jpeg { y, .. } => *y += delta,
@@ -1945,6 +2155,15 @@ fn pdf_escape(s: &str) -> String {
         }
     }
     output
+}
+
+fn pdf_color(color: Color) -> String {
+    format!(
+        "{:.4} {:.4} {:.4}",
+        f32::from(color.red) / 255.0,
+        f32::from(color.green) / 255.0,
+        f32::from(color.blue) / 255.0
+    )
 }
 
 fn encode_win_ansi(character: char) -> Option<u8> {
@@ -2038,6 +2257,7 @@ fn write_pdf(pages: &[PageDraw]) -> Vec<u8> {
                     text,
                     face,
                     underline,
+                    color,
                 } => {
                     let font = match face {
                         FontFace::Regular => "F1",
@@ -2047,18 +2267,58 @@ fn write_pdf(pages: &[PageDraw]) -> Vec<u8> {
                     };
                     let _ = writeln!(
                         stream,
-                        "BT /{font} {size:.2} Tf {x:.2} {y:.2} Td ({}) Tj ET",
+                        "{} rg BT /{font} {size:.2} Tf {x:.2} {y:.2} Td ({}) Tj ET",
+                        pdf_color(*color),
                         pdf_escape(text)
                     );
                     if *underline {
                         let x2 = *x + text_width(text, *size);
                         let line_y = *y - 1.2;
-                        let _ =
-                            writeln!(stream, "0.5 w {x:.2} {line_y:.2} m {x2:.2} {line_y:.2} l S");
+                        let _ = writeln!(
+                            stream,
+                            "{} RG 0.5 w {x:.2} {line_y:.2} m {x2:.2} {line_y:.2} l S",
+                            pdf_color(*color)
+                        );
                     }
                 }
-                Draw::Line { x1, y, x2, width } => {
-                    let _ = writeln!(stream, "{width:.2} w {x1:.2} {y:.2} m {x2:.2} {y:.2} l S");
+                Draw::Line {
+                    x1,
+                    y,
+                    x2,
+                    width,
+                    color,
+                } => {
+                    let _ = writeln!(
+                        stream,
+                        "{} RG {width:.2} w {x1:.2} {y:.2} m {x2:.2} {y:.2} l S",
+                        pdf_color(*color)
+                    );
+                }
+                Draw::Rect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    fill,
+                    stroke,
+                    stroke_width,
+                } => {
+                    if let Some(color) = fill {
+                        let _ = writeln!(
+                            stream,
+                            "{} rg {x:.2} {y:.2} {width:.2} {height:.2} re f",
+                            pdf_color(*color)
+                        );
+                    }
+                    if let Some(color) = stroke {
+                        if *stroke_width > 0.0 {
+                            let _ = writeln!(
+                                stream,
+                                "{} RG {stroke_width:.2} w {x:.2} {y:.2} {width:.2} {height:.2} re S",
+                                pdf_color(*color)
+                            );
+                        }
+                    }
                 }
                 Draw::Qr {
                     x,
@@ -2066,6 +2326,7 @@ fn write_pdf(pages: &[PageDraw]) -> Vec<u8> {
                     size,
                     modules,
                 } => {
+                    stream.push_str("0 0 0 rg\n");
                     let count = modules.len() as f32;
                     let module = *size / (count + 8.0);
                     for (row, values) in modules.iter().enumerate() {
@@ -2088,6 +2349,7 @@ fn write_pdf(pages: &[PageDraw]) -> Vec<u8> {
                     height,
                     bits,
                 } => {
+                    stream.push_str("0 0 0 rg\n");
                     let module = *width / bits.len() as f32;
                     for (index, dark) in bits.iter().enumerate() {
                         if *dark {
@@ -2261,6 +2523,7 @@ mod tests {
                 }],
                 repeat_header: true,
                 empty: vec![text("No items")],
+                style: TableStyle::default(),
             }]);
             let data = json!({"items":(0..count).map(|i|json!({"name":format!("Line {i}")})).collect::<Vec<_>>()});
             assert!(
@@ -2543,6 +2806,140 @@ mod tests {
         assert_eq!(
             render_with_resources(&d, &json!({}), &wrong, RenderLimits::default()),
             Err(RenderError::Invalid("image digest mismatch"))
+        );
+    }
+
+    #[test]
+    fn branded_box_and_table_styles_render_deterministically() {
+        let navy = Color {
+            red: 0,
+            green: 54,
+            blue: 110,
+        };
+        let white = Color {
+            red: 255,
+            green: 255,
+            blue: 255,
+        };
+        let d = document(vec![
+            Node::Box {
+                children: vec![Node::Heading {
+                    content: vec![Inline::Text {
+                        value: "PACKING SLIP".into(),
+                        style: TextStyle::default(),
+                    }],
+                    level: 2,
+                    style: TextStyle {
+                        color: Some(white),
+                        ..Default::default()
+                    },
+                }],
+                style: BoxStyle {
+                    padding_mm: 4.0,
+                    background: Some(navy),
+                    border_color: Some(navy),
+                    border_width_pt: 1.0,
+                },
+            },
+            Node::Table {
+                items: Expr::Path {
+                    path: vec!["items".into()],
+                },
+                columns: vec![TableColumn {
+                    header: vec![Inline::Text {
+                        value: "ITEM".into(),
+                        style: TextStyle::default(),
+                    }],
+                    cell: vec![Inline::Value {
+                        value: Expr::CurrentPath {
+                            path: vec!["name".into()],
+                        },
+                        style: TextStyle::default(),
+                    }],
+                    width: 1.0,
+                    align: TextAlign::Left,
+                }],
+                repeat_header: true,
+                empty: vec![],
+                style: TableStyle {
+                    header_background: Some(navy),
+                    header_text_color: Some(white),
+                    ..TableStyle::default()
+                },
+            },
+        ]);
+        let input = json!({"items": [{"name": "Coffee"}]});
+        let first = render(&d, &input, RenderLimits::default()).unwrap();
+        let second = render(&d, &input, RenderLimits::default()).unwrap();
+        assert_eq!(first, second);
+        let pdf = String::from_utf8(first).unwrap();
+        assert!(pdf.contains("0.0000 0.2118 0.4314 rg"));
+        assert!(pdf.contains("1.0000 1.0000 1.0000 rg"));
+        assert!(pdf.contains(" re f"));
+    }
+
+    #[test]
+    fn decoration_dimensions_are_bounded() {
+        let d = document(vec![Node::Box {
+            children: vec![text("x")],
+            style: BoxStyle {
+                padding_mm: 51.0,
+                ..BoxStyle::default()
+            },
+        }]);
+        assert_eq!(
+            validate(&d, RenderLimits::default()),
+            Err(RenderError::Invalid("box style"))
+        );
+    }
+
+    #[test]
+    fn optional_paths_and_membership_rules_are_safe() {
+        let missing = Expr::Path {
+            path: vec!["product".into(), "metafields".into(), "optional".into()],
+        };
+        assert_eq!(
+            eval(
+                &Expr::Exists {
+                    value: Box::new(missing.clone()),
+                },
+                &json!({"product": {}}),
+                &json!({}),
+            )
+            .unwrap(),
+            json!(false)
+        );
+        assert_eq!(
+            eval(
+                &Expr::Coalesce {
+                    values: vec![
+                        missing,
+                        Expr::Literal {
+                            value: json!("fallback")
+                        }
+                    ],
+                },
+                &json!({"product": {}}),
+                &json!({}),
+            )
+            .unwrap(),
+            json!("fallback")
+        );
+        assert_eq!(
+            eval(
+                &Expr::Contains {
+                    collection: Box::new(Expr::Path {
+                        path: vec!["category".into(), "ancestorIds".into()],
+                    }),
+                    value: Box::new(Expr::Literal {
+                        value: json!("gid://shopify/TaxonomyCategory/aa")
+                    }),
+                },
+                &json!({"category": {"ancestorIds": ["gid://shopify/TaxonomyCategory/aa"]}}),
+                &json!({}),
+            )
+            .unwrap(),
+            json!(true)
         );
     }
 }
