@@ -179,6 +179,9 @@ pub struct LocalHistoryJob {
 #[derive(Debug, Clone, Serialize)]
 pub struct LocalConnectorDetail {
     pub connector_id: String,
+    pub display_name: String,
+    pub workspace_name: Option<String>,
+    pub authorization_type: Option<String>,
     pub endpoint: String,
     pub connection: String,
     pub permission: String,

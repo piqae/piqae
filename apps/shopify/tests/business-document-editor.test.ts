@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   blocksToDoc,
   docToBlocks,
+  insertBlockAfterPath,
+  moveBlockAtPath,
   removeBlockAtPath,
   replaceBlockAtPath,
 } from "../app/components/BusinessDocumentEditor";
@@ -144,5 +146,49 @@ describe("business document editor serialization", () => {
         >
       ).then,
     ).toEqual([{ type: "divider" }]);
+  });
+
+  it("inserts after the selected block without replacing existing content", () => {
+    const first: Block = {
+      type: "paragraph",
+      content: [{ type: "text", value: "First" }],
+    };
+    const second: Block = { type: "divider" };
+    const inserted: Block = {
+      type: "paragraph",
+      content: [{ type: "text", value: "Inserted" }],
+    };
+    expect(
+      insertBlockAfterPath(
+        [first, second],
+        [{ branch: "root", index: 0 }],
+        inserted,
+      ),
+    ).toEqual([first, inserted, second]);
+  });
+
+  it("moves a selected nested block without moving its container", () => {
+    const first: Block = {
+      type: "paragraph",
+      content: [{ type: "text", value: "First" }],
+    };
+    const second: Block = { type: "divider" };
+    const blocks: Block[] = [
+      { type: "stack", children: [first, second] },
+      { type: "page_break" },
+    ];
+    expect(
+      moveBlockAtPath(
+        blocks,
+        [
+          { branch: "root", index: 0 },
+          { branch: "children", index: 1 },
+        ],
+        -1,
+      ),
+    ).toEqual([
+      { type: "stack", children: [second, first] },
+      { type: "page_break" },
+    ]);
   });
 });

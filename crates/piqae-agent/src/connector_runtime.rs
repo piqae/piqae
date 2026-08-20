@@ -26,6 +26,14 @@ pub struct ConnectorRecord {
     pub connector_id: String,
     pub agent_id: String,
     pub control_plane_url: Url,
+    /// Operator-facing identity captured from the authenticated invitation.
+    /// It is metadata only and is never used for authorization.
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub workspace_name: Option<String>,
+    #[serde(default)]
+    pub authorization_type: Option<String>,
     /// Relative to the installation data directory. Never accept an absolute
     /// or parent-traversing path from a downloaded enrolment response.
     pub device_key_file: PathBuf,
@@ -312,6 +320,9 @@ mod tests {
             connector_id: id.into(),
             agent_id: format!("agt_{id}"),
             control_plane_url: Url::parse("https://api.piqae.example/").unwrap(),
+            display_name: Some("Example service".into()),
+            workspace_name: Some("Example customer".into()),
+            authorization_type: Some("platform_customer".into()),
             device_key_file: format!("connectors/{id}/device.key").into(),
             enabled: true,
             printer_grant: PrinterGrant::SelectedPrinters,
