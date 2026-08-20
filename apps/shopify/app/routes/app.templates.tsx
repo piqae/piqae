@@ -103,15 +103,20 @@ export default function Templates() {
   const data = useLoaderData<typeof loader>();
   const result = useActionData<typeof action>();
   const [query, setQuery] = useState("");
+  const [scope, setScope] = useState<"all" | "starters" | "custom">("all");
   const visibleTemplates = useMemo(() => {
     const normalized = query.trim().toLowerCase();
-    if (!normalized) return data.templates;
-    return data.templates.filter((template) =>
+    const scoped = data.templates.filter((template) => {
+      const starter = template.source.includes('"immutable":true');
+      return scope === "all" || (scope === "starters" ? starter : !starter);
+    });
+    if (!normalized) return scoped;
+    return scoped.filter((template) =>
       [template.name, template.kind, template.pageSize, template.state].some(
         (value) => value.toLowerCase().includes(normalized),
       ),
     );
-  }, [data.templates, query]);
+  }, [data.templates, query, scope]);
   return (
     <s-page heading="Templates">
       <s-button
@@ -129,18 +134,31 @@ export default function Templates() {
         ) : null}
         {visibleTemplates.length ? (
           <s-table>
-            <s-search-field
-              slot="filters"
-              label="Search templates"
-              labelAccessibilityVisibility="exclusive"
-              placeholder="Search templates"
-              value={query}
-              onInput={(event) => setQuery(event.currentTarget.value)}
-            />
+            <div slot="filters" className="piqae-template-filters">
+              <s-search-field
+                label="Search templates"
+                labelAccessibilityVisibility="exclusive"
+                placeholder="Search templates"
+                value={query}
+                onInput={(event) => setQuery(event.currentTarget.value)}
+              />
+              <select
+                className="piqae-input"
+                aria-label="Filter templates"
+                value={scope}
+                onChange={(event) =>
+                  setScope(event.currentTarget.value as typeof scope)
+                }
+              >
+                <option value="all">All templates</option>
+                <option value="starters">Piqae starters</option>
+                <option value="custom">Your templates</option>
+              </select>
+            </div>
             <s-table-header-row>
               <s-table-header listSlot="primary">Document</s-table-header>
-              <s-table-header listSlot="inline">Status</s-table-header>
-              <s-table-header listSlot="secondary">Format</s-table-header>
+              <s-table-header listSlot="inline">Type</s-table-header>
+              <s-table-header listSlot="secondary">Status</s-table-header>
               <s-table-header listSlot="labeled">Actions</s-table-header>
             </s-table-header-row>
             <s-table-body>
@@ -149,9 +167,36 @@ export default function Templates() {
                 return (
                   <s-table-row key={template.id}>
                     <s-table-cell>
-                      <s-link href={`/app/templates/${template.id}`}>
-                        {template.name}
-                      </s-link>
+                      <div className="piqae-template-title-cell">
+                        <div
+                          className={`piqae-template-thumbnail piqae-template-${template.kind}`}
+                          aria-hidden="true"
+                        >
+                          <span>
+                            {template.kind === "packing_slip"
+                              ? "PACKING SLIP"
+                              : template.kind
+                                  .replaceAll("_", " ")
+                                  .toUpperCase()}
+                          </span>
+                          <i />
+                          <i />
+                          <i />
+                        </div>
+                        <div>
+                          <s-link href={`/app/templates/${template.id}`}>
+                            <strong>{template.name}</strong>
+                          </s-link>
+                          <p className="piqae-muted">
+                            {immutable
+                              ? "Ready-to-use Piqae starter"
+                              : `Updated ${new Date(template.updatedAt).toLocaleDateString()}`}
+                          </p>
+                        </div>
+                      </div>
+                    </s-table-cell>
+                    <s-table-cell>
+                      {template.kind.replaceAll("_", " ")} · {template.pageSize}
                     </s-table-cell>
                     <s-table-cell>
                       <s-badge
@@ -161,10 +206,6 @@ export default function Templates() {
                       >
                         {template.state}
                       </s-badge>
-                    </s-table-cell>
-                    <s-table-cell>
-                      {template.kind.replaceAll("_", " ")} · {template.pageSize}{" "}
-                      · revision {template.revision}
                     </s-table-cell>
                     <s-table-cell>
                       <s-stack direction="inline" gap="small">
@@ -181,18 +222,18 @@ export default function Templates() {
                               value={template.id}
                             />
                             <s-button type="submit" variant="secondary">
-                              Customize
+                              Edit a copy
                             </s-button>
                           </Form>
                         ) : (
                           <>
                             <s-link href={`/app/templates/${template.id}`}>
-                              Edit
+                              Open editor
                             </s-link>
                             <s-link
                               href={`/app/templates/new?from=${encodeURIComponent(template.id)}`}
                             >
-                              Use as base
+                              Duplicate
                             </s-link>
                           </>
                         )}

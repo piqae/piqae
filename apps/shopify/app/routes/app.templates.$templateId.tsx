@@ -9,8 +9,10 @@ import {
   workflows,
   type MerchantTemplate,
 } from "../core/workflows.server";
-import { TemplatePreview } from "../components/shopify-ui";
-import { BusinessDocumentEditor } from "../components/BusinessDocumentEditor";
+import {
+  BusinessDocumentEditor,
+  BusinessDocumentPreview,
+} from "../components/BusinessDocumentEditor";
 import { starterTemplates } from "../core/starter-templates";
 import {
   parseTemplateEnvelope,
@@ -23,6 +25,7 @@ import { syncTemplateIndex } from "../core/template-index.server";
 import { publishCanonicalTemplate } from "../core/template-publisher.server";
 import { createProductionServices } from "../services.server";
 import { shopifyCustomDocumentFields } from "../core/shopify-document-fields";
+import { importOrderPrinterProTemplate } from "../core/order-printer-pro-import.server";
 import {
   canonicalToLiquid,
   liquidToCanonical,
@@ -83,6 +86,22 @@ export async function action({ request, params }: ActionFunctionArgs) {
   const form = await request.formData();
   try {
     const intent = String(form.get("intent") ?? "draft");
+    if (intent === "import_order_printer") {
+      const imported = importOrderPrinterProTemplate(
+        bounded(form, "orderPrinterSource", 65536, true),
+      );
+      return imported.ok
+        ? { ok: true, error: "", deleted: false, imported }
+        : Response.json(
+            {
+              ok: false,
+              error: "The template needs changes before it can be imported.",
+              deleted: false,
+              imported,
+            },
+            { status: 400 },
+          );
+    }
     let existing =
       params.templateId && params.templateId !== "new"
         ? await workflows().getTemplate(session.shop, params.templateId)
@@ -207,16 +226,35 @@ export default function TemplateEditor() {
   );
   if (!template) removeSystemOwnership(initial);
   const [document, setDocument] = useState(initial.document);
-  const [mode, setMode] = useState(initial.editor.mode);
+  const [mode, setMode] = useState<TemplateEditorMode>(
+    initial.editor.mode === "liquid" ? "liquid" : "visual",
+  );
   const [liquid, setLiquid] = useState(initial.editor.liquid);
-  const [view, setView] = useState<"edit" | "preview">("edit");
+  const [importMetadata, setImportMetadata] = useState(initial.editor.import);
+  const [workspace, setWorkspace] = useState<"visual" | "preview" | "liquid">(
+    initial.editor.mode === "liquid" ? "liquid" : "visual",
+  );
   const [error, setError] = useState("");
   const starter = Boolean(initial.system?.immutable);
   useEffect(() => {
     setDocument(initial.document);
-    setMode(initial.editor.mode);
+    setMode(initial.editor.mode === "liquid" ? "liquid" : "visual");
     setLiquid(initial.editor.liquid);
+    setImportMetadata(initial.editor.import);
   }, [initialTemplate?.source]);
+  useEffect(() => {
+    if (result && "imported" in result && result.imported?.ok) {
+      setDocument(result.imported.document);
+      setLiquid(result.imported.normalizedLiquid);
+      setImportMetadata({
+        format: "order_printer_pro",
+        originalSource: result.imported.originalSource,
+        diagnostics: result.imported.diagnostics,
+      });
+      setMode("visual");
+      setWorkspace("visual");
+    }
+  }, [result]);
   const switchMode = (next: TemplateEditorMode) => {
     if (mode === "liquid" && next !== "liquid") {
       const conversion = liquidToCanonical(liquid, document);
@@ -234,8 +272,18 @@ export default function TemplateEditor() {
   const source = serializeTemplateEnvelope({
     ...initial,
     document,
-    editor: { mode, liquid, roundTrip: "lossless", warnings: [] },
+    editor: {
+      mode,
+      liquid,
+      roundTrip: "lossless",
+      warnings: [],
+      ...(importMetadata ? { import: importMetadata } : {}),
+    },
   });
+  const switchWorkspace = (next: "visual" | "preview" | "liquid") => {
+    if (next !== "preview") switchMode(next);
+    setWorkspace(next);
+  };
   return (
     <s-page heading={template?.name ?? "New template"} inlineSize="large">
       <s-section>
@@ -243,7 +291,11 @@ export default function TemplateEditor() {
           <s-stack direction="block" gap="base">
             {result?.ok ? (
               <s-banner tone="success">
-                {result.deleted ? "Draft deleted." : "Template saved."}
+                {"imported" in result
+                  ? "Template imported into the visual editor. Review highlighted compatibility notes, then save it."
+                  : result.deleted
+                    ? "Draft deleted."
+                    : "Template saved."}
               </s-banner>
             ) : result?.error ? (
               <s-banner tone="critical">{result.error}</s-banner>
@@ -259,24 +311,84 @@ export default function TemplateEditor() {
                 keeps the original available for future documents.
               </s-banner>
             ) : null}
-            <s-button-group accessibilityLabel="Document view">
-              <s-button
-                type="button"
-                variant={view === "edit" ? "primary" : "secondary"}
-                onClick={() => setView("edit")}
-              >
-                Edit
-              </s-button>
-              <s-button
-                type="button"
-                variant={view === "preview" ? "primary" : "secondary"}
-                onClick={() => setView("preview")}
-              >
-                Preview
-              </s-button>
-            </s-button-group>
-            {view === "preview" ? (
-              <TemplatePreview />
+            <div className="piqae-editor-commandbar">
+              <s-button-group accessibilityLabel="Template editor mode">
+                <s-button
+                  type="button"
+                  variant={workspace === "visual" ? "primary" : "secondary"}
+                  onClick={() => switchWorkspace("visual")}
+                >
+                  Visual editor
+                </s-button>
+                <s-button
+                  type="button"
+                  variant={workspace === "preview" ? "primary" : "secondary"}
+                  onClick={() => switchWorkspace("preview")}
+                >
+                  Preview
+                </s-button>
+                <s-button
+                  type="button"
+                  variant={workspace === "liquid" ? "primary" : "secondary"}
+                  onClick={() => switchWorkspace("liquid")}
+                >
+                  Liquid
+                </s-button>
+              </s-button-group>
+              <span className="piqae-muted">
+                Preview and print use the same document revision.
+              </span>
+            </div>
+            <details className="piqae-import-panel">
+              <summary>
+                Import an Order Printer or Order Printer Pro template
+              </summary>
+              <div className="piqae-import-content">
+                <p>
+                  Paste the template’s HTML and Liquid. Piqae converts supported
+                  document structure without running scripts or remote code.
+                </p>
+                <textarea
+                  className="piqae-code piqae-code-short"
+                  name="orderPrinterSource"
+                  maxLength={65536}
+                  placeholder="Paste HTML and Liquid here"
+                />
+                <button
+                  className="piqae-link-button"
+                  type="submit"
+                  name="intent"
+                  value="import_order_printer"
+                >
+                  Import into editor
+                </button>
+              </div>
+            </details>
+            {result &&
+            "imported" in result &&
+            result.imported?.diagnostics.length ? (
+              <div className="piqae-import-diagnostics">
+                <strong>Import compatibility</strong>
+                {result.imported.diagnostics.map((diagnostic, index) => (
+                  <p key={`${diagnostic.code}-${index}`}>
+                    <s-badge
+                      tone={
+                        diagnostic.fidelity === "unsupported"
+                          ? "critical"
+                          : diagnostic.fidelity === "lossy"
+                            ? "warning"
+                            : "info"
+                      }
+                    >
+                      {diagnostic.fidelity}
+                    </s-badge>{" "}
+                    {diagnostic.message}
+                  </p>
+                ))}
+              </div>
+            ) : null}
+            {workspace === "preview" ? (
+              <BusinessDocumentPreview value={document} />
             ) : (
               <div className="piqae-editor-surface">
                 <div className="piqae-editor-settings">
@@ -323,34 +435,16 @@ export default function TemplateEditor() {
                       <option value="80mm">80 mm receipt</option>
                     </select>
                   </label>
-                  <label>
-                    Editor
-                    <select
-                      className="piqae-input"
-                      name="mode"
-                      value={mode}
-                      onChange={(event) =>
-                        switchMode(
-                          event.currentTarget.value as TemplateEditorMode,
-                        )
-                      }
-                      disabled={false}
-                    >
-                      <option value="visual">Document editor</option>
-                      <option value="liquid">Advanced Liquid</option>
-                      <option value="source">Piqae source</option>
-                    </select>
-                  </label>
                 </div>
                 {error ? <s-banner tone="critical">{error}</s-banner> : null}
-                {mode === "visual" ? (
+                {workspace === "visual" ? (
                   <BusinessDocumentEditor
                     value={document}
                     disabled={false}
                     customFields={customFields}
                     onChange={setDocument}
                   />
-                ) : mode === "liquid" ? (
+                ) : (
                   <label>
                     Shopify Liquid
                     <textarea
@@ -362,26 +456,8 @@ export default function TemplateEditor() {
                       disabled={false}
                     />
                   </label>
-                ) : (
-                  <label>
-                    Piqae business-document source
-                    <textarea
-                      className="piqae-code"
-                      name="document"
-                      maxLength={196608}
-                      value={JSON.stringify(document, null, 2)}
-                      onChange={(e) => {
-                        try {
-                          setDocument(JSON.parse(e.currentTarget.value));
-                          setError("");
-                        } catch {
-                          setError("Source must be valid JSON");
-                        }
-                      }}
-                      disabled={false}
-                    />
-                  </label>
                 )}
+                <input type="hidden" name="mode" value={mode} />
                 {mode !== "source" ? (
                   <input
                     type="hidden"

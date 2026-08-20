@@ -28,6 +28,8 @@ pub const RENDERER_VERSION: &str = concat!(
     "piqae-business-document-renderer/",
     env!("CARGO_PKG_VERSION")
 );
+const PAGE_NUMBER_MARKER: &str = "\u{e000}\u{e000}\u{e000}\u{e000}";
+const PAGE_COUNT_MARKER: &str = "\u{e001}\u{e001}\u{e001}\u{e001}";
 
 #[derive(Debug, Clone, Copy)]
 pub struct RenderLimits {
@@ -273,6 +275,18 @@ pub enum Node {
         #[serde(default)]
         gap_mm: f32,
     },
+    DataList {
+        items: Expr,
+        #[serde(default)]
+        header: Vec<Node>,
+        item: Vec<Node>,
+        #[serde(default)]
+        empty: Vec<Node>,
+        #[serde(default = "default_true")]
+        repeat_header: bool,
+        #[serde(default)]
+        gap_mm: f32,
+    },
     Conditional {
         condition: Expr,
         then: Vec<Node>,
@@ -297,6 +311,13 @@ pub enum Node {
         #[serde(default)]
         fit: ImageFit,
     },
+    ImageValue {
+        resource: Expr,
+        width_mm: f32,
+        height_mm: f32,
+        #[serde(default)]
+        fit: ImageFit,
+    },
     Qr {
         value: Expr,
         size_mm: f32,
@@ -314,6 +335,9 @@ pub enum Node {
 }
 const fn default_heading_level() -> u8 {
     1
+}
+const fn default_true() -> bool {
+    true
 }
 const fn default_divider_width() -> f32 {
     0.5
@@ -478,6 +502,8 @@ pub enum Expr {
         collection: Box<Expr>,
         value: Box<Expr>,
     },
+    PageNumber,
+    PageCount,
     Arithmetic {
         operator: ArithmeticOperator,
         left: Box<Expr>,
@@ -814,6 +840,20 @@ fn validate_nodes(
                 validate_nodes(then, depth + 1, count, limits)?;
                 validate_nodes(otherwise, depth + 1, count, limits)?
             }
+            Node::DataList {
+                header,
+                item,
+                empty,
+                gap_mm,
+                ..
+            } => {
+                if !gap_mm.is_finite() || !(0.0..=100.0).contains(gap_mm) {
+                    return Err(RenderError::Invalid("data-list gap"));
+                }
+                validate_nodes(header, depth + 1, count, limits)?;
+                validate_nodes(item, depth + 1, count, limits)?;
+                validate_nodes(empty, depth + 1, count, limits)?;
+            }
             Node::Table { columns, style, .. } => {
                 if columns.is_empty()
                     || columns.len() > limits.max_table_columns
@@ -1029,6 +1069,23 @@ fn layout_nodes(nodes: &[Node], state: &mut State, depth: usize) -> Result<(), R
                 }
                 state.current = old;
             }
+            Node::DataList {
+                items,
+                header,
+                item,
+                empty,
+                repeat_header,
+                gap_mm,
+            } => data_list(
+                items,
+                header,
+                item,
+                empty,
+                *repeat_header,
+                *gap_mm,
+                state,
+                depth,
+            )?,
             Node::Conditional {
                 condition,
                 then,
@@ -1095,6 +1152,15 @@ fn layout_nodes(nodes: &[Node], state: &mut State, depth: usize) -> Result<(), R
                 height_mm,
                 fit,
             } => image(resource, *width_mm, *height_mm, *fit, state)?,
+            Node::ImageValue {
+                resource,
+                width_mm,
+                height_mm,
+                fit,
+            } => {
+                let resource = value_text(&eval(resource, state.root, &state.current)?);
+                image(&resource, *width_mm, *height_mm, *fit, state)?
+            }
             Node::Qr {
                 value,
                 size_mm,
@@ -1209,6 +1275,90 @@ fn box_node(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
+fn data_list(
+    items: &Expr,
+    header: &[Node],
+    item: &[Node],
+    empty: &[Node],
+    repeat_header: bool,
+    gap_mm: f32,
+    state: &mut State,
+    depth: usize,
+) -> Result<(), RenderError> {
+    let values = eval(items, state.root, &state.current)?
+        .as_array()
+        .ok_or(RenderError::Expression("data-list items must be an array"))?
+        .clone();
+    account_repeat(state, values.len())?;
+    if values.is_empty() {
+        return layout_nodes(empty, state, depth + 1);
+    }
+    let gap = checked_mm(gap_mm, "data-list gap")?;
+    let old = state.current.clone();
+    state.current = values[0].clone();
+    let first_item_height = estimate_nodes(
+        item,
+        state.content_width,
+        state.doc.theme.font_size_pt,
+        state.doc.theme.line_height,
+    )?;
+    state.current = old.clone();
+    let header_height = estimate_nodes(
+        header,
+        state.content_width,
+        state.doc.theme.font_size_pt,
+        state.doc.theme.line_height,
+    )?;
+    ensure_space(state, header_height + first_item_height + gap)?;
+    render_atomic_nodes(header, state, depth + 1, "data-list header")?;
+    for value in &values {
+        state.current = value.clone();
+        let estimated = estimate_nodes(
+            item,
+            state.content_width,
+            state.doc.theme.font_size_pt,
+            state.doc.theme.line_height,
+        )? + gap;
+        if !state.continuous && state.y - estimated < state.bottom {
+            new_page(state)?;
+            if repeat_header {
+                state.current = old.clone();
+                render_atomic_nodes(header, state, depth + 1, "data-list header")?;
+                state.current = value.clone();
+            }
+        }
+        render_atomic_nodes(item, state, depth + 1, "data-list item")?;
+        state.y -= gap;
+    }
+    state.current = old;
+    Ok(())
+}
+
+fn render_atomic_nodes(
+    nodes: &[Node],
+    state: &mut State,
+    depth: usize,
+    label: &'static str,
+) -> Result<(), RenderError> {
+    if nodes.is_empty() {
+        return Ok(());
+    }
+    let height = estimate_nodes(
+        nodes,
+        state.content_width,
+        state.doc.theme.font_size_pt,
+        state.doc.theme.line_height,
+    )?;
+    ensure_space(state, height)?;
+    let page = state.pages.len();
+    layout_nodes(nodes, state, depth)?;
+    if state.pages.len() != page {
+        return Err(RenderError::Unsupported(label));
+    }
+    Ok(())
+}
+
 fn paragraph(content: &[Inline], style: &TextStyle, state: &mut State) -> Result<(), RenderError> {
     let size = style.font_size_pt.unwrap_or(state.doc.theme.font_size_pt);
     if !size.is_finite() || !(4.0..=72.0).contains(&size) {
@@ -1291,6 +1441,14 @@ fn resolve_runs(
         }
         let (text, style) = match inline {
             Inline::Text { value, style } => (value.clone(), style),
+            Inline::Value {
+                value: Expr::PageNumber,
+                style,
+            } => (PAGE_NUMBER_MARKER.into(), style),
+            Inline::Value {
+                value: Expr::PageCount,
+                style,
+            } => (PAGE_COUNT_MARKER.into(), style),
             Inline::Value { value, style } => (value_text(&eval(value, root, current)?), style),
             Inline::LineBreak => unreachable!(),
         };
@@ -1831,6 +1989,9 @@ fn eval(expr: &Expr, root: &Value, current: &Value) -> Result<Value, RenderError
             };
             Ok(Value::Bool(contains))
         }
+        Expr::PageNumber | Expr::PageCount => Err(RenderError::Unsupported(
+            "page context expressions are supported only as direct inline values",
+        )),
         Expr::Arithmetic {
             operator,
             left,
@@ -2038,6 +2199,9 @@ const fn account_text(state: &mut State, s: &str) -> Result<(), RenderError> {
 }
 fn validate_text(s: &str) -> Result<(), RenderError> {
     for c in s.chars() {
+        if matches!(c, '\u{e000}' | '\u{e001}') {
+            continue;
+        }
         if c != '\n' && c != '\r' && c != '\t' && (encode_win_ansi(c).is_none() || c.is_control()) {
             return Err(RenderError::UnsupportedCharacter { code: c as u32 });
         }
@@ -2045,7 +2209,12 @@ fn validate_text(s: &str) -> Result<(), RenderError> {
     Ok(())
 }
 fn text_width(s: &str, size: f32) -> f32 {
-    s.len() as f32 * size * 0.52
+    display_width_text(s).chars().count() as f32 * size * 0.52
+}
+fn display_width_text(value: &str) -> String {
+    value
+        .replace(PAGE_NUMBER_MARKER, "0000")
+        .replace(PAGE_COUNT_MARKER, "0000")
 }
 fn checked_mm(v: f32, label: &'static str) -> Result<f32, RenderError> {
     if !v.is_finite() || !(0.0..=2_000.0).contains(&v) {
@@ -2076,12 +2245,62 @@ fn estimate_nodes(nodes: &[Node], width: f32, size: f32, line: f32) -> Result<f3
             Node::Divider { .. } => 3.0,
             Node::Qr { size_mm, .. } => checked_mm(*size_mm, "QR")?,
             Node::Barcode { height_mm, .. } => checked_mm(*height_mm, "barcode")? + size * line,
-            Node::Section { children, .. }
-            | Node::Stack { children, .. }
-            | Node::KeepTogether { children } => estimate_nodes(children, width, size, line)?,
+            Node::Image { height_mm, .. } | Node::ImageValue { height_mm, .. } => {
+                checked_mm(*height_mm, "image height")?
+            }
+            Node::Section { children, gap_mm } | Node::Stack { children, gap_mm } => {
+                estimate_nodes(children, width, size, line)? + checked_mm(*gap_mm, "gap")?
+            }
+            Node::KeepTogether { children } => estimate_nodes(children, width, size, line)?,
+            Node::Row { children, gap_mm } => {
+                let gap = checked_mm(*gap_mm, "column gap")?;
+                let child_width = (width - gap * children.len().saturating_sub(1) as f32)
+                    / children.len().max(1) as f32;
+                children
+                    .iter()
+                    .map(|child| {
+                        estimate_nodes(std::slice::from_ref(child), child_width, size, line)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?
+                    .into_iter()
+                    .fold(0.0_f32, f32::max)
+            }
+            Node::Grid {
+                columns,
+                children,
+                gap_mm,
+            } => {
+                let gap = checked_mm(*gap_mm, "column gap")?;
+                let available = width - gap * children.len().saturating_sub(1) as f32;
+                let total: f32 = columns.iter().sum();
+                children
+                    .iter()
+                    .zip(columns)
+                    .map(|(child, weight)| {
+                        estimate_nodes(
+                            std::slice::from_ref(child),
+                            available * *weight / total,
+                            size,
+                            line,
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()?
+                    .into_iter()
+                    .fold(0.0_f32, f32::max)
+            }
             Node::Box { children, style } => {
                 let padding = checked_mm(style.padding_mm, "box padding")?;
                 estimate_nodes(children, width - padding * 2.0, size, line)? + padding * 2.0
+            }
+            Node::DataList {
+                header,
+                item,
+                gap_mm,
+                ..
+            } => {
+                estimate_nodes(header, width, size, line)?
+                    + estimate_nodes(item, width, size, line)?
+                    + checked_mm(*gap_mm, "data-list gap")?
             }
             _ => size * line,
         };
@@ -2259,6 +2478,9 @@ fn write_pdf(pages: &[PageDraw]) -> Vec<u8> {
                     underline,
                     color,
                 } => {
+                    let rendered_text = text
+                        .replace(PAGE_NUMBER_MARKER, &(page_index + 1).to_string())
+                        .replace(PAGE_COUNT_MARKER, &page_count.to_string());
                     let font = match face {
                         FontFace::Regular => "F1",
                         FontFace::Bold => "F2",
@@ -2269,10 +2491,10 @@ fn write_pdf(pages: &[PageDraw]) -> Vec<u8> {
                         stream,
                         "{} rg BT /{font} {size:.2} Tf {x:.2} {y:.2} Td ({}) Tj ET",
                         pdf_color(*color),
-                        pdf_escape(text)
+                        pdf_escape(&rendered_text)
                     );
                     if *underline {
-                        let x2 = *x + text_width(text, *size);
+                        let x2 = *x + text_width(&rendered_text, *size);
                         let line_y = *y - 1.2;
                         let _ = writeln!(
                             stream,
@@ -2801,10 +3023,31 @@ mod tests {
         let pdf =
             render_with_resources(&d, &json!({}), &resolved, RenderLimits::default()).unwrap();
         assert!(pdf.windows(10).any(|window| window == b"/DCTDecode"));
+        d.body = vec![Node::ImageValue {
+            resource: Expr::Path {
+                path: vec!["product_image".into()],
+            },
+            width_mm: 20.0,
+            height_mm: 10.0,
+            fit: ImageFit::Contain,
+        }];
+        let selected = render_with_resources(
+            &d,
+            &json!({"product_image": "logo"}),
+            &resolved,
+            RenderLimits::default(),
+        )
+        .unwrap();
+        assert!(selected.windows(10).any(|window| window == b"/DCTDecode"));
         let mut wrong = resolved;
         wrong.images.get_mut("logo").unwrap()[2] = 0;
         assert_eq!(
-            render_with_resources(&d, &json!({}), &wrong, RenderLimits::default()),
+            render_with_resources(
+                &d,
+                &json!({"product_image": "logo"}),
+                &wrong,
+                RenderLimits::default()
+            ),
             Err(RenderError::Invalid("image digest mismatch"))
         );
     }
@@ -2940,6 +3183,121 @@ mod tests {
             )
             .unwrap(),
             json!(true)
+        );
+    }
+
+    #[test]
+    fn rich_data_list_repeats_designed_header_and_keeps_items_atomic() {
+        let header = Node::Box {
+            children: vec![text("ITEM DESCRIPTION")],
+            style: BoxStyle {
+                padding_mm: 2.0,
+                background: Some(Color {
+                    red: 8,
+                    green: 50,
+                    blue: 96,
+                }),
+                ..BoxStyle::default()
+            },
+        };
+        let item = Node::Grid {
+            columns: vec![3.0, 1.0],
+            gap_mm: 3.0,
+            children: vec![
+                Node::Stack {
+                    children: vec![Node::Paragraph {
+                        content: vec![Inline::Value {
+                            value: Expr::CurrentPath {
+                                path: vec!["title".into()],
+                            },
+                            style: TextStyle {
+                                bold: true,
+                                ..Default::default()
+                            },
+                        }],
+                        style: TextStyle::default(),
+                    }],
+                    gap_mm: 1.0,
+                },
+                Node::Barcode {
+                    value: Expr::CurrentPath {
+                        path: vec!["barcode".into()],
+                    },
+                    symbology: BarcodeSymbology::Code128,
+                    width_mm: 35.0,
+                    height_mm: 10.0,
+                    human_readable: false,
+                },
+            ],
+        };
+        let d = document(vec![Node::DataList {
+            items: Expr::Path {
+                path: vec!["items".into()],
+            },
+            header: vec![header],
+            item: vec![item],
+            empty: vec![text("No items")],
+            repeat_header: true,
+            gap_mm: 2.0,
+        }]);
+        let items = (0..120)
+            .map(|index| json!({"title": format!("Coffee {index}"), "barcode": format!("SKU-{index:04}")}))
+            .collect::<Vec<_>>();
+        let output = render_with_metrics(
+            &d,
+            &json!({"items": items}),
+            &ResolvedResources::default(),
+            RenderLimits::default(),
+        )
+        .unwrap();
+        assert!(output.page_count > 1);
+        let pdf = String::from_utf8(output.pdf).unwrap();
+        assert_eq!(pdf.matches("(ITEM) Tj").count(), output.page_count as usize);
+        assert_eq!(pdf.matches("(Coffee)").count(), 120);
+    }
+
+    #[test]
+    fn renderer_owned_page_numbers_and_count_are_resolved_per_page() {
+        let mut d = document((0..180).map(|_| text("flowing body line")).collect());
+        d.footer = Some(Region {
+            first: vec![],
+            default: vec![Node::Paragraph {
+                content: vec![
+                    Inline::Value {
+                        value: Expr::PageNumber,
+                        style: TextStyle::default(),
+                    },
+                    Inline::Text {
+                        value: " of ".into(),
+                        style: TextStyle::default(),
+                    },
+                    Inline::Value {
+                        value: Expr::PageCount,
+                        style: TextStyle::default(),
+                    },
+                ],
+                style: TextStyle::default(),
+            }],
+            last: vec![],
+        });
+        let output = render_with_metrics(
+            &d,
+            &json!({}),
+            &ResolvedResources::default(),
+            RenderLimits::default(),
+        )
+        .unwrap();
+        let count = output.page_count;
+        let pdf = String::from_utf8(output.pdf).unwrap();
+        assert!(pdf.contains("(1) Tj"));
+        assert!(pdf.contains(&format!("({count}) Tj")));
+        assert!(!pdf.contains(PAGE_NUMBER_MARKER));
+        assert!(!pdf.contains(PAGE_COUNT_MARKER));
+        assert_eq!(
+            eval(&Expr::PageNumber, &json!({}), &json!({})),
+            Err(RenderError::Unsupported(
+                "page context expressions are supported only as direct inline values"
+            ))
         );
     }
 }

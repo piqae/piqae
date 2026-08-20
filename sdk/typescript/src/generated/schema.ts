@@ -3646,6 +3646,9 @@ export interface components {
             collection: components["schemas"]["BusinessDocumentExpression"];
             value: components["schemas"]["BusinessDocumentExpression"];
         } | {
+            /** @enum {unknown} */
+            type: "page_number" | "page_count";
+        } | {
             /** @constant */
             type: "arithmetic";
             /** @enum {unknown} */
@@ -3777,6 +3780,17 @@ export interface components {
             gap_mm?: number;
         } | {
             /** @constant */
+            type: "data_list";
+            items: components["schemas"]["BusinessDocumentExpression"];
+            header?: components["schemas"]["BusinessDocumentNode"][];
+            item: components["schemas"]["BusinessDocumentNode"][];
+            empty?: components["schemas"]["BusinessDocumentNode"][];
+            /** @default true */
+            repeat_header?: boolean;
+            /** @default 0 */
+            gap_mm?: number;
+        } | {
+            /** @constant */
             type: "conditional";
             condition: components["schemas"]["BusinessDocumentExpression"];
             then: components["schemas"]["BusinessDocumentNode"][];
@@ -3801,6 +3815,17 @@ export interface components {
             /** @constant */
             type: "image";
             resource: string;
+            width_mm: number;
+            height_mm: number;
+            /**
+             * @default contain
+             * @enum {unknown}
+             */
+            fit?: "contain" | "fill" | "scale_down";
+        } | {
+            /** @constant */
+            type: "image_value";
+            resource: components["schemas"]["BusinessDocumentExpression"];
             width_mm: number;
             height_mm: number;
             /**
