@@ -157,7 +157,8 @@
   align-items: center;
   justify-content: center;
   gap: 0.2rem;
-  width: min(210mm, calc(100% - 2rem));
+  width: fit-content;
+  max-width: calc(100% - 2rem);
   margin: 0 auto;
   padding: 0.45rem;
   border: 1px solid #d5d5d5;
@@ -178,6 +179,11 @@
   min-width: 2.25rem;
   justify-items: center;
   gap: 0.1rem;
+}
+.piqae-insert-button:hover,
+.piqae-word-toolbar select:hover {
+  border-color: #8c9196;
+  background: #f6f6f7;
 }
 .piqae-toolbar-label {
   position: absolute;
@@ -213,7 +219,7 @@
   width: 10rem;
 }
 .piqae-editor-workspace {
-  padding-top: 0.75rem;
+  padding-top: 0.35rem;
 }
 .piqae-page-sheet {
   box-sizing: border-box;
@@ -260,6 +266,14 @@
 }
 .piqae-canvas-selectable:hover {
   border-color: #91c0ff;
+}
+.piqae-canvas-selected,
+.piqae-canvas-selected:hover,
+.piqae-canvas-text.piqae-canvas-selected {
+  position: relative;
+  border-color: #005bd3;
+  outline: 2px solid #005bd3;
+  outline-offset: 2px;
 }
 .piqae-canvas-stack {
   display: flex;
@@ -531,13 +545,46 @@
 }
 .piqae-editor-workspace {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 20rem;
+  grid-template-columns: minmax(0, 1fr) 18rem;
   align-items: start;
 }
 .piqae-canvas-wrap {
   min-width: 0;
   padding: 0 1rem;
   overflow: auto;
+}
+.piqae-canvas-context {
+  position: sticky;
+  top: 4.8rem;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  width: fit-content;
+  min-height: 2.2rem;
+  margin: 0.35rem auto 0.65rem;
+  padding: 0.3rem 0.45rem;
+  border: 1px solid #d5d5d5;
+  border-radius: 0.55rem;
+  background: Canvas;
+  box-shadow: 0 2px 8px rgb(0 0 0 / 8%);
+  color: CanvasText;
+  font-size: 0.78rem;
+}
+.piqae-canvas-context span {
+  color: #616161;
+}
+.piqae-canvas-context button {
+  padding: 0.25rem 0.45rem;
+  border: 1px solid #c9cccf;
+  border-radius: 0.35rem;
+  background: Canvas;
+  color: CanvasText;
+  cursor: pointer;
+}
+.piqae-canvas-context button:disabled {
+  cursor: default;
+  opacity: 0.45;
 }
 .piqae-canvas-hint {
   margin: 0.75rem auto;

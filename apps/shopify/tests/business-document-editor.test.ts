@@ -3,6 +3,7 @@ import {
   blocksToDoc,
   docToBlocks,
   insertBlockAfterPath,
+  moveBlockAtPath,
   removeBlockAtPath,
   replaceBlockAtPath,
 } from "../app/components/BusinessDocumentEditor";
@@ -164,5 +165,30 @@ describe("business document editor serialization", () => {
         inserted,
       ),
     ).toEqual([first, inserted, second]);
+  });
+
+  it("moves a selected nested block without moving its container", () => {
+    const first: Block = {
+      type: "paragraph",
+      content: [{ type: "text", value: "First" }],
+    };
+    const second: Block = { type: "divider" };
+    const blocks: Block[] = [
+      { type: "stack", children: [first, second] },
+      { type: "page_break" },
+    ];
+    expect(
+      moveBlockAtPath(
+        blocks,
+        [
+          { branch: "root", index: 0 },
+          { branch: "children", index: 1 },
+        ],
+        -1,
+      ),
+    ).toEqual([
+      { type: "stack", children: [second, first] },
+      { type: "page_break" },
+    ]);
   });
 });

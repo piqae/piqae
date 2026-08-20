@@ -318,6 +318,40 @@ export function BusinessDocumentEditor({
     setSelection(null);
     instance.focus();
   };
+  const moveSelected = (direction: -1 | 1) => {
+    if (!selection?.path) return;
+    const body = moveBlockAtPath(
+      latest.current.body,
+      selection.path,
+      direction,
+    );
+    const nextPath = selection.path.map((part, index) =>
+      index === selection.path!.length - 1
+        ? { ...part, index: part.index + direction }
+        : part,
+    );
+    const nextDocument = { ...latest.current, body };
+    latest.current = nextDocument;
+    view.current?.updateState(
+      EditorState.create({ schema, doc: blocksToDoc(body) }),
+    );
+    setSelection({ position: -1, path: nextPath, block: selection.block });
+    onChange(nextDocument);
+  };
+  const duplicateSelected = () => {
+    if (!selection?.path) return;
+    const body = insertBlockAfterPath(
+      latest.current.body,
+      selection.path,
+      structuredClone(selection.block),
+    );
+    const nextDocument = { ...latest.current, body };
+    latest.current = nextDocument;
+    view.current?.updateState(
+      EditorState.create({ schema, doc: blocksToDoc(body) }),
+    );
+    onChange(nextDocument);
+  };
   return (
     <div className="piqae-word-editor">
       <div
@@ -444,9 +478,53 @@ export function BusinessDocumentEditor({
       </div>
       <div className="piqae-editor-workspace">
         <div className="piqae-canvas-wrap">
+          <div className="piqae-canvas-context" aria-live="polite">
+            {selection?.path ? (
+              <>
+                <strong>{blockTitle(selection.block)}</strong>
+                <span>Selected on page</span>
+                <button
+                  type="button"
+                  onClick={() => moveSelected(-1)}
+                  disabled={disabled || selection.path.at(-1)?.index === 0}
+                  aria-label="Move selected block up"
+                  title="Move up"
+                >
+                  ↑
+                </button>
+                <button
+                  type="button"
+                  onClick={() => moveSelected(1)}
+                  disabled={disabled}
+                  aria-label="Move selected block down"
+                  title="Move down"
+                >
+                  ↓
+                </button>
+                <button
+                  type="button"
+                  onClick={duplicateSelected}
+                  disabled={disabled}
+                >
+                  Duplicate
+                </button>
+                <button
+                  type="button"
+                  className="piqae-danger"
+                  onClick={removeSelected}
+                  disabled={disabled}
+                >
+                  Delete
+                </button>
+              </>
+            ) : (
+              <span>Click content on the page to edit it</span>
+            )}
+          </div>
           <div className="piqae-page-sheet piqae-rendered-canvas">
             <DocumentCanvas
               blocks={value.body}
+              selectedPath={selection?.path}
               editable={!disabled}
               authoringFields={authoringFields}
               onSelect={(block, path) =>
@@ -614,6 +692,7 @@ function DocumentCanvas({
   path = [],
   branch = "root",
   editable = true,
+  selectedPath,
   authoringFields = AUTHORING_FIELDS,
   onSelect,
   onChange,
@@ -622,6 +701,7 @@ function DocumentCanvas({
   path?: BlockPath;
   branch?: BlockPathPart["branch"];
   editable?: boolean;
+  selectedPath?: BlockPath;
   authoringFields?: readonly ShopifyDocumentField[];
   onSelect(block: Block, path: BlockPath): void;
   onChange(block: Block, path: BlockPath): void;
@@ -634,6 +714,8 @@ function DocumentCanvas({
           block={block}
           path={[...path, { branch, index }]}
           editable={editable}
+          selectedPath={selectedPath}
+          selected={sameBlockPath(selectedPath, [...path, { branch, index }])}
           authoringFields={authoringFields}
           onSelect={onSelect}
           onChange={onChange}
@@ -647,6 +729,8 @@ function CanvasBlock({
   block,
   path,
   editable,
+  selectedPath,
+  selected,
   authoringFields,
   onSelect,
   onChange,
@@ -654,6 +738,8 @@ function CanvasBlock({
   block: Block;
   path: BlockPath;
   editable: boolean;
+  selectedPath?: BlockPath;
+  selected: boolean;
   authoringFields: readonly ShopifyDocumentField[];
   onSelect(block: Block, path: BlockPath): void;
   onChange(block: Block, path: BlockPath): void;
@@ -667,7 +753,7 @@ function CanvasBlock({
       block.type === "heading" ? (`h${block.level ?? 2}` as "h1") : "p";
     return (
       <Tag
-        className="piqae-canvas-text"
+        className={`piqae-canvas-text${selected ? " piqae-canvas-selected" : ""}`}
         onClick={select}
         contentEditable={editable}
         suppressContentEditableWarning
@@ -689,11 +775,16 @@ function CanvasBlock({
     );
   }
   if (block.type === "divider")
-    return <hr className="piqae-canvas-selectable" onClick={select} />;
+    return (
+      <hr
+        className={`piqae-canvas-selectable${selected ? " piqae-canvas-selected" : ""}`}
+        onClick={select}
+      />
+    );
   if (block.type === "spacer")
     return (
       <div
-        className="piqae-canvas-spacer piqae-canvas-selectable"
+        className={`piqae-canvas-spacer piqae-canvas-selectable${selected ? " piqae-canvas-selected" : ""}`}
         style={{ height: `${Math.max(8, block.height_mm * 2)}px` }}
         onClick={select}
       >
@@ -702,14 +793,21 @@ function CanvasBlock({
     );
   if (block.type === "page_break")
     return (
-      <div className="piqae-canvas-page-break" onClick={select}>
+      <div
+        className={
+          selected
+            ? "piqae-canvas-page-break piqae-canvas-selected"
+            : "piqae-canvas-page-break"
+        }
+        onClick={select}
+      >
         Page break
       </div>
     );
   if (block.type === "image")
     return (
       <div
-        className="piqae-canvas-image piqae-canvas-selectable"
+        className={`piqae-canvas-image piqae-canvas-selectable${selected ? " piqae-canvas-selected" : ""}`}
         style={{
           width: `${Math.max(80, block.width_mm * 2)}px`,
           height: `${Math.max(40, block.height_mm * 2)}px`,
@@ -723,7 +821,7 @@ function CanvasBlock({
   if (block.type === "qr" || block.type === "barcode")
     return (
       <div
-        className={`piqae-canvas-code piqae-canvas-${block.type} piqae-canvas-selectable`}
+        className={`piqae-canvas-code piqae-canvas-${block.type} piqae-canvas-selectable${selected ? " piqae-canvas-selected" : ""}`}
         onClick={select}
       >
         <span aria-hidden="true">{block.type === "qr" ? "▦" : "▌█▌▌█▌█"}</span>
@@ -733,7 +831,7 @@ function CanvasBlock({
   if (block.type === "table")
     return (
       <div
-        className="piqae-canvas-table piqae-canvas-selectable"
+        className={`piqae-canvas-table piqae-canvas-selectable${selected ? " piqae-canvas-selected" : ""}`}
         onClick={select}
       >
         <div className="piqae-canvas-table-row piqae-canvas-table-head">
@@ -903,7 +1001,7 @@ function CanvasBlock({
   if (block.type === "conditional")
     return (
       <section
-        className="piqae-canvas-conditional piqae-canvas-selectable"
+        className={`piqae-canvas-conditional piqae-canvas-selectable${selected ? " piqae-canvas-selected" : ""}`}
         onClick={select}
       >
         <small>Shown when {expressionLabel(block.condition)}</small>
@@ -912,6 +1010,7 @@ function CanvasBlock({
           path={path}
           branch="then"
           editable={editable}
+          selectedPath={selectedPath}
           authoringFields={authoringFields}
           onSelect={onSelect}
           onChange={onChange}
@@ -924,6 +1023,7 @@ function CanvasBlock({
               path={path}
               branch="else"
               editable={editable}
+              selectedPath={selectedPath}
               authoringFields={authoringFields}
               onSelect={onSelect}
               onChange={onChange}
@@ -950,7 +1050,7 @@ function CanvasBlock({
       : { gap: `${"gap_mm" in block ? (block.gap_mm ?? 0) : 0}mm` };
   return (
     <section
-      className={`${className} piqae-canvas-selectable`}
+      className={`${className} piqae-canvas-selectable${selected ? " piqae-canvas-selected" : ""}`}
       style={style}
       onClick={select}
     >
@@ -959,6 +1059,7 @@ function CanvasBlock({
         path={path}
         branch="children"
         editable={editable}
+        selectedPath={selectedPath}
         authoringFields={authoringFields}
         onSelect={onSelect}
         onChange={onChange}
@@ -1585,6 +1686,47 @@ function moveItem<T>(items: T[], index: number, direction: -1 | 1) {
   const next = [...items];
   [next[index], next[target]] = [next[target]!, next[index]!];
   return next;
+}
+function sameBlockPath(left?: BlockPath, right?: BlockPath) {
+  return Boolean(
+    left &&
+    right &&
+    left.length === right.length &&
+    left.every(
+      (part, index) =>
+        part.branch === right[index]?.branch &&
+        part.index === right[index]?.index,
+    ),
+  );
+}
+export function moveBlockAtPath(
+  blocks: Block[],
+  path: BlockPath,
+  direction: -1 | 1,
+): Block[] {
+  const [part, ...rest] = path;
+  if (!part) return blocks;
+  if (!rest.length) return moveItem(blocks, part.index, direction);
+  return blocks.map((block, index) => {
+    if (index !== part.index) return block;
+    const nextPart = rest[0]!;
+    if (nextPart.branch === "children" && "children" in block)
+      return {
+        ...block,
+        children: moveBlockAtPath(block.children, rest, direction),
+      };
+    if (nextPart.branch === "then" && block.type === "conditional")
+      return {
+        ...block,
+        then: moveBlockAtPath(block.then, rest, direction),
+      };
+    if (nextPart.branch === "else" && block.type === "conditional")
+      return {
+        ...block,
+        else: moveBlockAtPath(block.else ?? [], rest, direction),
+      };
+    return block;
+  });
 }
 export function replaceBlockAtPath(
   blocks: Block[],
