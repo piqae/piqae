@@ -31,9 +31,12 @@ function event(body?: FormData) {
   const url = new URL('https://app.piqae.test/login');
   const setHeaders = vi.fn();
   const encodedBody = body
-    ? new URLSearchParams(
-        [...body.entries()].map(([name, value]) => [name, String(value)])
-      )
+    ? [...body.entries()]
+        .map(
+          ([name, value]) =>
+            `${encodeURIComponent(name)}=${encodeURIComponent(String(value))}`
+        )
+        .join('&')
     : undefined;
   const request = new Request(url, {
     method: body ? 'POST' : 'GET',
