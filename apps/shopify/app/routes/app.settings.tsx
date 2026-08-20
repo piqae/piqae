@@ -1,5 +1,11 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
-import { Form, useActionData, useFetcher, useLoaderData } from "react-router";
+import {
+  Form,
+  useActionData,
+  useFetcher,
+  useLoaderData,
+  useRevalidator,
+} from "react-router";
 import { useEffect, useState } from "react";
 import shopify from "../shopify.server";
 import { parseSettings, workflows } from "../core/workflows.server";
@@ -46,7 +52,8 @@ export async function action({ request }: ActionFunctionArgs) {
       const connection = await services.managedAccounts
         .client(link)
         .connectSessions.create({
-          return_url: `${process.env.SHOPIFY_APP_URL}/app/settings`,
+          name: `${session.shop} · Piqae Order Printing`,
+          return_url: `${process.env.SHOPIFY_APP_URL}/connect/complete?shop=${encodeURIComponent(session.shop)}`,
           expires_in_seconds: 600,
         });
       return { ok: true, error: "", connection };
@@ -73,6 +80,7 @@ export default function Settings() {
     useLoaderData<typeof loader>();
   const result = useActionData<typeof action>();
   const connector = useFetcher<typeof action>();
+  const revalidator = useRevalidator();
   const [showInstaller, setShowInstaller] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const connection = connector.data?.connection;
@@ -89,17 +97,65 @@ export default function Settings() {
           : "macos",
     );
   }, []);
+  useEffect(() => {
+    const connected = (event: MessageEvent) => {
+      if (
+        event.origin === window.location.origin &&
+        event.data?.type === "piqae:node-connected"
+      )
+        revalidator.revalidate();
+    };
+    window.addEventListener("message", connected);
+    return () => window.removeEventListener("message", connected);
+  }, [revalidator]);
   const installer = connection?.downloads.find(
     (download) => download.platform === detectedPlatform,
   );
 
+  const hasNodes = nodes.length > 0;
   const hasPrinters = printers.length > 0;
   return (
     <s-page heading="Settings">
-      <s-section heading={hasPrinters ? "Printers" : "Connect a printer"}>
+      <s-section heading={hasNodes ? "Printers" : "Connect a printer"}>
         <s-stack direction="block" gap="base">
           {!connected ? <s-banner tone="warning">{setupError}</s-banner> : null}
-          {hasPrinters ? (
+          {hasNodes ? (
+            <>
+              <s-paragraph>
+                Piqae is connected on {nodes.length} computer
+                {nodes.length === 1 ? "" : "s"}. {printers.length} printer
+                {printers.length === 1 ? "" : "s"} available.
+              </s-paragraph>
+              <div className="piqae-node-list">
+                {nodes.map((node) => (
+                  <div className="piqae-node-row" key={node.id}>
+                    <strong>{node.name}</strong>
+                    <span>{node.platform}</span>
+                    <span>{node.state}</span>
+                    <small>Last seen {node.last_seen_at}</small>
+                  </div>
+                ))}
+              </div>
+              {!hasPrinters ? (
+                <s-banner tone="warning">
+                  The computer is connected, but it has not reported an
+                  available printer yet. Check the printer in macOS or Windows,
+                  then refresh.
+                </s-banner>
+              ) : null}
+              <s-stack direction="inline" gap="base">
+                <s-button onClick={() => revalidator.revalidate()}>
+                  Refresh printers
+                </s-button>
+                <connector.Form method="post">
+                  <input type="hidden" name="intent" value="connect-node" />
+                  <s-button type="submit" disabled={connector.state !== "idle"}>
+                    Connect another computer
+                  </s-button>
+                </connector.Form>
+              </s-stack>
+            </>
+          ) : hasPrinters ? (
             <s-paragraph>
               {printers.length} printer{printers.length === 1 ? "" : "s"}{" "}
               connected across {nodes.length} computer
@@ -112,18 +168,20 @@ export default function Settings() {
               account or API key is needed.
             </s-paragraph>
           )}
-          <connector.Form method="post">
-            <input type="hidden" name="intent" value="connect-node" />
-            <s-button
-              type="submit"
-              variant="primary"
-              disabled={!connected || connector.state !== "idle"}
-            >
-              {connector.state === "idle"
-                ? "Connect this computer"
-                : "Preparing connection…"}
-            </s-button>
-          </connector.Form>
+          {!hasNodes ? (
+            <connector.Form method="post">
+              <input type="hidden" name="intent" value="connect-node" />
+              <s-button
+                type="submit"
+                variant="primary"
+                disabled={!connected || connector.state !== "idle"}
+              >
+                {connector.state === "idle"
+                  ? "Connect this computer"
+                  : "Preparing connection…"}
+              </s-button>
+            </connector.Form>
+          ) : null}
           {connection ? (
             <s-stack direction="block" gap="base">
               {connection.connect_url ? (

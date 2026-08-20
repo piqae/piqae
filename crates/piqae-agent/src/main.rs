@@ -920,6 +920,10 @@ async fn preview_connector(arguments: &Arguments, token: &str) -> Result<()> {
     Ok(())
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "connector enrolment keeps preview, proof, durable identity, and reload ordering visible"
+)]
 async fn add_connector(arguments: &Arguments, consent: ConnectorConsentInput) -> Result<()> {
     let ConnectorConsentInput {
         token,
@@ -929,6 +933,10 @@ async fn add_connector(arguments: &Arguments, consent: ConnectorConsentInput) ->
     let mut allowed_printer_ids = printer_ids;
     allowed_printer_ids.sort();
     let (base_url, installation, installation_key_path) = installed_control_plane(arguments)?;
+    let preview = AgentClient::new(base_url.clone())?
+        .preview_connect_session(&token)
+        .await
+        .context("read Piqae connector identity")?;
     let fingerprint = hex::encode(Sha256::digest(token.as_bytes()));
     let local_first_connection = no_enabled_connectors(&arguments.data_dir)?;
     let relative_key = if local_first_connection {
@@ -1008,6 +1016,11 @@ async fn add_connector(arguments: &Arguments, consent: ConnectorConsentInput) ->
         connector_id,
         agent_id: enrolled.agent_id.to_string(),
         control_plane_url: base_url,
+        display_name: preview
+            .requesting_service_name
+            .or_else(|| Some(preview.workspace_name.clone())),
+        workspace_name: Some(preview.workspace_name),
+        authorization_type: Some(preview.authorization_type),
         device_key_file: relative_key,
         enabled: true,
         printer_grant,
@@ -1739,6 +1752,11 @@ async fn connector_supervisor_loop(
                             let selected_printer_count = record.allowed_printer_ids.len();
                             details.push(LocalConnectorDetail {
                                 connector_id: record.connector_id,
+                                display_name: record
+                                    .display_name
+                                    .unwrap_or_else(|| "Piqae connection".to_owned()),
+                                workspace_name: record.workspace_name,
+                                authorization_type: record.authorization_type,
                                 endpoint: record.control_plane_url.origin().ascii_serialization(),
                                 connection,
                                 permission,
@@ -5015,6 +5033,9 @@ mod tests {
             connector_id: id.to_owned(),
             agent_id: format!("agt_{id}"),
             control_plane_url: Url::parse("https://api.piqae.example/").expect("url"),
+            display_name: Some("Example service".to_owned()),
+            workspace_name: Some("Example customer".to_owned()),
+            authorization_type: Some("platform_customer".to_owned()),
             device_key_file: format!("connectors/{id}/device.key").into(),
             enabled: true,
             printer_grant: PrinterGrant::SelectedPrinters,

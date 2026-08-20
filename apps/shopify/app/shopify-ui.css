@@ -118,6 +118,30 @@
 .piqae-template-thumbnail i:nth-of-type(3) {
   width: 45%;
 }
+.piqae-node-list {
+  display: grid;
+  gap: 0.5rem;
+}
+.piqae-node-row {
+  display: grid;
+  grid-template-columns: minmax(10rem, 1fr) auto auto;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.75rem;
+  border: 1px solid #e1e3e5;
+  border-radius: 0.5rem;
+}
+.piqae-node-row small {
+  grid-column: 1 / -1;
+  color: #616161;
+}
+.piqae-connect-complete {
+  max-width: 34rem;
+  margin: 12vh auto;
+  padding: 2rem;
+  color: #202223;
+  font-family: system-ui, sans-serif;
+}
 .piqae-word-editor {
   margin-top: 1rem;
   background: #f4f4f4;
@@ -126,19 +150,24 @@
 }
 .piqae-word-toolbar {
   position: sticky;
-  top: 0;
-  z-index: 2;
+  top: 0.5rem;
+  z-index: 3;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 0.35rem;
-  padding: 0.6rem 0.75rem;
-  border-bottom: 1px solid #d5d5d5;
+  justify-content: center;
+  gap: 0.2rem;
+  width: min(210mm, calc(100% - 2rem));
+  margin: 0 auto;
+  padding: 0.45rem;
+  border: 1px solid #d5d5d5;
+  border-radius: 0.65rem;
   background: Canvas;
+  box-shadow: 0 2px 8px rgb(0 0 0 / 8%);
 }
 .piqae-word-toolbar button,
 .piqae-word-toolbar select {
-  padding: 0.45rem 0.65rem;
+  padding: 0.35rem 0.45rem;
   border: 1px solid color-mix(in srgb, currentColor 22%, transparent);
   border-radius: 0.45rem;
   background: Canvas;
@@ -146,12 +175,16 @@
 }
 .piqae-insert-button {
   display: inline-grid;
-  min-width: 3.8rem;
+  min-width: 2.25rem;
   justify-items: center;
   gap: 0.1rem;
 }
 .piqae-toolbar-label {
-  margin-right: 0.35rem;
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
   font-size: 0.75rem;
   font-weight: 650;
   color: #616161;
@@ -170,10 +203,17 @@
   line-height: 1;
 }
 .piqae-insert-button > small {
-  font-size: 0.7rem;
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
 }
 .piqae-variable-picker {
-  min-width: 12rem;
+  width: 10rem;
+}
+.piqae-editor-workspace {
+  padding-top: 0.75rem;
 }
 .piqae-page-sheet {
   box-sizing: border-box;
@@ -262,6 +302,52 @@
 }
 .piqae-canvas-table-row span {
   padding: 0.45rem 0.25rem;
+}
+.piqae-canvas-table-column {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.25rem;
+}
+.piqae-canvas-table-column strong {
+  min-width: 1rem;
+  flex: 1;
+}
+.piqae-canvas-column-actions {
+  display: none;
+  gap: 0.1rem;
+  padding: 0;
+}
+.piqae-canvas-table-column:hover .piqae-canvas-column-actions,
+.piqae-canvas-table-column:focus-within .piqae-canvas-column-actions {
+  display: inline-flex;
+}
+.piqae-canvas-column-actions button,
+.piqae-canvas-add-column {
+  padding: 0.15rem 0.3rem;
+  border: 1px solid #c9cccf;
+  border-radius: 0.25rem;
+  background: white;
+  font: inherit;
+}
+.piqae-canvas-add-column {
+  margin: 0.35rem;
+}
+.piqae-canvas-table-row [contenteditable="true"] {
+  cursor: text;
+  outline: 1px solid transparent;
+}
+.piqae-canvas-table-row [contenteditable="true"]:focus {
+  outline-color: #2c6ecb;
+}
+.piqae-canvas-table-row select {
+  min-width: 0;
+  margin: 0.2rem;
+  padding: 0.3rem;
+  border: 1px solid #c9cccf;
+  border-radius: 0.3rem;
+  background: white;
 }
 .piqae-canvas-table-head {
   font-weight: 700;

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   blocksToDoc,
   docToBlocks,
+  insertBlockAfterPath,
   removeBlockAtPath,
   replaceBlockAtPath,
 } from "../app/components/BusinessDocumentEditor";
@@ -144,5 +145,24 @@ describe("business document editor serialization", () => {
         >
       ).then,
     ).toEqual([{ type: "divider" }]);
+  });
+
+  it("inserts after the selected block without replacing existing content", () => {
+    const first: Block = {
+      type: "paragraph",
+      content: [{ type: "text", value: "First" }],
+    };
+    const second: Block = { type: "divider" };
+    const inserted: Block = {
+      type: "paragraph",
+      content: [{ type: "text", value: "Inserted" }],
+    };
+    expect(
+      insertBlockAfterPath(
+        [first, second],
+        [{ branch: "root", index: 0 }],
+        inserted,
+      ),
+    ).toEqual([first, inserted, second]);
   });
 });

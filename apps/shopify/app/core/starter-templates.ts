@@ -151,7 +151,18 @@ const documents = {
           columns: [2, 1],
           gap_mm: 10,
           children: [
-            value(["shop"], true),
+            {
+              type: "stack",
+              gap_mm: 3,
+              children: [
+                value(["shop", "name"], true),
+                {
+                  type: "qr",
+                  value: current("statusUrl"),
+                  size_mm: 24,
+                },
+              ],
+            },
             {
               type: "stack",
               gap_mm: 1,

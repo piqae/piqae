@@ -225,9 +225,17 @@ export function BusinessDocumentEditor({
   const insert = (node: ProseMirrorNode) => {
     const instance = view.current;
     if (!instance) return;
-    instance.dispatch(
-      instance.state.tr.replaceSelectionWith(node).scrollIntoView(),
+    const inserted = docToBlocks(schema.nodes.doc!.create(null, [node]))[0];
+    if (!inserted) return;
+    const body = selection?.path
+      ? insertBlockAfterPath(latest.current.body, selection.path, inserted)
+      : [...latest.current.body, inserted];
+    const nextDocument = { ...latest.current, body };
+    latest.current = nextDocument;
+    instance.updateState(
+      EditorState.create({ schema, doc: blocksToDoc(body) }),
     );
+    onChange(nextDocument);
     instance.focus();
   };
   const insertVariable = (path: string) =>
@@ -436,13 +444,11 @@ export function BusinessDocumentEditor({
       </div>
       <div className="piqae-editor-workspace">
         <div className="piqae-canvas-wrap">
-          <p className="piqae-canvas-hint">
-            Select a blue-outlined section to edit its content and layout.
-          </p>
           <div className="piqae-page-sheet piqae-rendered-canvas">
             <DocumentCanvas
               blocks={value.body}
               editable={!disabled}
+              authoringFields={authoringFields}
               onSelect={(block, path) =>
                 setSelection({ position: -1, block, path })
               }
@@ -608,6 +614,7 @@ function DocumentCanvas({
   path = [],
   branch = "root",
   editable = true,
+  authoringFields = AUTHORING_FIELDS,
   onSelect,
   onChange,
 }: {
@@ -615,6 +622,7 @@ function DocumentCanvas({
   path?: BlockPath;
   branch?: BlockPathPart["branch"];
   editable?: boolean;
+  authoringFields?: readonly ShopifyDocumentField[];
   onSelect(block: Block, path: BlockPath): void;
   onChange(block: Block, path: BlockPath): void;
 }) {
@@ -626,6 +634,7 @@ function DocumentCanvas({
           block={block}
           path={[...path, { branch, index }]}
           editable={editable}
+          authoringFields={authoringFields}
           onSelect={onSelect}
           onChange={onChange}
         />
@@ -638,12 +647,14 @@ function CanvasBlock({
   block,
   path,
   editable,
+  authoringFields,
   onSelect,
   onChange,
 }: {
   block: Block;
   path: BlockPath;
   editable: boolean;
+  authoringFields: readonly ShopifyDocumentField[];
   onSelect(block: Block, path: BlockPath): void;
   onChange(block: Block, path: BlockPath): void;
 }) {
@@ -729,26 +740,164 @@ function CanvasBlock({
           {block.columns.map((column, index) => (
             <span
               key={index}
+              className="piqae-canvas-table-column"
               style={{ flex: column.width ?? 1, textAlign: column.align }}
+              onClick={(event) => event.stopPropagation()}
             >
-              {inlineLabel(column.header)}
+              <strong
+                contentEditable={editable}
+                suppressContentEditableWarning
+                onBlur={(event) =>
+                  editable &&
+                  onChange(
+                    {
+                      ...block,
+                      columns: block.columns.map((item, itemIndex) =>
+                        itemIndex === index
+                          ? {
+                              ...item,
+                              header: [
+                                {
+                                  type: "text" as const,
+                                  value: event.currentTarget.textContent ?? "",
+                                },
+                              ],
+                            }
+                          : item,
+                      ),
+                    },
+                    path,
+                  )
+                }
+              >
+                {inlineLabel(column.header)}
+              </strong>
+              {editable ? (
+                <span className="piqae-canvas-column-actions">
+                  <button
+                    type="button"
+                    disabled={index === 0}
+                    aria-label={`Move ${inlineLabel(column.header)} left`}
+                    onClick={() =>
+                      onChange(
+                        {
+                          ...block,
+                          columns: moveItem(block.columns, index, -1),
+                        },
+                        path,
+                      )
+                    }
+                  >
+                    ←
+                  </button>
+                  <button
+                    type="button"
+                    disabled={index === block.columns.length - 1}
+                    aria-label={`Move ${inlineLabel(column.header)} right`}
+                    onClick={() =>
+                      onChange(
+                        {
+                          ...block,
+                          columns: moveItem(block.columns, index, 1),
+                        },
+                        path,
+                      )
+                    }
+                  >
+                    →
+                  </button>
+                  <button
+                    type="button"
+                    disabled={block.columns.length === 1}
+                    aria-label={`Remove ${inlineLabel(column.header)} column`}
+                    onClick={() =>
+                      onChange(
+                        {
+                          ...block,
+                          columns: block.columns.filter((_, i) => i !== index),
+                        },
+                        path,
+                      )
+                    }
+                  >
+                    ×
+                  </button>
+                </span>
+              ) : null}
             </span>
           ))}
         </div>
-        {[0, 1].map((row) => (
-          <div className="piqae-canvas-table-row" key={row}>
-            {block.columns.map((column, index) => (
-              <span
-                key={index}
-                style={{ flex: column.width ?? 1, textAlign: column.align }}
+        <div className="piqae-canvas-table-row piqae-canvas-table-binding-row">
+          {block.columns.map((column, index) => (
+            <label
+              key={index}
+              style={{ flex: column.width ?? 1, textAlign: column.align }}
+              onClick={(event) => event.stopPropagation()}
+            >
+              <select
+                aria-label={`${inlineLabel(column.header)} value`}
+                value={
+                  columnCellPath(column.cell)
+                    ? `item.${columnCellPath(column.cell)}`
+                    : ""
+                }
+                disabled={!editable}
+                onChange={(event) =>
+                  onChange(
+                    {
+                      ...block,
+                      columns: block.columns.map((item, itemIndex) =>
+                        itemIndex === index
+                          ? {
+                              ...item,
+                              cell: [
+                                {
+                                  type: "value" as const,
+                                  value: currentPathExpression(
+                                    event.currentTarget.value.replace(
+                                      /^item\./,
+                                      "",
+                                    ),
+                                  ),
+                                },
+                              ],
+                            }
+                          : item,
+                      ),
+                    },
+                    path,
+                  )
+                }
               >
-                {columnCellPath(column.cell)
-                  ? `{{ ${columnCellPath(column.cell)} }}`
-                  : "Value"}
-              </span>
-            ))}
-          </div>
-        ))}
+                {!columnCellPath(column.cell) ? (
+                  <option value="">Computed value</option>
+                ) : null}
+                {authoringFields
+                  .filter((field) => field.path.startsWith("item."))
+                  .map((field) => (
+                    <option value={field.path} key={field.path}>
+                      {field.label}
+                    </option>
+                  ))}
+              </select>
+            </label>
+          ))}
+        </div>
+        {editable ? (
+          <button
+            className="piqae-canvas-add-column"
+            type="button"
+            onClick={(event) => {
+              event.stopPropagation();
+              onChange(
+                { ...block, columns: [...block.columns, defaultColumn()] },
+                path,
+              );
+            }}
+          >
+            + Add column
+          </button>
+        ) : null}
       </div>
     );
   if (block.type === "conditional")
@@ -763,6 +912,7 @@ function CanvasBlock({
           path={path}
           branch="then"
           editable={editable}
+          authoringFields={authoringFields}
           onSelect={onSelect}
           onChange={onChange}
         />
@@ -774,6 +924,7 @@ function CanvasBlock({
               path={path}
               branch="else"
               editable={editable}
+              authoringFields={authoringFields}
               onSelect={onSelect}
               onChange={onChange}
             />
@@ -803,16 +954,12 @@ function CanvasBlock({
       style={style}
       onClick={select}
     >
-      {block.type === "repeat" ? (
-        <small className="piqae-repeat-label">
-          One document per {expressionLabel(block.items)}
-        </small>
-      ) : null}
       <DocumentCanvas
         blocks={children}
         path={path}
         branch="children"
         editable={editable}
+        authoringFields={authoringFields}
         onSelect={onSelect}
         onChange={onChange}
       />
@@ -881,184 +1028,9 @@ function BlockProperties({
           />{" "}
           Repeat header on each page
         </label>
-        <div className="piqae-property-row">
-          <strong>Columns</strong>
-          <button
-            type="button"
-            disabled={disabled}
-            onClick={() =>
-              onChange({
-                ...block,
-                columns: [...block.columns, defaultColumn()],
-              })
-            }
-          >
-            + Add column
-          </button>
-        </div>
-        <div className="piqae-table-columns">
-          {block.columns.map((column, index) => (
-            <fieldset key={index}>
-              <legend>Column {index + 1}</legend>
-              <label>
-                Heading
-                <input
-                  value={inlineLabel(column.header)}
-                  disabled={disabled}
-                  onChange={(event) =>
-                    onChange({
-                      ...block,
-                      columns: block.columns.map((item, itemIndex) =>
-                        itemIndex === index
-                          ? {
-                              ...item,
-                              header: [
-                                {
-                                  type: "text" as const,
-                                  value: event.currentTarget.value,
-                                },
-                              ],
-                            }
-                          : item,
-                      ),
-                    })
-                  }
-                />
-              </label>
-              <label>
-                Line-item value
-                <select
-                  value={`item.${columnCellPath(column.cell)}`}
-                  disabled={disabled || !columnCellPath(column.cell)}
-                  onChange={(event) =>
-                    onChange({
-                      ...block,
-                      columns: block.columns.map((item, itemIndex) =>
-                        itemIndex === index
-                          ? {
-                              ...item,
-                              cell: [
-                                {
-                                  type: "value" as const,
-                                  value: currentPathExpression(
-                                    event.currentTarget.value.replace(
-                                      /^item\./,
-                                      "",
-                                    ),
-                                  ),
-                                },
-                              ],
-                            }
-                          : item,
-                      ),
-                    })
-                  }
-                >
-                  {!columnCellPath(column.cell) ? (
-                    <option value="item.">Computed value</option>
-                  ) : null}
-                  {authoringFields
-                    .filter((field) => field.path.startsWith("item."))
-                    .map((field) => (
-                      <option value={field.path} key={field.path}>
-                        {field.label}
-                      </option>
-                    ))}
-                </select>
-              </label>
-              <label>
-                Width
-                <input
-                  type="number"
-                  min="1"
-                  max="20"
-                  value={column.width}
-                  disabled={disabled}
-                  onChange={(event) =>
-                    onChange({
-                      ...block,
-                      columns: block.columns.map((item, itemIndex) =>
-                        itemIndex === index
-                          ? {
-                              ...item,
-                              width: Number(event.currentTarget.value),
-                            }
-                          : item,
-                      ),
-                    })
-                  }
-                />
-              </label>
-              <label>
-                Alignment
-                <select
-                  value={column.align ?? "left"}
-                  disabled={disabled}
-                  onChange={(event) =>
-                    onChange({
-                      ...block,
-                      columns: block.columns.map((item, itemIndex) =>
-                        itemIndex === index
-                          ? {
-                              ...item,
-                              align: event.currentTarget.value as
-                                | "left"
-                                | "center"
-                                | "right",
-                            }
-                          : item,
-                      ),
-                    })
-                  }
-                >
-                  <option value="left">Left</option>
-                  <option value="center">Centre</option>
-                  <option value="right">Right</option>
-                </select>
-              </label>
-              <div className="piqae-inline-actions">
-                <button
-                  type="button"
-                  disabled={disabled || index === 0}
-                  onClick={() =>
-                    onChange({
-                      ...block,
-                      columns: moveItem(block.columns, index, -1),
-                    })
-                  }
-                  aria-label={`Move column ${index + 1} left`}
-                >
-                  ←
-                </button>
-                <button
-                  type="button"
-                  disabled={disabled || index === block.columns.length - 1}
-                  onClick={() =>
-                    onChange({
-                      ...block,
-                      columns: moveItem(block.columns, index, 1),
-                    })
-                  }
-                  aria-label={`Move column ${index + 1} right`}
-                >
-                  →
-                </button>
-                <button
-                  type="button"
-                  disabled={disabled || block.columns.length === 1}
-                  onClick={() =>
-                    onChange({
-                      ...block,
-                      columns: block.columns.filter((_, i) => i !== index),
-                    })
-                  }
-                >
-                  Remove
-                </button>
-              </div>
-            </fieldset>
-          ))}
-        </div>
+        <p className="piqae-property-help">
+          Edit headings and choose line-item fields directly in the table.
+        </p>
       </div>
     );
   if (block.type === "conditional")
@@ -1639,6 +1611,39 @@ export function replaceBlockAtPath(
       return {
         ...block,
         else: replaceBlockAtPath(block.else ?? [], rest, replacement),
+      };
+    return block;
+  });
+}
+export function insertBlockAfterPath(
+  blocks: Block[],
+  path: BlockPath,
+  inserted: Block,
+): Block[] {
+  const [part, ...rest] = path;
+  if (!part) return [...blocks, inserted];
+  if (!rest.length) {
+    const next = [...blocks];
+    next.splice(Math.min(part.index + 1, next.length), 0, inserted);
+    return next;
+  }
+  return blocks.map((block, index) => {
+    if (index !== part.index) return block;
+    const nextPart = rest[0]!;
+    if (nextPart.branch === "children" && "children" in block)
+      return {
+        ...block,
+        children: insertBlockAfterPath(block.children, rest, inserted),
+      };
+    if (nextPart.branch === "then" && block.type === "conditional")
+      return {
+        ...block,
+        then: insertBlockAfterPath(block.then, rest, inserted),
+      };
+    if (nextPart.branch === "else" && block.type === "conditional")
+      return {
+        ...block,
+        else: insertBlockAfterPath(block.else ?? [], rest, inserted),
       };
     return block;
   });

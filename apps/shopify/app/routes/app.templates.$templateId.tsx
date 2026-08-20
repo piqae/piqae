@@ -300,17 +300,6 @@ export default function TemplateEditor() {
             ) : result?.error ? (
               <s-banner tone="critical">{result.error}</s-banner>
             ) : null}
-            <s-banner tone="info">
-              This structured document reflows line items, tables and text
-              automatically. Preview, download and print use the same published
-              Piqae revision.
-            </s-banner>
-            {starter ? (
-              <s-banner tone="info">
-                You are editing a starter. Saving creates your own copy and
-                keeps the original available for future documents.
-              </s-banner>
-            ) : null}
             <div className="piqae-editor-commandbar">
               <s-button-group accessibilityLabel="Template editor mode">
                 <s-button
@@ -322,48 +311,20 @@ export default function TemplateEditor() {
                 </s-button>
                 <s-button
                   type="button"
+                  variant={workspace === "liquid" ? "primary" : "secondary"}
+                  onClick={() => switchWorkspace("liquid")}
+                >
+                  Code
+                </s-button>
+                <s-button
+                  type="button"
                   variant={workspace === "preview" ? "primary" : "secondary"}
                   onClick={() => switchWorkspace("preview")}
                 >
                   Preview
                 </s-button>
-                <s-button
-                  type="button"
-                  variant={workspace === "liquid" ? "primary" : "secondary"}
-                  onClick={() => switchWorkspace("liquid")}
-                >
-                  Liquid
-                </s-button>
               </s-button-group>
-              <span className="piqae-muted">
-                Preview and print use the same document revision.
-              </span>
             </div>
-            <details className="piqae-import-panel">
-              <summary>
-                Import an Order Printer or Order Printer Pro template
-              </summary>
-              <div className="piqae-import-content">
-                <p>
-                  Paste the template’s HTML and Liquid. Piqae converts supported
-                  document structure without running scripts or remote code.
-                </p>
-                <textarea
-                  className="piqae-code piqae-code-short"
-                  name="orderPrinterSource"
-                  maxLength={65536}
-                  placeholder="Paste HTML and Liquid here"
-                />
-                <button
-                  className="piqae-link-button"
-                  type="submit"
-                  name="intent"
-                  value="import_order_printer"
-                >
-                  Import into editor
-                </button>
-              </div>
-            </details>
             {result &&
             "imported" in result &&
             result.imported?.diagnostics.length ? (
@@ -445,17 +406,32 @@ export default function TemplateEditor() {
                     onChange={setDocument}
                   />
                 ) : (
-                  <label>
-                    Shopify Liquid
-                    <textarea
-                      className="piqae-code"
-                      name="liquid"
-                      maxLength={65536}
+                  <div className="piqae-code-workspace">
+                    <label>
+                      Shopify Liquid / Order Printer template
+                      <textarea
+                        className="piqae-code"
+                        name="liquid"
+                        maxLength={65536}
+                        value={liquid}
+                        onChange={(e) => setLiquid(e.currentTarget.value)}
+                        disabled={false}
+                      />
+                    </label>
+                    <input
+                      type="hidden"
+                      name="orderPrinterSource"
                       value={liquid}
-                      onChange={(e) => setLiquid(e.currentTarget.value)}
-                      disabled={false}
                     />
-                  </label>
+                    <button
+                      className="piqae-link-button"
+                      type="submit"
+                      name="intent"
+                      value="import_order_printer"
+                    >
+                      Convert code to visual document
+                    </button>
+                  </div>
                 )}
                 <input type="hidden" name="mode" value={mode} />
                 {mode !== "source" ? (
