@@ -109,6 +109,15 @@ pub struct PlatformManagerAuthenticationRecord {
     pub owner_workspace_id: WorkspaceId,
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct StoredPlatformCredential {
+    pub id: String,
+    pub name: String,
+    pub lookup_prefix: String,
+    pub last_used_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+}
+
 #[derive(Clone, Debug)]
 pub struct EnrolledAgent {
     pub agent_id: AgentId,
@@ -1613,6 +1622,31 @@ impl PostgresStore {
         .fetch_optional(&self.pool)
         .await?
         .ok_or(StorageError::NotFound)
+    }
+
+    pub async fn platform_credential_for_owner_workspace(
+        &self,
+        owner_workspace_id: WorkspaceId,
+    ) -> Result<StoredPlatformCredential, StorageError> {
+        let row = sqlx::query(
+            "SELECT account.id, account.name, account.last_used_at, account.created_at
+             FROM platform_service_accounts account
+             JOIN workspaces owner ON owner.id = account.owner_workspace_id
+             WHERE account.owner_workspace_id = $1 AND account.revoked_at IS NULL
+               AND owner.status = 'active'",
+        )
+        .bind(owner_workspace_id.to_string())
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(StorageError::NotFound)?;
+        let id: String = row.try_get("id")?;
+        Ok(StoredPlatformCredential {
+            lookup_prefix: format!("piq_platform_{id}"),
+            id,
+            name: row.try_get("name")?,
+            last_used_at: row.try_get("last_used_at")?,
+            created_at: row.try_get("created_at")?,
+        })
     }
 
     pub async fn has_platform_manager_for_owner_workspace(

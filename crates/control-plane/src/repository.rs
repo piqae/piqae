@@ -19,11 +19,11 @@ use piqae_storage_postgres::{
     StoredConnectSessionPreview, StoredContentEncryptionKey, StoredDeviceAuthorization,
     StoredDocumentPreview, StoredDocumentRender, StoredDocumentTemplate,
     StoredDocumentTemplateRevision, StoredLoadedMedia, StoredNodeConnector, StoredNodeDiagnostic,
-    StoredNodeUpdate, StoredPlatformAccount, StoredPrintWorkflow, StoredPrinter,
-    StoredResolvedPrintTicket, StoredStock, StoredTarget, StoredTargetBinding, StoredTenantEvent,
-    StoredUpload, StoredUsageSummary, StoredWebhook, StoredWebhookDelivery, StripeBillingEvent,
-    StripeProjectionResult, SyncedPrinter, UpsertedPlatformAccount, WebhookDeliveryWork,
-    WorkOsIdentityEvent, WorkOsProjectionResult,
+    StoredNodeUpdate, StoredPlatformAccount, StoredPlatformCredential, StoredPrintWorkflow,
+    StoredPrinter, StoredResolvedPrintTicket, StoredStock, StoredTarget, StoredTargetBinding,
+    StoredTenantEvent, StoredUpload, StoredUsageSummary, StoredWebhook, StoredWebhookDelivery,
+    StripeBillingEvent, StripeProjectionResult, SyncedPrinter, UpsertedPlatformAccount,
+    WebhookDeliveryWork, WorkOsIdentityEvent, WorkOsProjectionResult,
 };
 use sha2::Digest as _;
 use std::{
@@ -237,6 +237,25 @@ pub trait Repository: Send + Sync + 'static {
         _secret_hash: &str,
         _owner_workspace_id: WorkspaceId,
         _request_id: &str,
+    ) -> Result<(), RepositoryError> {
+        Err(RepositoryError::NotFound)
+    }
+    async fn get_platform_credential(
+        &self,
+        _owner_workspace_id: WorkspaceId,
+    ) -> Result<StoredPlatformCredential, RepositoryError> {
+        Err(RepositoryError::NotFound)
+    }
+    async fn rotate_platform_manager(
+        &self,
+        _owner_workspace_id: WorkspaceId,
+        _secret_hash: &str,
+    ) -> Result<StoredPlatformCredential, RepositoryError> {
+        Err(RepositoryError::NotFound)
+    }
+    async fn revoke_platform_manager(
+        &self,
+        _owner_workspace_id: WorkspaceId,
     ) -> Result<(), RepositoryError> {
         Err(RepositoryError::NotFound)
     }
@@ -1410,6 +1429,42 @@ impl Repository for PostgresStore {
         request_id: &str,
     ) -> Result<(), RepositoryError> {
         self.enable_platform_service_account(id, name, secret_hash, owner_workspace_id, request_id)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn get_platform_credential(
+        &self,
+        owner_workspace_id: WorkspaceId,
+    ) -> Result<StoredPlatformCredential, RepositoryError> {
+        self.platform_credential_for_owner_workspace(owner_workspace_id)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn rotate_platform_manager(
+        &self,
+        owner_workspace_id: WorkspaceId,
+        secret_hash: &str,
+    ) -> Result<StoredPlatformCredential, RepositoryError> {
+        let id = self
+            .platform_manager_for_owner_workspace(owner_workspace_id)
+            .await?;
+        self.rotate_platform_service_account(&id, secret_hash)
+            .await?;
+        self.platform_credential_for_owner_workspace(owner_workspace_id)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn revoke_platform_manager(
+        &self,
+        owner_workspace_id: WorkspaceId,
+    ) -> Result<(), RepositoryError> {
+        let id = self
+            .platform_manager_for_owner_workspace(owner_workspace_id)
+            .await?;
+        self.revoke_platform_service_account(&id)
             .await
             .map_err(Into::into)
     }
@@ -2944,7 +2999,8 @@ struct MemoryState {
         ),
     >,
     document_previews: HashMap<String, (WorkspaceId, EnvironmentId, String, StoredDocumentPreview)>,
-    platform_managers: HashMap<WorkspaceId, String>,
+    platform_managers: HashMap<WorkspaceId, StoredPlatformCredential>,
+    platform_manager_secret_hashes: HashMap<WorkspaceId, String>,
     api_keys: HashMap<String, (WorkspaceId, EnvironmentId, StoredApiKey, String)>,
     jobs: HashMap<JobId, MemoryJob>,
     printers: HashMap<PrinterId, (WorkspaceId, EnvironmentId, StoredPrinter)>,
@@ -3603,8 +3659,8 @@ impl Repository for MemoryRepository {
     async fn enable_platform_manager(
         &self,
         id: &str,
-        _name: &str,
-        _secret_hash: &str,
+        name: &str,
+        secret_hash: &str,
         owner_workspace_id: WorkspaceId,
         _request_id: &str,
     ) -> Result<(), RepositoryError> {
@@ -3612,9 +3668,65 @@ impl Repository for MemoryRepository {
         if state.platform_managers.contains_key(&owner_workspace_id) {
             return Err(RepositoryError::PlatformAlreadyEnabled);
         }
+        state.platform_managers.insert(
+            owner_workspace_id,
+            StoredPlatformCredential {
+                id: id.to_owned(),
+                name: name.to_owned(),
+                lookup_prefix: format!("piq_platform_{id}"),
+                last_used_at: None,
+                created_at: Utc::now(),
+            },
+        );
+        state
+            .platform_manager_secret_hashes
+            .insert(owner_workspace_id, secret_hash.to_owned());
+        Ok(())
+    }
+
+    async fn get_platform_credential(
+        &self,
+        owner_workspace_id: WorkspaceId,
+    ) -> Result<StoredPlatformCredential, RepositoryError> {
+        self.state
+            .read()
+            .await
+            .platform_managers
+            .get(&owner_workspace_id)
+            .cloned()
+            .ok_or(RepositoryError::NotFound)
+    }
+
+    async fn rotate_platform_manager(
+        &self,
+        owner_workspace_id: WorkspaceId,
+        secret_hash: &str,
+    ) -> Result<StoredPlatformCredential, RepositoryError> {
+        let mut state = self.state.write().await;
+        let credential = state
+            .platform_managers
+            .get(&owner_workspace_id)
+            .cloned()
+            .ok_or(RepositoryError::NotFound)?;
+        state
+            .platform_manager_secret_hashes
+            .insert(owner_workspace_id, secret_hash.to_owned());
+        Ok(credential)
+    }
+
+    async fn revoke_platform_manager(
+        &self,
+        owner_workspace_id: WorkspaceId,
+    ) -> Result<(), RepositoryError> {
+        let mut state = self.state.write().await;
         state
             .platform_managers
-            .insert(owner_workspace_id, id.to_owned());
+            .remove(&owner_workspace_id)
+            .map(|_| ())
+            .ok_or(RepositoryError::NotFound)?;
+        state
+            .platform_manager_secret_hashes
+            .remove(&owner_workspace_id);
         Ok(())
     }
 

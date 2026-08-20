@@ -279,6 +279,12 @@ pub fn router(state: AppState) -> Router {
         .merge(documents::router())
         .route("/v1/platform/status", get(platform::status))
         .route("/v1/platform/enable", post(platform::enable))
+        .route(
+            "/v1/platform/credential",
+            get(platform::credential)
+                .post(platform::rotate_credential)
+                .delete(platform::revoke_credential),
+        )
         .route("/v1/platform/accounts", get(platform::list))
         .route(
             "/v1/platform/accounts/{external_id}",
@@ -1681,6 +1687,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn platform_enablement_is_one_time_workspace_scoped_and_not_cacheable() {
         let application = application().await;
         let before = json_response(
@@ -1739,6 +1746,7 @@ mod tests {
 
         let repeated = application
             .router
+            .clone()
             .oneshot(api_request(
                 "POST",
                 "/v1/platform/enable",
@@ -1748,6 +1756,76 @@ mod tests {
             .await
             .expect("repeat enablement response");
         assert_eq!(repeated.status(), StatusCode::CONFLICT);
+
+        let metadata = json_response(
+            &application.router,
+            api_request(
+                "GET",
+                "/v1/platform/credential",
+                "piq_test_integration",
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(metadata["name"], "Piqae platform integration");
+        assert!(metadata.get("secret").is_none());
+        assert!(
+            metadata["lookup_prefix"]
+                .as_str()
+                .is_some_and(|prefix| prefix.starts_with("piq_platform_"))
+        );
+
+        let rotated = application
+            .router
+            .clone()
+            .oneshot(api_request(
+                "POST",
+                "/v1/platform/credential",
+                "piq_test_integration",
+                None,
+            ))
+            .await
+            .expect("rotation response");
+        assert_eq!(rotated.status(), StatusCode::OK);
+        assert_eq!(
+            rotated
+                .headers()
+                .get("cache-control")
+                .and_then(|value| value.to_str().ok()),
+            Some("no-store")
+        );
+        let rotated_body = rotated
+            .into_body()
+            .collect()
+            .await
+            .expect("rotation body")
+            .to_bytes();
+        let rotated_body: serde_json::Value =
+            serde_json::from_slice(&rotated_body).expect("rotation JSON");
+        assert!(
+            rotated_body["secret"]
+                .as_str()
+                .is_some_and(|secret| secret.starts_with("piq_platform_"))
+        );
+
+        let revoked = application
+            .router
+            .clone()
+            .oneshot(api_request(
+                "DELETE",
+                "/v1/platform/credential",
+                "piq_test_integration",
+                None,
+            ))
+            .await
+            .expect("revoke response");
+        assert_eq!(revoked.status(), StatusCode::NO_CONTENT);
+        let after_revoke = json_response(
+            &application.router,
+            api_request("GET", "/v1/platform/status", "piq_test_integration", None),
+        )
+        .await;
+        assert_eq!(after_revoke["enabled"], false);
     }
 
     #[tokio::test]

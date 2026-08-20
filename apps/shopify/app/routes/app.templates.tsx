@@ -21,8 +21,6 @@ import {
 export const templates = [
   ["Invoice", "Orders · A4", "Published"],
   ["Packing slip", "Fulfillment · A4", "Published"],
-  ["Receipt", "Orders · 80 mm", "Published"],
-  ["Credit Note", "Refunds · A4", "Published"],
 ] as const;
 export function customizedSystemDraft(
   existing: MerchantTemplate,
@@ -187,9 +185,16 @@ export default function Templates() {
                             </s-button>
                           </Form>
                         ) : (
-                          <s-link href={`/app/templates/${template.id}`}>
-                            Edit
-                          </s-link>
+                          <>
+                            <s-link href={`/app/templates/${template.id}`}>
+                              Edit
+                            </s-link>
+                            <s-link
+                              href={`/app/templates/new?from=${encodeURIComponent(template.id)}`}
+                            >
+                              Use as base
+                            </s-link>
+                          </>
                         )}
                         <s-link
                           download={`${template.name}.piqae-template.json`}

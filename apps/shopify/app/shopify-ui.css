@@ -27,7 +27,7 @@
 }
 .piqae-word-editor {
   margin-top: 1rem;
-  background: #f1f1f1;
+  background: #f4f4f4;
   border-radius: 0.75rem;
   overflow: hidden;
 }
@@ -37,8 +37,9 @@
   z-index: 2;
   display: flex;
   flex-wrap: wrap;
-  gap: 0.5rem;
-  padding: 0.75rem;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.6rem 0.75rem;
   border-bottom: 1px solid #d5d5d5;
   background: Canvas;
 }
@@ -50,11 +51,42 @@
   background: Canvas;
   color: CanvasText;
 }
+.piqae-insert-button {
+  display: inline-grid;
+  min-width: 3.8rem;
+  justify-items: center;
+  gap: 0.1rem;
+}
+.piqae-toolbar-label {
+  margin-right: 0.35rem;
+  font-size: 0.75rem;
+  font-weight: 650;
+  color: #616161;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.piqae-toolbar-separator {
+  width: 1px;
+  height: 2.2rem;
+  margin: 0 0.2rem;
+  background: #dedede;
+}
+.piqae-insert-button > span {
+  font-size: 1.15rem;
+  font-weight: 650;
+  line-height: 1;
+}
+.piqae-insert-button > small {
+  font-size: 0.7rem;
+}
+.piqae-variable-picker {
+  min-width: 12rem;
+}
 .piqae-page-sheet {
   box-sizing: border-box;
   width: min(210mm, calc(100% - 2rem));
   min-height: 297mm;
-  margin: 1rem auto;
+  margin: 0 auto 2rem;
   padding: 14mm;
   background: white;
   color: #202223;
@@ -73,12 +105,174 @@
   font-size: 0.9em;
 }
 .piqae-structured-block {
+  position: relative;
   margin: 0.75rem 0;
   padding: 0.8rem;
   border: 1px solid #b7c7e8;
   border-radius: 0.5rem;
   background: #f5f8ff;
   color: #253858;
+  cursor: pointer;
+  transition:
+    border-color 120ms,
+    box-shadow 120ms;
+}
+.piqae-structured-block:hover {
+  border-color: #458fff;
+  box-shadow: 0 0 0 1px #458fff;
+}
+.ProseMirror-selectednode.piqae-structured-block {
+  border-color: #005bd3;
+  box-shadow: 0 0 0 2px #005bd3;
+}
+.piqae-block-label {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 0.55rem;
+  font-size: 0.78rem;
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.piqae-block-label span {
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: normal;
+  opacity: 0.7;
+}
+.piqae-table-preview,
+.piqae-grid-preview {
+  display: flex;
+  gap: 0.35rem;
+}
+.piqae-table-preview span,
+.piqae-grid-preview span {
+  min-width: 0;
+  padding: 0.4rem;
+  border-radius: 0.25rem;
+  background: white;
+  font-size: 0.8rem;
+}
+.piqae-branch-preview {
+  padding: 0.45rem;
+  border-left: 3px solid #4a8be8;
+  background: white;
+  font-size: 0.82rem;
+}
+.piqae-else-preview {
+  margin-top: 0.35rem;
+  border-left-color: #b5b5b5;
+}
+.piqae-container-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+.piqae-container-row {
+  flex-direction: row;
+}
+.piqae-container-preview span {
+  flex: 1;
+  padding: 0.35rem;
+  border: 1px dashed #b7c7e8;
+  background: white;
+  font-size: 0.78rem;
+}
+.piqae-block-qr,
+.piqae-block-barcode,
+.piqae-block-image {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  column-gap: 0.65rem;
+}
+.piqae-block-qr small,
+.piqae-block-barcode small,
+.piqae-block-image small {
+  grid-column: 2;
+  opacity: 0.7;
+}
+.piqae-machine-placeholder,
+.piqae-image-placeholder {
+  grid-row: 1 / 3;
+  font-size: 2rem;
+}
+.piqae-block-spacer {
+  min-height: 1rem;
+  padding: 0.25rem 0.7rem;
+  border-style: dashed;
+  background: repeating-linear-gradient(
+    135deg,
+    #f5f8ff,
+    #f5f8ff 6px,
+    #edf3ff 6px,
+    #edf3ff 12px
+  );
+  font-size: 0.75rem;
+}
+.piqae-editor-workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 20rem;
+  align-items: start;
+}
+.piqae-canvas-wrap {
+  min-width: 0;
+  padding: 0 1rem;
+  overflow: auto;
+}
+.piqae-canvas-hint {
+  margin: 0.75rem auto;
+  max-width: 210mm;
+  color: #616161;
+  font-size: 0.78rem;
+}
+.piqae-inspector {
+  position: sticky;
+  top: 4.5rem;
+  min-height: 24rem;
+  max-height: calc(100vh - 6rem);
+  overflow: auto;
+  border-left: 1px solid #d5d5d5;
+  background: Canvas;
+  color: CanvasText;
+}
+.piqae-inspector-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 1rem;
+  border-bottom: 1px solid #e3e3e3;
+}
+.piqae-inspector-heading div {
+  display: grid;
+  gap: 0.15rem;
+}
+.piqae-inspector-heading small {
+  color: #616161;
+}
+.piqae-inspector-empty {
+  display: grid;
+  place-items: center;
+  padding: 4rem 1.5rem;
+  text-align: center;
+  color: #616161;
+}
+.piqae-inspector-empty span {
+  font-size: 2rem;
+}
+.piqae-inspector-empty p {
+  margin: 0.3rem 0;
+}
+.piqae-icon-button {
+  border: 0;
+  background: transparent;
+  padding: 0.45rem;
+  border-radius: 0.4rem;
+  cursor: pointer;
+}
+.piqae-danger {
+  color: #8e1f0b;
 }
 .piqae-region-editors,
 .piqae-block-properties {
@@ -89,13 +283,72 @@
   border-bottom: 1px solid #d5d5d5;
   background: Canvas;
 }
+.piqae-block-properties {
+  grid-template-columns: 1fr;
+  border: 0;
+  padding: 1rem;
+}
+.piqae-property-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.6rem;
+}
+.piqae-property-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.piqae-property-row button,
+.piqae-inline-actions button,
+.piqae-add-nested button {
+  padding: 0.35rem 0.5rem;
+  border: 1px solid #c9cccf;
+  border-radius: 0.4rem;
+  background: Canvas;
+  color: CanvasText;
+}
+.piqae-checkbox {
+  display: flex !important;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+}
+.piqae-checkbox input {
+  width: auto;
+}
+.piqae-nested-editor {
+  display: grid;
+  gap: 0.65rem;
+  margin: 0;
+  padding: 0.75rem;
+  border: 1px solid #d5d5d5;
+  border-radius: 0.5rem;
+}
+.piqae-nested-row {
+  display: grid;
+  gap: 0.35rem;
+  padding-bottom: 0.65rem;
+  border-bottom: 1px solid #eee;
+}
+.piqae-block-kind {
+  font-size: 0.72rem;
+  font-weight: 650;
+  color: #616161;
+  text-transform: uppercase;
+}
+.piqae-inline-actions,
+.piqae-add-nested {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
 .piqae-region-editors label,
 .piqae-block-properties label {
   display: grid;
   gap: 0.25rem;
 }
 .piqae-region-editors input,
-.piqae-block-properties input {
+.piqae-block-properties input,
+.piqae-block-properties select {
   box-sizing: border-box;
   width: 100%;
   padding: 0.45rem;
@@ -103,6 +356,34 @@
   border-radius: 0.4rem;
   background: Canvas;
   color: CanvasText;
+}
+.piqae-table-columns {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: 1fr;
+  gap: 0.75rem;
+}
+@media (max-width: 72rem) {
+  .piqae-editor-workspace {
+    grid-template-columns: 1fr;
+  }
+  .piqae-inspector {
+    position: static;
+    max-height: none;
+    border-top: 1px solid #d5d5d5;
+    border-left: 0;
+  }
+  .piqae-editor-settings {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+.piqae-table-columns fieldset {
+  display: grid;
+  gap: 0.6rem;
+  margin: 0;
+  padding: 0.75rem;
+  border: 1px solid color-mix(in srgb, currentColor 16%, transparent);
+  border-radius: 0.5rem;
 }
 .piqae-toolbar {
   display: flex;

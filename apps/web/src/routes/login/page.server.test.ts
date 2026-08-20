@@ -30,13 +30,22 @@ import { actions, load } from './+page.server';
 function event(body?: FormData) {
   const url = new URL('https://app.piqae.test/login');
   const setHeaders = vi.fn();
+  const encodedBody = body
+    ? new URLSearchParams(
+        [...body.entries()].map(([name, value]) => [name, String(value)])
+      )
+    : undefined;
+  const request = new Request(url, {
+    method: body ? 'POST' : 'GET',
+    body: encodedBody,
+    headers: body
+      ? { 'content-type': 'application/x-www-form-urlencoded;charset=UTF-8' }
+      : undefined
+  });
+  if (body) request.headers.set('origin', url.origin);
   return {
     url,
-    request: new Request(url, {
-      method: body ? 'POST' : 'GET',
-      headers: body ? { origin: url.origin } : undefined,
-      body
-    }),
+    request,
     route: { id: '/login' },
     setHeaders,
     getClientAddress: vi.fn(() => '192.0.2.55'),

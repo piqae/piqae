@@ -107,4 +107,38 @@ describe('settings credential reveal', () => {
     expect(dialog.querySelector('button[type="submit"]')).toBeDisabled();
     expect(screen.getByText('Demo mode: preview only. No credential will be created.')).toBeInTheDocument();
   });
+
+  it('lists the platform credential with rotate and revoke actions', async () => {
+    render(Page, {
+      data: {
+        ...data,
+        meta: { ...meta, platform: { accounts: true } },
+        sections: { team: false, billing: false, platform: true },
+        platform: Promise.resolve({ enabled: true, dataError: null }),
+        apiKeys: Promise.resolve({
+          items: [
+            {
+              id: '00000000-0000-4000-8000-000000000001',
+              name: 'Piqae platform integration',
+              prefix: 'piq_platform_00000000',
+              environment: 'platform',
+              kind: 'platform',
+              scopes: [],
+              lastUsedAt: null,
+              createdAt: '2026-08-20T00:00:00Z'
+            }
+          ],
+          dataError: null
+        })
+      } as never,
+      form: null
+    });
+
+    expect(await screen.findByText('Piqae platform integration')).toBeInTheDocument();
+    expect(screen.getByText('Customer accounts')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Rotate' })).toBeInTheDocument();
+    expect(
+      screen.getByRole('button', { name: 'Revoke Piqae platform integration' })
+    ).toBeInTheDocument();
+  });
 });

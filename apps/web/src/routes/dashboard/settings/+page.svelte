@@ -49,7 +49,9 @@
   let apiKeyDismissed = $state(false);
   let revokeKeyDialog = $state(false);
   let revokeKeyAttempted = $state(false);
-  let selectedKey = $state<{ id: string; name: string; prefix: string } | null>(null);
+  let rotatePlatformDialog = $state(false);
+  let rotatePlatformAttempted = $state(false);
+  let selectedKey = $state<{ id: string; name: string; prefix: string; kind?: string } | null>(null);
 
   let webhookDialog = $state(false);
   let webhookAttempted = $state(false);
@@ -74,6 +76,11 @@
     !mutationPending &&
       form?.mutation === 'enablePlatform' &&
       (platformAttempted || !platformDismissed)
+      ? form
+      : null
+  );
+  const rotatedPlatformResult = $derived(
+    !mutationPending && form?.mutation === 'rotatePlatformCredential' && rotatePlatformAttempted
       ? form
       : null
   );
@@ -228,11 +235,21 @@
                     </button>
                   </td>
                   <td><span class:live-key={key.environment === 'live'} class="environment">{key.environment}</span></td>
-                  <td class="muted">{key.scopes.length} scopes</td>
+                  <td class="muted">{key.kind === 'platform' ? 'Customer accounts' : `${key.scopes.length} scopes`}</td>
                   <td class="muted">
                     {#if key.lastUsedAt}<RelativeTime value={key.lastUsedAt} />{:else}Never{/if}
                   </td>
                   <td class="right">
+                    {#if key.kind === 'platform'}
+                      <button
+                        class="button compact"
+                        onclick={() => {
+                          selectedKey = key;
+                          rotatePlatformAttempted = false;
+                          rotatePlatformDialog = true;
+                        }}
+                      >Rotate</button>
+                    {/if}
                     <button
                       class="icon-button"
                       aria-label={`Revoke ${key.name}`}
@@ -843,7 +860,7 @@
     <form
       id="revoke-api-key-form"
       method="POST"
-      action="?/revokeApiKey"
+      action={selectedKey?.kind === 'platform' ? '?/revokePlatformCredential' : '?/revokeApiKey'}
       use:enhance={() => {
         mutationPending = true;
         revokeKeyAttempted = true;
@@ -861,7 +878,7 @@
       </p>
     </form>
     {#if !live}<p class="ui-note warning">Demo mode: no credential will be revoked.</p>{/if}
-    {#if revokeKeyAttempted && !mutationPending && form?.mutation === 'revokeApiKey' && form?.error}
+    {#if revokeKeyAttempted && !mutationPending && (form?.mutation === 'revokeApiKey' || form?.mutation === 'revokePlatformCredential') && typeof form?.error === 'object'}
       <p class="ui-note error" role="alert">{form.error.message}</p>
     {/if}
   </div>
@@ -871,6 +888,52 @@
     <button class="button danger-solid" type="submit" form="revoke-api-key-form" disabled={mutationPending || !live}>
       {mutationPending ? 'Revoking…' : 'Revoke key'}
     </button>
+  {/snippet}
+</Dialog>
+
+<Dialog
+  bind:open={rotatePlatformDialog}
+  labelledBy="rotate-platform-credential-title"
+  title="Rotate platform credential?"
+  description="The current credential stops working immediately. Update every server that provisions customer accounts."
+>
+  <div class="ui-dialog__body">
+    <form
+      id="rotate-platform-credential-form"
+      method="POST"
+      action="?/rotatePlatformCredential"
+      use:enhance={() => {
+        mutationPending = true;
+        rotatePlatformAttempted = true;
+        copied = null;
+        return async ({ update }) => {
+          await update({ reset: false });
+          mutationPending = false;
+        };
+      }}
+    ></form>
+    {#if rotatedPlatformResult?.error}
+      <p class="ui-note error" role="alert">{rotatedPlatformResult.error.message}</p>
+    {/if}
+    {#if rotatedPlatformResult?.platformCredential}
+      <section class="secret" aria-live="polite">
+        <div><strong>New platform credential · shown once</strong></div>
+        <code>{rotatedPlatformResult.platformCredential.secret}</code>
+        <button class="button compact" type="button" onclick={() => copy(rotatedPlatformResult.platformCredential.secret)}>
+          <Icon name="copy" size={13} /> {copied === rotatedPlatformResult.platformCredential.secret ? 'Copied' : 'Copy credential'}
+        </button>
+      </section>
+    {:else}
+      <p class="ui-note warning">Store the new value in your server-side secret manager. It cannot be shown again.</p>
+    {/if}
+  </div>
+  {#snippet footer()}
+    <button class="button" type="button" onclick={() => (rotatePlatformDialog = false)}>Close</button>
+    {#if !rotatedPlatformResult?.platformCredential}
+      <button class="button danger-solid" type="submit" form="rotate-platform-credential-form" disabled={mutationPending || !live}>
+        {mutationPending ? 'Rotating…' : 'Rotate credential'}
+      </button>
+    {/if}
   {/snippet}
 </Dialog>
 

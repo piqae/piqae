@@ -21,22 +21,26 @@ const value = (parts: string[], bold = false): Block => ({
     { type: "value", value: path(...parts), style: bold ? { bold: true } : {} },
   ],
 });
-const money = (...parts: string[]) => ({
-  type: "format_money" as const,
-  amount: path(...parts),
-  currency: path("order", "currencyCode"),
+const currentValue = (parts: string[], bold = false): Block => ({
+  type: "paragraph",
+  content: [
+    {
+      type: "value",
+      value: current(...parts),
+      style: bold ? { bold: true } : {},
+    },
+  ],
 });
 const currentMoney = (...parts: string[]) => ({
   type: "format_money" as const,
   amount: current(...parts),
-  currency: path("order", "currencyCode"),
+  currency: current("currency"),
 });
 const column = (
   label: string,
   expression:
     | ReturnType<typeof path>
     | ReturnType<typeof current>
-    | ReturnType<typeof money>
     | ReturnType<typeof currentMoney>,
   width: number,
   align: "left" | "right" = "left",
@@ -48,13 +52,14 @@ const column = (
 });
 const itemColumns = (): Extract<Block, { type: "table" }>["columns"] => [
   column("Item", current("title"), 5),
+  column("SKU", current("sku"), 2),
   column("Qty", current("quantity"), 1, "right"),
-  column("Price", currentMoney("price"), 2, "right"),
+  column("Price", currentMoney("unitPrice"), 2, "right"),
   column("Total", currentMoney("total"), 2, "right"),
 ];
 const items = (source = "lineItems", columns = itemColumns()): Block => ({
   type: "table",
-  items: path("order", source),
+  items: current(source),
   repeat_header: true,
   columns,
   empty: [text("No items")],
@@ -86,100 +91,110 @@ const base = (body: Block[], continuous = false): BusinessDocument => ({
   resources: {},
   header: region(),
   body,
-  footer: {
-    ...region(),
-    default: [
-      {
-        type: "paragraph",
-        content: [
-          { type: "text", value: "Page " },
-          { type: "value", value: path("page", "number") },
-        ],
-      },
-    ],
-  },
+  footer: region(),
 });
 const documents = {
   invoice: base([
-    text("INVOICE", 1),
-    value(["shop", "name"], true),
-    value(["order", "name"]),
-    value(["order", "billingAddress", "formatted"]),
-    { type: "divider" },
-    items(),
-    { type: "divider" },
     {
-      type: "paragraph",
-      content: [
-        { type: "text", value: "Subtotal " },
-        { type: "value", value: money("order", "subtotal") },
-      ],
-    },
-    {
-      type: "paragraph",
-      content: [
-        { type: "text", value: "Tax " },
-        { type: "value", value: money("order", "taxTotal") },
-      ],
-    },
-    {
-      type: "paragraph",
-      content: [
-        { type: "text", value: "Total ", style: { bold: true } },
+      type: "repeat",
+      items: path("orders"),
+      gap_mm: 10,
+      children: [
         {
-          type: "value",
-          value: money("order", "total"),
-          style: { bold: true },
+          type: "grid",
+          columns: [2, 1],
+          gap_mm: 8,
+          children: [value(["shop"], true), text("INVOICE", 1)],
         },
+        currentValue(["name"], true),
+        currentValue(["shippingAddress", "formatted"]),
+        { type: "divider" },
+        items(),
+        { type: "divider" },
+        {
+          type: "paragraph",
+          content: [
+            { type: "text", value: "Subtotal " },
+            { type: "value", value: currentMoney("subtotal") },
+          ],
+        },
+        {
+          type: "paragraph",
+          content: [
+            { type: "text", value: "Tax " },
+            { type: "value", value: currentMoney("tax") },
+          ],
+        },
+        {
+          type: "paragraph",
+          content: [
+            { type: "text", value: "Total ", style: { bold: true } },
+            {
+              type: "value",
+              value: currentMoney("total"),
+              style: { bold: true },
+            },
+          ],
+        },
+        { type: "page_break" },
       ],
     },
-    { type: "qr", value: path("order", "statusUrl"), size_mm: 24 },
   ]),
   "packing-slip": base([
-    text("PACKING SLIP", 1),
-    value(["order", "name"]),
-    text("Ship to", 2),
-    value(["order", "shippingAddress", "formatted"]),
-    items("lineItems", itemColumns().slice(0, 2)),
-    text("Packed with care."),
-  ]),
-  receipt: base(
-    [
-      value(["shop", "name"], true),
-      text("RECEIPT", 2),
-      value(["order", "name"]),
-      items(),
-      { type: "divider" },
-      {
-        type: "paragraph",
-        content: [
-          { type: "text", value: "TOTAL ", style: { bold: true } },
-          {
-            type: "value",
-            value: money("order", "total"),
-            style: { bold: true },
-          },
-        ],
-      },
-      { type: "qr", value: path("order", "statusUrl"), size_mm: 22 },
-      text("Thank you."),
-    ],
-    true,
-  ),
-  "credit-note": base([
-    text("CREDIT NOTE", 1),
-    value(["shop", "name"]),
-    value(["order", "name"]),
-    items("refundLineItems"),
     {
-      type: "paragraph",
-      content: [
-        { type: "text", value: "Refund total ", style: { bold: true } },
+      type: "repeat",
+      items: path("orders"),
+      gap_mm: 10,
+      children: [
         {
-          type: "value",
-          value: money("order", "refundTotal"),
-          style: { bold: true },
+          type: "grid",
+          columns: [2, 1],
+          gap_mm: 10,
+          children: [
+            value(["shop"], true),
+            {
+              type: "stack",
+              gap_mm: 1,
+              children: [
+                text("PACKING SLIP", 1),
+                currentValue(["name"], true),
+                currentValue(["createdAt"]),
+              ],
+            },
+          ],
         },
+        { type: "spacer", height_mm: 7 },
+        {
+          type: "grid",
+          columns: [1, 1],
+          gap_mm: 12,
+          children: [
+            {
+              type: "stack",
+              gap_mm: 1,
+              children: [
+                text("SHIP TO", 2),
+                currentValue(["shippingAddress", "formatted"]),
+              ],
+            },
+            {
+              type: "stack",
+              gap_mm: 1,
+              children: [
+                text("CUSTOMER", 2),
+                currentValue(["customer", "displayName"]),
+                currentValue(["customer", "email"]),
+              ],
+            },
+          ],
+        },
+        { type: "spacer", height_mm: 6 },
+        { type: "divider", width_pt: 1 },
+        items("lineItems", itemColumns().slice(0, 3)),
+        { type: "divider" },
+        text("Thank you for your order."),
+        currentValue(["name"]),
+        { type: "page_break" },
       ],
     },
   ]),
@@ -199,12 +214,7 @@ export type StarterTemplate = {
 export const starterTemplates: readonly StarterTemplate[] = Object.entries(
   documents,
 ).map(([id, specification]) => {
-  const kind =
-    id === "packing-slip"
-      ? "packing_slip"
-      : id === "credit-note"
-        ? "credit_note"
-        : (id as "invoice" | "receipt");
+  const kind = id === "packing-slip" ? "packing_slip" : "invoice";
   const liquid = canonicalToLiquid(specification);
   return {
     id,

@@ -600,6 +600,62 @@ paths:
         "403": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
+  /v1/platform/credential:
+    get:
+      summary: Inspect the active platform credential for the current workspace
+      description: |
+        Returns safe metadata only. The secret is never returned. This operation
+        accepts only an authorised human dashboard bearer; ordinary API keys and
+        platform credentials are rejected.
+      tags: [Platform]
+      operationId: getPlatformCredential
+      security: [{ bearer: [] }]
+      responses:
+        "200":
+          description: Active platform credential metadata.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PlatformCredential" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+    post:
+      summary: Rotate the active platform credential
+      description: |
+        Atomically replaces the secret for the current workspace's platform
+        credential. The previous secret stops authenticating immediately. The
+        replacement secret is returned once and cannot be retrieved later.
+      tags: [Platform]
+      operationId: rotatePlatformCredential
+      security: [{ bearer: [] }]
+      responses:
+        "200":
+          description: Credential rotated and one-time replacement secret issued.
+          headers:
+            Cache-Control:
+              schema: { type: string, example: "no-store" }
+            Pragma:
+              schema: { type: string, example: "no-cache" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PlatformCredentialSecret" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+    delete:
+      summary: Revoke the active platform credential
+      description: |
+        Immediately disables platform authentication for this workspace. Customer
+        account data is retained, but cannot be managed until platform mode is
+        enabled again with a new credential.
+      tags: [Platform]
+      operationId: revokePlatformCredential
+      security: [{ bearer: [] }]
+      responses:
+        "204": { description: Platform credential revoked. }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
   /v1/platform/accounts/{external_id}:
     parameters:
       - name: external_id
@@ -3091,6 +3147,34 @@ components:
           type: string
           writeOnly: true
           description: One-time platform credential for server-side storage.
+    PlatformCredential:
+      type: object
+      additionalProperties: false
+      required: [id, name, lookup_prefix, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string, minLength: 1, maxLength: 120 }
+        lookup_prefix:
+          type: string
+          description: Non-secret credential prefix suitable for identification.
+        last_used_at: { type: [string, "null"], format: date-time }
+        created_at: { type: string, format: date-time }
+    PlatformCredentialSecret:
+      type: object
+      additionalProperties: false
+      required: [id, name, lookup_prefix, created_at, secret]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string, minLength: 1, maxLength: 120 }
+        lookup_prefix:
+          type: string
+          description: Non-secret credential prefix suitable for identification.
+        last_used_at: { type: [string, "null"], format: date-time }
+        created_at: { type: string, format: date-time }
+        secret:
+          type: string
+          writeOnly: true
+          description: One-time replacement platform credential.
     PlatformAccountEnvironment:
       type: object
       additionalProperties: false
@@ -3395,7 +3479,10 @@ components:
         state: { type: string, enum: [pending, connected, expired] }
         expires_at: { type: string, format: date-time }
         node_id: { type: [string, "null"] }
-        connect_url: { type: [string, "null"], format: uri, description: Associated Domains verified HTTPS Universal Link returned only at creation. }
+        connect_url: { type: [string, "null"], format: uri, description: HTTPS handoff and installer fallback returned only at creation. }
+        native_connect_url:
+          type: [string, "null"]
+          description: One-time piqae:// native-app handoff returned only at creation. Launch only from an explicit user gesture and fall back to connect_url.
         return_url: { type: [string, "null"], format: uri, description: Returned only at creation. }
         downloads:
           type: array
@@ -5308,6 +5395,8 @@ components:
         - { type: object, additionalProperties: false, required: [type, operator, left, right], properties: { type: { const: compare }, operator: { enum: [equal, not_equal, less, less_or_equal, greater, greater_or_equal] }, left: { $ref: "#/components/schemas/BusinessDocumentExpression" }, right: { $ref: "#/components/schemas/BusinessDocumentExpression" } } }
         - { type: object, additionalProperties: false, required: [type, operator, values], properties: { type: { const: boolean }, operator: { enum: [and, or] }, values: { type: array, minItems: 1, maxItems: 100, items: { $ref: "#/components/schemas/BusinessDocumentExpression" } } } }
         - { type: object, additionalProperties: false, required: [type, value], properties: { type: { const: not }, value: { $ref: "#/components/schemas/BusinessDocumentExpression" } } }
+        - { type: object, additionalProperties: false, required: [type, value], properties: { type: { const: exists }, value: { $ref: "#/components/schemas/BusinessDocumentExpression" } } }
+        - { type: object, additionalProperties: false, required: [type, collection, value], properties: { type: { const: contains }, collection: { $ref: "#/components/schemas/BusinessDocumentExpression" }, value: { $ref: "#/components/schemas/BusinessDocumentExpression" } } }
         - { type: object, additionalProperties: false, required: [type, operator, left, right], properties: { type: { const: arithmetic }, operator: { enum: [add, subtract, multiply, divide] }, left: { $ref: "#/components/schemas/BusinessDocumentExpression" }, right: { $ref: "#/components/schemas/BusinessDocumentExpression" } } }
         - { type: object, additionalProperties: false, required: [type, value], properties: { type: { const: format_number }, value: { $ref: "#/components/schemas/BusinessDocumentExpression" }, decimals: { type: integer, minimum: 0, maximum: 12, default: 0 } } }
         - { type: object, additionalProperties: false, required: [type, amount, currency], properties: { type: { const: format_money }, amount: { $ref: "#/components/schemas/BusinessDocumentExpression" }, currency: { $ref: "#/components/schemas/BusinessDocumentExpression" }, decimals: { type: integer, minimum: 0, maximum: 6, default: 2 } } }
@@ -5322,6 +5411,32 @@ components:
         underline: { type: boolean, default: false }
         font_size_pt: { type: [number, "null"], minimum: 4, maximum: 72 }
         align: { enum: [left, center, right], default: left }
+        color: { $ref: "#/components/schemas/BusinessDocumentColor" }
+    BusinessDocumentColor:
+      type: object
+      additionalProperties: false
+      required: [red, green, blue]
+      properties:
+        red: { type: integer, minimum: 0, maximum: 255 }
+        green: { type: integer, minimum: 0, maximum: 255 }
+        blue: { type: integer, minimum: 0, maximum: 255 }
+    BusinessDocumentBoxStyle:
+      type: object
+      additionalProperties: false
+      properties:
+        padding_mm: { type: number, minimum: 0, maximum: 50, default: 0 }
+        background: { $ref: "#/components/schemas/BusinessDocumentColor" }
+        border_color: { $ref: "#/components/schemas/BusinessDocumentColor" }
+        border_width_pt: { type: number, minimum: 0, maximum: 10, default: 0 }
+    BusinessDocumentTableStyle:
+      type: object
+      additionalProperties: false
+      properties:
+        cell_padding_mm: { type: number, minimum: 0, maximum: 20, default: 1 }
+        header_background: { $ref: "#/components/schemas/BusinessDocumentColor" }
+        header_text_color: { $ref: "#/components/schemas/BusinessDocumentColor" }
+        border_color: { $ref: "#/components/schemas/BusinessDocumentColor" }
+        border_width_pt: { type: number, minimum: 0, maximum: 10, default: 0.25 }
     BusinessDocumentInline:
       oneOf:
         - { type: object, additionalProperties: false, required: [type, value], properties: { type: { const: text }, value: { type: string, maxLength: 100000 }, style: { $ref: "#/components/schemas/BusinessDocumentTextStyle" } } }
@@ -5330,10 +5445,11 @@ components:
     BusinessDocumentNode:
       oneOf:
         - { type: object, additionalProperties: false, required: [type, children], properties: { type: { enum: [section, stack, row] }, children: { type: array, maxItems: 20000, items: { $ref: "#/components/schemas/BusinessDocumentNode" } }, gap_mm: { type: number, minimum: 0, maximum: 100, default: 0 } } }
+        - { type: object, additionalProperties: false, required: [type, children], properties: { type: { const: box }, children: { type: array, maxItems: 20000, items: { $ref: "#/components/schemas/BusinessDocumentNode" } }, style: { $ref: "#/components/schemas/BusinessDocumentBoxStyle" } } }
         - { type: object, additionalProperties: false, required: [type, content], properties: { type: { const: paragraph }, content: { type: array, maxItems: 10000, items: { $ref: "#/components/schemas/BusinessDocumentInline" } }, style: { $ref: "#/components/schemas/BusinessDocumentTextStyle" } } }
         - { type: object, additionalProperties: false, required: [type, content], properties: { type: { const: heading }, content: { type: array, maxItems: 10000, items: { $ref: "#/components/schemas/BusinessDocumentInline" } }, level: { type: integer, minimum: 1, maximum: 6, default: 1 }, style: { $ref: "#/components/schemas/BusinessDocumentTextStyle" } } }
         - { type: object, additionalProperties: false, required: [type, columns, children], properties: { type: { const: grid }, columns: { type: array, minItems: 1, maxItems: 32, items: { type: number, exclusiveMinimum: 0, maximum: 1000 } }, children: { type: array, maxItems: 20000, items: { $ref: "#/components/schemas/BusinessDocumentNode" } }, gap_mm: { type: number, minimum: 0, maximum: 100, default: 0 } } }
-        - { type: object, additionalProperties: false, required: [type, items, columns], properties: { type: { const: table }, items: { $ref: "#/components/schemas/BusinessDocumentExpression" }, columns: { type: array, minItems: 1, maxItems: 32, items: { $ref: "#/components/schemas/BusinessDocumentTableColumn" } }, repeat_header: { type: boolean, default: false }, empty: { type: array, maxItems: 20000, items: { $ref: "#/components/schemas/BusinessDocumentNode" } } } }
+        - { type: object, additionalProperties: false, required: [type, items, columns], properties: { type: { const: table }, items: { $ref: "#/components/schemas/BusinessDocumentExpression" }, columns: { type: array, minItems: 1, maxItems: 32, items: { $ref: "#/components/schemas/BusinessDocumentTableColumn" } }, repeat_header: { type: boolean, default: false }, empty: { type: array, maxItems: 20000, items: { $ref: "#/components/schemas/BusinessDocumentNode" } }, style: { $ref: "#/components/schemas/BusinessDocumentTableStyle" } } }
         - { type: object, additionalProperties: false, required: [type, items, children], properties: { type: { const: repeat }, items: { $ref: "#/components/schemas/BusinessDocumentExpression" }, children: { type: array, maxItems: 20000, items: { $ref: "#/components/schemas/BusinessDocumentNode" } }, gap_mm: { type: number, minimum: 0, maximum: 100, default: 0 } } }
         - { type: object, additionalProperties: false, required: [type, condition, then], properties: { type: { const: conditional }, condition: { $ref: "#/components/schemas/BusinessDocumentExpression" }, then: { type: array, maxItems: 20000, items: { $ref: "#/components/schemas/BusinessDocumentNode" } }, else: { type: array, maxItems: 20000, items: { $ref: "#/components/schemas/BusinessDocumentNode" } } } }
         - { type: object, additionalProperties: false, required: [type, height_mm], properties: { type: { const: spacer }, height_mm: { type: number, minimum: 0, maximum: 2000 } } }

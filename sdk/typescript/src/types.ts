@@ -420,6 +420,7 @@ export interface NodeConnectSession {
   expires_at: string;
   node_id: PiqaeId | null;
   connect_url?: string | null;
+  native_connect_url?: string | null;
   return_url?: string | null;
   downloads: Array<{ platform: 'macos' | 'windows' | 'linux'; url: string }>;
 }

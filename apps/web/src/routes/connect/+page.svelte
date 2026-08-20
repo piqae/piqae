@@ -11,6 +11,7 @@
     nativeUrl = invitation
       ? nativeNodeConnectUrl(invitation.enrolmentToken, invitation.controlPlaneUrl)
       : null;
+    if (nativeUrl) window.location.assign(nativeUrl);
   });
 
   function openPiqae() {
@@ -27,13 +28,13 @@
   <section>
     <span>Piqae node connection</span>
     {#if nativeUrl}
-      <h1>Connect this printer computer</h1>
+      <h1>Opening Piqae…</h1>
       <p>
         Piqae will show the service requesting access and let you choose exactly which local
         printers it may use.
       </p>
-      <button type="button" onclick={openPiqae}>Open Piqae</button>
-      <a href={`/downloads#${nativeUrl.split('#')[1]}`}>Piqae is not installed</a>
+      <button type="button" onclick={openPiqae}>Try opening Piqae again</button>
+      <a href={`/downloads#${nativeUrl.split('#')[1]}`}>Download or update Piqae</a>
       <small>This invitation expires shortly and can be accepted only once.</small>
     {:else}
       <h1>This connection link is invalid or has already been cleared</h1>
