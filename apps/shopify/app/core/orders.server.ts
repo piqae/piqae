@@ -22,6 +22,10 @@ export interface NormalizedOrder {
   currency: string;
   customer: { id: string; displayName: string; email: string } | null;
   shippingAddress: Record<string, string> | null;
+  billingAddress: Record<string, string> | null;
+  note: string;
+  shippingMethod: string;
+  statusUrl: string;
   metafields: Record<string, Record<string, NormalizedMetafield>>;
   lineItems: Array<{
     id: string;
@@ -88,6 +92,8 @@ const ORDER_QUERY = `#graphql
      id name createdAt currencyCode
      customer { id displayName email }
      shippingAddress { name company address1 address2 city province zip country phone }
+     billingAddress { name company address1 address2 city province zip country phone }
+     note statusPageUrl shippingLine { title }
      metafieldsByIdentifiers(identifiers: $orderFields) { namespace key type jsonValue reference { ... on Metaobject { id type handle displayName fields { key value jsonValue } } } }
      lineItems(first: 100, after: $after) { nodes { id title sku quantity originalUnitPriceSet { shopMoney { amount } } discountedTotalSet { shopMoney { amount } } product { id title vendor productType category { id name fullName level ancestorIds } metafieldsByIdentifiers(identifiers: $productFields) { namespace key type jsonValue reference { ... on Metaobject { id type handle displayName fields { key value jsonValue } } } } } variant { id title barcode metafieldsByIdentifiers(identifiers: $variantFields) { namespace key type jsonValue reference { ... on Metaobject { id type handle displayName fields { key value jsonValue } } } } } } pageInfo { hasNextPage endCursor } }
      subtotalPriceSet { shopMoney { amount } }
@@ -117,7 +123,7 @@ export function normalizeDraftOrderGid(value: string): string {
 const DRAFT_ORDER_QUERY = `#graphql
  query PiqaePrintableDraftOrder($id: ID!, $after: String, $orderFields: [HasMetafieldsIdentifier!]!, $productFields: [HasMetafieldsIdentifier!]!, $variantFields: [HasMetafieldsIdentifier!]!) {
    draftOrder(id: $id) {
-     id name createdAt currencyCode email
+     id name createdAt currencyCode email note
      metafieldsByIdentifiers(identifiers: $orderFields) { namespace key type jsonValue reference { ... on Metaobject { id type handle displayName fields { key value jsonValue } } } }
      shippingAddress { name company address1 address2 city province zip country phone }
      lineItems(first: 100, after: $after) { nodes { id title sku quantity originalUnitPriceSet { shopMoney { amount } } discountedTotalSet { shopMoney { amount } } product { id title vendor productType category { id name fullName level ancestorIds } metafieldsByIdentifiers(identifiers: $productFields) { namespace key type jsonValue reference { ... on Metaobject { id type handle displayName fields { key value jsonValue } } } } } variant { id title barcode metafieldsByIdentifiers(identifiers: $variantFields) { namespace key type jsonValue reference { ... on Metaobject { id type handle displayName fields { key value jsonValue } } } } } } pageInfo { hasNextPage endCursor } }
@@ -178,6 +184,10 @@ export async function fetchDraftOrders(
           }
         : null,
       shippingAddress: normalizedAddress(draft.shippingAddress),
+      billingAddress: null,
+      note: stringValue(draft.note),
+      shippingMethod: "",
+      statusUrl: "",
       metafields: normalizeMetafields(
         draft.metafieldsByIdentifiers,
         selection,
@@ -256,6 +266,10 @@ export async function fetchOrders(
           }
         : null,
       shippingAddress: normalizedAddress(order.shippingAddress),
+      billingAddress: normalizedAddress(order.billingAddress),
+      note: stringValue(order.note),
+      shippingMethod: stringValue(order.shippingLine?.title),
+      statusUrl: stringValue(order.statusPageUrl),
       metafields: normalizeMetafields(
         order.metafieldsByIdentifiers,
         selection,

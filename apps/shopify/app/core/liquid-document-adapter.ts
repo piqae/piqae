@@ -108,7 +108,7 @@ export function liquidToCanonical(
         );
       const node: Extract<Block, { type: "repeat" }> = {
         type: "repeat",
-        items: path(m[2]!),
+        items: scopedPath(m[2]!, stack),
         children: [],
       };
       stack.at(-1)!.blocks.push(node);
@@ -172,7 +172,7 @@ export function liquidToCanonical(
           "invalid_table",
           "Use: {% piqae_table order.lineItems as: line %}",
         );
-      stack.at(-1)!.blocks.push(table(path(m[1]!), m[2]!));
+      stack.at(-1)!.blocks.push(table(scopedPath(m[1]!, stack), m[2]!));
     } else if (tag === "piqae_qr") {
       const m = /^piqae_qr\s+([\w.]+)$/i.exec(inner);
       if (!m)
@@ -329,7 +329,10 @@ function parseOutput(input: string, stack: Frame[]): Expression | null {
       value = {
         type: "format_money",
         amount: value,
-        currency: path("order.currencyCode"),
+        currency: scopedPath(
+          `${name!.split(".")[0] === "line_item" || name!.split(".")[0] === "item" ? name!.split(".")[0] : "order"}.currency`,
+          stack,
+        ),
       };
     else if (filter === "date")
       value = { type: "format_date", value, format: "day_month_year" };
@@ -435,7 +438,7 @@ function table(
             value: {
               type: "format_money",
               amount: current("total"),
-              currency: path("order.currencyCode"),
+              currency: current("currency"),
             },
           },
         ],

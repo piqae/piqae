@@ -167,12 +167,14 @@ export function BusinessDocumentEditor({
   onChange(document: BusinessDocument): void;
 }) {
   const authoringFields = [...AUTHORING_FIELDS, ...customFields];
+  const theme = value.theme ?? {};
   const host = useRef<HTMLDivElement>(null);
   const view = useRef<EditorView | null>(null);
   const latest = useRef(value);
   const [selection, setSelection] = useState<{
     position: number;
     block: Block;
+    path?: BlockPath;
   } | null>(null);
   latest.current = value;
   useEffect(() => {
@@ -238,6 +240,29 @@ export function BusinessDocumentEditor({
   const updateSelected = (block: Block) => {
     const instance = view.current;
     if (!instance || !selection) return;
+    if (selection.path) {
+      const body = replaceBlockAtPath(
+        latest.current.body,
+        selection.path,
+        block,
+      );
+      const nextDocument = { ...latest.current, body };
+      latest.current = nextDocument;
+      instance.updateState(
+        EditorState.create({
+          schema,
+          doc: blocksToDoc(body),
+          plugins: [
+            history(),
+            keymap({ "Mod-z": undo, "Shift-Mod-z": redo }),
+            keymap(baseKeymap),
+          ],
+        }),
+      );
+      setSelection({ position: -1, path: selection.path, block });
+      onChange(nextDocument);
+      return;
+    }
     instance.dispatch(
       instance.state.tr.setNodeMarkup(selection.position, undefined, {
         json: JSON.stringify(block),
@@ -264,6 +289,17 @@ export function BusinessDocumentEditor({
   const removeSelected = () => {
     const instance = view.current;
     if (!instance || !selection) return;
+    if (selection.path) {
+      const body = removeBlockAtPath(latest.current.body, selection.path);
+      const nextDocument = { ...latest.current, body };
+      latest.current = nextDocument;
+      instance.updateState(
+        EditorState.create({ schema, doc: blocksToDoc(body) }),
+      );
+      onChange(nextDocument);
+      setSelection(null);
+      return;
+    }
     const node = instance.state.doc.nodeAt(selection.position);
     if (!node) return;
     instance.dispatch(
@@ -398,74 +434,389 @@ export function BusinessDocumentEditor({
           onClick={() => insertBlock(defaultContainer("row"))}
         />
       </div>
-      <div className="piqae-region-editors">
-        <label>
-          Repeating page header
-          <input
-            type="text"
-            value={regionText(value.header?.default)}
-            onChange={(event) =>
-              updateRegion("header", event.currentTarget.value)
-            }
-            disabled={disabled}
-            placeholder="Optional header text"
-          />
-        </label>
-        <label>
-          Repeating page footer
-          <input
-            type="text"
-            value={regionText(value.footer?.default)}
-            onChange={(event) =>
-              updateRegion("footer", event.currentTarget.value)
-            }
-            disabled={disabled}
-            placeholder="Optional footer text"
-          />
-        </label>
-      </div>
       <div className="piqae-editor-workspace">
         <div className="piqae-canvas-wrap">
           <p className="piqae-canvas-hint">
             Select a blue-outlined section to edit its content and layout.
           </p>
-          <div className="piqae-page-sheet" ref={host} />
+          <div className="piqae-page-sheet piqae-rendered-canvas">
+            <DocumentCanvas
+              blocks={value.body}
+              editable={!disabled}
+              onSelect={(block, path) =>
+                setSelection({ position: -1, block, path })
+              }
+              onChange={(block, path) => {
+                setSelection({ position: -1, block, path });
+                const body = replaceBlockAtPath(value.body, path, block);
+                latest.current = { ...latest.current, body };
+                view.current?.updateState(
+                  EditorState.create({ schema, doc: blocksToDoc(body) }),
+                );
+                onChange({ ...latest.current, body });
+              }}
+            />
+          </div>
+          <div
+            className="piqae-prosemirror-source"
+            ref={host}
+            aria-hidden="true"
+          />
         </div>
         <aside className="piqae-inspector" aria-label="Document block settings">
-          {selection ? (
-            <>
-              <div className="piqae-inspector-heading">
-                <div>
-                  <small>Selected</small>
-                  <strong>{blockTitle(selection.block)}</strong>
-                </div>
-                <button
-                  type="button"
-                  className="piqae-icon-button piqae-danger"
-                  onClick={removeSelected}
-                  disabled={disabled}
-                  aria-label="Delete selected block"
-                >
-                  ✕
-                </button>
-              </div>
-              <BlockProperties
-                block={selection.block}
+          <details open className="piqae-inspector-section">
+            <summary>Brand &amp; styling</summary>
+            <div className="piqae-block-properties">
+              <NumberProperty
+                label="Base text size (pt)"
+                value={theme.font_size_pt ?? 10}
+                min={7}
+                max={24}
                 disabled={disabled}
-                authoringFields={authoringFields}
-                onChange={updateSelected}
+                onChange={(font_size_pt) =>
+                  onChange({
+                    ...latest.current,
+                    theme: { ...latest.current.theme, font_size_pt },
+                  })
+                }
               />
-            </>
-          ) : (
-            <div className="piqae-inspector-empty">
-              <span aria-hidden="true">↖</span>
-              <strong>Select something on the page</strong>
-              <p>Formatting and data options appear here.</p>
+              <label>
+                Text colour
+                <input
+                  type="color"
+                  value={rgbToHex(
+                    theme.text_color ?? { red: 32, green: 34, blue: 35 },
+                  )}
+                  disabled={disabled}
+                  onChange={(event) =>
+                    onChange({
+                      ...latest.current,
+                      theme: {
+                        ...latest.current.theme,
+                        text_color: hexToRgb(event.currentTarget.value),
+                      },
+                    })
+                  }
+                />
+              </label>
             </div>
-          )}
+          </details>
+          <details className="piqae-inspector-section">
+            <summary>Document options</summary>
+            <div className="piqae-block-properties">
+              <p className="piqae-muted">
+                Page size and document type are set above. Content automatically
+                reflows across pages.
+              </p>
+            </div>
+          </details>
+          <details className="piqae-inspector-section">
+            <summary>Text &amp; language</summary>
+            <div className="piqae-block-properties">
+              <label>
+                Repeating page header
+                <input
+                  type="text"
+                  value={regionText(value.header?.default)}
+                  onChange={(event) =>
+                    updateRegion("header", event.currentTarget.value)
+                  }
+                  disabled={disabled}
+                  placeholder="Optional header text"
+                />
+              </label>
+              <label>
+                Repeating page footer
+                <input
+                  type="text"
+                  value={regionText(value.footer?.default)}
+                  onChange={(event) =>
+                    updateRegion("footer", event.currentTarget.value)
+                  }
+                  disabled={disabled}
+                  placeholder="Optional footer text"
+                />
+              </label>
+            </div>
+          </details>
+          <div className="piqae-selected-inspector">
+            {selection ? (
+              <>
+                <div className="piqae-inspector-heading">
+                  <div>
+                    <small>Selected</small>
+                    <strong>{blockTitle(selection.block)}</strong>
+                  </div>
+                  <button
+                    type="button"
+                    className="piqae-icon-button piqae-danger"
+                    onClick={removeSelected}
+                    disabled={disabled}
+                    aria-label="Delete selected block"
+                  >
+                    ✕
+                  </button>
+                </div>
+                <BlockProperties
+                  block={selection.block}
+                  disabled={disabled}
+                  authoringFields={authoringFields}
+                  onChange={updateSelected}
+                />
+              </>
+            ) : (
+              <div className="piqae-inspector-empty">
+                <span aria-hidden="true">↖</span>
+                <strong>Select something on the page</strong>
+                <p>Formatting and data options appear here.</p>
+              </div>
+            )}
+          </div>
         </aside>
       </div>
     </div>
+  );
+}
+
+export type BlockPathPart = {
+  branch: "root" | "children" | "then" | "else";
+  index: number;
+};
+export type BlockPath = BlockPathPart[];
+
+export function BusinessDocumentPreview({
+  value,
+}: {
+  value: BusinessDocument;
+}) {
+  return (
+    <div className="piqae-preview-stage" aria-label="Rendered document preview">
+      <div className="piqae-page-sheet piqae-rendered-canvas">
+        <DocumentCanvas
+          blocks={value.body}
+          editable={false}
+          onSelect={() => undefined}
+          onChange={() => undefined}
+        />
+      </div>
+    </div>
+  );
+}
+
+function DocumentCanvas({
+  blocks,
+  path = [],
+  branch = "root",
+  editable = true,
+  onSelect,
+  onChange,
+}: {
+  blocks: Block[];
+  path?: BlockPath;
+  branch?: BlockPathPart["branch"];
+  editable?: boolean;
+  onSelect(block: Block, path: BlockPath): void;
+  onChange(block: Block, path: BlockPath): void;
+}) {
+  return (
+    <div className="piqae-document-flow">
+      {blocks.map((block, index) => (
+        <CanvasBlock
+          key={`${path.map((part) => `${part.branch}-${part.index}`).join("/")}-${branch}-${index}`}
+          block={block}
+          path={[...path, { branch, index }]}
+          editable={editable}
+          onSelect={onSelect}
+          onChange={onChange}
+        />
+      ))}
+    </div>
+  );
+}
+
+function CanvasBlock({
+  block,
+  path,
+  editable,
+  onSelect,
+  onChange,
+}: {
+  block: Block;
+  path: BlockPath;
+  editable: boolean;
+  onSelect(block: Block, path: BlockPath): void;
+  onChange(block: Block, path: BlockPath): void;
+}) {
+  const select = (event: React.MouseEvent) => {
+    event.stopPropagation();
+    onSelect(block, path);
+  };
+  if (block.type === "paragraph" || block.type === "heading") {
+    const Tag =
+      block.type === "heading" ? (`h${block.level ?? 2}` as "h1") : "p";
+    return (
+      <Tag
+        className="piqae-canvas-text"
+        onClick={select}
+        contentEditable={editable}
+        suppressContentEditableWarning
+        onBlur={(event) =>
+          editable &&
+          onChange(
+            {
+              ...block,
+              content: parseEditableInline(
+                event.currentTarget.textContent ?? "",
+              ),
+            },
+            path,
+          )
+        }
+      >
+        {editableInline(block.content)}
+      </Tag>
+    );
+  }
+  if (block.type === "divider")
+    return <hr className="piqae-canvas-selectable" onClick={select} />;
+  if (block.type === "spacer")
+    return (
+      <div
+        className="piqae-canvas-spacer piqae-canvas-selectable"
+        style={{ height: `${Math.max(8, block.height_mm * 2)}px` }}
+        onClick={select}
+      >
+        <span>{block.height_mm} mm space</span>
+      </div>
+    );
+  if (block.type === "page_break")
+    return (
+      <div className="piqae-canvas-page-break" onClick={select}>
+        Page break
+      </div>
+    );
+  if (block.type === "image")
+    return (
+      <div
+        className="piqae-canvas-image piqae-canvas-selectable"
+        style={{
+          width: `${Math.max(80, block.width_mm * 2)}px`,
+          height: `${Math.max(40, block.height_mm * 2)}px`,
+        }}
+        onClick={select}
+      >
+        <span aria-hidden="true">▧</span>
+        <small>{block.resource}</small>
+      </div>
+    );
+  if (block.type === "qr" || block.type === "barcode")
+    return (
+      <div
+        className={`piqae-canvas-code piqae-canvas-${block.type} piqae-canvas-selectable`}
+        onClick={select}
+      >
+        <span aria-hidden="true">{block.type === "qr" ? "▦" : "▌█▌▌█▌█"}</span>
+        <small>{expressionLabel(block.value)}</small>
+      </div>
+    );
+  if (block.type === "table")
+    return (
+      <div
+        className="piqae-canvas-table piqae-canvas-selectable"
+        onClick={select}
+      >
+        <div className="piqae-canvas-table-row piqae-canvas-table-head">
+          {block.columns.map((column, index) => (
+            <span
+              key={index}
+              style={{ flex: column.width ?? 1, textAlign: column.align }}
+            >
+              {inlineLabel(column.header)}
+            </span>
+          ))}
+        </div>
+        {[0, 1].map((row) => (
+          <div className="piqae-canvas-table-row" key={row}>
+            {block.columns.map((column, index) => (
+              <span
+                key={index}
+                style={{ flex: column.width ?? 1, textAlign: column.align }}
+              >
+                {columnCellPath(column.cell)
+                  ? `{{ ${columnCellPath(column.cell)} }}`
+                  : "Value"}
+              </span>
+            ))}
+          </div>
+        ))}
+      </div>
+    );
+  if (block.type === "conditional")
+    return (
+      <section
+        className="piqae-canvas-conditional piqae-canvas-selectable"
+        onClick={select}
+      >
+        <small>Shown when {expressionLabel(block.condition)}</small>
+        <DocumentCanvas
+          blocks={block.then}
+          path={path}
+          branch="then"
+          editable={editable}
+          onSelect={onSelect}
+          onChange={onChange}
+        />
+        {block.else?.length ? (
+          <details>
+            <summary>Otherwise</summary>
+            <DocumentCanvas
+              blocks={block.else}
+              path={path}
+              branch="else"
+              editable={editable}
+              onSelect={onSelect}
+              onChange={onChange}
+            />
+          </details>
+        ) : null}
+      </section>
+    );
+  const children = "children" in block ? block.children : [];
+  const className =
+    block.type === "grid"
+      ? "piqae-canvas-grid"
+      : block.type === "row"
+        ? "piqae-canvas-row"
+        : "piqae-canvas-stack";
+  const style =
+    block.type === "grid"
+      ? {
+          gridTemplateColumns: block.columns
+            .map((column) => `${column}fr`)
+            .join(" "),
+          gap: `${block.gap_mm ?? 0}mm`,
+        }
+      : { gap: `${"gap_mm" in block ? (block.gap_mm ?? 0) : 0}mm` };
+  return (
+    <section
+      className={`${className} piqae-canvas-selectable`}
+      style={style}
+      onClick={select}
+    >
+      {block.type === "repeat" ? (
+        <small className="piqae-repeat-label">
+          One document per {expressionLabel(block.items)}
+        </small>
+      ) : null}
+      <DocumentCanvas
+        blocks={children}
+        path={path}
+        branch="children"
+        editable={editable}
+        onSelect={onSelect}
+        onChange={onChange}
+      />
+    </section>
   );
 }
 
@@ -1262,6 +1613,61 @@ function moveItem<T>(items: T[], index: number, direction: -1 | 1) {
   const next = [...items];
   [next[index], next[target]] = [next[target]!, next[index]!];
   return next;
+}
+export function replaceBlockAtPath(
+  blocks: Block[],
+  path: BlockPath,
+  replacement: Block,
+): Block[] {
+  const [part, ...rest] = path;
+  if (!part) return blocks;
+  return blocks.map((block, index) => {
+    if (index !== part.index) return block;
+    if (!rest.length) return replacement;
+    const nextPart = rest[0]!;
+    if (nextPart.branch === "children" && "children" in block)
+      return {
+        ...block,
+        children: replaceBlockAtPath(block.children, rest, replacement),
+      };
+    if (nextPart.branch === "then" && block.type === "conditional")
+      return {
+        ...block,
+        then: replaceBlockAtPath(block.then, rest, replacement),
+      };
+    if (nextPart.branch === "else" && block.type === "conditional")
+      return {
+        ...block,
+        else: replaceBlockAtPath(block.else ?? [], rest, replacement),
+      };
+    return block;
+  });
+}
+export function removeBlockAtPath(blocks: Block[], path: BlockPath): Block[] {
+  const [part, ...rest] = path;
+  if (!part) return blocks;
+  if (!rest.length) return blocks.filter((_, index) => index !== part.index);
+  return blocks.map((block, index) => {
+    if (index !== part.index) return block;
+    const nextPart = rest[0]!;
+    if (nextPart.branch === "children" && "children" in block)
+      return { ...block, children: removeBlockAtPath(block.children, rest) };
+    if (nextPart.branch === "then" && block.type === "conditional")
+      return { ...block, then: removeBlockAtPath(block.then, rest) };
+    if (nextPart.branch === "else" && block.type === "conditional")
+      return { ...block, else: removeBlockAtPath(block.else ?? [], rest) };
+    return block;
+  });
+}
+function rgbToHex(color: { red: number; green: number; blue: number }) {
+  return `#${[color.red, color.green, color.blue].map((value) => Math.max(0, Math.min(255, value)).toString(16).padStart(2, "0")).join("")}`;
+}
+function hexToRgb(value: string) {
+  return {
+    red: Number.parseInt(value.slice(1, 3), 16),
+    green: Number.parseInt(value.slice(3, 5), 16),
+    blue: Number.parseInt(value.slice(5, 7), 16),
+  };
 }
 function fieldGroups(fields: readonly ShopifyDocumentField[]) {
   const groups = new Map<

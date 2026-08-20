@@ -1,0 +1,24 @@
+{% assign heading = "Packing Slip" %}
+<style>
+  body { font-size: 12px; line-height: 1.4; color: #222222; }
+  .header { display: flex; gap: 16px; }
+</style>
+<div class="header">
+  <h1>{{ heading }}</h1>
+  <div>{{ shop.name }} — {{ order.name }}</div>
+</div>
+<div class="addresses">
+  <div><strong>Ship to</strong><br>{{ shipping_address.name }}<br>{{ shipping_address.address1 }}</div>
+  <div><strong>Bill to</strong><br>{{ billing_address.name }}<br>{{ billing_address.address1 }}</div>
+</div>
+<hr>
+{% for line_item in line_items limit: 250 %}
+  <div class="line-item">
+    {{ line_item.title }} — {{ line_item.sku }} × {{ line_item.quantity }}
+    {{ line_item.line_price | money }}
+    <span class="barcode">{{ line_item.sku }}</span>
+  </div>
+{% endfor %}
+{% if order.note %}<div class="notes">{{ order.note }}</div>{% endif %}
+<div class="qrcode">Order status</div>
+<footer>Thanks for your business.</footer>

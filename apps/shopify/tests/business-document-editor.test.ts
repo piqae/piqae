@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   blocksToDoc,
   docToBlocks,
+  removeBlockAtPath,
+  replaceBlockAtPath,
 } from "../app/components/BusinessDocumentEditor";
 import type { Block } from "../app/core/template-model";
 
@@ -107,5 +109,40 @@ describe("business document editor serialization", () => {
     ];
 
     expect(docToBlocks(blocksToDoc(blocks))).toEqual(blocks);
+  });
+
+  it("updates and removes nested canvas blocks without changing their siblings", () => {
+    const blocks: Block[] = [
+      {
+        type: "conditional",
+        condition: { type: "path", path: ["order", "note"] },
+        then: [
+          { type: "paragraph", content: [{ type: "text", value: "Original" }] },
+          { type: "divider" },
+        ],
+        else: [],
+      },
+    ];
+    const path = [
+      { branch: "root" as const, index: 0 },
+      { branch: "then" as const, index: 0 },
+    ];
+    const replacement: Block = {
+      type: "heading",
+      level: 2,
+      content: [{ type: "text", value: "Updated" }],
+    };
+    const updated = replaceBlockAtPath(blocks, path, replacement);
+    expect(
+      (updated[0] as Extract<Block, { type: "conditional" }>).then,
+    ).toEqual([replacement, { type: "divider" }]);
+    expect(
+      (
+        removeBlockAtPath(updated, path)[0] as Extract<
+          Block,
+          { type: "conditional" }
+        >
+      ).then,
+    ).toEqual([{ type: "divider" }]);
   });
 });

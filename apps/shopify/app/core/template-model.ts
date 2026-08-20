@@ -37,6 +37,15 @@ export type TemplateEnvelope = {
     liquid: string;
     roundTrip: "lossless";
     warnings: string[];
+    import?: {
+      format: "order_printer_pro";
+      originalSource: string;
+      diagnostics: Array<{
+        fidelity: "exact" | "mapped" | "lossy" | "unsupported";
+        code: string;
+        message: string;
+      }>;
+    };
   };
   assets: ExternalAsset[];
   system?: { key: string; immutable: true };
@@ -67,15 +76,40 @@ export function parseTemplateEnvelope(source: string): TemplateEnvelope {
     !["visual", "liquid", "source"].includes(envelope.editor.mode)
   )
     throw new Error("Document editor metadata is invalid");
+  validateImportMetadata(envelope.editor.import);
   return envelope;
 }
 export function serializeTemplateEnvelope(value: TemplateEnvelope): string {
   validateAssets(value.assets);
   validateBusinessDocument(value.document);
+  validateImportMetadata(value.editor.import);
   const source = JSON.stringify(value);
   if (new TextEncoder().encode(source).byteLength > 262_144)
     throw new Error("Document source exceeds 256 KiB");
   return source;
+}
+
+function validateImportMetadata(value: TemplateEnvelope["editor"]["import"]) {
+  if (!value) return;
+  if (
+    value.format !== "order_printer_pro" ||
+    typeof value.originalSource !== "string" ||
+    new TextEncoder().encode(value.originalSource).byteLength > 65_536 ||
+    !Array.isArray(value.diagnostics) ||
+    value.diagnostics.length > 200
+  )
+    throw new Error("Template import metadata is invalid");
+  for (const diagnostic of value.diagnostics) {
+    if (
+      !["exact", "mapped", "lossy", "unsupported"].includes(
+        diagnostic.fidelity,
+      ) ||
+      !/^[a-z0-9_]{1,64}$/.test(diagnostic.code) ||
+      typeof diagnostic.message !== "string" ||
+      diagnostic.message.length > 500
+    )
+      throw new Error("Template import diagnostic is invalid");
+  }
 }
 export function validateAssets(assets: ExternalAsset[]) {
   if (assets.length > ASSET_LIMITS.maxAssets)

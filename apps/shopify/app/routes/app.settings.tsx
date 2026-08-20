@@ -126,22 +126,17 @@ export default function Settings() {
           </connector.Form>
           {connection ? (
             <s-stack direction="block" gap="base">
-              {connection.native_connect_url ? (
+              {connection.connect_url ? (
                 <s-button
-                  href={connection.native_connect_url}
-                  target="_top"
+                  href={connection.connect_url}
+                  target="_blank"
                   onClick={() => {
                     setShowInstaller(false);
                     window.setTimeout(() => setShowInstaller(true), 1800);
                   }}
                 >
-                  Open Piqae
+                  Open Piqae connection
                 </s-button>
-              ) : null}
-              {connection.connect_url ? (
-                <s-link href={connection.connect_url} target="_blank">
-                  Connection help and downloads
-                </s-link>
               ) : null}
               {showInstaller && installer ? (
                 <s-button href={installer.url} target="_top">
