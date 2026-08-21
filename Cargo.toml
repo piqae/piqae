@@ -7,7 +7,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.15"
+version = "0.1.16"
 edition = "2024"
 license = "Apache-2.0"
 authors = ["Piqae contributors"]
@@ -49,9 +49,9 @@ url = { version = "2.5.4", features = ["serde"] }
 uuid = { version = "1.16.0", features = ["v4", "v7", "serde"] }
 zeroize = { version = "1.8.1", features = ["derive"] }
 
-piqae-domain = { path = "crates/domain", version = "0.1.15" }
-piqae-protocol = { path = "crates/protocol", version = "0.1.15" }
-piqae-document-renderer = { path = "crates/document-renderer", version = "0.1.15" }
+piqae-domain = { path = "crates/domain", version = "0.1.16" }
+piqae-protocol = { path = "crates/protocol", version = "0.1.16" }
+piqae-document-renderer = { path = "crates/document-renderer", version = "0.1.16" }
 
 [workspace.lints.rust]
 unsafe_code = "deny"
