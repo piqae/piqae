@@ -18,7 +18,7 @@ piqae-executor-protocol = { path = "../executor-protocol", version = "0.1.2" }
 piqae-protocol.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59.0", features = [
+windows-sys = { version = "0.61.2", features = [
   "Win32_Foundation",
   "Win32_Graphics_Gdi",
   "Win32_Graphics_Printing",
