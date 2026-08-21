@@ -6,7 +6,7 @@ license = "Apache-2.0"
 
 [dependencies]
 argon2 = "0.5"
-base64 = "0.22"
+base64 = "0.23"
 rand = "0.8"
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
