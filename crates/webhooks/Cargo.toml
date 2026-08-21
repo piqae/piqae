@@ -10,7 +10,7 @@ chacha20poly1305 = "0.10"
 hmac = "0.12"
 rand = "0.8"
 serde = { version = "1", features = ["derive"] }
-sha2 = "0.10"
+sha2 = "0.11"
 subtle = "2.6"
 time = { version = "0.3", features = ["serde"] }
 uuid = { version = "1", features = ["serde", "v7"] }
