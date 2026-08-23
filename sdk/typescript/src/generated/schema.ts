@@ -447,7 +447,13 @@ export interface paths {
         delete?: never;
         options?: never;
         head?: never;
-        patch?: never;
+        /**
+         * Rename the authenticated workspace
+         * @description Changes the workspace display name only. The slug, workspace ID and
+         *     identity-provider linkage are unchanged, so existing references keep
+         *     resolving. Restricted to workspace owners and admins.
+         */
+        patch: operations["renameCurrentWorkspace"];
         trace?: never;
     };
     "/v1/workspaces/current/members": {
@@ -4796,6 +4802,36 @@ export interface operations {
                 };
             };
             401: components["responses"]["Error"];
+            404: components["responses"]["Error"];
+        };
+    };
+    renameCurrentWorkspace: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    name: string;
+                };
+            };
+        };
+        responses: {
+            /** @description Updated workspace. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Workspace"];
+                };
+            };
+            400: components["responses"]["Error"];
+            401: components["responses"]["Error"];
+            403: components["responses"]["Error"];
             404: components["responses"]["Error"];
         };
     };

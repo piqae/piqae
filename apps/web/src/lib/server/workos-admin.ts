@@ -170,6 +170,21 @@ export async function createOrganization(
   }
 }
 
+/**
+ * Mirrors a workspace rename onto the linked WorkOS organisation so SSO and
+ * directory surfaces keep showing the same name. Piqae remains the source of
+ * truth: a failure here must not roll back the local rename.
+ */
+export async function renameOrganization(
+  organizationId: string,
+  name: string
+): Promise<WorkOsOrganization> {
+  return workosRequest(`/organizations/${encodeURIComponent(organizationId)}`, {
+    method: 'PUT',
+    body: { name }
+  });
+}
+
 export async function ensureOrganizationMembership(
   organizationId: string,
   userId: string,

@@ -179,6 +179,7 @@
   // Hosted PDF print dialog.
   let printOpen = $state(false);
   let printPending = $state(false);
+  let diagnosticsPending = $state(false);
   let printAttempted = $state(false);
   let printPrinterId = $state('');
   let printProfileId = $state('');
@@ -615,6 +616,51 @@
       {:else}
         <p class="muted empty-line">This node has not reported any printers.</p>
       {/each}
+    </div>
+
+    <div class="drawer-section">
+      <h3>Diagnostics</h3>
+      <p class="muted empty-line">
+        Asks this node for a redacted health report: agent version, queue depth,
+        local storage integrity and the last error it recorded. No document
+        content is collected.
+      </p>
+      <form
+        method="POST"
+        action="?/collectNodeDiagnostics"
+        use:enhance={() => {
+          diagnosticsPending = true;
+          return async ({ update }) => {
+            await update({ reset: false });
+            diagnosticsPending = false;
+          };
+        }}
+      >
+        <input type="hidden" name="node_id" value={detail.node.id} />
+        <button class="button small" type="submit" disabled={diagnosticsPending || data.dashboardMode !== 'live'}>
+          {diagnosticsPending ? 'Requesting…' : 'Collect diagnostics'}
+        </button>
+      </form>
+      {#await detail.diagnostics}
+        <p class="muted empty-line">Loading reports…</p>
+      {:then diagnostics}
+        {#if diagnostics.dataError}<DataError error={diagnostics.dataError} />{/if}
+        {#each diagnostics.reports.slice(0, 5) as report}
+          <div class="mini-row">
+            <span class="cell-stack">
+              <strong>{report.state}</strong>
+              <small class="mono">
+                {report.agentVersion ? `v${report.agentVersion}` : report.requestId}
+                {report.lastErrorCode ? ` · ${report.lastErrorCode}` : ''}
+                {report.storageHealthy === false ? ' · storage damaged' : ''}
+              </small>
+            </span>
+            <small class="muted"><RelativeTime value={report.receivedAt ?? report.requestedAt} /></small>
+          </div>
+        {:else}
+          <p class="muted empty-line">No diagnostic report has been collected yet.</p>
+        {/each}
+      {/await}
     </div>
   {:else if detail?.kind === 'customer'}
     <DefinitionList

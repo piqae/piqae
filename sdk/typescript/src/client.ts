@@ -177,6 +177,10 @@ export class PiqaeClient {
 
   readonly workspaces = {
     current: () => this.request<Workspace>('GET', '/v1/workspaces/current'),
+    rename: (name: string) =>
+      this.request<Workspace>('PATCH', '/v1/workspaces/current', {
+        body: { name }
+      }),
     members: () =>
       this.request<WorkspaceMember[]>('GET', '/v1/workspaces/current/members')
   };

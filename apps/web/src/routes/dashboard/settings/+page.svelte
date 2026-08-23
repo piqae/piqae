@@ -19,11 +19,18 @@
 
   let { data, form } = $props();
 
+  const renameResult = $derived(
+    form && 'workspace' in form && form.mutation === 'renameWorkspace'
+      ? (form as { workspace?: { name: string }; directoryWarning?: string | null })
+      : null
+  );
+
   const live = $derived(data.dashboardMode === 'live');
   const billingContext = $derived(data.billingContext);
 
   const sections = $derived(
     [
+      { id: 'workspace', label: 'Workspace' },
       { id: 'api-keys', label: 'API keys' },
       { id: 'webhooks', label: 'Webhooks' },
       ...(data.sections.team ? [{ id: 'team', label: 'Team' }] : []),
@@ -189,6 +196,50 @@
   </nav>
 
   <div class="sections">
+    <!-- Workspace -->
+    <section class="panel" id="workspace">
+      <SectionHeader
+        title="Workspace"
+        description="The name every member, connected store and integration sees. The workspace ID and slug never change, so existing references keep working."
+      />
+
+      {#await data.workspace}
+        <div class="loading">Loading workspace…</div>
+      {:then workspace}
+        {#if workspace.dataError}<DataError error={workspace.dataError} />{/if}
+        {#if renameResult?.directoryWarning}
+          <p class="ui-note banner" role="status">{renameResult.directoryWarning}</p>
+        {/if}
+        <form
+          method="POST"
+          action="?/renameWorkspace"
+          class="workspace-form"
+          use:enhance={() => {
+            mutationPending = true;
+            return async ({ update }) => {
+              await update();
+              mutationPending = false;
+            };
+          }}
+        >
+          <Field label="Workspace name" hint="Up to 120 characters.">
+            <input
+              class="ui-input"
+              type="text"
+              name="name"
+              maxlength="120"
+              required
+              disabled={!live || !workspace.workspace}
+              value={renameResult?.workspace?.name ?? workspace.workspace?.name ?? ''}
+            />
+          </Field>
+          <button class="button primary" type="submit" disabled={mutationPending || !live}>
+            {mutationPending ? 'Saving…' : 'Save name'}
+          </button>
+        </form>
+      {/await}
+    </section>
+
     <!-- API keys -->
     <section class="panel" id="api-keys">
       <SectionHeader

@@ -171,3 +171,24 @@ export interface DashboardOverview {
   printers: { total: number; online: number; attention: number };
   jobs: { recent: number; active: number; failed: number; uncertain: number };
 }
+
+export interface DashboardWorkspace {
+  id: string;
+  name: string;
+  slug: string;
+}
+
+export interface DashboardNodeDiagnostic {
+  requestId: string;
+  state: 'requested' | 'complete' | 'failed';
+  requestedAt: string;
+  receivedAt: string | null;
+  agentVersion: string | null;
+  queuedJobs: number | null;
+  activeJobs: number | null;
+  storageHealthy: boolean | null;
+  executorCrashes: number | null;
+  lastErrorCode: string | null;
+  collectionErrorCode: string | null;
+}
+

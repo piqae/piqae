@@ -52,10 +52,14 @@ export function messageForLoadError(error) {
 }
 
 export function chooseDefault(items) {
+  // An entry without an id cannot be previewed or printed, so it must never
+  // win the default selection: doing so leaves an empty picker next to a
+  // failed preview with nothing the merchant can act on.
+  const usable = items.filter((item) => item?.id);
   return (
-    items.find((item) => item.isDefault) ??
-    items.find((item) => item.eligible) ??
-    items[0]
+    usable.find((item) => item.isDefault) ??
+    usable.find((item) => item.eligible) ??
+    usable[0]
   );
 }
 
@@ -172,9 +176,9 @@ function AdminOrderPrintActionContent({ bulk = false }) {
     };
   }, []);
 
-  const selectedDocument = options?.documents?.find(
-    ({ id }) => id === documentId,
-  );
+  const selectedDocument = documentId
+    ? options?.documents?.find(({ id }) => id === documentId)
+    : undefined;
   useEffect(() => {
     if (!options?.linked || !selectedDocument || orderIds.length === 0) return;
     const sequence = ++previewSequence.current;

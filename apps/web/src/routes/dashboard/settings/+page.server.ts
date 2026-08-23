@@ -27,6 +27,7 @@ import {
   listUserMemberships,
   organizationRoles,
   removeMembershipAccess,
+  renameOrganization,
   resendInvitation as resendWorkosInvitation,
   revokeInvitation as revokeWorkosInvitation,
   sendInvitation,
@@ -80,6 +81,7 @@ export const load: PageServerLoad = async (event) => {
       },
       portalAvailable: stripePortalAvailable()
     },
+    workspace: loadWorkspace(event),
     apiKeys: loadApiKeys(event, meta.platform.accounts),
     platform: meta.platform.accounts ? loadPlatform(event) : null,
     webhooks: loadWebhooks(event),
@@ -87,6 +89,14 @@ export const load: PageServerLoad = async (event) => {
     billing: meta.billing.enabled ? loadBilling(event) : null
   };
 };
+
+async function loadWorkspace(event: RequestEvent) {
+  try {
+    return { workspace: await dashboardSource(event).api.workspace(), dataError: null };
+  } catch (error) {
+    return { workspace: null, dataError: presentDashboardError(error) };
+  }
+}
 
 async function loadPlatform(event: RequestEvent) {
   try {
@@ -274,6 +284,50 @@ export const actions: Actions = {
         error: { message: presentDashboardError(error).message }
       });
     }
+  },
+
+  renameWorkspace: async (event) => {
+    if (dashboardMode() !== 'live') {
+      return fail(400, {
+        mutation: 'renameWorkspace',
+        error: { message: 'Renaming is disabled while demo data is active.' }
+      });
+    }
+    const current = actor(event);
+    if (authMode === 'workos' && (!current || !canManage(current.role))) {
+      return fail(403, {
+        mutation: 'renameWorkspace',
+        error: { message: 'Only workspace owners and admins can rename the workspace.' }
+      });
+    }
+    const name = String((await event.request.formData()).get('name') ?? '').trim();
+    if (!name || [...name].length > 120) {
+      return fail(400, {
+        mutation: 'renameWorkspace',
+        error: { message: 'Enter a workspace name of 120 characters or fewer.' }
+      });
+    }
+    let workspace;
+    try {
+      workspace = await dashboardSource(event).api.renameWorkspace(name);
+    } catch (error) {
+      return fail(502, {
+        mutation: 'renameWorkspace',
+        error: { message: presentDashboardError(error).message }
+      });
+    }
+    // Piqae owns the name. A WorkOS mirror failure is reported, never rolled
+    // back, so the two surfaces can be reconciled without losing the rename.
+    let directoryWarning: string | null = null;
+    if (authMode === 'workos' && current) {
+      try {
+        await renameOrganization(current.organizationId, name);
+      } catch {
+        directoryWarning =
+          'The workspace was renamed, but the linked WorkOS organisation still shows the old name.';
+      }
+    }
+    return { mutation: 'renameWorkspace', workspace, directoryWarning };
   },
 
   createApiKey: async (event) => {
