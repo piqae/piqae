@@ -15,6 +15,7 @@ import {
 } from "./orders.server";
 import { workflows, type WorkflowRepository } from "./workflows.server";
 import { parseTemplateEnvelope } from "./template-model";
+import { ACCOUNT_DEFAULT_DOCUMENT_ID } from "./admin-print-options.server";
 import type { DownloadTokenVault } from "./download-token.server";
 
 export type PrintResult =
@@ -190,7 +191,8 @@ export class ShopifyPrintingService {
     fallback: string,
     templateId?: string,
   ) {
-    if (!templateId) return fallback;
+    if (!templateId || templateId === ACCOUNT_DEFAULT_DOCUMENT_ID)
+      return fallback;
     const selected = await this.workflow.getTemplate(shop, templateId);
     if (!selected || selected.state !== "published")
       throw new Error("The selected document is not published");

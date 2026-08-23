@@ -7,6 +7,14 @@ import { normalizeShopDomain } from "./model";
 import type { WorkflowRepository } from "./workflows.server";
 import type { RenderExecutionPolicy } from "./workflows.server";
 
+/**
+ * Selects the account's provisioned starter revision instead of a merchant
+ * template. Printing must still work before the merchant has published a
+ * document of their own, so this id is resolved against the shop link rather
+ * than the local template store.
+ */
+export const ACCOUNT_DEFAULT_DOCUMENT_ID = "account-default";
+
 export type AdminPrintOptions = {
   linked: boolean;
   documents: Array<{
@@ -101,19 +109,23 @@ export async function loadAdminPrintOptions(input: {
     // A printer-list outage must not hide document preview or PDF download.
     destinationError = "Printer status is temporarily unavailable";
   }
+  // A shop with no published document of its own still prints, using the
+  // starter revision provisioned when the managed account was created. The
+  // previous fallback exposed the revision id as if it were a merchant
+  // template id, which no lookup could ever resolve.
+  const accountDefault = link.templateRevisionId
+    ? [
+        {
+          id: ACCOUNT_DEFAULT_DOCUMENT_ID,
+          name: "Default document",
+          kind: "document",
+          isDefault: true,
+        },
+      ]
+    : [];
   return {
     linked: true,
-    documents:
-      documents.length > 0
-        ? documents
-        : [
-            {
-              id: link.templateRevisionId,
-              name: "Default document",
-              kind: "document",
-              isDefault: true,
-            },
-          ],
+    documents: documents.length > 0 ? documents : accountDefault,
     destinations,
     manageDocumentsUrl: "/app/templates",
     setupDestinationUrl: "/app/settings",
