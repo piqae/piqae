@@ -1,6 +1,7 @@
 import { PiqaeClient } from '@piqae/sdk';
 import type {
   DashboardAccount,
+  DashboardNodeDiagnostic,
   DashboardWorkspace,
   DashboardAgent,
   DashboardApiKey,
@@ -33,6 +34,8 @@ export interface DashboardApi {
   account(externalId: string): Promise<DashboardAccount | null>;
   workspace(): Promise<DashboardWorkspace>;
   renameWorkspace(name: string): Promise<DashboardWorkspace>;
+  nodeDiagnostics(nodeId: string): Promise<DashboardNodeDiagnostic[]>;
+  collectNodeDiagnostics(nodeId: string): Promise<{ requestId: string }>;
 }
 
 const page = <T>(data: T[]): DashboardPage<T> => ({ data, nextCursor: null });
@@ -110,14 +113,15 @@ export const mockApi: DashboardApi = {
   account: (externalId) =>
     delay(demo.accounts.find((account) => account.externalId === externalId) ?? null),
   workspace: () => delay({ id: 'wsp_demo', name: 'Demo workspace', slug: 'demo-workspace' }),
-  renameWorkspace: (name) => delay({ id: 'wsp_demo', name, slug: 'demo-workspace' })
+  renameWorkspace: (name) => delay({ id: 'wsp_demo', name, slug: 'demo-workspace' }),
+  nodeDiagnostics: () => delay([]),
+  collectNodeDiagnostics: () => delay({ requestId: 'diag_demo' })
 };
 
 /**
  * The dashboard view model is intentionally richer than the current public
  * OpenAPI. This adapter only derives fields represented by that contract;
- * diagnostics and usage screens remain disabled until their public endpoints
- * are added.
+ * usage screens remain disabled until their public endpoints are added.
  */
 export function createLiveApi(
   fetcher: typeof fetch,
@@ -407,7 +411,44 @@ export function createLiveApi(
     },
     workspace: async () => parseDashboardWorkspace(await client.workspaces.current()),
     renameWorkspace: async (name) =>
-      parseDashboardWorkspace(await client.workspaces.rename(name))
+      parseDashboardWorkspace(await client.workspaces.rename(name)),
+    nodeDiagnostics: async (nodeId) =>
+      (await client.nodes.listDiagnostics(nodeId)).map(parseNodeDiagnostic),
+    collectNodeDiagnostics: async (nodeId) => ({
+      requestId: (await client.nodes.diagnostics(nodeId)).request_id
+    })
+  };
+}
+
+function parseNodeDiagnostic(value: {
+  request_id: string;
+  state: string;
+  requested_at: string;
+  received_at?: string | null;
+  report?: {
+    agent_version?: string;
+    queued_jobs?: number;
+    active_jobs?: number;
+    sqlite_integrity_ok?: boolean;
+    executor_crashes?: number;
+    last_error_code?: string | null;
+    collection_error_code?: string | null;
+  } | null;
+}): DashboardNodeDiagnostic {
+  const report = value.report ?? null;
+  return {
+    requestId: value.request_id,
+    state:
+      value.state === 'complete' || value.state === 'failed' ? value.state : 'requested',
+    requestedAt: value.requested_at,
+    receivedAt: value.received_at ?? null,
+    agentVersion: report?.agent_version ?? null,
+    queuedJobs: report?.queued_jobs ?? null,
+    activeJobs: report?.active_jobs ?? null,
+    storageHealthy: report?.sqlite_integrity_ok ?? null,
+    executorCrashes: report?.executor_crashes ?? null,
+    lastErrorCode: report?.last_error_code ?? null,
+    collectionErrorCode: report?.collection_error_code ?? null
   };
 }
 

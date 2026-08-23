@@ -14,6 +14,7 @@ import type {
   DashboardAgent,
   DashboardJob,
   DashboardJobEvent,
+  DashboardNodeDiagnostic,
   DashboardOverview,
   DashboardPrinter
 } from '$lib/view-types';
@@ -49,7 +50,15 @@ export type OperationalDetail =
       agent: DashboardAgent | null;
       jobs: DashboardJob[];
     }
-  | { kind: 'node'; node: DashboardAgent; printers: DashboardPrinter[] }
+  | {
+      kind: 'node';
+      node: DashboardAgent;
+      printers: DashboardPrinter[];
+      diagnostics: Promise<{
+        reports: DashboardNodeDiagnostic[];
+        dataError: ReturnType<typeof presentDashboardError> | null;
+      }>;
+    }
   | { kind: 'customer'; account: DashboardAccount }
   | { kind: 'missing'; label: string };
 
@@ -165,7 +174,9 @@ async function loadDetail(
     return {
       kind: 'node',
       node,
-      printers: loaded.printers.filter((printer) => printer.agentId === node.id)
+      printers: loaded.printers.filter((printer) => printer.agentId === node.id),
+      // Streamed: a diagnostics outage must never block the node drawer.
+      diagnostics: nodeDiagnostics(api, node.id)
     };
   }
 
@@ -179,7 +190,40 @@ async function loadDetail(
   return null;
 }
 
+async function nodeDiagnostics(api: DashboardApi, nodeId: string) {
+  try {
+    return { reports: await api.nodeDiagnostics(nodeId), dataError: null };
+  } catch (error) {
+    return { reports: [], dataError: presentDashboardError(error) };
+  }
+}
+
 export const actions: Actions = {
+  collectNodeDiagnostics: async (event) => {
+    if (dashboardMode() !== 'live') {
+      return fail(400, {
+        mutation: 'collectNodeDiagnostics',
+        error: { message: 'Diagnostics are disabled while demo data is active.' }
+      });
+    }
+    const nodeId = String((await event.request.formData()).get('node_id') ?? '').trim();
+    if (!nodeId) {
+      return fail(400, {
+        mutation: 'collectNodeDiagnostics',
+        error: { message: 'Select a node before collecting diagnostics.' }
+      });
+    }
+    try {
+      const { requestId } = await dashboardSource(event).api.collectNodeDiagnostics(nodeId);
+      return { mutation: 'collectNodeDiagnostics', diagnosticRequestId: requestId };
+    } catch (error) {
+      return fail(502, {
+        mutation: 'collectNodeDiagnostics',
+        error: { message: presentDashboardError(error).message }
+      });
+    }
+  },
+
   createPrintJob: async (event) => {
     preventSecretCaching(event);
     if (dashboardMode() !== 'live') {

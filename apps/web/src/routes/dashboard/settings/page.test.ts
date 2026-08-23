@@ -150,7 +150,7 @@ describe('settings credential reveal', () => {
 describe('workspace rename', () => {
   it('shows the current name and warns when the directory mirror fails', async () => {
     render(Page, {
-      data,
+      data: data as never,
       form: {
         mutation: 'renameWorkspace',
         workspace: { id: 'wsp_test', name: 'Renamed workspace', slug: 'test-workspace' },
