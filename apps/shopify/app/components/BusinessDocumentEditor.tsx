@@ -755,22 +755,22 @@ function CanvasBlock({
       <Tag
         className={`piqae-canvas-text${selected ? " piqae-canvas-selected" : ""}`}
         onClick={select}
-        contentEditable={editable}
-        suppressContentEditableWarning
-        onBlur={(event) =>
-          editable &&
-          onChange(
-            {
-              ...block,
-              content: parseEditableInline(
-                event.currentTarget.textContent ?? "",
-              ),
-            },
-            path,
-          )
-        }
       >
-        {editableInline(block.content)}
+        <ExpressionEditor
+          value={editableInline(block.content)}
+          fields={contextualFieldSuggestions(authoringFields)}
+          disabled={!editable}
+          multiline
+          onChange={(source) =>
+            onChange(
+              {
+                ...block,
+                content: parseContextualInline(source, block.content),
+              },
+              path,
+            )
+          }
+        />
       </Tag>
     );
   }
@@ -927,20 +927,18 @@ function CanvasBlock({
         </div>
         <div className="piqae-canvas-table-row piqae-canvas-table-binding-row">
           {block.columns.map((column, index) => (
-            <label
+            <div
               key={index}
               style={{ flex: column.width ?? 1, textAlign: column.align }}
               onClick={(event) => event.stopPropagation()}
             >
-              <select
+              <ExpressionEditor
                 aria-label={`${inlineLabel(column.header)} value`}
-                value={
-                  columnCellPath(column.cell)
-                    ? `item.${columnCellPath(column.cell)}`
-                    : ""
-                }
+                value={editableInlineWithScope(column.cell, "item")}
+                fields={contextualFieldSuggestions(authoringFields, "item")}
                 disabled={!editable}
-                onChange={(event) =>
+                placeholder="{{ item.title }}"
+                onChange={(source) =>
                   onChange(
                     {
                       ...block,
@@ -948,17 +946,11 @@ function CanvasBlock({
                         itemIndex === index
                           ? {
                               ...item,
-                              cell: [
-                                {
-                                  type: "value" as const,
-                                  value: currentPathExpression(
-                                    event.currentTarget.value.replace(
-                                      /^item\./,
-                                      "",
-                                    ),
-                                  ),
-                                },
-                              ],
+                              cell: parseContextualInline(
+                                source,
+                                item.cell,
+                                "item",
+                              ),
                             }
                           : item,
                       ),
@@ -966,19 +958,8 @@ function CanvasBlock({
                     path,
                   )
                 }
-              >
-                {!columnCellPath(column.cell) ? (
-                  <option value="">Computed value</option>
-                ) : null}
-                {authoringFields
-                  .filter((field) => field.path.startsWith("item."))
-                  .map((field) => (
-                    <option value={field.path} key={field.path}>
-                      {field.label}
-                    </option>
-                  ))}
-              </select>
-            </label>
+              />
+            </div>
           ))}
         </div>
         {editable ? (
@@ -1088,6 +1069,119 @@ function InsertButton({
       <span aria-hidden="true">{icon}</span>
       <small>{label}</small>
     </button>
+  );
+}
+
+function ExpressionEditor({
+  value,
+  fields,
+  disabled,
+  multiline = false,
+  placeholder,
+  onChange,
+  ...attributes
+}: {
+  value: string;
+  fields: readonly ShopifyDocumentField[];
+  disabled?: boolean;
+  multiline?: boolean;
+  placeholder?: string;
+  onChange(value: string): void;
+  "aria-label"?: string;
+}) {
+  const editor = useRef<HTMLSpanElement>(null);
+  const [query, setQuery] = useState<string | null>(null);
+  const [active, setActive] = useState(0);
+  const matches = query === null ? [] : searchDocumentFields(fields, query);
+  useEffect(() => {
+    if (!editor.current || editor.current.textContent === value) return;
+    const focused = document.activeElement === editor.current;
+    editor.current.textContent = value;
+    if (focused) placeCaretAtEnd(editor.current);
+  }, [value]);
+  const update = (source: string) => {
+    onChange(source);
+    const nextQuery = incompleteExpressionQuery(source);
+    setQuery(nextQuery);
+    setActive(0);
+  };
+  const choose = (field: ShopifyDocumentField) => {
+    const source = completeExpression(valueFromEditor(editor), field.path);
+    if (editor.current) editor.current.textContent = source;
+    onChange(source);
+    setQuery(null);
+    editor.current?.focus();
+    placeCaretAtEnd(editor.current);
+  };
+  return (
+    <span
+      className={`piqae-expression-editor${multiline ? " piqae-expression-editor-multiline" : ""}`}
+    >
+      <span
+        {...attributes}
+        ref={editor}
+        role="textbox"
+        aria-multiline={multiline}
+        aria-autocomplete="list"
+        aria-expanded={query !== null}
+        data-placeholder={placeholder}
+        contentEditable={!disabled}
+        suppressContentEditableWarning
+        onInput={(event) => update(event.currentTarget.textContent ?? "")}
+        onKeyDown={(event) => {
+          if (query === null) {
+            if (!multiline && event.key === "Enter") event.preventDefault();
+            return;
+          }
+          if (event.key === "Escape") {
+            event.preventDefault();
+            setQuery(null);
+          } else if (event.key === "ArrowDown") {
+            event.preventDefault();
+            setActive((index) => Math.min(index + 1, matches.length - 1));
+          } else if (event.key === "ArrowUp") {
+            event.preventDefault();
+            setActive((index) => Math.max(index - 1, 0));
+          } else if (
+            (event.key === "Enter" || event.key === "Tab") &&
+            matches[active]
+          ) {
+            event.preventDefault();
+            choose(matches[active]!);
+          } else if (!multiline && event.key === "Enter")
+            event.preventDefault();
+        }}
+        onBlur={() => setTimeout(() => setQuery(null), 100)}
+      />
+      {query !== null ? (
+        <span className="piqae-expression-menu" role="listbox">
+          <span className="piqae-expression-menu-title">
+            {query ? `Results for “${query}”` : "Insert Shopify data"}
+          </span>
+          {matches.length ? (
+            matches.map((field, index) => (
+              <button
+                type="button"
+                role="option"
+                aria-selected={index === active}
+                className={index === active ? "is-active" : ""}
+                key={field.path}
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => choose(field)}
+              >
+                <span>{field.label}</span>
+                <small>{`{{ ${field.path} }}`}</small>
+                <em>{field.group}</em>
+              </button>
+            ))
+          ) : (
+            <span className="piqae-expression-empty">
+              No matching Shopify data. Continue typing a valid path.
+            </span>
+          )}
+        </span>
+      ) : null}
+    </span>
   );
 }
 
@@ -1650,6 +1744,17 @@ function editableInline(content: Inline[]) {
     )
     .join("");
 }
+function editableInlineWithScope(content: Inline[], currentAlias: string) {
+  return content
+    .map((item) =>
+      item.type === "text"
+        ? item.value
+        : item.type === "line_break"
+          ? "\n"
+          : `{{ ${item.value.type === "current_path" ? `${currentAlias}.${item.value.path.join(".")}` : expressionLabel(item.value)} }}`,
+    )
+    .join("");
+}
 function parseEditableInline(
   source: string,
   original: Inline[] = [],
@@ -1679,6 +1784,86 @@ function parseEditableInline(
   if (cursor < source.length)
     content.push({ type: "text", value: source.slice(cursor) });
   return content.length ? content : [{ type: "text", value: "" }];
+}
+export function parseContextualInline(
+  source: string,
+  original: Inline[] = [],
+  currentAlias?: string,
+): Inline[] {
+  const parsed = parseEditableInline(source, original);
+  if (!currentAlias) return parsed;
+  return parsed.map((item) => {
+    if (
+      item.type !== "value" ||
+      item.value.type !== "path" ||
+      item.value.path[0] !== currentAlias
+    )
+      return item;
+    return {
+      ...item,
+      value: {
+        type: "current_path",
+        path: item.value.path.slice(1),
+      },
+    };
+  });
+}
+
+export function contextualFieldSuggestions(
+  fields: readonly ShopifyDocumentField[],
+  currentAlias?: string,
+) {
+  if (!currentAlias) return [...fields];
+  return [...fields].sort((left, right) => {
+    const leftCurrent = left.path.startsWith(`${currentAlias}.`) ? 0 : 1;
+    const rightCurrent = right.path.startsWith(`${currentAlias}.`) ? 0 : 1;
+    return leftCurrent - rightCurrent;
+  });
+}
+
+export function incompleteExpressionQuery(source: string) {
+  const open = source.lastIndexOf("{{");
+  if (open < 0 || source.slice(open + 2).includes("}}")) return null;
+  return source.slice(open + 2).trimStart();
+}
+
+export function searchDocumentFields(
+  fields: readonly ShopifyDocumentField[],
+  query: string,
+  limit = 12,
+) {
+  const terms = query
+    .toLowerCase()
+    .split(/[\s.]+/)
+    .filter(Boolean);
+  return fields
+    .filter((field) => {
+      const haystack =
+        `${field.label} ${field.path} ${field.group}`.toLowerCase();
+      return terms.every((term) => haystack.includes(term));
+    })
+    .slice(0, limit);
+}
+
+export function completeExpression(source: string, path: string) {
+  const open = source.lastIndexOf("{{");
+  if (open < 0 || source.slice(open + 2).includes("}}"))
+    return `${source}{{ ${path} }}`;
+  return `${source.slice(0, open)}{{ ${path} }}`;
+}
+
+function valueFromEditor(editor: React.RefObject<HTMLSpanElement | null>) {
+  return editor.current?.textContent ?? "";
+}
+
+function placeCaretAtEnd(element: HTMLElement | null) {
+  if (!element) return;
+  const selection = window.getSelection();
+  const range = document.createRange();
+  range.selectNodeContents(element);
+  range.collapse(false);
+  selection?.removeAllRanges();
+  selection?.addRange(range);
 }
 function moveItem<T>(items: T[], index: number, direction: -1 | 1) {
   const target = index + direction;

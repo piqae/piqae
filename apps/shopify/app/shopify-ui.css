@@ -363,6 +363,93 @@
   border-radius: 0.3rem;
   background: white;
 }
+.piqae-expression-editor {
+  position: relative;
+  display: inline-block;
+  min-width: 0;
+  width: 100%;
+  text-align: inherit;
+}
+.piqae-expression-editor > [contenteditable] {
+  display: block;
+  min-width: 2rem;
+  min-height: 1.2rem;
+  padding: 0.28rem 0.38rem;
+  border: 1px solid transparent;
+  border-radius: 0.3rem;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: inherit;
+  white-space: pre-wrap;
+  cursor: text;
+  outline: none;
+}
+.piqae-expression-editor > [contenteditable]:empty::before {
+  content: attr(data-placeholder);
+  color: #8c9196;
+  pointer-events: none;
+}
+.piqae-expression-editor > [contenteditable]:hover {
+  border-color: #c9cccf;
+}
+.piqae-expression-editor > [contenteditable]:focus {
+  border-color: #005bd3;
+  box-shadow: 0 0 0 1px #005bd3;
+  background: white;
+}
+.piqae-canvas-text > .piqae-expression-editor > [contenteditable] {
+  margin: -0.28rem -0.38rem;
+}
+.piqae-expression-menu {
+  position: absolute;
+  z-index: 40;
+  top: calc(100% + 0.3rem);
+  left: 0;
+  display: grid;
+  width: min(28rem, 80vw);
+  max-height: 19rem;
+  overflow-y: auto;
+  border: 1px solid #c9cccf;
+  border-radius: 0.55rem;
+  background: white;
+  box-shadow: 0 8px 24px rgb(0 0 0 / 18%);
+  text-align: left;
+}
+.piqae-expression-menu-title,
+.piqae-expression-empty {
+  padding: 0.6rem 0.75rem;
+  color: #616161;
+  font-size: 0.75rem;
+}
+.piqae-expression-menu button {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 0.08rem 0.75rem;
+  padding: 0.52rem 0.75rem;
+  border: 0;
+  border-top: 1px solid #f1f1f1;
+  background: white;
+  color: #202223;
+  text-align: left;
+  cursor: pointer;
+}
+.piqae-expression-menu button:hover,
+.piqae-expression-menu button.is-active {
+  background: #f1f6ff;
+}
+.piqae-expression-menu button small {
+  color: #174ea6;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.piqae-expression-menu button em {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  align-self: center;
+  color: #616161;
+  font-size: 0.7rem;
+  font-style: normal;
+}
 .piqae-canvas-table-head {
   font-weight: 700;
   text-transform: uppercase;

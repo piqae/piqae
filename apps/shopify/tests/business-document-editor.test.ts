@@ -1,12 +1,18 @@
 import { describe, expect, it } from "vitest";
 import {
   blocksToDoc,
+  completeExpression,
+  contextualFieldSuggestions,
   docToBlocks,
+  incompleteExpressionQuery,
   insertBlockAfterPath,
   moveBlockAtPath,
+  parseContextualInline,
   removeBlockAtPath,
   replaceBlockAtPath,
+  searchDocumentFields,
 } from "../app/components/BusinessDocumentEditor";
+import type { ShopifyDocumentField } from "../app/core/shopify-document-fields";
 import type { Block } from "../app/core/template-model";
 
 describe("business document editor serialization", () => {
@@ -190,5 +196,60 @@ describe("business document editor serialization", () => {
       { type: "stack", children: [second, first] },
       { type: "page_break" },
     ]);
+  });
+
+  it("converts contextual item expressions while retaining global Shopify data", () => {
+    expect(
+      parseContextualInline(
+        "{{ item.title }} — {{ order.name }} — {{ item.product.metafields.custom.bin.value }}",
+        [],
+        "item",
+      ),
+    ).toEqual([
+      {
+        type: "value",
+        value: { type: "current_path", path: ["title"] },
+      },
+      { type: "text", value: " — " },
+      {
+        type: "value",
+        value: { type: "path", path: ["order", "name"] },
+      },
+      { type: "text", value: " — " },
+      {
+        type: "value",
+        value: {
+          type: "current_path",
+          path: ["product", "metafields", "custom", "bin", "value"],
+        },
+      },
+    ]);
+  });
+
+  it("finds and completes expressions from a contextual Shopify field catalogue", () => {
+    const fields: ShopifyDocumentField[] = [
+      { label: "Order name", path: "order.name", group: "Order" },
+      { label: "Item SKU", path: "item.sku", group: "Item" },
+      {
+        label: "Product · custom.origin",
+        path: "item.product.metafields.custom.origin.value",
+        group: "Shopify custom data",
+      },
+    ];
+    expect(
+      contextualFieldSuggestions(fields, "item").map((field) => field.path),
+    ).toEqual([
+      "item.sku",
+      "item.product.metafields.custom.origin.value",
+      "order.name",
+    ]);
+    expect(searchDocumentFields(fields, "custom origin")[0]?.path).toBe(
+      "item.product.metafields.custom.origin.value",
+    );
+    expect(incompleteExpressionQuery("SKU: {{ item.sk")).toBe("item.sk");
+    expect(incompleteExpressionQuery("{{ item.sku }}")).toBeNull();
+    expect(completeExpression("SKU: {{ item.sk", "item.sku")).toBe(
+      "SKU: {{ item.sku }}",
+    );
   });
 });
