@@ -1,6 +1,7 @@
 import { PiqaeClient } from '@piqae/sdk';
 import type {
   DashboardAccount,
+  DashboardWorkspace,
   DashboardAgent,
   DashboardApiKey,
   DashboardJob,
@@ -30,6 +31,8 @@ export interface DashboardApi {
   apiKeys(): Promise<DashboardPage<DashboardApiKey>>;
   accounts(): Promise<DashboardPage<DashboardAccount>>;
   account(externalId: string): Promise<DashboardAccount | null>;
+  workspace(): Promise<DashboardWorkspace>;
+  renameWorkspace(name: string): Promise<DashboardWorkspace>;
 }
 
 const page = <T>(data: T[]): DashboardPage<T> => ({ data, nextCursor: null });
@@ -105,7 +108,9 @@ export const mockApi: DashboardApi = {
   apiKeys: () => delay(page(demo.apiKeys)),
   accounts: () => delay(page(demo.accounts)),
   account: (externalId) =>
-    delay(demo.accounts.find((account) => account.externalId === externalId) ?? null)
+    delay(demo.accounts.find((account) => account.externalId === externalId) ?? null),
+  workspace: () => delay({ id: 'wsp_demo', name: 'Demo workspace', slug: 'demo-workspace' }),
+  renameWorkspace: (name) => delay({ id: 'wsp_demo', name, slug: 'demo-workspace' })
 };
 
 /**
@@ -399,7 +404,21 @@ export function createLiveApi(
         throw new Error(`Piqae customer account request failed with HTTP ${response.status}.`);
       }
       return parseDashboardAccount(await response.json());
-    }
+    },
+    workspace: async () => parseDashboardWorkspace(await client.workspaces.current()),
+    renameWorkspace: async (name) =>
+      parseDashboardWorkspace(await client.workspaces.rename(name))
+  };
+}
+
+function parseDashboardWorkspace(value: unknown): DashboardWorkspace {
+  if (!isRecord(value) || typeof value.id !== 'string' || typeof value.name !== 'string') {
+    throw new Error('Piqae workspace response was invalid.');
+  }
+  return {
+    id: value.id,
+    name: value.name,
+    slug: typeof value.slug === 'string' ? value.slug : ''
   };
 }
 

@@ -1501,6 +1501,27 @@ impl PostgresStore {
         workspace_from_row(&row)
     }
 
+    /// Renames a workspace. Only the display name moves: the slug, identity
+    /// provider linkage and every identifier other surfaces key off are left
+    /// untouched so a rename can never orphan an existing reference.
+    pub async fn rename_workspace(
+        &self,
+        workspace_id: WorkspaceId,
+        name: &str,
+    ) -> Result<StoredWorkspace, StorageError> {
+        let row = sqlx::query(
+            "UPDATE workspaces SET name = $2, updated_at = now()
+             WHERE id = $1
+             RETURNING id, name, slug, status, created_at, updated_at",
+        )
+        .bind(workspace_id.to_string())
+        .bind(name)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(StorageError::NotFound)?;
+        workspace_from_row(&row)
+    }
+
     pub async fn list_workspace_members(
         &self,
         workspace_id: WorkspaceId,

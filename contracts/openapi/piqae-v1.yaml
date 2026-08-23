@@ -519,6 +519,33 @@ paths:
               schema: { $ref: "#/components/schemas/Workspace" }
         "401": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
+    patch:
+      summary: Rename the authenticated workspace
+      description: |
+        Changes the workspace display name only. The slug, workspace ID and
+        identity-provider linkage are unchanged, so existing references keep
+        resolving. Restricted to workspace owners and admins.
+      tags: [Identity]
+      operationId: renameCurrentWorkspace
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, minLength: 1, maxLength: 120 }
+      responses:
+        "200":
+          description: Updated workspace.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Workspace" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
   /v1/workspaces/current/members:
     get:
       summary: List members of the authenticated workspace

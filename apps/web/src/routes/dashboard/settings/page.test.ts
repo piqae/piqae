@@ -25,6 +25,10 @@ const data = {
     checkoutAvailable: { monthly: false, annual: false },
     portalAvailable: false
   },
+  workspace: Promise.resolve({
+    workspace: { id: 'wsp_test', name: 'Test workspace', slug: 'test-workspace' },
+    dataError: null
+  }),
   apiKeys: Promise.resolve({ items: [], dataError: null }),
   webhooks: Promise.resolve({ items: [], dataError: null }),
   team: null,
@@ -142,3 +146,22 @@ describe('settings credential reveal', () => {
     ).toBeInTheDocument();
   });
 });
+
+describe('workspace rename', () => {
+  it('shows the current name and warns when the directory mirror fails', async () => {
+    render(Page, {
+      data,
+      form: {
+        mutation: 'renameWorkspace',
+        workspace: { id: 'wsp_test', name: 'Renamed workspace', slug: 'test-workspace' },
+        directoryWarning: 'The workspace was renamed, but the linked WorkOS organisation still shows the old name.'
+      }
+    });
+
+    // The rename result wins over the loaded value so the field never snaps
+    // back to the stale name after a successful save.
+    expect(await screen.findByDisplayValue('Renamed workspace')).toBeTruthy();
+    expect(screen.getByText(/still shows the old name/)).toBeTruthy();
+  });
+});
+

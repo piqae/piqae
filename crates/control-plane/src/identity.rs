@@ -75,7 +75,10 @@ pub fn router() -> Router<AppState> {
         .route("/v1/identity/local/sessions/rotate", post(rotate_session))
         .route("/v1/identity/local/sessions/revoke", post(revoke_session))
         .route("/v1/identity/me", get(current_identity))
-        .route("/v1/workspaces/current", get(current_workspace))
+        .route(
+            "/v1/workspaces/current",
+            get(current_workspace).patch(rename_current_workspace),
+        )
         .route(
             "/v1/workspaces/current/members",
             get(current_workspace_members),
@@ -276,6 +279,56 @@ async fn current_workspace(
     ))
 }
 
+#[derive(Debug, Deserialize)]
+struct RenameWorkspaceRequest {
+    name: String,
+}
+
+/// Renames the authenticated workspace. Restricted to owners and admins: the
+/// name is what every member and connected integration sees, so an ordinary
+/// member must not be able to change it.
+async fn rename_current_workspace(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<RenameWorkspaceRequest>,
+) -> Result<Json<StoredWorkspace>, AppError> {
+    let identity = identity_state(&state)?;
+    let tenant = authenticate_tenant(&state, &headers).await?;
+    let name = validated_workspace_name(&request.name)?;
+    let members = identity
+        .store
+        .list_workspace_members(tenant.workspace_id)
+        .await?;
+    if !can_rename_workspace(&members) {
+        return Err(AppError::forbidden());
+    }
+    Ok(Json(
+        identity
+            .store
+            .rename_workspace(tenant.workspace_id, name)
+            .await?,
+    ))
+}
+
+/// Bounded on characters rather than bytes so a name of multi-byte glyphs is
+/// judged by what a person sees rather than by its encoding.
+fn validated_workspace_name(raw: &str) -> Result<&str, AppError> {
+    let name = raw.trim();
+    if name.is_empty() || name.chars().count() > 120 {
+        return Err(AppError::invalid(
+            "invalid_workspace_name",
+            "Workspace name must be between 1 and 120 characters.",
+        ));
+    }
+    Ok(name)
+}
+
+fn can_rename_workspace(members: &[StoredWorkspaceMember]) -> bool {
+    members.iter().any(|member| {
+        member.status == "active" && matches!(member.role.as_str(), "owner" | "admin")
+    })
+}
+
 async fn current_workspace_members(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -397,5 +450,32 @@ mod tests {
         assert_eq!(bounded_session_seconds(Some(10)), 15 * 60);
         assert_eq!(bounded_session_seconds(Some(99 * 60 * 60)), 24 * 60 * 60);
         assert_eq!(bounded_session_seconds(None), DEFAULT_SESSION_SECONDS);
+    }
+
+    #[test]
+    fn workspace_names_are_trimmed_and_bounded_by_characters() {
+        assert_eq!(validated_workspace_name("  Piqae  ").ok(), Some("Piqae"));
+        assert!(validated_workspace_name("   ").is_err());
+        assert!(validated_workspace_name(&"é".repeat(120)).is_ok());
+        assert!(validated_workspace_name(&"é".repeat(121)).is_err());
+    }
+
+    #[test]
+    fn only_active_owners_and_admins_may_rename_a_workspace() {
+        let member = |role: &str, status: &str| StoredWorkspaceMember {
+            id: "usr_1".into(),
+            email: "owner@example.test".into(),
+            name: None,
+            role: role.into(),
+            status: status.into(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        assert!(can_rename_workspace(&[member("owner", "active")]));
+        assert!(can_rename_workspace(&[member("admin", "active")]));
+        assert!(!can_rename_workspace(&[member("member", "active")]));
+        // A revoked owner must not retain control of the workspace name.
+        assert!(!can_rename_workspace(&[member("owner", "inactive")]));
+        assert!(!can_rename_workspace(&[]));
     }
 }

@@ -171,3 +171,9 @@ export interface DashboardOverview {
   printers: { total: number; online: number; attention: number };
   jobs: { recent: number; active: number; failed: number; uncertain: number };
 }
+
+export interface DashboardWorkspace {
+  id: string;
+  name: string;
+  slug: string;
+}
