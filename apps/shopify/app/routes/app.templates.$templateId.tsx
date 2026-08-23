@@ -12,6 +12,8 @@ import {
 import {
   BusinessDocumentEditor,
   BusinessDocumentPreview,
+  DocumentSettingsFields,
+  Icon,
 } from "../components/BusinessDocumentEditor";
 import { starterTemplates } from "../core/starter-templates";
 import {
@@ -217,6 +219,12 @@ export async function action({ request, params }: ActionFunctionArgs) {
     );
   }
 }
+const WORKSPACES = [
+  ["visual", "Design", "design"],
+  ["liquid", "Code", "code"],
+  ["preview", "Preview", "preview"],
+] as const;
+
 export default function TemplateEditor() {
   const { template, initialTemplate, customFields } =
     useLoaderData<typeof loader>();
@@ -226,6 +234,12 @@ export default function TemplateEditor() {
   );
   if (!template) removeSystemOwnership(initial);
   const [document, setDocument] = useState(initial.document);
+  const [name, setName] = useState(
+    template?.name ??
+      (initialTemplate
+        ? `${initialTemplate.name} — copy`.slice(0, 200)
+        : "Untitled document"),
+  );
   const [mode, setMode] = useState<TemplateEditorMode>(
     initial.editor.mode === "liquid" ? "liquid" : "visual",
   );
@@ -288,6 +302,121 @@ export default function TemplateEditor() {
     <s-page heading={template?.name ?? "New template"} inlineSize="large">
       <s-section>
         <Form method="post">
+          <div className="piqae-actionbar">
+            <div className="piqae-actionbar-lead">
+              <input
+                className="piqae-doc-title"
+                name="name"
+                required
+                maxLength={200}
+                aria-label="Document name"
+                placeholder="Untitled document"
+                value={name}
+                onChange={(event) => setName(event.currentTarget.value)}
+              />
+              <span className="piqae-doc-state">
+                {templateStateLabel(template, starter)}
+              </span>
+            </div>
+            <div
+              className="piqae-segmented"
+              role="group"
+              aria-label="Editor workspace"
+            >
+              {WORKSPACES.map(([key, label, icon]) => (
+                <button
+                  key={key}
+                  type="button"
+                  aria-pressed={workspace === key}
+                  onClick={() => switchWorkspace(key)}
+                >
+                  <Icon name={icon} />
+                  {label}
+                </button>
+              ))}
+            </div>
+            <div className="piqae-actionbar-trail">
+              <details className="piqae-menu">
+                <summary
+                  className="piqae-button"
+                  aria-label="Document settings"
+                  title="Document settings"
+                >
+                  <Icon name="settings" />
+                  Settings
+                </summary>
+                <div className="piqae-menu-panel piqae-settings-panel">
+                  <label className="piqae-field">
+                    <span>Document type</span>
+                    <select
+                      name="kind"
+                      defaultValue={initialTemplate?.kind ?? "invoice"}
+                    >
+                      <option value="invoice">Invoice</option>
+                      <option value="packing_slip">Packing slip</option>
+                      <option value="receipt">Receipt</option>
+                      <option value="credit_note">Credit note</option>
+                      <option value="returns">Returns form</option>
+                      <option value="custom">Custom</option>
+                    </select>
+                  </label>
+                  <label className="piqae-field">
+                    <span>Media</span>
+                    <select
+                      name="pageSize"
+                      defaultValue={initialTemplate?.pageSize ?? "A4"}
+                    >
+                      <option>A4</option>
+                      <option>A5</option>
+                      <option>Letter</option>
+                      <option value="80mm">80 mm receipt</option>
+                    </select>
+                  </label>
+                  <DocumentSettingsFields
+                    value={document}
+                    onChange={setDocument}
+                  />
+                  <p className="piqae-menu-note">
+                    Content reflows across pages automatically.
+                  </p>
+                </div>
+              </details>
+              <button className="piqae-button" name="intent" value="draft">
+                {starter ? "Save as copy" : "Save draft"}
+              </button>
+              <button
+                className="piqae-button piqae-button-primary"
+                name="intent"
+                value="publish"
+              >
+                Publish
+              </button>
+              {template?.state === "draft" ? (
+                <details className="piqae-menu piqae-menu-end">
+                  <summary
+                    className="piqae-button piqae-button-icon"
+                    aria-label="More actions"
+                    title="More actions"
+                  >
+                    <Icon name="more" />
+                  </summary>
+                  <div className="piqae-menu-panel">
+                    <button
+                      className="piqae-menu-item piqae-menu-critical"
+                      name="intent"
+                      value="delete"
+                    >
+                      <Icon name="trash" />
+                      Delete draft
+                    </button>
+                  </div>
+                </details>
+              ) : null}
+            </div>
+          </div>
+          <p className="piqae-actionbar-note">
+            {templateFlowNote(template, starter)}
+          </p>
           <s-stack direction="block" gap="base">
             {result?.ok ? (
               <s-banner tone="success">
@@ -300,31 +429,7 @@ export default function TemplateEditor() {
             ) : result?.error ? (
               <s-banner tone="critical">{result.error}</s-banner>
             ) : null}
-            <div className="piqae-editor-commandbar">
-              <s-button-group accessibilityLabel="Template editor mode">
-                <s-button
-                  type="button"
-                  variant={workspace === "visual" ? "primary" : "secondary"}
-                  onClick={() => switchWorkspace("visual")}
-                >
-                  Visual editor
-                </s-button>
-                <s-button
-                  type="button"
-                  variant={workspace === "liquid" ? "primary" : "secondary"}
-                  onClick={() => switchWorkspace("liquid")}
-                >
-                  Code
-                </s-button>
-                <s-button
-                  type="button"
-                  variant={workspace === "preview" ? "primary" : "secondary"}
-                  onClick={() => switchWorkspace("preview")}
-                >
-                  Preview
-                </s-button>
-              </s-button-group>
-            </div>
+            {error ? <s-banner tone="critical">{error}</s-banner> : null}
             {result &&
             "imported" in result &&
             result.imported?.diagnostics.length ? (
@@ -350,133 +455,73 @@ export default function TemplateEditor() {
             ) : null}
             {workspace === "preview" ? (
               <BusinessDocumentPreview value={document} />
+            ) : workspace === "visual" ? (
+              <BusinessDocumentEditor
+                value={document}
+                disabled={false}
+                customFields={customFields}
+                onChange={setDocument}
+              />
             ) : (
-              <div className="piqae-editor-surface">
-                <div className="piqae-editor-settings">
-                  <label>
-                    Name
-                    <input
-                      className="piqae-input"
-                      name="name"
-                      required
-                      maxLength={200}
-                      defaultValue={
-                        template?.name ??
-                        (initialTemplate
-                          ? `${initialTemplate.name} — copy`.slice(0, 200)
-                          : "Untitled document")
-                      }
-                    />
-                  </label>
-                  <label>
-                    Document type
-                    <select
-                      className="piqae-input"
-                      name="kind"
-                      defaultValue={initialTemplate?.kind ?? "invoice"}
-                    >
-                      <option value="invoice">Invoice</option>
-                      <option value="packing_slip">Packing slip</option>
-                      <option value="receipt">Receipt</option>
-                      <option value="credit_note">Credit note</option>
-                      <option value="returns">Returns form</option>
-                      <option value="custom">Custom</option>
-                    </select>
-                  </label>
-                  <label>
-                    Media
-                    <select
-                      className="piqae-input"
-                      name="pageSize"
-                      defaultValue={initialTemplate?.pageSize ?? "A4"}
-                    >
-                      <option>A4</option>
-                      <option>A5</option>
-                      <option>Letter</option>
-                      <option value="80mm">80 mm receipt</option>
-                    </select>
-                  </label>
-                </div>
-                {error ? <s-banner tone="critical">{error}</s-banner> : null}
-                {workspace === "visual" ? (
-                  <BusinessDocumentEditor
-                    value={document}
-                    disabled={false}
-                    customFields={customFields}
-                    onChange={setDocument}
+              <div className="piqae-code-workspace">
+                <label>
+                  Shopify Liquid / Order Printer template
+                  <textarea
+                    className="piqae-code"
+                    name="liquid"
+                    maxLength={65536}
+                    value={liquid}
+                    onChange={(event) => setLiquid(event.currentTarget.value)}
                   />
-                ) : (
-                  <div className="piqae-code-workspace">
-                    <label>
-                      Shopify Liquid / Order Printer template
-                      <textarea
-                        className="piqae-code"
-                        name="liquid"
-                        maxLength={65536}
-                        value={liquid}
-                        onChange={(e) => setLiquid(e.currentTarget.value)}
-                        disabled={false}
-                      />
-                    </label>
-                    <input
-                      type="hidden"
-                      name="orderPrinterSource"
-                      value={liquid}
-                    />
-                    <button
-                      className="piqae-link-button"
-                      type="submit"
-                      name="intent"
-                      value="import_order_printer"
-                    >
-                      Convert code to visual document
-                    </button>
-                  </div>
-                )}
-                <input type="hidden" name="mode" value={mode} />
-                {mode !== "source" ? (
-                  <input
-                    type="hidden"
-                    name="document"
-                    value={JSON.stringify(document)}
-                  />
-                ) : null}
-                <input type="hidden" name="source" value={source} />
-                {mode !== "liquid" ? (
-                  <input type="hidden" name="liquid" value={liquid} />
-                ) : null}
-                <div className="piqae-actions">
-                  <>
-                    <button
-                      className="piqae-link-button"
-                      name="intent"
-                      value="draft"
-                    >
-                      {starter ? "Save as new template" : "Save draft"}
-                    </button>
-                    <button
-                      className="piqae-link-button"
-                      name="intent"
-                      value="publish"
-                    >
-                      Publish revision
-                    </button>
-                  </>
-                  {template?.state === "draft" ? (
-                    <button
-                      className="piqae-link-button"
-                      name="intent"
-                      value="delete"
-                    >
-                      Delete draft
-                    </button>
-                  ) : null}
-                </div>
+                </label>
+                <input type="hidden" name="orderPrinterSource" value={liquid} />
+                <button
+                  className="piqae-button"
+                  type="submit"
+                  name="intent"
+                  value="import_order_printer"
+                >
+                  Convert code to visual document
+                </button>
               </div>
             )}
           </s-stack>
+          <input type="hidden" name="mode" value={mode} />
+          <input
+            type="hidden"
+            name="document"
+            value={JSON.stringify(document)}
+          />
+          <input type="hidden" name="source" value={source} />
+          {workspace === "liquid" ? null : (
+            <input type="hidden" name="liquid" value={liquid} />
+          )}
         </Form>
       </s-section>
     </s-page>
   );
+}
+
+export function templateStateLabel(
+  template: MerchantTemplate | null,
+  starter: boolean,
+) {
+  if (starter) return "Starter";
+  if (!template) return "Not saved yet";
+  return template.state === "published"
+    ? `Published · revision ${template.revision}`
+    : "Draft";
+}
+
+export function templateFlowNote(
+  template: MerchantTemplate | null,
+  starter: boolean,
+) {
+  if (starter)
+    return "Starter document. Save as copy creates an editable document in your shop; the original stays untouched.";
+  if (!template)
+    return "New document. Save draft keeps your work private; Publish makes this revision available to printing and automations.";
+  return template.state === "published"
+    ? "Published. Save draft holds edits back from printing; Publish issues the next revision."
+    : "Draft. Publish makes this revision available to printing and automations.";
 }
