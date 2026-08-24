@@ -19,6 +19,16 @@ Before requesting review:
 cargo xtask test all
 ```
 
+To reproduce what CI will actually run for this change, including the jobs
+`cargo xtask test all` does not cover:
+
+```console
+cargo xtask preflight
+```
+
+See [Continuous integration](ci.md) for the scope classifier, prerequisites,
+and post-deploy verification.
+
 The full command runs formatting, strict Clippy, the Rust workspace tests,
 TypeScript checks and tests, and macOS Swift tests when available. It does not
 submit a physical print job.
@@ -29,6 +39,9 @@ submit a physical print job.
 - Repository tests cover durability, leases, idempotency, and concurrency.
 - Executor tests use fake or virtual spoolers by default.
 - Compatibility fixtures verify exact API shapes and stable error behavior.
+- Configuration-matrix tests exercise the API under every identity provider it
+  ships with, because a passing default configuration is not evidence for the
+  one production runs.
 - Physical certification is a separately recorded, human-authorized hardware
   activity.
 
@@ -62,10 +75,11 @@ PIQAE_TEST_DATABASE_URL=postgres://postgres:password@127.0.0.1:5432/piqae_test \
   cargo test -p piqae-control-plane --test platform_service_accounts_postgres -- --nocapture
 ```
 
-Normal contributor checks may omit both PostgreSQL suites. The release-only
-wrapper requires the exact routing, grant-lifecycle, and HTTP-auth tests. It
-fails closed if any target is
-missing, skipped, filtered to zero tests, or unsuccessful:
+Normal contributor checks may omit the PostgreSQL suites. The wrapper below
+requires the exact routing, grant-lifecycle, HTTP-auth, migration, WorkOS
+projection, and billing tests. It fails closed if any target is missing,
+skipped, filtered to zero tests, or unsuccessful, and CI runs it on every
+change that touches Rust:
 
 ```console
 PIQAE_TEST_DATABASE_URL=postgres://postgres:password@127.0.0.1:5432/piqae_test \
