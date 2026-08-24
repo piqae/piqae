@@ -65,6 +65,34 @@ The authoritative daily development, Railway, pilot, production, rollback,
 privacy, and App Store process is in
 [`docs/operations/shopify-release.md`](../../docs/operations/shopify-release.md).
 
+## Error reporting
+
+Sentry is gated on a configured DSN, the same way `apps/web` gates it. With
+`SENTRY_DSN` unset the SDK is never initialized on the server, and with
+`PUBLIC_SENTRY_DSN` unset nothing is initialized in the browser and no DSN is
+serialized into the embedded Admin document. Environment, release, and trace
+sample rate use the `SENTRY_*` and `PUBLIC_SENTRY_*` names shared with the web
+service.
+
+`app/observability/sentry.ts` is a port of
+`apps/web/src/lib/observability/sentry.ts`. The two apps are separate workspace
+packages on different frameworks and Sentry SDKs, so the rules are duplicated
+rather than imported across the app boundary. On top of the shared redaction it
+scrubs Shopify-specific identity before an event leaves the process:
+
+- the `*.myshopify.com` shop domain, which names one merchant, becomes `[shop]`;
+- Shopify GIDs keep their resource kind and lose the record id;
+- Shopify access tokens (`shpat_`/`shpca_`/`shppa_`/`shpss_`/`shpua_`) and App
+  Bridge session tokens (JWTs) are removed, along with `hmac` and `id_token`
+  pairs;
+- buyer fields — customer, names, email, phone, addresses, city, postcode,
+  province, and order notes — are dropped by key;
+- legacy numeric Shopify identifiers in URL paths become `:id`.
+
+`user`, `server_name`, request headers, request bodies, query strings, stack
+frame locals, console breadcrumbs, and UI interaction breadcrumbs are never
+sent. `tests/sentry.test.ts` asserts on the real redaction output.
+
 ## PostgreSQL migration gate
 
 Run the fresh-database and N−1 upgrade assertions against a disposable PostgreSQL database:

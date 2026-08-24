@@ -99,6 +99,9 @@ importers:
       '@react-router/serve':
         specifier: 7.12.0
         version: 7.12.0(react-router@7.12.0(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(typescript@5.9.3)
+      '@sentry/react-router':
+        specifier: 10.69.0
+        version: 10.69.0(@opentelemetry/core@2.10.0(@opentelemetry/api@1.9.1))(@react-router/node@7.12.0(react-router@7.12.0(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(typescript@5.9.3))(react-router@7.12.0(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(react@19.2.4)(rollup@4.62.3)
       '@shopify/shopify-app-react-router':
         specifier: 1.2.1
         version: 1.2.1(react-dom@19.2.4(react@19.2.4))(react-router@7.12.0(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(react@19.2.4)
@@ -366,6 +369,9 @@ packages:
   '@aws-sdk/core@3.977.1':
     resolution: {integrity: sha512-KVtQRtc00ES/y+Sc3vYXeP6pCIcNlBJCZOwvqSy8ZpVGmbM5+IG+AfhuTKQ2oXmIVqZJewaGMMpzPkywC6xg0w==}
     engines: {node: '>=20.0.0'}
+    deprecated: |-
+      Deprecated due to Document number parsing bug in JSON, see
+        https://github.com/aws/aws-sdk-js-v3/issues/8246. Newer version available.
 
   '@aws-sdk/credential-provider-env@3.883.0':
     resolution: {integrity: sha512-Z6tPBXPCodfhIF1rvQKoeRGMkwL6TK0xdl1UoMIA1x4AfBpPICAF77JkFBExk/pdiFYq1d04Qzddd/IiujSlLg==}
@@ -2434,6 +2440,20 @@ packages:
       '@opentelemetry/api': ^1.9.0
       '@opentelemetry/core': ^1.30.1 || ^2.1.0
       '@opentelemetry/sdk-trace-base': ^1.30.1 || ^2.1.0
+
+  '@sentry/react-router@10.69.0':
+    resolution: {integrity: sha512-WIhVFgix4MgOGRAgd27CvbN0AjDmEPXrg2S7G4V1PNLA8S3dnx+4nl8UY55r+58k0KGditYPicaykQ14sb0QQQ==}
+    engines: {node: '>=20'}
+    peerDependencies:
+      '@react-router/node': 7.x || ^8.x
+      react: '>=18'
+      react-router: 7.x || ^8.x
+
+  '@sentry/react@10.69.0':
+    resolution: {integrity: sha512-f0Il/JMteHjdWPNZQB3rtp1Pcj2Leb3p0KSZuv3rh0EUril9CbWtQVy5zJhoAppi+MWWmgRWa+6BpHbQf+ABQA==}
+    engines: {node: '>=18'}
+    peerDependencies:
+      react: ^16.14.0 || 17.x || 18.x || 19.x
 
   '@sentry/replay-canvas@10.69.0':
     resolution: {integrity: sha512-VF6nXvSninHcc7dC1Zme0RjkC7VgRMCixs6jKaQX5zTNeqTW3dZGSefSOVv+ZteRi3hJvVORq985VjUC9Z/0+A==}
@@ -8134,6 +8154,36 @@ snapshots:
       '@opentelemetry/sdk-trace-base': 2.10.0(@opentelemetry/api@1.9.1)
       '@sentry/conventions': 0.16.0
       '@sentry/core': 10.69.0
+
+  '@sentry/react-router@10.69.0(@opentelemetry/core@2.10.0(@opentelemetry/api@1.9.1))(@react-router/node@7.12.0(react-router@7.12.0(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(typescript@5.9.3))(react-router@7.12.0(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(react@19.2.4)(rollup@4.62.3)':
+    dependencies:
+      '@opentelemetry/api': 1.9.1
+      '@opentelemetry/instrumentation': 0.220.0(@opentelemetry/api@1.9.1)
+      '@react-router/node': 7.12.0(react-router@7.12.0(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(typescript@5.9.3)
+      '@sentry/browser': 10.69.0
+      '@sentry/cli': 2.58.6
+      '@sentry/conventions': 0.16.0
+      '@sentry/core': 10.69.0
+      '@sentry/node': 10.69.0(@opentelemetry/core@2.10.0(@opentelemetry/api@1.9.1))
+      '@sentry/react': 10.69.0(react@19.2.4)
+      '@sentry/vite-plugin': 5.4.0(rollup@4.62.3)
+      glob: 13.0.6
+      react: 19.2.4
+      react-router: 7.12.0(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
+    transitivePeerDependencies:
+      - '@opentelemetry/core'
+      - '@opentelemetry/exporter-trace-otlp-http'
+      - encoding
+      - rollup
+      - supports-color
+      - webpack
+
+  '@sentry/react@10.69.0(react@19.2.4)':
+    dependencies:
+      '@sentry/browser': 10.69.0
+      '@sentry/conventions': 0.16.0
+      '@sentry/core': 10.69.0
+      react: 19.2.4
 
   '@sentry/replay-canvas@10.69.0':
     dependencies:
