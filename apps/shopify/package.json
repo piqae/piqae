@@ -27,6 +27,7 @@
     "prosemirror-state": "1.4.3",
     "prosemirror-view": "1.41.3",
     "@piqae/sdk": "workspace:*",
+    "@sentry/react-router": "10.69.0",
     "@react-router/node": "7.12.0",
     "@react-router/serve": "7.12.0",
     "@shopify/shopify-app-react-router": "1.2.1",
