@@ -75,10 +75,11 @@ PIQAE_TEST_DATABASE_URL=postgres://postgres:password@127.0.0.1:5432/piqae_test \
   cargo test -p piqae-control-plane --test platform_service_accounts_postgres -- --nocapture
 ```
 
-Normal contributor checks may omit both PostgreSQL suites. The release-only
-wrapper requires the exact routing, grant-lifecycle, and HTTP-auth tests. It
-fails closed if any target is
-missing, skipped, filtered to zero tests, or unsuccessful:
+Normal contributor checks may omit the PostgreSQL suites. The wrapper below
+requires the exact routing, grant-lifecycle, HTTP-auth, migration, WorkOS
+projection, and billing tests. It fails closed if any target is missing,
+skipped, filtered to zero tests, or unsuccessful, and CI runs it on every
+change that touches Rust:
 
 ```console
 PIQAE_TEST_DATABASE_URL=postgres://postgres:password@127.0.0.1:5432/piqae_test \
