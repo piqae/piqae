@@ -1,4 +1,9 @@
-//! Self-hosted local-owner identity and tenant projections.
+//! Local-owner identity and provider-independent workspace projections.
+//!
+//! Bootstrap, credential exchange and session rotation are local-owner
+//! operations and require [`LocalIdentityState`]. The identity and workspace
+//! projections are tenant reads keyed off the authenticated workspace, so they
+//! go through [`AppState::repository`] and work under every identity provider.
 
 use crate::{AppState, authentication::TenantContext, error::AppError};
 use axum::{
@@ -249,10 +254,9 @@ async fn current_identity(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<CurrentIdentity>, AppError> {
-    let identity = identity_state(&state)?;
     let tenant = authenticate_tenant(&state, &headers).await?;
-    let member = identity
-        .store
+    let member = state
+        .repository
         .list_workspace_members(tenant.workspace_id)
         .await?
         .into_iter()
@@ -272,10 +276,9 @@ async fn current_workspace(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<StoredWorkspace>, AppError> {
-    let identity = identity_state(&state)?;
     let tenant = authenticate_tenant(&state, &headers).await?;
     Ok(Json(
-        identity.store.get_workspace(tenant.workspace_id).await?,
+        state.repository.get_workspace(tenant.workspace_id).await?,
     ))
 }
 
@@ -292,19 +295,18 @@ async fn rename_current_workspace(
     headers: HeaderMap,
     Json(request): Json<RenameWorkspaceRequest>,
 ) -> Result<Json<StoredWorkspace>, AppError> {
-    let identity = identity_state(&state)?;
     let tenant = authenticate_tenant(&state, &headers).await?;
     let name = validated_workspace_name(&request.name)?;
-    let members = identity
-        .store
+    let members = state
+        .repository
         .list_workspace_members(tenant.workspace_id)
         .await?;
     if !can_rename_workspace(&members) {
         return Err(AppError::forbidden());
     }
     Ok(Json(
-        identity
-            .store
+        state
+            .repository
             .rename_workspace(tenant.workspace_id, name)
             .await?,
     ))
@@ -333,11 +335,10 @@ async fn current_workspace_members(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<StoredWorkspaceMember>>, AppError> {
-    let identity = identity_state(&state)?;
     let tenant = authenticate_tenant(&state, &headers).await?;
     Ok(Json(
-        identity
-            .store
+        state
+            .repository
             .list_workspace_members(tenant.workspace_id)
             .await?,
     ))
@@ -443,7 +444,186 @@ fn map_bootstrap_error(error: StorageError) -> AppError {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::expect_used)]
+
     use super::*;
+    use crate::{
+        authentication::{StaticAuthenticator, TenantContext},
+        repository::MemoryRepository,
+    };
+    use axum::{body::Body, http::Request};
+    use http_body_util::BodyExt;
+    use std::sync::Arc;
+    use tower::ServiceExt;
+
+    const TOKEN: &str = "piq_test_workspace";
+
+    fn stored_member(role: &str, status: &str) -> StoredWorkspaceMember {
+        StoredWorkspaceMember {
+            id: "usr_1".into(),
+            email: "owner@example.test".into(),
+            name: Some("Owner".into()),
+            role: role.into(),
+            status: status.into(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    /// Builds the real route table over a repository with no local identity
+    /// configured, which is exactly how production runs with
+    /// `PIQAE_IDENTITY_PROVIDER=workos`.
+    async fn workspace_application(members: Vec<StoredWorkspaceMember>) -> Router {
+        let repository = MemoryRepository::default();
+        let authenticator = StaticAuthenticator::default();
+        let tenant = TenantContext::unrestricted(WorkspaceId::new(), EnvironmentId::new());
+        repository
+            .add_workspace(tenant.workspace_id, "Acme Printing", members)
+            .await;
+        authenticator.insert(TOKEN, tenant).await;
+        let state = AppState::new_for_tests(Arc::new(repository), Arc::new(authenticator));
+        assert!(
+            state.local_identity.is_none(),
+            "the regression only reproduces while local identity is disabled"
+        );
+        crate::router(state)
+    }
+
+    fn signed_request(method: &str, path: &str, body: Option<&str>) -> Request<Body> {
+        let mut request = Request::builder()
+            .method(method)
+            .uri(path)
+            .header("authorization", format!("Bearer {TOKEN}"));
+        if body.is_some() {
+            request = request.header("content-type", "application/json");
+        }
+        request
+            .body(body.map_or_else(Body::empty, |value| Body::from(value.to_owned())))
+            .expect("valid request")
+    }
+
+    async fn json_body(response: axum::response::Response) -> serde_json::Value {
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("readable body")
+            .to_bytes();
+        serde_json::from_slice(&bytes).expect("JSON body")
+    }
+
+    #[tokio::test]
+    async fn workspace_projections_do_not_require_local_identity() {
+        let router = workspace_application(vec![stored_member("owner", "active")]).await;
+
+        let workspace = router
+            .clone()
+            .oneshot(signed_request("GET", "/v1/workspaces/current", None))
+            .await
+            .expect("workspace response");
+        assert_eq!(workspace.status(), StatusCode::OK);
+        assert_eq!(json_body(workspace).await["name"], "Acme Printing");
+
+        let members = router
+            .clone()
+            .oneshot(signed_request(
+                "GET",
+                "/v1/workspaces/current/members",
+                None,
+            ))
+            .await
+            .expect("members response");
+        assert_eq!(members.status(), StatusCode::OK);
+        assert_eq!(json_body(members).await[0]["role"], "owner");
+
+        let identity = router
+            .clone()
+            .oneshot(signed_request("GET", "/v1/identity/me", None))
+            .await
+            .expect("identity response");
+        assert_eq!(identity.status(), StatusCode::OK);
+        assert_eq!(json_body(identity).await["email"], "owner@example.test");
+    }
+
+    #[tokio::test]
+    async fn workspace_rename_does_not_require_local_identity() {
+        let router = workspace_application(vec![stored_member("owner", "active")]).await;
+        let response = router
+            .clone()
+            .oneshot(signed_request(
+                "PATCH",
+                "/v1/workspaces/current",
+                Some(r#"{"name":"  Renamed Workspace  "}"#),
+            ))
+            .await
+            .expect("rename response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["name"], "Renamed Workspace");
+
+        let reread = router
+            .oneshot(signed_request("GET", "/v1/workspaces/current", None))
+            .await
+            .expect("workspace response");
+        assert_eq!(json_body(reread).await["name"], "Renamed Workspace");
+    }
+
+    #[tokio::test]
+    async fn workspace_rename_still_requires_an_owner_or_admin() {
+        let router = workspace_application(vec![stored_member("member", "active")]).await;
+        let response = router
+            .oneshot(signed_request(
+                "PATCH",
+                "/v1/workspaces/current",
+                Some(r#"{"name":"Renamed Workspace"}"#),
+            ))
+            .await
+            .expect("rename response");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn workspace_rename_still_rejects_an_over_long_name() {
+        let router = workspace_application(vec![stored_member("owner", "active")]).await;
+        // 121 multi-byte glyphs: rejected on glyph count, not byte length.
+        let body = serde_json::json!({ "name": "é".repeat(121) }).to_string();
+        let response = router
+            .oneshot(signed_request(
+                "PATCH",
+                "/v1/workspaces/current",
+                Some(&body),
+            ))
+            .await
+            .expect("rename response");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// The local-owner-only routes must stay closed when local identity is
+    /// disabled: widening the workspace projections must not widen these.
+    #[tokio::test]
+    async fn local_owner_routes_remain_unavailable_without_local_identity() {
+        let router = workspace_application(vec![stored_member("owner", "active")]).await;
+        for (path, body) in [
+            (
+                "/v1/identity/local/bootstrap",
+                r#"{"workspace_name":"Acme","email":"owner@example.test"}"#,
+            ),
+            ("/v1/identity/local/exchange", r#"{"credential":"nope"}"#),
+            ("/v1/identity/local/sessions/rotate", "{}"),
+            ("/v1/identity/local/sessions/revoke", "{}"),
+        ] {
+            let response = router
+                .clone()
+                .oneshot(signed_request("POST", path, Some(body)))
+                .await
+                .expect("local identity response");
+            assert_eq!(
+                response.status(),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "{path} must stay disabled"
+            );
+        }
+    }
 
     #[test]
     fn session_ttl_is_bounded() {
