@@ -1,36 +1,103 @@
+#[cfg(feature = "sentry")]
+mod error_reporting;
+#[cfg(feature = "sentry")]
+mod redaction;
+
 use anyhow::{Context, Result};
-use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
+use tracing_subscriber::{
+    EnvFilter, Layer, Registry, layer::Layered, layer::SubscriberExt, util::SubscriberInitExt,
+};
 
 const DEFAULT_FILTER: &str = "info";
 
 #[cfg(feature = "otlp")]
 const SERVICE_NAME: &str = "piqae-control-plane";
 
-#[derive(Debug)]
+/// The subscriber every optional layer is composed onto.
+type FilteredRegistry = Layered<EnvFilter, Registry>;
+type BoxedLayer = Box<dyn Layer<FilteredRegistry> + Send + Sync + 'static>;
+
 #[must_use = "the guard flushes pending trace spans when it is shut down or dropped"]
 pub struct ObservabilityGuard {
     #[cfg(feature = "otlp")]
     provider: Option<opentelemetry_sdk::trace::SdkTracerProvider>,
+    // `sentry::ClientInitGuard` drains the send queue when it is dropped.
+    #[cfg(feature = "sentry")]
+    error_reporting: Option<sentry::ClientInitGuard>,
+}
+
+impl std::fmt::Debug for ObservabilityGuard {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut debug = formatter.debug_struct("ObservabilityGuard");
+        #[cfg(feature = "otlp")]
+        debug.field("otlp", &self.provider.is_some());
+        #[cfg(feature = "sentry")]
+        debug.field("error_reporting", &self.error_reporting.is_some());
+        debug.finish()
+    }
 }
 
 pub fn init() -> Result<ObservabilityGuard> {
     let filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(DEFAULT_FILTER));
 
+    // Both optional pipelines are constructed before the subscriber is
+    // installed so a configuration failure is reported by `main` rather than
+    // half-initializing telemetry.
+    #[cfg(feature = "sentry")]
+    let error_reporting = error_reporting::init_from_env()?;
+
     #[cfg(feature = "otlp")]
-    if otlp_requested_from_env() {
-        return init_with_otlp(filter);
+    let otlp = if otlp_requested_from_env() {
+        Some(build_otlp_pipeline()?)
+    } else {
+        None
+    };
+
+    #[cfg_attr(not(any(feature = "otlp", feature = "sentry")), allow(unused_mut))]
+    let mut layers: Vec<BoxedLayer> = vec![tracing_subscriber::fmt::layer().json().boxed()];
+
+    #[cfg(feature = "otlp")]
+    let provider = otlp.map(|(provider, layer)| {
+        layers.push(layer);
+        provider
+    });
+
+    #[cfg(feature = "sentry")]
+    if error_reporting.is_some() {
+        layers.push(error_reporting::tracing_layer().boxed());
     }
 
     tracing_subscriber::registry()
         .with(filter)
-        .with(tracing_subscriber::fmt::layer().json())
+        .with(layers)
         .try_init()
         .context("initialize structured tracing")?;
 
+    #[cfg(feature = "otlp")]
+    if provider.is_some() {
+        tracing::info!(
+            service.name = SERVICE_NAME,
+            service.version = env!("CARGO_PKG_VERSION"),
+            transport = "http/protobuf",
+            "OTLP trace export enabled"
+        );
+    }
+
+    #[cfg(feature = "sentry")]
+    if error_reporting.is_some() {
+        // The DSN is never logged; it identifies the ingest project.
+        tracing::info!(
+            service.version = env!("CARGO_PKG_VERSION"),
+            "Sentry error reporting enabled"
+        );
+    }
+
     Ok(ObservabilityGuard {
         #[cfg(feature = "otlp")]
-        provider: None,
+        provider,
+        #[cfg(feature = "sentry")]
+        error_reporting,
     })
 }
 
@@ -40,39 +107,48 @@ impl ObservabilityGuard {
     // control flow.
     #[allow(clippy::missing_const_for_fn, clippy::unnecessary_wraps)]
     pub fn shutdown(self) -> Result<()> {
-        #[cfg(feature = "otlp")]
-        {
-            let mut this = self;
-            if let Some(provider) = this.provider.take() {
-                provider
-                    .shutdown()
-                    .context("flush OpenTelemetry trace provider")?;
-            }
-        }
+        #[cfg(any(feature = "otlp", feature = "sentry"))]
+        let mut this = self;
 
-        #[cfg(not(feature = "otlp"))]
+        #[cfg(feature = "otlp")]
+        let flushed = this.provider.take().map_or(Ok(()), |provider| {
+            provider
+                .shutdown()
+                .context("flush OpenTelemetry trace provider")
+        });
+
+        // Drained last so a failing trace flush is still reported.
+        #[cfg(feature = "sentry")]
+        drop(this.error_reporting.take());
+
+        #[cfg(feature = "otlp")]
+        flushed?;
+
+        #[cfg(not(any(feature = "otlp", feature = "sentry")))]
         let _ = self;
 
         Ok(())
     }
 }
 
-#[cfg(feature = "otlp")]
+#[cfg(any(feature = "otlp", feature = "sentry"))]
 impl Drop for ObservabilityGuard {
     fn drop(&mut self) {
+        #[cfg(feature = "otlp")]
         if let Some(provider) = self.provider.take() {
             let _ = provider.shutdown();
         }
+        #[cfg(feature = "sentry")]
+        drop(self.error_reporting.take());
     }
 }
 
 #[cfg(feature = "otlp")]
-fn init_with_otlp(filter: EnvFilter) -> Result<ObservabilityGuard> {
+fn build_otlp_pipeline() -> Result<(opentelemetry_sdk::trace::SdkTracerProvider, BoxedLayer)> {
     use opentelemetry::{KeyValue, global, trace::TracerProvider};
     use opentelemetry_otlp::WithHttpConfig;
     use opentelemetry_sdk::{Resource, propagation::TraceContextPropagator};
-    use std::env;
-    use tracing_subscriber::{Layer, filter::filter_fn};
+    use tracing_subscriber::filter::filter_fn;
 
     let http_client = OtlpHttpClient(
         reqwest::Client::builder()
@@ -115,23 +191,8 @@ fn init_with_otlp(filter: EnvFilter) -> Result<ObservabilityGuard> {
 
     global::set_tracer_provider(provider.clone());
     global::set_text_map_propagator(TraceContextPropagator::new());
-    tracing_subscriber::registry()
-        .with(filter)
-        .with(tracing_subscriber::fmt::layer().json())
-        .with(otlp_layer)
-        .try_init()
-        .context("initialize structured and OpenTelemetry tracing")?;
 
-    tracing::info!(
-        service.name = SERVICE_NAME,
-        service.version = env!("CARGO_PKG_VERSION"),
-        transport = "http/protobuf",
-        "OTLP trace export enabled"
-    );
-
-    Ok(ObservabilityGuard {
-        provider: Some(provider),
-    })
+    Ok((provider, Box::new(otlp_layer)))
 }
 
 #[cfg(feature = "otlp")]
@@ -172,7 +233,7 @@ fn otlp_requested_from_env() -> bool {
     )
 }
 
-#[cfg(feature = "otlp")]
+#[cfg(any(feature = "otlp", feature = "sentry"))]
 fn nonempty_env(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|value| !value.is_empty())
 }

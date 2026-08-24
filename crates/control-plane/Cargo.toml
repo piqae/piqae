@@ -13,6 +13,10 @@ otlp = [
   "dep:opentelemetry_sdk",
   "dep:tracing-opentelemetry",
 ]
+sentry = [
+  "dep:regex",
+  "dep:sentry",
+]
 
 [[bin]]
 name = "piqae-server"
@@ -39,10 +43,12 @@ opentelemetry-otlp = { version = "0.32", default-features = false, features = ["
 opentelemetry_sdk = { version = "0.32", default-features = false, features = ["experimental_trace_batch_span_processor_with_async_runtime", "internal-logs", "rt-tokio", "trace"], optional = true }
 p256.workspace = true
 rand.workspace = true
+regex = { version = "1.11", optional = true }
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_urlencoded = "0.7"
+sentry = { version = "0.49", default-features = false, features = ["backtrace", "contexts", "panic", "reqwest", "rustls", "tracing"], optional = true }
 sha2.workspace = true
 subtle = "2.6"
 thiserror.workspace = true
