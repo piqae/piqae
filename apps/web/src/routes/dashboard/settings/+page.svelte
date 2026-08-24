@@ -208,12 +208,12 @@
       {:then workspace}
         {#if workspace.dataError}<DataError error={workspace.dataError} />{/if}
         {#if renameResult?.directoryWarning}
-          <p class="ui-note banner" role="status">{renameResult.directoryWarning}</p>
+          <p class="ui-note inset" role="status">{renameResult.directoryWarning}</p>
         {/if}
         <form
           method="POST"
           action="?/renameWorkspace"
-          class="workspace-form"
+          class="inset-form"
           use:enhance={() => {
             mutationPending = true;
             return async ({ update }) => {
@@ -263,7 +263,7 @@
         <div class="loading">Loading API keys…</div>
       {:then apiKeys}
         {#if apiKeys.dataError}<DataError error={apiKeys.dataError} />{/if}
-        <DataPanel minWidth="640px">
+        <DataPanel minWidth="860px">
           <table class="ui-data-table">
             <thead>
               <tr>
@@ -271,7 +271,7 @@
                 <th>Key</th>
                 <th>Environment</th>
                 <th>Scopes</th>
-                <th>Last used</th>
+                <th class="nowrap">Last used</th>
                 <th><span class="sr-only">Actions</span></th>
               </tr>
             </thead>
@@ -287,10 +287,10 @@
                   </td>
                   <td><span class:live-key={key.environment === 'live'} class="environment">{key.environment}</span></td>
                   <td class="muted">{key.kind === 'platform' ? 'Customer accounts' : `${key.scopes.length} scopes`}</td>
-                  <td class="muted">
+                  <td class="muted nowrap">
                     {#if key.lastUsedAt}<RelativeTime value={key.lastUsedAt} />{:else}Never{/if}
                   </td>
-                  <td class="right">
+                  <td class="right key-actions">
                     {#if key.kind === 'platform'}
                       <button
                         class="button compact"
@@ -1162,6 +1162,18 @@
   .inset-form :global(.field) {
     max-width: 300px;
     flex: 1;
+  }
+
+  .nowrap {
+    white-space: nowrap;
+  }
+
+  .key-actions {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 6px;
+    white-space: nowrap;
   }
 
   .ui-note.inset {
