@@ -1,3 +1,4 @@
+// Blacksmith runner validation: remove with this branch.
 //! Authoritative Piqae HTTP control plane.
 
 pub mod api;
