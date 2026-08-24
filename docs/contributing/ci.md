@@ -112,6 +112,25 @@ wall-clock time, not a saving. Measure before and after with the job durations
 in the Actions UI, and clear the variable if the change does not pay for
 itself.
 
+To move the Rust jobs onto Blacksmith, install its GitHub App first — a runner
+label with no fleet behind it leaves jobs queued indefinitely — and then set
+one variable:
+
+```console
+gh variable set PIQAE_CI_RUST_RUNNER --body blacksmith-4vcpu-ubuntu-2404
+gh variable delete PIQAE_CI_RUST_RUNNER   # revert
+```
+
+Start at 4 vCPU. Blacksmith bills free and paid minutes in proportion to vCPU
+count, so a larger runner has to convert the extra cores into proportionally
+less wall-clock to break even, and `rustc` does not scale linearly. Keep
+`Swatinem/rust-cache` as it is: Blacksmith's own fork of it was archived, and
+its colocated cache accelerates the upstream action with no workflow change.
+
+Leave the light, macOS, Windows, and release runner variables unset. Those jobs
+are install-bound or on the signing path, where a third-party runner buys
+little and risks more.
+
 ## Post-deploy verification
 
 A health probe that answers `200` proves a process started. It does not prove
