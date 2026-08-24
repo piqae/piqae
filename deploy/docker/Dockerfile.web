@@ -23,6 +23,11 @@ ARG SENTRY_AUTH_TOKEN=""
 ARG SENTRY_ORG=""
 ARG SENTRY_PROJECT=""
 ARG SENTRY_RELEASE=""
+# Railway does not expose RAILWAY_GIT_COMMIT_SHA as a service variable. This
+# records whether it arrives as a build argument, which would let the release
+# be derived per deploy rather than pinned.
+ARG RAILWAY_GIT_COMMIT_SHA=""
+RUN echo "railway-commit-probe:[${RAILWAY_GIT_COMMIT_SHA}]"
 RUN pnpm --filter @piqae/sdk build
 RUN pnpm --filter @piqae/web build:self-host
 RUN pnpm --filter @piqae/web --prod deploy --legacy /app
