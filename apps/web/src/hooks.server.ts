@@ -16,11 +16,26 @@ import { localSessionToken } from '$lib/server/local-owner-auth';
 
 const serverDsn = env.SENTRY_DSN?.trim();
 
+/**
+ * The release this build reports errors against.
+ *
+ * The image build derives the same value from the same commit, so uploaded
+ * source maps and reported events always share a release. Falling back to the
+ * commit Railway injects keeps that true without pinning a literal that goes
+ * stale on the next deploy.
+ */
+function releaseIdentifier(): string | undefined {
+  const explicit = env.SENTRY_RELEASE?.trim();
+  if (explicit) return explicit;
+  const revision = env.RAILWAY_GIT_COMMIT_SHA?.trim();
+  return revision && /^[0-9a-f]{40}$/i.test(revision) ? revision : undefined;
+}
+
 if (serverDsn) {
   Sentry.init({
     dsn: serverDsn,
     environment: env.SENTRY_ENVIRONMENT?.trim() || undefined,
-    release: env.SENTRY_RELEASE?.trim() || undefined,
+    release: releaseIdentifier(),
     sendDefaultPii: false,
     tracesSampleRate: sentrySampleRate(env.SENTRY_TRACES_SAMPLE_RATE),
     maxValueLength: 1_000,
