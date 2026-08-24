@@ -22,8 +22,8 @@ cargo xtask preflight --all    # every scope, as a scheduled run would
 It refuses to imply coverage it did not give:
 
 - A missing prerequisite is named **before** any time is spent, with the
-  command that fixes it. `preflight` exits non-zero rather than quietly
-  skipping the job.
+  command that fixes it. Everything else still runs, and `preflight` exits
+  non-zero listing what it could not verify rather than quietly skipping it.
 - A job that cannot run on this operating system is reported as skipped and
   attributed to the CI job that does cover it.
 - Jobs that only exist to produce release artifacts are listed as `ci-only`
@@ -31,8 +31,20 @@ It refuses to imply coverage it did not give:
 
 ### PostgreSQL
 
-`CI / Shopify` and `cargo xtask release check` need a disposable PostgreSQL
-database. This is the most common opaque failure, so both name it directly:
+`CI / Rust (PostgreSQL evidence)`, `CI / Shopify`, and
+`cargo xtask release check` need a disposable PostgreSQL database.
+
+Every database-backed Rust suite answers `skipped:` and reports a pass when
+`PIQAE_TEST_DATABASE_URL` is unset, so an ordinary `cargo test` run proves
+nothing about schema upgrades, the WorkOS identity projection, cloud billing,
+cross-node reroute fencing, or platform-account authorization. CI now runs them
+through `release/tools/check_postgres_release_tests.py`, which fails closed when
+a required test is missing, skipped, filtered to zero tests, or unsuccessful.
+Add a gate there when you add a boundary that only exists against a real
+database.
+
+A missing database is the most common opaque local failure, so `preflight` and
+`release check` both name it with the command that fixes it:
 
 ```console
 docker run --rm -d -p 5432:5432 -e POSTGRES_PASSWORD=postgres \

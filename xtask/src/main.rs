@@ -696,6 +696,12 @@ const CHECKS: &[Check] = &[
         ],
     },
     Check {
+        scopes: &["rust_server", "rust_shared"],
+        job: "CI / Rust (PostgreSQL evidence)",
+        needs: &[Need::Tool("cargo"), Need::Tool("python3"), Need::Postgres],
+        steps: &[&["python3", "release/tools/check_postgres_release_tests.py"]],
+    },
+    Check {
         scopes: &["macos_rust"],
         job: "CI / Rust (macos-latest)",
         needs: &[Need::Os("macos"), Need::Tool("cargo")],
@@ -955,23 +961,15 @@ fn preflight(root: &Path, arguments: &[String]) -> TaskResult {
     }
 
     if !blocked.is_empty() {
-        let mut message = String::from(
-            "preflight cannot honestly report a pass with these prerequisites missing",
-        );
+        println!("\nSome selected jobs cannot run on this machine:");
         for (check, need) in &blocked {
-            let _ = write!(
-                message,
-                "\n  {} needs {}\n      {}",
-                check.job,
-                need.describe(),
-                need.remedy()
-            );
+            println!("  {} needs {}", check.job, need.describe());
+            println!("      {}", need.remedy());
         }
-        message.push_str(
-            "\n\nInstall the prerequisite, or run the remaining jobs individually.\n\
-             CI will still run every selected job on the pull request.",
+        println!(
+            "\nEverything else still runs. Preflight will not report a pass while\n\
+             a selected job is unverified."
         );
-        return Err(TaskError(message));
     }
 
     if list_only {
@@ -989,7 +987,19 @@ fn preflight(root: &Path, arguments: &[String]) -> TaskResult {
     for (check, need) in &deferred {
         println!("  not run: {} ({})", check.job, need.describe());
     }
-    Ok(())
+    if blocked.is_empty() {
+        return Ok(());
+    }
+    let mut message =
+        String::from("every job that could run passed, but these were not verified here");
+    for (check, need) in &blocked {
+        let _ = write!(message, "\n  {} (needs {})", check.job, need.describe());
+    }
+    message.push_str(
+        "\n\nInstall the prerequisite to verify them locally. CI runs every\n\
+         selected job on the pull request either way.",
+    );
+    Err(TaskError(message))
 }
 
 /// Expands the `@workflows` placeholder into the checked-in workflow files, so
