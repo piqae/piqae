@@ -556,7 +556,9 @@ mod tests {
         };
         breadcrumb.data.insert(
             "url".into(),
-            json!("https://api.piqae.example.com/v1/printjobs?token=piq_test_EXAMPLE_NOT_A_REAL_KEY"),
+            json!(
+                "https://api.piqae.example.com/v1/printjobs?token=piq_test_EXAMPLE_NOT_A_REAL_KEY"
+            ),
         );
         breadcrumb.data.insert(
             "enrollment_token".into(),
@@ -650,8 +652,7 @@ mod tests {
 
         Event {
             message: Some(
-                "rejected piq_live_EXAMPLE_NOT_A_REAL_KEY for operator@example.com"
-                    .into(),
+                "rejected piq_live_EXAMPLE_NOT_A_REAL_KEY for operator@example.com".into(),
             ),
             transaction: Some("POST /v1/printjobs".into()),
             server_name: Some("piqae-prod-01.internal".into()),

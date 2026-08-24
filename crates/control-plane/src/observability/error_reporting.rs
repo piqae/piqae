@@ -186,8 +186,7 @@ mod tests {
 
         let event = Event {
             message: Some(
-                "rejected piq_live_EXAMPLE_NOT_A_REAL_KEY for operator@example.com"
-                    .into(),
+                "rejected piq_live_EXAMPLE_NOT_A_REAL_KEY for operator@example.com".into(),
             ),
             server_name: Some("piqae-prod-01.internal".into()),
             ..Default::default()
