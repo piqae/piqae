@@ -3,9 +3,11 @@ use std::{
     env,
     error::Error,
     ffi::OsStr,
-    fmt, fs,
+    fmt::{self, Write as _},
+    fs,
+    io::Write as _,
     path::{Path, PathBuf},
-    process::{Command, ExitStatus},
+    process::{Command, ExitStatus, Stdio},
 };
 
 type TaskResult<T = ()> = Result<T, TaskError>;
@@ -37,6 +39,7 @@ fn execute(arguments: &[String]) -> TaskResult {
         [command, target] if command == "dev" => dev(&root, target),
         [command, scope] if command == "test" && scope == "changed" => test_changed(&root),
         [command, scope] if command == "test" && scope == "all" => test_all(&root),
+        [command, options @ ..] if command == "preflight" => preflight(&root, options),
         [command, action] if command == "fixture" && action == "reset" => fixture_reset(&root),
         [command, action] if command == "release" && action == "check" => release_check(&root),
         [] | [..] if arguments.iter().any(|argument| argument == "--help") => {
@@ -60,8 +63,13 @@ Usage:
   cargo xtask dev [web|agent]
   cargo xtask test changed
   cargo xtask test all
+  cargo xtask preflight [--all] [--list]
   cargo xtask fixture reset
   cargo xtask release check
+
+`preflight` reproduces the CI jobs this change selects, names any missing
+prerequisite before it spends time, and never claims a pass for a job it
+could not run.
 
 No command submits a physical print job."
     );
@@ -507,10 +515,14 @@ fn run(mut command: Command) -> TaskResult {
     require_success(status, &display_command(&command))
 }
 
+/// Probes for a command without letting its output leak into task output.
 fn command_success(root: &Path, program: &str, arguments: &[&str]) -> bool {
     Command::new(program)
         .args(arguments)
         .current_dir(root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .is_ok_and(|status| status.success())
 }
@@ -535,6 +547,534 @@ fn display_command(command: &Command) -> String {
 fn path_text(path: &Path) -> TaskResult<&str> {
     path.to_str()
         .ok_or_else(|| TaskError(format!("path is not valid UTF-8: {}", path.display())))
+}
+
+/// A prerequisite a preflight check needs before it can honestly run.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Need {
+    /// A program that must be on `PATH`.
+    Tool(&'static str),
+    /// A disposable `PostgreSQL` database, named by `PIQAE_TEST_DATABASE_URL`.
+    Postgres,
+    /// An operating system the check can only run on.
+    Os(&'static str),
+}
+
+impl Need {
+    fn describe(self) -> String {
+        match self {
+            Self::Tool(tool) => format!("{tool} on PATH"),
+            Self::Postgres => "PIQAE_TEST_DATABASE_URL".into(),
+            Self::Os(os) => format!("{os} host"),
+        }
+    }
+
+    /// Remediation a contributor can act on without reading CI YAML.
+    fn remedy(self) -> String {
+        match self {
+            Self::Tool(tool @ ("cargo" | "rustc")) => {
+                format!("install the pinned toolchain from rust-toolchain.toml ({tool})")
+            }
+            Self::Tool(tool @ ("node" | "pnpm")) => {
+                format!("`mise install` provides {tool} at the version CI pins")
+            }
+            Self::Tool("swift") => "install Xcode command line tools".into(),
+            Self::Tool("terraform") => "install Terraform 1.9.8, the version CI pins".into(),
+            Self::Tool(tool) => format!("install {tool}"),
+            Self::Postgres => concat!(
+                "start a disposable database and export its URL, for example:\n",
+                "      docker run --rm -d -p 5432:5432 -e POSTGRES_PASSWORD=postgres \\\n",
+                "        -e POSTGRES_DB=piqae_test --name piqae-preflight-db postgres:16\n",
+                "      export PIQAE_TEST_DATABASE_URL=",
+                "postgres://postgres:postgres@127.0.0.1:5432/piqae_test\n",
+                "      Point it only at a database you can afford to lose."
+            )
+            .into(),
+            Self::Os(os) => format!("run this check on {os}; CI covers it on every push"),
+        }
+    }
+}
+
+/// One CI job reproduced locally.
+struct Check {
+    /// The `Select CI scope` outputs that select this job. An empty list means
+    /// the job has no `if:` guard and always runs.
+    scopes: &'static [&'static str],
+    /// The job name as it appears in the GitHub Actions UI.
+    job: &'static str,
+    needs: &'static [Need],
+    steps: &'static [&'static [&'static str]],
+}
+
+/// Every CI job that a contributor can reproduce, in the order CI would.
+///
+/// Jobs that only exist to produce release artifacts are listed in
+/// [`CI_ONLY_JOBS`] instead of being silently dropped.
+const CHECKS: &[Check] = &[
+    Check {
+        scopes: &[],
+        job: "Supply-chain policy / Release policy and tooling",
+        needs: &[Need::Tool("python3")],
+        steps: &[
+            &[
+                "python3",
+                "-m",
+                "unittest",
+                "discover",
+                "-s",
+                "release/tools",
+                "-p",
+                "test_*.py",
+            ],
+            &["python3", "release/tools/check_security_exceptions.py"],
+            &["python3", "release/tools/check_competitor_mentions.py"],
+        ],
+    },
+    Check {
+        scopes: &[],
+        job: "Supply-chain policy / workflow policy",
+        needs: &[Need::Tool("python3")],
+        steps: &[
+            &[
+                "python3",
+                "release/tools/check_workflow_pins.py",
+                "@workflows",
+            ],
+            &[
+                "python3",
+                "release/tools/check_workflow_runners.py",
+                "@workflows",
+            ],
+        ],
+    },
+    Check {
+        scopes: &["rust_server", "rust_shared"],
+        job: "CI / Rust (ubuntu-latest)",
+        needs: &[Need::Tool("cargo")],
+        steps: &[
+            &["cargo", "fmt", "--all", "--", "--check"],
+            &[
+                "cargo",
+                "clippy",
+                "--workspace",
+                "--all-targets",
+                "--locked",
+                "--",
+                "-D",
+                "warnings",
+            ],
+            &["cargo", "test", "--workspace", "--locked"],
+        ],
+    },
+    Check {
+        scopes: &["rust_server", "rust_shared"],
+        job: "CI / Rust (ubuntu-latest, otlp)",
+        needs: &[Need::Tool("cargo")],
+        steps: &[
+            &[
+                "cargo",
+                "clippy",
+                "-p",
+                "piqae-control-plane",
+                "--all-targets",
+                "--features",
+                "otlp",
+                "--locked",
+                "--",
+                "-D",
+                "warnings",
+            ],
+            &[
+                "cargo",
+                "test",
+                "-p",
+                "piqae-control-plane",
+                "--features",
+                "otlp",
+                "--locked",
+            ],
+        ],
+    },
+    Check {
+        scopes: &["macos_rust"],
+        job: "CI / Rust (macos-latest)",
+        needs: &[Need::Os("macos"), Need::Tool("cargo")],
+        steps: &[
+            &[
+                "cargo",
+                "clippy",
+                "--locked",
+                "--all-targets",
+                "-p",
+                "piqae-agent",
+                "-p",
+                "piqae-executor-cups",
+                "--",
+                "-D",
+                "warnings",
+            ],
+            &[
+                "cargo",
+                "test",
+                "--locked",
+                "-p",
+                "piqae-agent",
+                "-p",
+                "piqae-executor-cups",
+            ],
+        ],
+    },
+    Check {
+        scopes: &["macos_shell"],
+        job: "CI / macOS menu shell",
+        needs: &[Need::Os("macos"), Need::Tool("swift")],
+        steps: &[&["swift", "test", "--package-path", "shells/macos"]],
+    },
+    Check {
+        scopes: &["windows_rust"],
+        job: "CI / Rust (windows-latest)",
+        needs: &[Need::Os("windows"), Need::Tool("cargo")],
+        steps: &[
+            &[
+                "cargo",
+                "clippy",
+                "--locked",
+                "--all-targets",
+                "--target",
+                "x86_64-pc-windows-msvc",
+                "-p",
+                "piqae-agent",
+                "-p",
+                "piqaectl",
+                "-p",
+                "piqae-executor-windows",
+                "-p",
+                "piqae-shell-windows",
+                "--",
+                "-D",
+                "warnings",
+            ],
+            &[
+                "cargo",
+                "test",
+                "--locked",
+                "--target",
+                "x86_64-pc-windows-msvc",
+                "-p",
+                "piqae-agent",
+                "-p",
+                "piqaectl",
+                "-p",
+                "piqae-executor-windows",
+                "-p",
+                "piqae-shell-windows",
+            ],
+        ],
+    },
+    Check {
+        scopes: &["web"],
+        job: "CI / Web",
+        needs: &[Need::Tool("pnpm"), Need::Tool("node")],
+        steps: &[
+            &["pnpm", "install", "--frozen-lockfile", "--prefer-offline"],
+            &["pnpm", "--filter", "@piqae/web", "check"],
+            &["pnpm", "--filter", "@piqae/web", "test"],
+            &["pnpm", "--filter", "@piqae/web", "build"],
+            &[
+                "node",
+                "--test",
+                "deploy/cloudflare/domain-router/router.test.mjs",
+            ],
+            &[
+                "pnpm",
+                "dlx",
+                "wrangler@4.115.0",
+                "deploy",
+                "--dry-run",
+                "--config",
+                "deploy/cloudflare/domain-router/wrangler.jsonc",
+            ],
+        ],
+    },
+    Check {
+        scopes: &["sdk"],
+        job: "CI / SDK",
+        needs: &[Need::Tool("pnpm")],
+        steps: &[
+            &["pnpm", "install", "--frozen-lockfile", "--prefer-offline"],
+            &["pnpm", "--filter", "@piqae/sdk", "generate:check"],
+            &["pnpm", "--filter", "@piqae/sdk", "check"],
+            &["pnpm", "--filter", "@piqae/sdk", "test"],
+            &["pnpm", "--filter", "@piqae/sdk", "build"],
+            &["pnpm", "--filter", "@piqae/sdk", "lint"],
+            &["pnpm", "--filter", "@piqae/sdk", "smoke:package"],
+        ],
+    },
+    Check {
+        scopes: &["mcp"],
+        job: "CI / MCP",
+        needs: &[Need::Tool("pnpm")],
+        steps: &[
+            &["pnpm", "install", "--frozen-lockfile", "--prefer-offline"],
+            &["pnpm", "--filter", "@piqae/sdk", "build"],
+            &["pnpm", "--filter", "@piqae/mcp-server", "check"],
+            &["pnpm", "--filter", "@piqae/mcp-server", "test"],
+            &["pnpm", "--filter", "@piqae/mcp-server", "format:check"],
+            &["pnpm", "--filter", "@piqae/mcp-server", "smoke:package"],
+        ],
+    },
+    Check {
+        scopes: &["shopify"],
+        job: "CI / Shopify",
+        needs: &[Need::Tool("pnpm"), Need::Postgres],
+        steps: &[
+            &["pnpm", "install", "--frozen-lockfile", "--prefer-offline"],
+            &["pnpm", "--filter", "@piqae/sdk", "build"],
+            &["pnpm", "--filter", "@piqae/shopify-app", "check"],
+            &["pnpm", "--filter", "@piqae/shopify-app", "test"],
+            &["pnpm", "--filter", "@piqae/shopify-app", "test:postgres"],
+            &["pnpm", "--filter", "@piqae/shopify-app", "format:check"],
+            &["pnpm", "--filter", "@piqae/shopify-app", "build"],
+        ],
+    },
+    Check {
+        scopes: &["openapi"],
+        job: "CI / API contract",
+        needs: &[Need::Tool("pnpm")],
+        steps: &[&[
+            "pnpm",
+            "--package=@redocly/cli@1.34.3",
+            "dlx",
+            "redocly",
+            "lint",
+            "contracts/openapi/piqae-v1.yaml",
+        ]],
+    },
+    Check {
+        scopes: &["terraform"],
+        job: "CI / Terraform",
+        needs: &[Need::Tool("terraform")],
+        steps: &[
+            &[
+                "terraform",
+                "-chdir=deploy/terraform",
+                "fmt",
+                "-check",
+                "-recursive",
+            ],
+            &[
+                "terraform",
+                "-chdir=deploy/terraform",
+                "init",
+                "-backend=false",
+                "-input=false",
+            ],
+            &[
+                "terraform",
+                "-chdir=deploy/terraform",
+                "validate",
+                "-no-color",
+            ],
+        ],
+    },
+];
+
+/// Selected CI work that cannot be reproduced from a contributor checkout.
+/// Naming it is the point: preflight must not imply coverage it did not give.
+const CI_ONLY_JOBS: &[(&str, &str)] = &[
+    (
+        "windows_installer",
+        "CI / Rust (windows-latest) compiles the Inno Setup installer",
+    ),
+    (
+        "macos_packaging",
+        "the macOS release workflow signs and notarizes the bundle",
+    ),
+    (
+        "release_tooling",
+        "the release workflows are exercised on tags, not on a checkout",
+    ),
+];
+
+/// Reproduces the CI jobs that the current change selects.
+fn preflight(root: &Path, arguments: &[String]) -> TaskResult {
+    let mut everything = false;
+    let mut list_only = false;
+    for argument in arguments {
+        match argument.as_str() {
+            "--all" => everything = true,
+            "--list" => list_only = true,
+            other => {
+                return Err(TaskError(format!(
+                    "unknown preflight option '{other}'; expected --all or --list"
+                )));
+            }
+        }
+    }
+
+    let scopes = selected_scopes(root, everything)?;
+    let selected: Vec<&Check> = CHECKS
+        .iter()
+        .filter(|check| {
+            check.scopes.is_empty() || check.scopes.iter().any(|scope| scopes.contains(*scope))
+        })
+        .collect();
+
+    println!("Piqae preflight: the CI jobs this change selects");
+    println!(
+        "Scope came from release/tools/ci_changed_paths.py, the same classifier\n\
+         the 'Select CI scope' job uses, so this list is what CI will run.\n"
+    );
+
+    let mut runnable = Vec::new();
+    let mut deferred = Vec::new();
+    let mut blocked = Vec::new();
+    for check in selected {
+        match unmet_need(root, check) {
+            None => {
+                println!("  run      {}", check.job);
+                runnable.push(check);
+            }
+            Some(need @ Need::Os(_)) => {
+                println!("  skip     {} ({})", check.job, need.remedy());
+                deferred.push((check, need));
+            }
+            Some(need) => {
+                println!("  blocked  {} (needs {})", check.job, need.describe());
+                blocked.push((check, need));
+            }
+        }
+    }
+    for (scope, reason) in CI_ONLY_JOBS {
+        if scopes.contains(*scope) {
+            println!("  ci-only  {reason}");
+        }
+    }
+    if runnable.is_empty() && blocked.is_empty() {
+        println!("\nNothing selected; CI would run no gated job for this change.");
+    }
+
+    if !blocked.is_empty() {
+        let mut message = String::from(
+            "preflight cannot honestly report a pass with these prerequisites missing",
+        );
+        for (check, need) in &blocked {
+            let _ = write!(
+                message,
+                "\n  {} needs {}\n      {}",
+                check.job,
+                need.describe(),
+                need.remedy()
+            );
+        }
+        message.push_str(
+            "\n\nInstall the prerequisite, or run the remaining jobs individually.\n\
+             CI will still run every selected job on the pull request.",
+        );
+        return Err(TaskError(message));
+    }
+
+    if list_only {
+        return Ok(());
+    }
+
+    println!();
+    for check in &runnable {
+        for step in check.steps {
+            run(check_command(root, step)?)?;
+        }
+    }
+
+    println!("\nPreflight reproduced {} CI job(s).", runnable.len());
+    for (check, need) in &deferred {
+        println!("  not run: {} ({})", check.job, need.describe());
+    }
+    Ok(())
+}
+
+/// Expands the `@workflows` placeholder into the checked-in workflow files, so
+/// preflight passes the same argument list the shell glob gives CI.
+fn check_command(root: &Path, step: &[&str]) -> TaskResult<Command> {
+    let (program, rest) = step
+        .split_first()
+        .ok_or_else(|| TaskError("preflight step is empty".into()))?;
+    let mut command = Command::new(program);
+    command.current_dir(root);
+    for argument in rest {
+        if *argument == "@workflows" {
+            for workflow in workflow_files(root)? {
+                command.arg(workflow.strip_prefix(root).unwrap_or(&workflow));
+            }
+        } else {
+            command.arg(argument);
+        }
+    }
+    Ok(command)
+}
+
+fn workflow_files(root: &Path) -> TaskResult<Vec<PathBuf>> {
+    let directory = root.join(".github/workflows");
+    let mut files: Vec<_> = fs::read_dir(&directory)
+        .map_err(|error| TaskError(format!("cannot inspect {}: {error}", directory.display())))?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension() == Some(OsStr::new("yml")))
+        .collect();
+    files.sort();
+    Ok(files)
+}
+
+fn unmet_need(root: &Path, check: &Check) -> Option<Need> {
+    check.needs.iter().copied().find(|need| match need {
+        Need::Tool(tool) => tool_output(root, tool, &["--version"]).is_err(),
+        Need::Postgres => !env::var("PIQAE_TEST_DATABASE_URL")
+            .is_ok_and(|value| value.trim_start().starts_with("postgres")),
+        Need::Os(os) => env::consts::OS != *os,
+    })
+}
+
+/// Classifies the change with the script CI uses, so local and CI scope cannot
+/// drift apart.
+fn selected_scopes(root: &Path, everything: bool) -> TaskResult<BTreeSet<String>> {
+    let mut command = Command::new("python3");
+    command
+        .arg("release/tools/ci_changed_paths.py")
+        .current_dir(root)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit());
+    let output = if everything {
+        command.arg("--all").stdin(Stdio::null()).output()
+    } else {
+        command.stdin(Stdio::piped());
+        let mut child = command
+            .spawn()
+            .map_err(|error| TaskError(format!("cannot classify changed paths: {error}")))?;
+        {
+            let mut stdin = child
+                .stdin
+                .take()
+                .ok_or_else(|| TaskError("cannot write the changed-path list".into()))?;
+            for file in changed_files(root)? {
+                writeln!(stdin, "{}", file.display())
+                    .map_err(|error| TaskError(format!("cannot write a changed path: {error}")))?;
+            }
+        }
+        child.wait_with_output()
+    }
+    .map_err(|error| TaskError(format!("cannot classify changed paths: {error}")))?;
+    if !output.status.success() {
+        return Err(TaskError(format!(
+            "release/tools/ci_changed_paths.py failed with {}",
+            output.status
+        )));
+    }
+    let mut scopes = BTreeSet::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        if let Some((group, "true")) = line.trim().split_once('=') {
+            scopes.insert(group.to_owned());
+        }
+    }
+    Ok(scopes)
 }
 
 #[cfg(test)]

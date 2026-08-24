@@ -27,12 +27,27 @@ narrow these rules but must not weaken safety or support-claim requirements.
 cargo xtask doctor
 cargo xtask test changed
 cargo xtask test all
+cargo xtask preflight
 cargo xtask release check
 ```
+
+`cargo xtask preflight` reproduces the CI jobs the current change selects, using
+the same classifier as the `Select CI scope` job. Run it before opening a pull
+request. It names every missing prerequisite before it spends time and never
+reports a pass for a job it could not run; `--list` shows the plan and `--all`
+runs every scope.
+
+`cargo xtask preflight` (Shopify scope) and `cargo xtask release check` require
+a disposable PostgreSQL database in `PIQAE_TEST_DATABASE_URL`. Without it
+`release check` fails immediately. See `docs/contributing/ci.md`.
 
 Use `cargo xtask dev` for the demo dashboard or `cargo xtask dev agent` for the
 fake local printer path. `cargo xtask fixture reset` removes only disposable
 repository-local state.
+
+Runner capacity is a repository variable, never a workflow edit: every
+`runs-on:` resolves through a `vars.PIQAE_*_RUNNER` indirection, and
+`release/tools/check_workflow_runners.py` enforces it.
 
 ## Safety
 
@@ -56,6 +71,11 @@ repository-local state.
 - TypeScript must pass the workspace checks and tests.
 - Add failure-path and restart/durability coverage when behavior crosses a queue
   or process boundary.
+- Behavior that varies by deployment configuration must be tested in every
+  configuration it ships in, not only the default one. A handler that depends on
+  the identity provider, the deployment kind, or an optional service belongs in
+  `crates/control-plane/tests/identity_provider_matrix.rs` or an equivalent
+  matrix. One passing configuration is not evidence for another.
 - Use conventional, focused commits with DCO sign-off.
 
 ## Documentation and support truth

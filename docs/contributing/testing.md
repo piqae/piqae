@@ -19,6 +19,16 @@ Before requesting review:
 cargo xtask test all
 ```
 
+To reproduce what CI will actually run for this change, including the jobs
+`cargo xtask test all` does not cover:
+
+```console
+cargo xtask preflight
+```
+
+See [Continuous integration](ci.md) for the scope classifier, prerequisites,
+and post-deploy verification.
+
 The full command runs formatting, strict Clippy, the Rust workspace tests,
 TypeScript checks and tests, and macOS Swift tests when available. It does not
 submit a physical print job.
@@ -29,6 +39,9 @@ submit a physical print job.
 - Repository tests cover durability, leases, idempotency, and concurrency.
 - Executor tests use fake or virtual spoolers by default.
 - Compatibility fixtures verify exact API shapes and stable error behavior.
+- Configuration-matrix tests exercise the API under every identity provider it
+  ships with, because a passing default configuration is not evidence for the
+  one production runs.
 - Physical certification is a separately recorded, human-authorized hardware
   activity.
 
