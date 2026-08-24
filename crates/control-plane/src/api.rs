@@ -2505,7 +2505,19 @@ pub async fn agent_sync(
             )
             .await
         {
-            Ok(Some(job)) => state.publish(tenant, "job.updated", &job).await?,
+            Ok(Some(job)) => {
+                state.publish(tenant, "job.updated", &job).await?;
+                // Uncertain delivery is the one outcome that cannot be proved
+                // either way, so it gets its own event rather than making every
+                // consumer subscribe to all job updates and filter. `event.state`
+                // is the reported transition, so this fires once on the way in
+                // rather than repeating for a job that is already uncertain.
+                if event.state == JobState::DeliveryUncertain {
+                    state
+                        .publish(tenant, "job.delivery_uncertain", &job)
+                        .await?;
+                }
+            }
             Ok(None) | Err(RepositoryError::ConcurrentStateChange) => {}
             Err(error) => return Err(error.into()),
         }
