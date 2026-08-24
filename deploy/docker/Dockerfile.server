@@ -6,10 +6,11 @@ COPY crates crates
 COPY bins bins
 COPY xtask xtask
 COPY migrations migrations
-# Published server images include OTLP capability; runtime export remains off
-# unless standard OTEL configuration enables it. Local Compose builds override
-# this argument with an empty value by default for the lightweight build.
-ARG PIQAE_SERVER_FEATURES="otlp"
+# Published server images include OTLP and Sentry capability; both remain off at
+# runtime unless standard OTEL configuration or SENTRY_DSN enables them. Local
+# Compose builds override this argument with an empty value by default for the
+# lightweight build.
+ARG PIQAE_SERVER_FEATURES="otlp,sentry"
 RUN if [ -n "${PIQAE_SERVER_FEATURES}" ]; then \
       cargo build --locked --release --bin piqae-server --features "${PIQAE_SERVER_FEATURES}"; \
     else \

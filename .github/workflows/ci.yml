@@ -108,6 +108,9 @@ jobs:
       - run: cargo test --workspace --locked
       - run: cargo clippy -p piqae-control-plane --all-targets --features otlp --locked -- -D warnings
       - run: cargo test -p piqae-control-plane --features otlp --locked
+      - run: cargo clippy -p piqae-control-plane --all-targets --features sentry --locked -- -D warnings
+      - run: cargo test -p piqae-control-plane --features sentry --locked
+      - run: cargo clippy -p piqae-control-plane --all-targets --features otlp,sentry --locked -- -D warnings
 
   rust-macos:
     name: Rust (macos-latest)
