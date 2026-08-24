@@ -56,6 +56,10 @@ async fn main() -> Result<()> {
             "control plane stopped with an error"
         );
     }
+    // A span only closes, and so only exports, once every handle is dropped.
+    // Holding this one across shutdown flushed the provider first and lost the
+    // very span that reports service failure.
+    drop(run_span);
     let shutdown_result = observability.shutdown();
     result.and(shutdown_result)
 }
