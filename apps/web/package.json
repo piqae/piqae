@@ -36,7 +36,7 @@
   "devDependencies": {
     "@playwright/test": "^1.54.1",
     "@sveltejs/adapter-node": "^5.2.13",
-    "@sveltejs/vite-plugin-svelte": "^5.1.0",
+    "@sveltejs/vite-plugin-svelte": "^7.3.0",
     "@testing-library/jest-dom": "^6.6.3",
     "@testing-library/svelte": "^5.2.8",
     "@types/d3-geo": "^3.1.0",
