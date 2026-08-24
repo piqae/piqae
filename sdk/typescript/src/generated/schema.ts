@@ -2451,6 +2451,10 @@ export interface components {
             /** @enum {string} */
             status: "ok";
             version: string;
+            /** @description Stable service identifier, so a probe cannot be satisfied by an unrelated origin. */
+            service: string;
+            /** @description The 40-character commit the running build was produced from, or `unknown` when the deployment did not supply one. A deploy gate can assert the live revision is the reviewed revision. */
+            revision: string;
         };
         DeploymentMeta: {
             /** @enum {string} */

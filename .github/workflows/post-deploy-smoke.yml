@@ -1,0 +1,115 @@
+name: Post-deploy smoke
+
+# A liveness probe proves a process started. It does not prove the reviewed
+# commit is live, and it does not prove the endpoints work in the deployment's
+# own configuration. This workflow asserts both against the running origin.
+#
+# Two entry points, on purpose:
+#   * `workflow_call` / `workflow_dispatch` with a revision, for a deploy gate
+#     that must refuse to finish until the reviewed commit is serving.
+#   * `schedule`, without a revision, as a standing production surface check.
+#     A configuration-dependent failure that no test covers surfaces here
+#     within hours instead of when a customer reports it.
+
+on:
+  workflow_call:
+    inputs:
+      service:
+        description: Health `service` identifier, for example piqae-control-plane
+        required: true
+        type: string
+      origin_variable:
+        description: Repository variable holding the live HTTPS origin
+        required: true
+        type: string
+      revision:
+        description: Full 40-character commit the origin must be serving
+        required: false
+        type: string
+  workflow_dispatch:
+    inputs:
+      service:
+        description: Health `service` identifier
+        required: true
+        type: choice
+        options:
+          - piqae-control-plane
+          - piqae-web
+      origin_variable:
+        description: Repository variable holding the live HTTPS origin
+        required: true
+        type: choice
+        options:
+          - PIQAE_API_ORIGIN
+          - PIQAE_WEB_ORIGIN
+      revision:
+        description: Full 40-character commit the origin must be serving
+        required: false
+        type: string
+  schedule:
+    - cron: "17 */6 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: post-deploy-smoke-${{ inputs.service || 'scheduled' }}
+  cancel-in-progress: false
+
+jobs:
+  requested:
+    name: Smoke ${{ inputs.service }}
+    if: github.event_name != 'schedule'
+    runs-on: ${{ vars.PIQAE_CI_LIGHT_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Assert the live revision and its real endpoints
+        env:
+          ORIGIN: ${{ vars[inputs.origin_variable] }}
+          SERVICE: ${{ inputs.service }}
+          REVISION: ${{ inputs.revision }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$ORIGIN" ]]; then
+            echo "Repository variable ${{ inputs.origin_variable }} is not set;" \
+              "a smoke check cannot be run without a live origin." >&2
+            exit 1
+          fi
+          arguments=(--origin "$ORIGIN" --service "$SERVICE")
+          if [[ -n "$REVISION" ]]; then
+            arguments+=(--revision "$REVISION")
+          fi
+          python3 release/tools/post_deploy_smoke.py "${arguments[@]}"
+
+  standing:
+    name: Standing production surface check
+    if: github.event_name == 'schedule'
+    runs-on: ${{ vars.PIQAE_CI_LIGHT_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - service: piqae-control-plane
+            origin: PIQAE_API_ORIGIN
+          - service: piqae-web
+            origin: PIQAE_WEB_ORIGIN
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Assert the live endpoints answer as themselves
+        env:
+          ORIGIN: ${{ vars[matrix.origin] }}
+          SERVICE: ${{ matrix.service }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$ORIGIN" ]]; then
+            echo "::notice::${{ matrix.origin }} is not set; skipping the" \
+              "standing check for $SERVICE."
+            exit 0
+          fi
+          python3 release/tools/post_deploy_smoke.py \
+            --origin "$ORIGIN" \
+            --service "$SERVICE" \
+            --attempts 3 \
+            --interval 10

@@ -54,13 +54,36 @@ use std::{
 pub struct HealthResponse {
     status: &'static str,
     version: &'static str,
+    service: &'static str,
+    revision: String,
 }
 
 pub async fn health() -> Json<HealthResponse> {
     Json(HealthResponse {
         status: "ok",
         version: env!("CARGO_PKG_VERSION"),
+        service: "piqae-control-plane",
+        revision: release_revision(),
     })
+}
+
+/// The commit the running build was produced from.
+///
+/// A deploy that reports only a package version cannot be checked against the
+/// revision that was reviewed: the version is unchanged between most commits,
+/// so a stale container answers a health probe indistinguishably from the
+/// intended one. Reporting the commit lets a post-deploy gate assert the live
+/// build is the reviewed build before it trusts any other signal.
+///
+/// Unset or malformed values become `unknown` rather than being echoed back,
+/// so a gate can never be satisfied by an arbitrary string.
+fn release_revision() -> String {
+    ["PIQAE_RELEASE_SHA", "RAILWAY_GIT_COMMIT_SHA"]
+        .into_iter()
+        .filter_map(|name| std::env::var(name).ok())
+        .map(|value| value.trim().to_ascii_lowercase())
+        .find(|value| value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .unwrap_or_else(|| "unknown".into())
 }
 
 pub async fn meta(State(state): State<AppState>) -> Json<crate::DeploymentCapabilities> {
