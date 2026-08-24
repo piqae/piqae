@@ -65,7 +65,10 @@ jobs:
     name: Rust (ubuntu-latest)
     needs: changes
     if: needs.changes.outputs.rust_server == 'true' || needs.changes.outputs.rust_shared == 'true'
-    runs-on: ${{ vars.PIQAE_CI_LINUX_RUNNER || 'ubuntu-latest' }}
+    # The Rust jobs are compile-bound and dominate wall-clock, while the Node
+    # jobs on PIQAE_CI_LINUX_RUNNER are install-bound. Giving the Rust jobs
+    # their own variable lets cores be bought where they convert into time.
+    runs-on: ${{ vars.PIQAE_CI_RUST_RUNNER || vars.PIQAE_CI_LINUX_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -106,11 +109,75 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
+
+  # The otlp feature changes the resolved feature set, so cargo rebuilds the
+  # control plane and its dependency tree from scratch for it. Serialising that
+  # behind the default build added about 63s to a 226s job for no extra
+  # coverage; running it beside the default build keeps every command and flag
+  # identical and returns that time. It stays required by `CI result`.
+  rust-linux-otlp:
+    name: Rust (ubuntu-latest, otlp)
+    needs: changes
+    if: needs.changes.outputs.rust_server == 'true' || needs.changes.outputs.rust_shared == 'true'
+    runs-on: ${{ vars.PIQAE_CI_RUST_RUNNER || vars.PIQAE_CI_LINUX_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: 1.88.0
+          components: clippy
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+        with:
+          # A distinct key: sharing one with the default build would make each
+          # job evict the other's artifacts on every run.
+          shared-key: ci-linux-otlp
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo clippy -p piqae-control-plane --all-targets --features otlp --locked -- -D warnings
       - run: cargo test -p piqae-control-plane --features otlp --locked
       - run: cargo clippy -p piqae-control-plane --all-targets --features sentry --locked -- -D warnings
       - run: cargo test -p piqae-control-plane --features sentry --locked
       - run: cargo clippy -p piqae-control-plane --all-targets --features otlp,sentry --locked -- -D warnings
+
+  # Every database-backed suite answers "skipped" and reports a pass when
+  # PIQAE_TEST_DATABASE_URL is unset, so CI ran none of them: schema upgrades,
+  # the WorkOS identity projection, cloud billing, cross-node reroute fencing,
+  # and platform-account HTTP authorization were only ever exercised by a
+  # release check on a contributor's machine. Run them here against a real
+  # database, through the wrapper that fails closed on a skip.
+  rust-postgres:
+    name: Rust (PostgreSQL evidence)
+    needs: changes
+    if: needs.changes.outputs.rust_server == 'true' || needs.changes.outputs.rust_shared == 'true'
+    runs-on: ${{ vars.PIQAE_CI_RUST_RUNNER || vars.PIQAE_CI_LINUX_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
+        env:
+          POSTGRES_DB: piqae_test
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d piqae_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      PIQAE_TEST_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/piqae_test
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: 1.88.0
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+        with:
+          shared-key: ci-linux-postgres
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Require every database boundary to produce evidence
+        run: python3 release/tools/check_postgres_release_tests.py
 
   rust-macos:
     name: Rust (macos-latest)
@@ -400,7 +467,9 @@ jobs:
       - mcp
       - openapi
       - rust-linux
+      - rust-linux-otlp
       - rust-macos
+      - rust-postgres
       - rust-windows
       - sdk
       - shopify
@@ -417,7 +486,9 @@ jobs:
           MCP: ${{ needs.mcp.result }}
           OPENAPI: ${{ needs.openapi.result }}
           RUST_LINUX: ${{ needs.rust-linux.result }}
+          RUST_LINUX_OTLP: ${{ needs.rust-linux-otlp.result }}
           RUST_MACOS: ${{ needs.rust-macos.result }}
+          RUST_POSTGRES: ${{ needs.rust-postgres.result }}
           RUST_WINDOWS: ${{ needs.rust-windows.result }}
           SDK: ${{ needs.sdk.result }}
           SHOPIFY: ${{ needs.shopify.result }}
@@ -430,7 +501,9 @@ jobs:
             "$MCP" \
             "$OPENAPI" \
             "$RUST_LINUX" \
+            "$RUST_LINUX_OTLP" \
             "$RUST_MACOS" \
+            "$RUST_POSTGRES" \
             "$RUST_WINDOWS" \
             "$SDK" \
             "$SHOPIFY" \

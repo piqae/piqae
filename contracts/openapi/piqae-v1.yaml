@@ -3418,13 +3418,22 @@ components:
         options: { type: object, additionalProperties: true }
     Health:
       type: object
-      required: [status, version]
+      required: [status, version, service, revision]
       properties:
         status:
           type: string
           enum: [ok]
         version:
           type: string
+        service:
+          type: string
+          description: Stable service identifier, so a probe cannot be satisfied
+            by an unrelated origin.
+        revision:
+          type: string
+          description: The 40-character commit the running build was produced
+            from, or `unknown` when the deployment did not supply one. A deploy
+            gate can assert the live revision is the reviewed revision.
     DeploymentMeta:
       type: object
       additionalProperties: false

@@ -33,6 +33,7 @@ Detailed contributor references:
 - [Development](development.md)
 - [Architecture](architecture.md)
 - [Testing](testing.md)
+- [Continuous integration](ci.md)
 - [Releases](releases.md)
 - [RFC process](rfc-process.md)
 - [Security policy](../../SECURITY.md)

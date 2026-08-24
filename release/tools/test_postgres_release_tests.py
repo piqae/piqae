@@ -17,6 +17,9 @@ class PostgresReleaseEvidenceTest(unittest.TestCase):
                 "platform_service_accounts",
                 "platform_service_account_http",
                 "platform_accounts",
+                "migrations",
+                "workos_identity",
+                "billing",
             ],
         )
 
