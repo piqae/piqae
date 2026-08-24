@@ -69,9 +69,13 @@ before deleting the cookie. Configure the lifetime with
 by default). Set `PIQAE_COOKIE_SECURE=true` when TLS is terminated in front of
 an internally HTTP SvelteKit process.
 
-The tenant endpoints `GET /v1/identity/me`, `GET /v1/workspaces/current`, and
-`GET /v1/workspaces/current/members` always derive the workspace from the
-verified bearer; callers cannot provide a workspace ID.
+The tenant endpoints `GET /v1/identity/me`, `GET /v1/workspaces/current`,
+`PATCH /v1/workspaces/current`, and `GET /v1/workspaces/current/members` always
+derive the workspace from the verified bearer; callers cannot provide a
+workspace ID. They are workspace projections rather than local-owner identity
+operations, so they are served under every identity provider, including WorkOS
+and OIDC. Only bootstrap, credential exchange, and session rotation/revocation
+require `PIQAE_IDENTITY_PROVIDER=local_owner`.
 
 Current limitations are intentional and explicit:
 

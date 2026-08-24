@@ -22,8 +22,9 @@ use piqae_storage_postgres::{
     StoredNodeUpdate, StoredPlatformAccount, StoredPlatformCredential, StoredPrintWorkflow,
     StoredPrinter, StoredResolvedPrintTicket, StoredStock, StoredTarget, StoredTargetBinding,
     StoredTenantEvent, StoredUpload, StoredUsageSummary, StoredWebhook, StoredWebhookDelivery,
-    StripeBillingEvent, StripeProjectionResult, SyncedPrinter, UpsertedPlatformAccount,
-    WebhookDeliveryWork, WorkOsIdentityEvent, WorkOsProjectionResult,
+    StoredWorkspace, StoredWorkspaceMember, StripeBillingEvent, StripeProjectionResult,
+    SyncedPrinter, UpsertedPlatformAccount, WebhookDeliveryWork, WorkOsIdentityEvent,
+    WorkOsProjectionResult,
 };
 use sha2::Digest as _;
 use std::{
@@ -1060,6 +1061,25 @@ pub trait Repository: Send + Sync + 'static {
         resource_type: &str,
         compatibility_id: i64,
     ) -> Result<String, RepositoryError>;
+    /// Workspace projections. These are tenant reads and writes keyed off the
+    /// authenticated workspace, not local-owner identity operations, so they
+    /// live on the repository and stay available under every identity
+    /// provider.
+    async fn get_workspace(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<StoredWorkspace, RepositoryError>;
+    async fn list_workspace_members(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<Vec<StoredWorkspaceMember>, RepositoryError>;
+    /// Changes only the workspace display name. Slug and identifiers are left
+    /// untouched so a rename can never orphan an existing reference.
+    async fn rename_workspace(
+        &self,
+        workspace_id: WorkspaceId,
+        name: &str,
+    ) -> Result<StoredWorkspace, RepositoryError>;
 }
 
 #[async_trait]
@@ -2936,6 +2956,34 @@ impl Repository for PostgresStore {
         .await
         .map_err(Into::into)
     }
+
+    async fn get_workspace(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<StoredWorkspace, RepositoryError> {
+        PostgresStore::get_workspace(self, workspace_id)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn list_workspace_members(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<Vec<StoredWorkspaceMember>, RepositoryError> {
+        PostgresStore::list_workspace_members(self, workspace_id)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn rename_workspace(
+        &self,
+        workspace_id: WorkspaceId,
+        name: &str,
+    ) -> Result<StoredWorkspace, RepositoryError> {
+        PostgresStore::rename_workspace(self, workspace_id, name)
+            .await
+            .map_err(Into::into)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -2985,6 +3033,8 @@ type MemoryEnrolment = (
 
 #[derive(Debug, Default)]
 struct MemoryState {
+    workspaces: HashMap<WorkspaceId, StoredWorkspace>,
+    workspace_members: HashMap<WorkspaceId, Vec<StoredWorkspaceMember>>,
     document_templates: HashMap<String, (WorkspaceId, EnvironmentId, StoredDocumentTemplate)>,
     document_revisions:
         HashMap<String, (WorkspaceId, EnvironmentId, StoredDocumentTemplateRevision)>,
@@ -3102,6 +3152,30 @@ impl MemoryRepository {
                 },
             ),
         );
+    }
+
+    /// Seeds a workspace and its members so workspace projections can be
+    /// exercised without `PostgreSQL`.
+    pub async fn add_workspace(
+        &self,
+        workspace_id: WorkspaceId,
+        name: &str,
+        members: Vec<StoredWorkspaceMember>,
+    ) {
+        let now = Utc::now();
+        let mut state = self.state.write().await;
+        state.workspaces.insert(
+            workspace_id,
+            StoredWorkspace {
+                id: workspace_id,
+                name: name.to_owned(),
+                slug: format!("ws-{workspace_id}"),
+                status: "active".into(),
+                created_at: now,
+                updated_at: now,
+            },
+        );
+        state.workspace_members.insert(workspace_id, members);
     }
 
     pub async fn set_agent_public_key(&self, agent_id: AgentId, public_key: Vec<u8>) {
@@ -6437,6 +6511,48 @@ impl Repository for MemoryRepository {
             ))
             .cloned()
             .ok_or(RepositoryError::NotFound)
+    }
+
+    async fn get_workspace(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<StoredWorkspace, RepositoryError> {
+        self.state
+            .read()
+            .await
+            .workspaces
+            .get(&workspace_id)
+            .cloned()
+            .ok_or(RepositoryError::NotFound)
+    }
+
+    async fn list_workspace_members(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<Vec<StoredWorkspaceMember>, RepositoryError> {
+        Ok(self
+            .state
+            .read()
+            .await
+            .workspace_members
+            .get(&workspace_id)
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    async fn rename_workspace(
+        &self,
+        workspace_id: WorkspaceId,
+        name: &str,
+    ) -> Result<StoredWorkspace, RepositoryError> {
+        let mut state = self.state.write().await;
+        let workspace = state
+            .workspaces
+            .get_mut(&workspace_id)
+            .ok_or(RepositoryError::NotFound)?;
+        name.clone_into(&mut workspace.name);
+        workspace.updated_at = Utc::now();
+        Ok(workspace.clone())
     }
 }
 
