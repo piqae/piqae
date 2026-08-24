@@ -37,7 +37,7 @@
     "@playwright/test": "^1.54.1",
     "@sveltejs/adapter-node": "^5.2.13",
     "@sveltejs/vite-plugin-svelte": "^5.1.0",
-    "@testing-library/jest-dom": "^6.6.3",
+    "@testing-library/jest-dom": "^7.0.1",
     "@testing-library/svelte": "^5.2.8",
     "@types/d3-geo": "^3.1.0",
     "@types/node": "^22.20.1",
