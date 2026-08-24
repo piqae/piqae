@@ -84,6 +84,54 @@ GATES = (
         ),
         expected_test="postgres_http_platform_accounts_are_owned_idempotent_and_archive_safely",
     ),
+    # Schema upgrades, the WorkOS identity projection, and cloud billing each
+    # only exist against a real database. Without them here nothing ran them:
+    # they answer "skipped" and report a pass to any ordinary test command.
+    Gate(
+        identifier="migrations",
+        command=(
+            "cargo",
+            "test",
+            "-p",
+            "piqae-storage-postgres",
+            "--test",
+            "migrations",
+            "--locked",
+            "--",
+            "--nocapture",
+        ),
+        expected_test="documents_migrate_and_enforce_tenant_scoped_references",
+    ),
+    Gate(
+        identifier="workos_identity",
+        command=(
+            "cargo",
+            "test",
+            "-p",
+            "piqae-storage-postgres",
+            "--test",
+            "workos_identity",
+            "--locked",
+            "--",
+            "--nocapture",
+        ),
+        expected_test="workos_projection_is_idempotent_ordered_and_organization_scoped",
+    ),
+    Gate(
+        identifier="billing",
+        command=(
+            "cargo",
+            "test",
+            "-p",
+            "piqae-control-plane",
+            "--test",
+            "billing_postgres",
+            "--locked",
+            "--",
+            "--nocapture",
+        ),
+        expected_test="cloud_billing_is_tenant_scoped_idempotent_and_stripe_projected",
+    ),
 )
 
 

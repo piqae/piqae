@@ -1,0 +1,32 @@
+{
+  "schema": 1,
+  "comment": "Endpoints a post-deploy gate exercises against the live revision. Deliberately small and representative: a smoke check proves the deployed build serves its real surface in its real configuration, it does not replace the test suite. Every api path here is asserted to exist in contracts/openapi/piqae-v1.yaml by release/tools/test_post_deploy_smoke.py.",
+  "services": {
+    "piqae-control-plane": {
+      "health_path": "/v1/health",
+      "probes": [
+        { "path": "/v1/meta", "expect": "public" },
+        { "path": "/v1/ready", "expect": "public" },
+        { "path": "/v1/workspaces/current", "expect": "authenticated" },
+        { "path": "/v1/workspaces/current/members", "expect": "authenticated" },
+        { "path": "/v1/identity/me", "expect": "authenticated" },
+        { "path": "/v1/printers", "expect": "authenticated" },
+        { "path": "/v1/jobs", "expect": "authenticated" },
+        { "path": "/v1/api-keys", "expect": "authenticated" },
+        { "path": "/v1/webhooks", "expect": "authenticated" },
+        { "path": "/v1/targets", "expect": "authenticated" },
+        { "path": "/v1/nodes", "expect": "authenticated" },
+        { "path": "/v1/usage", "expect": "authenticated" }
+      ]
+    },
+    "piqae-web": {
+      "health_path": "/healthz",
+      "probes": [
+        { "path": "/", "expect": "public" },
+        { "path": "/pricing", "expect": "public" },
+        { "path": "/login", "expect": "public" },
+        { "path": "/docs", "expect": "public" }
+      ]
+    }
+  }
+}
