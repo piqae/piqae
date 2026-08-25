@@ -23,6 +23,8 @@ use std::{collections::BTreeMap, str::FromStr, time::Duration};
 use thiserror::Error;
 use uuid::Uuid;
 
+pub mod destination_topology;
+
 #[derive(Clone, Copy)]
 struct PlanDefaults {
     included_jobs: i64,
