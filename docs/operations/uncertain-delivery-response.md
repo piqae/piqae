@@ -96,7 +96,7 @@ update and filter.
 Subscribe to both, and treat them differently. `job.delivery_uncertain` is
 timely and noisy: entering the state is unremarkable, and many of these
 questions are answered the moment somebody glances at the printer. It is the
-right feed for a dashboard or a log. `job.delivery_uncertain.unresolved` is the one that has
+right feed for a dashboard or a log. The unresolved event is the one that has
 earned a human's attention, because the job stayed uncertain past the
 threshold and was never surfaced before. It is the right feed for a ticket.
 
@@ -290,6 +290,8 @@ removes it.
     of. A job that reached the native queue is materially more likely to have
     printed than one whose handoff is itself in doubt.
 - `agent_id` on that event names the node to go and look at.
+- The dashboard jobs view has an **Uncertain** state filter if you would rather
+  browse than query.
 
 Do not rewrite this history to make a later attempt look like the original.
 
@@ -388,8 +390,18 @@ to look until the ticket exists.
 
 Stated plainly, because assuming any of these work would cost a document.
 
-- There is no dashboard view of uncertain jobs. Reconciliation is
+- The dashboard's uncertain surface is a state filter, a per-job note, and a
+  count on the overview computed from the most recent 100 jobs only. There is
+  no age, no unresolved marker, and no workspace-wide total, so it will not
+  tell you that a job has been uncertain since this morning. Reconciliation is
   `GET /v1/jobs?state=delivery_uncertain`, paginated with `after`.
+- The signal depends on the node reconnecting. A node that is handed a job and
+  then never syncs again leaves the control plane holding the last state it
+  reported, which is node hardware loss rather than uncertain delivery, and a
+  different procedure.
+- A local-only node has no control plane, so it has no webhooks and no event
+  stream. Its queue view is the only surface, and this whole alerting path does
+  not apply.
 - There is no server-side reprint and no recorded link from a reprinted job
   back to the uncertain one beyond metadata you set yourself.
 - Nothing marks an uncertain job resolved.
