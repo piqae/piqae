@@ -143,6 +143,7 @@ async fn insert_durable_job(
         state: JobState::WaitingForAgent,
         created_at: now,
         expires_at: now + chrono::Duration::hours(1),
+        delivery_uncertain_since: None,
     };
     store
         .create_job(&job, agent_id, None, b"durable archive fixture")

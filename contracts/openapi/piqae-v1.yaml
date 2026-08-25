@@ -4810,6 +4810,14 @@ components:
         expires_at:
           type: string
           format: date-time
+        delivery_uncertain_since:
+          description: |
+            When the job entered delivery_uncertain, on the server clock.
+            Present only for jobs in that state. A caller can use it to show how
+            long a handoff has gone unconfirmed; the job's own age is a poor
+            substitute, since a job may sit queued long before the handoff.
+          type: string
+          format: date-time
         resolved_print_ticket:
           oneOf:
             - { $ref: "#/components/schemas/ResolvedPrintTicket" }
