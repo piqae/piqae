@@ -10,7 +10,7 @@ use anyhow::{Context, Result, bail};
 use piqae_protocol::agent::PrinterGrant;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::BTreeMap,
     fs::OpenOptions,
     io::Write as _,
     path::{Path, PathBuf},
@@ -296,46 +296,6 @@ fn validate_record(record: &ConnectorRecord) -> Result<()> {
     Ok(())
 }
 
-/// Round-robin admission queue for a bounded shared native executor.
-/// Duplicate readiness signals are coalesced, preventing a busy tenant from
-/// occupying the queue and starving quiet connectors.
-#[derive(Debug)]
-#[allow(dead_code, reason = "consumed by the staged connector supervisor")]
-pub struct FairConnectorQueue {
-    ready: VecDeque<String>,
-    queued: std::collections::BTreeSet<String>,
-    capacity: usize,
-}
-
-impl FairConnectorQueue {
-    #[allow(dead_code, reason = "consumed by the staged connector supervisor")]
-    pub(crate) fn new(capacity: usize) -> Result<Self> {
-        if capacity == 0 || capacity > MAX_CONNECTORS {
-            bail!("invalid scheduler capacity");
-        }
-        Ok(Self {
-            ready: VecDeque::new(),
-            queued: std::collections::BTreeSet::default(),
-            capacity,
-        })
-    }
-    #[allow(dead_code, reason = "consumed by the staged connector supervisor")]
-    pub(crate) fn notify_ready(&mut self, connector_id: &str) -> bool {
-        if self.queued.contains(connector_id) || self.ready.len() >= self.capacity {
-            return false;
-        }
-        self.queued.insert(connector_id.to_owned());
-        self.ready.push_back(connector_id.to_owned());
-        true
-    }
-    #[allow(dead_code, reason = "consumed by the staged connector supervisor")]
-    pub(crate) fn next(&mut self) -> Option<String> {
-        let id = self.ready.pop_front()?;
-        self.queued.remove(&id);
-        Some(id)
-    }
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -446,19 +406,6 @@ mod tests {
         assert!(registry.add(insecure).is_err());
         registry.add(record("ncon_a")).unwrap();
         assert!(registry.add(record("ncon_a")).is_err());
-    }
-
-    #[test]
-    fn scheduler_is_bounded_coalesced_and_round_robin() {
-        let mut queue = FairConnectorQueue::new(2).unwrap();
-        assert!(queue.notify_ready("ncon_a"));
-        assert!(!queue.notify_ready("ncon_a"));
-        assert!(queue.notify_ready("ncon_b"));
-        assert!(!queue.notify_ready("ncon_c"));
-        assert_eq!(queue.next().as_deref(), Some("ncon_a"));
-        assert!(queue.notify_ready("ncon_a"));
-        assert_eq!(queue.next().as_deref(), Some("ncon_b"));
-        assert_eq!(queue.next().as_deref(), Some("ncon_a"));
     }
 
     #[test]

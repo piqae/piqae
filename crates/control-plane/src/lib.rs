@@ -1644,6 +1644,9 @@ mod tests {
             lease_token: offer.lease_token.clone(),
             content_sha256: offered_sha256.clone(),
             local_sequence: 1,
+            route_reservation_id: None,
+            route_generation: None,
+            route_fencing_token: None,
         };
         let accepted = application
             .router
@@ -3564,6 +3567,9 @@ mod tests {
                 _ => panic!("expected materialized download content"),
             },
             local_sequence: 1,
+            route_reservation_id: None,
+            route_generation: None,
+            route_fencing_token: None,
         };
         let path = format!("/v1/agent/jobs/{}/accept", offer.job.id);
         let response = application

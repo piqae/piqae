@@ -182,6 +182,7 @@ mod platform {
                 content_path,
                 options,
                 native_profile,
+                route_fence,
                 ..
             } => {
                 if let Some(error) =
@@ -189,7 +190,15 @@ mod platform {
                 {
                     Err(error)
                 } else {
-                    submit_raw(&native_printer_id, &title, &content_path)
+                    let mut result = submit_raw(&native_printer_id, &title, &content_path)?;
+                    if let ExecutorResult::Submitted {
+                        route_fence: echoed,
+                        ..
+                    } = &mut result
+                    {
+                        *echoed = route_fence;
+                    }
+                    Ok(result)
                 }
             }
             ExecutorOperation::Submit {
@@ -200,8 +209,9 @@ mod platform {
                 content_path,
                 options,
                 native_profile,
+                route_fence,
             } => {
-                if let Some(profile) = native_profile.as_ref() {
+                let mut result = if let Some(profile) = native_profile.as_ref() {
                     piqae_executor_windows::windows_replay::submit_native_pdf(
                         &native_printer_id,
                         &title,
@@ -211,7 +221,15 @@ mod platform {
                     )
                 } else {
                     submit_pdf_helper(job_id, &native_printer_id, &content_path, &options)
+                }?;
+                if let ExecutorResult::Submitted {
+                    route_fence: echoed,
+                    ..
+                } = &mut result
+                {
+                    *echoed = route_fence;
                 }
+                Ok(result)
             }
             ExecutorOperation::Observe {
                 native_printer_id,
@@ -378,6 +396,7 @@ mod platform {
                     capabilities: PrinterCapabilities::default(),
                     native_options: std::collections::BTreeMap::new(),
                     driver_fingerprint: None,
+                    identity_evidence: Vec::new(),
                 })
                 .collect();
             Ok(ExecutorResult::Printers { printers })
@@ -459,6 +478,7 @@ mod platform {
             }
             Ok(ExecutorResult::Submitted {
                 native_job_id: Some(job_id.to_string()),
+                route_fence: None,
             })
         }
     }
@@ -511,6 +531,7 @@ mod platform {
             // explicitly backend-scoped and must not be queried through
             // SetJobW as though it were a native integer.
             native_job_id: Some(format!("sumatra-{job_id}")),
+            route_fence: None,
         })
     }
 

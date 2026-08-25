@@ -100,7 +100,9 @@ impl PlatformAdapter for FakePlatformAdapter {
                 .then(|| ExecutorResult::Jobs { jobs: Vec::new() })
                 .ok_or_else(|| not_found(&native_printer_id)),
             ExecutorOperation::Submit {
-                native_printer_id, ..
+                native_printer_id,
+                route_fence,
+                ..
             } => {
                 if !self
                     .printers
@@ -112,6 +114,7 @@ impl PlatformAdapter for FakePlatformAdapter {
                 self.submitted_jobs += 1;
                 Ok(ExecutorResult::Submitted {
                     native_job_id: Some(format!("fake-{}", self.submitted_jobs)),
+                    route_fence,
                 })
             }
             ExecutorOperation::Cancel {
@@ -185,6 +188,7 @@ mod tests {
                 capabilities: PrinterCapabilities::default(),
                 native_options: std::collections::BTreeMap::new(),
                 driver_fingerprint: None,
+                identity_evidence: Vec::new(),
             }],
             submitted_jobs: 0,
         };

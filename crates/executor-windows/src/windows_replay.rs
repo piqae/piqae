@@ -88,6 +88,7 @@ pub fn submit_native_pdf(
     let job_id = job.finish()?;
     Ok(ExecutorResult::Submitted {
         native_job_id: Some(job_id.to_string()),
+        route_fence: None,
     })
 }
 

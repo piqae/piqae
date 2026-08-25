@@ -2671,6 +2671,7 @@ pub async fn agent_sync(
                     lease_token: lease.lease_token,
                     lease_expires_at: lease.lease_until,
                     content,
+                    route_reservation: None,
                 });
                 continue;
             }
@@ -2710,6 +2711,7 @@ pub async fn agent_sync(
             lease_token: lease.lease_token,
             lease_expires_at: lease.lease_until,
             content,
+            route_reservation: None,
         });
     }
     let has_immediate_work = !request.events.is_empty()
@@ -2727,7 +2729,9 @@ pub async fn agent_sync(
         next_poll_after_ms,
         acknowledged_diagnostics,
         inventory_projection,
-        acknowledged_handoff_sequence: request.native_handoffs.last().map(|item| item.sequence),
+        // Handoff evidence storage is capability-gated; do not acknowledge
+        // values until the repository transaction has durably consumed them.
+        acknowledged_handoff_sequence: None,
     }))
 }
 
