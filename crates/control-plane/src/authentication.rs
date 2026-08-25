@@ -145,6 +145,15 @@ pub trait Authenticator: Send + Sync + 'static {
     ) -> Result<PlatformManagerContext, AuthenticationError> {
         Err(AuthenticationError)
     }
+    async fn authenticate_managed_human(
+        &self,
+        _authorization: &str,
+        _workspace_id: WorkspaceId,
+        _environment_id: EnvironmentId,
+        _required_scope: Scope,
+    ) -> Result<TenantContext, AuthenticationError> {
+        Err(AuthenticationError)
+    }
     async fn authenticate_human(
         &self,
         authorization: &str,
@@ -521,6 +530,39 @@ impl Authenticator for CombinedAuthenticator {
         Ok(PlatformManagerContext {
             service_account_id,
             owner_workspace_id: human.workspace_id,
+        })
+    }
+
+    async fn authenticate_managed_human(
+        &self,
+        authorization: &str,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        required_scope: Scope,
+    ) -> Result<TenantContext, AuthenticationError> {
+        let human = self.authenticate_human(authorization).await?;
+        // Managed-customer administration is an owner/admin capability. The
+        // same explicit platform-management permission gates account listing,
+        // so a workspace member cannot bypass that boundary by supplying a
+        // known child workspace identifier directly.
+        if !human.allows(Scope::ApiKeysWrite) || !human.allows(required_scope) {
+            return Err(AuthenticationError);
+        }
+        let grant = self
+            .postgres
+            .store
+            .managed_tenant_for_owner(human.workspace_id, workspace_id, environment_id)
+            .await
+            .map_err(|_| AuthenticationError)?;
+        let permissions = Permissions::from_names(&grant.scopes);
+        if !permissions.allows(required_scope) {
+            return Err(AuthenticationError);
+        }
+        Ok(TenantContext {
+            workspace_id,
+            environment_id,
+            permissions,
+            platform_service_account_id: None,
         })
     }
 

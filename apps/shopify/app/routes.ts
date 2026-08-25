@@ -5,6 +5,7 @@ export default [
   index("routes/_index.tsx"),
   route("auth/*", "routes/auth.$.tsx"),
   route("webhooks", "routes/webhooks.tsx"),
+  route("connect/complete", "routes/connect.complete.tsx"),
   route("api/print/admin", "routes/api.print.admin.tsx"),
   route("api/print/admin/options", "routes/api.print.admin-options.tsx"),
   route("api/print/admin/readiness", "routes/api.print.admin-readiness.tsx"),

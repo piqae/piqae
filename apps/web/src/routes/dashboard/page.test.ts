@@ -7,6 +7,7 @@ vi.mock('$app/state', () => ({
 }));
 
 import Page from './+page.svelte';
+import { page } from '$app/state';
 import type { DashboardJob } from '$lib/view-types';
 
 // Deliberately far from the wall clock: every age below is measured against
@@ -221,5 +222,69 @@ describe('uncertain delivery on the operations dashboard', () => {
     expect(screen.getByText('Unproven label')).toBeInTheDocument();
     expect(screen.queryByText('Completed slip')).not.toBeInTheDocument();
     expect(screen.getByLabelText('Filter by state')).toHaveValue('delivery_uncertain');
+  });
+});
+
+describe('managed customer operations', () => {
+  const account = {
+    id: 'wsp_child',
+    externalId: 'shopify:gid://shopify/Shop/1',
+    name: 'C4 Beta',
+    status: 'active' as const,
+    metadata: {},
+    environments: { testId: 'env_test', liveId: 'env_live' },
+    createdAt: minutesAgo(60),
+    updatedAt: minutesAgo(1)
+  };
+
+  it('makes delegated customer context explicit and explains empty printer inventory', () => {
+    page.url = new URL(
+      `https://piqae.test/dashboard?view=nodes&managed_customer=${encodeURIComponent(account.externalId)}&node=agt_old`
+    ) as never;
+    render(Page, {
+      data: {
+        ...pageData([]),
+        view: 'nodes',
+        managedAccount: account,
+        printers: [],
+        agents: [agent]
+      } as never,
+      form: null as never
+    });
+
+    expect(screen.getByText('C4 Beta operations')).toBeInTheDocument();
+    expect(
+      screen.getByText('Managing C4 Beta on behalf of your workspace')
+    ).toBeInTheDocument();
+    expect(screen.getByText(/no printer inventory has been reported/i)).toBeInTheDocument();
+    const nodesMetric = screen.getByRole('link', { name: /Nodes online/ });
+    expect(nodesMetric).toHaveAttribute(
+      'href',
+      expect.stringContaining(`managed_customer=${encodeURIComponent(account.externalId)}`)
+    );
+    expect(nodesMetric).not.toHaveAttribute(
+      'href',
+      expect.stringContaining('node=')
+    );
+    expect(screen.getByRole('link', { name: 'Return to customers' })).not.toHaveAttribute(
+      'href',
+      expect.stringContaining('managed_customer=')
+    );
+  });
+
+  it('offers an intentional customer drill-in instead of aggregating resources', () => {
+    render(Page, {
+      data: {
+        ...pageData([]),
+        view: 'customers',
+        accounts: [account],
+        detail: { kind: 'customer', account }
+      } as never,
+      form: null as never
+    });
+
+    const link = screen.getByRole('link', { name: 'Manage customer' });
+    expect(link).toHaveAttribute('href', expect.stringContaining('managed_customer='));
+    expect(link).toHaveAttribute('href', expect.stringContaining('view=nodes'));
   });
 });

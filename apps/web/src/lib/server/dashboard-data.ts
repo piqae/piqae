@@ -71,14 +71,23 @@ export function dashboardSource(event: Pick<RequestEvent, 'fetch' | 'url' | 'loc
 }
 
 export function dashboardSdk(
-  event: Pick<RequestEvent, 'fetch' | 'url' | 'locals'>
+  event: Pick<RequestEvent, 'fetch' | 'url' | 'locals'>,
+  managed?: { workspaceId: string; environmentId: string }
 ): PiqaeClient {
   const { baseUrl, bearerToken } = dashboardConnection(event);
   return new PiqaeClient({
     baseUrl,
     fetch: event.fetch,
     apiKey: bearerToken,
-    headers: { 'x-piqae-dashboard': '1' }
+    headers: {
+      'x-piqae-dashboard': '1',
+      ...(managed
+        ? {
+            'x-piqae-managed-workspace-id': managed.workspaceId,
+            'x-piqae-managed-environment-id': managed.environmentId
+          }
+        : {})
+    }
   });
 }
 

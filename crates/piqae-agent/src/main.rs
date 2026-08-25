@@ -318,6 +318,7 @@ struct ConnectorWorker {
     allowed_printer_ids: Option<std::collections::BTreeSet<String>>,
     printer_inventory_dirty: Arc<AtomicBool>,
     wakeup: Arc<Notify>,
+    last_sync_error_code: Arc<RwLock<Option<String>>>,
     sync_stop: StopSignal,
     scheduler_stop: StopSignal,
     connection_stop: StopSignal,
@@ -686,6 +687,7 @@ async fn main() -> Result<()> {
             Arc::clone(&paused),
             Arc::clone(&cloud_sync_wakeup),
             Arc::clone(&printer_inventory_dirty),
+            Arc::new(RwLock::new(None)),
             stop.clone(),
         ));
         Some(LegacyCloudWorker { stop, task })
@@ -1759,12 +1761,54 @@ async fn connector_supervisor_loop(
                     });
                 let details = match result {
                     Ok(records) => {
+                        let local_printers = AgentStore::open(data_dir.join("agent.sqlite3"))
+                            .and_then(|store| store.present_printers())
+                            .map_err(|error| {
+                                control_failure("connector_details_failed", &error.to_string())
+                            });
+                        let local_printers = match local_printers {
+                            Ok(printers) => printers,
+                            Err(failure) => {
+                                let _ = respond_to.send(Err(failure));
+                                continue;
+                            }
+                        };
                         let mut details = Vec::with_capacity(records.len());
                         for record in records {
                             let connection =
                                 enum_string(connections.state(&record.connector_id).await);
                             let permission = enum_string(record.printer_grant);
                             let selected_printer_count = record.allowed_printer_ids.len();
+                            let allowed_printers = connector_allowed_printers(&record);
+                            let eligible_printer_count = local_printers
+                                .iter()
+                                .filter(|printer| {
+                                    printer_is_allowed(
+                                        allowed_printers.as_ref(),
+                                        &printer.printer_id,
+                                    )
+                                })
+                                .count();
+                            let (last_sync_error_code, inventory_refresh_pending) =
+                                if let Some(worker) = workers.get(&record.connector_id) {
+                                    (
+                                        worker.last_sync_error_code.read().await.clone(),
+                                        worker.printer_inventory_dirty.load(Ordering::Acquire),
+                                    )
+                                } else {
+                                    (Some("connector_worker_unavailable".to_owned()), true)
+                                };
+                            let inventory_revision =
+                                connector_runtime::ConnectorRegistry::load(&data_dir)
+                                    .ok()
+                                    .and_then(|registry| registry.paths(&record.connector_id).ok())
+                                    .and_then(|paths| AgentStore::open(paths.database).ok())
+                                    .and_then(|store| {
+                                        store.setting("printer_inventory_revision").ok()
+                                    })
+                                    .flatten()
+                                    .and_then(|revision| revision.parse::<u64>().ok())
+                                    .unwrap_or(0);
                             details.push(LocalConnectorDetail {
                                 connector_id: record.connector_id,
                                 display_name: record
@@ -1777,6 +1821,11 @@ async fn connector_supervisor_loop(
                                 permission,
                                 allowed_printer_ids: record.allowed_printer_ids,
                                 selected_printer_count,
+                                last_sync_error_code,
+                                local_printer_count: local_printers.len(),
+                                eligible_printer_count,
+                                inventory_revision,
+                                inventory_refresh_pending,
                                 manage_url: None,
                             });
                         }
@@ -1958,6 +2007,7 @@ async fn start_connector_worker(
     ));
     let wakeup = Arc::new(Notify::new());
     let printer_inventory_dirty = Arc::new(AtomicBool::new(true));
+    let last_sync_error_code = Arc::new(RwLock::new(None));
     let sync_stop = StopSignal::default();
     let scheduler_stop = StopSignal::default();
     // Resolve every fallible runtime dependency before spawning either half;
@@ -1987,6 +2037,7 @@ async fn start_connector_worker(
         paused,
         Arc::clone(&wakeup),
         Arc::clone(&printer_inventory_dirty),
+        Arc::clone(&last_sync_error_code),
         sync_stop.clone(),
     ));
     let connection_stop = StopSignal::default();
@@ -2000,6 +2051,7 @@ async fn start_connector_worker(
         allowed_printer_ids: connector_allowed_printers(&record),
         printer_inventory_dirty,
         wakeup,
+        last_sync_error_code,
         sync_stop,
         scheduler_stop,
         connection_stop,
@@ -3441,6 +3493,7 @@ async fn cloud_sync_loop(
     paused: Arc<AtomicBool>,
     cloud_sync_wakeup: Arc<Notify>,
     printer_inventory_dirty: Arc<AtomicBool>,
+    last_sync_error_code: Arc<RwLock<Option<String>>>,
     stop: StopSignal,
 ) {
     let store = match AgentStore::open(&database_path) {
@@ -3477,6 +3530,7 @@ async fn cloud_sync_loop(
         paused,
         cloud_sync_wakeup,
         printer_inventory_dirty,
+        last_sync_error_code,
         stop,
     )
     .await;
@@ -3500,6 +3554,7 @@ async fn run_cloud_sync_loop(
     paused: Arc<AtomicBool>,
     cloud_sync_wakeup: Arc<Notify>,
     printer_inventory_dirty: Arc<AtomicBool>,
+    last_sync_error_code: Arc<RwLock<Option<String>>>,
     stop: StopSignal,
 ) {
     let Some((active_content_key_id, active_content_key)) = cloud.content_encryption_keys.active()
@@ -3528,8 +3583,9 @@ async fn run_cloud_sync_loop(
         {
             Ok(_) => break,
             Err(error) => {
+                *last_sync_error_code.write().await = redacted_sync_error_code(&error);
                 warn!(%error, "content encryption key registration deferred");
-                *connection.write().await = ConnectionState::Degraded;
+                *connection.write().await = failure_state(&error);
                 tokio::select! {
                     () = tokio::time::sleep(Duration::from_secs(5)) => {}
                     () = stop.cancelled() => return,
@@ -3577,6 +3633,7 @@ async fn run_cloud_sync_loop(
         }
         let delay = match cloud.client.sync(&cloud.identity, &request).await {
             Ok(response) => {
+                *last_sync_error_code.write().await = None;
                 sync_succeeded(
                     response,
                     SyncContext {
@@ -3593,7 +3650,10 @@ async fn run_cloud_sync_loop(
                 )
                 .await
             }
-            Err(error) => sync_failed(&error, &mut failures, &connection).await,
+            Err(error) => {
+                *last_sync_error_code.write().await = redacted_sync_error_code(&error);
+                sync_failed(&error, &mut failures, &connection).await
+            }
         };
         tokio::select! {
             () = tokio::time::sleep(delay) => {}
@@ -4739,6 +4799,13 @@ fn failure_state(error: &ClientError) -> ConnectionState {
     }
 }
 
+/// Returns only the bounded protocol classification suitable for local
+/// diagnostics. Transport bodies and request material are deliberately never
+/// retained.
+fn redacted_sync_error_code(error: &ClientError) -> Option<String> {
+    error.unauthorized_code().map(str::to_owned)
+}
+
 async fn sync_failed(
     error: &ClientError,
     failures: &mut u32,
@@ -5106,6 +5173,7 @@ mod tests {
                 allowed_printer_ids: None,
                 printer_inventory_dirty: Arc::new(AtomicBool::new(false)),
                 wakeup: Arc::new(Notify::new()),
+                last_sync_error_code: Arc::new(RwLock::new(None)),
                 sync_stop: StopSignal::default(),
                 scheduler_stop: StopSignal::default(),
                 connection_stop: StopSignal::default(),
@@ -5253,6 +5321,7 @@ mod tests {
                 allowed_printer_ids: Some(std::iter::once("prn_test".to_owned()).collect()),
                 printer_inventory_dirty: Arc::new(AtomicBool::new(false)),
                 wakeup: Arc::new(Notify::new()),
+                last_sync_error_code: Arc::new(RwLock::new(None)),
                 sync_stop,
                 scheduler_stop,
                 connection_stop,
@@ -5311,6 +5380,7 @@ mod tests {
                 allowed_printer_ids: Some(std::collections::BTreeSet::new()),
                 printer_inventory_dirty: Arc::new(AtomicBool::new(false)),
                 wakeup: Arc::new(Notify::new()),
+                last_sync_error_code: Arc::new(RwLock::new(None)),
                 sync_stop,
                 scheduler_stop,
                 connection_stop,
@@ -5522,6 +5592,17 @@ mod tests {
     #[test]
     fn a_revoked_node_is_reported_differently_from_an_unreachable_one() {
         use piqae_agent_client::ClientError;
+        let invalid_signature = ClientError::Unauthorized {
+            code: "invalid_agent_signature".into(),
+        };
+        assert_eq!(
+            redacted_sync_error_code(&invalid_signature).as_deref(),
+            Some("invalid_agent_signature")
+        );
+        assert_eq!(
+            failure_state(&invalid_signature),
+            ConnectionState::Unauthorized
+        );
         assert_eq!(
             failure_state(&ClientError::Unauthorized {
                 code: "unknown_agent".into()
@@ -5542,6 +5623,13 @@ mod tests {
                 body: String::new()
             }),
             ConnectionState::Offline
+        );
+        assert_eq!(
+            redacted_sync_error_code(&ClientError::Status {
+                status: 503,
+                body: "must never reach diagnostics".into(),
+            }),
+            None
         );
     }
 

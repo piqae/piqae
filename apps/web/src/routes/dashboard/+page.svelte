@@ -14,7 +14,6 @@
   import {
     summariseUncertainDelivery,
     summariseUncertainDeliveryOverview,
-    UNCERTAIN_DELIVERY_HREF,
     UNCERTAIN_DELIVERY_STATE
   } from '$lib/uncertain-delivery';
   import {
@@ -34,6 +33,7 @@
 
   const overview = $derived(data.overview);
   const detail = $derived(data.detail);
+  const managedAccount = $derived(data.managedAccount);
   const views = $derived(
     operationalViews({ platform: { accounts: data.meta.platform.accounts && data.platformEnabled } })
   );
@@ -129,8 +129,11 @@
     return search ? `/dashboard?${search}` : '/dashboard';
   }
 
+  const operationalHref = (overrides: Record<string, string | null>) =>
+    buildHref({ ...Object.fromEntries(DETAIL_KEYS.map((key) => [key, null])), ...overrides });
+
   const detailHref = (kind: string, id: string) =>
-    buildHref({ ...Object.fromEntries(DETAIL_KEYS.map((key) => [key, null])), [kind]: id });
+    operationalHref({ [kind]: id });
 
   const listHref = $derived(
     buildHref(Object.fromEntries(DETAIL_KEYS.map((key) => [key, null])))
@@ -138,8 +141,7 @@
 
   function switchView(next: string) {
     void goto(
-      buildHref({
-        ...Object.fromEntries(DETAIL_KEYS.map((k) => [k, null])),
+      operationalHref({
         view: next,
         state: null
       }),
@@ -148,7 +150,7 @@
   }
 
   function filterByState(next: string) {
-    void goto(buildHref({ state: next === 'all' ? null : next }), {
+    void goto(operationalHref({ state: next === 'all' ? null : next }), {
       keepFocus: true,
       noScroll: true
     });
@@ -283,12 +285,37 @@
 {/snippet}
 
 <PageHeader
-  title="Operations"
-  description="Live jobs, printers, and nodes across your workspace."
+  title={managedAccount ? `${managedAccount.name} operations` : 'Operations'}
+  description={managedAccount
+    ? 'Live resources in this managed customer’s isolated workspace.'
+    : 'Live jobs, printers, and nodes across your workspace.'}
   {actions}
 />
 
 {#if data.dataError}<DataError error={data.dataError} />{/if}
+
+{#if managedAccount}
+  <section class="managed-context" aria-label="Managed customer context">
+    <div>
+      <strong>Managing {managedAccount.name} on behalf of your workspace</strong>
+      <span>
+        Live environment · <span class="mono">{managedAccount.externalId}</span>. Nodes, printers,
+        jobs and actions below stay isolated to this customer.
+      </span>
+    </div>
+    <a class="button compact" href={operationalHref({ managed_customer: null, view: 'customers', state: null })}>
+      Return to customers
+    </a>
+  </section>
+
+  {#if data.agents.length > 0 && data.printers.length === 0}
+    <p class="ui-note warning" role="status">
+      {data.agents.length === 1 ? 'One node is' : `${data.agents.length} nodes are`} visible in this
+      customer workspace, but no printer inventory has been reported. Open a node to inspect its
+      last-seen time and request a redacted diagnostic report.
+    </p>
+  {/if}
+{/if}
 
 {#if !setupComplete}
   <section class="setup" aria-label="Setup progress">
@@ -303,7 +330,7 @@
       </li>
       <li class:complete={setupStep > 2} class:current={setupStep === 2}>
         <span class="step">{setupStep > 2 ? '✓' : '2'}</span>
-        <a href="/dashboard?view=printers">Confirm a printer</a>
+        <a href={operationalHref({ view: 'printers', state: null })}>Confirm a printer</a>
       </li>
       <li class:complete={setupStep > 3} class:current={setupStep === 3}>
         <span class="step">{setupStep > 3 ? '✓' : '3'}</span>
@@ -329,20 +356,20 @@
     value={overview.agents.online}
     total={overview.agents.total}
     detail={`${overview.agents.total - overview.agents.online} unavailable`}
-    href="/dashboard?view=nodes"
+    href={operationalHref({ view: 'nodes', state: null })}
   />
   <Metric
     label="Printers available"
     value={overview.printers.online}
     total={overview.printers.total}
     detail={`${overview.printers.attention} need attention`}
-    href="/dashboard?view=printers"
+    href={operationalHref({ view: 'printers', state: null })}
   />
   <Metric
     label="Recent jobs"
     value={overview.jobs.recent.toLocaleString()}
     detail={`${overview.jobs.active} active in queues`}
-    href="/dashboard?view=jobs"
+    href={operationalHref({ view: 'jobs', state: null })}
   />
   <Metric
     label="Needs review"
@@ -350,7 +377,10 @@
     detail={uncertainDetail}
     tone={uncertain.count > 0 ? 'attention' : 'neutral'}
     title={uncertainTitle}
-    href={uncertain.count > 0 ? UNCERTAIN_DELIVERY_HREF : '/dashboard?view=jobs'}
+    href={operationalHref({
+      view: 'jobs',
+      state: uncertain.count > 0 ? 'delivery_uncertain' : null
+    })}
   />
 </section>
 
@@ -553,6 +583,16 @@
         onclick={() => openPrintDialog(detail.printer.id)}
       >Print PDF</button>
       <a class="button compact" href={detailHref('node', detail.printer.agentId)}>Open node</a>
+    {:else if detail?.kind === 'customer'}
+      <a
+        class="button compact primary"
+        href={operationalHref({
+          managed_customer: detail.account.externalId,
+          customer: null,
+          view: 'nodes',
+          state: null
+        })}
+      >Manage customer</a>
     {/if}
   {/snippet}
 
@@ -683,6 +723,7 @@
           };
         }}
       >
+        {#if managedAccount}<input type="hidden" name="managed_customer" value={managedAccount.externalId} />{/if}
         <input type="hidden" name="node_id" value={detail.node.id} />
         <button class="button small" type="submit" disabled={diagnosticsPending || data.dashboardMode !== 'live'}>
           {diagnosticsPending ? 'Requesting…' : 'Collect diagnostics'}
@@ -752,6 +793,7 @@
         };
       }}
     >
+      {#if managedAccount}<input type="hidden" name="managed_customer" value={managedAccount.externalId} />{/if}
       <div class="print-fields">
         <Field label="Printer">
           <select class="ui-select" name="printer_id" bind:value={printPrinterId} onchange={updatePrintProfiles} required>
@@ -856,6 +898,7 @@
         };
       }}
     >
+      {#if managedAccount}<input type="hidden" name="managed_customer" value={managedAccount.externalId} />{/if}
       <details class="advanced-options">
         <summary>Advanced options</summary>
         <Field label="Custom node name (optional)">
@@ -922,6 +965,7 @@
           };
         }}
       >
+        {#if managedAccount}<input type="hidden" name="managed_customer" value={managedAccount.externalId} />{/if}
         <input type="hidden" name="job_id" value={detail.job.id} />
         <p class="ui-note neutral">
           Cancel <strong>{detail.job.title}</strong>? If the operating system has already handed the
@@ -952,6 +996,28 @@
 {/if}
 
 <style>
+  .managed-context {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    margin-top: 16px;
+    padding: 14px 16px;
+    background: var(--accent-soft, var(--surface-raised));
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-lg);
+  }
+
+  .managed-context > div {
+    display: grid;
+    gap: 3px;
+  }
+
+  .managed-context span {
+    color: var(--text-secondary);
+    font-size: var(--text-meta);
+  }
+
   .print-fields {
     display: grid;
     gap: 16px;

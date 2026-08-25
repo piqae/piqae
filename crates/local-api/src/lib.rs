@@ -187,6 +187,17 @@ pub struct LocalConnectorDetail {
     pub permission: String,
     pub allowed_printer_ids: Vec<String>,
     pub selected_printer_count: usize,
+    /// Redacted connector health only. This may contain a stable protocol
+    /// error code, but never response bodies, credentials, or request data.
+    pub last_sync_error_code: Option<String>,
+    /// Number of queues currently present in the node-owned inventory.
+    pub local_printer_count: usize,
+    /// Number of present queues permitted by this connector's grant.
+    pub eligible_printer_count: usize,
+    /// Latest inventory revision prepared by this connector for cloud sync.
+    pub inventory_revision: u64,
+    /// True when a local inventory change still needs a sync attempt.
+    pub inventory_refresh_pending: bool,
     /// Present only when connector enrolment records an authenticated,
     /// operator-safe management destination. Never guess provider paths.
     pub manage_url: Option<String>,
@@ -1076,6 +1087,33 @@ mod tests {
         assert!(html.contains("const seenJobs=new Set()"));
         assert!(html.contains("if(seenJobs.has(job.job_id))continue"));
         assert!(html.contains("seenJobs.clear()"));
+    }
+
+    #[test]
+    fn connector_diagnostics_are_bounded_and_explain_empty_projection() {
+        let detail = LocalConnectorDetail {
+            connector_id: "ncon_test".into(),
+            display_name: "Shopify store".into(),
+            workspace_name: Some("Managed customer".into()),
+            authorization_type: Some("platform_customer".into()),
+            endpoint: "https://api.example.test".into(),
+            connection: "unauthorized".into(),
+            permission: "all_local_printers".into(),
+            allowed_printer_ids: Vec::new(),
+            selected_printer_count: 0,
+            last_sync_error_code: Some("invalid_agent_signature".into()),
+            local_printer_count: 3,
+            eligible_printer_count: 3,
+            inventory_revision: 1,
+            inventory_refresh_pending: true,
+            manage_url: None,
+        };
+        let encoded = serde_json::to_value(detail).expect("serialize diagnostics");
+        assert_eq!(encoded["local_printer_count"], 3);
+        assert_eq!(encoded["eligible_printer_count"], 3);
+        assert_eq!(encoded["last_sync_error_code"], "invalid_agent_signature");
+        assert!(encoded.get("device_key").is_none());
+        assert!(encoded.get("token").is_none());
     }
 
     fn profile(profile_id: &str, name: String) -> LocalPrinterProfile {
