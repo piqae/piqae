@@ -2,6 +2,7 @@ import { PiqaeClient } from '@piqae/sdk';
 import type {
   DashboardAccount,
   DashboardCustomerOperationsPage,
+  DashboardDestination,
   DashboardNodeDiagnostic,
   DashboardWorkspace,
   DashboardAgent,
@@ -12,6 +13,8 @@ import type {
   DashboardOverview,
   DashboardPage,
   DashboardPrinter,
+  DashboardPrinterRoute,
+  DashboardRouteObservation,
   DashboardWebhook
 } from './view-types';
 import * as demo from './demo-data';
@@ -26,6 +29,8 @@ export interface DashboardApi {
   overview(): Promise<DashboardOverview>;
   agents(): Promise<DashboardPage<DashboardAgent>>;
   printers(): Promise<DashboardPage<DashboardPrinter>>;
+  destinations(): Promise<DashboardPage<DashboardDestination>>;
+  routes(): Promise<DashboardPage<DashboardPrinterRoute>>;
   jobs(): Promise<DashboardPage<DashboardJob>>;
   job(id: string): Promise<DashboardJob | null>;
   jobEvents(id: string): Promise<DashboardPage<DashboardJobEvent>>;
@@ -114,6 +119,8 @@ export const mockApi: DashboardApi = {
     }),
   agents: () => delay(page(demo.agents)),
   printers: () => delay(page(demo.printers)),
+  destinations: () => delay(page([])),
+  routes: () => delay(page([])),
   jobs: () => delay(page(demo.jobs)),
   job: (id) => delay(demo.jobs.find((job) => job.id === id) ?? null),
   jobEvents: (id) =>
@@ -128,7 +135,10 @@ export const mockApi: DashboardApi = {
         environment: { id: account.environments.liveId, kind: 'live' as const },
         agents: demo.agents.map((agent) => ({ ...agent, customer: { id: account.id, externalId: account.externalId, name: account.name } })),
         printers: demo.printers.map((printer) => ({ ...printer, customer: { id: account.id, externalId: account.externalId, name: account.name } })),
-        jobs: demo.jobs.map((job) => ({ ...job, customer: { id: account.id, externalId: account.externalId, name: account.name } }))
+        jobs: demo.jobs.map((job) => ({ ...job, customer: { id: account.id, externalId: account.externalId, name: account.name } })),
+        destinations: [],
+        routes: [],
+        routeObservations: []
       })),
       nextCursor: null,
       hasMore: false
@@ -247,6 +257,55 @@ export function createLiveApi(
       revision: String(printer.capability_revision),
       observedAt: printer.updated_at
     }
+  });
+
+  const toRouteObservation = (
+    observation: Awaited<ReturnType<typeof client.routes.observations>>[number]
+  ): DashboardRouteObservation => ({
+    id: observation.id,
+    routeId: observation.route_id,
+    sequence: observation.sequence,
+    printerState: observation.printer_state,
+    acceptingJobs: observation.accepting_jobs,
+    totalJobs: observation.total_jobs,
+    activeJobs: observation.active_jobs,
+    heldJobs: observation.held_jobs,
+    connectorJobs: observation.connector_jobs,
+    otherPiqaeOrExternalJobs: observation.other_piqae_or_external_jobs,
+    unknownJobs: observation.unknown_jobs,
+    estimatedBusySeconds: observation.estimated_busy_seconds ?? null,
+    observedAt: observation.observed_at,
+    expiresAt: observation.expires_at
+  });
+
+  const toRoute = (
+    route: Awaited<ReturnType<typeof client.routes.list>>[number]
+  ): DashboardPrinterRoute => ({
+    id: route.id,
+    physicalDestinationId: route.physical_destination_id,
+    printerId: route.printer_id,
+    agentId: route.agent_id,
+    nativeQueueId: route.native_queue_id,
+    enabled: route.enabled,
+    health: route.health,
+    telemetryFreshness: route.telemetry_freshness,
+    projectionHealth: route.projection_health ?? 'unsupported',
+    schedulingAuthorityId: route.scheduling_authority_id ?? null,
+    latestObservation: route.latest_observation ? toRouteObservation(route.latest_observation) : null,
+    updatedAt: route.updated_at
+  });
+
+  const toDestination = (
+    destination: Awaited<ReturnType<typeof client.destinations.list>>[number]
+  ): DashboardDestination => ({
+    id: destination.id,
+    displayName: destination.display_name,
+    manufacturer: destination.manufacturer ?? null,
+    model: destination.model ?? null,
+    identityConfidence: destination.identity_confidence,
+    status: destination.status,
+    routeCount: destination.route_count ?? 0,
+    updatedAt: destination.updated_at
   });
 
   const toJob = (job: Awaited<ReturnType<typeof client.jobs.retrieve>>): DashboardJob => ({
@@ -369,6 +428,8 @@ export function createLiveApi(
       const result = await client.printers.list({ limit: 100 });
       return { data: result.data.map(toPrinter), nextCursor: result.next_cursor ?? null };
     },
+    destinations: async () => page((await client.destinations.list()).map(toDestination)),
+    routes: async () => page((await client.routes.list()).map(toRoute)),
     jobs: async () => {
       const result = await client.jobs.list({ limit: 100 });
       return { data: result.data.map(toJob), nextCursor: result.next_cursor ?? null };
@@ -507,7 +568,13 @@ export function createLiveApi(
           environment: { id: raw.environment.id, kind: 'live' as const },
           agents: (raw.agents as Parameters<typeof toAgent>[0][]).map((agent) => ({ ...toAgent(agent), customer: owner })),
           printers: (raw.printers as Parameters<typeof toPrinter>[0][]).map((printer) => ({ ...toPrinter(printer), customer: owner })),
-          jobs: (raw.jobs as Parameters<typeof toJob>[0][]).map((job) => ({ ...toJob(job), customer: owner }))
+          jobs: (raw.jobs as Parameters<typeof toJob>[0][]).map((job) => ({ ...toJob(job), customer: owner })),
+          destinations: (Array.isArray(raw.physical_destinations) ? raw.physical_destinations : [])
+            .map((destination) => ({ ...toDestination(destination as Parameters<typeof toDestination>[0]), customer: owner })),
+          routes: (Array.isArray(raw.routes) ? raw.routes : [])
+            .map((route) => ({ ...toRoute(route as Parameters<typeof toRoute>[0]), customer: owner })),
+          routeObservations: (Array.isArray(raw.route_observations) ? raw.route_observations : [])
+            .map((observation) => ({ ...toRouteObservation(observation as Parameters<typeof toRouteObservation>[0]), customer: owner }))
         };
       });
       return {

@@ -123,6 +123,8 @@ function loadEvent(search: string) {
       jobs: async () => emptyPage,
       printers: async () => emptyPage,
       agents: async () => emptyPage,
+      destinations: async () => emptyPage,
+      routes: async () => emptyPage,
       accounts: async () => emptyPage
     }
   });
@@ -163,7 +165,7 @@ describe('managed customer selection', () => {
         customer: { id: 'wsp_child', externalId: 'c4beta', name: 'C4 Beta' },
         environment: { id: 'env_live', kind: 'live' },
         agents: [{ ...({ id: 'agt_child', name: 'Shop Mac', state: 'online' }), customer: { id: 'wsp_child', externalId: 'c4beta', name: 'C4 Beta' } }],
-        printers: [], jobs: []
+        printers: [], jobs: [], destinations: [], routes: [], routeObservations: []
       }],
       nextCursor: null,
       hasMore: false
@@ -180,7 +182,9 @@ describe('managed customer selection', () => {
         }),
         jobs: async () => emptyPage,
         printers: async () => emptyPage,
-        agents: async () => emptyPage
+        agents: async () => emptyPage,
+        destinations: async () => emptyPage,
+        routes: async () => emptyPage
       }
     });
 
@@ -221,7 +225,9 @@ describe('managed customer selection', () => {
       }),
       jobs: async () => emptyPage,
       printers: async () => emptyPage,
-      agents: childAgents
+      agents: childAgents,
+      destinations: async () => emptyPage,
+      routes: async () => emptyPage
     };
     const managedWorkspace = vi.fn(() => childApi);
     dashboardSource.mockReturnValue({
