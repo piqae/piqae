@@ -3,7 +3,7 @@ import Foundation
 public enum MenuPresentation {
     public static let cloudAndAPIAccessTitle = "Available to connected services"
     public static let connectionsTitle = "Connections"
-    public static let queueTitle = "Queue"
+    public static let queueTitle = "Print History…"
 
     public static func printerActivityTitle(
         state: String,

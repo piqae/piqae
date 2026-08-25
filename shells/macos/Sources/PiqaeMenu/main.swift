@@ -1030,18 +1030,18 @@ final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func openQueue() {
-        openNodeDashboard(fallbackURL: dashboardURL())
+        openNodeDashboard(view: "history", fallbackURL: dashboardURL())
     }
 
     @objc private func openConnections() {
         if let configured = explicitConnectionsURL() {
             NSWorkspace.shared.open(configured)
         } else {
-            openNodeDashboard(fallbackURL: dashboardURL())
+            openNodeDashboard(view: "connections", fallbackURL: dashboardURL())
         }
     }
 
-    private func openNodeDashboard(fallbackURL: URL?) {
+    private func openNodeDashboard(view: String, fallbackURL: URL?) {
         guard let client else {
             if let fallbackURL { NSWorkspace.shared.open(fallbackURL) }
             return
@@ -1050,7 +1050,7 @@ final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         actionTask = Task { [weak self] in
             guard let self else { return }
             do {
-                let url = try await client.createDashboardSession()
+                let url = try await client.createDashboardSession(view: view)
                 NSWorkspace.shared.open(url)
             } catch is CancellationError {
                 return

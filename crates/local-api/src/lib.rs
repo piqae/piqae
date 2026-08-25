@@ -174,6 +174,7 @@ pub struct LocalHistoryJob {
     pub state: String,
     pub native_job_id: Option<String>,
     pub can_reprint: bool,
+    pub created_unix_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -369,10 +370,14 @@ pub fn router(state: LocalApiState) -> Router {
             "/v1/local/dashboard-sessions",
             post(create_dashboard_session),
         )
+        .route("/local/history", get(open_dashboard))
+        .route("/local/connections", get(open_dashboard))
+        // Keep the pre-split URL alive so bookmarks and an older macOS shell
+        // can renew their narrowly scoped dashboard cookie during upgrades.
         .route("/local/queue", get(open_dashboard))
-        .route("/local/queue/data", get(dashboard_data))
+        .route("/local/dashboard/data", get(dashboard_data))
         .route(
-            "/local/queue/jobs/{job_id}/reprint",
+            "/local/history/jobs/{job_id}/reprint",
             post(dashboard_reprint),
         )
         .route("/v1/local/printers/{printer_id}/test-page", post(test_page))
@@ -420,8 +425,15 @@ async fn create_dashboard_session(
             |address| address.to_string(),
         )
     };
+    let destination = match headers
+        .get("x-piqae-dashboard-view")
+        .and_then(|value| value.to_str().ok())
+    {
+        Some("connections") => "connections",
+        _ => "history",
+    };
     Json(DashboardSessionCreated {
-        url: format!("http://{authority}/local/queue?handoff={token}"),
+        url: format!("http://{authority}/local/{destination}?handoff={token}"),
         expires_in_seconds: HANDOFF_LIFETIME.as_secs(),
     })
     .into_response()
@@ -436,9 +448,17 @@ struct HandoffQuery {
 async fn open_dashboard(
     State(state): State<LocalApiState>,
     Query(query): Query<HandoffQuery>,
+    uri: axum::http::Uri,
     headers: HeaderMap,
 ) -> Response {
     if dashboard_authenticated(&state, &headers).await {
+        if uri.path() == "/local/queue" {
+            let mut response = Redirect::to("/local/history").into_response();
+            if let Some(session) = cookie_value(&headers, "piqae_local_session") {
+                set_dashboard_cookie(&mut response, &session);
+            }
+            return response;
+        }
         return dashboard_html().into_response();
     }
     let Some(handoff) = query.handoff.filter(|value| value.len() <= 64) else {
@@ -454,17 +474,26 @@ async fn open_dashboard(
         .sessions
         .insert(session.clone(), Instant::now() + BROWSER_SESSION_LIFETIME);
     drop(sessions);
-    let mut response = Redirect::to("/local/queue").into_response();
-    if let Ok(cookie) = HeaderValue::from_str(&format!(
-        "piqae_local_session={session}; HttpOnly; SameSite=Strict; Path=/local/queue; Max-Age={}",
-        BROWSER_SESSION_LIFETIME.as_secs()
-    )) {
-        response.headers_mut().insert(header::SET_COOKIE, cookie);
-    }
+    let path = if uri.path() == "/local/connections" {
+        "/local/connections"
+    } else {
+        "/local/history"
+    };
+    let mut response = Redirect::to(path).into_response();
+    set_dashboard_cookie(&mut response, &session);
     response
         .headers_mut()
         .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     response
+}
+
+fn set_dashboard_cookie(response: &mut Response, session: &str) {
+    if let Ok(cookie) = HeaderValue::from_str(&format!(
+        "piqae_local_session={session}; HttpOnly; SameSite=Strict; Path=/local; Max-Age={}",
+        BROWSER_SESSION_LIFETIME.as_secs()
+    )) {
+        response.headers_mut().insert(header::SET_COOKIE, cookie);
+    }
 }
 
 async fn dashboard_data(
@@ -1088,7 +1117,7 @@ mod tests {
     fn embedded_dashboard_deduplicates_jobs_across_offset_pages() {
         let html = include_str!("dashboard.html");
         assert!(html.contains("const seenJobs=new Set()"));
-        assert!(html.contains("if(seenJobs.has(job.job_id))continue"));
+        assert!(html.contains("if(!seenJobs.has(job.job_id))"));
         assert!(html.contains("seenJobs.clear()"));
     }
 
@@ -1099,8 +1128,11 @@ mod tests {
         assert!(html.contains("Connected workspace"));
         assert!(html.contains("Service / platform"));
         assert!(html.contains("Reconnect with owner"));
-        assert!(html.contains("The node cannot safely invent that owner’s sign-in address."));
+        assert!(html.contains("Return to the workspace or app that created it"));
         assert!(html.contains("rel=\"noopener noreferrer\""));
+        assert!(html.contains("prefers-color-scheme:dark"));
+        assert!(html.contains("type=\"datetime-local\""));
+        assert!(html.contains("aria-label=\"Search print history\""));
     }
 
     #[test]
@@ -1439,7 +1471,7 @@ mod tests {
         let body = to_bytes(created.into_body(), 4096).await.expect("body");
         let value: serde_json::Value = serde_json::from_slice(&body).expect("json");
         let url = value["url"].as_str().expect("url");
-        assert!(url.starts_with("http://127.0.0.1:49100/local/queue?handoff="));
+        assert!(url.starts_with("http://127.0.0.1:49100/local/history?handoff="));
         let path = url.strip_prefix("http://127.0.0.1:49100").expect("path");
 
         let opened = router(state.clone())
@@ -1452,7 +1484,7 @@ mod tests {
             .await
             .expect("response");
         assert_eq!(opened.status(), StatusCode::SEE_OTHER);
-        assert_eq!(opened.headers()[header::LOCATION], "/local/queue");
+        assert_eq!(opened.headers()[header::LOCATION], "/local/history");
         let cookie = opened.headers()[header::SET_COOKIE]
             .to_str()
             .expect("cookie");
@@ -1483,6 +1515,7 @@ mod tests {
                     .uri("/v1/local/dashboard-sessions")
                     .header("authorization", "Bearer secret")
                     .header("host", "remote.example:443")
+                    .header("x-piqae-dashboard-view", "connections")
                     .body(Body::empty())
                     .expect("request"),
             )
@@ -1495,8 +1528,39 @@ mod tests {
             value["url"]
                 .as_str()
                 .expect("url")
-                .starts_with("http://127.0.0.1:49277/local/queue?handoff=")
+                .starts_with("http://127.0.0.1:49277/local/connections?handoff=")
         );
+    }
+
+    #[tokio::test]
+    async fn legacy_queue_url_renews_cookie_scope_and_redirects_to_history() {
+        let (state, _receive) = test_state();
+        let session = "legacy-browser-session".to_owned();
+        state
+            .browser_sessions
+            .lock()
+            .await
+            .sessions
+            .insert(session.clone(), Instant::now() + BROWSER_SESSION_LIFETIME);
+
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/local/queue")
+                    .header("cookie", format!("piqae_local_session={session}"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(response.headers()[header::LOCATION], "/local/history");
+        let cookie = response.headers()[header::SET_COOKIE]
+            .to_str()
+            .expect("cookie");
+        assert!(cookie.contains("Path=/local;"));
+        assert!(cookie.contains("HttpOnly"));
     }
 
     #[tokio::test]
@@ -1513,7 +1577,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/local/queue/jobs/job_1/reprint")
+                    .uri("/local/history/jobs/job_1/reprint")
                     .header("cookie", format!("piqae_local_session={session}"))
                     .header("content-type", "application/json")
                     .body(Body::from(r#"{"idempotency_key":"once","confirmed":true}"#))
@@ -1544,7 +1608,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/local/queue/jobs/job_1/reprint")
+                    .uri("/local/history/jobs/job_1/reprint")
                     .header("cookie", format!("piqae_local_session={session}"))
                     .header("x-piqae-local-action", "reprint")
                     .header("content-type", "application/json")

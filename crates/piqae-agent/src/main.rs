@@ -3040,6 +3040,11 @@ fn local_job_history(
     let jobs = jobs
         .into_iter()
         .map(|job| {
+            let created_unix_ms = job
+                .job_id
+                .strip_prefix("job_")
+                .and_then(|value| value.parse::<ulid::Ulid>().ok())
+                .and_then(|value| i64::try_from(value.timestamp_ms()).ok());
             let can_reprint = is_terminal_job_state(&job.state)
                 && resolve_present_printer(store, &job.printer_id).is_ok()
                 && std::fs::metadata(&job.content_path).is_ok_and(|metadata| metadata.is_file());
@@ -3050,6 +3055,7 @@ fn local_job_history(
                 state: job.state,
                 native_job_id: job.native_job_id,
                 can_reprint,
+                created_unix_ms,
             }
         })
         .collect();
