@@ -13,6 +13,7 @@ import type {
   CreateStock,
   CreateTarget,
   CreateTargetBinding,
+  CreateDestinationIdentityDecision,
   CreateUpload,
   CreatedUpload,
   CreatedDeviceAuthorization,
@@ -32,6 +33,9 @@ import type {
   DeviceAuthorizationReview,
   DeviceAuthorizationStatus,
   DesignSpecification,
+  DestinationIdentityDecision,
+  DestinationIdentityEvidence,
+  DeliveryAttempt,
   CreatedApiKey,
   CurrentIdentity,
   ErrorEnvelope,
@@ -51,15 +55,21 @@ import type {
   PatchTarget,
   Page,
   PlatformContext,
+  PhysicalDestination,
   Printer,
+  PrinterRoute,
   PrintIntent,
   PrintIntentValidation,
   PrintWorkflow,
   ResolvedPrintTicket,
+  ResolveUncertainDelivery,
+  RouteObservation,
+  RouteReservation,
   Stock,
   Target,
   TargetBinding,
   TargetReadiness,
+  UncertainDeliveryResolution,
   Upload,
   UsageSummary,
   UpsertLoadedMediaObservation,
@@ -379,6 +389,53 @@ export class PiqaeClient {
       )
   };
 
+  readonly destinations = {
+    list: () => this.request<PhysicalDestination[]>('GET', '/v1/physical-destinations'),
+    retrieve: (id: string) =>
+      this.request<PhysicalDestination>(
+        'GET',
+        `/v1/physical-destinations/${encodeURIComponent(id)}`
+      ),
+    routes: (id: string) =>
+      this.request<PrinterRoute[]>(
+        'GET',
+        `/v1/physical-destinations/${encodeURIComponent(id)}/routes`
+      ),
+    identityEvidence: (id: string) =>
+      this.request<DestinationIdentityEvidence[]>(
+        'GET',
+        `/v1/physical-destinations/${encodeURIComponent(id)}/identity-evidence`
+      ),
+    identityDecisions: (id: string) =>
+      this.request<DestinationIdentityDecision[]>(
+        'GET',
+        `/v1/physical-destinations/${encodeURIComponent(id)}/identity-decisions`
+      ),
+    decideIdentity: (id: string, input: CreateDestinationIdentityDecision) =>
+      this.request<DestinationIdentityDecision>(
+        'POST',
+        `/v1/physical-destinations/${encodeURIComponent(id)}/identity-decisions`,
+        { body: input }
+      ),
+    reverseIdentityDecision: (destinationId: string, decisionId: string) =>
+      this.request<DestinationIdentityDecision>(
+        'POST',
+        `/v1/physical-destinations/${encodeURIComponent(destinationId)}/identity-decisions/${encodeURIComponent(decisionId)}/reverse`
+      )
+  };
+
+  readonly routes = {
+    list: () => this.request<PrinterRoute[]>('GET', '/v1/printer-routes'),
+    retrieve: (id: string) =>
+      this.request<PrinterRoute>('GET', `/v1/printer-routes/${encodeURIComponent(id)}`),
+    observations: (id: string) =>
+      this.request<RouteObservation[]>(
+        'GET',
+        `/v1/printer-routes/${encodeURIComponent(id)}/observations`
+      ),
+    reservations: () => this.request<RouteReservation[]>('GET', '/v1/route-reservations')
+  };
+
   readonly uploads = {
     create: (input: CreateUpload) =>
       this.request<CreatedUpload>('POST', '/v1/uploads', { body: input }),
@@ -425,6 +482,17 @@ export class PiqaeClient {
     retrieve: (id: string) => this.request<Job>('GET', `/v1/jobs/${encodeURIComponent(id)}`),
     events: (id: string) =>
       this.request<JobEvent[]>('GET', `/v1/jobs/${encodeURIComponent(id)}/events`),
+    deliveryAttempts: (id: string) =>
+      this.request<DeliveryAttempt[]>(
+        'GET',
+        `/v1/jobs/${encodeURIComponent(id)}/delivery-attempts`
+      ),
+    resolveUncertain: (id: string, input: ResolveUncertainDelivery) =>
+      this.request<UncertainDeliveryResolution>(
+        'POST',
+        `/v1/jobs/${encodeURIComponent(id)}/resolve-uncertain`,
+        { body: input }
+      ),
     create: (input: CreateJob, idempotencyKey?: string) =>
       this.request<Job>(
         'POST',

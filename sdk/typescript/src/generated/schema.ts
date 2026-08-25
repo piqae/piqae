@@ -987,6 +987,54 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/jobs/{job_id}/delivery-attempts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                job_id: components["parameters"]["JobId"];
+            };
+            cookie?: never;
+        };
+        /**
+         * List fenced delivery attempts for a job
+         * @description Attempts are immutable execution history. Exactly one attempt may hold
+         *     an active route reservation. Automatic failover is limited to attempts
+         *     that have not reached native spooler acceptance.
+         */
+        get: operations["listJobDeliveryAttempts"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/jobs/{job_id}/resolve-uncertain": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                job_id: components["parameters"]["JobId"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Resolve an uncertain delivery with an explicit operator decision
+         * @description Never silently retries a spooler-accepted attempt. Reprint creates a new
+         *     linked job; acknowledge_missing and acknowledge_printed record the
+         *     operator's evidence without claiming more than was observed.
+         */
+        post: operations["resolveUncertainDelivery"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/jobs/{job_id}/cancel": {
         parameters: {
             query?: never;
@@ -1316,6 +1364,206 @@ export interface paths {
         head?: never;
         /** Update a stock */
         patch: operations["updateStock"];
+        trace?: never;
+    };
+    "/v1/physical-destinations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List inferred physical printer destinations
+         * @description Lists tenant-visible physical devices and their identity confidence.
+         *     A physical destination can have multiple installed routes. Piqae never
+         *     groups routes by friendly name alone and exposes ambiguous matches for
+         *     explicit review.
+         */
+        get: operations["listPhysicalDestinations"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/physical-destinations/{destination_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                destination_id: components["parameters"]["DestinationId"];
+            };
+            cookie?: never;
+        };
+        /** Get a physical destination */
+        get: operations["getPhysicalDestination"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/physical-destinations/{destination_id}/routes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                destination_id: components["parameters"]["DestinationId"];
+            };
+            cookie?: never;
+        };
+        /** List installed routes to a physical destination */
+        get: operations["listPhysicalDestinationRoutes"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/physical-destinations/{destination_id}/identity-evidence": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                destination_id: components["parameters"]["DestinationId"];
+            };
+            cookie?: never;
+        };
+        /** List redacted identity evidence for a physical destination */
+        get: operations["listDestinationIdentityEvidence"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/physical-destinations/{destination_id}/identity-decisions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                destination_id: components["parameters"]["DestinationId"];
+            };
+            cookie?: never;
+        };
+        /** List merge and split decisions for a physical destination */
+        get: operations["listDestinationIdentityDecisions"];
+        put?: never;
+        /**
+         * Confirm a destination merge or route split
+         * @description A decision is append-only. Reverse it through the decision-specific endpoint.
+         */
+        post: operations["createDestinationIdentityDecision"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/physical-destinations/{destination_id}/identity-decisions/{decision_id}/reverse": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                destination_id: components["parameters"]["DestinationId"];
+                decision_id: components["parameters"]["IdentityDecisionId"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Reverse a prior physical-identity decision */
+        post: operations["reverseDestinationIdentityDecision"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/printer-routes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List node and operating-system routes */
+        get: operations["listPrinterRoutes"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/printer-routes/{route_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                route_id: components["parameters"]["RouteId"];
+            };
+            cookie?: never;
+        };
+        /** Get a printer route */
+        get: operations["getPrinterRoute"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/printer-routes/{route_id}/observations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                route_id: components["parameters"]["RouteId"];
+            };
+            cookie?: never;
+        };
+        /**
+         * List privacy-safe route and spooler observations
+         * @description Returns bounded aggregate occupancy and health. External job titles,
+         *     usernames, filenames, native identifiers and document data are never
+         *     exposed across tenants.
+         */
+        get: operations["listPrinterRouteObservations"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/route-reservations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List current and recent fenced route reservations */
+        get: operations["listRouteReservations"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
         trace?: never;
     };
     "/v1/targets": {
@@ -2354,6 +2602,12 @@ export interface components {
             agents: components["schemas"]["Agent"][];
             printers: components["schemas"]["Printer"][];
             jobs: components["schemas"]["Job"][];
+            /** @description Present when destination_identity_v1 is supported by the deployment. */
+            physical_destinations?: components["schemas"]["PhysicalDestination"][];
+            /** @description Present when route_inventory_v1 is supported by the deployment. */
+            routes?: components["schemas"]["PrinterRoute"][];
+            /** @description Latest privacy-safe observation per returned route. */
+            route_observations?: components["schemas"]["RouteObservation"][];
         };
         PlatformOperationsPage: {
             data: components["schemas"]["PlatformOperationsRow"][];
@@ -3421,6 +3675,141 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
+        PhysicalDestination: {
+            id: string;
+            display_name: string;
+            manufacturer?: string | null;
+            model?: string | null;
+            /** @enum {string} */
+            identity_confidence: "verified" | "high_confidence" | "possible_match" | "distinct" | "unknown";
+            /** @enum {string} */
+            status: "active" | "needs_review" | "split" | "retired";
+            route_count?: number;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: date-time */
+            updated_at: string;
+        };
+        PrinterRoute: {
+            id: string;
+            physical_destination_id: string;
+            printer_id: string;
+            agent_id: string;
+            native_queue_id: string;
+            enabled: boolean;
+            /** @enum {string} */
+            health: "ready" | "busy" | "needs_operator" | "offline" | "stale" | "unknown";
+            /** @enum {string} */
+            telemetry_freshness: "live" | "recent" | "stale" | "never";
+            /** @enum {string} */
+            projection_health?: "current" | "pending" | "failed" | "unsupported";
+            latest_observation?: components["schemas"]["RouteObservation"] | null;
+            scheduling_authority_id?: string | null;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: date-time */
+            updated_at: string;
+        };
+        DestinationIdentityEvidence: {
+            id: string;
+            destination_id: string;
+            route_id: string;
+            /** @enum {string} */
+            kind: "ipp_uuid" | "device_serial" | "usb_serial" | "device_uuid" | "certificate_key" | "network_endpoint" | "usb_topology" | "make_model" | "capability_signature" | "operator_confirmation";
+            /** @description One-way digest of the bounded identity value; raw hardware identifiers are not returned. */
+            digest: string;
+            /** @enum {string} */
+            confidence: "verified" | "high_confidence" | "possible_match" | "distinct" | "unknown";
+            /** Format: date-time */
+            observed_at: string;
+        };
+        CreateDestinationIdentityDecision: {
+            /** @enum {string} */
+            kind: "merge" | "split";
+            route_ids: string[];
+            reason: string;
+        };
+        DestinationIdentityDecision: {
+            id: string;
+            destination_id: string;
+            /** @enum {string} */
+            kind: "merge" | "split" | "reversal";
+            route_ids: string[];
+            reason: string;
+            actor_id: string;
+            reverses_decision_id?: string | null;
+            reversed_by_decision_id?: string | null;
+            /** Format: date-time */
+            created_at: string;
+        };
+        RouteObservation: {
+            id: string;
+            route_id: string;
+            /** Format: int64 */
+            sequence: number;
+            /** @enum {string} */
+            printer_state: "online" | "busy" | "paused" | "paper_out" | "error" | "offline" | "unknown";
+            state_reasons?: string[];
+            accepting_jobs: boolean;
+            total_jobs: number;
+            active_jobs: number;
+            held_jobs: number;
+            connector_jobs: number;
+            other_piqae_or_external_jobs: number;
+            unknown_jobs: number;
+            estimated_busy_seconds?: number | null;
+            /** Format: date-time */
+            observed_at: string;
+            /** Format: date-time */
+            expires_at: string;
+        };
+        RouteReservation: {
+            id: string;
+            route_id: string;
+            job_id: string;
+            attempt_id: string;
+            /** Format: int64 */
+            generation: number;
+            /** @enum {string} */
+            state: "active" | "released" | "expired" | "fenced";
+            /** Format: date-time */
+            acquired_at: string;
+            /** Format: date-time */
+            expires_at: string;
+            /** Format: date-time */
+            released_at?: string | null;
+        };
+        DeliveryAttempt: {
+            id: string;
+            job_id: string;
+            target_id: string | null;
+            route_id: string;
+            /** Format: int64 */
+            generation: number;
+            /** @enum {string} */
+            state: "route_leased" | "accepted_by_node" | "queued_local" | "handing_to_spooler" | "accepted_by_spooler" | "printing_reported" | "completed_reported" | "rejected_before_handoff" | "cancelled_before_handoff" | "delivery_uncertain" | "failed";
+            native_spool_id?: string | null;
+            failure_reason?: string | null;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: date-time */
+            updated_at: string;
+            /** Format: date-time */
+            completed_at?: string | null;
+        };
+        ResolveUncertainDelivery: {
+            /** @enum {string} */
+            resolution: "acknowledge_printed" | "acknowledge_missing" | "reprint";
+            note: string;
+        };
+        UncertainDeliveryResolution: {
+            job: components["schemas"]["Job"];
+            /** @enum {string} */
+            resolution: "acknowledge_printed" | "acknowledge_missing" | "reprint";
+            replacement_job?: components["schemas"]["Job"] | null;
+            /** Format: date-time */
+            resolved_at: string;
+        };
         CreateTarget: {
             name: string;
             description?: string;
@@ -4161,6 +4550,9 @@ export interface components {
         StockId: string;
         TargetId: string;
         BindingId: string;
+        DestinationId: string;
+        RouteId: string;
+        IdentityDecisionId: string;
         WebhookId: string;
         DeliveryId: string;
         NodeId: string;
@@ -5689,6 +6081,62 @@ export interface operations {
             404: components["responses"]["Error"];
         };
     };
+    listJobDeliveryAttempts: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                job_id: components["parameters"]["JobId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Ordered delivery attempts. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DeliveryAttempt"][];
+                };
+            };
+            401: components["responses"]["Error"];
+            403: components["responses"]["Error"];
+            404: components["responses"]["Error"];
+        };
+    };
+    resolveUncertainDelivery: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                job_id: components["parameters"]["JobId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ResolveUncertainDelivery"];
+            };
+        };
+        responses: {
+            /** @description Updated job or linked reprint result. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UncertainDeliveryResolution"];
+                };
+            };
+            400: components["responses"]["Error"];
+            401: components["responses"]["Error"];
+            403: components["responses"]["Error"];
+            404: components["responses"]["Error"];
+            409: components["responses"]["Error"];
+        };
+    };
     cancelJob: {
         parameters: {
             query?: never;
@@ -6188,6 +6636,278 @@ export interface operations {
             401: components["responses"]["Error"];
             403: components["responses"]["Error"];
             404: components["responses"]["Error"];
+        };
+    };
+    listPhysicalDestinations: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Physical destinations in the active environment. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PhysicalDestination"][];
+                };
+            };
+            401: components["responses"]["Error"];
+            403: components["responses"]["Error"];
+        };
+    };
+    getPhysicalDestination: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                destination_id: components["parameters"]["DestinationId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Physical destination with its current identity confidence. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PhysicalDestination"];
+                };
+            };
+            401: components["responses"]["Error"];
+            403: components["responses"]["Error"];
+            404: components["responses"]["Error"];
+        };
+    };
+    listPhysicalDestinationRoutes: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                destination_id: components["parameters"]["DestinationId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Node and operating-system queue routes for the destination. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PrinterRoute"][];
+                };
+            };
+            401: components["responses"]["Error"];
+            403: components["responses"]["Error"];
+            404: components["responses"]["Error"];
+        };
+    };
+    listDestinationIdentityEvidence: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                destination_id: components["parameters"]["DestinationId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Bounded identity evidence; raw sensitive hardware values are never returned. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DestinationIdentityEvidence"][];
+                };
+            };
+            401: components["responses"]["Error"];
+            403: components["responses"]["Error"];
+            404: components["responses"]["Error"];
+        };
+    };
+    listDestinationIdentityDecisions: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                destination_id: components["parameters"]["DestinationId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Auditable and reversible identity decisions. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DestinationIdentityDecision"][];
+                };
+            };
+            401: components["responses"]["Error"];
+            403: components["responses"]["Error"];
+        };
+    };
+    createDestinationIdentityDecision: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                destination_id: components["parameters"]["DestinationId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateDestinationIdentityDecision"];
+            };
+        };
+        responses: {
+            /** @description Identity decision recorded. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DestinationIdentityDecision"];
+                };
+            };
+            400: components["responses"]["Error"];
+            401: components["responses"]["Error"];
+            403: components["responses"]["Error"];
+            409: components["responses"]["Error"];
+        };
+    };
+    reverseDestinationIdentityDecision: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                destination_id: components["parameters"]["DestinationId"];
+                decision_id: components["parameters"]["IdentityDecisionId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Reversal audit record. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DestinationIdentityDecision"];
+                };
+            };
+            401: components["responses"]["Error"];
+            403: components["responses"]["Error"];
+            404: components["responses"]["Error"];
+            409: components["responses"]["Error"];
+        };
+    };
+    listPrinterRoutes: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Tenant-visible routes with telemetry and projection freshness. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PrinterRoute"][];
+                };
+            };
+            401: components["responses"]["Error"];
+            403: components["responses"]["Error"];
+        };
+    };
+    getPrinterRoute: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                route_id: components["parameters"]["RouteId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Route details. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PrinterRoute"];
+                };
+            };
+            401: components["responses"]["Error"];
+            403: components["responses"]["Error"];
+            404: components["responses"]["Error"];
+        };
+    };
+    listPrinterRouteObservations: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                route_id: components["parameters"]["RouteId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Newest-first route observations. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RouteObservation"][];
+                };
+            };
+            401: components["responses"]["Error"];
+            403: components["responses"]["Error"];
+            404: components["responses"]["Error"];
+        };
+    };
+    listRouteReservations: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Tenant-scoped reservation history. Fencing tokens are redacted. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RouteReservation"][];
+                };
+            };
+            401: components["responses"]["Error"];
+            403: components["responses"]["Error"];
         };
     };
     listTargets: {
