@@ -142,15 +142,26 @@ mod platform {
                 content_path,
                 options,
                 native_profile,
+                route_fence,
                 ..
-            } => submit(
-                &native_printer_id,
-                &title,
-                &content_path,
-                content_kind == piqae_domain::ContentKind::Raw,
-                &options,
-                native_profile.as_ref(),
-            ),
+            } => {
+                let mut result = submit(
+                    &native_printer_id,
+                    &title,
+                    &content_path,
+                    content_kind == piqae_domain::ContentKind::Raw,
+                    &options,
+                    native_profile.as_ref(),
+                )?;
+                if let ExecutorResult::Submitted {
+                    route_fence: echoed,
+                    ..
+                } = &mut result
+                {
+                    *echoed = route_fence;
+                }
+                Ok(result)
+            }
             ExecutorOperation::Observe {
                 native_printer_id,
                 native_job_id,
@@ -334,6 +345,7 @@ mod platform {
                         capabilities,
                         native_options,
                         driver_fingerprint: None,
+                        identity_evidence: Vec::new(),
                     }
                 })
                 .collect();
@@ -1051,6 +1063,7 @@ mod platform {
         }
         Ok(ExecutorResult::Submitted {
             native_job_id: Some(job_id.to_string()),
+            route_fence: None,
         })
     }
 
@@ -1191,6 +1204,7 @@ mod platform {
         if let Some(job_id) = response.native_job_id {
             return Ok(ExecutorResult::Submitted {
                 native_job_id: Some(job_id),
+                route_fence: None,
             });
         }
 
@@ -1221,6 +1235,7 @@ mod platform {
             {
                 return Ok(ExecutorResult::Submitted {
                     native_job_id: Some(job_id),
+                    route_fence: None,
                 });
             }
             std::thread::sleep(Duration::from_millis(50));

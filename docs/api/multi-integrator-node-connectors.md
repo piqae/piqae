@@ -86,20 +86,39 @@ connector workers, with periodic reconciliation as a recovery bound.
 | Different connector subsets on different nodes | Only the explicit grant on each connector controls visibility and job admission. |
 | Printer added, removed or reconfigured | Every connector is invalidated immediately and later reconciled; selected-printer grants never widen automatically. |
 
-## Shared destinations and queue privacy
+## Shared routes, fencing and queue privacy
 
-Multi-connector projection does not create a global physical-printer queue.
-Within one node, every connector has a tenant-private durable Piqae queue and
-all accepted work ultimately reaches the same OS queue. A tenant may receive a
-privacy-safe busy/occupancy signal, but must never receive another tenant's job
-title, document, metadata or identifiers. Jobs submitted directly to the OS
-spooler are outside Piqae's ordering and idempotency boundary.
+Within one installation, a durable route coordinator is the single final
+handoff boundary for every connector worker. Connectors retain tenant-private
+credentials, content, cursors and durable queues, but cannot submit around the
+coordinator. Each accepted offer carries a generation and opaque fencing proof;
+the native executor must echo the non-secret route fence immediately around OS
+submission. A rejected pre-handoff attempt releases the route. An accepted
+attempt advances the queue, while an ambiguous timeout or crash keeps the route
+fenced across restart until reconciliation or explicit resolution. Elapsed
+lease time alone never authorizes a second submission.
+
+The node publishes an installation-stable `local_route_key` for an exact OS
+queue. The control plane maps that opaque key to its own route resource ID,
+including during rolling upgrades where a server route was backfilled before
+the node first reported its key. Identically named queues on different
+computers remain different routes; weak queue or driver similarity is never
+enough to infer one physical printer.
+
+Native state and queue occupancy are collected once per route in a short
+installation-wide cache, then projected separately for each connector. Wire
+telemetry contains counts and bounded state classifications only: never native
+job titles, users, paths, documents or another connector's identifiers. Each
+connector can see its own known count and combined external/unknown occupancy,
+but not who owns work ahead of it. Jobs submitted directly to the OS spooler
+remain visible only as privacy-safe occupancy and are outside Piqae's ordering
+and idempotency boundary.
 
 When several computers can drive the same physical printer, use an explicit
 logical target with primary/standby bindings. The control plane leases one job
-to one route. It may reroute before durable native acceptance; after spooler
-handoff or an ambiguous crash it must enter `delivery_uncertain` rather than
-automatically print through another node and risk a duplicate. Pool scheduling,
-cross-tenant queue positions and automatic physical-device discovery remain
-future work and must not be implied by connector health or matching queue
-names.
+to one route. It may reroute only after a terminal rejection proves native
+handoff did not happen; after spooler handoff or an ambiguous crash it must
+enter `delivery_uncertain` rather than automatically print through another node
+and risk a duplicate. Verified physical identity evidence can suggest a target,
+but automatic cross-computer merging and failover remain gated on control-plane
+policy and release evidence and must not be inferred from matching queue names.

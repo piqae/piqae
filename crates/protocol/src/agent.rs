@@ -314,6 +314,53 @@ pub struct AgentSyncRequest {
     /// still validates every offered manifest and fails closed.
     #[serde(default)]
     pub document_render: DocumentRenderCapabilities,
+    /// Additive capability negotiation for optional node features. A missing
+    /// value is the legacy v1 feature set.
+    #[serde(default)]
+    pub capabilities: AgentProtocolCapabilities,
+    /// Privacy-minimised live observations for the local OS queues visible to
+    /// this authenticated connector. These contain counts, never job titles,
+    /// usernames, paths, document data, or native option payloads.
+    #[serde(default)]
+    pub route_observations: Vec<RouteObservation>,
+    /// Bounded installation topology deltas, including removals which cannot
+    /// be represented by a current printer snapshot.
+    #[serde(default)]
+    pub topology_changes: Vec<RouteTopologyChange>,
+    /// Evidence emitted after a fenced local handoff. Entries are scoped to
+    /// this connector and intentionally omit document metadata.
+    #[serde(default)]
+    pub native_handoffs: Vec<NativeHandoffEvidence>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AgentProtocolCapabilities {
+    /// Stable identifiers allow independent deployment without relying on a
+    /// single monotonically increasing protocol version.
+    #[serde(default)]
+    pub features: Vec<AgentFeature>,
+    #[serde(default)]
+    pub telemetry_privacy: TelemetryPrivacy,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentFeature {
+    DestinationIdentityV1,
+    RouteInventoryV1,
+    ProjectionAckV1,
+    SpoolerObservationV1,
+    RouteFencingV1,
+    NativeHandoffEvidenceV1,
+    TopologyChangesV1,
+    ProfileStockFreshnessV1,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TelemetryPrivacy {
+    #[default]
+    CountsOnly,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -374,6 +421,20 @@ pub struct AgentSyncResponse {
     pub next_poll_after_ms: u64,
     #[serde(default)]
     pub acknowledged_diagnostics: Vec<String>,
+    /// Confirms that the exact connector-scoped inventory revision was
+    /// durably projected. Nodes retry inventory until this acknowledgement is
+    /// observed; a successful heartbeat alone is not sufficient.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inventory_projection: Option<InventoryProjectionAcknowledgement>,
+    /// Highest local handoff evidence sequence durably consumed by the server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acknowledged_handoff_sequence: Option<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct InventoryProjectionAcknowledgement {
+    pub revision: u64,
+    pub projected_at: DateTime<Utc>,
 }
 
 /// A deliberately small, structured support snapshot. It contains no logs,
@@ -410,6 +471,40 @@ pub struct JobOffer {
     pub lease_token: String,
     pub lease_expires_at: DateTime<Utc>,
     pub content: ContentDescriptor,
+    /// Authoritative control-plane route fence for multi-route scheduling.
+    /// Older servers omit this and the installation applies its local fence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_reservation: Option<CloudRouteReservation>,
+}
+
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CloudRouteReservation {
+    /// Canonical control-plane route resource. This identity may predate the
+    /// node's first route-key projection during a rolling upgrade.
+    pub route_id: String,
+    /// Installation-stable opaque key for this exact OS queue. The node
+    /// validates this value; it must not try to derive the server route ID.
+    pub local_route_key: String,
+    pub reservation_id: Uuid,
+    pub generation: u64,
+    /// Opaque server capability. It is persisted owner-only and must never be
+    /// logged, included in evidence, or forwarded to a native executor.
+    pub fencing_token: String,
+    pub lease_expires_at: DateTime<Utc>,
+}
+
+impl std::fmt::Debug for CloudRouteReservation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CloudRouteReservation")
+            .field("route_id", &self.route_id)
+            .field("local_route_key", &self.local_route_key)
+            .field("reservation_id", &self.reservation_id)
+            .field("generation", &self.generation)
+            .field("fencing_token", &"[REDACTED]")
+            .field("lease_expires_at", &self.lease_expires_at)
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -449,12 +544,33 @@ pub enum ContentDescriptor {
     },
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 pub struct AgentAcceptJobRequest {
     pub lease_id: Uuid,
     pub lease_token: String,
     pub content_sha256: String,
     pub local_sequence: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_reservation_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_generation: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_fencing_token: Option<String>,
+}
+
+impl std::fmt::Debug for AgentAcceptJobRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AgentAcceptJobRequest")
+            .field("lease_id", &self.lease_id)
+            .field("lease_token", &"[REDACTED]")
+            .field("content_sha256", &self.content_sha256)
+            .field("local_sequence", &self.local_sequence)
+            .field("route_reservation_id", &self.route_reservation_id)
+            .field("route_generation", &self.route_generation)
+            .field("route_fencing_token", &"[REDACTED]")
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -535,6 +651,160 @@ pub struct PrinterSnapshot {
     pub semantic_capabilities: piqae_domain::SemanticPrinterCapabilities,
     #[serde(default)]
     pub profiles: Vec<PrinterProfileSnapshot>,
+    /// Installation-wide route identity shared by every connector projection
+    /// of this exact OS queue.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route: Option<PrinterRouteSnapshot>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct PrinterRouteSnapshot {
+    pub local_route_key: String,
+    pub inventory_revision: u64,
+    pub topology_revision: u64,
+    pub observed_at: DateTime<Utc>,
+    #[serde(default)]
+    pub identity_evidence: Vec<PhysicalIdentityEvidence>,
+    #[serde(default)]
+    pub identity_confidence: IdentityConfidence,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topology_change: Option<TopologyChange>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_observed_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stock_observed_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PhysicalIdentityEvidenceKind {
+    IppPrinterUuid,
+    DeviceSerial,
+    UsbSerial,
+    CertificateKey,
+    NetworkMac,
+    NetworkEndpoint,
+    DriverFingerprint,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct PhysicalIdentityEvidence {
+    pub kind: PhysicalIdentityEvidenceKind,
+    /// Lowercase SHA-256 of the canonical value. Raw serials, MAC addresses,
+    /// endpoints, and certificates never leave the node through this field.
+    pub value_sha256: String,
+    pub strength: IdentityEvidenceStrength,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IdentityEvidenceStrength {
+    Strong,
+    Medium,
+    Weak,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IdentityConfidence {
+    Verified,
+    High,
+    Possible,
+    Conflict,
+    #[default]
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TopologyChange {
+    Added,
+    Changed,
+    Removed,
+    Reconciled,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RouteTopologyChange {
+    pub local_route_key: String,
+    pub topology_revision: u64,
+    pub observed_at: DateTime<Utc>,
+    pub change: TopologyChange,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RouteObservation {
+    pub local_route_key: String,
+    pub observed_at: DateTime<Utc>,
+    pub inventory_revision: u64,
+    pub state: PrinterState,
+    pub accepts_jobs: bool,
+    /// Bounded machine classifications such as `media_empty` or `paused`.
+    /// Native free-form driver messages are not allowed here.
+    #[serde(default)]
+    pub state_reasons: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue: Option<PrivacySafeQueueObservation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_observed_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stock_observed_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct PrivacySafeQueueObservation {
+    pub total_jobs: u32,
+    pub active_jobs: u32,
+    pub held_jobs: u32,
+    pub connector_jobs: u32,
+    pub other_piqae_or_external_jobs: u32,
+    pub unknown_jobs: u32,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NativeHandoffOutcome {
+    Accepted,
+    RejectedBeforeHandoff,
+    Ambiguous,
+}
+
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
+pub struct NativeHandoffEvidence {
+    pub sequence: u64,
+    /// Canonical server route when the offer carried a cloud reservation.
+    /// Legacy offers can only identify the installation-local route key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_id: Option<String>,
+    pub local_route_key: String,
+    pub job_id: piqae_domain::JobId,
+    pub reservation_id: Uuid,
+    pub fencing_generation: u64,
+    /// Authenticated reservation proof. Servers must redact this field from
+    /// logs and never return it through operator APIs.
+    pub fencing_token: String,
+    pub observed_at: DateTime<Utc>,
+    pub outcome: NativeHandoffOutcome,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_job_id: Option<String>,
+}
+
+impl std::fmt::Debug for NativeHandoffEvidence {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("NativeHandoffEvidence")
+            .field("sequence", &self.sequence)
+            .field("route_id", &self.route_id)
+            .field("local_route_key", &self.local_route_key)
+            .field("job_id", &self.job_id)
+            .field("reservation_id", &self.reservation_id)
+            .field("fencing_generation", &self.fencing_generation)
+            .field("fencing_token", &"[REDACTED]")
+            .field("observed_at", &self.observed_at)
+            .field("outcome", &self.outcome)
+            .field("native_job_id", &self.native_job_id)
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

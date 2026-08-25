@@ -48,8 +48,13 @@ fn execute(operation: ExecutorOperation) -> Result<ExecutorResult, ExecutorError
         ExecutorOperation::Submit {
             native_printer_id, ..
         } if native_printer_id != "fake-printer" => Err(not_found()),
-        ExecutorOperation::Submit { job_id, .. } => Ok(ExecutorResult::Submitted {
+        ExecutorOperation::Submit {
+            job_id,
+            route_fence,
+            ..
+        } => Ok(ExecutorResult::Submitted {
             native_job_id: Some(format!("fake-{}", job_id.as_ulid())),
+            route_fence,
         }),
         ExecutorOperation::Observe {
             native_printer_id, ..
@@ -98,6 +103,11 @@ fn fake_printer() -> DiscoveredPrinter {
         capabilities: PrinterCapabilities::default(),
         native_options: std::collections::BTreeMap::new(),
         driver_fingerprint: None,
+        identity_evidence: vec![piqae_protocol::agent::PhysicalIdentityEvidence {
+            kind: piqae_protocol::agent::PhysicalIdentityEvidenceKind::IppPrinterUuid,
+            value_sha256: "f3c51f7f5ac01930f70c45b3663606e52dd06bf6570d8eecda8f00ccf4b43527".into(),
+            strength: piqae_protocol::agent::IdentityEvidenceStrength::Strong,
+        }],
     }
 }
 

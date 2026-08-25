@@ -24,6 +24,7 @@ async fn fake_executor_runs_across_the_framed_process_boundary() {
                 content_path: "/does/not/matter".into(),
                 options: JobOptions::default(),
                 native_profile: None,
+                route_fence: None,
             },
         })
         .await
@@ -31,7 +32,8 @@ async fn fake_executor_runs_across_the_framed_process_boundary() {
     assert!(matches!(
         response.result,
         Ok(ExecutorResult::Submitted {
-            native_job_id: Some(_)
+            native_job_id: Some(_),
+            route_fence: None,
         })
     ));
 
