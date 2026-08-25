@@ -94,9 +94,9 @@ dedicated event exists so a consumer does not have to subscribe to every job
 update and filter.
 
 Subscribe to both, and treat them differently. `job.delivery_uncertain` is
-timely and noisy: entering the state is unremarkable, and some of these
-resolve as soon as somebody looks at the printer. It is the right feed for a
-dashboard or a log. `job.delivery_uncertain.unresolved` is the one that has
+timely and noisy: entering the state is unremarkable, and many of these
+questions are answered the moment somebody glances at the printer. It is the
+right feed for a dashboard or a log. `job.delivery_uncertain.unresolved` is the one that has
 earned a human's attention, because the job stayed uncertain past the
 threshold and was never surfaced before. It is the right feed for a ticket.
 
@@ -229,3 +229,177 @@ webhook outbox does.
 The stream has no signature: it is authenticated by the API key on a TLS
 connection you opened, so there is nothing to verify. It also has no retry
 schedule and no dead letters — the cursor is yours to persist.
+
+## Routing it somewhere a human notices
+
+Piqae deliberately has no opinion about the destination, and self-hosted
+operation is not a degraded path here: the receiver is an HTTPS endpoint you
+control, or the event stream you poll. Whatever you choose has to satisfy four
+properties.
+
+- Somebody is accountable for it during the hours the printers run.
+- It can hold an item open until a person closes it. A chat message scrolls
+  away; uncertain delivery needs a thing that stays open.
+- It is searchable by Piqae job ID months later, because that is the only
+  identifier that ties the ticket to the event history.
+- It does not page. This is not an outage, and paging on it recreates exactly
+  the fatigue that keeping it out of Sentry was meant to avoid.
+
+An issue tracker satisfies all four. Linear is the tool the Piqae operator
+already triages in, so it is a reasonable default: a small receiver verifies
+the signature, then creates one issue per uncertain job. Nothing in Piqae knows
+or cares that it is Linear — a ticket queue, an internal ops app, a shared
+mailbox watched by the shift lead, or a row in your own database all work the
+same way. No vendor is required and none is integrated in the product.
+
+The receiver itself is the same shape whichever destination you pick:
+
+1. read the raw body, verify `piqae-signature`, reject on failure;
+2. look up `piqae-event-id`; if already processed, return 2xx and stop;
+3. key the work item on the Piqae job ID, not the event ID, and upsert. The
+   timely event and the later unresolved event then collapse into one item
+   instead of two, and a replayed delivery updates rather than duplicates;
+4. persist durably, then return 2xx. A 2xx before the write means a lost
+   signal that will never be retried;
+5. put the job ID, the printer, the last event message, and `uncertain_since`
+   in the item, and a link to the job. Keep the document title out of any
+   channel wider than the people already entitled to see the document.
+
+If you route the timely `job.delivery_uncertain` anywhere at all, route it
+somewhere ambient — a queue view, a log, a counter on a dashboard. The item
+that a human is expected to act on should come from
+`job.delivery_uncertain.unresolved`.
+
+## What to do when it fires
+
+This is a judgement call, and the runbook cannot make it for you. Reprinting
+risks a duplicate physical document. Doing nothing risks a document that never
+existed. Piqae has no way to distinguish the two after the fact, which is the
+entire reason the state exists. What follows narrows the judgement, not
+removes it.
+
+### 1. Gather the evidence Piqae has
+
+- `GET /v1/jobs/{job_id}` — title, printer, and your own `metadata`, which is
+  usually what ties the job back to an order or consignment.
+- `GET /v1/jobs/{job_id}/events` — the append-only history in sequence order.
+  The last event is the one that matters. Two fields carry most of the signal:
+  - `message` identifies which of the five paths above produced the state;
+  - `native_job_id` is `null` when the spooler never returned an identifier,
+    and set when the job did exist in the native queue and was then lost track
+    of. A job that reached the native queue is materially more likely to have
+    printed than one whose handoff is itself in doubt.
+- `agent_id` on that event names the node to go and look at.
+
+Do not rewrite this history to make a later attempt look like the original.
+
+### 2. Gather the evidence Piqae does not have
+
+Physical evidence beats every inference available from the API.
+
+- The printer's output. For a label or receipt printer, the last item in the
+  tray or on the roll answers the question outright.
+- The printer's own counter or job log, where the hardware keeps one.
+- The operating system's queue view on that node, searched for the
+  `native_job_id` if there is one.
+- The node's `agent.log` (plus four rotated generations, per
+  [`diagnostics.md`](../nodes/diagnostics.md)) around `occurred_at`.
+- The downstream system. If a picker scanned the label or the order moved on,
+  the document reached the world.
+
+### 3. Decide
+
+Two questions decide it.
+
+**What does a duplicate cost?** Sort the document into one of two classes
+before anything else:
+
+| Class | Examples | Default |
+| --- | --- | --- |
+| Consumes something scarce or externally visible | Carrier label with a live tracking number, cheque, ticket, serial-numbered or controlled form, anything already handed to a third party | A duplicate is an incident in its own right. Do not reprint without positive evidence that nothing printed |
+| Safely re-printable | Picking list, packing slip copy, internal worksheet, shelf label | A duplicate is waste paper. Reprint and move on |
+
+**Can anyone still look?** Time and attendance decide whether physical evidence
+is retrievable at all. Within minutes, on an attended printer, go and look —
+that is the cheapest and most conclusive step in this entire document. Hours
+later, on an unattended printer in a warehouse, the paper has moved and the
+evidence is gone.
+
+Combining them:
+
+- evidence says it printed → do not reprint; close the item with the evidence;
+- evidence says it did not print → reprint as a new attempt;
+- no evidence, safely re-printable → reprint;
+- no evidence, duplicate is harmful → do not decide alone. Escalate to whoever
+  owns the downstream process — the person who can void a duplicate label or
+  reconcile a numbered form — and let them choose. Record that you asked.
+
+Never bulk-retry a set of uncertain jobs, and never let an automated retry loop
+near this state. The same rule appears in
+[`incident-response.md`](incident-response.md),
+[`production-release.md`](production-release.md), and
+[`backups-and-restore.md`](backups-and-restore.md) because it is the one
+mistake that turns a recoverable ambiguity into a customer-visible one.
+
+### 4. Reprint, if that is the decision
+
+There is no server-side reprint of an uncertain job. Two paths exist.
+
+- **Re-issue from the system that created the job.** Submit a new job through
+  your integration with a *new* idempotency key and metadata naming the
+  original job ID. Reusing the original key returns the original job instead of
+  printing, which is correct behaviour and not what you want here.
+- **Reprint retained content on the node.** The node's local queue view offers
+  a confirmed reprint for terminal attempts, including `delivery_uncertain`,
+  when the printer is still present and the content file is still retained. It
+  requires explicit confirmation, and the new attempt's identity is derived
+  from the original job ID plus the caller's idempotency key, so replaying the
+  browser request cannot produce a second print. The result is a node-local
+  attempt titled `Reprint — <original title>`; it is not a cloud job and will
+  not appear in `GET /v1/jobs`. Reaching it is described in
+  [`local-agent-control.md`](../architecture/local-agent-control.md).
+
+### 5. Close the loop yourself
+
+Nothing in Piqae records that a human resolved an uncertain job. The job stays
+`delivery_uncertain` permanently, and `delivery_uncertain_alerted_at` is an
+idempotency fence — it guarantees the sweep surfaces a job once — not a
+resolution flag. Your tracker is the system of record for the decision, the
+evidence behind it, and who made it.
+
+## Configuration
+
+| Setting | Default | Notes |
+| --- | --- | --- |
+| `PIQAE_DELIVERY_UNCERTAIN_ALERT_SECONDS` | `900` | Age at which an uncertain job is surfaced as unresolved. Clamped to 60–86400 seconds; an unparseable value falls back to the default. Also accepted as `SPOOL_DELIVERY_UNCERTAIN_ALERT_SECONDS` |
+| `PIQAE_SERVICE_ROLE` | `all` | The sweep and the webhook worker run only in the `worker` and `all` roles. A deployment split into `api` and `sync` roles must run at least one worker or nothing is ever surfaced or delivered |
+
+The sweep runs once a minute and claims at most 50 jobs per pass, so worst-case
+detection latency is the threshold plus about a minute, and a backlog drains at
+50 jobs per minute rather than storming the receiver.
+
+Treat the threshold as a debounce on human attention rather than a timeout:
+the state is terminal and the job will never leave it on its own. Raise it if
+your printers are attended and people notice problems before a ticket would
+help. Lower it toward the floor if printing is unattended and nobody is going
+to look until the ticket exists.
+
+## Known gaps
+
+Stated plainly, because assuming any of these work would cost a document.
+
+- There is no dashboard view of uncertain jobs. Reconciliation is
+  `GET /v1/jobs?state=delivery_uncertain`, paginated with `after`.
+- There is no server-side reprint and no recorded link from a reprinted job
+  back to the uncertain one beyond metadata you set yourself.
+- Nothing marks an uncertain job resolved.
+- A job is surfaced as unresolved once. If your receiver was down for the full
+  ~31-hour retry window and the dead-lettered delivery was never replayed,
+  nothing re-surfaces it. Run the reconciliation query on a schedule.
+- The node-side uncertainty deadline is a fixed ten-minute constant. The
+  workspace-configurable timers listed in
+  [`reliability-and-job-lifecycle.md`](reliability-and-job-lifecycle.md) are a
+  requirement, not a description of today's behaviour.
+- None of this establishes that ink reached paper. `completed_reported` does
+  not either. Piqae reports the strongest evidence it has and refuses to
+  overstate it.
