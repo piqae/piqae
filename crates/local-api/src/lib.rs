@@ -182,6 +182,9 @@ pub struct LocalConnectorDetail {
     pub display_name: String,
     pub workspace_name: Option<String>,
     pub authorization_type: Option<String>,
+    pub workspace_id: Option<String>,
+    pub environment_id: Option<String>,
+    pub requesting_service_account_id: Option<String>,
     pub endpoint: String,
     pub connection: String,
     pub permission: String,
@@ -1090,12 +1093,26 @@ mod tests {
     }
 
     #[test]
+    fn embedded_dashboard_wraps_identifiers_and_keeps_recovery_owner_scoped() {
+        let html = include_str!("dashboard.html");
+        assert!(html.contains("overflow-wrap:anywhere"));
+        assert!(html.contains("Connected workspace"));
+        assert!(html.contains("Service / platform"));
+        assert!(html.contains("Reconnect with owner"));
+        assert!(html.contains("The node cannot safely invent that owner’s sign-in address."));
+        assert!(html.contains("rel=\"noopener noreferrer\""));
+    }
+
+    #[test]
     fn connector_diagnostics_are_bounded_and_explain_empty_projection() {
         let detail = LocalConnectorDetail {
             connector_id: "ncon_test".into(),
             display_name: "Shopify store".into(),
             workspace_name: Some("Managed customer".into()),
             authorization_type: Some("platform_customer".into()),
+            workspace_id: Some("wsp_test".into()),
+            environment_id: Some("env_live".into()),
+            requesting_service_account_id: Some("svc_shopify".into()),
             endpoint: "https://api.example.test".into(),
             connection: "unauthorized".into(),
             permission: "all_local_printers".into(),
@@ -1106,12 +1123,15 @@ mod tests {
             eligible_printer_count: 3,
             inventory_revision: 1,
             inventory_refresh_pending: true,
-            manage_url: None,
+            manage_url: Some("https://shop.example/settings".into()),
         };
         let encoded = serde_json::to_value(detail).expect("serialize diagnostics");
         assert_eq!(encoded["local_printer_count"], 3);
         assert_eq!(encoded["eligible_printer_count"], 3);
         assert_eq!(encoded["last_sync_error_code"], "invalid_agent_signature");
+        assert_eq!(encoded["workspace_id"], "wsp_test");
+        assert_eq!(encoded["requesting_service_account_id"], "svc_shopify");
+        assert_eq!(encoded["manage_url"], "https://shop.example/settings");
         assert!(encoded.get("device_key").is_none());
         assert!(encoded.get("token").is_none());
     }
