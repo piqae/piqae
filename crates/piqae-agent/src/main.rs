@@ -256,6 +256,7 @@ enum ConnectorSupervisorCommand {
     Details {
         respond_to: oneshot::Sender<Result<Vec<LocalConnectorDetail>, ControlFailure>>,
     },
+    RefreshPrinters,
 }
 
 fn reject_connector_supervisor_command(
@@ -304,11 +305,19 @@ fn reject_connector_supervisor_command(
                 },
             )));
         }
+        ConnectorSupervisorCommand::RefreshPrinters => {
+            warn!(
+                busy = is_full,
+                "connector printer refresh notification was deferred"
+            );
+        }
     }
 }
 
 struct ConnectorWorker {
     allowed_printer_ids: Option<std::collections::BTreeSet<String>>,
+    printer_inventory_dirty: Arc<AtomicBool>,
+    wakeup: Arc<Notify>,
     sync_stop: StopSignal,
     scheduler_stop: StopSignal,
     connection_stop: StopSignal,
@@ -1561,6 +1570,12 @@ async fn control_loop(
                 if sync_relevant {
                     cloud_sync_wakeup.notify_one();
                 }
+                if inventory_changed
+                    && let Err(error) = connector_supervisor
+                        .try_send(ConnectorSupervisorCommand::RefreshPrinters)
+                {
+                    reject_connector_supervisor_command(error);
+                }
             }
             _ = scheduler.tick(), if !paused.load(Ordering::Relaxed) => {
                 let before = engine.store().latest_pending_cloud_event_sequence();
@@ -1771,6 +1786,14 @@ async fn connector_supervisor_loop(
                 };
                 let _ = respond_to.send(details);
             }
+            ConnectorSupervisorCommand::RefreshPrinters => {
+                for worker in workers.values() {
+                    worker
+                        .printer_inventory_dirty
+                        .store(true, Ordering::Release);
+                    worker.wakeup.notify_one();
+                }
+            }
         }
     }
     if let Some(worker) = legacy_cloud_worker.take() {
@@ -1934,6 +1957,7 @@ async fn start_connector_worker(
         store.setting("paused")?.as_deref() == Some("true"),
     ));
     let wakeup = Arc::new(Notify::new());
+    let printer_inventory_dirty = Arc::new(AtomicBool::new(true));
     let sync_stop = StopSignal::default();
     let scheduler_stop = StopSignal::default();
     // Resolve every fallible runtime dependency before spawning either half;
@@ -1961,8 +1985,8 @@ async fn start_connector_worker(
         support_packs,
         Arc::clone(&connector_connection),
         paused,
-        wakeup,
-        Arc::new(AtomicBool::new(true)),
+        Arc::clone(&wakeup),
+        Arc::clone(&printer_inventory_dirty),
         sync_stop.clone(),
     ));
     let connection_stop = StopSignal::default();
@@ -1974,6 +1998,8 @@ async fn start_connector_worker(
     ));
     Ok(ConnectorWorker {
         allowed_printer_ids: connector_allowed_printers(&record),
+        printer_inventory_dirty,
+        wakeup,
         sync_stop,
         scheduler_stop,
         connection_stop,
@@ -2087,6 +2113,11 @@ async fn handle_control_request(
         }
         ControlRequest::Printers { respond_to } => match refresh_local_printers(engine).await {
             Ok(printers) => {
+                if let Err(error) =
+                    connector_supervisor.try_send(ConnectorSupervisorCommand::RefreshPrinters)
+                {
+                    reject_connector_supervisor_command(error);
+                }
                 let _ = respond_to.send(printers);
             }
             Err(error) => {
@@ -5073,6 +5104,8 @@ mod tests {
         ) -> ConnectorWorker {
             ConnectorWorker {
                 allowed_printer_ids: None,
+                printer_inventory_dirty: Arc::new(AtomicBool::new(false)),
+                wakeup: Arc::new(Notify::new()),
                 sync_stop: StopSignal::default(),
                 scheduler_stop: StopSignal::default(),
                 connection_stop: StopSignal::default(),
@@ -5218,6 +5251,8 @@ mod tests {
             "ncon_good".to_owned(),
             ConnectorWorker {
                 allowed_printer_ids: Some(std::iter::once("prn_test".to_owned()).collect()),
+                printer_inventory_dirty: Arc::new(AtomicBool::new(false)),
+                wakeup: Arc::new(Notify::new()),
                 sync_stop,
                 scheduler_stop,
                 connection_stop,
@@ -5274,6 +5309,8 @@ mod tests {
             "ncon_test".to_owned(),
             ConnectorWorker {
                 allowed_printer_ids: Some(std::collections::BTreeSet::new()),
+                printer_inventory_dirty: Arc::new(AtomicBool::new(false)),
+                wakeup: Arc::new(Notify::new()),
                 sync_stop,
                 scheduler_stop,
                 connection_stop,
@@ -6063,6 +6100,53 @@ mod tests {
         .await
         .expect("selected connector sync");
         assert!(request.printers.expect("printer inventory").is_empty());
+    }
+
+    #[tokio::test]
+    async fn multiple_connectors_publish_existing_inventory_after_node_restart() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let inventory_path = directory.path().join("agent.sqlite3");
+        let expected_printer_id = {
+            let mut node_inventory = AgentStore::open(&inventory_path).expect("node inventory");
+            discover_cloud_printers(
+                &mut node_inventory,
+                &PrinterDiscovery::Fake,
+                &SupportPackRegistry::default(),
+            )
+            .await
+            .expect("initial discovery")[0]
+                .id
+        };
+
+        // Reopening the node catalogue models an installed node restart. Each
+        // connector keeps its own queue and revision while sharing the stable
+        // physical printer identity.
+        let mut restarted_inventory = AgentStore::open(&inventory_path).expect("restart inventory");
+        for connector_number in 1..=2 {
+            let mut connector_queue = AgentStore::open(
+                directory
+                    .path()
+                    .join(format!("connector-{connector_number}.sqlite3")),
+            )
+            .expect("connector queue");
+            let request = prepare_sync_request(
+                &mut connector_queue,
+                &mut restarted_inventory,
+                &PrinterDiscovery::Fake,
+                &SupportPackRegistry::default(),
+                AgentId::new(),
+                Utc::now(),
+                false,
+                true,
+                None,
+            )
+            .await
+            .expect("connector sync");
+            let printers = request.printers.expect("printer inventory");
+            assert_eq!(printers.len(), 1);
+            assert_eq!(printers[0].id, expected_printer_id);
+            assert_eq!(request.printer_revision, 1);
+        }
     }
 
     #[test]

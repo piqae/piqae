@@ -77,6 +77,12 @@ const printer = {
 
 function pageData(jobs: DashboardJob[], stateFilter = 'all') {
   const uncertain = jobs.filter((entry) => entry.state === 'delivery_uncertain').length;
+  const oldestUncertainSince =
+    jobs
+      .filter((entry) => entry.state === 'delivery_uncertain')
+      .map((entry) => entry.deliveryUncertainSince)
+      .filter((value): value is string => typeof value === 'string')
+      .sort()[0] ?? null;
   const failed = jobs.filter((entry) => entry.state.startsWith('failed')).length;
   return {
     dashboardMode: 'live',
@@ -94,7 +100,7 @@ function pageData(jobs: DashboardJob[], stateFilter = 'all') {
     overview: {
       agents: { total: 1, online: 1, degraded: 0 },
       printers: { total: 1, online: 1, attention: 0 },
-      jobs: { recent: jobs.length, active: 0, failed, uncertain }
+      jobs: { recent: jobs.length, active: 0, failed, uncertain, oldestUncertainSince }
     },
     jobs,
     printers: [printer],
@@ -138,8 +144,8 @@ describe('uncertain delivery on the operations dashboard', () => {
   it('names how long the oldest handoff has been unproven', () => {
     render(Page, {
       data: pageData([
-        job({ id: 'job_02', state: 'delivery_uncertain', updatedAt: minutesAgo(125) }),
-        job({ id: 'job_03', state: 'delivery_uncertain', updatedAt: minutesAgo(9) })
+        job({ id: 'job_02', state: 'delivery_uncertain', deliveryUncertainSince: minutesAgo(125) }),
+        job({ id: 'job_03', state: 'delivery_uncertain', deliveryUncertainSince: minutesAgo(9) })
       ]) as never,
       form: null as never
     });
@@ -152,7 +158,7 @@ describe('uncertain delivery on the operations dashboard', () => {
   it('marks the tile for attention and links to exactly those jobs', () => {
     render(Page, {
       data: pageData([
-        job({ id: 'job_02', state: 'delivery_uncertain', updatedAt: minutesAgo(185) })
+        job({ id: 'job_02', state: 'delivery_uncertain', deliveryUncertainSince: minutesAgo(185) })
       ]) as never,
       form: null as never
     });
@@ -168,7 +174,7 @@ describe('uncertain delivery on the operations dashboard', () => {
   it('does not let a fresh handoff read as resolved', () => {
     render(Page, {
       data: pageData([
-        job({ id: 'job_02', state: 'delivery_uncertain', updatedAt: minutesAgo(0) })
+        job({ id: 'job_02', state: 'delivery_uncertain', deliveryUncertainSince: minutesAgo(0) })
       ]) as never,
       form: null as never
     });
@@ -182,7 +188,7 @@ describe('uncertain delivery on the operations dashboard', () => {
       title: 'Unproven label',
       state: 'delivery_uncertain',
       message: 'The agent restarted after handing the job to Windows',
-      updatedAt: minutesAgo(125)
+      deliveryUncertainSince: minutesAgo(125)
     });
     render(Page, {
       data: {
@@ -193,8 +199,10 @@ describe('uncertain delivery on the operations dashboard', () => {
     });
 
     expect(
-      screen.getByText(/Unresolved for 2h since the last recorded update\./)
+      screen.getByText(/Unresolved for 2h\./)
     ).toBeInTheDocument();
+    expect(screen.getByText(/Automatic retry is disabled because it could produce a duplicate/)).toBeInTheDocument();
+    expect(screen.queryByText(/node restarted between/i)).not.toBeInTheDocument();
     expect(reviewTile().textContent).toContain('oldest 2h');
   });
 

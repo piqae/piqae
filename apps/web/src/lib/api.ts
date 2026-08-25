@@ -38,6 +38,8 @@ export interface DashboardApi {
   collectNodeDiagnostics(nodeId: string): Promise<{ requestId: string }>;
 }
 
+const MAX_OVERVIEW_JOB_PAGES = 100;
+
 const page = <T>(data: T[]): DashboardPage<T> => ({ data, nextCursor: null });
 const delay = <T>(value: T): Promise<T> =>
   new Promise((resolve) => setTimeout(() => resolve(value), 60));
@@ -98,7 +100,13 @@ export const mockApi: DashboardApi = {
           ].includes(job.state)
         ).length,
         failed: demo.jobs.filter((job) => job.state.startsWith('failed')).length,
-        uncertain: demo.jobs.filter((job) => job.state === 'delivery_uncertain').length
+        uncertain: demo.jobs.filter((job) => job.state === 'delivery_uncertain').length,
+        oldestUncertainSince:
+          demo.jobs
+            .filter((job) => job.state === 'delivery_uncertain')
+            .map((job) => job.deliveryUncertainSince)
+            .filter((value): value is string => typeof value === 'string')
+            .sort()[0] ?? null
       }
     }),
   agents: () => delay(page(demo.agents)),
@@ -230,9 +238,48 @@ export function createLiveApi(
     nativeJobId: null,
     createdAt: job.created_at,
     updatedAt: job.created_at,
+    deliveryUncertainSince: job.delivery_uncertain_since ?? null,
     expiresAt: job.expires_at,
     contentRetained: true
   });
+
+  const summariseAllUncertainJobs = async () => {
+    let count = 0;
+    let oldestSince: string | null = null;
+    const seenCursors = new Set<string>();
+    let after: string | undefined;
+    let pages = 0;
+
+    do {
+      pages += 1;
+      if (pages > MAX_OVERVIEW_JOB_PAGES) {
+        throw new Error('Piqae uncertain-job overview exceeded its pagination bound.');
+      }
+      const result = await client.jobs.list({
+        limit: 100,
+        state: 'delivery_uncertain',
+        ...(after ? { after } : {})
+      });
+      count += result.data.length;
+      for (const job of result.data) {
+        const since = job.delivery_uncertain_since;
+        if (typeof since === 'string' && (oldestSince === null || since < oldestSince)) {
+          oldestSince = since;
+        }
+      }
+      const next = result.next_cursor ?? undefined;
+      if (next && seenCursors.has(next)) {
+        throw new Error('Piqae jobs pagination returned a repeated cursor.');
+      }
+      if (next) seenCursors.add(next);
+      if (result.has_more && !next) {
+        throw new Error('Piqae jobs pagination reported more results without a cursor.');
+      }
+      after = next;
+    } while (after);
+
+    return { count, oldestSince };
+  };
 
   const platformRequest = async (path: string, init: RequestInit = {}): Promise<Response> =>
     fetcher(`${baseUrl.replace(/\/$/, '')}${path}`, {
@@ -255,10 +302,11 @@ export function createLiveApi(
       return parseDashboardMeta(await response.json());
     },
     overview: async () => {
-      const [agentList, printerPage, jobPage] = await Promise.all([
+      const [agentList, printerPage, jobPage, uncertainJobs] = await Promise.all([
         client.agents.list(),
         client.printers.list({ limit: 100 }),
-        client.jobs.list({ limit: 100 })
+        client.jobs.list({ limit: 100 }),
+        summariseAllUncertainJobs()
       ]);
       return {
         agents: {
@@ -286,7 +334,8 @@ export function createLiveApi(
             ].includes(job.state)
           ).length,
           failed: jobPage.data.filter((job) => job.state.startsWith('failed')).length,
-          uncertain: jobPage.data.filter((job) => job.state === 'delivery_uncertain').length
+          uncertain: uncertainJobs.count,
+          oldestUncertainSince: uncertainJobs.oldestSince
         },
       };
     },

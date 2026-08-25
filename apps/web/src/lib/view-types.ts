@@ -98,6 +98,7 @@ export interface DashboardJob {
   nativeJobId: string | null;
   createdAt: string;
   updatedAt: string;
+  deliveryUncertainSince?: string | null;
   expiresAt: string | null;
   contentRetained: boolean;
 }
@@ -169,7 +170,13 @@ export interface DashboardMeta {
 export interface DashboardOverview {
   agents: { total: number; online: number; degraded: number };
   printers: { total: number; online: number; attention: number };
-  jobs: { recent: number; active: number; failed: number; uncertain: number };
+  jobs: {
+    recent: number;
+    active: number;
+    failed: number;
+    uncertain: number;
+    oldestUncertainSince?: string | null;
+  };
 }
 
 export interface DashboardWorkspace {
@@ -191,4 +198,3 @@ export interface DashboardNodeDiagnostic {
   lastErrorCode: string | null;
   collectionErrorCode: string | null;
 }
-
