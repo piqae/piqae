@@ -13,7 +13,8 @@
 ## Printing safety
 
 Do not bulk retry ambiguous jobs. Reconcile Piqae ID, native spooler ID,
-physical output, and stock. For labels, check the next serial/order before
+physical output, and stock. One uncertain job outside an incident is
+[`uncertain-delivery-response.md`](uncertain-delivery-response.md). For labels, check the next serial/order before
 releasing work. Disable a bad profile/target rather than editing history.
 
 ## Dependency failures

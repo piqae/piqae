@@ -20,7 +20,8 @@ or intervention states include `cancelled`, `expired`, `failed_terminal`,
 that paper exited the printer. `completed_reported` is the strongest available
 reported completion, not independent physical proof. `delivery_uncertain`
 means retrying could duplicate output; an operator must reconcile the printer,
-native queue, and stock before deciding.
+native queue, and stock before deciding. The procedure for doing that is
+[`operations/uncertain-delivery-response.md`](../operations/uncertain-delivery-response.md).
 
 Store and search by Piqae job ID. Native spooler IDs are node-local correlation
 data and may be reused. State transitions and audit events are append-oriented;

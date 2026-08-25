@@ -116,7 +116,8 @@ three outcomes:
 This is deliberate. Blind retry after an ambiguous handoff can produce a
 duplicate physical label, invoice, or dispatch document. An operator may
 choose to reprint as a new job with a recorded relationship to the uncertain
-job.
+job. The alerting and decision procedure for a single uncertain job is
+[`uncertain-delivery-response.md`](uncertain-delivery-response.md).
 
 ### After native handoff
 
