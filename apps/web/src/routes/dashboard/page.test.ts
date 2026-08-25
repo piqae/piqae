@@ -176,6 +176,28 @@ describe('uncertain delivery on the operations dashboard', () => {
     expect(reviewTile().textContent).toContain('oldest under a minute');
   });
 
+  it('states the same age in the job drawer as on the tile', () => {
+    const unproven = job({
+      id: 'job_02',
+      title: 'Unproven label',
+      state: 'delivery_uncertain',
+      message: 'The agent restarted after handing the job to Windows',
+      updatedAt: minutesAgo(125)
+    });
+    render(Page, {
+      data: {
+        ...pageData([unproven]),
+        detail: { kind: 'job', job: unproven, events: [], printer, agent }
+      } as never,
+      form: null as never
+    });
+
+    expect(
+      screen.getByText(/Unresolved for 2h since the last recorded update\./)
+    ).toBeInTheDocument();
+    expect(reviewTile().textContent).toContain('oldest 2h');
+  });
+
   it('shows only uncertain jobs when the address selects that state', () => {
     render(Page, {
       data: pageData(
