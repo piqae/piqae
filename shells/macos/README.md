@@ -38,7 +38,9 @@ Configuration:
   `~/Library/Application Support/Spool/local.token`. This internal path remains
   stable across the visible Piqae rename so existing identities and queues are
   not stranded.
-- **Queue** opens the node's authenticated loopback dashboard. The menu requests
+- **Print History…** opens the searchable, filterable retained history view.
+  **Connections → View Connections…** opens the separate connection ownership
+  and recovery view. Both request
   a short-lived, single-use browser handoff, so the local API token is never put
   in a browser URL. `PIQAE_DASHBOARD_URL` is only a compatibility fallback for
   older agents that do not yet provide that handoff.

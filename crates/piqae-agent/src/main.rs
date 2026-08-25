@@ -1032,6 +1032,10 @@ async fn add_connector(arguments: &Arguments, consent: ConnectorConsentInput) ->
             .or_else(|| Some(preview.workspace_name.clone())),
         workspace_name: Some(preview.workspace_name),
         authorization_type: Some(preview.authorization_type),
+        workspace_id: Some(preview.workspace_id),
+        environment_id: Some(preview.environment_id),
+        requesting_service_account_id: preview.requesting_service_account_id,
+        manage_url: preview.return_url.and_then(|value| value.parse().ok()),
         device_key_file: relative_key,
         enabled: true,
         printer_grant,
@@ -1816,6 +1820,9 @@ async fn connector_supervisor_loop(
                                     .unwrap_or_else(|| "Piqae connection".to_owned()),
                                 workspace_name: record.workspace_name,
                                 authorization_type: record.authorization_type,
+                                workspace_id: record.workspace_id,
+                                environment_id: record.environment_id,
+                                requesting_service_account_id: record.requesting_service_account_id,
                                 endpoint: record.control_plane_url.origin().ascii_serialization(),
                                 connection,
                                 permission,
@@ -1826,7 +1833,7 @@ async fn connector_supervisor_loop(
                                 eligible_printer_count,
                                 inventory_revision,
                                 inventory_refresh_pending,
-                                manage_url: None,
+                                manage_url: record.manage_url.map(|url| url.to_string()),
                             });
                         }
                         Ok(details)
@@ -3033,6 +3040,11 @@ fn local_job_history(
     let jobs = jobs
         .into_iter()
         .map(|job| {
+            let created_unix_ms = job
+                .job_id
+                .strip_prefix("job_")
+                .and_then(|value| value.parse::<ulid::Ulid>().ok())
+                .and_then(|value| i64::try_from(value.timestamp_ms()).ok());
             let can_reprint = is_terminal_job_state(&job.state)
                 && resolve_present_printer(store, &job.printer_id).is_ok()
                 && std::fs::metadata(&job.content_path).is_ok_and(|metadata| metadata.is_file());
@@ -3043,6 +3055,7 @@ fn local_job_history(
                 state: job.state,
                 native_job_id: job.native_job_id,
                 can_reprint,
+                created_unix_ms,
             }
         })
         .collect();
@@ -5134,6 +5147,10 @@ mod tests {
             display_name: Some("Example service".to_owned()),
             workspace_name: Some("Example customer".to_owned()),
             authorization_type: Some("platform_customer".to_owned()),
+            workspace_id: Some("wsp_test".to_owned()),
+            environment_id: Some("env_test".to_owned()),
+            requesting_service_account_id: Some("svc_test".to_owned()),
+            manage_url: Some(Url::parse("https://app.example/manage").expect("url")),
             device_key_file: format!("connectors/{id}/device.key").into(),
             enabled: true,
             printer_grant: PrinterGrant::SelectedPrinters,

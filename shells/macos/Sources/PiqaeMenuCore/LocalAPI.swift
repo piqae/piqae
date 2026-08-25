@@ -293,10 +293,14 @@ public final class LocalAPIClient: @unchecked Sendable {
         return try decoder.decode([LocalQueueJob].self, from: data)
     }
 
-    public func createDashboardSession() async throws -> URL {
+    public func createDashboardSession(view: String) async throws -> URL {
+        guard ["history", "connections"].contains(view) else {
+            throw LocalAPIError.invalidResponse
+        }
         let response: DashboardSessionResponse = try await request(
             method: "POST",
-            path: "/v1/local/dashboard-sessions"
+            path: "/v1/local/dashboard-sessions",
+            additionalHeaders: ["X-Piqae-Dashboard-View": view]
         )
         guard
             response.expiresInSeconds > 0,
@@ -307,7 +311,7 @@ public final class LocalAPIClient: @unchecked Sendable {
             ["127.0.0.1", "localhost", "::1"].contains(host),
             url.user == nil,
             url.password == nil,
-            url.path == "/local/queue",
+            url.path == "/local/\(view)",
             URLComponents(url: url, resolvingAgainstBaseURL: false)?
                 .queryItems?.contains(where: { $0.name == "handoff" && !($0.value ?? "").isEmpty }) == true
         else {

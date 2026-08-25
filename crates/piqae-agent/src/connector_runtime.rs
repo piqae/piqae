@@ -34,6 +34,18 @@ pub struct ConnectorRecord {
     pub workspace_name: Option<String>,
     #[serde(default)]
     pub authorization_type: Option<String>,
+    /// Stable, non-secret tenant identity captured from the signed preview.
+    #[serde(default)]
+    pub workspace_id: Option<String>,
+    #[serde(default)]
+    pub environment_id: Option<String>,
+    /// Platform/service account that requested a managed-customer connection.
+    #[serde(default)]
+    pub requesting_service_account_id: Option<String>,
+    /// Explicit HTTPS destination supplied by the connection owner. This is
+    /// the only URL the local UI may offer for management or reauthorization.
+    #[serde(default)]
+    pub manage_url: Option<Url>,
     /// Relative to the installation data directory. Never accept an absolute
     /// or parent-traversing path from a downloaded enrolment response.
     pub device_key_file: PathBuf,
@@ -228,6 +240,18 @@ fn validate_record(record: &ConnectorRecord) -> Result<()> {
     if !matches!(record.control_plane_url.scheme(), "https" | "http") {
         bail!("unsupported control-plane URL scheme");
     }
+    if record.manage_url.as_ref().is_some_and(|url| {
+        let local_http = url.scheme() == "http"
+            && url
+                .host_str()
+                .is_some_and(|host| matches!(host, "localhost" | "127.0.0.1" | "::1"));
+        (url.scheme() != "https" && !local_http)
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.fragment().is_some()
+    }) {
+        bail!("connector management URL is not operator-safe");
+    }
     if record.control_plane_url.scheme() == "http"
         && !record
             .control_plane_url
@@ -323,6 +347,10 @@ mod tests {
             display_name: Some("Example service".into()),
             workspace_name: Some("Example customer".into()),
             authorization_type: Some("platform_customer".into()),
+            workspace_id: Some("wsp_test".into()),
+            environment_id: Some("env_live".into()),
+            requesting_service_account_id: Some("svc_example".into()),
+            manage_url: Some(Url::parse("https://app.example/manage").unwrap()),
             device_key_file: format!("connectors/{id}/device.key").into(),
             enabled: true,
             printer_grant: PrinterGrant::SelectedPrinters,
@@ -338,6 +366,12 @@ mod tests {
         registry.add(record("ncon_b")).unwrap();
         assert!(registry.revoke("ncon_a").unwrap());
         let restarted = ConnectorRegistry::load(dir.path()).unwrap();
+        let surviving = restarted.enabled().next().unwrap();
+        assert_eq!(surviving.workspace_id.as_deref(), Some("wsp_test"));
+        assert_eq!(
+            surviving.manage_url.as_ref().map(Url::as_str),
+            Some("https://app.example/manage")
+        );
         assert_eq!(
             restarted
                 .enabled()
@@ -361,6 +395,16 @@ mod tests {
                 0o600
             );
         }
+    }
+
+    #[test]
+    fn management_destinations_fail_closed() {
+        let mut connector = record("ncon_unsafe");
+        connector.manage_url = Some(Url::parse("http://owner.example/manage").unwrap());
+        assert!(validate_record(&connector).is_err());
+
+        connector.manage_url = Some(Url::parse("http://localhost:5173/manage").unwrap());
+        assert!(validate_record(&connector).is_ok());
     }
 
     #[test]

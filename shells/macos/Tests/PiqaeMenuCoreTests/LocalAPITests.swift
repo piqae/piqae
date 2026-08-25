@@ -82,7 +82,7 @@ final class LocalAPITests: XCTestCase {
             MenuPresentation.testPresetTitle("A4 colour"),
             "Test “A4 colour”…"
         )
-        XCTAssertEqual(MenuPresentation.queueTitle, "Queue")
+        XCTAssertEqual(MenuPresentation.queueTitle, "Print History…")
     }
 
     func testConnectionStatusIsProviderNeutral() {
@@ -280,14 +280,15 @@ final class LocalAPITests: XCTestCase {
         StubURLProtocol.handler = { request in
             XCTAssertEqual(request.httpMethod, "POST")
             XCTAssertEqual(request.url?.path, "/v1/local/dashboard-sessions")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "X-Piqae-Dashboard-View"), "history")
             XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer test-secret")
             return Self.response(
                 for: request,
-                body: #"{"url":"http://127.0.0.1:39100/local/queue?handoff=once","expires_in_seconds":30}"#
+                body: #"{"url":"http://127.0.0.1:39100/local/history?handoff=once","expires_in_seconds":30}"#
             )
         }
-        let dashboardURL = try await client.createDashboardSession()
-        XCTAssertEqual(dashboardURL.path, "/local/queue")
+        let dashboardURL = try await client.createDashboardSession(view: "history")
+        XCTAssertEqual(dashboardURL.path, "/local/history")
         XCTAssertEqual(
             URLComponents(url: dashboardURL, resolvingAgainstBaseURL: false)?
                 .queryItems?.first(where: { $0.name == "handoff" })?.value,
@@ -312,12 +313,12 @@ final class LocalAPITests: XCTestCase {
         StubURLProtocol.handler = { request in
             Self.response(
                 for: request,
-                body: #"{"url":"https://example.com/local/queue?handoff=leak","expires_in_seconds":30}"#
+                body: #"{"url":"https://example.com/local/history?handoff=leak","expires_in_seconds":30}"#
             )
         }
 
         do {
-            _ = try await client.createDashboardSession()
+            _ = try await client.createDashboardSession(view: "history")
             XCTFail("Expected a remote dashboard handoff to be rejected.")
         } catch let error as LocalAPIError {
             XCTAssertEqual(error, .invalidResponse)
