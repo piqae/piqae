@@ -5360,9 +5360,21 @@ impl PostgresStore {
         .execute(&mut *transaction)
         .await?;
         let endpoints = sqlx::query(
+            // A trailing `.*` subscribes to a family, which is what the
+            // dashboard has always offered. Matching was exact, so every
+            // endpoint created there received nothing at all. `starts_with`
+            // rather than LIKE, so an underscore in an event name cannot act
+            // as a wildcard and over-match.
             "SELECT id, url FROM webhook_endpoints
              WHERE workspace_id = $1 AND environment_id = $2 AND enabled = true
-               AND $3 = ANY(subscribed_events)
+               AND (
+                 $3 = ANY(subscribed_events)
+                 OR EXISTS (
+                   SELECT 1 FROM unnest(subscribed_events) AS pattern
+                   WHERE pattern LIKE '%.*'
+                     AND starts_with($3, left(pattern, length(pattern) - 1))
+                 )
+               )
              FOR SHARE",
         )
         .bind(workspace_id.to_string())
