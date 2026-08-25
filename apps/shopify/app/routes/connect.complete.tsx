@@ -2,7 +2,7 @@ import type { LoaderFunctionArgs } from "react-router";
 import { redirect } from "react-router";
 import shopify from "../shopify.server";
 
-const SETTINGS_PATH = "/app/settings";
+const SETTINGS_PATH = "/app/printers";
 
 export async function loader({ request }: LoaderFunctionArgs) {
   const { session } = await shopify.authenticate.admin(request);
