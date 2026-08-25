@@ -42,6 +42,10 @@ Linear's workflows or depending on a React-only component library.
 - `Field` pairs a label, control, and optional hint.
 - `DefinitionList` renders term/value metadata in one or two columns.
 - `Metric` renders a headline number with its label and supporting detail.
+  Pass a snippet for `detail` when part of it needs emphasis, and
+  `tone="attention"` only while the tile actually needs an operator. A tile
+  that reads zero stays neutral: healthy systems show it constantly, and one
+  that shouts while nothing is wrong is one operators learn to ignore.
 - `EmptyState` renders the standard empty message, optionally compact.
 
 Build new dashboard views from these primitives before adding page-local CSS.

@@ -9,8 +9,13 @@
   import RelativeTime from '$lib/components/RelativeTime.svelte';
   import Status from '$lib/components/Status.svelte';
   import JobTimeline from '$lib/components/dashboard/JobTimeline.svelte';
-  import { operationalViews } from '$lib/dashboard-navigation';
+  import { operationalViews, stateFilters } from '$lib/dashboard-navigation';
   import { nativeNodeConnectUrlFromHandoff } from '$lib/node-connect-fragment';
+  import {
+    summariseUncertainDelivery,
+    UNCERTAIN_DELIVERY_HREF,
+    UNCERTAIN_DELIVERY_STATE
+  } from '$lib/uncertain-delivery';
   import {
     DataPanel,
     DefinitionList,
@@ -33,7 +38,23 @@
   );
 
   let query = $state('');
-  let stateFilter = $state('all');
+  // The state narrowing is addressed, not held: it arrives validated from the
+  // loader so a link can put an operator in front of one set of jobs.
+  const stateFilter = $derived(data.stateFilter);
+
+  /**
+   * A count of uncertain handoffs cannot separate a job that turned uncertain a
+   * minute ago from one nobody has resolved for two hours. The age of the
+   * oldest is the number worth reading, so the tile leads with it.
+   */
+  const uncertain = $derived(summariseUncertainDelivery(data.jobs));
+  const uncertainTitle = $derived(
+    uncertain.count === 0
+      ? 'No job is waiting on proof that it printed.'
+      : `Piqae cannot prove these jobs printed. Longest unresolved: ${
+          uncertain.oldestLabel ?? 'unknown'
+        } since the last recorded update.`
+  );
 
   // The checklist is scaffolding, not chrome: once a first job exists it stops
   // occupying the top of the operational surface for good.
@@ -88,22 +109,7 @@
           : visibleAccounts.length
   );
 
-  const stateOptions = $derived(
-    data.view === 'jobs'
-      ? [
-          { value: 'all', label: 'All states' },
-          { value: 'active', label: 'Active' },
-          { value: 'failed', label: 'Failed' },
-          { value: 'delivery_uncertain', label: 'Uncertain' }
-        ]
-      : [
-          { value: 'all', label: 'All states' },
-          { value: 'online', label: 'Online' },
-          { value: 'degraded', label: 'Degraded' },
-          { value: 'offline', label: 'Offline' },
-          { value: 'paused', label: 'Paused' }
-        ]
-  );
+  const stateOptions = $derived(stateFilters(data.view));
 
   const DETAIL_KEYS = ['job', 'printer', 'node', 'customer'];
 
@@ -125,8 +131,18 @@
   );
 
   function switchView(next: string) {
-    stateFilter = 'all';
-    void goto(buildHref({ ...Object.fromEntries(DETAIL_KEYS.map((k) => [k, null])), view: next }), {
+    void goto(
+      buildHref({
+        ...Object.fromEntries(DETAIL_KEYS.map((k) => [k, null])),
+        view: next,
+        state: null
+      }),
+      { keepFocus: true, noScroll: true }
+    );
+  }
+
+  function filterByState(next: string) {
+    void goto(buildHref({ state: next === 'all' ? null : next }), {
       keepFocus: true,
       noScroll: true
     });
@@ -170,6 +186,13 @@
   let cancelOpen = $state(false);
   let cancelPending = $state(false);
   let cancelAttempted = $state(false);
+
+  // Reuse the summary so the drawer and the tile can never disagree about age.
+  const uncertainFor = $derived(
+    detail?.kind === 'job' && detail.job.state === UNCERTAIN_DELIVERY_STATE
+      ? summariseUncertainDelivery([detail.job]).oldestLabel
+      : null
+  );
 
   const cancellable = $derived(
     detail?.kind === 'job' &&
@@ -284,6 +307,16 @@
   </section>
 {/if}
 
+{#snippet uncertainDetail()}
+  {#if uncertain.count === 0}
+    No uncertain handoffs
+  {:else}
+    {uncertain.count} uncertain {uncertain.count === 1 ? 'handoff' : 'handoffs'}{#if uncertain.oldestLabel}
+      · <strong>oldest {uncertain.oldestLabel}</strong>
+    {/if}
+  {/if}
+{/snippet}
+
 <section class="metrics" aria-label="Printing overview">
   <Metric
     label="Nodes online"
@@ -308,8 +341,10 @@
   <Metric
     label="Needs review"
     value={overview.jobs.failed + overview.jobs.uncertain}
-    detail={`${overview.jobs.uncertain} uncertain handoff`}
-    href="/dashboard?view=jobs"
+    detail={uncertainDetail}
+    tone={uncertain.count > 0 ? 'attention' : 'neutral'}
+    title={uncertainTitle}
+    href={uncertain.count > 0 ? UNCERTAIN_DELIVERY_HREF : '/dashboard?view=jobs'}
   />
 </section>
 
@@ -321,8 +356,13 @@
     onchange={switchView}
   />
   <SearchField bind:value={query} label={`Search ${data.view}`} placeholder={`Search ${data.view}…`} />
-  {#if data.view !== 'customers'}
-    <select class="ui-select" bind:value={stateFilter} aria-label="Filter by state">
+  {#if stateOptions.length > 0}
+    <select
+      class="ui-select"
+      value={stateFilter}
+      onchange={(event) => filterByState(event.currentTarget.value)}
+      aria-label="Filter by state"
+    >
       {#each stateOptions as option}
         <option value={option.value}>{option.label}</option>
       {/each}
@@ -520,7 +560,9 @@
       <p class="ui-note error">
         Piqae cannot safely determine whether this job printed. The node restarted between the OS
         handoff and recording its native job ID, so automatic retry is disabled to prevent a
-        duplicate.
+        duplicate.{#if uncertainFor}
+          Unresolved for {uncertainFor} since the last recorded update.
+        {/if}
       </p>
     {/if}
 

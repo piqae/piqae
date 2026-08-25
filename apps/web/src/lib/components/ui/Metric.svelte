@@ -1,25 +1,48 @@
 <script lang="ts">
+  import type { Snippet } from 'svelte';
+
   let {
     label,
     value,
     total,
     detail,
-    href
+    href,
+    title,
+    tone = 'neutral'
   }: {
     label: string;
     value: string | number;
     total?: string | number;
-    detail?: string;
+    /** Plain supporting text, or a snippet when the detail needs emphasis. */
+    detail?: string | Snippet;
     href?: string;
+    title?: string;
+    /**
+     * `attention` marks a tile the operator has to act on. Tiles that read
+     * zero must stay `neutral`: a healthy system shows them constantly, and a
+     * tile that shouts while nothing is wrong is a tile that gets ignored.
+     */
+    tone?: 'neutral' | 'attention';
   } = $props();
 </script>
 
-<svelte:element this={href ? 'a' : 'div'} class="metric" {href} role={href ? undefined : 'group'}>
+<svelte:element
+  this={href ? 'a' : 'div'}
+  class="metric"
+  class:attention={tone === 'attention'}
+  {href}
+  {title}
+  role={href ? undefined : 'group'}
+>
   <span class="label">{label}</span>
   <span class="value numeric">
     {value}{#if total !== undefined}<small>/{total}</small>{/if}
   </span>
-  {#if detail}<span class="detail">{detail}</span>{/if}
+  {#if detail}
+    <span class="detail">
+      {#if typeof detail === 'string'}{detail}{:else}{@render detail()}{/if}
+    </span>
+  {/if}
 </svelte:element>
 
 <style>
@@ -59,5 +82,18 @@
     color: var(--text-tertiary);
     font-size: var(--text-meta);
     line-height: var(--text-meta-line);
+  }
+
+  /* Attention is carried by the words first; colour only reinforces them. */
+  .metric.attention .value {
+    color: var(--danger);
+  }
+
+  .metric.attention .detail {
+    color: var(--danger);
+  }
+
+  .metric.attention .detail :global(strong) {
+    font-weight: 560;
   }
 </style>
