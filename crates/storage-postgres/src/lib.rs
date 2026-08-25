@@ -6863,6 +6863,13 @@ impl PostgresStore {
             occurred_at: reported.occurred_at,
         };
         job.state = event.state;
+        // Stamped on the payload as well as the column so the anchor reaches
+        // the API without a second read path, and so a caller can tell how long
+        // delivery has been unproven rather than only that it is.
+        let uncertain_now = Utc::now();
+        if event.state == JobState::DeliveryUncertain && job.delivery_uncertain_since.is_none() {
+            job.delivery_uncertain_since = Some(uncertain_now);
+        }
         insert_event(&mut transaction, &job, &event).await?;
         // `delivery_uncertain_since` is stamped with the server clock on the
         // transition into the state, not `event.occurred_at`, which carries the
@@ -6873,7 +6880,7 @@ impl PostgresStore {
             "UPDATE jobs SET payload = $2, state = $3, state_sequence = $4,
                 final_at = CASE WHEN $5 THEN $6 ELSE final_at END,
                 delivery_uncertain_since = CASE
-                    WHEN $7 AND delivery_uncertain_since IS NULL THEN now()
+                    WHEN $7 AND delivery_uncertain_since IS NULL THEN $8
                     ELSE delivery_uncertain_since
                 END,
                 updated_at = now()
@@ -6886,6 +6893,7 @@ impl PostgresStore {
         .bind(event.state.is_terminal())
         .bind(event.occurred_at)
         .bind(event.state == JobState::DeliveryUncertain)
+        .bind(uncertain_now)
         .execute(&mut *transaction)
         .await?;
         if event.state == JobState::CompletedReported {

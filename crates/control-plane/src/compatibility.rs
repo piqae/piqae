@@ -278,6 +278,8 @@ pub(crate) async fn create_print_job(
         state: JobState::Registered,
         created_at: now,
         expires_at: now + Duration::seconds(request.expire_after.clamp(1, 1_209_600)),
+        // A new job is never uncertain; the transition stamps the anchor.
+        delivery_uncertain_since: None,
     };
     let idempotency = headers
         .get("x-idempotency-key")
