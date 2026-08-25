@@ -249,7 +249,7 @@ async fn postgres_reported_complete_billing_upgrades_from_previous_schema() {
         .fetch_one(&pool)
         .await
         .expect("read latest schema version");
-    assert_eq!(latest, 39);
+    assert_eq!(latest, 40);
     let billable_index: Option<String> =
         sqlx::query_scalar("SELECT to_regclass('usage_one_billable_print_per_job_idx')::text")
             .fetch_one(&pool)
@@ -415,19 +415,27 @@ async fn documents_migrate_and_enforce_tenant_scoped_references() {
     .expect("inspect artifact ownership constraints");
     assert_eq!(artifact_reference_constraints, 6);
     let active_reference_index: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM pg_indexes
-         WHERE schemaname=current_schema()
-           AND indexname='document_artifact_active_references_idx'
-           AND indexdef LIKE '%released_at IS NULL%')",
+        // Resolved by name rather than scanned from pg_indexes: a catalog scan
+        // can trip over a schema another test is dropping concurrently and fail
+        // with "could not open relation with OID".
+        "SELECT COALESCE(
+             pg_get_indexdef(to_regclass(
+                 current_schema() || '.document_artifact_active_references_idx'
+             )) LIKE '%released_at IS NULL%',
+             false
+         )",
     )
     .fetch_one(&pool)
     .await
     .expect("inspect active artifact reference index");
     assert!(active_reference_index);
     let stable_document_indexes: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM pg_indexes WHERE schemaname=current_schema()
-           AND indexname IN ('document_templates_tenant_created_idx','document_renders_tenant_created_idx')
-           AND indexdef LIKE '%created_at DESC, id%'",
+        "SELECT count(*) FROM unnest(ARRAY[
+             'document_templates_tenant_created_idx',
+             'document_renders_tenant_created_idx'
+         ]) AS name
+         WHERE pg_get_indexdef(to_regclass(current_schema() || '.' || name))
+               LIKE '%created_at DESC, id%'",
     )
     .fetch_one(&pool)
     .await
@@ -453,7 +461,7 @@ async fn documents_migrate_and_enforce_tenant_scoped_references() {
         .fetch_one(&pool)
         .await
         .expect("read schema version");
-    assert_eq!(latest, 39);
+    assert_eq!(latest, 40);
     pool.close().await;
     sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
         .execute(&admin)
@@ -847,7 +855,7 @@ async fn agent_health_migrates_empty_and_previous_schemas_with_tenant_fencing() 
         .fetch_one(&empty_pool)
         .await
         .expect("read empty-database schema version");
-    assert_eq!(latest, 39);
+    assert_eq!(latest, 40);
     empty_pool.close().await;
     sqlx::query(&format!("DROP SCHEMA {empty_schema} CASCADE"))
         .execute(&admin)
@@ -996,7 +1004,7 @@ async fn content_encryption_key_algorithm_migrates_fresh_and_legacy_schemas() {
         .fetch_one(&empty_pool)
         .await
         .expect("read empty-database schema version");
-    assert_eq!(empty_latest, 39);
+    assert_eq!(empty_latest, 40);
     empty_pool.close().await;
     sqlx::query(&format!("DROP SCHEMA {empty_schema} CASCADE"))
         .execute(&admin)
@@ -1064,7 +1072,7 @@ async fn content_encryption_key_algorithm_migrates_fresh_and_legacy_schemas() {
         .fetch_one(&upgrade_pool)
         .await
         .expect("read upgraded schema version");
-    assert_eq!(latest, 39);
+    assert_eq!(latest, 40);
     let reference_guard_config: Vec<String> = sqlx::query_scalar(
         "SELECT coalesce(proconfig, ARRAY[]::text[])
          FROM pg_proc JOIN pg_namespace ON pg_namespace.oid = pg_proc.pronamespace
