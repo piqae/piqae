@@ -3283,6 +3283,14 @@ export interface components {
             created_at: string;
             /** Format: date-time */
             expires_at: string;
+            /**
+             * Format: date-time
+             * @description When the job entered delivery_uncertain, on the server clock.
+             *     Present only for jobs in that state. A caller can use it to show how
+             *     long a handoff has gone unconfirmed; the job's own age is a poor
+             *     substitute, since a job may sit queued long before the handoff.
+             */
+            delivery_uncertain_since?: string;
             resolved_print_ticket?: components["schemas"]["ResolvedPrintTicket"] | null;
         };
         JobPage: {

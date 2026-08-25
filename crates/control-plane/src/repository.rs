@@ -6969,6 +6969,7 @@ mod routing_repository_tests {
             state: JobState::Registered,
             created_at: Utc::now(),
             expires_at: Utc::now() + chrono::Duration::hours(1),
+            delivery_uncertain_since: None,
         };
         let original = make_job(manifest.clone());
         let now = Utc::now();
@@ -7340,6 +7341,7 @@ mod routing_repository_tests {
             state: JobState::WaitingForAgent,
             created_at: now,
             expires_at: now + chrono::Duration::hours(1),
+            delivery_uncertain_since: None,
         };
         repository
             .create_job(&job, primary_agent, None, b"recovery fixture")
