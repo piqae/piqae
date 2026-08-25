@@ -277,6 +277,13 @@ pub async fn delete_node(
         .await?;
     let inventory_projection =
         crate::destination_topology::project_agent_topology(&state, tenant, &request).await?;
+    let acknowledged_handoff_sequence = crate::destination_topology::ingest_native_handoffs(
+        &state,
+        tenant,
+        request.agent_id,
+        &request.native_handoffs,
+    )
+    .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1754,7 +1761,10 @@ async fn resolve_job_destination(
             Ok(ResolvedJobDestination {
                 printer_id,
                 agent_id,
-                metadata: BTreeMap::new(),
+                metadata: BTreeMap::from([(
+                    "piqae.route_agent_id".into(),
+                    agent_id.to_string(),
+                )]),
                 binding: None,
             })
         }
@@ -1941,6 +1951,7 @@ async fn resolve_target_destination(
             ("piqae.target_id".into(), target.id.clone()),
             ("piqae.binding_id".into(), binding.id.clone()),
             ("piqae.profile_id".into(), profile.profile_id.clone()),
+            ("piqae.route_agent_id".into(), printer.agent_id.to_string()),
             (
                 "piqae.profile_revision".into(),
                 profile.revision.to_string(),
@@ -2560,6 +2571,13 @@ pub async fn agent_sync(
     };
     let mut candidate_jobs = Vec::with_capacity(leases.len());
     for lease in leases {
+        let route_reservation = crate::destination_topology::reserve_job_route(
+            &state,
+            tenant,
+            &lease.job,
+            lease.lease_until,
+        )
+        .await?;
         let mut content = match &lease.job.content {
             ContentSource::Upload { upload_id } => {
                 let upload = state
@@ -2671,7 +2689,7 @@ pub async fn agent_sync(
                     lease_token: lease.lease_token,
                     lease_expires_at: lease.lease_until,
                     content,
-                    route_reservation: None,
+                    route_reservation,
                 });
                 continue;
             }
@@ -2711,7 +2729,7 @@ pub async fn agent_sync(
             lease_token: lease.lease_token,
             lease_expires_at: lease.lease_until,
             content,
-            route_reservation: None,
+            route_reservation,
         });
     }
     let has_immediate_work = !request.events.is_empty()
@@ -2729,9 +2747,7 @@ pub async fn agent_sync(
         next_poll_after_ms,
         acknowledged_diagnostics,
         inventory_projection,
-        // Handoff evidence storage is capability-gated; do not acknowledge
-        // values until the repository transaction has durably consumed them.
-        acknowledged_handoff_sequence: None,
+        acknowledged_handoff_sequence,
     }))
 }
 
@@ -2874,6 +2890,15 @@ pub async fn accept_agent_job(
             request.local_sequence,
         )
         .await?;
+    crate::destination_topology::accept_job_route(
+        &state,
+        identity.tenant,
+        &job_id,
+        request.route_reservation_id,
+        request.route_generation,
+        request.route_fencing_token.as_deref(),
+    )
+    .await?;
     state.publish(identity.tenant, "job.updated", &job).await?;
     Ok(Json(AgentAcceptJobResponse {
         accepted_at: Utc::now(),

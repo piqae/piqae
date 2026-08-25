@@ -16,7 +16,7 @@ use chrono::{DateTime, TimeDelta, Utc};
 use hmac::{Hmac, Mac};
 use piqae_auth::Scope;
 use piqae_storage_postgres::{
-    DeliveryAttempt, IdentityConfidence, IdentityDecision, IdentityDecisionKind,
+    DeliveryAttempt, IdentityConfidence, IdentityDecision, IdentityDecisionKind, NewDeliveryAttempt,
     IdentityEvidence, ProjectionAcknowledgement, RouteObservation, RouteReservation,
     SchedulingAuthority, SiteCoordinatorMembership, StorageError, StoredPhysicalDestination,
     StoredPrinterRoute, TenantScope,
@@ -37,13 +37,9 @@ fn protocol_confidence(
 ) -> IdentityConfidence {
     match value {
         piqae_protocol::agent::IdentityConfidence::Verified => IdentityConfidence::Verified,
-        piqae_protocol::agent::IdentityConfidence::HighConfidence => {
-            IdentityConfidence::High
-        }
-        piqae_protocol::agent::IdentityConfidence::PossibleMatch => {
-            IdentityConfidence::Possible
-        }
-        piqae_protocol::agent::IdentityConfidence::Distinct => IdentityConfidence::Conflict,
+        piqae_protocol::agent::IdentityConfidence::High => IdentityConfidence::High,
+        piqae_protocol::agent::IdentityConfidence::Possible => IdentityConfidence::Possible,
+        piqae_protocol::agent::IdentityConfidence::Conflict => IdentityConfidence::Conflict,
         piqae_protocol::agent::IdentityConfidence::Unknown => IdentityConfidence::Unknown,
     }
 }
@@ -386,11 +382,10 @@ fn evidence_kind(kind: piqae_protocol::agent::PhysicalIdentityEvidenceKind) -> &
         Kind::IppPrinterUuid => "ipp_uuid",
         Kind::DeviceSerial => "device_serial",
         Kind::UsbSerial => "usb_serial",
-        Kind::NetworkCertificate => "certificate_key",
-        Kind::MacAddress => "network_mac",
-        Kind::MdnsEndpoint => "network_endpoint",
+        Kind::CertificateKey => "certificate_key",
+        Kind::NetworkMac => "network_mac",
+        Kind::NetworkEndpoint => "network_endpoint",
         Kind::DriverFingerprint => "driver_fingerprint",
-        Kind::NativeQueue => "native_queue",
     }
 }
 
@@ -400,7 +395,7 @@ fn evidence_strength(
     use piqae_protocol::agent::IdentityEvidenceStrength as Strength;
     match strength {
         Strength::Strong => "strong",
-        Strength::Supporting => "medium",
+        Strength::Medium => "medium",
         Strength::Weak => "weak",
     }
 }
@@ -761,6 +756,273 @@ pub(crate) async fn project_agent_topology(
             projected_at: now,
         }
     }))
+}
+
+/// Acquires the destination-wide native-handoff fence for an already leased
+/// job. The route is resolved by immutable tenant printer/agent identity; a
+/// missing topology row is the bounded compatibility path for older nodes.
+pub(crate) async fn reserve_job_route(
+    state: &AppState,
+    tenant: crate::authentication::TenantContext,
+    job: &piqae_domain::Job,
+    lease_until: DateTime<Utc>,
+) -> Result<Option<piqae_protocol::agent::CloudRouteReservation>, AppError> {
+    let tenant_scope = scope(tenant);
+    let route = state
+        .destination_topology
+        .list_all_routes(tenant_scope)
+        .await
+        .map_err(storage_error)?
+        .into_iter()
+        .find(|route| {
+            route.enabled
+                && route.agent_id == job.metadata.get("piqae.route_agent_id").map_or_else(
+                    || String::new(),
+                    Clone::clone,
+                )
+                && route.printer_id == job.printer_id.to_string()
+        });
+    // Older jobs do not carry route_agent_id. Fall back to the route's
+    // printer identity only when it is unambiguous within this tenant.
+    let route = if route.is_some() {
+        route
+    } else {
+        let matching = state
+            .destination_topology
+            .list_all_routes(tenant_scope)
+            .await
+            .map_err(storage_error)?
+            .into_iter()
+            .filter(|route| route.enabled && route.printer_id == job.printer_id.to_string())
+            .collect::<Vec<_>>();
+        (matching.len() == 1).then(|| matching[0].clone())
+    };
+    let Some(route) = route else {
+        return Ok(None);
+    };
+    let Some(local_route_key) = route.local_route_key.clone() else {
+        return Ok(None);
+    };
+    let destination = state
+        .destination_topology
+        .get_destination(tenant_scope, &route.destination_id)
+        .await
+        .map_err(storage_error)?;
+    if destination.state != "active" {
+        return Err(AppError::conflict(
+            "destination_needs_attention",
+            "The physical destination requires operator review before another handoff.",
+        ));
+    }
+    let reservation_id = uuid::Uuid::new_v4();
+    let started = state
+        .destination_topology
+        .begin_delivery_attempt(
+            tenant_scope,
+            NewDeliveryAttempt {
+                attempt_id: &format!("datt_{}", ulid::Ulid::new()),
+                reservation_id: &reservation_id.to_string(),
+                job_id: &job.id.to_string(),
+                destination_id: &route.destination_id,
+                route_id: &route.id,
+                lease_until,
+            },
+        )
+        .await
+        .map_err(storage_error)?;
+    Ok(Some(piqae_protocol::agent::CloudRouteReservation {
+        route_id: route.id,
+        local_route_key,
+        reservation_id,
+        generation: started.attempt.generation,
+        fencing_token: started.fencing_token,
+        lease_expires_at: started.reservation.lease_until,
+    }))
+}
+
+pub(crate) async fn accept_job_route(
+    state: &AppState,
+    tenant: crate::authentication::TenantContext,
+    job_id: &str,
+    reservation_id: Option<uuid::Uuid>,
+    generation: Option<u64>,
+    fencing_token: Option<&str>,
+) -> Result<(), AppError> {
+    let supplied = usize::from(reservation_id.is_some())
+        + usize::from(generation.is_some())
+        + usize::from(fencing_token.is_some());
+    if supplied == 0 {
+        return Ok(());
+    }
+    if supplied != 3 {
+        return Err(AppError::invalid(
+            "incomplete_route_reservation",
+            "Route reservation ID, generation, and fencing proof must be supplied together.",
+        ));
+    }
+    let reservation_id = reservation_id.map(|id| id.to_string()).unwrap_or_default();
+    let generation = generation.unwrap_or_default();
+    let token = fencing_token.unwrap_or_default();
+    let tenant_scope = scope(tenant);
+    let attempt = state
+        .destination_topology
+        .get_delivery_attempt_by_reservation(tenant_scope, &reservation_id)
+        .await
+        .map_err(storage_error)?;
+    if attempt.job_id != job_id || attempt.generation != generation {
+        return Err(AppError::conflict(
+            "stale_route_fence",
+            "The route reservation no longer authorizes this job.",
+        ));
+    }
+    let attempt = match attempt.state {
+        piqae_storage_postgres::DeliveryAttemptState::RouteLeased => state
+            .destination_topology
+            .transition_delivery_attempt(
+                tenant_scope,
+                &attempt.id,
+                generation,
+                token,
+                piqae_storage_postgres::DeliveryAttemptState::AcceptedByNode,
+            )
+            .await
+            .map_err(storage_error)?,
+        piqae_storage_postgres::DeliveryAttemptState::AcceptedByNode
+        | piqae_storage_postgres::DeliveryAttemptState::QueuedLocal => attempt,
+        _ => {
+            return Err(AppError::conflict(
+                "stale_route_fence",
+                "The delivery attempt is no longer at the node-acceptance boundary.",
+            ));
+        }
+    };
+    if attempt.state == piqae_storage_postgres::DeliveryAttemptState::AcceptedByNode {
+        state
+            .destination_topology
+            .transition_delivery_attempt(
+                tenant_scope,
+                &attempt.id,
+                generation,
+                token,
+                piqae_storage_postgres::DeliveryAttemptState::QueuedLocal,
+            )
+            .await
+            .map_err(storage_error)?;
+    }
+    Ok(())
+}
+
+pub(crate) async fn ingest_native_handoffs(
+    state: &AppState,
+    tenant: crate::authentication::TenantContext,
+    agent_id: piqae_domain::AgentId,
+    evidence: &[piqae_protocol::agent::NativeHandoffEvidence],
+) -> Result<Option<u64>, AppError> {
+    if evidence.len() > 1_000
+        || evidence
+            .windows(2)
+            .any(|pair| pair[0].sequence >= pair[1].sequence)
+    {
+        return Err(AppError::invalid(
+            "invalid_handoff_evidence",
+            "Native handoff evidence must be bounded and strictly ordered.",
+        ));
+    }
+    let tenant_scope = scope(tenant);
+    let mut acknowledged = None;
+    for item in evidence {
+        let Some(route_id) = item.route_id.as_deref() else {
+            // Legacy local-only fences have no server execution authority.
+            // Their ordinary job event remains the durable status channel.
+            acknowledged = Some(item.sequence);
+            continue;
+        };
+        let route = state
+            .destination_topology
+            .get_route(tenant_scope, route_id)
+            .await
+            .map_err(storage_error)?;
+        if route.agent_id != agent_id.to_string()
+            || route.local_route_key.as_deref() != Some(item.local_route_key.as_str())
+        {
+            return Err(AppError::conflict(
+                "stale_route_fence",
+                "Native handoff evidence does not identify the authorized route.",
+            ));
+        }
+        let mut attempt = state
+            .destination_topology
+            .get_delivery_attempt_by_reservation(
+                tenant_scope,
+                &item.reservation_id.to_string(),
+            )
+            .await
+            .map_err(storage_error)?;
+        if attempt.job_id != item.job_id.to_string()
+            || attempt.route_id != route_id
+            || attempt.generation != item.fencing_generation
+        {
+            return Err(AppError::conflict(
+                "stale_route_fence",
+                "Native handoff evidence was fenced by a newer delivery attempt.",
+            ));
+        }
+        if attempt.state == piqae_storage_postgres::DeliveryAttemptState::QueuedLocal {
+            attempt = state
+                .destination_topology
+                .transition_delivery_attempt(
+                    tenant_scope,
+                    &attempt.id,
+                    item.fencing_generation,
+                    &item.fencing_token,
+                    piqae_storage_postgres::DeliveryAttemptState::HandingToSpooler,
+                )
+                .await
+                .map_err(storage_error)?;
+        }
+        let next = match item.outcome {
+            piqae_protocol::agent::NativeHandoffOutcome::Accepted => {
+                piqae_storage_postgres::DeliveryAttemptState::AcceptedBySpooler
+            }
+            piqae_protocol::agent::NativeHandoffOutcome::RejectedBeforeHandoff => {
+                piqae_storage_postgres::DeliveryAttemptState::Failed
+            }
+            piqae_protocol::agent::NativeHandoffOutcome::Ambiguous => {
+                piqae_storage_postgres::DeliveryAttemptState::DeliveryUncertain
+            }
+        };
+        if attempt.state == piqae_storage_postgres::DeliveryAttemptState::HandingToSpooler {
+            attempt = state
+                .destination_topology
+                .transition_delivery_attempt(
+                    tenant_scope,
+                    &attempt.id,
+                    item.fencing_generation,
+                    &item.fencing_token,
+                    next,
+                )
+                .await
+                .map_err(storage_error)?;
+        }
+        if next == piqae_storage_postgres::DeliveryAttemptState::DeliveryUncertain
+            && attempt.state == next
+        {
+            let mut destination = state
+                .destination_topology
+                .get_destination(tenant_scope, &attempt.destination_id)
+                .await
+                .map_err(storage_error)?;
+            destination.state = "needs_review".into();
+            destination.updated_at = Utc::now();
+            state
+                .destination_topology
+                .upsert_destination(tenant_scope, &destination)
+                .await
+                .map_err(storage_error)?;
+        }
+        acknowledged = Some(item.sequence);
+    }
+    Ok(acknowledged)
 }
 
 pub async fn list_destinations(
