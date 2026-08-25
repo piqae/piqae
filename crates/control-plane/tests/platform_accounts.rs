@@ -462,6 +462,79 @@ async fn postgres_http_platform_accounts_are_owned_idempotent_and_archive_safely
     assert_eq!(exact_grants, 2);
 
     let durable_job = insert_durable_job(&pool, &store, customer_workspace, customer_live).await;
+    let operations = application
+        .clone()
+        .oneshot(request(
+            "GET",
+            "/v1/platform/operations?limit=25",
+            &platform_a.plaintext,
+            None,
+        ))
+        .await
+        .expect("platform operations response");
+    assert_eq!(operations.status(), StatusCode::OK);
+    let operations = response_json(operations).await;
+    let customer_operations = operations["data"]
+        .as_array()
+        .expect("operations rows")
+        .iter()
+        .find(|row| row["customer"]["external_id"] == "customer-one")
+        .expect("owned customer operations");
+    assert_eq!(
+        customer_operations["customer"]["id"],
+        customer_workspace.to_string()
+    );
+    assert_eq!(
+        customer_operations["environment"]["id"],
+        customer_live.to_string()
+    );
+    assert_eq!(customer_operations["environment"]["kind"], "live");
+    assert_eq!(
+        customer_operations["agents"].as_array().map(Vec::len),
+        Some(1)
+    );
+    assert_eq!(
+        customer_operations["printers"].as_array().map(Vec::len),
+        Some(1)
+    );
+    assert_eq!(
+        customer_operations["jobs"][0]["id"],
+        durable_job.to_string()
+    );
+
+    let foreign_operations = application
+        .clone()
+        .oneshot(request(
+            "GET",
+            "/v1/platform/operations",
+            &platform_b.plaintext,
+            None,
+        ))
+        .await
+        .expect("foreign platform operations response");
+    assert_eq!(foreign_operations.status(), StatusCode::OK);
+    assert!(
+        response_json(foreign_operations).await["data"]
+            .as_array()
+            .is_some_and(Vec::is_empty)
+    );
+
+    let spoofed_operations = application
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v1/platform/operations")
+                .header("authorization", format!("Bearer {}", platform_a.plaintext))
+                .header(
+                    "x-piqae-managed-workspace-id",
+                    customer_workspace.to_string(),
+                )
+                .body(Body::empty())
+                .expect("spoofed operations request"),
+        )
+        .await
+        .expect("spoofed operations response");
+    assert_eq!(spoofed_operations.status(), StatusCode::UNAUTHORIZED);
     let managed_request = |bearer: &str, include_dashboard_marker: bool| {
         let mut request = Request::builder()
             .uri("/v1/jobs")

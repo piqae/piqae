@@ -3,7 +3,7 @@
 use crate::{AppState, authentication::PlatformManagerContext, error::AppError};
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
 };
@@ -13,6 +13,49 @@ use piqae_auth::{
 use piqae_storage_postgres::{StoredPlatformAccount, StoredPlatformCredential};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+
+const MAX_OPERATION_CUSTOMERS: usize = 25;
+const MAX_RESOURCES_PER_CUSTOMER: usize = 100;
+
+#[derive(Debug, Deserialize)]
+pub struct PlatformOperationsQuery {
+    #[serde(default = "default_operations_limit")]
+    limit: usize,
+    after: Option<String>,
+}
+
+const fn default_operations_limit() -> usize {
+    MAX_OPERATION_CUSTOMERS
+}
+
+#[derive(Debug, Serialize)]
+pub struct PlatformOperationsCustomer {
+    id: piqae_domain::WorkspaceId,
+    external_id: String,
+    name: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PlatformOperationsEnvironment {
+    id: piqae_domain::EnvironmentId,
+    kind: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PlatformOperationsRow {
+    customer: PlatformOperationsCustomer,
+    environment: PlatformOperationsEnvironment,
+    agents: Vec<piqae_storage_postgres::StoredAgent>,
+    printers: Vec<piqae_storage_postgres::StoredPrinter>,
+    jobs: Vec<crate::api::JobResponse>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PlatformOperationsPage {
+    data: Vec<PlatformOperationsRow>,
+    next_cursor: Option<String>,
+    has_more: bool,
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -277,6 +320,83 @@ pub async fn list(
             .list_platform_accounts(&manager.service_account_id)
             .await?,
     ))
+}
+
+/// Returns a bounded, owner-scoped operational snapshot.
+///
+/// Resources remain nested under their immutable customer identity so equal
+/// resource IDs in separate tenants cannot be confused by callers.
+pub async fn operations(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<PlatformOperationsQuery>,
+) -> Result<Json<PlatformOperationsPage>, AppError> {
+    let manager = authenticate_manager(&state, &headers).await?;
+    let limit = query.limit.clamp(1, MAX_OPERATION_CUSTOMERS);
+    if let Some(after) = query.after.as_deref() {
+        validate_external_id(after)?;
+    }
+
+    let mut accounts = state
+        .repository
+        .list_platform_accounts(&manager.service_account_id)
+        .await?;
+    accounts.retain(|account| {
+        account.status == "active"
+            && query
+                .after
+                .as_ref()
+                .is_none_or(|after| account.external_id > *after)
+    });
+    accounts.sort_by(|left, right| left.external_id.cmp(&right.external_id));
+    let has_more = accounts.len() > limit;
+    accounts.truncate(limit);
+
+    let mut data = Vec::with_capacity(accounts.len());
+    for account in accounts {
+        let workspace_id = account.id;
+        let environment_id = account.environments.live.id;
+        let mut agents = state
+            .repository
+            .list_agents(workspace_id, environment_id)
+            .await?;
+        agents.truncate(MAX_RESOURCES_PER_CUSTOMER);
+        let mut printers = state
+            .repository
+            .list_printers(workspace_id, environment_id, None, 100)
+            .await?;
+        printers.truncate(MAX_RESOURCES_PER_CUSTOMER);
+        let mut jobs = state
+            .repository
+            .list_jobs(workspace_id, environment_id, None, 100)
+            .await?;
+        jobs.truncate(MAX_RESOURCES_PER_CUSTOMER);
+        data.push(PlatformOperationsRow {
+            customer: PlatformOperationsCustomer {
+                id: workspace_id,
+                external_id: account.external_id,
+                name: account.name,
+            },
+            environment: PlatformOperationsEnvironment {
+                id: environment_id,
+                kind: "live",
+            },
+            agents,
+            printers,
+            jobs: jobs
+                .into_iter()
+                .map(crate::api::JobResponse::from)
+                .collect(),
+        });
+    }
+    let next_cursor = has_more
+        .then(|| data.last().map(|row| row.customer.external_id.clone()))
+        .flatten();
+    Ok(Json(PlatformOperationsPage {
+        data,
+        next_cursor,
+        has_more,
+    }))
 }
 
 pub async fn get(
