@@ -122,6 +122,10 @@ impl ConnectorRegistry {
         self.records.values().filter(|record| record.enabled)
     }
 
+    pub(crate) fn contains(&self, connector_id: &str) -> bool {
+        self.records.contains_key(connector_id)
+    }
+
     #[allow(dead_code, reason = "consumed by the staged connector supervisor")]
     pub(crate) fn paths(&self, connector_id: &str) -> Result<ConnectorRuntimePaths> {
         let record = self
@@ -171,26 +175,25 @@ impl ConnectorRegistry {
         Ok(true)
     }
 
-    /// Replaces the explicit printer grant returned by a replay-safe
-    /// enrolment before the running worker is asked to reload it.
-    pub(crate) fn update_allowed_printers(
-        &mut self,
-        connector_id: &str,
-        printer_grant: PrinterGrant,
-        mut allowed_printer_ids: Vec<String>,
-    ) -> Result<bool> {
-        allowed_printer_ids.sort();
-        let Some(record) = self.records.get_mut(connector_id) else {
-            return Ok(false);
-        };
-        let mut candidate = record.clone();
-        candidate.printer_grant = printer_grant;
-        candidate.allowed_printer_ids = allowed_printer_ids;
-        validate_record(&candidate)?;
-        record.printer_grant = candidate.printer_grant;
-        record.allowed_printer_ids = candidate.allowed_printer_ids;
-        self.persist()?;
-        Ok(true)
+    /// Atomically replaces the durable credentials and metadata for one
+    /// server-side connector. Re-enrolment may rotate the agent signing key
+    /// while deliberately returning the same connector id; retaining the old
+    /// local key in that case strands the connector with
+    /// `invalid_agent_signature`.
+    pub(crate) fn replace(&mut self, mut record: ConnectorRecord) -> Result<ConnectorRecord> {
+        validate_record(&record)?;
+        record.allowed_printer_ids.sort();
+        let previous = self
+            .records
+            .get(&record.connector_id)
+            .cloned()
+            .context("connector was not found")?;
+        self.records.insert(record.connector_id.clone(), record);
+        if let Err(error) = self.persist() {
+            self.records.insert(previous.connector_id.clone(), previous);
+            return Err(error);
+        }
+        Ok(previous)
     }
 
     fn persist(&self) -> Result<()> {
@@ -473,25 +476,32 @@ mod tests {
     }
 
     #[test]
-    fn replayed_enrolment_replaces_the_durable_printer_grant() {
+    fn reauthentication_rotates_only_the_matching_durable_connector() {
         let dir = tempfile::tempdir().unwrap();
         let mut registry = ConnectorRegistry::load(dir.path()).unwrap();
-        registry.add(record("ncon_existing")).unwrap();
-        assert!(
-            registry
-                .update_allowed_printers(
-                    "ncon_existing",
-                    PrinterGrant::SelectedPrinters,
-                    vec!["prn_new_z".into(), "prn_new_a".into()],
-                )
-                .unwrap()
+        let healthy = record("ncon_healthy");
+        let mut stale = record("ncon_child");
+        stale.device_key_file = "connectors/keys/stale.key".into();
+        stale.enabled = false;
+        registry.add(healthy.clone()).unwrap();
+        registry.add(stale.clone()).unwrap();
+
+        let mut replacement = stale;
+        replacement.enabled = true;
+        replacement.agent_id = "agt_child_reauthenticated".into();
+        replacement.device_key_file = "connectors/keys/current.key".into();
+        replacement.printer_grant = PrinterGrant::AllLocalPrinters;
+        replacement.allowed_printer_ids.clear();
+        let previous = registry.replace(replacement.clone()).unwrap();
+        assert_eq!(
+            previous.device_key_file,
+            PathBuf::from("connectors/keys/stale.key")
         );
 
         let restarted = ConnectorRegistry::load(dir.path()).unwrap();
-        assert_eq!(
-            restarted.records["ncon_existing"].allowed_printer_ids,
-            ["prn_new_a", "prn_new_z"]
-        );
+        assert_eq!(restarted.records["ncon_healthy"], healthy);
+        assert_eq!(restarted.records["ncon_child"], replacement);
+        assert_eq!(restarted.enabled().count(), 2);
     }
 
     #[test]
