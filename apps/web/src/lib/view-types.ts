@@ -74,9 +74,9 @@ export interface DashboardPrinter {
 
 export type DashboardIdentityConfidence =
   | 'verified'
-  | 'high_confidence'
-  | 'possible_match'
-  | 'distinct'
+  | 'high'
+  | 'possible'
+  | 'conflict'
   | 'unknown';
 
 export interface DashboardDestination {

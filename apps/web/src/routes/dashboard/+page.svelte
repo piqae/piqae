@@ -141,7 +141,7 @@
     (customerFilter === 'all' || job.customer?.externalId === customerFilter)
   ));
   const reviewDestinations = $derived(data.destinations.filter((destination) =>
-    (destination.status === 'needs_review' || destination.identityConfidence === 'possible_match' || destination.identityConfidence === 'unknown') &&
+    (destination.status === 'needs_review' || destination.identityConfidence === 'possible' || destination.identityConfidence === 'conflict' || destination.identityConfidence === 'unknown') &&
     matches(destination.displayName, destination.id, destination.customer?.name) &&
     (customerFilter === 'all' || destination.customer?.externalId === customerFilter)
   ));

@@ -275,6 +275,8 @@ pub async fn delete_node(
             &serde_json::json!({"node_id": node_id}),
         )
         .await?;
+    let inventory_projection =
+        crate::destination_topology::project_agent_topology(&state, tenant, &request).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -2724,6 +2726,8 @@ pub async fn agent_sync(
         candidate_jobs,
         next_poll_after_ms,
         acknowledged_diagnostics,
+        inventory_projection,
+        acknowledged_handoff_sequence: request.native_handoffs.last().map(|item| item.sequence),
     }))
 }
 

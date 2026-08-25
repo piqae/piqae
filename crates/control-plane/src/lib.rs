@@ -8,6 +8,7 @@ pub mod billing;
 pub mod billing_usage_worker;
 pub mod compatibility;
 pub mod device_auth;
+pub mod destination_topology;
 pub mod document_crypto;
 pub mod document_render_worker;
 pub mod documents;
@@ -32,9 +33,11 @@ use axum::{
     routing::{get, post},
 };
 use piqae_object_store::{MemoryObjectStore, ObjectStore};
+use piqae_storage_postgres::{DestinationTopologyRepository, MemoryDestinationTopologyRepository};
 use piqae_webhooks::WebhookSecretBox;
 use repository::Repository;
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use std::{fmt, sync::Arc};
 use tokio::sync::{Semaphore, broadcast};
 use tower_http::compression::CompressionLayer;
@@ -50,6 +53,13 @@ pub struct PublishedEvent {
 #[derive(Clone)]
 pub struct AppState {
     pub repository: Arc<dyn Repository>,
+    /// Destination/route topology is deliberately separate from the legacy
+    /// job repository while the public target aliases delegate into it. The
+    /// production builder replaces the in-memory default with PostgreSQL.
+    pub destination_topology: Arc<dyn DestinationTopologyRepository>,
+    /// Server-secret key used only to tenant-pseudonymise already-normalised
+    /// node identity evidence before persistence.
+    pub(crate) destination_identity_key: [u8; 32],
     pub authenticator: Arc<dyn Authenticator>,
     pub events: broadcast::Sender<PublishedEvent>,
     pub webhook_secrets: Arc<WebhookSecretBox>,
@@ -116,8 +126,15 @@ impl AppState {
         object_store: Arc<dyn ObjectStore>,
     ) -> Self {
         let (events, _) = broadcast::channel(1_024);
+        let destination_identity_key: [u8; 32] = Sha256::new()
+            .chain_update(b"piqae.destination-identity.v1\0")
+            .chain_update(webhook_key)
+            .finalize()
+            .into();
         Self {
             repository,
+            destination_topology: Arc::new(MemoryDestinationTopologyRepository::default()),
+            destination_identity_key,
             authenticator,
             events,
             webhook_secrets: Arc::new(WebhookSecretBox::new(webhook_key)),
@@ -135,6 +152,15 @@ impl AppState {
     #[must_use]
     pub fn with_capabilities(mut self, capabilities: DeploymentCapabilities) -> Self {
         self.capabilities = capabilities;
+        self
+    }
+
+    #[must_use]
+    pub fn with_destination_topology(
+        mut self,
+        repository: Arc<dyn DestinationTopologyRepository>,
+    ) -> Self {
+        self.destination_topology = repository;
         self
     }
 
@@ -313,6 +339,47 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/printers", get(api::list_printers))
         .route("/v1/printers/{printer_id}", get(api::get_printer))
         .route(
+            "/v1/physical-destinations",
+            get(destination_topology::list_destinations),
+        )
+        .route(
+            "/v1/physical-destinations/{destination_id}",
+            get(destination_topology::get_destination),
+        )
+        .route(
+            "/v1/physical-destinations/{destination_id}/routes",
+            get(destination_topology::list_destination_routes),
+        )
+        .route(
+            "/v1/physical-destinations/{destination_id}/identity-evidence",
+            get(destination_topology::list_identity_evidence),
+        )
+        .route(
+            "/v1/physical-destinations/{destination_id}/identity-decisions",
+            get(destination_topology::list_identity_decisions)
+                .post(destination_topology::create_identity_decision),
+        )
+        .route(
+            "/v1/physical-destinations/{destination_id}/identity-decisions/{decision_id}/reverse",
+            post(destination_topology::reverse_identity_decision),
+        )
+        .route(
+            "/v1/printer-routes",
+            get(destination_topology::list_routes),
+        )
+        .route(
+            "/v1/printer-routes/{route_id}",
+            get(destination_topology::get_route),
+        )
+        .route(
+            "/v1/printer-routes/{route_id}/observations",
+            get(destination_topology::list_route_observations),
+        )
+        .route(
+            "/v1/route-reservations",
+            get(destination_topology::list_route_reservations),
+        )
+        .route(
             "/v1/printers/{printer_id}/capabilities",
             get(print_intents::capability_document),
         )
@@ -417,6 +484,10 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/jobs", post(api::create_job).get(api::list_jobs))
         .route("/v1/jobs/{job_id}", get(api::get_job))
         .route("/v1/jobs/{job_id}/events", get(api::list_job_events))
+        .route(
+            "/v1/jobs/{job_id}/delivery-attempts",
+            get(destination_topology::list_delivery_attempts),
+        )
         .route("/v1/jobs/{job_id}/cancel", post(api::cancel_job))
         .route("/v1/events/stream", get(api::stream_events))
         .route("/v1/agent/sync", post(api::agent_sync))

@@ -5322,13 +5322,16 @@ components:
       additionalProperties: false
       required: [id, display_name, identity_confidence, status, created_at, updated_at]
       properties:
-        id: { type: string, pattern: '^pdst_[0-9A-HJKMNP-TV-Z]{26}$' }
+        id:
+          type: string
+          pattern: '^pdst_(?:[0-9A-HJKMNP-TV-Z]{26}|[0-9a-f]{32})$'
+          description: Opaque destination identifier. Deterministic identities use lowercase hexadecimal; newly inferred identities may use ULIDs.
         display_name: { type: string, minLength: 1, maxLength: 255 }
         manufacturer: { type: [string, "null"], maxLength: 255 }
         model: { type: [string, "null"], maxLength: 255 }
         identity_confidence:
           type: string
-          enum: [verified, high_confidence, possible_match, distinct, unknown]
+          enum: [verified, high, possible, conflict, unknown]
         status: { type: string, enum: [active, needs_review, split, retired] }
         route_count: { type: integer, minimum: 0 }
         created_at: { type: string, format: date-time }
@@ -5339,11 +5342,17 @@ components:
       required:
         [id, physical_destination_id, printer_id, agent_id, native_queue_id, enabled, health, telemetry_freshness, created_at, updated_at]
       properties:
-        id: { type: string, pattern: '^rte_[0-9A-HJKMNP-TV-Z]{26}$' }
+        id:
+          type: string
+          pattern: '^rte_(?:[0-9A-HJKMNP-TV-Z]{26}|[0-9a-f]{32})$'
+          description: Opaque installation-route identifier. Clients must not derive meaning from the suffix.
         physical_destination_id: { type: string }
         printer_id: { type: string }
         agent_id: { type: string }
         native_queue_id: { type: string, maxLength: 1024 }
+        local_route_key:
+          type: [string, "null"]
+          description: Opaque installation-local key used to reconcile a route across rolling upgrades; not a server resource identifier.
         enabled: { type: boolean }
         health:
           type: string
@@ -5364,20 +5373,18 @@ components:
     DestinationIdentityEvidence:
       type: object
       additionalProperties: false
-      required: [id, destination_id, route_id, kind, digest, confidence, observed_at]
+      required: [id, destination_id, route_id, kind, confidence, observed_at]
       properties:
         id: { type: string }
         destination_id: { type: string }
         route_id: { type: string }
         kind:
           type: string
-          enum: [ipp_uuid, device_serial, usb_serial, device_uuid, certificate_key, network_endpoint, usb_topology, make_model, capability_signature, operator_confirmation]
-        digest:
-          type: string
-          description: One-way digest of the bounded identity value; raw hardware identifiers are not returned.
+          enum:
+            [ipp_uuid, device_serial, usb_serial, usb_vid_pid, certificate_key, network_mac, network_endpoint, native_queue, manufacturer_model, driver_fingerprint, capability_fingerprint, operator_confirmation]
         confidence:
           type: string
-          enum: [verified, high_confidence, possible_match, distinct, unknown]
+          enum: [verified, high, possible, conflict, unknown]
         observed_at: { type: string, format: date-time }
     CreateDestinationIdentityDecision:
       type: object
@@ -5392,6 +5399,11 @@ components:
           uniqueItems: true
           items: { type: string }
         reason: { type: string, minLength: 1, maxLength: 2000 }
+        display_name:
+          type: string
+          minLength: 1
+          maxLength: 255
+          description: Optional name for the new destination created by a split decision.
     DestinationIdentityDecision:
       type: object
       additionalProperties: false

@@ -236,6 +236,7 @@ async fn run() -> Result<()> {
         document_keyring,
         object_store,
     )
+    .with_destination_topology(Arc::new(store.clone()))
     .with_document_artifact_download_concurrency(artifact_download_concurrency)
     .with_capabilities(capabilities.clone())
     .with_public_control_plane_url(public_control_plane_url);

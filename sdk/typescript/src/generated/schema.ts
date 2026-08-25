@@ -3676,12 +3676,13 @@ export interface components {
             [key: string]: unknown;
         };
         PhysicalDestination: {
+            /** @description Opaque destination identifier. Deterministic identities use lowercase hexadecimal; newly inferred identities may use ULIDs. */
             id: string;
             display_name: string;
             manufacturer?: string | null;
             model?: string | null;
             /** @enum {string} */
-            identity_confidence: "verified" | "high_confidence" | "possible_match" | "distinct" | "unknown";
+            identity_confidence: "verified" | "high" | "possible" | "conflict" | "unknown";
             /** @enum {string} */
             status: "active" | "needs_review" | "split" | "retired";
             route_count?: number;
@@ -3691,11 +3692,14 @@ export interface components {
             updated_at: string;
         };
         PrinterRoute: {
+            /** @description Opaque installation-route identifier. Clients must not derive meaning from the suffix. */
             id: string;
             physical_destination_id: string;
             printer_id: string;
             agent_id: string;
             native_queue_id: string;
+            /** @description Opaque installation-local key used to reconcile a route across rolling upgrades; not a server resource identifier. */
+            local_route_key?: string | null;
             enabled: boolean;
             /** @enum {string} */
             health: "ready" | "busy" | "needs_operator" | "offline" | "stale" | "unknown";
@@ -3715,11 +3719,9 @@ export interface components {
             destination_id: string;
             route_id: string;
             /** @enum {string} */
-            kind: "ipp_uuid" | "device_serial" | "usb_serial" | "device_uuid" | "certificate_key" | "network_endpoint" | "usb_topology" | "make_model" | "capability_signature" | "operator_confirmation";
-            /** @description One-way digest of the bounded identity value; raw hardware identifiers are not returned. */
-            digest: string;
+            kind: "ipp_uuid" | "device_serial" | "usb_serial" | "usb_vid_pid" | "certificate_key" | "network_mac" | "network_endpoint" | "native_queue" | "manufacturer_model" | "driver_fingerprint" | "capability_fingerprint" | "operator_confirmation";
             /** @enum {string} */
-            confidence: "verified" | "high_confidence" | "possible_match" | "distinct" | "unknown";
+            confidence: "verified" | "high" | "possible" | "conflict" | "unknown";
             /** Format: date-time */
             observed_at: string;
         };
