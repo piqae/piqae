@@ -16,7 +16,7 @@ export const UNCERTAIN_DELIVERY_HREF = `/dashboard?view=jobs&state=${UNCERTAIN_D
 export interface UncertainDeliverySummary {
   count: number;
   /**
-   * Last recorded observation of the longest-unresolved uncertain job, or
+   * Transition time of the longest-unresolved uncertain job, or
    * `null` when nothing is uncertain (or no job carried a usable timestamp).
    */
   oldestObservedAt: string | null;
@@ -24,14 +24,28 @@ export interface UncertainDeliverySummary {
   oldestLabel: string | null;
 }
 
-type TimedJob = Pick<DashboardJob, 'state' | 'createdAt' | 'updatedAt'>;
+export function summariseUncertainDeliveryOverview(
+  count: number,
+  oldestUncertainSince: string | null | undefined,
+  now: number = Date.now()
+): UncertainDeliverySummary {
+  const oldestObservedAt = firstTimestamp(oldestUncertainSince);
+  return {
+    count,
+    oldestObservedAt,
+    oldestLabel:
+      oldestObservedAt === null
+        ? null
+        : durationLabel(now - new Date(oldestObservedAt).getTime())
+  };
+}
+
+type TimedJob = Pick<DashboardJob, 'state' | 'deliveryUncertainSince'>;
 
 /**
- * Piqae has no dedicated "became uncertain at" stamp on the job list: the
- * public job resource carries `created_at` only, and the dashboard adapter
- * mirrors it into `updatedAt`. The last recorded observation therefore *bounds*
- * how long delivery has been unproven — it never measures it, and the wording
- * around this summary must not claim otherwise.
+ * The server stamps `delivery_uncertain_since` at the transition. Never infer
+ * this duration from job creation or another update: a job may have waited in
+ * an earlier state for an arbitrary amount of time.
  */
 export function summariseUncertainDelivery(
   jobs: readonly TimedJob[],
@@ -44,7 +58,7 @@ export function summariseUncertainDelivery(
   for (const job of jobs) {
     if (job.state !== UNCERTAIN_DELIVERY_STATE) continue;
     count += 1;
-    const observedAt = firstTimestamp(job.updatedAt, job.createdAt);
+    const observedAt = firstTimestamp(job.deliveryUncertainSince);
     if (observedAt === null) continue;
     const observed = new Date(observedAt).getTime();
     if (observed < oldest) {

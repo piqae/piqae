@@ -353,6 +353,7 @@ export const jobs: DashboardJob[] = [
     nativeJobId: null,
     createdAt: ago(31),
     updatedAt: ago(29),
+    deliveryUncertainSince: ago(29),
     expiresAt: null,
     contentRetained: true
   }

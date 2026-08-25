@@ -754,6 +754,8 @@ export interface Job {
   metadata?: Record<string, string>;
   created_at: string;
   expires_at: string;
+  /** Server timestamp for the transition into `delivery_uncertain`. */
+  delivery_uncertain_since?: string;
 }
 
 export interface JobEvent {

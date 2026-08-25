@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { summariseUncertainDelivery } from './uncertain-delivery';
+import {
+  summariseUncertainDelivery,
+  summariseUncertainDeliveryOverview
+} from './uncertain-delivery';
 import type { DashboardJob } from './view-types';
 
 const NOW = Date.parse('2026-08-25T12:00:00.000Z');
@@ -39,9 +42,9 @@ describe('uncertain delivery summary', () => {
   it('counts uncertain jobs and ages the longest-unresolved one', () => {
     const summary = summariseUncertainDelivery(
       [
-        job({ state: 'delivery_uncertain', updatedAt: minutesAgo(9) }),
-        job({ state: 'delivery_uncertain', updatedAt: minutesAgo(125) }),
-        job({ state: 'delivery_uncertain', updatedAt: minutesAgo(40) }),
+        job({ state: 'delivery_uncertain', deliveryUncertainSince: minutesAgo(9) }),
+        job({ state: 'delivery_uncertain', deliveryUncertainSince: minutesAgo(125) }),
+        job({ state: 'delivery_uncertain', deliveryUncertainSince: minutesAgo(40) }),
         job({ state: 'failed_terminal', updatedAt: minutesAgo(600) })
       ],
       NOW
@@ -54,27 +57,28 @@ describe('uncertain delivery summary', () => {
 
   it('does not let a fresh handoff read as an instant', () => {
     const summary = summariseUncertainDelivery(
-      [job({ state: 'delivery_uncertain', updatedAt: minutesAgo(0) })],
+      [job({ state: 'delivery_uncertain', deliveryUncertainSince: minutesAgo(0) })],
       NOW
     );
 
     expect(summary.oldestLabel).toBe('under a minute');
   });
 
-  it('falls back to creation when no later observation is usable', () => {
+  it('does not infer the transition time from another job timestamp', () => {
     const summary = summariseUncertainDelivery(
       [
         job({
           state: 'delivery_uncertain',
           createdAt: minutesAgo(180),
-          updatedAt: 'not-a-timestamp'
+          updatedAt: minutesAgo(120),
+          deliveryUncertainSince: 'not-a-timestamp'
         })
       ],
       NOW
     );
 
-    expect(summary.oldestObservedAt).toBe(minutesAgo(180));
-    expect(summary.oldestLabel).toBe('3h');
+    expect(summary.oldestObservedAt).toBeNull();
+    expect(summary.oldestLabel).toBeNull();
   });
 
   it('still counts a job whose timestamps are unusable', () => {
@@ -84,5 +88,13 @@ describe('uncertain delivery summary', () => {
     );
 
     expect(summary).toEqual({ count: 1, oldestObservedAt: null, oldestLabel: null });
+  });
+
+  it('summarises an authoritative paginated count without allocating one item per job', () => {
+    expect(summariseUncertainDeliveryOverview(237, minutesAgo(185), NOW)).toEqual({
+      count: 237,
+      oldestObservedAt: minutesAgo(185),
+      oldestLabel: '3h'
+    });
   });
 });

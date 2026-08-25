@@ -13,6 +13,7 @@
   import { nativeNodeConnectUrlFromHandoff } from '$lib/node-connect-fragment';
   import {
     summariseUncertainDelivery,
+    summariseUncertainDeliveryOverview,
     UNCERTAIN_DELIVERY_HREF,
     UNCERTAIN_DELIVERY_STATE
   } from '$lib/uncertain-delivery';
@@ -47,13 +48,18 @@
    * minute ago from one nobody has resolved for two hours. The age of the
    * oldest is the number worth reading, so the tile leads with it.
    */
-  const uncertain = $derived(summariseUncertainDelivery(data.jobs));
+  const uncertain = $derived(
+    summariseUncertainDeliveryOverview(
+      overview.jobs.uncertain,
+      overview.jobs.oldestUncertainSince
+    )
+  );
   const uncertainTitle = $derived(
     uncertain.count === 0
       ? 'No job is waiting on proof that it printed.'
       : `Piqae cannot prove these jobs printed. Longest unresolved: ${
           uncertain.oldestLabel ?? 'unknown'
-        } since the last recorded update.`
+        }.`
   );
 
   // The checklist is scaffolding, not chrome: once a first job exists it stops
@@ -558,10 +564,9 @@
 
     {#if detail.job.state === 'delivery_uncertain'}
       <p class="ui-note error">
-        Piqae cannot safely determine whether this job printed. The node restarted between the OS
-        handoff and recording its native job ID, so automatic retry is disabled to prevent a
-        duplicate.{#if uncertainFor}
-          Unresolved for {uncertainFor} since the last recorded update.
+        Piqae cannot safely determine whether this job printed after it was handed to the operating
+        system. Automatic retry is disabled because it could produce a duplicate.{#if uncertainFor}
+          Unresolved for {uncertainFor}.
         {/if}
       </p>
     {/if}
