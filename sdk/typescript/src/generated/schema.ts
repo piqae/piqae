@@ -497,6 +497,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/platform/operations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List live operations across owned customer accounts
+         * @description Returns a bounded page of active managed customers and their live
+         *     nodes, printers, and recent jobs. Resources are nested beneath immutable
+         *     customer attribution to prevent cross-tenant ID ambiguity. Only the
+         *     owning platform service account or authorised human owner dashboard may
+         *     call this operation. Tenant-selection headers are rejected.
+         */
+        get: operations["listPlatformOperations"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/platform/status": {
         parameters: {
             query?: never;
@@ -2318,6 +2342,23 @@ export interface components {
             created_at: string;
             /** Format: date-time */
             updated_at: string;
+        };
+        PlatformOperationsCustomer: {
+            id: string;
+            external_id: string;
+            name: string;
+        };
+        PlatformOperationsRow: {
+            customer: components["schemas"]["PlatformOperationsCustomer"];
+            environment: components["schemas"]["PlatformAccountEnvironment"];
+            agents: components["schemas"]["Agent"][];
+            printers: components["schemas"]["Printer"][];
+            jobs: components["schemas"]["Job"][];
+        };
+        PlatformOperationsPage: {
+            data: components["schemas"]["PlatformOperationsRow"][];
+            next_cursor: string | null;
+            has_more: boolean;
         };
         UpsertPlatformAccount: {
             name: string;
@@ -4886,6 +4927,33 @@ export interface operations {
                     "application/json": components["schemas"]["PlatformAccount"][];
                 };
             };
+            401: components["responses"]["Error"];
+            403: components["responses"]["Error"];
+        };
+    };
+    listPlatformOperations: {
+        parameters: {
+            query?: {
+                limit?: number;
+                /** @description Last customer external ID returned by the previous page. */
+                after?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Owner-scoped managed-customer operational snapshot. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PlatformOperationsPage"];
+                };
+            };
+            400: components["responses"]["Error"];
             401: components["responses"]["Error"];
             403: components["responses"]["Error"];
         };
