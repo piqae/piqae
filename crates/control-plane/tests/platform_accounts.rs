@@ -501,6 +501,21 @@ async fn postgres_http_platform_accounts_are_owned_idempotent_and_archive_safely
         customer_operations["jobs"][0]["id"],
         durable_job.to_string()
     );
+    let agent_id = customer_operations["agents"][0]["id"]
+        .as_str()
+        .expect("canonical aggregate agent ID");
+    let printer_id = customer_operations["printers"][0]["id"]
+        .as_str()
+        .expect("canonical aggregate printer ID");
+    assert!(agent_id.starts_with("agt_"));
+    assert!(printer_id.starts_with("ptr_"));
+    assert_eq!(customer_operations["printers"][0]["agent_id"], agent_id);
+    assert_eq!(customer_operations["jobs"][0]["printer_id"], printer_id);
+    assert!(
+        customer_operations["jobs"][0]["id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("job_"))
+    );
 
     let foreign_operations = application
         .clone()

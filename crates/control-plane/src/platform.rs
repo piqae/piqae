@@ -45,9 +45,9 @@ pub struct PlatformOperationsEnvironment {
 pub struct PlatformOperationsRow {
     customer: PlatformOperationsCustomer,
     environment: PlatformOperationsEnvironment,
-    agents: Vec<piqae_storage_postgres::StoredAgent>,
-    printers: Vec<piqae_storage_postgres::StoredPrinter>,
-    jobs: Vec<crate::api::JobResponse>,
+    agents: Vec<serde_json::Value>,
+    printers: Vec<serde_json::Value>,
+    jobs: Vec<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -55,6 +55,24 @@ pub struct PlatformOperationsPage {
     data: Vec<PlatformOperationsRow>,
     next_cursor: Option<String>,
     has_more: bool,
+}
+
+fn canonical_resource<T: Serialize>(
+    resource: &T,
+    identifiers: &[(&str, String)],
+) -> Result<serde_json::Value, AppError> {
+    let mut value = serde_json::to_value(resource)
+        .map_err(|_| AppError::service_unavailable("platform_operations_serialization_failed"))?;
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| AppError::service_unavailable("platform_operations_serialization_failed"))?;
+    for (field, identifier) in identifiers {
+        object.insert(
+            (*field).to_owned(),
+            serde_json::Value::String(identifier.clone()),
+        );
+    }
+    Ok(value)
 }
 
 #[derive(Debug, Deserialize)]
@@ -101,6 +119,8 @@ async fn authenticate_human_manager(
         || headers.contains_key("x-piqae-environment-id")
         || headers.contains_key("x-spool-workspace-id")
         || headers.contains_key("x-spool-environment-id")
+        || headers.contains_key("x-piqae-managed-workspace-id")
+        || headers.contains_key("x-piqae-managed-environment-id")
     {
         return Err(AppError::unauthorized());
     }
@@ -257,6 +277,8 @@ async fn authenticate_manager(
         || headers.contains_key("x-piqae-environment-id")
         || headers.contains_key("x-spool-workspace-id")
         || headers.contains_key("x-spool-environment-id")
+        || headers.contains_key("x-piqae-managed-workspace-id")
+        || headers.contains_key("x-piqae-managed-environment-id")
     {
         return Err(AppError::unauthorized());
     }
@@ -371,6 +393,35 @@ pub async fn operations(
             .list_jobs(workspace_id, environment_id, None, 100)
             .await?;
         jobs.truncate(MAX_RESOURCES_PER_CUSTOMER);
+        let agents = agents
+            .iter()
+            .map(|agent| canonical_resource(agent, &[("id", agent.id.to_string())]))
+            .collect::<Result<Vec<_>, _>>()?;
+        let printers = printers
+            .iter()
+            .map(|printer| {
+                canonical_resource(
+                    printer,
+                    &[
+                        ("id", printer.id.to_string()),
+                        ("agent_id", printer.agent_id.to_string()),
+                    ],
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let jobs = jobs
+            .into_iter()
+            .map(crate::api::JobResponse::from)
+            .map(|job| {
+                canonical_resource(
+                    &job,
+                    &[
+                        ("id", job.id.to_string()),
+                        ("printer_id", job.printer_id.to_string()),
+                    ],
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         data.push(PlatformOperationsRow {
             customer: PlatformOperationsCustomer {
                 id: workspace_id.to_string(),
@@ -383,10 +434,7 @@ pub async fn operations(
             },
             agents,
             printers,
-            jobs: jobs
-                .into_iter()
-                .map(crate::api::JobResponse::from)
-                .collect(),
+            jobs,
         });
     }
     let next_cursor = has_more
