@@ -30,14 +30,14 @@ const fn default_operations_limit() -> usize {
 
 #[derive(Debug, Serialize)]
 pub struct PlatformOperationsCustomer {
-    id: piqae_domain::WorkspaceId,
+    id: String,
     external_id: String,
     name: String,
 }
 
 #[derive(Debug, Serialize)]
 pub struct PlatformOperationsEnvironment {
-    id: piqae_domain::EnvironmentId,
+    id: String,
     kind: &'static str,
 }
 
@@ -373,12 +373,12 @@ pub async fn operations(
         jobs.truncate(MAX_RESOURCES_PER_CUSTOMER);
         data.push(PlatformOperationsRow {
             customer: PlatformOperationsCustomer {
-                id: workspace_id,
+                id: workspace_id.to_string(),
                 external_id: account.external_id,
                 name: account.name,
             },
             environment: PlatformOperationsEnvironment {
-                id: environment_id,
+                id: environment_id.to_string(),
                 kind: "live",
             },
             agents,
