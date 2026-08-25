@@ -315,7 +315,7 @@ fn reject_connector_supervisor_command(
 }
 
 struct ConnectorWorker {
-    allowed_printer_ids: Option<std::collections::BTreeSet<String>>,
+    record: connector_runtime::ConnectorRecord,
     printer_inventory_dirty: Arc<AtomicBool>,
     wakeup: Arc<Notify>,
     last_sync_error_code: Arc<RwLock<Option<String>>>,
@@ -1012,19 +1012,8 @@ async fn add_connector(arguments: &Arguments, consent: ConnectorConsentInput) ->
         .connector_id
         .context("control plane omitted connector id")?;
     let mut registry = connector_runtime::ConnectorRegistry::load(&arguments.data_dir)?;
-    if registry
-        .enabled()
-        .any(|record| record.connector_id == connector_id)
-    {
-        registry.update_allowed_printers(&connector_id, printer_grant, allowed_printer_ids)?;
-        if let Err(error) = signal_connector_reload(arguments).await {
-            warn!(%error, "existing connector is durable but immediate reload was deferred");
-        }
-        print_connector_connected(&enrolled.agent_id);
-        return Ok(());
-    }
-    registry.add(connector_runtime::ConnectorRecord {
-        connector_id,
+    let record = connector_runtime::ConnectorRecord {
+        connector_id: connector_id.clone(),
         agent_id: enrolled.agent_id.to_string(),
         control_plane_url: base_url,
         display_name: preview
@@ -1040,7 +1029,16 @@ async fn add_connector(arguments: &Arguments, consent: ConnectorConsentInput) ->
         enabled: true,
         printer_grant,
         allowed_printer_ids,
-    })?;
+    };
+    if registry.contains(&connector_id) {
+        registry.replace(record)?;
+        if let Err(error) = signal_connector_reload(arguments).await {
+            warn!(%error, "existing connector is durable but immediate reload was deferred");
+        }
+        print_connector_connected(&enrolled.agent_id);
+        return Ok(());
+    }
+    registry.add(record)?;
     if let Err(error) = signal_connector_reload(arguments).await {
         warn!(%error, "connector is durable but the running node could not be notified; periodic recovery will retry");
     }
@@ -1926,15 +1924,15 @@ async fn reload_connector_workers(
         }
     }
     for (id, record) in enabled {
-        let grants = connector_allowed_printers(&record);
         let worker_exited = workers.get(&id).is_some_and(connector_worker_has_exited);
         if worker_exited {
             connections.update(&id, ConnectionState::Degraded).await;
             error!(connector_id = %id, "connector worker task exited unexpectedly; restarting connector runtime");
         }
-        if workers.get(&id).is_some_and(|worker| {
-            worker.allowed_printer_ids == grants && !connector_worker_has_exited(worker)
-        }) {
+        if workers
+            .get(&id)
+            .is_some_and(|worker| connector_worker_matches(worker, &record))
+        {
             continue;
         }
         if workers.contains_key(&id) {
@@ -1984,6 +1982,13 @@ fn connector_worker_has_exited(worker: &ConnectorWorker) -> bool {
     worker.sync.is_finished()
         || worker.scheduler.is_finished()
         || worker.connection_watch.is_finished()
+}
+
+fn connector_worker_matches(
+    worker: &ConnectorWorker,
+    record: &connector_runtime::ConnectorRecord,
+) -> bool {
+    worker.record == *record && !connector_worker_has_exited(worker)
 }
 
 #[allow(
@@ -2055,7 +2060,7 @@ async fn start_connector_worker(
         connection_stop.clone(),
     ));
     Ok(ConnectorWorker {
-        allowed_printer_ids: connector_allowed_printers(&record),
+        record,
         printer_inventory_dirty,
         wakeup,
         last_sync_error_code,
@@ -5187,7 +5192,7 @@ mod tests {
             connection_watch: tokio::task::JoinHandle<()>,
         ) -> ConnectorWorker {
             ConnectorWorker {
-                allowed_printer_ids: None,
+                record: test_connector_record("ncon_worker"),
                 printer_inventory_dirty: Arc::new(AtomicBool::new(false)),
                 wakeup: Arc::new(Notify::new()),
                 last_sync_error_code: Arc::new(RwLock::new(None)),
@@ -5222,6 +5227,38 @@ mod tests {
             let _ = worker.scheduler.await;
             let _ = worker.connection_watch.await;
         }
+    }
+
+    #[tokio::test]
+    async fn connector_worker_restarts_when_reauthentication_rotates_identity() {
+        let stop = StopSignal::default();
+        let spawn_waiter = || {
+            let stop = stop.clone();
+            tokio::spawn(async move { stop.cancelled().await })
+        };
+        let record = test_connector_record("ncon_child");
+        let worker = ConnectorWorker {
+            record: record.clone(),
+            printer_inventory_dirty: Arc::new(AtomicBool::new(false)),
+            wakeup: Arc::new(Notify::new()),
+            last_sync_error_code: Arc::new(RwLock::new(None)),
+            sync_stop: StopSignal::default(),
+            scheduler_stop: StopSignal::default(),
+            connection_stop: StopSignal::default(),
+            sync: spawn_waiter(),
+            scheduler: spawn_waiter(),
+            connection_watch: spawn_waiter(),
+        };
+        assert!(connector_worker_matches(&worker, &record));
+
+        let mut rotated = record;
+        rotated.device_key_file = "connectors/keys/rotated.key".into();
+        assert!(!connector_worker_matches(&worker, &rotated));
+
+        stop.stop();
+        let _ = worker.sync.await;
+        let _ = worker.scheduler.await;
+        let _ = worker.connection_watch.await;
     }
 
     #[tokio::test]
@@ -5335,7 +5372,7 @@ mod tests {
         let mut workers = std::collections::BTreeMap::from([(
             "ncon_good".to_owned(),
             ConnectorWorker {
-                allowed_printer_ids: Some(std::iter::once("prn_test".to_owned()).collect()),
+                record: test_connector_record("ncon_good"),
                 printer_inventory_dirty: Arc::new(AtomicBool::new(false)),
                 wakeup: Arc::new(Notify::new()),
                 last_sync_error_code: Arc::new(RwLock::new(None)),
@@ -5394,7 +5431,7 @@ mod tests {
         let mut workers = std::collections::BTreeMap::from([(
             "ncon_test".to_owned(),
             ConnectorWorker {
-                allowed_printer_ids: Some(std::collections::BTreeSet::new()),
+                record: test_connector_record("ncon_test"),
                 printer_inventory_dirty: Arc::new(AtomicBool::new(false)),
                 wakeup: Arc::new(Notify::new()),
                 last_sync_error_code: Arc::new(RwLock::new(None)),
