@@ -3053,12 +3053,12 @@ struct MemoryState {
     platform_manager_secret_hashes: HashMap<WorkspaceId, String>,
     api_keys: HashMap<String, (WorkspaceId, EnvironmentId, StoredApiKey, String)>,
     jobs: HashMap<JobId, MemoryJob>,
-    printers: HashMap<PrinterId, (WorkspaceId, EnvironmentId, StoredPrinter)>,
+    printers: HashMap<(WorkspaceId, EnvironmentId, PrinterId), StoredPrinter>,
     stocks: HashMap<String, (WorkspaceId, EnvironmentId, StoredStock)>,
     print_workflows: HashMap<String, (WorkspaceId, EnvironmentId, StoredPrintWorkflow)>,
     resolved_print_tickets:
         HashMap<String, (WorkspaceId, EnvironmentId, StoredResolvedPrintTicket)>,
-    loaded_media: HashMap<(PrinterId, String), (WorkspaceId, EnvironmentId, StoredLoadedMedia)>,
+    loaded_media: HashMap<(WorkspaceId, EnvironmentId, PrinterId, String), StoredLoadedMedia>,
     targets: HashMap<String, (WorkspaceId, EnvironmentId, StoredTarget)>,
     target_bindings: HashMap<String, (WorkspaceId, EnvironmentId, StoredTargetBinding)>,
     agents: HashMap<AgentId, (WorkspaceId, EnvironmentId, StoredAgent)>,
@@ -3114,23 +3114,19 @@ impl MemoryRepository {
         agent_id: AgentId,
     ) {
         self.state.write().await.printers.insert(
-            printer_id,
-            (
-                workspace_id,
-                environment_id,
-                StoredPrinter {
-                    id: printer_id,
-                    agent_id,
-                    name: "Test printer".into(),
-                    state: PrinterState::Online,
-                    capabilities: PrinterCapabilities::default(),
-                    capability_revision: 0,
-                    native_options: std::collections::BTreeMap::default(),
-                    semantic_capabilities: piqae_domain::SemanticPrinterCapabilities::default(),
-                    profiles: Vec::new(),
-                    updated_at: Utc::now(),
-                },
-            ),
+            (workspace_id, environment_id, printer_id),
+            StoredPrinter {
+                id: printer_id,
+                agent_id,
+                name: "Test printer".into(),
+                state: PrinterState::Online,
+                capabilities: PrinterCapabilities::default(),
+                capability_revision: 0,
+                native_options: std::collections::BTreeMap::default(),
+                semantic_capabilities: piqae_domain::SemanticPrinterCapabilities::default(),
+                profiles: Vec::new(),
+                updated_at: Utc::now(),
+            },
         );
         self.state.write().await.agents.insert(
             agent_id,
@@ -3924,13 +3920,13 @@ impl Repository for MemoryRepository {
             .read()
             .await
             .loaded_media
-            .values()
-            .filter(|(workspace, environment, observation)| {
+            .iter()
+            .filter(|((workspace, environment, candidate, _), _)| {
                 *workspace == workspace_id
                     && *environment == environment_id
-                    && observation.printer_id == printer_id
+                    && *candidate == printer_id
             })
-            .map(|(_, _, observation)| observation.clone())
+            .map(|(_, observation)| observation.clone())
             .collect())
     }
 
@@ -3941,16 +3937,20 @@ impl Repository for MemoryRepository {
         observation: &StoredLoadedMedia,
     ) -> Result<StoredLoadedMedia, RepositoryError> {
         let mut state = self.state.write().await;
-        if !state.printers.get(&observation.printer_id).is_some_and(
-            |(workspace, environment, _)| {
-                *workspace == workspace_id && *environment == environment_id
-            },
-        ) {
+        if !state
+            .printers
+            .contains_key(&(workspace_id, environment_id, observation.printer_id))
+        {
             return Err(RepositoryError::NotFound);
         }
         state.loaded_media.insert(
-            (observation.printer_id, observation.source.clone()),
-            (workspace_id, environment_id, observation.clone()),
+            (
+                workspace_id,
+                environment_id,
+                observation.printer_id,
+                observation.source.clone(),
+            ),
+            observation.clone(),
         );
         Ok(observation.clone())
     }
@@ -4046,26 +4046,26 @@ impl Repository for MemoryRepository {
         if let Some(printers) = printers {
             state
                 .printers
-                .retain(|_, (_, _, printer)| printer.agent_id != agent_id);
+                .retain(|(workspace, environment, _), printer| {
+                    *workspace != workspace_id
+                        || *environment != environment_id
+                        || printer.agent_id != agent_id
+                });
             for printer in printers {
                 state.printers.insert(
-                    printer.id,
-                    (
-                        workspace_id,
-                        environment_id,
-                        StoredPrinter {
-                            id: printer.id,
-                            agent_id,
-                            name: printer.name.clone(),
-                            state: printer.state,
-                            capabilities: printer.capabilities.clone(),
-                            capability_revision: printer.capability_revision,
-                            native_options: printer.native_options.clone(),
-                            semantic_capabilities: printer.semantic_capabilities.clone(),
-                            profiles: printer.profiles.clone(),
-                            updated_at: Utc::now(),
-                        },
-                    ),
+                    (workspace_id, environment_id, printer.id),
+                    StoredPrinter {
+                        id: printer.id,
+                        agent_id,
+                        name: printer.name.clone(),
+                        state: printer.state,
+                        capabilities: printer.capabilities.clone(),
+                        capability_revision: printer.capability_revision,
+                        native_options: printer.native_options.clone(),
+                        semantic_capabilities: printer.semantic_capabilities.clone(),
+                        profiles: printer.profiles.clone(),
+                        updated_at: Utc::now(),
+                    },
                 );
             }
         }
@@ -4079,12 +4079,9 @@ impl Repository for MemoryRepository {
         printer_id: PrinterId,
     ) -> Result<piqae_protocol::agent::DocumentRenderCapabilities, RepositoryError> {
         let state = self.state.read().await;
-        let (_, _, printer) = state
+        let printer = state
             .printers
-            .get(&printer_id)
-            .filter(|(workspace, environment, _)| {
-                *workspace == workspace_id && *environment == environment_id
-            })
+            .get(&(workspace_id, environment_id, printer_id))
             .ok_or(RepositoryError::NotFound)?;
         let _agent = state
             .agents
@@ -4536,11 +4533,11 @@ impl Repository for MemoryRepository {
             .read()
             .await
             .printers
-            .values()
-            .filter(|(workspace, environment, _)| {
+            .iter()
+            .filter(|((workspace, environment, _), _)| {
                 *workspace == workspace_id && *environment == environment_id
             })
-            .map(|(_, _, printer)| printer.clone())
+            .map(|(_, printer)| printer.clone())
             .collect::<Vec<_>>();
         printers.sort_by_key(|printer| std::cmp::Reverse((printer.updated_at, printer.id)));
         if let Some(cursor) = after
@@ -4562,11 +4559,8 @@ impl Repository for MemoryRepository {
             .read()
             .await
             .printers
-            .get(&printer_id)
-            .filter(|(workspace, environment, _)| {
-                *workspace == workspace_id && *environment == environment_id
-            })
-            .map(|(_, _, printer)| printer.clone())
+            .get(&(workspace_id, environment_id, printer_id))
+            .cloned()
             .ok_or(RepositoryError::NotFound)
     }
 
@@ -4638,13 +4632,10 @@ impl Repository for MemoryRepository {
         workflow: &StoredPrintWorkflow,
     ) -> Result<StoredPrintWorkflow, RepositoryError> {
         let mut state = self.state.write().await;
-        let printer_visible = state.printers.get(&workflow.printer_id).is_some_and(
-            |(workspace, environment, printer)| {
-                *workspace == workspace_id
-                    && *environment == environment_id
-                    && printer.capability_revision == workflow.capability_revision
-            },
-        );
+        let printer_visible = state
+            .printers
+            .get(&(workspace_id, environment_id, workflow.printer_id))
+            .is_some_and(|printer| printer.capability_revision == workflow.capability_revision);
         if !printer_visible {
             return Err(RepositoryError::NotFound);
         }
@@ -4901,12 +4892,9 @@ impl Repository for MemoryRepository {
                 *workspace == workspace_id && *environment == environment_id
             })
             .ok_or(RepositoryError::NotFound)?;
-        let (_, _, printer) = state
+        let printer = state
             .printers
-            .get(&binding.printer_id)
-            .filter(|(workspace, environment, _)| {
-                *workspace == workspace_id && *environment == environment_id
-            })
+            .get(&(workspace_id, environment_id, binding.printer_id))
             .ok_or(RepositoryError::NotFound)?;
         let profile = printer
             .profiles
@@ -5613,11 +5601,8 @@ impl Repository for MemoryRepository {
             .read()
             .await
             .printers
-            .get(&printer_id)
-            .filter(|(workspace, environment, _printer)| {
-                *workspace == workspace_id && *environment == environment_id
-            })
-            .map(|(_, _, printer)| printer.agent_id)
+            .get(&(workspace_id, environment_id, printer_id))
+            .map(|printer| printer.agent_id)
             .ok_or(RepositoryError::NotFound)
     }
 
@@ -5689,9 +5674,8 @@ impl Repository for MemoryRepository {
         let state = self.state.read().await;
         let agent_id = state
             .printers
-            .get(&printer_id)
-            .filter(|(w, e, _)| *w == workspace_id && *e == environment_id)
-            .map(|(_, _, p)| p.agent_id)
+            .get(&(workspace_id, environment_id, printer_id))
+            .map(|printer| printer.agent_id)
             .ok_or(RepositoryError::NotFound)?;
         state
             .content_encryption_keys
@@ -5931,11 +5915,11 @@ impl Repository for MemoryRepository {
         if target_stock.is_some() && target_stock != intended_stock {
             return Ok(None);
         }
-        let profile_is_valid = state.printers.get(&binding.printer_id).is_some_and(
-            |(workspace, environment, printer)| {
-                *workspace == workspace_id
-                    && *environment == environment_id
-                    && printer.agent_id == binding.agent_id
+        let profile_is_valid = state
+            .printers
+            .get(&(workspace_id, environment_id, binding.printer_id))
+            .is_some_and(|printer| {
+                printer.agent_id == binding.agent_id
                     && printer.profiles.iter().any(|profile| {
                         profile.profile_id == binding.profile_id
                             && (profile.profile_id.as_str(), profile.revision)
@@ -5944,8 +5928,7 @@ impl Repository for MemoryRepository {
                             && matches!(profile.status.as_deref(), None | Some("ready"))
                             && profile.stock_id == intended_stock
                     })
-            },
-        );
+            });
         if !profile_is_valid {
             return Ok(None);
         }
@@ -7255,9 +7238,8 @@ mod routing_repository_tests {
             for printer_id in [primary_printer, standby_printer] {
                 state
                     .printers
-                    .get_mut(&printer_id)
+                    .get_mut(&(workspace_id, environment_id, printer_id))
                     .expect("fixture printer")
-                    .2
                     .profiles = vec![PrinterProfileSnapshot {
                     profile_id: "profile_shipping".into(),
                     revision: 4,
@@ -7406,6 +7388,41 @@ mod routing_repository_tests {
                 .await,
             Err(RepositoryError::NotFound)
         ));
+    }
+
+    #[tokio::test]
+    async fn one_physical_printer_projects_into_multiple_tenants() {
+        let repository = MemoryRepository::default();
+        let first_workspace = WorkspaceId::new();
+        let second_workspace = WorkspaceId::new();
+        let environment = EnvironmentId::new();
+        let printer_id = PrinterId::new();
+        let first_agent = AgentId::new();
+        let second_agent = AgentId::new();
+
+        repository
+            .add_printer(first_workspace, environment, printer_id, first_agent)
+            .await;
+        repository
+            .add_printer(second_workspace, environment, printer_id, second_agent)
+            .await;
+
+        assert_eq!(
+            repository
+                .get_printer(first_workspace, environment, printer_id)
+                .await
+                .expect("first tenant projection")
+                .agent_id,
+            first_agent
+        );
+        assert_eq!(
+            repository
+                .get_printer(second_workspace, environment, printer_id)
+                .await
+                .expect("second tenant projection")
+                .agent_id,
+            second_agent
+        );
     }
 
     #[tokio::test]
