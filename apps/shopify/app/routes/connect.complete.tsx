@@ -13,8 +13,8 @@ export async function loader({ request }: LoaderFunctionArgs) {
     });
   }
 
-  // This destination is deliberately fixed. Shopify's authenticated app
-  // loader restores embedded Admin navigation and refreshes the newly synced
-  // node/printer inventory without accepting a caller-controlled redirect.
-  return redirect(SETTINGS_PATH);
+  // Keep the destination fixed and derive the only query value from the
+  // authenticated session. App Bridge needs the shop context after this
+  // top-level, non-Shopify connection flow returns to the embedded app.
+  return redirect(`${SETTINGS_PATH}?shop=${encodeURIComponent(session.shop)}`);
 }

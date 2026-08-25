@@ -31,7 +31,9 @@ describe("node connection completion", () => {
 
     expect(authenticateAdmin).toHaveBeenCalledWith(request);
     expect(response.status).toBe(302);
-    expect(response.headers.get("location")).toBe("/app/settings");
+    expect(response.headers.get("location")).toBe(
+      "/app/settings?shop=c4beta.myshopify.com",
+    );
   });
 
   it("rejects a completion URL for a different authenticated store", async () => {
@@ -59,6 +61,8 @@ describe("node connection completion", () => {
       unstable_pattern: "/connect/complete",
     });
 
-    expect(response.headers.get("location")).toBe("/app/settings");
+    expect(response.headers.get("location")).toBe(
+      "/app/settings?shop=c4beta.myshopify.com",
+    );
   });
 });

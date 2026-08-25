@@ -965,7 +965,11 @@ async fn revoke_connector(
     Path(connector_id): Path<String>,
     headers: HeaderMap,
 ) -> Response {
-    if !authenticate(&state, &headers) {
+    let dashboard_request = dashboard_authenticated(&state, &headers).await
+        && headers
+            .get("x-piqae-local-action")
+            .is_some_and(|value| value == "disconnect");
+    if !authenticate(&state, &headers) && !dashboard_request {
         return StatusCode::UNAUTHORIZED.into_response();
     }
     if connector_id.len() > 128
@@ -976,13 +980,23 @@ async fn revoke_connector(
     {
         return StatusCode::BAD_REQUEST.into_response();
     }
-    control_action(state, headers, |respond_to| {
-        ControlRequest::RevokeConnector {
+    let (send, receive) = oneshot::channel();
+    if state
+        .control
+        .send(ControlRequest::RevokeConnector {
             connector_id,
-            respond_to,
-        }
-    })
-    .await
+            respond_to: send,
+        })
+        .await
+        .is_err()
+    {
+        return unavailable();
+    }
+    match receive.await {
+        Ok(Ok(())) => StatusCode::NO_CONTENT.into_response(),
+        Ok(Err(failure)) => (failure_status(&failure.code), Json(failure)).into_response(),
+        Err(_) => unavailable(),
+    }
 }
 
 async fn submit_job(
@@ -1440,6 +1454,67 @@ mod tests {
             .expect("response");
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
         responder.await.expect("responder");
+    }
+
+    #[tokio::test]
+    async fn dashboard_session_can_disconnect_a_connector_with_explicit_action() {
+        let (state, mut receive) = test_state();
+        let session = "connector-browser-session".to_owned();
+        state
+            .browser_sessions
+            .lock()
+            .await
+            .sessions
+            .insert(session.clone(), Instant::now() + BROWSER_SESSION_LIFETIME);
+        let responder = tokio::spawn(async move {
+            if let Some(ControlRequest::RevokeConnector {
+                connector_id,
+                respond_to,
+            }) = receive.recv().await
+            {
+                assert_eq!(connector_id, "ncon_stale");
+                let _ = respond_to.send(Ok(()));
+            }
+        });
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/v1/local/connectors/ncon_stale")
+                    .header("cookie", format!("piqae_local_session={session}"))
+                    .header("x-piqae-local-action", "disconnect")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        responder.await.expect("responder");
+    }
+
+    #[tokio::test]
+    async fn dashboard_disconnect_requires_explicit_action() {
+        let (state, mut receive) = test_state();
+        let session = "connector-browser-session".to_owned();
+        state
+            .browser_sessions
+            .lock()
+            .await
+            .sessions
+            .insert(session.clone(), Instant::now() + BROWSER_SESSION_LIFETIME);
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/v1/local/connectors/ncon_stale")
+                    .header("cookie", format!("piqae_local_session={session}"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert!(receive.try_recv().is_err());
     }
 
     #[tokio::test]
