@@ -1,6 +1,7 @@
 import { PiqaeClient } from '@piqae/sdk';
 import type {
   DashboardAccount,
+  DashboardCustomerOperationsPage,
   DashboardNodeDiagnostic,
   DashboardWorkspace,
   DashboardAgent,
@@ -31,6 +32,7 @@ export interface DashboardApi {
   webhooks(): Promise<DashboardPage<DashboardWebhook>>;
   apiKeys(): Promise<DashboardPage<DashboardApiKey>>;
   accounts(): Promise<DashboardPage<DashboardAccount>>;
+  customerOperations(after?: string): Promise<DashboardCustomerOperationsPage>;
   account(externalId: string): Promise<DashboardAccount | null>;
   managedWorkspace(account: DashboardAccount): DashboardApi;
   workspace(): Promise<DashboardWorkspace>;
@@ -119,6 +121,18 @@ export const mockApi: DashboardApi = {
   webhooks: () => delay(page(demo.webhooks)),
   apiKeys: () => delay(page(demo.apiKeys)),
   accounts: () => delay(page(demo.accounts)),
+  customerOperations: () =>
+    delay({
+      data: demo.accounts.filter((account) => account.status === 'active').map((account) => ({
+        customer: { id: account.id, externalId: account.externalId, name: account.name },
+        environment: { id: account.environments.liveId, kind: 'live' as const },
+        agents: demo.agents.map((agent) => ({ ...agent, customer: { id: account.id, externalId: account.externalId, name: account.name } })),
+        printers: demo.printers.map((printer) => ({ ...printer, customer: { id: account.id, externalId: account.externalId, name: account.name } })),
+        jobs: demo.jobs.map((job) => ({ ...job, customer: { id: account.id, externalId: account.externalId, name: account.name } }))
+      })),
+      nextCursor: null,
+      hasMore: false
+    }),
   account: (externalId) =>
     delay(demo.accounts.find((account) => account.externalId === externalId) ?? null),
   managedWorkspace: () => mockApi,
@@ -458,6 +472,49 @@ export function createLiveApi(
         throw new Error('Piqae customer account response was not a list.');
       }
       return page(value.map(parseDashboardAccount));
+    },
+    customerOperations: async (after) => {
+      const params = new URLSearchParams({ limit: '25' });
+      if (after) params.set('after', after);
+      const response = await platformRequest(`/v1/platform/operations?${params}`);
+      if (!response.ok) {
+        throw new Error(`Piqae customer operations request failed with HTTP ${response.status}.`);
+      }
+      const value: unknown = await response.json();
+      if (!isRecord(value) || !Array.isArray(value.data)) {
+        throw new Error('Piqae customer operations response was invalid.');
+      }
+      const data = value.data.map((raw) => {
+        if (!isRecord(raw) || !isRecord(raw.customer) || !isRecord(raw.environment)) {
+          throw new Error('Piqae customer operations response was invalid.');
+        }
+        const customer = raw.customer;
+        if (
+          typeof customer.id !== 'string' ||
+          typeof customer.external_id !== 'string' ||
+          typeof customer.name !== 'string' ||
+          typeof raw.environment.id !== 'string' ||
+          raw.environment.kind !== 'live' ||
+          !Array.isArray(raw.agents) ||
+          !Array.isArray(raw.printers) ||
+          !Array.isArray(raw.jobs)
+        ) {
+          throw new Error('Piqae customer operations response was invalid.');
+        }
+        const owner = { id: customer.id, externalId: customer.external_id, name: customer.name };
+        return {
+          customer: owner,
+          environment: { id: raw.environment.id, kind: 'live' as const },
+          agents: (raw.agents as Parameters<typeof toAgent>[0][]).map((agent) => ({ ...toAgent(agent), customer: owner })),
+          printers: (raw.printers as Parameters<typeof toPrinter>[0][]).map((printer) => ({ ...toPrinter(printer), customer: owner })),
+          jobs: (raw.jobs as Parameters<typeof toJob>[0][]).map((job) => ({ ...toJob(job), customer: owner }))
+        };
+      });
+      return {
+        data,
+        nextCursor: typeof value.next_cursor === 'string' ? value.next_cursor : null,
+        hasMore: value.has_more === true
+      };
     },
     account: async (externalId) => {
       const response = await platformRequest(

@@ -39,6 +39,8 @@
   );
 
   let query = $state('');
+  let customerFilter = $state('all');
+  const aggregateCustomers = $derived(data.scope === 'customers' && !managedAccount);
   // The state narrowing is addressed, not held: it arrives validated from the
   // loader so a link can put an operator in front of one set of jobs.
   const stateFilter = $derived(data.stateFilter);
@@ -81,14 +83,16 @@
           !['completed_reported', 'cancelled', 'expired', 'failed_terminal'].includes(job.state)) ||
         (stateFilter === 'failed' && ['failed_terminal', 'failed_retryable'].includes(job.state)) ||
         job.state === stateFilter;
-      return matches(job.title, job.id) && matchesState;
+      const matchesCustomer = customerFilter === 'all' || job.customer?.externalId === customerFilter;
+      return matches(job.title, job.id, job.customer?.name, job.customer?.externalId) && matchesState && matchesCustomer;
     })
   );
 
   const visiblePrinters = $derived(
     data.printers.filter(
       (printer) =>
-        matches(printer.name, printer.location, printer.description) &&
+        matches(printer.name, printer.location, printer.description, printer.customer?.name, printer.customer?.externalId) &&
+        (customerFilter === 'all' || printer.customer?.externalId === customerFilter) &&
         (stateFilter === 'all' || printer.state === stateFilter)
     )
   );
@@ -96,7 +100,8 @@
   const visibleNodes = $derived(
     data.agents.filter(
       (node) =>
-        (matches(node.name, node.id) || node.labels.some((label) => matches(label))) &&
+        (matches(node.name, node.id, node.customer?.name, node.customer?.externalId) || node.labels.some((label) => matches(label))) &&
+        (customerFilter === 'all' || node.customer?.externalId === customerFilter) &&
         (stateFilter === 'all' || node.state === stateFilter)
     )
   );
@@ -132,8 +137,11 @@
   const operationalHref = (overrides: Record<string, string | null>) =>
     buildHref({ ...Object.fromEntries(DETAIL_KEYS.map((key) => [key, null])), ...overrides });
 
-  const detailHref = (kind: string, id: string) =>
-    operationalHref({ [kind]: id });
+  const detailHref = (kind: string, id: string, customerExternalId?: string | null) =>
+    operationalHref({
+      [kind]: id,
+      ...(customerExternalId ? { managed_customer: customerExternalId, scope: null } : {})
+    });
 
   const listHref = $derived(
     buildHref(Object.fromEntries(DETAIL_KEYS.map((key) => [key, null])))
@@ -160,9 +168,11 @@
     void goto(listHref, { keepFocus: true, noScroll: true });
   }
 
-  const nodeName = (agentId: string) =>
+  const nodeName = (agentId: string, customerExternalId?: string | null) =>
+    data.agents.find((agent) => agent.id === agentId && agent.customer?.externalId === customerExternalId)?.name ??
     data.agents.find((agent) => agent.id === agentId)?.name ?? 'Unknown';
-  const printerName = (printerId: string) =>
+  const printerName = (printerId: string, customerExternalId?: string | null) =>
+    data.printers.find((printer) => printer.id === printerId && printer.customer?.externalId === customerExternalId)?.name ??
     data.printers.find((printer) => printer.id === printerId)?.name ?? 'Unknown';
   const readyProfiles = (printer: (typeof data.printers)[number]) =>
     printer.profiles.filter((profile) => profile.status === 'ready').length;
@@ -265,7 +275,7 @@
     <a class="button" href="/dashboard/local"><Icon name="printers" size={14} /> This device</a>
   {/if}
   <a class="button" href="/docs/quickstart"><Icon name="docs" size={14} /> Quickstart</a>
-  <button
+  {#if !aggregateCustomers}<button
     class="button"
     disabled={printablePrinters.length === 0}
     title={printablePrinters.length === 0 ? 'Connect an online printer with a ready profile first' : 'Send a PDF to a printer'}
@@ -281,14 +291,16 @@
     }}
   >
     <Icon name="plus" size={14} /> Add node
-  </button>
+  </button>{/if}
 {/snippet}
 
 <PageHeader
-  title={managedAccount ? `${managedAccount.name} operations` : 'Operations'}
+  title={managedAccount ? `${managedAccount.name} operations` : aggregateCustomers ? 'Customer operations' : 'Operations'}
   description={managedAccount
     ? 'Live resources in this managed customer’s isolated workspace.'
-    : 'Live jobs, printers, and nodes across your workspace.'}
+    : aggregateCustomers
+      ? 'Live jobs, printers, and nodes across your managed customers.'
+      : 'Live jobs, printers, and nodes in your own workspace.'}
   {actions}
 />
 
@@ -317,7 +329,21 @@
   {/if}
 {/if}
 
-{#if !setupComplete}
+{#if data.platformEnabled && !managedAccount}
+  <nav class="operations-scope" aria-label="Operations scope">
+    <a class:active={aggregateCustomers} aria-current={aggregateCustomers ? 'page' : undefined} href={operationalHref({ scope: null })}>
+      Customer operations
+    </a>
+    {#if data.ownHasResources}
+      <a class:active={!aggregateCustomers} aria-current={!aggregateCustomers ? 'page' : undefined} href={operationalHref({ scope: 'own' })}>
+        My workspace
+      </a>
+    {/if}
+    <span>{data.accounts.filter((account) => account.status === 'active').length} active customers</span>
+  </nav>
+{/if}
+
+{#if !setupComplete && !aggregateCustomers}
   <section class="setup" aria-label="Setup progress">
     <div class="setup-intro">
       <strong>Send your first print</strong>
@@ -392,6 +418,14 @@
     onchange={switchView}
   />
   <SearchField bind:value={query} label={`Search ${data.view}`} placeholder={`Search ${data.view}…`} />
+  {#if aggregateCustomers && data.view !== 'customers'}
+    <select class="ui-select" bind:value={customerFilter} aria-label="Filter by customer">
+      <option value="all">All customers</option>
+      {#each data.accounts.filter((account) => account.status === 'active') as account}
+        <option value={account.externalId}>{account.name}</option>
+      {/each}
+    </select>
+  {/if}
   {#if stateOptions.length > 0}
     <select
       class="ui-select"
@@ -412,6 +446,7 @@
       <thead>
         <tr>
           <th>Job</th>
+          {#if aggregateCustomers}<th>Customer</th>{/if}
           <th>Status</th>
           <th>Printer</th>
           <th>Node</th>
@@ -422,23 +457,24 @@
         {#each visibleJobs as job}
           <tr>
             <td>
-              <a class="cell-stack" href={detailHref('job', job.id)}>
+              <a class="cell-stack" href={detailHref('job', job.id, job.customer?.externalId)}>
                 <strong>{job.title}</strong>
                 <small class="mono">{job.id} · {job.contentFormat.toUpperCase()}</small>
               </a>
             </td>
+            {#if aggregateCustomers}<td><a class="customer-link" href={operationalHref({ managed_customer: job.customer?.externalId ?? null, scope: null })}>{job.customer?.name ?? 'Unknown'}</a></td>{/if}
             <td><Status value={job.state} /></td>
             <td>
               <span class="cell-inline">
                 <Icon name="printers" size={14} />
-                {printerName(job.printerId)}
+                {printerName(job.printerId, job.customer?.externalId)}
               </span>
             </td>
-            <td class="muted">{nodeName(job.agentId)}</td>
+            <td class="muted">{nodeName(job.agentId, job.customer?.externalId)}</td>
             <td class="right muted numeric"><RelativeTime value={job.updatedAt} /></td>
           </tr>
         {:else}
-          <tr><td colspan="5"><EmptyState message="No jobs match this view." compact /></td></tr>
+          <tr><td colspan={aggregateCustomers ? 6 : 5}><EmptyState message="No jobs match this view." compact /></td></tr>
         {/each}
       </tbody>
     </table>
@@ -447,6 +483,7 @@
       <thead>
         <tr>
           <th>Printer</th>
+          {#if aggregateCustomers}<th>Customer</th>{/if}
           <th>Status</th>
           <th>Node</th>
           <th>Profiles</th>
@@ -458,11 +495,12 @@
         {#each visiblePrinters as printer}
           <tr>
             <td>
-              <a class="cell-stack" href={detailHref('printer', printer.id)}>
+              <a class="cell-stack" href={detailHref('printer', printer.id, printer.customer?.externalId)}>
                 <strong>{printer.name}</strong>
                 <small>{printer.location ?? printer.description ?? 'No location'}</small>
               </a>
             </td>
+            {#if aggregateCustomers}<td><a class="customer-link" href={operationalHref({ managed_customer: printer.customer?.externalId ?? null, scope: null })}>{printer.customer?.name ?? 'Unknown'}</a></td>{/if}
             <td><Status value={printer.state} /></td>
             <td class="muted">{nodeName(printer.agentId)}</td>
             <td class="numeric">
@@ -472,7 +510,7 @@
             <td class="right muted numeric"><RelativeTime value={printer.lastSeenAt} /></td>
           </tr>
         {:else}
-          <tr><td colspan="6"><EmptyState message="No printers match this view." compact /></td></tr>
+          <tr><td colspan={aggregateCustomers ? 7 : 6}><EmptyState message="No printers match this view." compact /></td></tr>
         {/each}
       </tbody>
     </table>
@@ -481,6 +519,7 @@
       <thead>
         <tr>
           <th>Node</th>
+          {#if aggregateCustomers}<th>Customer</th>{/if}
           <th>Status</th>
           <th>Platform</th>
           <th>Printers</th>
@@ -492,11 +531,12 @@
         {#each visibleNodes as node}
           <tr>
             <td>
-              <a class="cell-stack" href={detailHref('node', node.id)}>
+              <a class="cell-stack" href={detailHref('node', node.id, node.customer?.externalId)}>
                 <strong>{node.name}</strong>
                 <small class="mono">{node.id}</small>
               </a>
             </td>
+            {#if aggregateCustomers}<td><a class="customer-link" href={operationalHref({ managed_customer: node.customer?.externalId ?? null, scope: null })}>{node.customer?.name ?? 'Unknown'}</a></td>{/if}
             <td><Status value={node.state} /></td>
             <td class="muted">{node.os} · {node.architecture}</td>
             <td class="numeric">{node.printerCount}</td>
@@ -504,7 +544,7 @@
             <td class="right muted numeric"><RelativeTime value={node.lastSeenAt} /></td>
           </tr>
         {:else}
-          <tr><td colspan="6"><EmptyState message="No nodes match this view." compact /></td></tr>
+          <tr><td colspan={aggregateCustomers ? 7 : 6}><EmptyState message="No nodes match this view." compact /></td></tr>
         {/each}
       </tbody>
     </table>
@@ -996,6 +1036,49 @@
 {/if}
 
 <style>
+  .operations-scope {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    margin-bottom: 20px;
+    padding: 4px;
+    width: fit-content;
+    max-width: 100%;
+    background: var(--surface-raised);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-md);
+  }
+
+  .operations-scope a {
+    padding: 7px 10px;
+    color: var(--text-secondary);
+    border-radius: calc(var(--radius-md) - 3px);
+    font-size: var(--text-compact);
+    font-weight: 520;
+  }
+
+  .operations-scope a.active {
+    color: var(--text-primary);
+    background: var(--surface-base);
+    box-shadow: 0 0 0 1px var(--border-subtle);
+  }
+
+  .operations-scope > span {
+    padding: 0 8px;
+    color: var(--text-tertiary);
+    font-size: var(--text-meta);
+    white-space: nowrap;
+  }
+
+  .customer-link {
+    color: var(--text-secondary);
+    font-weight: 500;
+  }
+
+  .customer-link:hover {
+    color: var(--accent);
+  }
+
   .managed-context {
     display: flex;
     align-items: center;
@@ -1306,6 +1389,23 @@
   }
 
   @media (max-width: 620px) {
+    .operations-scope {
+      align-items: stretch;
+      width: 100%;
+      flex-wrap: wrap;
+    }
+
+    .operations-scope a {
+      flex: 1;
+      text-align: center;
+    }
+
+    .operations-scope > span {
+      width: 100%;
+      padding-block: 4px;
+      text-align: center;
+    }
+
     .setup {
       align-items: flex-start;
       flex-direction: column;

@@ -14,6 +14,40 @@ const uncertainJob = (id: string, since: string) => ({
 });
 
 describe('live dashboard overview', () => {
+  it('loads customer operations with immutable attribution and no tenant selector headers', async () => {
+    const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input));
+      expect(url.pathname).toBe('/v1/platform/operations');
+      expect(url.searchParams.get('limit')).toBe('25');
+      expect(url.searchParams.get('after')).toBe('c4beta');
+      const headers = new Headers(init?.headers);
+      expect(headers.get('x-piqae-dashboard')).toBe('1');
+      expect(headers.has('x-piqae-managed-workspace-id')).toBe(false);
+      return Response.json({
+        data: [{
+          customer: { id: 'wsp_child', external_id: 'c4beta', name: 'C4 Beta' },
+          environment: { id: 'env_live', kind: 'live' },
+          agents: [], printers: [], jobs: []
+        }],
+        next_cursor: 'next-shop',
+        has_more: true
+      });
+    });
+
+    await expect(
+      createLiveApi(fetcher as typeof fetch, 'https://api.example.test', 'owner')
+        .customerOperations('c4beta')
+    ).resolves.toEqual({
+      data: [{
+        customer: { id: 'wsp_child', externalId: 'c4beta', name: 'C4 Beta' },
+        environment: { id: 'env_live', kind: 'live' },
+        agents: [], printers: [], jobs: []
+      }],
+      nextCursor: 'next-shop',
+      hasMore: true
+    });
+  });
+
   it('scopes managed customer resources without adding tenant selectors to platform requests', async () => {
     const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = new URL(String(input));

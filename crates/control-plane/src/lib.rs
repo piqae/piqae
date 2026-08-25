@@ -287,6 +287,7 @@ pub fn router(state: AppState) -> Router {
                 .delete(platform::revoke_credential),
         )
         .route("/v1/platform/accounts", get(platform::list))
+        .route("/v1/platform/operations", get(platform::operations))
         .route(
             "/v1/platform/accounts/{external_id}",
             get(platform::get)

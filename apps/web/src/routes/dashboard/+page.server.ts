@@ -12,6 +12,7 @@ import type { DashboardApi } from '$lib/api';
 import type {
   DashboardAccount,
   DashboardAgent,
+  DashboardCustomerOperations,
   DashboardJob,
   DashboardJobEvent,
   DashboardNodeDiagnostic,
@@ -69,6 +70,63 @@ type LoadedLists = {
   accounts: DashboardAccount[];
 };
 
+type OperationsScope = 'customers' | 'own';
+
+function overviewFor(lists: Pick<LoadedLists, 'jobs' | 'printers' | 'agents'>): DashboardOverview {
+  const uncertain = lists.jobs.filter((job) => job.state === 'delivery_uncertain');
+  return {
+    agents: {
+      total: lists.agents.length,
+      online: lists.agents.filter((agent) => agent.state === 'online').length,
+      degraded: lists.agents.filter((agent) => agent.state === 'degraded').length
+    },
+    printers: {
+      total: lists.printers.length,
+      online: lists.printers.filter((printer) => printer.state === 'online').length,
+      attention: lists.printers.filter((printer) => printer.state !== 'online').length
+    },
+    jobs: {
+      recent: lists.jobs.length,
+      active: lists.jobs.filter(
+        (job) => !['completed_reported', 'cancelled', 'expired', 'failed_terminal'].includes(job.state)
+      ).length,
+      failed: lists.jobs.filter((job) => job.state.startsWith('failed')).length,
+      uncertain: uncertain.length,
+      oldestUncertainSince:
+        uncertain
+          .map((job) => job.deliveryUncertainSince)
+          .filter((value): value is string => typeof value === 'string')
+          .sort()[0] ?? null
+    }
+  };
+}
+
+async function loadCustomerOperations(api: DashboardApi) {
+  const loaded: DashboardCustomerOperations[] = [];
+  const seen = new Set<string>();
+  let after: string | undefined;
+  let complete = false;
+  for (let page = 0; page < 100; page += 1) {
+    const result = await api.customerOperations(after);
+    loaded.push(...result.data);
+    if (!result.hasMore) {
+      complete = true;
+      break;
+    }
+    if (!result.nextCursor || seen.has(result.nextCursor)) {
+      throw new Error('Piqae customer operations pagination returned an invalid cursor.');
+    }
+    seen.add(result.nextCursor);
+    after = result.nextCursor;
+  }
+  if (!complete) throw new Error('Piqae customer operations exceeded its pagination bound.');
+  return {
+    jobs: loaded.flatMap((entry) => entry.jobs),
+    printers: loaded.flatMap((entry) => entry.printers),
+    agents: loaded.flatMap((entry) => entry.agents)
+  };
+}
+
 export const load: PageServerLoad = async (event) => {
   const { meta } = await event.parent();
   const { api } = dashboardSource(event);
@@ -102,15 +160,28 @@ export const load: PageServerLoad = async (event) => {
       throw new Error('Archived or suspended managed customers cannot be operated.');
     }
     const operationalApi = managedAccount ? api.managedWorkspace(managedAccount) : api;
-    const [overview, jobs, printers, agents, accounts] = await Promise.all([
+    const accounts = effectiveMeta.platform.accounts
+      ? await api.accounts()
+      : { data: [] as DashboardAccount[], nextCursor: null };
+    const requestedScope = event.url.searchParams.get('scope');
+    const scope: OperationsScope =
+      !managedAccount && effectiveMeta.platform.accounts && requestedScope !== 'own'
+        ? 'customers'
+        : 'own';
+    const [ownOverview, ownJobs, ownPrinters, ownAgents] = await Promise.all([
       operationalApi.overview(),
       operationalApi.jobs(),
       operationalApi.printers(),
-      operationalApi.agents(),
-      effectiveMeta.platform.accounts
-        ? api.accounts()
-        : Promise.resolve({ data: [] as DashboardAccount[], nextCursor: null })
+      operationalApi.agents()
     ]);
+    const ownHasResources = ownAgents.data.length > 0 || ownPrinters.data.length > 0 || ownJobs.data.length > 0;
+    const customerOperations =
+      scope === 'customers' && !managedAccount
+        ? await loadCustomerOperations(api)
+        : null;
+    const jobs = customerOperations ? { data: customerOperations.jobs, nextCursor: null } : ownJobs;
+    const printers = customerOperations ? { data: customerOperations.printers, nextCursor: null } : ownPrinters;
+    const agents = customerOperations ? { data: customerOperations.agents, nextCursor: null } : ownAgents;
 
     const lists: LoadedLists = {
       jobs: jobs.data,
@@ -119,11 +190,15 @@ export const load: PageServerLoad = async (event) => {
       accounts: accounts.data
     };
 
+    const overview = customerOperations ? overviewFor(lists) : ownOverview;
+
     return {
       view,
       stateFilter,
       platformEnabled,
       managedAccount,
+      scope,
+      ownHasResources,
       overview,
       ...lists,
       detail: await loadDetail(event, operationalApi, lists),
@@ -135,6 +210,8 @@ export const load: PageServerLoad = async (event) => {
       stateFilter,
       platformEnabled,
       managedAccount: null,
+      scope: 'own' as OperationsScope,
+      ownHasResources: false,
       overview: emptyOverview,
       jobs: [],
       printers: [],

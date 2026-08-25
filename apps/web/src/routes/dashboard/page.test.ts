@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from '@testing-library/svelte';
+import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
 vi.mock('$app/navigation', () => ({ goto: vi.fn() }));
@@ -272,7 +272,7 @@ describe('managed customer operations', () => {
     );
   });
 
-  it('offers an intentional customer drill-in instead of aggregating resources', () => {
+  it('offers an intentional customer drill-in from the customer directory', () => {
     render(Page, {
       data: {
         ...pageData([]),
@@ -286,5 +286,43 @@ describe('managed customer operations', () => {
     const link = screen.getByRole('link', { name: 'Manage customer' });
     expect(link).toHaveAttribute('href', expect.stringContaining('managed_customer='));
     expect(link).toHaveAttribute('href', expect.stringContaining('view=nodes'));
+  });
+
+  it('defaults integrators to searchable customer-attributed operations and hides unsafe aggregate actions', async () => {
+    cleanup();
+    const second = { ...account, id: 'wsp_other', externalId: 'other-shop', name: 'Other Shop' };
+    const owner = { id: account.id, externalId: account.externalId, name: account.name };
+    const otherOwner = { id: second.id, externalId: second.externalId, name: second.name };
+    page.url = new URL('https://piqae.test/dashboard?view=nodes') as never;
+    const view = render(Page, {
+      data: {
+        ...pageData([]),
+        meta: { ...pageData([]).meta, platform: { accounts: true } },
+        platformEnabled: true,
+        scope: 'customers',
+        ownHasResources: false,
+        view: 'nodes',
+        accounts: [account, second],
+        agents: [
+          { ...agent, customer: owner },
+          { ...agent, id: 'agt_02', name: 'Other warehouse', customer: otherOwner }
+        ]
+      } as never,
+      form: null as never
+    });
+
+    expect(view.getByRole('heading', { name: 'Customer operations' })).toBeInTheDocument();
+    expect(view.getAllByRole('columnheader', { name: 'Customer' }).length).toBeGreaterThan(0);
+    expect(view.queryByRole('button', { name: /Add node/ })).not.toBeInTheDocument();
+    expect(view.queryByRole('button', { name: /Print PDF/ })).not.toBeInTheDocument();
+    expect(view.queryByRole('link', { name: 'My workspace' })).not.toBeInTheDocument();
+
+    await fireEvent.change(view.getByLabelText('Filter by customer'), { target: { value: account.externalId } });
+    expect(view.getByText('Warehouse Mac mini')).toBeInTheDocument();
+    expect(view.queryByText('Other warehouse')).not.toBeInTheDocument();
+    expect(view.getByRole('link', { name: 'Warehouse Mac mini agt_01' })).toHaveAttribute(
+      'href',
+      expect.stringContaining('managed_customer=')
+    );
   });
 });

@@ -582,6 +582,38 @@ paths:
                 items: { $ref: "#/components/schemas/PlatformAccount" }
         "401": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
+  /v1/platform/operations:
+    get:
+      summary: List live operations across owned customer accounts
+      description: |
+        Returns a bounded page of active managed customers and their live
+        nodes, printers, and recent jobs. Resources are nested beneath immutable
+        customer attribution to prevent cross-tenant ID ambiguity. Only the
+        owning platform service account or authorised human owner dashboard may
+        call this operation. Tenant-selection headers are rejected.
+      tags: [Platform]
+      operationId: listPlatformOperations
+      security: [{ platformBearer: [] }, { bearer: [] }]
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 25, default: 25 }
+        - name: after
+          in: query
+          description: Last customer external ID returned by the previous page.
+          schema:
+            type: string
+            maxLength: 120
+            pattern: '^[A-Za-z0-9][A-Za-z0-9_.:-]*$'
+      responses:
+        "200":
+          description: Owner-scoped managed-customer operational snapshot.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PlatformOperationsPage" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
   /v1/platform/status:
     get:
       summary: Inspect whether platform account management is enabled for this workspace
@@ -3240,6 +3272,44 @@ components:
           $ref: "#/components/schemas/PlatformAccountEnvironments"
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
+    PlatformOperationsCustomer:
+      type: object
+      additionalProperties: false
+      required: [id, external_id, name]
+      properties:
+        id: { type: string }
+        external_id: { type: string }
+        name: { type: string }
+    PlatformOperationsRow:
+      type: object
+      additionalProperties: false
+      required: [customer, environment, agents, printers, jobs]
+      properties:
+        customer: { $ref: "#/components/schemas/PlatformOperationsCustomer" }
+        environment: { $ref: "#/components/schemas/PlatformAccountEnvironment" }
+        agents:
+          type: array
+          maxItems: 100
+          items: { $ref: "#/components/schemas/Agent" }
+        printers:
+          type: array
+          maxItems: 100
+          items: { $ref: "#/components/schemas/Printer" }
+        jobs:
+          type: array
+          maxItems: 100
+          items: { $ref: "#/components/schemas/Job" }
+    PlatformOperationsPage:
+      type: object
+      additionalProperties: false
+      required: [data, next_cursor, has_more]
+      properties:
+        data:
+          type: array
+          maxItems: 25
+          items: { $ref: "#/components/schemas/PlatformOperationsRow" }
+        next_cursor: { type: [string, "null"] }
+        has_more: { type: boolean }
     UpsertPlatformAccount:
       type: object
       additionalProperties: false
