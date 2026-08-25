@@ -19,7 +19,7 @@ use sqlx::{
     PgPool, Postgres, Row, Transaction,
     postgres::{PgPoolOptions, PgRow},
 };
-use std::{collections::BTreeMap, str::FromStr};
+use std::{collections::BTreeMap, str::FromStr, time::Duration};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -183,6 +183,15 @@ pub struct LocalOwnerAuthenticationRecord {
     pub environment_id: EnvironmentId,
     pub credential_id: String,
     pub secret_hash: String,
+}
+
+/// A job that has stayed uncertain long enough to need a human.
+#[derive(Clone, Debug, Serialize)]
+pub struct StuckUncertainJob {
+    pub job_id: JobId,
+    pub workspace_id: WorkspaceId,
+    pub environment_id: EnvironmentId,
+    pub uncertain_since: DateTime<Utc>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -6843,9 +6852,19 @@ impl PostgresStore {
         };
         job.state = event.state;
         insert_event(&mut transaction, &job, &event).await?;
+        // `delivery_uncertain_since` is stamped with the server clock on the
+        // transition into the state, not `event.occurred_at`, which carries the
+        // agent's clock. A stuck-job sweep that trusted a remote clock could be
+        // starved or stormed by a skewed node. The state is terminal, so the
+        // anchor is written once and never has to be cleared.
         sqlx::query(
             "UPDATE jobs SET payload = $2, state = $3, state_sequence = $4,
-                final_at = CASE WHEN $5 THEN $6 ELSE final_at END, updated_at = now()
+                final_at = CASE WHEN $5 THEN $6 ELSE final_at END,
+                delivery_uncertain_since = CASE
+                    WHEN $7 AND delivery_uncertain_since IS NULL THEN now()
+                    ELSE delivery_uncertain_since
+                END,
+                updated_at = now()
              WHERE id = $1",
         )
         .bind(job.id.to_string())
@@ -6854,6 +6873,7 @@ impl PostgresStore {
         .bind(sequence)
         .bind(event.state.is_terminal())
         .bind(event.occurred_at)
+        .bind(event.state == JobState::DeliveryUncertain)
         .execute(&mut *transaction)
         .await?;
         if event.state == JobState::CompletedReported {
@@ -7836,6 +7856,46 @@ impl PostgresStore {
         } else {
             Err(StorageError::ConcurrentStateChange)
         }
+    }
+
+    /// Claims jobs that have been uncertain for longer than `threshold`.
+    ///
+    /// Uncertain delivery is terminal and self-resolving only in the sense that
+    /// nothing else will move it: the handoff happened but nobody can prove ink
+    /// reached paper. Entering the state is unremarkable; remaining in it is the
+    /// fault worth a human's attention.
+    ///
+    /// `delivery_uncertain_alerted_at` is stamped in the same statement that
+    /// selects the row, so a job is surfaced at most once no matter how many
+    /// workers sweep concurrently. Without that fence a periodic sweep would
+    /// re-report the same jobs forever and train the operator to ignore it.
+    pub async fn claim_stuck_uncertain_jobs(
+        &self,
+        threshold: Duration,
+        limit: i64,
+    ) -> Result<Vec<StuckUncertainJob>, StorageError> {
+        // Bounded to i32 so the interval cast to f64 cannot lose precision.
+        let seconds = i32::try_from(threshold.as_secs())
+            .map_err(|error| StorageError::InvalidData(format!("threshold overflow: {error}")))?;
+        let rows = sqlx::query(
+            "UPDATE jobs SET delivery_uncertain_alerted_at = now()
+             WHERE id IN (
+                 SELECT id FROM jobs
+                 WHERE state = 'delivery_uncertain'
+                   AND delivery_uncertain_alerted_at IS NULL
+                   AND delivery_uncertain_since IS NOT NULL
+                   AND delivery_uncertain_since <= now() - make_interval(secs => $1::double precision)
+                 ORDER BY delivery_uncertain_since
+                 LIMIT $2
+                 FOR UPDATE SKIP LOCKED
+             )
+             RETURNING id, workspace_id, environment_id, delivery_uncertain_since",
+        )
+        .bind(f64::from(seconds))
+        .bind(limit.clamp(1, 500))
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(stuck_uncertain_from_row).collect()
     }
 
     pub async fn release_expired_jobs(&self) -> Result<u64, StorageError> {
@@ -8974,6 +9034,24 @@ async fn insert_event(
     .execute(&mut **transaction)
     .await?;
     Ok(())
+}
+
+fn stuck_uncertain_from_row(row: &PgRow) -> Result<StuckUncertainJob, StorageError> {
+    let id = row.try_get::<String, _>("id")?;
+    let workspace_id = row.try_get::<String, _>("workspace_id")?;
+    let environment_id = row.try_get::<String, _>("environment_id")?;
+    Ok(StuckUncertainJob {
+        job_id: id
+            .parse()
+            .map_err(|error| StorageError::InvalidData(format!("job id `{id}`: {error}")))?,
+        workspace_id: workspace_id.parse().map_err(|error| {
+            StorageError::InvalidData(format!("workspace id `{workspace_id}`: {error}"))
+        })?,
+        environment_id: environment_id.parse().map_err(|error| {
+            StorageError::InvalidData(format!("environment id `{environment_id}`: {error}"))
+        })?,
+        uncertain_since: row.try_get("delivery_uncertain_since")?,
+    })
 }
 
 fn job_from_row(payload: serde_json::Value, state: &str) -> Result<Job, StorageError> {

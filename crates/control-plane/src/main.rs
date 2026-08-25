@@ -289,6 +289,9 @@ async fn run() -> Result<()> {
     } else {
         None
     };
+    let _uncertain_delivery_worker = service_role
+        .runs_workers()
+        .then(|| spawn_uncertain_delivery_sweep(store.clone(), application.clone()));
     let _document_render_worker = if service_role.runs_workers() {
         let worker_id = format!("document-renderer-{}", uuid::Uuid::new_v4());
         let concurrency = product_env("PIQAE_DOCUMENT_RENDER_CONCURRENCY")
@@ -682,6 +685,72 @@ async fn shutdown_signal() {
     tokio::select! {
         () = control_c => {},
         () = terminate => {},
+    }
+}
+
+/// Surfaces jobs that have stayed uncertain past the alert threshold.
+///
+/// Uncertain delivery is terminal: nothing else will move these jobs. Entering
+/// the state is unremarkable and often transient, so only jobs past the
+/// threshold are reported, and the storage claim stamps each one so it is
+/// surfaced once rather than on every pass.
+fn spawn_uncertain_delivery_sweep(
+    store: PostgresStore,
+    application: AppState,
+) -> tokio::task::JoinHandle<()> {
+    let threshold = std::time::Duration::from_secs(
+        product_env("PIQAE_DELIVERY_UNCERTAIN_ALERT_SECONDS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(900)
+            .clamp(60, 86_400),
+    );
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            match store.claim_stuck_uncertain_jobs(threshold, 50).await {
+                Ok(jobs) if jobs.is_empty() => {}
+                Ok(jobs) => {
+                    for job in jobs {
+                        tracing::warn!(
+                            job_id = %job.job_id,
+                            workspace_id = %job.workspace_id,
+                            uncertain_since = %job.uncertain_since,
+                            "print job has stayed uncertain past the alert threshold"
+                        );
+                        report_unresolved_uncertain_job(&application, &job).await;
+                    }
+                }
+                Err(error) => tracing::error!(%error, "uncertain delivery sweep failed"),
+            }
+        }
+    })
+}
+
+/// Enqueued directly rather than through `AppState::publish`, which needs a
+/// tenant context built from an authenticated request. This sweep has none.
+async fn report_unresolved_uncertain_job(
+    application: &AppState,
+    job: &piqae_storage_postgres::StuckUncertainJob,
+) {
+    match serde_json::to_value(job) {
+        Ok(payload) => {
+            if let Err(error) = application
+                .repository
+                .enqueue_webhook_event(
+                    job.workspace_id,
+                    job.environment_id,
+                    "job.delivery_uncertain.unresolved",
+                    &payload,
+                )
+                .await
+            {
+                tracing::error!(%error, "could not enqueue unresolved uncertain delivery event");
+            }
+        }
+        Err(error) => tracing::error!(%error, "could not serialize stuck uncertain job"),
     }
 }
 
