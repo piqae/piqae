@@ -98,6 +98,26 @@ trusted SvelteKit server using an authorised human owner session. That session
 is never converted into or shown as a platform key, and ordinary tenant API
 keys remain invalid for account management.
 
+After resolving a customer through the account-management response, the
+trusted dashboard server may scope native API operations to that managed customer
+with all three headers below:
+
+```text
+X-Piqae-Dashboard: 1
+X-Piqae-Managed-Workspace-Id: wsp_...
+X-Piqae-Managed-Environment-Id: env_...
+```
+
+This is a human-session delegation, not a general tenant-selection mechanism.
+The control plane verifies that the signed-in owner workspace still owns the
+selected active child, that the environment belongs to that child, and that
+both the human and platform grant contain the route's required scope. Partial
+header pairs, platform/API keys, non-dashboard requests, archived customers,
+expired or revoked grants, and children belonging to another platform fail
+authentication. The dashboard must resolve these IDs from the authenticated
+account response; it must never accept workspace or environment IDs directly
+from a browser parameter.
+
 ## Accounts and external IDs
 
 Use an immutable identifier from your own database:

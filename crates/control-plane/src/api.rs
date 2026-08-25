@@ -3146,9 +3146,17 @@ pub(crate) async fn authenticate_native(
         optional_product_header(headers, "x-piqae-workspace-id", "x-spool-workspace-id")?;
     let platform_environment =
         optional_product_header(headers, "x-piqae-environment-id", "x-spool-environment-id")?;
-    let tenant = match (platform_workspace, platform_environment) {
-        (None, None) => state.authenticator.authenticate_bearer(authorization).await,
-        (Some(workspace), Some(environment)) => {
+    let managed_workspace = optional_header(headers, "x-piqae-managed-workspace-id")?;
+    let managed_environment = optional_header(headers, "x-piqae-managed-environment-id")?;
+    let dashboard_request = optional_header(headers, "x-piqae-dashboard")? == Some("1");
+    let tenant = match (
+        platform_workspace,
+        platform_environment,
+        managed_workspace,
+        managed_environment,
+    ) {
+        (None, None, None, None) => state.authenticator.authenticate_bearer(authorization).await,
+        (Some(workspace), Some(environment), None, None) => {
             let workspace_id =
                 WorkspaceId::from_str(workspace).map_err(|_| AppError::unauthorized())?;
             let environment_id =
@@ -3162,6 +3170,21 @@ pub(crate) async fn authenticate_native(
                     environment_id,
                     required_scope,
                     &request_id,
+                )
+                .await
+        }
+        (None, None, Some(workspace), Some(environment)) if dashboard_request => {
+            let workspace_id =
+                WorkspaceId::from_str(workspace).map_err(|_| AppError::unauthorized())?;
+            let environment_id =
+                EnvironmentId::from_str(environment).map_err(|_| AppError::unauthorized())?;
+            state
+                .authenticator
+                .authenticate_managed_human(
+                    authorization,
+                    workspace_id,
+                    environment_id,
+                    required_scope,
                 )
                 .await
         }

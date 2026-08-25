@@ -224,6 +224,29 @@ async fn postgres_http_platform_accounts_are_owned_idempotent_and_archive_safely
         )
         .await
         .expect("owner session row");
+    let foreign_owner_credential =
+        generate_local_owner_credential().expect("foreign owner credential");
+    let foreign_owner_session = generate_local_owner_session().expect("foreign owner session");
+    sqlx::query(
+        "INSERT INTO local_owner_credentials (id, workspace_id, key_hash)
+         VALUES ($1,$2,$3)",
+    )
+    .bind(foreign_owner_credential.id.to_string())
+    .bind(owner_b.to_string())
+    .bind(foreign_owner_credential.password_hash)
+    .execute(&pool)
+    .await
+    .expect("foreign owner credential row");
+    store
+        .create_local_owner_session(
+            &foreign_owner_session.id.to_string(),
+            owner_b,
+            &foreign_owner_credential.id.to_string(),
+            &foreign_owner_session.password_hash,
+            Utc::now() + chrono::Duration::hours(1),
+        )
+        .await
+        .expect("foreign owner session row");
     let ordinary_key = generate_api_key(Environment::Live).expect("ordinary API key");
     store
         .create_api_key(
@@ -439,6 +462,49 @@ async fn postgres_http_platform_accounts_are_owned_idempotent_and_archive_safely
     assert_eq!(exact_grants, 2);
 
     let durable_job = insert_durable_job(&pool, &store, customer_workspace, customer_live).await;
+    let managed_request = |bearer: &str, include_dashboard_marker: bool| {
+        let mut request = Request::builder()
+            .uri("/v1/jobs")
+            .header("authorization", format!("Bearer {bearer}"))
+            .header(
+                "x-piqae-managed-workspace-id",
+                customer_workspace.to_string(),
+            )
+            .header("x-piqae-managed-environment-id", customer_live.to_string());
+        if include_dashboard_marker {
+            request = request.header("x-piqae-dashboard", "1");
+        }
+        request.body(Body::empty()).expect("managed tenant request")
+    };
+    let managed_owner = application
+        .clone()
+        .oneshot(managed_request(&owner_session.plaintext, true))
+        .await
+        .expect("managed owner response");
+    assert_eq!(managed_owner.status(), StatusCode::OK);
+    let managed_jobs = response_json(managed_owner).await;
+    assert_eq!(
+        managed_jobs["data"][0]["id"],
+        durable_job.as_ulid().to_string()
+    );
+    let missing_dashboard_marker = application
+        .clone()
+        .oneshot(managed_request(&owner_session.plaintext, false))
+        .await
+        .expect("non-dashboard managed response");
+    assert_eq!(missing_dashboard_marker.status(), StatusCode::UNAUTHORIZED);
+    let foreign_managed_owner = application
+        .clone()
+        .oneshot(managed_request(&foreign_owner_session.plaintext, true))
+        .await
+        .expect("foreign managed owner response");
+    assert_eq!(foreign_managed_owner.status(), StatusCode::UNAUTHORIZED);
+    let platform_key_as_human = application
+        .clone()
+        .oneshot(managed_request(&platform_a.plaintext, true))
+        .await
+        .expect("platform key managed dashboard response");
+    assert_eq!(platform_key_as_human.status(), StatusCode::UNAUTHORIZED);
     let tenant_request = |bearer: &str| {
         Request::builder()
             .uri("/v1/jobs")

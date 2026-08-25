@@ -92,11 +92,21 @@ export const load: PageServerLoad = async (event) => {
   const stateFilter = resolveStateFilter(event.url.searchParams.get('state'), view);
 
   try {
+    const managedExternalId = event.url.searchParams.get('managed_customer');
+    const managedAccount =
+      managedExternalId && view !== 'customers' ? await api.account(managedExternalId) : null;
+    if (managedExternalId && view !== 'customers' && !managedAccount) {
+      throw new Error('That managed customer is unavailable or is not owned by this workspace.');
+    }
+    if (managedAccount && managedAccount.status !== 'active') {
+      throw new Error('Archived or suspended managed customers cannot be operated.');
+    }
+    const operationalApi = managedAccount ? api.managedWorkspace(managedAccount) : api;
     const [overview, jobs, printers, agents, accounts] = await Promise.all([
-      api.overview(),
-      api.jobs(),
-      api.printers(),
-      api.agents(),
+      operationalApi.overview(),
+      operationalApi.jobs(),
+      operationalApi.printers(),
+      operationalApi.agents(),
       effectiveMeta.platform.accounts
         ? api.accounts()
         : Promise.resolve({ data: [] as DashboardAccount[], nextCursor: null })
@@ -113,9 +123,10 @@ export const load: PageServerLoad = async (event) => {
       view,
       stateFilter,
       platformEnabled,
+      managedAccount,
       overview,
       ...lists,
-      detail: await loadDetail(event, api, lists),
+      detail: await loadDetail(event, operationalApi, lists),
       dataError: null
     };
   } catch (error) {
@@ -123,6 +134,7 @@ export const load: PageServerLoad = async (event) => {
       view,
       stateFilter,
       platformEnabled,
+      managedAccount: null,
       overview: emptyOverview,
       jobs: [],
       printers: [],
@@ -133,6 +145,24 @@ export const load: PageServerLoad = async (event) => {
     };
   }
 };
+
+async function managedSelection(event: RequestEvent, data: FormData) {
+  const externalId = String(data.get('managed_customer') ?? '').trim();
+  if (!externalId) return null;
+  const api = dashboardSource(event).api;
+  const account = await api.account(externalId);
+  if (!account || account.status !== 'active') {
+    throw new Error('That managed customer is unavailable or is not active.');
+  }
+  return {
+    api: api.managedWorkspace(account),
+    sdk: dashboardSdk(event, {
+      workspaceId: account.id,
+      environmentId: account.environments.liveId
+    }),
+    account
+  };
+}
 
 /**
  * Detail lives in a drawer on this page rather than on its own route, so the
@@ -211,7 +241,8 @@ export const actions: Actions = {
         error: { message: 'Diagnostics are disabled while demo data is active.' }
       });
     }
-    const nodeId = String((await event.request.formData()).get('node_id') ?? '').trim();
+    const data = await event.request.formData();
+    const nodeId = String(data.get('node_id') ?? '').trim();
     if (!nodeId) {
       return fail(400, {
         mutation: 'collectNodeDiagnostics',
@@ -219,7 +250,8 @@ export const actions: Actions = {
       });
     }
     try {
-      const { requestId } = await dashboardSource(event).api.collectNodeDiagnostics(nodeId);
+      const managed = await managedSelection(event, data);
+      const { requestId } = await (managed?.api ?? dashboardSource(event).api).collectNodeDiagnostics(nodeId);
       return { mutation: 'collectNodeDiagnostics', diagnosticRequestId: requestId };
     } catch (error) {
       return fail(502, {
@@ -271,7 +303,8 @@ export const actions: Actions = {
     }
 
     try {
-      const client = dashboardSdk(event);
+      const managed = await managedSelection(event, data);
+      const client = managed?.sdk ?? dashboardSdk(event);
       const printers = await client.printers.list({ limit: 100 });
       const printer = printers.data.find((candidate) => candidate.id === printerId);
       const profile = printer?.profiles.find(
@@ -355,10 +388,16 @@ export const actions: Actions = {
       });
     }
     try {
-      const enrolment = await dashboardSdk(event).connectSessions.create({
+      const managed = await managedSelection(event, data);
+      const enrolment = await (managed?.sdk ?? dashboardSdk(event)).connectSessions.create({
         ...(name ? { name } : {}),
         expires_in_seconds: expiresInSeconds,
-        return_url: new URL('/dashboard?view=nodes', event.url.origin).toString()
+        return_url: new URL(
+          managed
+            ? `/dashboard?view=nodes&managed_customer=${encodeURIComponent(managed.account.externalId)}`
+            : '/dashboard?view=nodes',
+          event.url.origin
+        ).toString()
       });
       if (!enrolment.connect_url) throw new Error('The connection session did not provide a link.');
       return {
@@ -393,7 +432,8 @@ export const actions: Actions = {
       });
     }
     try {
-      const job = await dashboardSdk(event).jobs.cancel(jobId);
+      const managed = await managedSelection(event, data);
+      const job = await (managed?.sdk ?? dashboardSdk(event)).jobs.cancel(jobId);
       return { mutation: 'cancelJob', cancelledJobId: job.id, state: job.state };
     } catch (error) {
       return fail(409, {

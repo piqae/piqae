@@ -147,6 +147,90 @@ describe('dashboard state addressing', () => {
     expect(await load(loadEvent('?view=jobs&state=nonsense'))).toMatchObject({
       stateFilter: 'all'
     });
-    expect(await load(loadEvent(''))).toMatchObject({ view: 'jobs', stateFilter: 'all' });
+    expect(await load(loadEvent(''))).toMatchObject({
+      view: 'jobs',
+      stateFilter: 'all',
+      managedAccount: null,
+      dataError: null
+    });
+  });
+});
+
+describe('managed customer selection', () => {
+  it('resolves an owned account before using its isolated operational client', async () => {
+    const childAgents = vi.fn(async () => ({
+      data: [{ id: 'agt_child', name: 'Shop Mac' }],
+      nextCursor: null
+    }));
+    const account = {
+      id: 'wsp_child',
+      externalId: 'shopify:gid://shopify/Shop/1',
+      name: 'C4 Beta',
+      status: 'active',
+      metadata: {},
+      environments: { testId: 'env_test', liveId: 'env_live' },
+      createdAt: '2026-08-25T00:00:00.000Z',
+      updatedAt: '2026-08-25T00:00:00.000Z'
+    };
+    const childApi = {
+      overview: async () => ({
+        agents: { total: 1, online: 1, degraded: 0 },
+        printers: { total: 0, online: 0, attention: 0 },
+        jobs: { recent: 0, active: 0, failed: 0, uncertain: 0 }
+      }),
+      jobs: async () => emptyPage,
+      printers: async () => emptyPage,
+      agents: childAgents
+    };
+    const managedWorkspace = vi.fn(() => childApi);
+    dashboardSource.mockReturnValue({
+      api: {
+        platformEnabled: async () => true,
+        account: async (externalId: string) =>
+          externalId === account.externalId ? account : null,
+        managedWorkspace,
+        accounts: async () => ({ data: [account], nextCursor: null })
+      }
+    });
+
+    const data = await load({
+      url: new URL(
+        `https://piqae.test/dashboard?view=nodes&managed_customer=${encodeURIComponent(account.externalId)}`
+      ),
+      parent: async () => ({ meta: { platform: { accounts: true } } })
+    } as never);
+
+    expect(managedWorkspace).toHaveBeenCalledWith(account);
+    expect(childAgents).toHaveBeenCalledOnce();
+    expect(data).toMatchObject({
+      managedAccount: account,
+      agents: [{ id: 'agt_child', name: 'Shop Mac' }]
+    });
+  });
+
+  it('fails closed before issuing child resource requests for an unowned customer', async () => {
+    const managedWorkspace = vi.fn();
+    const parentAgents = vi.fn();
+    dashboardSource.mockReturnValue({
+      api: {
+        platformEnabled: async () => true,
+        account: async () => null,
+        managedWorkspace,
+        agents: parentAgents
+      }
+    });
+
+    const data = await load({
+      url: new URL('https://piqae.test/dashboard?view=nodes&managed_customer=foreign'),
+      parent: async () => ({ meta: { platform: { accounts: true } } })
+    } as never);
+
+    expect(managedWorkspace).not.toHaveBeenCalled();
+    expect(parentAgents).not.toHaveBeenCalled();
+    expect(data).toMatchObject({
+      managedAccount: null,
+      agents: [],
+      dataError: { message: expect.stringMatching(/unavailable or is not owned/i) }
+    });
   });
 });

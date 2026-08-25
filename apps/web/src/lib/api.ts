@@ -32,6 +32,7 @@ export interface DashboardApi {
   apiKeys(): Promise<DashboardPage<DashboardApiKey>>;
   accounts(): Promise<DashboardPage<DashboardAccount>>;
   account(externalId: string): Promise<DashboardAccount | null>;
+  managedWorkspace(account: DashboardAccount): DashboardApi;
   workspace(): Promise<DashboardWorkspace>;
   renameWorkspace(name: string): Promise<DashboardWorkspace>;
   nodeDiagnostics(nodeId: string): Promise<DashboardNodeDiagnostic[]>;
@@ -120,6 +121,7 @@ export const mockApi: DashboardApi = {
   accounts: () => delay(page(demo.accounts)),
   account: (externalId) =>
     delay(demo.accounts.find((account) => account.externalId === externalId) ?? null),
+  managedWorkspace: () => mockApi,
   workspace: () => delay({ id: 'wsp_demo', name: 'Demo workspace', slug: 'demo-workspace' }),
   renameWorkspace: (name) => delay({ id: 'wsp_demo', name, slug: 'demo-workspace' }),
   nodeDiagnostics: () => delay([]),
@@ -134,13 +136,22 @@ export const mockApi: DashboardApi = {
 export function createLiveApi(
   fetcher: typeof fetch,
   baseUrl: string,
-  apiKey?: string
+  apiKey?: string,
+  managed?: { workspaceId: string; environmentId: string }
 ): DashboardApi {
   const client = new PiqaeClient({
     baseUrl,
     fetch: fetcher,
     ...(apiKey ? { apiKey } : {}),
-    headers: { 'x-piqae-dashboard': '1' }
+    headers: {
+      'x-piqae-dashboard': '1',
+      ...(managed
+        ? {
+            'x-piqae-managed-workspace-id': managed.workspaceId,
+            'x-piqae-managed-environment-id': managed.environmentId
+          }
+        : {})
+    }
   });
 
   const toAgent = (agent: Awaited<ReturnType<typeof client.agents.list>>[number]): DashboardAgent => ({
@@ -458,6 +469,11 @@ export function createLiveApi(
       }
       return parseDashboardAccount(await response.json());
     },
+    managedWorkspace: (account) =>
+      createLiveApi(fetcher, baseUrl, apiKey, {
+        workspaceId: account.id,
+        environmentId: account.environments.liveId
+      }),
     workspace: async () => parseDashboardWorkspace(await client.workspaces.current()),
     renameWorkspace: async (name) =>
       parseDashboardWorkspace(await client.workspaces.rename(name)),

@@ -104,6 +104,11 @@ pub struct PlatformGrantAuthenticationRecord {
 }
 
 #[derive(Clone, Debug)]
+pub struct ManagedTenantAuthenticationRecord {
+    pub scopes: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
 pub struct PlatformManagerAuthenticationRecord {
     pub secret_hash: String,
     pub owner_workspace_id: WorkspaceId,
@@ -1610,6 +1615,49 @@ impl PostgresStore {
         .ok_or(StorageError::NotFound)?;
         Ok(PlatformGrantAuthenticationRecord {
             secret_hash: row.try_get("secret_hash")?,
+            scopes: row.try_get("scopes")?,
+        })
+    }
+
+    /// Resolves a child tenant only when it is actively owned by the supplied
+    /// platform-owner workspace and its delegated grant is still active.
+    pub async fn managed_tenant_for_owner(
+        &self,
+        owner_workspace_id: WorkspaceId,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+    ) -> Result<ManagedTenantAuthenticationRecord, StorageError> {
+        let row = sqlx::query(
+            "SELECT workspace_grant.scopes
+             FROM platform_service_accounts account
+             JOIN workspaces owner ON owner.id = account.owner_workspace_id
+             JOIN workspaces child
+               ON child.platform_service_account_id = account.id
+             JOIN platform_workspace_grants workspace_grant
+               ON workspace_grant.service_account_id = account.id
+              AND workspace_grant.workspace_id = child.id
+             JOIN environments environment
+               ON environment.id = workspace_grant.environment_id
+              AND environment.workspace_id = child.id
+             WHERE account.owner_workspace_id = $1
+               AND child.id = $2
+               AND environment.id = $3
+               AND account.revoked_at IS NULL
+               AND owner.status = 'active'
+               AND child.status = 'active'
+               AND workspace_grant.revoked_at IS NULL
+               AND (
+                    workspace_grant.expires_at IS NULL
+                    OR workspace_grant.expires_at > now()
+               )",
+        )
+        .bind(owner_workspace_id.to_string())
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(StorageError::NotFound)?;
+        Ok(ManagedTenantAuthenticationRecord {
             scopes: row.try_get("scopes")?,
         })
     }

@@ -14,6 +14,48 @@ const uncertainJob = (id: string, since: string) => ({
 });
 
 describe('live dashboard overview', () => {
+  it('scopes managed customer resources without adding tenant selectors to platform requests', async () => {
+    const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input));
+      if (url.pathname.startsWith('/v1/platform/accounts/')) {
+        const headers = new Headers(init?.headers);
+        expect(headers.has('x-piqae-managed-workspace-id')).toBe(false);
+        expect(headers.has('x-piqae-managed-environment-id')).toBe(false);
+        return Response.json({
+          id: 'wsp_child',
+          external_id: 'shopify:gid://shopify/Shop/1',
+          name: 'C4 Beta',
+          status: 'active',
+          metadata: {},
+          environments: {
+            test: { id: 'env_test' },
+            live: { id: 'env_live' }
+          },
+          created_at: '2026-08-25T00:00:00.000Z',
+          updated_at: '2026-08-25T00:00:00.000Z'
+        });
+      }
+      if (url.pathname === '/v1/agents') {
+        const headers = new Headers(init?.headers);
+        expect(headers.get('x-piqae-dashboard')).toBe('1');
+        expect(headers.get('x-piqae-managed-workspace-id')).toBe('wsp_child');
+        expect(headers.get('x-piqae-managed-environment-id')).toBe('env_live');
+        expect(headers.has('x-piqae-workspace-id')).toBe(false);
+        expect(headers.has('x-piqae-environment-id')).toBe(false);
+        return Response.json([]);
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    const parent = createLiveApi(fetcher as typeof fetch, 'https://api.example.test', 'owner');
+    const account = await parent.account('shopify:gid://shopify/Shop/1');
+    expect(account).not.toBeNull();
+
+    await expect(parent.managedWorkspace(account!).agents()).resolves.toEqual({
+      data: [],
+      nextCursor: null
+    });
+  });
+
   it('paginates the server-filtered uncertain set and maps its transition timestamp', async () => {
     const first = Array.from({ length: 100 }, (_, index) =>
       uncertainJob(`job_${index}`, '2026-08-25T09:00:00.000Z')
