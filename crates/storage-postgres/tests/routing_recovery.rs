@@ -210,6 +210,7 @@ async fn create_waiting_job(
         state: JobState::WaitingForAgent,
         created_at: now,
         expires_at: now + chrono::Duration::hours(1),
+        delivery_uncertain_since: None,
     };
     store
         .create_job(&job, agent_id, None, suffix.as_bytes())

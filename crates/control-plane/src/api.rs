@@ -1549,6 +1549,10 @@ pub struct JobResponse {
     pub state: JobState,
     pub created_at: chrono::DateTime<Utc>,
     pub expires_at: chrono::DateTime<Utc>,
+    /// Present only while delivery is unproven. Lets a caller show how long a
+    /// handoff has gone unconfirmed rather than only that it has.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delivery_uncertain_since: Option<chrono::DateTime<Utc>>,
 }
 
 impl From<Job> for JobResponse {
@@ -1564,6 +1568,7 @@ impl From<Job> for JobResponse {
             state: job.state,
             created_at: job.created_at,
             expires_at: job.expires_at,
+            delivery_uncertain_since: job.delivery_uncertain_since,
         }
     }
 }
@@ -1663,6 +1668,8 @@ async fn create_job_impl(
         state: JobState::Registered,
         created_at: now,
         expires_at: job_expires_at,
+        // A new job is never uncertain; the transition stamps the anchor.
+        delivery_uncertain_since: None,
     };
     let idempotency = headers
         .get("idempotency-key")

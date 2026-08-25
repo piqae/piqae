@@ -435,6 +435,14 @@ pub struct Job {
     pub state: JobState,
     pub created_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
+    /// When the job entered `DeliveryUncertain`, on the server clock.
+    ///
+    /// Present only for jobs in that state. Without it a caller can see that
+    /// delivery is unproven but not for how long, and the age of the job is a
+    /// poor substitute: a job may sit queued for hours before the handoff that
+    /// could not be confirmed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_uncertain_since: Option<DateTime<Utc>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
