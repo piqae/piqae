@@ -57,3 +57,49 @@ editors that need the complete printer, stock, and captured-profile inventory,
 separation can choose `selected_printers`. Another connector cannot infer that
 a printer or service exists. Revocation, key loss and partial restart recovery
 still require release evidence across every advertised operating system.
+
+## Connection and printer topology invariants
+
+The connector registry is many-to-many. A durable connector is identified by
+its immutable server origin/identity, workspace, environment and connector ID;
+workspace names, customer names and future vanity domains are display data and
+must not merge or replace it. This permits one installation to maintain any
+combination of direct hosted workspaces, managed child workspaces and distinct
+self-hosted control planes. Reauthentication replaces only the matching
+connector identity and leaves every peer connector running.
+
+One node-owned printer ID may be projected into every authorized tenant. The
+PostgreSQL identity is consequently `(workspace_id, environment_id,
+printer_id)`, not a globally unique printer ID. Each projection contains the
+current state, driver/native options, semantic capabilities, profiles and
+last-seen time allowed by that connector's grant. An inventory failure remains
+dirty and retries on the next synchronization cycle; a later heartbeat must
+not hide a missing projection. Additions, removals and driver changes wake all
+connector workers, with periodic reconciliation as a recovery bound.
+
+| Topology | Identity and isolation behaviour |
+| --- | --- |
+| One node, several hosted direct or child connectors | Each tenant receives an isolated projection of every granted local printer. |
+| One node, hosted and self-hosted connectors | Each immutable server origin has independent credentials, queues, cursors and content roots. |
+| Several nodes with disjoint printers | Each OS queue remains a separate printer route. |
+| Several nodes exposing the same physical device | They remain separate routes until an operator binds them to one logical target; matching names or drivers never merges them automatically. |
+| Different connector subsets on different nodes | Only the explicit grant on each connector controls visibility and job admission. |
+| Printer added, removed or reconfigured | Every connector is invalidated immediately and later reconciled; selected-printer grants never widen automatically. |
+
+## Shared destinations and queue privacy
+
+Multi-connector projection does not create a global physical-printer queue.
+Within one node, every connector has a tenant-private durable Piqae queue and
+all accepted work ultimately reaches the same OS queue. A tenant may receive a
+privacy-safe busy/occupancy signal, but must never receive another tenant's job
+title, document, metadata or identifiers. Jobs submitted directly to the OS
+spooler are outside Piqae's ordering and idempotency boundary.
+
+When several computers can drive the same physical printer, use an explicit
+logical target with primary/standby bindings. The control plane leases one job
+to one route. It may reroute before durable native acceptance; after spooler
+handoff or an ambiguous crash it must enter `delivery_uncertain` rather than
+automatically print through another node and risk a duplicate. Pool scheduling,
+cross-tenant queue positions and automatic physical-device discovery remain
+future work and must not be implied by connector health or matching queue
+names.

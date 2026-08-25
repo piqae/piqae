@@ -3644,13 +3644,15 @@ async fn run_cloud_sync_loop(
                 continue;
             }
         };
-        if request.printers.is_some() {
-            last_printer_refresh = Some(tokio::time::Instant::now());
-        } else if refresh_printers {
+        let submitted_printer_inventory = request.printers.is_some();
+        if !submitted_printer_inventory && refresh_printers {
             printer_inventory_dirty.store(true, Ordering::Release);
         }
         let delay = match cloud.client.sync(&cloud.identity, &request).await {
             Ok(response) => {
+                if submitted_printer_inventory {
+                    last_printer_refresh = Some(tokio::time::Instant::now());
+                }
                 *last_sync_error_code.write().await = None;
                 sync_succeeded(
                     response,
@@ -3669,6 +3671,12 @@ async fn run_cloud_sync_loop(
                 .await
             }
             Err(error) => {
+                if submitted_printer_inventory {
+                    // A heartbeat succeeding after an inventory projection
+                    // failure must not mask missing printers for fifteen
+                    // minutes. Retry the same current inventory next cycle.
+                    printer_inventory_dirty.store(true, Ordering::Release);
+                }
                 *last_sync_error_code.write().await = redacted_sync_error_code(&error);
                 sync_failed(&error, &mut failures, &connection).await
             }
