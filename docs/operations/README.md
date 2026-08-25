@@ -12,6 +12,7 @@
 - [Piqae domain topology and enterprise custom domains](domain-topology.md)
 - [Reliability and job lifecycle](reliability-and-job-lifecycle.md)
 - [Monitoring](monitoring.md)
+- [Uncertain delivery response](uncertain-delivery-response.md)
 - [Incident response](incident-response.md)
 - [Self-hosting reference](self-hosting.md)
 - [Agent service installation](agent-service-installation.md)
