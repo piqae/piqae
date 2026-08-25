@@ -7,7 +7,7 @@ import {
   preventSecretCaching,
   presentDashboardError
 } from '$lib/server/dashboard-data';
-import { isOperationalView } from '$lib/dashboard-navigation';
+import { isOperationalView, resolveStateFilter } from '$lib/dashboard-navigation';
 import type { DashboardApi } from '$lib/api';
 import type {
   DashboardAccount,
@@ -87,6 +87,9 @@ export const load: PageServerLoad = async (event) => {
   };
   const requestedView = event.url.searchParams.get('view');
   const view = isOperationalView(requestedView, effectiveMeta) ? requestedView : 'jobs';
+  // The state narrowing is part of the address, not component state, so a link
+  // such as ?view=jobs&state=delivery_uncertain lands on exactly those jobs.
+  const stateFilter = resolveStateFilter(event.url.searchParams.get('state'), view);
 
   try {
     const [overview, jobs, printers, agents, accounts] = await Promise.all([
@@ -108,6 +111,7 @@ export const load: PageServerLoad = async (event) => {
 
     return {
       view,
+      stateFilter,
       platformEnabled,
       overview,
       ...lists,
@@ -117,6 +121,7 @@ export const load: PageServerLoad = async (event) => {
   } catch (error) {
     return {
       view,
+      stateFilter,
       platformEnabled,
       overview: emptyOverview,
       jobs: [],
