@@ -4,6 +4,7 @@
   import { onMount } from 'svelte';
   import type { Snippet } from 'svelte';
   import { dashboardNavigation } from '$lib/dashboard-navigation';
+  import { settleDashboardRefresh } from '$lib/dashboard-refresh';
   import type { DashboardMeta } from '$lib/view-types';
   import Icon from './Icon.svelte';
 
@@ -65,11 +66,15 @@
     if (mode !== 'live') return;
     const source = new EventSource('/api/events');
     let refreshTimer: ReturnType<typeof setTimeout> | undefined;
+    let refreshInFlight = false;
     const scheduleRefresh = () => {
-      if (refreshTimer) return;
+      if (refreshTimer || refreshInFlight) return;
       refreshTimer = setTimeout(() => {
         refreshTimer = undefined;
-        void invalidateAll();
+        refreshInFlight = true;
+        void settleDashboardRefresh(invalidateAll()).finally(() => {
+          refreshInFlight = false;
+        });
       }, 500);
     };
     for (const eventName of [
@@ -83,7 +88,6 @@
     ]) {
       source.addEventListener(eventName, scheduleRefresh);
     }
-    source.addEventListener('open', scheduleRefresh);
     return () => {
       source.close();
       if (refreshTimer) clearTimeout(refreshTimer);
