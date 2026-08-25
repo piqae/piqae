@@ -45,7 +45,7 @@ export default function Home() {
                   Connect a computer once, then print from Shopify Admin or POS
                   without downloading files.
                 </s-paragraph>
-                <s-button href="/app/settings">
+                <s-button href="/app/printers">
                   {state.connected ? "Manage printers" : "Finish setup"}
                 </s-button>
               </s-stack>
@@ -82,7 +82,7 @@ export default function Home() {
             <EmptyHint
               heading="1. Connect a computer"
               action="Set up printing"
-              href="/app/settings"
+              href="/app/printers"
             >
               Download Piqae Node and connect it directly to this store. No
               separate Piqae account is required.

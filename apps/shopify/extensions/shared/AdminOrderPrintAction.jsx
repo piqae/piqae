@@ -423,7 +423,7 @@ function AdminOrderPrintActionContent({ bulk = false }) {
               !effectiveNodeRendering.ready && (
                 <s-banner tone="critical">
                   This printer cannot be used while node rendering is required.
-                  Choose Automatic in Settings for safe cloud-PDF fallback, or
+                  Choose Automatic in Printers for safe cloud-PDF fallback, or
                   wait for this node's renderer and resources to become ready.
                 </s-banner>
               )}

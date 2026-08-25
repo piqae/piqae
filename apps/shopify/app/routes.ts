@@ -53,6 +53,7 @@ export default [
     route("templates/:templateId", "routes/app.templates.$templateId.tsx"),
     route("automations", "routes/app.automations.tsx"),
     route("activity", "routes/app.activity.tsx"),
+    route("printers", "routes/app.printers.tsx"),
     route("settings", "routes/app.settings.tsx"),
     route("billing", "routes/app.billing.tsx"),
     route("billing/confirm", "routes/app.billing-confirm.tsx"),
