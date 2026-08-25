@@ -249,6 +249,53 @@ describe('managed customer selection', () => {
     });
   });
 
+  it('resolves a canonical aggregate node link against the managed customer raw ID', async () => {
+    const account = {
+      id: 'wsp_child',
+      externalId: 'c4beta',
+      name: 'C4 Beta',
+      status: 'active',
+      metadata: {},
+      environments: { testId: 'env_test', liveId: 'env_live' },
+      createdAt: '2026-08-25T00:00:00.000Z',
+      updatedAt: '2026-08-25T00:00:00.000Z'
+    };
+    const rawId = '01M0EG7NMZ58KZQGNC7Y5GR0SV';
+    const childApi = {
+      overview: async () => ({
+        agents: { total: 1, online: 1, degraded: 0 },
+        printers: { total: 0, online: 0, attention: 0 },
+        jobs: { recent: 0, active: 0, failed: 0, uncertain: 0 }
+      }),
+      jobs: async () => emptyPage,
+      printers: async () => emptyPage,
+      agents: async () => ({ data: [{ id: rawId, name: 'Piqae node' }], nextCursor: null }),
+      nodeDiagnostics: async () => []
+    };
+    dashboardSource.mockReturnValue({
+      api: {
+        platformEnabled: async () => true,
+        account: async () => account,
+        managedWorkspace: () => childApi,
+        accounts: async () => ({ data: [account], nextCursor: null })
+      }
+    });
+
+    const data = await load({
+      url: new URL(
+        `https://piqae.test/dashboard?view=nodes&managed_customer=c4beta&node=agt_${rawId}`
+      ),
+      parent: async () => ({ meta: { platform: { accounts: true } } })
+    } as never);
+
+    expect(data).toMatchObject({
+      detail: {
+        kind: 'node',
+        node: { id: rawId, name: 'Piqae node' }
+      }
+    });
+  });
+
   it('fails closed before issuing child resource requests for an unowned customer', async () => {
     const managedWorkspace = vi.fn();
     const parentAgents = vi.fn();
