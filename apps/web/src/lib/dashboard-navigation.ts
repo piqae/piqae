@@ -33,3 +33,44 @@ export function isOperationalView(
 ): value is OperationalView {
   return operationalViews(meta).some((view) => view.value === value);
 }
+
+const JOB_STATE_FILTERS = [
+  { value: 'all', label: 'All states' },
+  { value: 'active', label: 'Active' },
+  { value: 'failed', label: 'Failed' },
+  { value: 'delivery_uncertain', label: 'Uncertain' }
+] as const;
+
+const RESOURCE_STATE_FILTERS = [
+  { value: 'all', label: 'All states' },
+  { value: 'online', label: 'Online' },
+  { value: 'degraded', label: 'Degraded' },
+  { value: 'offline', label: 'Offline' },
+  { value: 'paused', label: 'Paused' }
+] as const;
+
+export interface StateFilterOption {
+  value: string;
+  label: string;
+}
+
+/**
+ * State narrowing for `/dashboard?view=…&state=…`. The filter lives in the
+ * query string rather than component state so a link can land an operator on
+ * exactly one set of jobs — `state=delivery_uncertain` above all, which is the
+ * only way a non-zero uncertain count leads anywhere. Customers carry no
+ * operational state, so they offer no filter.
+ */
+export function stateFilters(view: OperationalView): StateFilterOption[] {
+  if (view === 'customers') return [];
+  return [...(view === 'jobs' ? JOB_STATE_FILTERS : RESOURCE_STATE_FILTERS)];
+}
+
+export function isStateFilter(value: string | null, view: OperationalView): boolean {
+  return stateFilters(view).some((filter) => filter.value === value);
+}
+
+/** An unknown or inapplicable `state=` must widen to everything, never hide rows. */
+export function resolveStateFilter(value: string | null, view: OperationalView): string {
+  return isStateFilter(value, view) ? (value as string) : 'all';
+}

@@ -1,7 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { createJob, listPrinters } = vi.hoisted(() => ({
+const { createJob, dashboardSource, listPrinters } = vi.hoisted(() => ({
   createJob: vi.fn(),
+  dashboardSource: vi.fn(),
   listPrinters: vi.fn()
 }));
 
@@ -11,14 +12,14 @@ vi.mock('$lib/server/dashboard-data', () => ({
     jobs: { create: createJob },
     printers: { list: listPrinters }
   }),
-  dashboardSource: vi.fn(),
+  dashboardSource,
   preventSecretCaching: vi.fn(),
   presentDashboardError: (error: unknown) => ({
     message: error instanceof Error ? error.message : 'Request failed.'
   })
 }));
 
-import { actions } from './+page.server';
+import { actions, load } from './+page.server';
 
 const createPrintJob = actions.createPrintJob!;
 
@@ -105,5 +106,47 @@ describe('dashboard PDF printing', () => {
 
     expect(result).toMatchObject({ status: 409 });
     expect(createJob).not.toHaveBeenCalled();
+  });
+});
+
+const emptyPage = { data: [], nextCursor: null };
+
+function loadEvent(search: string) {
+  dashboardSource.mockReturnValue({
+    api: {
+      platformEnabled: async () => false,
+      overview: async () => ({
+        agents: { total: 0, online: 0, degraded: 0 },
+        printers: { total: 0, online: 0, attention: 0 },
+        jobs: { recent: 0, active: 0, failed: 0, uncertain: 0 }
+      }),
+      jobs: async () => emptyPage,
+      printers: async () => emptyPage,
+      agents: async () => emptyPage,
+      accounts: async () => emptyPage
+    }
+  });
+  return {
+    url: new URL(`https://piqae.test/dashboard${search}`),
+    parent: async () => ({ meta: { platform: { accounts: false } } })
+  } as never;
+}
+
+describe('dashboard state addressing', () => {
+  it('carries an uncertain-delivery filter from the URL into the view model', async () => {
+    const data = await load(loadEvent('?view=jobs&state=delivery_uncertain'));
+
+    expect(data).toMatchObject({ view: 'jobs', stateFilter: 'delivery_uncertain' });
+  });
+
+  it('widens a state that does not apply to the requested view', async () => {
+    expect(await load(loadEvent('?view=printers&state=delivery_uncertain'))).toMatchObject({
+      view: 'printers',
+      stateFilter: 'all'
+    });
+    expect(await load(loadEvent('?view=jobs&state=nonsense'))).toMatchObject({
+      stateFilter: 'all'
+    });
+    expect(await load(loadEvent(''))).toMatchObject({ view: 'jobs', stateFilter: 'all' });
   });
 });
