@@ -7,7 +7,28 @@ export interface DashboardPage<T> {
   nextCursor: string | null;
 }
 
+export interface DashboardResourceOwner {
+  id: string;
+  externalId: string;
+  name: string;
+}
+
+export interface DashboardCustomerOperations {
+  customer: DashboardResourceOwner;
+  environment: { id: string; kind: 'live' };
+  agents: DashboardAgent[];
+  printers: DashboardPrinter[];
+  jobs: DashboardJob[];
+}
+
+export interface DashboardCustomerOperationsPage {
+  data: DashboardCustomerOperations[];
+  nextCursor: string | null;
+  hasMore: boolean;
+}
+
 export interface DashboardAgent {
+  customer?: DashboardResourceOwner | null;
   id: string;
   name: string;
   state: ResourceState;
@@ -22,6 +43,7 @@ export interface DashboardAgent {
 }
 
 export interface DashboardPrinter {
+  customer?: DashboardResourceOwner | null;
   id: string;
   agentId: string;
   name: string;
@@ -85,6 +107,7 @@ export interface DashboardPrinterProfile {
 }
 
 export interface DashboardJob {
+  customer?: DashboardResourceOwner | null;
   id: string;
   printerId: string;
   agentId: string;

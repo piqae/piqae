@@ -157,6 +157,47 @@ describe('dashboard state addressing', () => {
 });
 
 describe('managed customer selection', () => {
+  it('defaults platform operators to tenant-attributed customer operations', async () => {
+    const customerOperations = vi.fn(async () => ({
+      data: [{
+        customer: { id: 'wsp_child', externalId: 'c4beta', name: 'C4 Beta' },
+        environment: { id: 'env_live', kind: 'live' },
+        agents: [{ ...({ id: 'agt_child', name: 'Shop Mac', state: 'online' }), customer: { id: 'wsp_child', externalId: 'c4beta', name: 'C4 Beta' } }],
+        printers: [], jobs: []
+      }],
+      nextCursor: null,
+      hasMore: false
+    }));
+    dashboardSource.mockReturnValue({
+      api: {
+        platformEnabled: async () => true,
+        accounts: async () => ({ data: [], nextCursor: null }),
+        customerOperations,
+        overview: async () => ({
+          agents: { total: 0, online: 0, degraded: 0 },
+          printers: { total: 0, online: 0, attention: 0 },
+          jobs: { recent: 0, active: 0, failed: 0, uncertain: 0 }
+        }),
+        jobs: async () => emptyPage,
+        printers: async () => emptyPage,
+        agents: async () => emptyPage
+      }
+    });
+
+    const data = await load({
+      url: new URL('https://piqae.test/dashboard?view=nodes'),
+      parent: async () => ({ meta: { platform: { accounts: true } } })
+    } as never);
+
+    expect(customerOperations).toHaveBeenCalledWith(undefined);
+    expect(data).toMatchObject({
+      scope: 'customers',
+      ownHasResources: false,
+      overview: { agents: { total: 1, online: 1 } },
+      agents: [{ id: 'agt_child', customer: { externalId: 'c4beta' } }]
+    });
+  });
+
   it('resolves an owned account before using its isolated operational client', async () => {
     const childAgents = vi.fn(async () => ({
       data: [{ id: 'agt_child', name: 'Shop Mac' }],
