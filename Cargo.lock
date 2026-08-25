@@ -2862,6 +2862,7 @@ dependencies = [
 name = "piqae-storage-postgres"
 version = "0.1.20"
 dependencies = [
+ "async-trait",
  "base64 0.22.1",
  "chrono",
  "piqae-auth",
