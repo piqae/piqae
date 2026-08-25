@@ -72,6 +72,13 @@ type LoadedLists = {
 
 type OperationsScope = 'customers' | 'own';
 
+const RESOURCE_ID_PREFIX = /^(?:agt|ptr|job)_/;
+
+function sameResourceId(left: string | null | undefined, right: string | null | undefined): boolean {
+  if (!left || !right) return false;
+  return left === right || left.replace(RESOURCE_ID_PREFIX, '') === right.replace(RESOURCE_ID_PREFIX, '');
+}
+
 function overviewFor(lists: Pick<LoadedLists, 'jobs' | 'printers' | 'agents'>): DashboardOverview {
   const uncertain = lists.jobs.filter((job) => job.state === 'delivery_uncertain');
   return {
@@ -262,31 +269,31 @@ async function loadDetail(
       kind: 'job',
       job,
       events: events.data,
-      printer: loaded.printers.find((printer) => printer.id === job.printerId) ?? null,
-      agent: loaded.agents.find((agent) => agent.id === job.agentId) ?? null
+      printer: loaded.printers.find((printer) => sameResourceId(printer.id, job.printerId)) ?? null,
+      agent: loaded.agents.find((agent) => sameResourceId(agent.id, job.agentId)) ?? null
     };
   }
 
   const printerId = params.get('printer');
   if (printerId) {
-    const printer = loaded.printers.find((candidate) => candidate.id === printerId);
+    const printer = loaded.printers.find((candidate) => sameResourceId(candidate.id, printerId));
     if (!printer) return { kind: 'missing', label: 'printer' };
     return {
       kind: 'printer',
       printer,
-      agent: loaded.agents.find((agent) => agent.id === printer.agentId) ?? null,
-      jobs: loaded.jobs.filter((job) => job.printerId === printer.id)
+      agent: loaded.agents.find((agent) => sameResourceId(agent.id, printer.agentId)) ?? null,
+      jobs: loaded.jobs.filter((job) => sameResourceId(job.printerId, printer.id))
     };
   }
 
   const nodeId = params.get('node');
   if (nodeId) {
-    const node = loaded.agents.find((candidate) => candidate.id === nodeId);
+    const node = loaded.agents.find((candidate) => sameResourceId(candidate.id, nodeId));
     if (!node) return { kind: 'missing', label: 'node' };
     return {
       kind: 'node',
       node,
-      printers: loaded.printers.filter((printer) => printer.agentId === node.id),
+      printers: loaded.printers.filter((printer) => sameResourceId(printer.agentId, node.id)),
       // Streamed: a diagnostics outage must never block the node drawer.
       diagnostics: nodeDiagnostics(api, node.id)
     };
