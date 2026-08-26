@@ -1,6 +1,4 @@
-mod connector_runtime;
 mod content_key_store;
-mod route_coordinator;
 mod uri_fetch;
 #[cfg(windows)]
 mod windows_acl;
@@ -49,6 +47,11 @@ use piqae_local_ipc::{
     LocalPrinterQueueCounts, LocalQueueJob, LocalStatus, NativeProfileCapturePayload,
     NativeProfileSeed, ProfileCaptureAuthorized, ProfileValidationResult, SessionAuthenticator,
     capture_token_digest, generate_capture_token,
+};
+use piqae_node_runtime::{
+    AvailabilityClass, BrokerRegistry, BrokerServerState, HostCapabilities, HostKind,
+    LifecycleEvent, NodeRuntime, NodeRuntimeMode, PrinterTransport, RuntimeConfiguration,
+    connector_registry as connector_runtime, route_coordinator,
 };
 use piqae_protocol::{
     CURRENT_PROTOCOL_VERSION,
@@ -772,6 +775,31 @@ async fn main() -> Result<()> {
 
     std::fs::create_dir_all(&arguments.data_dir)
         .with_context(|| format!("create {}", arguments.data_dir.display()))?;
+    let printer_transports = match arguments.executor {
+        ExecutorMode::Disabled => std::collections::BTreeSet::new(),
+        ExecutorMode::Fake => std::iter::once(PrinterTransport::Fake).collect(),
+        ExecutorMode::Process => {
+            std::iter::once(PrinterTransport::OperatingSystemDriver).collect()
+        }
+    };
+    let node_runtime = NodeRuntime::start(RuntimeConfiguration {
+        data_directory: arguments.data_dir.clone(),
+        mode: if arguments.mode == AgentMode::Local {
+            NodeRuntimeMode::LocalOnly
+        } else {
+            NodeRuntimeMode::CloudCapable
+        },
+        host: HostCapabilities {
+            host_kind: HostKind::UserAgent,
+            availability: AvailabilityClass::ContinuousWhileAwake,
+            secure_storage: true,
+            local_ipc_broker: cfg!(unix),
+            can_prevent_idle_sleep_during_handoff: false,
+            can_receive_remote_wake_hint: false,
+            printer_transports,
+        },
+    })?;
+    let _ = node_runtime.apply_lifecycle(LifecycleEvent::Started);
     // Loading is intentionally fail-closed: a corrupt or unsupported
     // multi-connector registry must not silently fall back to another tenant's
     // legacy identity. An absent registry preserves single-connector behavior.
@@ -910,6 +938,13 @@ async fn main() -> Result<()> {
         bind = %arguments.local_bind,
         "Piqae node started"
     );
+    let broker_registry = BrokerRegistry::load(&arguments.data_dir)
+        .context("open local application broker registry")?;
+    let broker_state = BrokerServerState::new(broker_registry, control_tx.clone());
+    let mut broker_task = tokio::spawn(run_local_broker(
+        arguments.data_dir.join("runtime").join("node.sock"),
+        broker_state,
+    ));
     let local_api = piqae_local_api::serve(
         arguments.local_bind,
         LocalApiState::new(&challenge, control_tx),
@@ -921,9 +956,11 @@ async fn main() -> Result<()> {
         result = &mut connector_supervisor_task => {
             Err(unexpected_task_exit("connector supervisor", result))
         }
+        result = &mut broker_task => Err(unexpected_task_exit("local node broker", result)),
     };
     control_task.abort();
     connector_supervisor_task.abort();
+    broker_task.abort();
     result
     }
     .await;
@@ -931,6 +968,18 @@ async fn main() -> Result<()> {
         error!(error = %error, "Piqae agent stopped unexpectedly");
     }
     outcome
+}
+
+async fn run_local_broker(path: PathBuf, state: BrokerServerState) {
+    #[cfg(unix)]
+    if let Err(error) = piqae_node_runtime::broker::serve_unix_broker(path, state).await {
+        error!(error = %error, "local node broker stopped");
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, state);
+        std::future::pending::<()>().await;
+    }
 }
 
 fn unexpected_task_exit(
@@ -2118,40 +2167,35 @@ async fn reload_connector_workers(
     connections: &ConnectorConnectionTracker,
 ) -> Result<()> {
     let registry = connector_runtime::ConnectorRegistry::load(data_dir)?;
-    let enabled = registry
-        .enabled()
-        .map(|r| (r.connector_id.clone(), r.clone()))
+    let observations = workers
+        .iter()
+        .map(|(id, worker)| {
+            (
+                id.clone(),
+                piqae_node_runtime::WorkerObservation {
+                    record: &worker.record,
+                    running: !connector_worker_has_exited(worker),
+                },
+            )
+        })
         .collect::<std::collections::BTreeMap<_, _>>();
+    let plan = piqae_node_runtime::plan_connector_reconciliation(&registry, &observations);
     let mut failures = Vec::new();
-    for id in workers
-        .keys()
-        .filter(|id| !enabled.contains_key(*id))
-        .cloned()
-        .collect::<Vec<_>>()
-    {
-        if let Err(error) = stop_connector_worker(workers, &id, connections).await {
-            warn!(connector_id = %id, %error, "removed connector worker shutdown was forced");
-            failures.push(format!("{id}: {error}"));
-        }
-    }
-    for (id, record) in enabled {
-        let worker_exited = workers.get(&id).is_some_and(connector_worker_has_exited);
-        if worker_exited {
+    for id in plan.stop {
+        if workers.get(&id).is_some_and(connector_worker_has_exited) {
             connections.update(&id, ConnectionState::Degraded).await;
             error!(connector_id = %id, "connector worker task exited unexpectedly; restarting connector runtime");
         }
-        if workers
-            .get(&id)
-            .is_some_and(|worker| connector_worker_matches(worker, &record))
-        {
-            continue;
+        if let Err(error) = stop_connector_worker(workers, &id, connections).await {
+            warn!(connector_id = %id, %error, "connector worker shutdown was forced");
+            failures.push(format!("{id}: {error}"));
         }
+    }
+    for record in plan.start {
+        let id = record.connector_id.clone();
         if workers.contains_key(&id) {
-            if let Err(error) = stop_connector_worker(workers, &id, connections).await {
-                warn!(connector_id = %id, %error, "changed connector worker shutdown was forced");
-                failures.push(format!("{id}: {error}"));
-                continue;
-            }
+            failures.push(format!("{id}: prior worker did not stop"));
+            continue;
         }
         let paths = match registry.paths(&id) {
             Ok(paths) => paths,
@@ -2193,13 +2237,6 @@ fn connector_worker_has_exited(worker: &ConnectorWorker) -> bool {
     worker.sync.is_finished()
         || worker.scheduler.is_finished()
         || worker.connection_watch.is_finished()
-}
-
-fn connector_worker_matches(
-    worker: &ConnectorWorker,
-    record: &connector_runtime::ConnectorRecord,
-) -> bool {
-    worker.record == *record && !connector_worker_has_exited(worker)
 }
 
 #[allow(
@@ -5867,38 +5904,6 @@ mod tests {
             let _ = worker.scheduler.await;
             let _ = worker.connection_watch.await;
         }
-    }
-
-    #[tokio::test]
-    async fn connector_worker_restarts_when_reauthentication_rotates_identity() {
-        let stop = StopSignal::default();
-        let spawn_waiter = || {
-            let stop = stop.clone();
-            tokio::spawn(async move { stop.cancelled().await })
-        };
-        let record = test_connector_record("ncon_child");
-        let worker = ConnectorWorker {
-            record: record.clone(),
-            printer_inventory_dirty: Arc::new(AtomicBool::new(false)),
-            wakeup: Arc::new(Notify::new()),
-            last_sync_error_code: Arc::new(RwLock::new(None)),
-            sync_stop: StopSignal::default(),
-            scheduler_stop: StopSignal::default(),
-            connection_stop: StopSignal::default(),
-            sync: spawn_waiter(),
-            scheduler: spawn_waiter(),
-            connection_watch: spawn_waiter(),
-        };
-        assert!(connector_worker_matches(&worker, &record));
-
-        let mut rotated = record;
-        rotated.device_key_file = "connectors/keys/rotated.key".into();
-        assert!(!connector_worker_matches(&worker, &rotated));
-
-        stop.stop();
-        let _ = worker.sync.await;
-        let _ = worker.scheduler.await;
-        let _ = worker.connection_watch.await;
     }
 
     #[tokio::test]

@@ -6,6 +6,13 @@
 //! the crash window where a connector could otherwise replay a job after the
 //! operating system had already accepted it.
 
+#![allow(
+    clippy::missing_errors_doc,
+    clippy::must_use_candidate,
+    clippy::too_long_first_doc_paragraph,
+    reason = "durable compatibility API was moved intact; method contracts document fail-closed semantics inline"
+)]
+
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use piqae_protocol::{
