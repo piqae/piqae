@@ -713,6 +713,11 @@ fn validate_redacted_fixture(value: &serde_json::Value, depth: usize) -> Result<
                 if [
                     "serial",
                     "serial_number",
+                    "bluetooth_address",
+                    "mac_address",
+                    "network_address",
+                    "ip_address",
+                    "api_key",
                     "token",
                     "secret",
                     "password",
@@ -1223,15 +1228,24 @@ mod tests {
 
     #[test]
     fn rejects_sensitive_fixture_fields() -> Result<(), Box<dyn std::error::Error>> {
-        let pack = TestPack::new()?;
-        fs::write(
-            pack.0.join("fixtures/capabilities.redacted.json"),
-            r#"{"serial_number":"customer-device"}"#,
-        )?;
-        let trust = pack.trust()?;
-        assert!(
-            matches!(load_pack(&pack.0, &trust), Err(PackError::Invalid(message)) if message.contains("forbidden field"))
-        );
+        for field in [
+            "serial_number",
+            "bluetooth_address",
+            "mac_address",
+            "network_address",
+            "ip_address",
+            "api_key",
+        ] {
+            let pack = TestPack::new()?;
+            fs::write(
+                pack.0.join("fixtures/capabilities.redacted.json"),
+                format!(r#"{{"{field}":"customer-device"}}"#),
+            )?;
+            let trust = pack.trust()?;
+            assert!(
+                matches!(load_pack(&pack.0, &trust), Err(PackError::Invalid(message)) if message.contains(&format!("forbidden field {field}")))
+            );
+        }
         Ok(())
     }
 
