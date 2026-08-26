@@ -10,9 +10,9 @@ use piqae_storage_postgres::{
     PostgresStore, StorageError,
     destination_topology::{
         DeliveryAttemptState, DestinationTopologyRepository, IdentityConfidence, IdentityDecision,
-        IdentityDecisionKind, IdentityEvidence, NewDeliveryAttempt, ProjectionAcknowledgement,
-        RouteObservation, SchedulingAuthority, SiteCoordinatorMembership,
-        StoredPhysicalDestination, StoredPrinterRoute, TenantScope,
+        IdentityDecisionKind, IdentityEvidence, NewDeliveryAttempt, NodeRuntimeObservation,
+        ProjectionAcknowledgement, RouteObservation, SchedulingAuthority,
+        SiteCoordinatorMembership, StoredPhysicalDestination, StoredPrinterRoute, TenantScope,
     },
 };
 use sqlx::{PgPool, migrate::Migrator, postgres::PgPoolOptions};
@@ -160,6 +160,56 @@ async fn postgres_topology_is_tenant_isolated_and_fences_delivery() {
     };
     create_tenant_fixture(&store, first, "first", "ptr_shared").await;
     create_tenant_fixture(&store, second, "second", "ptr_second").await;
+    let runtime_observed_at = Utc::now();
+    for sequence in 1..=80 {
+        store
+            .record_node_runtime_observation(
+                first,
+                &NodeRuntimeObservation {
+                    id: format!("nro_first_{sequence}"),
+                    agent_id: "agt_first".into(),
+                    sequence,
+                    host_mode: "machine_service".into(),
+                    availability_class: "continuous_while_awake".into(),
+                    lifecycle_state: "available".into(),
+                    accepts_cloud_jobs: true,
+                    execution_budget_ms: None,
+                    wake_mechanisms: vec!["local_broker".into()],
+                    observed_at: runtime_observed_at,
+                    fresh_until: runtime_observed_at + Duration::minutes(1),
+                },
+            )
+            .await
+            .expect("record bounded runtime history");
+    }
+    let retained_runtime: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM node_runtime_observations WHERE workspace_id=$1 AND environment_id=$2 AND agent_id='agt_first'",
+    )
+    .bind(first.workspace_id.to_string())
+    .bind(first.environment_id.to_string())
+    .fetch_one(store.pool())
+    .await
+    .expect("count bounded runtime history");
+    assert_eq!(retained_runtime, 64);
+    let stale_runtime = NodeRuntimeObservation {
+        id: "nro_first_replay".into(),
+        agent_id: "agt_first".into(),
+        sequence: 1,
+        host_mode: "machine_service".into(),
+        availability_class: "continuous_while_awake".into(),
+        lifecycle_state: "available".into(),
+        accepts_cloud_jobs: true,
+        execution_budget_ms: None,
+        wake_mechanisms: vec!["local_broker".into()],
+        observed_at: runtime_observed_at,
+        fresh_until: runtime_observed_at + Duration::minutes(1),
+    };
+    assert!(matches!(
+        store
+            .record_node_runtime_observation(first, &stale_runtime)
+            .await,
+        Err(StorageError::ConcurrentStateChange)
+    ));
     sqlx::query("INSERT INTO agents (id,workspace_id,environment_id,name,installation_id,public_key,os,architecture,version,protocol_version) VALUES ('agt_first_backup',$1,$2,'Backup node','installation-first-backup',$3,'linux','x86_64','test',1)")
         .bind(first.workspace_id.to_string()).bind(first.environment_id.to_string()).bind(vec![9_u8;32]).execute(store.pool()).await.expect("backup route agent");
     sqlx::query("INSERT INTO printers (id,workspace_id,environment_id,agent_id,native_id,name,state,capabilities_revision) VALUES ('ptr_backup',$1,$2,'agt_first_backup','native-first-backup','Shared printer backup route','online',1)")
