@@ -134,6 +134,78 @@ final class PiqaeNodeKitTests: XCTestCase {
         XCTAssertEqual(submissionCount, 1)
     }
 
+    func testLinkedRuntimeDrainsSecondPrinterWhileFirstAwaitsNativeStatus() async throws {
+        try requireLinkedRuntime()
+        let fixture = nativeFixture("observation-liveness")
+        let runtime = PiqaeNativeRuntime(
+            configuration: fixture.configuration,
+            keyStore: PiqaeFixedHostKeyStore()
+        )
+        let adapter = PiqaeFakePrinterAdapter(
+            printers: [
+                PiqaeFakePrinterAdapter.printer(),
+                PiqaeFakePrinterAdapter.printer(
+                    id: "prn_second",
+                    name: "Second virtual printer"
+                ),
+            ]
+        )
+        await adapter.setNativeObservations(
+            [.unknown, .unknown, .completedReported],
+            for: "native_fake_1"
+        )
+        let node = PiqaeNode(
+            .localOnly(
+                startupMode: .embedded,
+                identityStore: PiqaeMemoryInstallationIdentityStore(
+                    id: .init(rawValue: fixture.applicationID)
+                ),
+                embeddedRuntime: runtime,
+                printerAdapters: [adapter]
+            )
+        )
+        addTeardownBlock {
+            await node.stop()
+            try? FileManager.default.removeItem(at: fixture.stateDirectory)
+        }
+        try await node.start()
+        let printers = try await node.printers.list()
+        let firstPrinter = try XCTUnwrap(printers.first { $0.nativeID == "virtual://prn_fake" })
+        let secondPrinter = try XCTUnwrap(printers.first { $0.nativeID == "virtual://prn_second" })
+
+        let first = try await node.jobs.submit(
+            PiqaePrintRequest(
+                printerID: firstPrinter.id,
+                title: "Observed first job",
+                content: .pdf(Data("%PDF-observed-first".utf8)),
+                idempotencyKey: "observed-first"
+            )
+        )
+        let second = try await node.jobs.submit(
+            PiqaePrintRequest(
+                printerID: secondPrinter.id,
+                title: "Runnable second job",
+                content: .pdf(Data("%PDF-runnable-second".utf8)),
+                idempotencyKey: "runnable-second"
+            )
+        )
+
+        let initialSubmissionCount = await adapter.submissionCount()
+        XCTAssertEqual(initialSubmissionCount, 2)
+        let completed = await eventually {
+            let firstStatus = try? await node.jobs.status(first.jobID)
+            let secondStatus = try? await node.jobs.status(second.jobID)
+            return firstStatus?.state == "completed_reported"
+                && secondStatus?.state == "completed_reported"
+        }
+        let firstObservations = await adapter.nativeObservationCount(for: "native_fake_1")
+        XCTAssertTrue(completed)
+        XCTAssertGreaterThanOrEqual(firstObservations, 3)
+        XCTAssertLessThan(firstObservations, 12)
+        let finalSubmissionCount = await adapter.submissionCount()
+        XCTAssertEqual(finalSubmissionCount, 2)
+    }
+
     func testHandoffStartedRestartBecomesUncertainWithoutNativeReplay() async throws {
         try requireLinkedRuntime()
         let fixture = nativeFixture("restart")
@@ -307,9 +379,13 @@ final class PiqaeNodeKitTests: XCTestCase {
             try PiqaeWakeHint(collapseID: "job-available", source: .backgroundPush),
             context: .init(phase: .background, source: .backgroundPush, remainingSeconds: 30)
         )
+        let completed = await eventually {
+            (try? await node.jobs.status(queued.jobID))?.state == "completed_reported"
+        }
         let status = try await node.jobs.status(queued.jobID)
         let count = await adapter.submissionCount()
         XCTAssertEqual(result, .reconciled)
+        XCTAssertTrue(completed)
         XCTAssertEqual(status.state, "completed_reported")
         XCTAssertEqual(count, 1)
     }
@@ -796,6 +872,185 @@ final class PiqaeNodeKitTests: XCTestCase {
         XCTAssertEqual(maximumConcurrentCalls, 1)
     }
 
+    func testAcceptedObservationDoesNotBlockLaterRunnableWork() async throws {
+        let contentURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("piqae-observation-\(UUID().uuidString).pdf")
+        try Data("%PDF-piqae-observation".utf8).write(to: contentURL, options: .atomic)
+        defer { try? FileManager.default.removeItem(at: contentURL) }
+        let runtime = PiqaeFakeEmbeddedRuntime()
+        let adapter = PiqaeFakePrinterAdapter(
+            printers: [
+                PiqaeFakePrinterAdapter.printer(),
+                PiqaeFakePrinterAdapter.printer(
+                    id: "prn_second",
+                    name: "Second virtual printer"
+                ),
+            ]
+        )
+        await adapter.setNativeObservations(
+            [.unknown, .unknown, .completedReported],
+            for: "native_fake_1"
+        )
+        let node = PiqaeNode(
+            .localOnly(
+                startupMode: .embedded,
+                identityStore: PiqaeMemoryInstallationIdentityStore(
+                    id: .init(rawValue: "ins_observation_liveness")
+                ),
+                embeddedRuntime: runtime,
+                printerAdapters: [adapter]
+            )
+        )
+        try await node.start()
+        defer { Task { await node.stop() } }
+
+        await runtime.activateRemoteOperation(
+            try automaticOperation("observed-first", contentURL: contentURL)
+        )
+        let firstAwaitingObservation = await eventually {
+            let submissions = await adapter.submissionCount()
+            let observations = await adapter.nativeObservationCount(for: "native_fake_1")
+            return submissions == 1 && observations >= 1
+        }
+        XCTAssertTrue(firstAwaitingObservation)
+        await runtime.activateRemoteOperation(
+            try automaticOperation(
+                "runnable-second",
+                contentURL: contentURL,
+                printerID: "prn_second",
+                printerNativeID: "virtual://prn_second"
+            )
+        )
+
+        let bothSubmitted = await eventually { await adapter.submissionCount() == 2 }
+        let firstCompleted = await eventually {
+            ((try? await runtime.nativeObservations(adapterID: "fake.printer")) ?? []).isEmpty
+        }
+        let observationCount = await adapter.nativeObservationCount(for: "native_fake_1")
+        XCTAssertTrue(bothSubmitted)
+        XCTAssertTrue(firstCompleted)
+        XCTAssertGreaterThanOrEqual(observationCount, 3)
+        XCTAssertLessThan(observationCount, 12)
+    }
+
+    func testNativeObservationDefersWithoutBackgroundBudgetAndResumesInForeground() async throws {
+        let fixture = try automaticDrainFixture(
+            "observation-background",
+            availability: .backgroundOpportunistic
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.contentURL) }
+        await fixture.adapter.setNativeObservations(
+            Array(repeating: .unknown, count: 100),
+            for: "native_fake_1"
+        )
+        try await fixture.node.start()
+        defer { Task { await fixture.node.stop() } }
+        await fixture.runtime.activateRemoteOperation(fixture.operation)
+        let began = await eventually {
+            await fixture.adapter.nativeObservationCount(for: "native_fake_1") >= 1
+        }
+        XCTAssertTrue(began)
+
+        await fixture.node.updateExecutionContext(
+            .init(phase: .background, source: .backgroundPush)
+        )
+        try await Task.sleep(nanoseconds: 120_000_000)
+        let pausedCount = await fixture.adapter.nativeObservationCount(for: "native_fake_1")
+        try await Task.sleep(nanoseconds: 120_000_000)
+        let stillPausedCount = await fixture.adapter.nativeObservationCount(for: "native_fake_1")
+        XCTAssertEqual(stillPausedCount, pausedCount)
+
+        await fixture.node.updateExecutionContext(.foreground)
+        let resumed = await eventually {
+            await fixture.adapter.nativeObservationCount(for: "native_fake_1") > pausedCount
+        }
+        let finalCount = await fixture.adapter.nativeObservationCount(for: "native_fake_1")
+        let runtimeCount = await fixture.runtime.nativeObservationCallCount()
+        XCTAssertTrue(
+            resumed,
+            "observation did not resume (paused: \(pausedCount), final: \(finalCount), runtime reads: \(runtimeCount))"
+        )
+    }
+
+    func testNativeObservationStopsAtExplicitBackgroundBudget() async throws {
+        let fixture = try automaticDrainFixture(
+            "observation-budget",
+            availability: .backgroundOpportunistic
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.contentURL) }
+        await fixture.adapter.setNativeObservations(
+            Array(repeating: .unknown, count: 100),
+            for: "native_fake_1"
+        )
+        try await fixture.node.start()
+        defer { Task { await fixture.node.stop() } }
+        await fixture.runtime.activateRemoteOperation(fixture.operation)
+        let began = await eventually {
+            await fixture.adapter.nativeObservationCount(for: "native_fake_1") >= 1
+        }
+        XCTAssertTrue(began)
+
+        await fixture.node.updateExecutionContext(
+            .init(phase: .background, source: .backgroundPush, remainingSeconds: 0.4)
+        )
+        try await Task.sleep(nanoseconds: 500_000_000)
+        let countAfterBudget = await fixture.adapter.nativeObservationCount(for: "native_fake_1")
+        try await Task.sleep(nanoseconds: 150_000_000)
+        let finalCount = await fixture.adapter.nativeObservationCount(for: "native_fake_1")
+        XCTAssertEqual(finalCount, countAfterBudget)
+    }
+
+    func testUnobservableAcceptedOperationDoesNotSpin() async throws {
+        let fixture = try automaticDrainFixture("observation-unavailable")
+        defer { try? FileManager.default.removeItem(at: fixture.contentURL) }
+        let missingPrinterOperation = try automaticOperation(
+            "missing-printer",
+            contentURL: fixture.contentURL,
+            printerID: "prn_missing",
+            printerNativeID: "virtual://prn_missing"
+        )
+        await fixture.runtime.activateNativeObservation(
+            missingPrinterOperation,
+            nativeJobID: "native_missing"
+        )
+        try await fixture.node.start()
+        defer { Task { await fixture.node.stop() } }
+
+        let observedOnce = await eventually {
+            await fixture.runtime.nativeObservationCallCount() >= 1
+        }
+        XCTAssertTrue(observedOnce)
+        let initialCount = await fixture.runtime.nativeObservationCallCount()
+        try await Task.sleep(nanoseconds: 150_000_000)
+        let finalCount = await fixture.runtime.nativeObservationCallCount()
+        XCTAssertEqual(finalCount, initialCount)
+    }
+
+    func testStopCancelsAndJoinsNativeObservation() async throws {
+        let fixture = try automaticDrainFixture("observation-stop")
+        defer { try? FileManager.default.removeItem(at: fixture.contentURL) }
+        await fixture.adapter.setNativeObservations(
+            [.unknown],
+            for: "native_fake_1"
+        )
+        await fixture.adapter.setNativeObservationDelayNanoseconds(60_000_000_000)
+        try await fixture.node.start()
+        await fixture.runtime.activateRemoteOperation(fixture.operation)
+        let observationStarted = await eventually {
+            await fixture.adapter.nativeObservationCount(for: "native_fake_1") == 1
+        }
+        XCTAssertTrue(observationStarted)
+
+        await fixture.node.stop()
+
+        let stopCount = await fixture.runtime.stopCount
+        XCTAssertEqual(stopCount, 1)
+        let countAfterStop = await fixture.adapter.nativeObservationCount(for: "native_fake_1")
+        try await Task.sleep(nanoseconds: 20_000_000)
+        let finalCount = await fixture.adapter.nativeObservationCount(for: "native_fake_1")
+        XCTAssertEqual(finalCount, countAfterStop)
+    }
+
     func testBackgroundWorkDefersUntilAnExplicitBudgetIsAvailable() async throws {
         let fixture = try automaticDrainFixture(
             "background-budget",
@@ -967,7 +1222,9 @@ final class PiqaeNodeKitTests: XCTestCase {
 
     private func automaticOperation(
         _ label: String,
-        contentURL: URL
+        contentURL: URL,
+        printerID: String = "prn_fake",
+        printerNativeID: String = "virtual://prn_fake"
     ) throws -> PiqaeRuntimeAdapterOperation {
         let content = try Data(contentsOf: contentURL)
         let digest = SHA256.hash(data: content).map { String(format: "%02x", $0) }.joined()
@@ -978,8 +1235,8 @@ final class PiqaeNodeKitTests: XCTestCase {
             idempotencyKey: "idem-\(label)",
             fence: "fence_\(label)",
             deadlineUnixMilliseconds: Int64(Date().addingTimeInterval(60).timeIntervalSince1970 * 1_000),
-            printerID: "prn_fake",
-            printerNativeID: "virtual://prn_fake",
+            printerID: printerID,
+            printerNativeID: printerNativeID,
             title: "Automatic drain \(label)",
             contentPath: contentURL.path,
             contentKind: "pdf",

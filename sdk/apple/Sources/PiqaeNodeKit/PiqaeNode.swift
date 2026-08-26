@@ -219,6 +219,8 @@ actor PiqaeNodeEngine {
     private var automaticDrainGeneration: UInt64 = 0
     private var automaticDrainRequested = false
     private var automaticDrainTask: Task<Void, Never>?
+    private var nativeObservationRequested = false
+    private var nativeObservationTask: Task<Void, Never>?
     private var observers: [UUID: AsyncStream<PiqaeNodeSnapshot>.Continuation] = [:]
     private var snapshotValue: PiqaeNodeSnapshot
 
@@ -286,9 +288,10 @@ actor PiqaeNodeEngine {
             snapshotValue = replacingSnapshot(phase: .ready, statusMessage: nil)
             emit()
             startAutomaticDrainIfPossible()
+            requestNativeObservation()
         } catch {
             started = false
-            await cancelAutomaticDrain()
+            await cancelRuntimeWork()
             if embeddedRuntimeStarted {
                 try? await configuration.embeddedRuntime?.stop()
                 embeddedRuntimeStarted = false
@@ -313,7 +316,7 @@ actor PiqaeNodeEngine {
 
     func stop() async {
         started = false
-        await cancelAutomaticDrain()
+        await cancelRuntimeWork()
         if embeddedRuntimeStarted {
             try? await configuration.embeddedRuntime?.stop()
             embeddedRuntimeStarted = false
@@ -386,6 +389,7 @@ actor PiqaeNodeEngine {
             for adapterID in adaptersByID.keys.sorted() {
                 _ = try await drainAdapter(adapterID, runtime: runtime)
             }
+            requestNativeObservation()
         }
     }
 
@@ -583,7 +587,7 @@ actor PiqaeNodeEngine {
         )
     }
 
-    func updateExecutionContext(_ context: PiqaeExecutionContext) {
+    func updateExecutionContext(_ context: PiqaeExecutionContext) async {
         executionContext = context
         if context.phase == .background, let remaining = context.remainingSeconds {
             executionDeadline = Date().addingTimeInterval(max(0, remaining))
@@ -596,8 +600,14 @@ actor PiqaeNodeEngine {
             snapshotValue = replacingSnapshot(phase: .ready, statusMessage: nil)
         }
         emit()
+        if !canObserveNativeStatus(), let task = nativeObservationTask {
+            nativeObservationTask = nil
+            task.cancel()
+            await task.value
+        }
         if context.phase != .suspended {
             requestAutomaticDrain()
+            requestNativeObservation()
         }
     }
 
@@ -608,19 +618,20 @@ actor PiqaeNodeEngine {
         try await configuration.hostLifecycleReporter?.report(event)
         switch event {
         case .enteredForeground:
-            updateExecutionContext(.foreground)
+            await updateExecutionContext(.foreground)
         case .enteredBackground:
-            updateExecutionContext(
+            await updateExecutionContext(
                 PiqaeExecutionContext(phase: .background, source: .foreground)
             )
         case .suspendImminent, .sleeping, .shutdownRequested:
-            updateExecutionContext(
+            await updateExecutionContext(
                 PiqaeExecutionContext(phase: .suspended, source: .foreground)
             )
         case .woke:
-            updateExecutionContext(.foreground)
+            await updateExecutionContext(.foreground)
         case .networkAvailable:
             requestAutomaticDrain()
+            requestNativeObservation()
         case .started, .networkConstrained, .networkUnavailable:
             break
         }
@@ -661,7 +672,7 @@ actor PiqaeNodeEngine {
         guard context.phase != .suspended else {
             return .deferred(reason: "The host application is suspended.")
         }
-        updateExecutionContext(context)
+        await updateExecutionContext(context)
         do {
             try await refresh()
             guard !Task.isCancelled else {
@@ -783,7 +794,7 @@ actor PiqaeNodeEngine {
             return discovered
         }
         var projected: [PiqaePrinter] = []
-        localPrintersByLogicalID.removeAll(keepingCapacity: true)
+        var nextLocalPrintersByLogicalID: [PiqaePrinterID: PiqaePrinter] = [:]
         for adapter in configuration.printerAdapters {
             guard adapter.runtimeFingerprint.adapterID == adapter.adapterID else {
                 throw PiqaeNodeError.invalidConfiguration(
@@ -832,9 +843,10 @@ actor PiqaeNodeEngine {
                     freshUntil: source.freshUntil
                 )
                 projected.append(printer)
-                localPrintersByLogicalID[logicalID] = printer
+                nextLocalPrintersByLogicalID[logicalID] = printer
             }
         }
+        localPrintersByLogicalID = nextLocalPrintersByLogicalID
         return projected.sorted {
             $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending
         }
@@ -846,6 +858,12 @@ actor PiqaeNodeEngine {
         case deferred
         case alreadyExecuting
         case capped
+    }
+
+    private enum NativeObservationReconciliation: Equatable {
+        case pending
+        case terminal
+        case unavailable
     }
 
     private func drainAdapter(
@@ -872,8 +890,15 @@ actor PiqaeNodeEngine {
             }
             switch operation.phase {
             case .accepted:
-                try await reconcileAccepted(operation, runtime: runtime)
-                return .blockedOnNativeObservation
+                switch try await reconcileAccepted(operation, runtime: runtime) {
+                case .pending:
+                    requestNativeObservation()
+                    return .blockedOnNativeObservation
+                case .unavailable:
+                    return .blockedOnNativeObservation
+                case .terminal:
+                    break
+                }
             case .handoffStarted:
                 _ = try await runtime.complete(
                     operation,
@@ -923,6 +948,12 @@ actor PiqaeNodeEngine {
         startAutomaticDrainIfPossible()
     }
 
+    private func requestNativeObservation() {
+        guard ownsEmbeddedRuntime else { return }
+        nativeObservationRequested = true
+        startNativeObservationIfPossible()
+    }
+
     private func startAutomaticDrainIfPossible() {
         guard started, embeddedRuntimeStarted, selectedIPC == nil,
             automaticDrainRequested, automaticDrainTask == nil,
@@ -967,36 +998,147 @@ actor PiqaeNodeEngine {
         startAutomaticDrainIfPossible()
     }
 
-    private func cancelAutomaticDrain() async {
+    private func startNativeObservationIfPossible() {
+        guard started, embeddedRuntimeStarted, selectedIPC == nil,
+            nativeObservationRequested, nativeObservationTask == nil,
+            canObserveNativeStatus()
+        else { return }
+        let generation = automaticDrainGeneration
+        nativeObservationTask = Task { [weak self] in
+            await self?.runNativeObservation(generation: generation)
+        }
+    }
+
+    private func runNativeObservation(generation: UInt64) async {
+        var delayNanoseconds: UInt64 = 50_000_000
+        while !Task.isCancelled,
+            generation == automaticDrainGeneration,
+            started,
+            nativeObservationRequested,
+            canObserveNativeStatus(),
+            let runtime = configuration.embeddedRuntime
+        {
+            nativeObservationRequested = false
+            var pending = false
+            do {
+                observationAdapters: for adapterID in adaptersByID.keys.sorted() {
+                    for operation in try await runtime.nativeObservations(adapterID: adapterID) {
+                        try Task.checkCancellation()
+                        guard canObserveNativeStatus() else {
+                            pending = true
+                            break observationAdapters
+                        }
+                        if try await reconcileAccepted(operation, runtime: runtime) == .pending {
+                            pending = true
+                        }
+                    }
+                }
+                if pending {
+                    nativeObservationRequested = true
+                    guard try await sleepBeforeNativeObservationRetry(delayNanoseconds) else {
+                        break
+                    }
+                    delayNanoseconds = min(delayNanoseconds * 2, 1_000_000_000)
+                }
+            } catch is CancellationError {
+                break
+            } catch {
+                // Native status APIs and runtime reads can fail transiently.
+                // Retain the observation request and retry with a capped delay
+                // while the host still has an explicit execution budget.
+                nativeObservationRequested = true
+                do {
+                    guard try await sleepBeforeNativeObservationRetry(delayNanoseconds) else {
+                        break
+                    }
+                } catch {
+                    break
+                }
+                delayNanoseconds = min(delayNanoseconds * 2, 1_000_000_000)
+            }
+        }
+        guard generation == automaticDrainGeneration else { return }
+        nativeObservationTask = nil
+        startNativeObservationIfPossible()
+    }
+
+    private func canObserveNativeStatus() -> Bool {
+        switch effectiveExecutionContext.phase {
+        case .foreground:
+            return true
+        case .suspended:
+            return false
+        case .background:
+            guard snapshotValue.availability != .foregroundOnly,
+                let remaining = effectiveExecutionContext.remainingSeconds
+            else { return false }
+            return remaining > 0.25
+        }
+    }
+
+    private func sleepBeforeNativeObservationRetry(_ requestedNanoseconds: UInt64) async throws
+        -> Bool
+    {
+        let delayNanoseconds: UInt64
+        switch effectiveExecutionContext.phase {
+        case .foreground:
+            delayNanoseconds = requestedNanoseconds
+        case .suspended:
+            return false
+        case .background:
+            guard snapshotValue.availability != .foregroundOnly,
+                let remaining = effectiveExecutionContext.remainingSeconds
+            else { return false }
+            let retryBudget = max(0, remaining - 0.25)
+            guard retryBudget > 0 else { return false }
+            let budgetNanoseconds = UInt64(
+                min(retryBudget * 1_000_000_000, Double(UInt64.max))
+            )
+            delayNanoseconds = min(requestedNanoseconds, budgetNanoseconds)
+        }
+        try await Task.sleep(nanoseconds: delayNanoseconds)
+        return canObserveNativeStatus()
+    }
+
+    private func cancelRuntimeWork() async {
         automaticDrainGeneration &+= 1
         automaticDrainRequested = false
-        let task = automaticDrainTask
+        nativeObservationRequested = false
+        let drainTask = automaticDrainTask
+        let observationTask = nativeObservationTask
         automaticDrainTask = nil
-        task?.cancel()
-        await task?.value
+        nativeObservationTask = nil
+        drainTask?.cancel()
+        observationTask?.cancel()
+        await drainTask?.value
+        await observationTask?.value
     }
 
     private func reconcileAccepted(
         _ operation: PiqaeRuntimeAdapterOperation,
         runtime: any PiqaeEmbeddedNodeRuntime
-    ) async throws {
+    ) async throws -> NativeObservationReconciliation {
         guard let nativeJobID = operation.nativeJobID,
             let adapter = adaptersByID[operation.adapterID],
             let printer = localPrintersByLogicalID[PiqaePrinterID(rawValue: operation.printerID)]
-        else { return }
+        else { return .unavailable }
         switch try await adapter.observeNativeJob(nativeJobID: nativeJobID, printer: printer) {
         case .accepted, .printing, .unknown:
-            return
+            return .pending
         case .completedReported:
             _ = try await runtime.complete(
                 operation,
                 outcome: .completedReported(nativeJobID: nativeJobID)
             )
+            requestAutomaticDrain()
+            return .terminal
         case let .failedTerminal(code):
             _ = try await runtime.complete(
                 operation,
                 outcome: .failedTerminal(nativeJobID: nativeJobID, code: code)
             )
+            requestAutomaticDrain()
+            return .terminal
         }
     }
 
@@ -1041,6 +1183,22 @@ actor PiqaeNodeEngine {
                 !nativeJobID.isEmpty
             {
                 _ = try await runtime.complete(started, outcome: .accepted(nativeJobID: nativeJobID))
+                do {
+                    let accepted = try await runtime.nativeObservations(
+                        adapterID: operation.adapterID
+                    ).first { $0.operationID == operation.operationID }
+                    if let accepted {
+                        if try await reconcileAccepted(accepted, runtime: runtime) == .pending {
+                            requestNativeObservation()
+                        }
+                    } else {
+                        requestNativeObservation()
+                    }
+                } catch {
+                    // The spooler acceptance is already durable. A transient
+                    // status-read error must never rewrite it as ambiguous.
+                    requestNativeObservation()
+                }
             } else {
                 _ = try await runtime.complete(
                     started,

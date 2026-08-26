@@ -169,26 +169,16 @@ public struct NodeConnectAgentBridge: Sendable {
         stdin.fileHandleForWriting.write(input)
         try? stdin.fileHandleForWriting.close()
         let group = DispatchGroup()
-        let lock = NSLock()
-        var output = Data()
-        var diagnostic = Data()
-        var diagnosticBytes = 0
-        var oversized = false
-        var timedOut = false
+        let captured = NodeConnectProcessOutput(maximumOutputBytes: Self.maximumOutputBytes)
         group.enter()
         DispatchQueue.global(qos: .utility).async {
             defer { group.leave() }
             while let chunk = try? stdout.fileHandleForReading.read(upToCount: 64 * 1024),
                   !chunk.isEmpty {
-                lock.lock()
-                if output.count + chunk.count > Self.maximumOutputBytes {
-                    oversized = true
-                    lock.unlock()
+                if !captured.appendOutput(chunk) {
                     process.terminate()
                     return
                 }
-                output.append(chunk)
-                lock.unlock()
             }
         }
         group.enter()
@@ -196,19 +186,12 @@ public struct NodeConnectAgentBridge: Sendable {
             defer { group.leave() }
             while let chunk = try? stderr.fileHandleForReading.read(upToCount: 64 * 1024),
                   !chunk.isEmpty {
-                lock.lock()
-                diagnosticBytes += chunk.count
-                if diagnostic.count < 32 * 1024 {
-                    diagnostic.append(chunk.prefix(32 * 1024 - diagnostic.count))
-                }
-                lock.unlock()
+                captured.appendDiagnostic(chunk)
             }
         }
         DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + processTimeout) {
             if process.isRunning {
-                lock.lock()
-                timedOut = true
-                lock.unlock()
+                captured.markTimedOut()
                 process.terminate()
                 DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2) {
                     if process.isRunning { _ = Darwin.kill(process.processIdentifier, SIGKILL) }
@@ -222,26 +205,22 @@ public struct NodeConnectAgentBridge: Sendable {
             try? stderr.fileHandleForReading.close()
             drainComplete = group.wait(timeout: .now() + 2) == .success
         }
-        lock.lock()
-        let result = output
-        let failureDiagnostic = diagnostic
-        let failureDiagnosticBytes = diagnosticBytes
-        let wasOversized = oversized
-        let didTimeOut = timedOut
-        lock.unlock()
+        let snapshot = captured.snapshot()
         let evidence = Self.nativeEvidence(
-            failureDiagnostic,
-            observedBytes: failureDiagnosticBytes,
+            snapshot.diagnostic,
+            observedBytes: snapshot.diagnosticBytes,
             drainComplete: drainComplete
         )
-        guard !wasOversized else {
+        guard !snapshot.oversized else {
             throw NodeConnectAgentBridgeError.oversizedResponse
         }
-        guard !didTimeOut else { throw NodeConnectAgentBridgeError.nativeProcessFailure(evidence) }
-        guard process.terminationStatus == 0 else {
-            throw Self.classifiedFailure(failureDiagnostic, evidence: evidence)
+        guard !snapshot.timedOut else {
+            throw NodeConnectAgentBridgeError.nativeProcessFailure(evidence)
         }
-        return result
+        guard process.terminationStatus == 0 else {
+            throw Self.classifiedFailure(snapshot.diagnostic, evidence: evidence)
+        }
+        return snapshot.output
     }
 
     private static func nativeEvidence(
@@ -287,5 +266,63 @@ public struct NodeConnectAgentBridge: Sendable {
             return .invitationRejected
         }
         return .nativeProcessFailure(evidence)
+    }
+}
+
+private final class NodeConnectProcessOutput: @unchecked Sendable {
+    struct Snapshot {
+        let output: Data
+        let diagnostic: Data
+        let diagnosticBytes: Int
+        let oversized: Bool
+        let timedOut: Bool
+    }
+
+    private let lock = NSLock()
+    private let maximumOutputBytes: Int
+    private var output = Data()
+    private var diagnostic = Data()
+    private var diagnosticBytes = 0
+    private var oversized = false
+    private var timedOut = false
+
+    init(maximumOutputBytes: Int) {
+        self.maximumOutputBytes = maximumOutputBytes
+    }
+
+    func appendOutput(_ chunk: Data) -> Bool {
+        lock.withLock {
+            guard output.count + chunk.count <= maximumOutputBytes else {
+                oversized = true
+                return false
+            }
+            output.append(chunk)
+            return true
+        }
+    }
+
+    func appendDiagnostic(_ chunk: Data) {
+        lock.withLock {
+            diagnosticBytes += chunk.count
+            if diagnostic.count < 32 * 1024 {
+                diagnostic.append(chunk.prefix(32 * 1024 - diagnostic.count))
+            }
+        }
+    }
+
+    func markTimedOut() {
+        lock.withLock { timedOut = true }
+    }
+
+    func snapshot() -> Snapshot {
+        lock.withLock {
+            Snapshot(
+                output: output,
+                diagnostic: diagnostic,
+                diagnosticBytes: diagnosticBytes,
+                oversized: oversized,
+                timedOut: timedOut
+            )
+        }
     }
 }

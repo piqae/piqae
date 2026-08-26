@@ -235,6 +235,15 @@ public actor PiqaeNativeRuntime: PiqaeEmbeddedNodeRuntime, PiqaeOpaqueIdentityPr
         ).operation
     }
 
+    public func nativeObservations(adapterID: String) async throws
+        -> [PiqaeRuntimeAdapterOperation]
+    {
+        try commandResponse(
+            AdapterIDCommand(type: "adapter_observations", adapterID: adapterID),
+            as: AdapterObservationsData.self
+        ).operations
+    }
+
     public func beginHandoff(_ operation: PiqaeRuntimeAdapterOperation) async throws
         -> PiqaeRuntimeAdapterOperation
     {
@@ -757,6 +766,9 @@ private struct RegisteredData: Decodable { let registered: Bool }
 private struct PrinterInventoryData: Decodable { let printers: [PiqaeRuntimePrinterSnapshot] }
 private struct JobAcceptedData: Decodable { let job: PiqaeRuntimeJobAccepted }
 private struct AdapterOperationData: Decodable { let operation: PiqaeRuntimeAdapterOperation? }
+private struct AdapterObservationsData: Decodable {
+    let operations: [PiqaeRuntimeAdapterOperation]
+}
 private struct AdapterAcknowledgementData: Decodable {
     let acknowledgement: PiqaeRuntimeAdapterAcknowledgement
 }

@@ -123,6 +123,10 @@ public protocol PiqaeEmbeddedNodeRuntime: PiqaeHostLifecycleReporter, Sendable {
     func printerInventory() async throws -> [PiqaeRuntimePrinterSnapshot]
     func enqueue(_ request: PiqaeRuntimeJobRequest) async throws -> PiqaeRuntimeJobAccepted
     func nextOperation(adapterID: String) async throws -> PiqaeRuntimeAdapterOperation?
+    /// Returns accepted native handoffs that require bounded status polling.
+    /// This is deliberately separate from runnable queue work so an accepted
+    /// handoff cannot suppress a later work-available edge.
+    func nativeObservations(adapterID: String) async throws -> [PiqaeRuntimeAdapterOperation]
     func beginHandoff(_ operation: PiqaeRuntimeAdapterOperation) async throws
         -> PiqaeRuntimeAdapterOperation
     func complete(
@@ -162,6 +166,7 @@ public extension PiqaeEmbeddedNodeRuntime {
         throw PiqaeNodeError.unsupportedOperation("The embedded runtime does not expose its queue.")
     }
     func nextOperation(adapterID: String) async throws -> PiqaeRuntimeAdapterOperation? { nil }
+    func nativeObservations(adapterID: String) async throws -> [PiqaeRuntimeAdapterOperation] { [] }
     func beginHandoff(_ operation: PiqaeRuntimeAdapterOperation) async throws
         -> PiqaeRuntimeAdapterOperation
     {

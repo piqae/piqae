@@ -695,12 +695,9 @@ impl EmbeddedQueue {
         if !self.document.adapters.contains_key(adapter_id) {
             bail!("adapter is not registered");
         }
-        if let Some(operation) = self
-            .document
-            .operations
-            .values()
-            .find(|operation| operation.adapter_id == adapter_id)
-        {
+        if let Some(operation) = self.document.operations.values().find(|operation| {
+            operation.adapter_id == adapter_id && operation.phase != AdapterOperationPhase::Accepted
+        }) {
             return Ok(Some(operation.clone()));
         }
         if self.document.operations.len() >= MAX_ACTIVE_OPERATIONS {
@@ -756,22 +753,44 @@ impl EmbeddedQueue {
         Ok(Some(operation))
     }
 
-    /// Proves whether any adapter in this installation still has durable work.
-    /// This is intentionally installation-wide: an empty pull for one adapter
-    /// cannot clear the coalesced host notification for another adapter.
-    pub fn has_adapter_work(&self) -> Result<bool> {
-        if !self.document.operations.is_empty() {
+    /// Returns the accepted native handoffs which need status observation.
+    /// Results are installation-owned, adapter-scoped, stable ordered and
+    /// bounded by the active-operation journal limit.
+    pub fn adapter_observations(&self, adapter_id: &str) -> Result<Vec<AdapterOperation>> {
+        if !self.document.adapters.contains_key(adapter_id) {
+            bail!("adapter is not registered");
+        }
+        let mut operations = self
+            .document
+            .operations
+            .values()
+            .filter(|operation| {
+                operation.adapter_id == adapter_id
+                    && operation.phase == AdapterOperationPhase::Accepted
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        operations.sort_by(|left, right| left.operation_id.cmp(&right.operation_id));
+        operations.truncate(MAX_ACTIVE_OPERATIONS);
+        Ok(operations)
+    }
+
+    /// Proves whether any adapter in this installation has work the host can
+    /// drain now. Accepted native handoffs are deliberately excluded: their
+    /// bounded status observation is independent from the edge-triggered
+    /// runnable-work signal.
+    pub fn has_runnable_adapter_work(&self) -> Result<bool> {
+        if self
+            .document
+            .operations
+            .values()
+            .any(|operation| operation.phase != AdapterOperationPhase::Accepted)
+        {
             return Ok(true);
         }
-        if self.store.has_queued_work()? {
-            return Ok(true);
-        }
-        for store in self.connector_stores.values() {
-            if store.has_queued_work()? {
-                return Ok(true);
-            }
-        }
-        Ok(false)
+        Ok(!self
+            .runnable_jobs_across_scopes(Utc::now().timestamp_millis())?
+            .is_empty())
     }
 
     /// Durably records that the host is about to call a native printing API.
@@ -1987,8 +2006,86 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        assert!(queue.has_adapter_work().unwrap());
+        assert!(queue.has_runnable_adapter_work().unwrap());
         assert!(queue.next_operation(second_id).unwrap().is_some());
+    }
+
+    #[test]
+    fn accepted_observation_does_not_block_runnable_work_for_another_printer() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut queue, first_printer) = prepare(root.path());
+        let second_printer = queue
+            .observe_inventory(
+                "com.example.pos.airprint",
+                &[
+                    EmbeddedPrinterObservation {
+                        native_id: first_printer.native_id.clone(),
+                        name: first_printer.name.clone(),
+                        state: "available".into(),
+                        is_default: true,
+                        native_options: BTreeMap::new(),
+                    },
+                    EmbeddedPrinterObservation {
+                        native_id: "ipp://second/ipp/print".into(),
+                        name: "Second kitchen".into(),
+                        state: "available".into(),
+                        is_default: false,
+                        native_options: BTreeMap::new(),
+                    },
+                ],
+            )
+            .unwrap()
+            .into_iter()
+            .find(|printer| printer.native_id == "ipp://second/ipp/print")
+            .unwrap();
+        let first_job = queue.enqueue(request(&first_printer)).unwrap();
+        let first_operation = queue
+            .next_operation("com.example.pos.airprint")
+            .unwrap()
+            .unwrap();
+        queue
+            .begin_handoff(
+                &first_operation.adapter_id,
+                &first_operation.operation_id,
+                &first_operation.fence,
+            )
+            .unwrap();
+        queue
+            .complete_operation(
+                &first_operation.adapter_id,
+                &first_operation.operation_id,
+                &first_operation.fence,
+                &AdapterOperationOutcome::Accepted {
+                    native_job_id: "native-first".into(),
+                },
+            )
+            .unwrap();
+
+        let mut second_request = request(&second_printer);
+        second_request.idempotency_key = "order-43-label-1".into();
+        let second_job = queue.enqueue(second_request).unwrap();
+        assert!(queue.has_runnable_adapter_work().unwrap());
+        let second_operation = queue
+            .next_operation("com.example.pos.airprint")
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(second_operation.job_id, second_job.job_id);
+        assert_ne!(second_operation.operation_id, first_operation.operation_id);
+        assert_eq!(
+            queue
+                .adapter_observations("com.example.pos.airprint")
+                .unwrap(),
+            vec![AdapterOperation {
+                phase: AdapterOperationPhase::Accepted,
+                native_job_id: Some("native-first".into()),
+                ..first_operation
+            }]
+        );
+        assert_eq!(
+            queue.job(&first_job.job_id).unwrap().unwrap().state,
+            "accepted_by_spooler"
+        );
     }
 
     #[test]
@@ -2221,10 +2318,17 @@ mod tests {
         queue.persist().unwrap();
         drop(queue);
         let mut queue = EmbeddedQueue::open(root.path(), SupportPackRegistry::default()).unwrap();
-        assert_eq!(
+        assert!(
             queue
                 .next_operation(&operation.adapter_id)
                 .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            queue
+                .adapter_observations(&operation.adapter_id)
+                .unwrap()
+                .first()
                 .unwrap()
                 .phase,
             AdapterOperationPhase::Accepted
