@@ -4,6 +4,51 @@ import XCTest
 import PiqaeNodeKitTesting
 
 final class PiqaeNodeKitTests: XCTestCase {
+    func testNativeRuntimeBindsLifecycleAndOpaqueEvidenceWhenArtifactIsProvided() async throws {
+        guard
+            let path = ProcessInfo.processInfo.environment["PIQAE_NODE_FFI_LIBRARY"],
+            FileManager.default.fileExists(atPath: path)
+        else {
+            throw XCTSkip("Set PIQAE_NODE_FFI_LIBRARY after building piqae-node-ffi.")
+        }
+        let applicationID = "com.piqae.tests.\(UUID().uuidString.lowercased())"
+        let stateDirectory = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/Piqae/embedded", isDirectory: true)
+            .appendingPathComponent(applicationID, isDirectory: true)
+        let runtime = PiqaeNativeRuntime(
+            configuration: PiqaeNativeRuntimeConfiguration(
+                applicationID: applicationID,
+                dataDirectory: "ffi-test-\(UUID().uuidString.lowercased())",
+                availability: .backgroundOpportunistic,
+                localOnly: true,
+                libraryURL: URL(fileURLWithPath: path)
+            ),
+            keyStore: PiqaeFixedHostKeyStore()
+        )
+        addTeardownBlock {
+            try await runtime.stop()
+            try? FileManager.default.removeItem(at: stateDirectory)
+        }
+        try await runtime.start()
+        let first = try await runtime.deriveOpaqueID(
+            namespace: "airprint",
+            canonicalIdentity: Data("ipps://printer.local/ipp/print".utf8)
+        )
+        let again = try await runtime.deriveOpaqueID(
+            namespace: "airprint",
+            canonicalIdentity: Data("ipps://printer.local/ipp/print".utf8)
+        )
+        let other = try await runtime.deriveOpaqueID(
+            namespace: "ble",
+            canonicalIdentity: Data("ipps://printer.local/ipp/print".utf8)
+        )
+        XCTAssertTrue(first.hasPrefix("pid_"))
+        XCTAssertEqual(first, again)
+        XCTAssertNotEqual(first, other)
+        XCTAssertFalse(first.contains("printer.local"))
+        try await runtime.report(.suspendImminent)
+        try await runtime.stop()
+    }
     func testLifecycleEventsUseSharedRuntimeWireNamesAndReporter() async throws {
         XCTAssertEqual(PiqaeHostLifecycleEvent.suspendImminent.rawValue, "suspend_imminent")
         XCTAssertEqual(PiqaeHostLifecycleEvent.networkConstrained.rawValue, "network_constrained")
@@ -267,7 +312,7 @@ final class PiqaeNodeKitTests: XCTestCase {
         )
     }
 
-    func testIdempotencyDoesNotHandoffTwice() async throws {
+    func testEmbeddedSubmissionCannotBypassDurableRuntime() async throws {
         let printer = PiqaeFakePrinterAdapter.printer()
         let adapter = PiqaeFakePrinterAdapter(printers: [printer])
         let node = PiqaeNode(
@@ -288,12 +333,19 @@ final class PiqaeNodeKitTests: XCTestCase {
             idempotencyKey: "order-42-receipt"
         )
 
-        let first = try await node.jobs.submit(request)
-        let retry = try await node.jobs.submit(request)
-        XCTAssertEqual(first, retry)
-        XCTAssertEqual(first.handoffState, .acceptedBySpooler)
+        for _ in 0..<2 {
+            do {
+                _ = try await node.jobs.submit(request)
+                XCTFail("embedded submission must fail closed until the durable executor ABI is bound")
+            } catch let error as PiqaeNodeError {
+                guard case .unsupportedOperation = error else {
+                    XCTFail("unexpected error: \(error)")
+                    continue
+                }
+            }
+        }
         let submissionCount = await adapter.submissionCount()
-        XCTAssertEqual(submissionCount, 1)
+        XCTAssertEqual(submissionCount, 0)
     }
 
     func testBackgroundSubmissionDefersWithoutDurablePayload() async throws {

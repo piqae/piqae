@@ -364,14 +364,13 @@ actor PiqaeNodeEngine {
         if let selectedIPC {
             receipt = try await selectedIPC.submit(request)
         } else {
-            guard let printer = snapshotValue.printers.first(where: { $0.id == request.printerID }) else {
-                throw PiqaeNodeError.printerNotFound(request.printerID)
-            }
-            guard let adapter = adaptersByID[printer.adapterID] else {
-                throw PiqaeNodeError.adapterUnavailable(printer.adapterID)
-            }
-            try await adapter.validate(request, for: printer)
-            receipt = try await adapter.submit(request, to: printer)
+            // A native handoff is irreversible and must only happen after the shared
+            // runtime has durably persisted the job, fence, and idempotency key. The
+            // Swift facade deliberately cannot bypass that queue while the executor
+            // ABI is unavailable.
+            throw PiqaeNodeError.unsupportedOperation(
+                "Embedded job submission requires the durable native runtime executor"
+            )
         }
         return receipt
     }

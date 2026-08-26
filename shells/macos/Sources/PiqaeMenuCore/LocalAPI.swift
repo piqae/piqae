@@ -209,8 +209,66 @@ public struct LocalLifecycleSnapshot: Codable, Equatable, Sendable {
     }
 }
 
+public enum LocalBrokerCapability: String, Codable, CaseIterable, Hashable, Sendable {
+    case observeStatus = "observe_status"
+    case observePrinters = "observe_printers"
+    case manageProfiles = "manage_profiles"
+    case submitLocalJobs = "submit_local_jobs"
+    case manageConnectors = "manage_connectors"
+
+    public var displayName: String {
+        switch self {
+        case .observeStatus: "View node status"
+        case .observePrinters: "View printers"
+        case .manageProfiles: "Manage print presets"
+        case .submitLocalJobs: "Submit print jobs"
+        case .manageConnectors: "Manage connections"
+        }
+    }
+}
+
+public struct LocalBrokerApplicationIdentity: Codable, Equatable, Sendable {
+    public let applicationID: String
+    public let displayName: String
+    public let signingIdentitySHA256: String?
+
+    enum CodingKeys: String, CodingKey {
+        case applicationID = "application_id"
+        case displayName = "display_name"
+        case signingIdentitySHA256 = "signing_identity_sha256"
+    }
+}
+
+public struct LocalPendingBrokerAuthorization: Codable, Equatable, Identifiable, Sendable {
+    public let authorizationID: UUID
+    public let application: LocalBrokerApplicationIdentity
+    public let requestedCapabilities: [LocalBrokerCapability]
+    public let requestedUnixMS: Int64
+    public let expiresUnixMS: Int64
+
+    public var id: UUID { authorizationID }
+
+    enum CodingKeys: String, CodingKey {
+        case authorizationID = "authorization_id"
+        case application
+        case requestedCapabilities = "requested_capabilities"
+        case requestedUnixMS = "requested_unix_ms"
+        case expiresUnixMS = "expires_unix_ms"
+    }
+}
+
 private struct LocalLifecycleRequest: Encodable {
     let event: PiqaeHostLifecycleEvent
+}
+
+private struct LocalBrokerAuthorizationDecision: Encodable {
+    let approved: Bool
+    let grantedCapabilities: [LocalBrokerCapability]
+
+    enum CodingKeys: String, CodingKey {
+        case approved
+        case grantedCapabilities = "granted_capabilities"
+    }
 }
 
 private struct APIMessage: Codable {
@@ -366,6 +424,36 @@ public final class LocalAPIClient: @unchecked Sendable {
             method: "POST",
             path: "/v1/local/lifecycle",
             body: try encoder.encode(LocalLifecycleRequest(event: event))
+        )
+    }
+
+    public func pendingBrokerAuthorizations() async throws
+        -> [LocalPendingBrokerAuthorization]
+    {
+        try await request(path: "/v1/local/broker/authorization-requests")
+    }
+
+    public func decideBrokerAuthorization(
+        authorizationID: UUID,
+        approved: Bool,
+        grantedCapabilities: [LocalBrokerCapability]
+    ) async throws {
+        let uniqueCapabilities = Array(Set(grantedCapabilities)).sorted { $0.rawValue < $1.rawValue }
+        guard approved || uniqueCapabilities.isEmpty else {
+            throw LocalAPIError.invalidConfiguration(
+                "Denied application access cannot include granted capabilities."
+            )
+        }
+        try await sendWithoutResponse(
+            method: "POST",
+            path: "/v1/local/broker/authorization-requests/"
+                + "\(try pathComponent(authorizationID.uuidString.lowercased()))/decision",
+            body: try encoder.encode(
+                LocalBrokerAuthorizationDecision(
+                    approved: approved,
+                    grantedCapabilities: uniqueCapabilities
+                )
+            )
         )
     }
 

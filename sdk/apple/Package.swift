@@ -1,5 +1,16 @@
 // swift-tools-version: 5.10
 import PackageDescription
+import Foundation
+
+let nativeArtifactPath = ".artifacts/PiqaeNode.xcframework"
+let hasNativeArtifact = FileManager.default.fileExists(
+    atPath: URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .appendingPathComponent(nativeArtifactPath).path
+)
+
+var nodeKitDependencies: [Target.Dependency] = ["CPiqaeNodeABI"]
+if hasNativeArtifact { nodeKitDependencies.append("PiqaeNodeNative") }
 
 let package = Package(
     name: "PiqaeNodeKit",
@@ -14,7 +25,11 @@ let package = Package(
         .library(name: "PiqaeNodeKitTesting", targets: ["PiqaeNodeKitTesting"]),
     ],
     targets: [
-        .target(name: "PiqaeNodeKit"),
+        .target(
+            name: "CPiqaeNodeABI",
+            publicHeadersPath: "include"
+        ),
+        .target(name: "PiqaeNodeKit", dependencies: nodeKitDependencies),
         .target(
             name: "PiqaeNodeKitAirPrint",
             dependencies: ["PiqaeNodeKit"]
@@ -37,3 +52,9 @@ let package = Package(
         ),
     ]
 )
+
+if hasNativeArtifact {
+    package.targets.append(
+        .binaryTarget(name: "PiqaeNodeNative", path: nativeArtifactPath)
+    )
+}

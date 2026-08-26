@@ -345,6 +345,70 @@ final class LocalAPITests: XCTestCase {
         XCTAssertFalse(snapshot.acceptingCloudLeases)
     }
 
+    func testBrokerAuthorizationRoutesNeverGrantOnDenial() async throws {
+        let tokenFile = FileManager.default.temporaryDirectory
+            .appendingPathComponent("piqae-broker-\(UUID().uuidString).token")
+        try Data("broker-secret".utf8).write(to: tokenFile, options: .atomic)
+        defer { try? FileManager.default.removeItem(at: tokenFile) }
+        let sessionConfiguration = URLSessionConfiguration.ephemeral
+        sessionConfiguration.protocolClasses = [StubURLProtocol.self]
+        let client = LocalAPIClient(
+            configuration: try LocalAPIConfiguration(
+                baseURL: XCTUnwrap(URL(string: "http://127.0.0.1:39100")),
+                tokenFile: tokenFile
+            ),
+            session: URLSession(configuration: sessionConfiguration)
+        )
+        let authorizationID = try XCTUnwrap(UUID(uuidString: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"))
+
+        StubURLProtocol.handler = { request in
+            XCTAssertEqual(request.url?.path, "/v1/local/broker/authorization-requests")
+            return Self.response(
+                for: request,
+                body: """
+                [{
+                  "authorization_id":"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+                  "application":{
+                    "application_id":"com.example.shipping",
+                    "display_name":"Shipping Desk",
+                    "signing_identity_sha256":"sha256:example"
+                  },
+                  "requested_capabilities":["observe_printers","submit_local_jobs"],
+                  "requested_unix_ms":1000,
+                  "expires_unix_ms":9999999999999
+                }]
+                """
+            )
+        }
+        let pending = try await client.pendingBrokerAuthorizations()
+        XCTAssertEqual(pending.first?.application.displayName, "Shipping Desk")
+        XCTAssertEqual(
+            pending.first?.requestedCapabilities,
+            [.observePrinters, .submitLocalJobs]
+        )
+
+        StubURLProtocol.handler = { request in
+            XCTAssertEqual(request.httpMethod, "POST")
+            XCTAssertEqual(
+                request.url?.path,
+                "/v1/local/broker/authorization-requests/"
+                    + "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee/decision"
+            )
+            let body = try XCTUnwrap(
+                try JSONSerialization.jsonObject(with: try Self.body(of: request))
+                    as? [String: Any]
+            )
+            XCTAssertEqual(body["approved"] as? Bool, false)
+            XCTAssertEqual(body["granted_capabilities"] as? [String], [])
+            return Self.response(for: request, body: "{}")
+        }
+        try await client.decideBrokerAuthorization(
+            authorizationID: authorizationID,
+            approved: false,
+            grantedCapabilities: []
+        )
+    }
+
     func testDashboardSessionRejectsRemoteHandoff() async throws {
         let tokenFile = FileManager.default.temporaryDirectory
             .appendingPathComponent("piqae-menu-\(UUID().uuidString).token")
