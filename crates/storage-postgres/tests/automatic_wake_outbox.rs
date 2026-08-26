@@ -2,6 +2,7 @@
 
 use piqae_domain::{AgentId, EnvironmentId, JobId, PrinterId, WorkspaceId};
 use piqae_storage_postgres::PostgresStore;
+use piqae_storage_postgres::destination_topology::{DestinationTopologyRepository, TenantScope};
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use std::{env, time::Duration};
 
@@ -223,15 +224,20 @@ async fn postgres_wake_outbox_is_idempotent_content_free_and_at_least_once() {
         2
     );
 
-    sqlx::query(
-        "UPDATE agents SET revoked_at=now() WHERE workspace_id=$1 AND environment_id=$2 AND id=$3",
-    )
-    .bind(workspace_id.to_string())
-    .bind(environment_id.to_string())
-    .bind(assigned_agent.to_string())
-    .execute(&pool)
-    .await
-    .expect("revoke assigned agent");
+    let scope = TenantScope {
+        workspace_id,
+        environment_id,
+    };
+    let observed = store
+        .observe_pending_node_wake_hints(scope, &standby_agent.to_string(), chrono::Utc::now(), 10)
+        .await
+        .expect("observe standby wake before dispatch");
+    assert!(!observed.is_empty());
+
+    store
+        .revoke_agent(workspace_id, environment_id, assigned_agent)
+        .await
+        .expect("revoke assigned agent");
     let no_candidate_destination = format!("pdst_{}", ulid::Ulid::new());
     sqlx::query("INSERT INTO physical_destinations (workspace_id,environment_id,id,name,state) VALUES ($1,$2,$3,'No wake candidate','unavailable')")
         .bind(workspace_id.to_string())
@@ -284,8 +290,22 @@ async fn postgres_wake_outbox_is_idempotent_content_free_and_at_least_once() {
             .await
             .expect("claim repaired dispatches")
             .len(),
-        2
+        0,
+        "observed and cancelled wake hints must never dispatch"
     );
+    let unprocessed_terminal_outbox: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM routing_outbox outbox
+         JOIN node_wake_hints hint
+           ON hint.workspace_id=outbox.workspace_id
+          AND hint.environment_id=outbox.environment_id
+          AND hint.id=outbox.aggregate_id
+         WHERE outbox.aggregate_type='node_wake_hint'
+           AND hint.status<>'pending' AND outbox.processed_at IS NULL",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("terminal wake outbox count");
+    assert_eq!(unprocessed_terminal_outbox, 0);
 
     pool.close().await;
     sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))

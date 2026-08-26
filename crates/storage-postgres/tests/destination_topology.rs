@@ -355,7 +355,7 @@ async fn postgres_topology_is_tenant_isolated_and_fences_delivery() {
     );
     assert!(matches!(
         store.upsert_route(second, &cross_tenant_route).await,
-        Err(StorageError::Database(_))
+        Err(StorageError::NotFound)
     ));
 
     let evidence = IdentityEvidence {
@@ -1303,6 +1303,20 @@ async fn revoking_node_retires_only_safe_routes_and_preserves_accepted_evidence(
             .await
             .expect("route fixture");
     }
+    sqlx::query(
+        "UPDATE physical_destinations SET state='attention'
+         WHERE workspace_id=$1 AND environment_id=$2 AND id='pdst_revoke_accepted'",
+    )
+    .bind(scope.workspace_id.to_string())
+    .bind(scope.environment_id.to_string())
+    .execute(store.pool())
+    .await
+    .expect("attention destination fixture");
+    let unrelated_destination = destination("pdst_revoke_unrelated", "authority_revoke");
+    store
+        .upsert_destination(scope, &unrelated_destination)
+        .await
+        .expect("unrelated orphan destination fixture");
     let backup_route = StoredPrinterRoute {
         id: "rte_revoke_backup".into(),
         destination_id: "pdst_revoke_safe".into(),
@@ -1432,7 +1446,7 @@ async fn revoking_node_retires_only_safe_routes_and_preserves_accepted_evidence(
     .fetch_all(store.pool())
     .await
     .expect("job states after revocation");
-    assert!(job_states.contains(&(safe_job_id, "waiting_for_agent".into())));
+    assert!(job_states.contains(&(safe_job_id.clone(), "waiting_for_agent".into())));
     assert!(job_states.contains(&("job_revoke_accepted".into(), "agent_accepted".into())));
     let wake_status: String = sqlx::query_scalar(
         "SELECT status FROM node_wake_hints WHERE workspace_id=$1 AND environment_id=$2 AND id='wkh_revoke'",
@@ -1454,10 +1468,238 @@ async fn revoking_node_retires_only_safe_routes_and_preserves_accepted_evidence(
     assert_eq!(
         destination_states,
         vec![
-            ("pdst_revoke_accepted".into(), "unavailable".into()),
+            ("pdst_revoke_accepted".into(), "attention".into()),
             ("pdst_revoke_safe".into(), "available".into()),
+            ("pdst_revoke_unrelated".into(), "available".into()),
         ]
     );
+    let stale_route = route(
+        "rte_revoke_stale",
+        "pdst_revoke_unrelated",
+        agent_suffix,
+        "ptr_revoke",
+        "primary",
+    );
+    assert!(matches!(
+        store.upsert_route(scope, &stale_route).await,
+        Err(StorageError::NotFound)
+    ));
+    assert!(matches!(
+        store
+            .begin_delivery_attempt(
+                scope,
+                NewDeliveryAttempt {
+                    attempt_id: "attempt_revoke_after",
+                    reservation_id: "reservation_revoke_after",
+                    job_id: &safe_job_id,
+                    destination_id: "pdst_revoke_safe",
+                    route_id: "rte_revoke_safe",
+                    lease_until: Utc::now() + Duration::minutes(1),
+                },
+            )
+            .await,
+        Err(StorageError::NotFound)
+    ));
+
+    pool.close().await;
+    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+        .execute(&admin)
+        .await
+        .expect("drop exact disposable schema");
+}
+
+#[tokio::test]
+async fn revocation_serializes_with_route_projection_and_retires_the_winner() {
+    let Some(database_url) = env::var("PIQAE_TEST_DATABASE_URL").ok() else {
+        eprintln!("skipped: set PIQAE_TEST_DATABASE_URL for revocation concurrency evidence");
+        return;
+    };
+    let schema = format!("piqae_revoke_race_{}", ulid::Ulid::new()).to_ascii_lowercase();
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&database_url)
+        .await
+        .expect("connect test PostgreSQL");
+    sqlx::query(&format!("CREATE SCHEMA {schema}"))
+        .execute(&admin)
+        .await
+        .expect("create exact disposable schema");
+    let pool = schema_pool(&database_url, &schema).await;
+    let store = PostgresStore::from_pool(pool.clone());
+    store.migrate().await.expect("migrate empty database");
+    let scope = TenantScope {
+        workspace_id: WorkspaceId::new(),
+        environment_id: EnvironmentId::new(),
+    };
+    let suffix = "01J00000000000000000000010";
+    let agent_id = format!("agt_{suffix}");
+    create_tenant_fixture(&store, scope, suffix, "ptr_revoke_race").await;
+    let mut projected_destination = destination("pdst_revoke_race", "unused");
+    projected_destination.scheduling_authority_id = None;
+    store
+        .upsert_destination(scope, &projected_destination)
+        .await
+        .expect("race destination fixture");
+
+    let mut projection = pool.begin().await.expect("begin projection transaction");
+    sqlx::query(
+        "SELECT id FROM agents
+         WHERE workspace_id=$1 AND environment_id=$2 AND id=$3 AND revoked_at IS NULL
+         FOR KEY SHARE",
+    )
+    .bind(scope.workspace_id.to_string())
+    .bind(scope.environment_id.to_string())
+    .bind(&agent_id)
+    .fetch_one(&mut *projection)
+    .await
+    .expect("hold projection's active-agent fence");
+
+    let revoke_store = store.clone();
+    let revoked_agent_id = agent_id.clone();
+    let mut revoke = tokio::spawn(async move {
+        revoke_store
+            .revoke_agent(
+                scope.workspace_id,
+                scope.environment_id,
+                revoked_agent_id.parse().expect("fixture agent id"),
+            )
+            .await
+    });
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), &mut revoke)
+            .await
+            .is_err(),
+        "revocation must wait for the projection holding the active-agent fence"
+    );
+    sqlx::query(
+        "INSERT INTO printer_routes
+         (workspace_id,environment_id,id,destination_id,printer_id,agent_id,native_queue_id,
+          local_route_key,state,role,priority,enabled,capability_revision,profile_revision)
+         VALUES ($1,$2,'rte_revoke_race',$3,'ptr_revoke_race',$4,'native-race',
+                 'local-race','available','primary',0,true,1,1)",
+    )
+    .bind(scope.workspace_id.to_string())
+    .bind(scope.environment_id.to_string())
+    .bind(&projected_destination.id)
+    .bind(&agent_id)
+    .execute(&mut *projection)
+    .await
+    .expect("commit projection before revocation");
+    projection.commit().await.expect("release projection fence");
+    tokio::time::timeout(std::time::Duration::from_secs(5), revoke)
+        .await
+        .expect("revocation completed after projection")
+        .expect("revocation task")
+        .expect("revocation result");
+
+    let retired: (bool, String, bool) = sqlx::query_as(
+        "SELECT enabled,state,retired_at IS NOT NULL FROM printer_routes
+         WHERE workspace_id=$1 AND environment_id=$2 AND id='rte_revoke_race'",
+    )
+    .bind(scope.workspace_id.to_string())
+    .bind(scope.environment_id.to_string())
+    .fetch_one(&pool)
+    .await
+    .expect("projected route retained as audit");
+    assert_eq!(retired, (false, "retired".into(), true));
+
+    let reserve_suffix = "01J00000000000000000000011";
+    let reserve_agent = format!("agt_{reserve_suffix}");
+    let reserve_job = format!("job_{reserve_suffix}");
+    create_tenant_fixture(&store, scope, reserve_suffix, "ptr_revoke_reserve").await;
+    sqlx::query(
+        "UPDATE jobs SET state='waiting_for_agent'
+         WHERE workspace_id=$1 AND environment_id=$2 AND id=$3",
+    )
+    .bind(scope.workspace_id.to_string())
+    .bind(scope.environment_id.to_string())
+    .bind(&reserve_job)
+    .execute(&pool)
+    .await
+    .expect("reserve race job fixture");
+    let mut reserve_destination = destination("pdst_revoke_reserve", "unused");
+    reserve_destination.scheduling_authority_id = None;
+    store
+        .upsert_destination(scope, &reserve_destination)
+        .await
+        .expect("reserve race destination");
+    store
+        .upsert_route(
+            scope,
+            &route(
+                "rte_revoke_reserve",
+                &reserve_destination.id,
+                reserve_suffix,
+                "ptr_revoke_reserve",
+                "primary",
+            ),
+        )
+        .await
+        .expect("reserve race route");
+    let mut blocked_job = pool.begin().await.expect("begin blocked job transaction");
+    sqlx::query(
+        "SELECT id FROM jobs WHERE workspace_id=$1 AND environment_id=$2 AND id=$3 FOR UPDATE",
+    )
+    .bind(scope.workspace_id.to_string())
+    .bind(scope.environment_id.to_string())
+    .bind(&reserve_job)
+    .fetch_one(&mut *blocked_job)
+    .await
+    .expect("hold job row while reservation locks route");
+    let reservation_store = store.clone();
+    let reservation_job = reserve_job.clone();
+    let reservation_destination = reserve_destination.id.clone();
+    let reservation = tokio::spawn(async move {
+        reservation_store
+            .begin_delivery_attempt(
+                scope,
+                NewDeliveryAttempt {
+                    attempt_id: "attempt_revoke_reserve_race",
+                    reservation_id: "reservation_revoke_reserve_race",
+                    job_id: &reservation_job,
+                    destination_id: &reservation_destination,
+                    route_id: "rte_revoke_reserve",
+                    lease_until: Utc::now() + Duration::minutes(1),
+                },
+            )
+            .await
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let revoke_store = store.clone();
+    let revoke_reserve = tokio::spawn(async move {
+        revoke_store
+            .revoke_agent(
+                scope.workspace_id,
+                scope.environment_id,
+                reserve_agent.parse().expect("reserve fixture agent id"),
+            )
+            .await
+    });
+    blocked_job.commit().await.expect("release blocked job");
+    let reservation_result = tokio::time::timeout(std::time::Duration::from_secs(5), reservation)
+        .await
+        .expect("reservation/revocation cannot deadlock")
+        .expect("reservation task");
+    assert!(
+        reservation_result.is_ok() || matches!(reservation_result, Err(StorageError::NotFound)),
+        "the reservation may win or be fenced, but cannot survive revocation"
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(5), revoke_reserve)
+        .await
+        .expect("revocation/reservation cannot deadlock")
+        .expect("reserve revocation task")
+        .expect("reserve revocation result");
+    let active_attempts: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM delivery_attempts
+         WHERE workspace_id=$1 AND environment_id=$2
+           AND route_id='rte_revoke_reserve' AND state='route_leased' AND final_at IS NULL",
+    )
+    .bind(scope.workspace_id.to_string())
+    .bind(scope.environment_id.to_string())
+    .fetch_one(&pool)
+    .await
+    .expect("active reserve-race attempts");
+    assert_eq!(active_attempts, 0);
 
     pool.close().await;
     sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))

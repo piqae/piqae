@@ -1464,22 +1464,17 @@ pub(crate) async fn record_runtime_availability(
                 runtime.lifecycle_state,
                 piqae_protocol::agent::NodeAvailability::Foreground
             );
-        // A runtime's self-report cannot establish a trusted relay. The
-        // authority has no endpoint registry/dispatcher yet, so accepting this
-        // class would falsely advertise remote-wake readiness.
-        let wake_relay_verified = !matches!(
-            runtime.availability_class,
-            piqae_protocol::agent::NodeAvailabilityClass::WakeRelayCapable
-        );
+        // Persist a node's truthful availability class independently of relay
+        // authorization. Nothing in route admission or wake dispatch treats
+        // this self-report as proof of a registered external relay.
         if !background_budget_ok
             || !attached_client_safe
             || !lifecycle_acceptance_safe
             || !availability_class_safe
-            || !wake_relay_verified
         {
             return Err(AppError::invalid(
                 "unsafe_runtime_admission",
-                "This host cannot safely accept cloud work or advertise an unverified wake relay in its current execution mode.",
+                "This host cannot safely accept cloud work in its current execution mode.",
             ));
         }
         let stored = StoredNodeRuntimeObservation {
@@ -2958,7 +2953,9 @@ mod tests {
 
     fn state_with_topology(topology: Arc<MemoryDestinationTopologyRepository>) -> AppState {
         AppState::new_for_tests(
-            Arc::new(MemoryRepository::default()),
+            Arc::new(MemoryRepository::with_destination_topology(
+                topology.as_ref().clone(),
+            )),
             Arc::new(StaticAuthenticator::default()),
         )
         .with_destination_topology(topology)

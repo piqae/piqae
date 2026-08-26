@@ -1058,8 +1058,24 @@ impl DestinationTopologyRepository for PostgresStore {
         let profiles = i64::try_from(route.profile_revision).map_err(|_| {
             StorageError::InvalidData("profile revision exceeds PostgreSQL bigint".into())
         })?;
+        let mut transaction = self.pool().begin().await?;
+        let active_agent: Option<String> = sqlx::query_scalar(
+            "SELECT id FROM agents
+             WHERE workspace_id=$1 AND environment_id=$2 AND id=$3
+               AND revoked_at IS NULL
+             FOR KEY SHARE",
+        )
+        .bind(scope.workspace_id.to_string())
+        .bind(scope.environment_id.to_string())
+        .bind(&route.agent_id)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        if active_agent.is_none() {
+            return Err(StorageError::NotFound);
+        }
         sqlx::query("INSERT INTO printer_routes (workspace_id,environment_id,id,destination_id,printer_id,agent_id,native_queue_id,local_route_key,state,role,priority,enabled,capability_revision,profile_revision,last_seen_at,updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) ON CONFLICT (workspace_id,environment_id,printer_id,agent_id) DO UPDATE SET destination_id=EXCLUDED.destination_id,native_queue_id=EXCLUDED.native_queue_id,local_route_key=COALESCE(EXCLUDED.local_route_key,printer_routes.local_route_key),state=EXCLUDED.state,role=EXCLUDED.role,priority=EXCLUDED.priority,enabled=EXCLUDED.enabled,capability_revision=EXCLUDED.capability_revision,profile_revision=EXCLUDED.profile_revision,last_seen_at=EXCLUDED.last_seen_at,updated_at=EXCLUDED.updated_at")
-            .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).bind(&route.id).bind(&route.destination_id).bind(&route.printer_id).bind(&route.agent_id).bind(&route.native_queue_id).bind(&route.local_route_key).bind(&route.state).bind(&route.role).bind(route.priority).bind(route.enabled).bind(capabilities).bind(profiles).bind(route.last_seen_at).bind(route.updated_at).execute(self.pool()).await?;
+            .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).bind(&route.id).bind(&route.destination_id).bind(&route.printer_id).bind(&route.agent_id).bind(&route.native_queue_id).bind(&route.local_route_key).bind(&route.state).bind(&route.role).bind(route.priority).bind(route.enabled).bind(capabilities).bind(profiles).bind(route.last_seen_at).bind(route.updated_at).execute(&mut *transaction).await?;
+        transaction.commit().await?;
         Ok(())
     }
 
@@ -1347,6 +1363,25 @@ impl DestinationTopologyRepository for PostgresStore {
         let rows = sqlx::query("WITH selected AS (SELECT id FROM node_wake_hints WHERE workspace_id=$1 AND environment_id=$2 AND agent_id=$3 AND status='pending' AND expires_at>$4 ORDER BY requested_at,id FOR UPDATE SKIP LOCKED LIMIT $5) UPDATE node_wake_hints hint SET status='observed',observed_at=$4 FROM selected WHERE hint.workspace_id=$1 AND hint.environment_id=$2 AND hint.id=selected.id RETURNING hint.id,hint.agent_id,hint.reason,hint.delivery_channel,hint.status,hint.requested_at,hint.expires_at,hint.observed_at")
             .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).bind(agent_id).bind(observed_at).bind(i64::from(limit.clamp(1, 100)))
             .fetch_all(&mut *tx).await?;
+        sqlx::query(
+            "UPDATE routing_outbox outbox
+             SET processed_at=COALESCE(processed_at,$4),claimed_until=NULL
+             FROM node_wake_hints hint
+             WHERE outbox.workspace_id=$1 AND outbox.environment_id=$2
+               AND outbox.aggregate_type='node_wake_hint'
+               AND outbox.event_type='node.wake_hint.requested'
+               AND hint.workspace_id=outbox.workspace_id
+               AND hint.environment_id=outbox.environment_id
+               AND hint.id=outbox.aggregate_id
+               AND hint.agent_id=$3
+               AND hint.status<>'pending'",
+        )
+        .bind(scope.workspace_id.to_string())
+        .bind(scope.environment_id.to_string())
+        .bind(agent_id)
+        .bind(observed_at)
+        .execute(&mut *tx)
+        .await?;
         tx.commit().await?;
         rows.iter().map(map_wake_hint).collect()
     }
@@ -1391,8 +1426,26 @@ impl DestinationTopologyRepository for PostgresStore {
         membership: &SiteCoordinatorMembership,
     ) -> Result<(), StorageError> {
         let revoked_at = (membership.state == "revoked").then(Utc::now);
+        let mut transaction = self.pool().begin().await?;
+        if membership.state != "revoked" {
+            let active_agent: Option<String> = sqlx::query_scalar(
+                "SELECT id FROM agents
+                 WHERE workspace_id=$1 AND environment_id=$2 AND id=$3
+                   AND revoked_at IS NULL
+                 FOR KEY SHARE",
+            )
+            .bind(scope.workspace_id.to_string())
+            .bind(scope.environment_id.to_string())
+            .bind(&membership.agent_id)
+            .fetch_optional(&mut *transaction)
+            .await?;
+            if active_agent.is_none() {
+                return Err(StorageError::NotFound);
+            }
+        }
         sqlx::query("INSERT INTO site_coordinator_memberships (workspace_id,environment_id,authority_id,agent_id,site_id,state,last_seen_at,revoked_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (workspace_id,environment_id,authority_id,agent_id) DO UPDATE SET site_id=EXCLUDED.site_id,state=EXCLUDED.state,last_seen_at=EXCLUDED.last_seen_at,revoked_at=EXCLUDED.revoked_at")
-            .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).bind(&membership.authority_id).bind(&membership.agent_id).bind(&membership.site_id).bind(&membership.state).bind(membership.last_seen_at).bind(revoked_at).execute(self.pool()).await?;
+            .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).bind(&membership.authority_id).bind(&membership.agent_id).bind(&membership.site_id).bind(&membership.state).bind(membership.last_seen_at).bind(revoked_at).execute(&mut *transaction).await?;
+        transaction.commit().await?;
         Ok(())
     }
 
@@ -1402,6 +1455,61 @@ impl DestinationTopologyRepository for PostgresStore {
         request: NewDeliveryAttempt<'_>,
     ) -> Result<StartedDeliveryAttempt, StorageError> {
         let mut tx = self.pool().begin().await?;
+        // Serialize every scheduler at the physical destination before
+        // validating its current route. Agent, route, then job is the same lock
+        // order used by node revocation and avoids a job/agent deadlock.
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(format!(
+                "{}:{}:{}",
+                scope.workspace_id, scope.environment_id, request.destination_id
+            ))
+            .execute(&mut *tx)
+            .await?;
+        let route_agent: Option<String> = sqlx::query_scalar(
+            "SELECT agent_id FROM printer_routes
+             WHERE workspace_id=$1 AND environment_id=$2
+               AND id=$3 AND destination_id=$4",
+        )
+        .bind(scope.workspace_id.to_string())
+        .bind(scope.environment_id.to_string())
+        .bind(request.route_id)
+        .bind(request.destination_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(route_agent) = route_agent else {
+            return Err(StorageError::NotFound);
+        };
+        let active_agent: Option<String> = sqlx::query_scalar(
+            "SELECT id FROM agents
+             WHERE workspace_id=$1 AND environment_id=$2 AND id=$3
+               AND revoked_at IS NULL
+             FOR KEY SHARE",
+        )
+        .bind(scope.workspace_id.to_string())
+        .bind(scope.environment_id.to_string())
+        .bind(&route_agent)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if active_agent.is_none() {
+            return Err(StorageError::NotFound);
+        }
+        let route_matches_destination: Option<String> = sqlx::query_scalar(
+            "SELECT id FROM printer_routes
+             WHERE workspace_id=$1 AND environment_id=$2
+               AND id=$3 AND destination_id=$4 AND agent_id=$5
+               AND enabled AND retired_at IS NULL
+             FOR KEY SHARE",
+        )
+        .bind(scope.workspace_id.to_string())
+        .bind(scope.environment_id.to_string())
+        .bind(request.route_id)
+        .bind(request.destination_id)
+        .bind(&route_agent)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if route_matches_destination.is_none() {
+            return Err(StorageError::NotFound);
+        }
         let job = sqlx::query(
             "SELECT id,destination_id FROM jobs WHERE workspace_id=$1 AND environment_id=$2 AND id=$3 FOR UPDATE",
         )
@@ -1418,24 +1526,10 @@ impl DestinationTopologyRepository for PostgresStore {
         {
             return Err(StorageError::ConcurrentStateChange);
         }
-        let route_matches_destination: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM printer_routes WHERE workspace_id=$1 AND environment_id=$2 AND id=$3 AND destination_id=$4 AND enabled AND retired_at IS NULL)")
-            .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).bind(request.route_id).bind(request.destination_id).fetch_one(&mut *tx).await?;
-        if !route_matches_destination {
-            return Err(StorageError::NotFound);
-        }
         if job_destination.is_none() {
             sqlx::query("UPDATE jobs SET destination_id=$4,route_id=$5,updated_at=now() WHERE workspace_id=$1 AND environment_id=$2 AND id=$3 AND destination_id IS NULL")
                 .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).bind(request.job_id).bind(request.destination_id).bind(request.route_id).execute(&mut *tx).await?;
         }
-        // Serialize schedulers at the physical destination boundary, including
-        // schedulers choosing different node routes for the same printer.
-        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-            .bind(format!(
-                "{}:{}:{}",
-                scope.workspace_id, scope.environment_id, request.destination_id
-            ))
-            .execute(&mut *tx)
-            .await?;
         let unresolved: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM delivery_attempts attempt WHERE attempt.workspace_id=$1 AND attempt.environment_id=$2 AND attempt.destination_id=$3 AND attempt.state='delivery_uncertain' AND NOT EXISTS (SELECT 1 FROM delivery_uncertainty_resolutions resolution WHERE resolution.workspace_id=attempt.workspace_id AND resolution.environment_id=attempt.environment_id AND resolution.attempt_id=attempt.id))")
             .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).bind(request.destination_id).fetch_one(&mut *tx).await?;
         if unresolved {
@@ -2255,6 +2349,7 @@ struct MemoryState {
     wake_hints: HashMap<(TenantScope, String), (NodeWakeHint, String)>,
     acknowledgements: HashMap<(TenantScope, String, String), ProjectionAcknowledgement>,
     memberships: HashMap<(TenantScope, String, String), SiteCoordinatorMembership>,
+    revoked_agents: HashSet<(TenantScope, String)>,
     attempts: HashMap<(TenantScope, String), (DeliveryAttempt, String)>,
     reservations: HashMap<(TenantScope, String), RouteReservation>,
     uncertainty_resolutions: HashMap<(TenantScope, String), DeliveryUncertaintyResolution>,
@@ -2286,6 +2381,88 @@ fn write_state(
         .state
         .write()
         .map_err(|_| StorageError::InvalidData("memory topology lock poisoned".into()))
+}
+
+impl MemoryDestinationTopologyRepository {
+    /// Retires every route for a revoked node and records a tombstone so stale
+    /// inventory projection cannot recreate an eligible execution path.
+    pub fn revoke_agent_topology(
+        &self,
+        scope: TenantScope,
+        agent_id: &str,
+    ) -> Result<(), StorageError> {
+        let mut state = write_state(self)?;
+        state.revoked_agents.insert((scope, agent_id.to_owned()));
+        let affected = state
+            .routes
+            .iter()
+            .filter(|((tenant, _), route)| *tenant == scope && route.agent_id == agent_id)
+            .map(|((_, route_id), route)| (route_id.clone(), route.destination_id.clone()))
+            .collect::<Vec<_>>();
+        let affected_routes = affected
+            .iter()
+            .map(|(route_id, _)| route_id.clone())
+            .collect::<HashSet<_>>();
+        let affected_destinations = affected
+            .into_iter()
+            .map(|(_, destination_id)| destination_id)
+            .collect::<HashSet<_>>();
+        let now = Utc::now();
+        for ((tenant, route_id), route) in &mut state.routes {
+            if *tenant == scope && affected_routes.contains(route_id) {
+                route.enabled = false;
+                route.state = "retired".into();
+                route.role = "disabled".into();
+                route.updated_at = now;
+            }
+        }
+        for ((tenant, _, membership_agent), membership) in &mut state.memberships {
+            if *tenant == scope && membership_agent == agent_id {
+                membership.state = "revoked".into();
+            }
+        }
+        for ((tenant, _), (hint, _)) in &mut state.wake_hints {
+            if *tenant == scope && hint.agent_id == agent_id && hint.status == "pending" {
+                hint.status = "cancelled".into();
+            }
+        }
+        for ((tenant, _), (attempt, _)) in &mut state.attempts {
+            if *tenant == scope
+                && affected_routes.contains(&attempt.route_id)
+                && attempt.state == DeliveryAttemptState::RouteLeased
+            {
+                attempt.state = DeliveryAttemptState::Superseded;
+                attempt.final_at = Some(now);
+                attempt.updated_at = now;
+            }
+        }
+        for ((tenant, _), reservation) in &mut state.reservations {
+            if *tenant == scope
+                && affected_routes.contains(&reservation.route_id)
+                && reservation.state == "active"
+            {
+                reservation.state = "superseded".into();
+                reservation.released_at = Some(now);
+            }
+        }
+        let destinations_with_routes = state
+            .routes
+            .iter()
+            .filter(|((tenant, _), route)| *tenant == scope && route.enabled)
+            .map(|(_, route)| route.destination_id.clone())
+            .collect::<HashSet<_>>();
+        for destination_id in affected_destinations {
+            if !destinations_with_routes.contains(&destination_id)
+                && let Some(destination) = state.destinations.get_mut(&(scope, destination_id))
+            {
+                if destination.state != "attention" {
+                    destination.state = "unavailable".into();
+                }
+                destination.updated_at = now;
+            }
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -2343,6 +2520,12 @@ impl DestinationTopologyRepository for MemoryDestinationTopologyRepository {
         route: &StoredPrinterRoute,
     ) -> Result<(), StorageError> {
         let state = read_state(self)?;
+        if state
+            .revoked_agents
+            .contains(&(scope, route.agent_id.clone()))
+        {
+            return Err(StorageError::NotFound);
+        }
         if !state
             .destinations
             .contains_key(&(scope, route.destination_id.clone()))
@@ -3002,7 +3185,15 @@ impl DestinationTopologyRepository for MemoryDestinationTopologyRepository {
         scope: TenantScope,
         membership: &SiteCoordinatorMembership,
     ) -> Result<(), StorageError> {
-        write_state(self)?.memberships.insert(
+        let mut state = write_state(self)?;
+        if membership.state != "revoked"
+            && state
+                .revoked_agents
+                .contains(&(scope, membership.agent_id.clone()))
+        {
+            return Err(StorageError::NotFound);
+        }
+        state.memberships.insert(
             (
                 scope,
                 membership.authority_id.clone(),
@@ -3022,7 +3213,13 @@ impl DestinationTopologyRepository for MemoryDestinationTopologyRepository {
         if !state
             .routes
             .get(&(scope, request.route_id.to_owned()))
-            .is_some_and(|route| route.destination_id == request.destination_id && route.enabled)
+            .is_some_and(|route| {
+                route.destination_id == request.destination_id
+                    && route.enabled
+                    && !state
+                        .revoked_agents
+                        .contains(&(scope, route.agent_id.clone()))
+            })
         {
             return Err(StorageError::NotFound);
         }

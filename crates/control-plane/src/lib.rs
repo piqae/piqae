@@ -128,9 +128,12 @@ impl AppState {
         object_store: Arc<dyn ObjectStore>,
     ) -> Self {
         let (events, _) = broadcast::channel(1_024);
+        let destination_topology = repository
+            .memory_destination_topology()
+            .unwrap_or_else(|| Arc::new(MemoryDestinationTopologyRepository::default()));
         Self {
             repository,
-            destination_topology: Arc::new(MemoryDestinationTopologyRepository::default()),
+            destination_topology,
             // Tests deliberately use an explicit non-production fixture key.
             // Production replaces it from PIQAE_DESTINATION_IDENTITY_KEY.
             destination_identity_key: [0; 32],
@@ -1134,7 +1137,12 @@ mod tests {
             piqae_protocol::agent::WakeDeliveryChannel::ExternalPush
         );
 
-        let foreground = sync(3, NodeAvailability::Foreground, true);
+        let mut foreground = sync(3, NodeAvailability::Foreground, true);
+        foreground
+            .runtime
+            .as_mut()
+            .expect("runtime fixture")
+            .availability_class = NodeAvailabilityClass::WakeRelayCapable;
         let foreground_response = sync_agent_request(&application, &foreground).await;
         assert_eq!(foreground_response.candidate_jobs.len(), 1);
         assert!(foreground_response.wake_hints.is_empty());
@@ -1165,6 +1173,10 @@ mod tests {
         assert_eq!(
             runtime_page["data"][0]["node_id"],
             application.agent_id.to_string()
+        );
+        assert_eq!(
+            runtime_page["data"][0]["availability_class"], "wake_relay_capable",
+            "relay capability is persisted as telemetry without creating a trusted relay"
         );
         let cross_tenant_runtime = application
             .router
