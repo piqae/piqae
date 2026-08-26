@@ -10,6 +10,16 @@
   exchange the approval once. The capability is stored in Windows Credential
   Manager, not a configuration file.
 
+Installed-node consent never accepts an application name or signing claim from
+the SDK. The broker derives the package family or verified Authenticode signer
+and canonical executable identity from the accepted named-pipe client. Stored
+credentials are slotted by that executable and are rejected after the verified
+principal changes.
+
+Upgrading from a caller-claimed broker credential requires one fresh consent.
+After the verified credential is stored successfully, the SDK removes only the
+matching legacy application-ID credential entry.
+
 Cloud-capable embedded hosts must install a connector-key provider before the
 runtime starts:
 

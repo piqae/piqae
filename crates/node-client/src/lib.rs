@@ -11,11 +11,10 @@
 
 use async_trait::async_trait;
 use piqae_local_ipc::{
-    BROKER_PROTOCOL_MIN_VERSION, BROKER_PROTOCOL_VERSION, BrokerApplicationIdentity,
-    BrokerAuthorizationHandle, BrokerAuthorizationState, BrokerCapability, BrokerCredential,
-    BrokerOperation, BrokerRequest, BrokerResponse, BrokerResult, LocalOperation, LocalPrinter,
-    LocalResult, LocalStatus, broker_proof_key, broker_request_proof, broker_response_proof,
-    constant_time_proof_eq,
+    BROKER_PROTOCOL_MIN_VERSION, BROKER_PROTOCOL_VERSION, BrokerAuthorizationHandle,
+    BrokerAuthorizationState, BrokerCapability, BrokerCredential, BrokerOperation, BrokerRequest,
+    BrokerResponse, BrokerResult, LocalOperation, LocalPrinter, LocalResult, LocalStatus,
+    broker_proof_key, broker_request_proof, broker_response_proof, constant_time_proof_eq,
 };
 use piqae_node_runtime::{
     AttachPolicy, BrokerEndpoint, RuntimeDisposition, RuntimeSelectionError, select_runtime,
@@ -66,13 +65,12 @@ impl<T: BrokerTransport> NodeAuthorizationClient<T> {
 
     pub async fn request(
         &self,
-        application: BrokerApplicationIdentity,
         requested_capabilities: Vec<BrokerCapability>,
     ) -> Result<BrokerAuthorizationHandle, NodeClientError> {
         match request_transport(
             &self.transport,
             BrokerOperation::RequestAuthorization {
-                application,
+                application: None,
                 requested_capabilities,
             },
         )
@@ -434,7 +432,7 @@ mod tests {
     #[cfg(unix)]
     use piqae_node_runtime::{
         BrokerConsentHandle, BrokerRegistry, BrokerServerState, RuntimeCommand,
-        broker::serve_unix_broker,
+        broker::serve_unix_broker_with_test_peer,
     };
     #[cfg(unix)]
     use std::collections::BTreeMap;
@@ -636,10 +634,7 @@ mod tests {
             BrokerCapability::ObserveStatus,
             BrokerCapability::ObservePrinters,
         ];
-        let handle = authorization
-            .request(test_application("com.example.pos"), capabilities.clone())
-            .await
-            .unwrap();
+        let handle = authorization.request(capabilities.clone()).await.unwrap();
         assert_eq!(consent.pending().await.len(), 1);
         consent
             .decide(
@@ -673,16 +668,13 @@ mod tests {
         let restarted_authorization =
             NodeAuthorizationClient::new(UnixBrokerTransport::new(&socket));
         let denied = restarted_authorization
-            .request(
-                test_application("com.example.denied"),
-                vec![BrokerCapability::ObservePrinters],
-            )
+            .request(vec![BrokerCapability::ObservePrinters])
             .await
             .unwrap();
         let pending = restarted_consent.pending().await;
         let denied_id = pending
             .iter()
-            .find(|item| item.application.application_id == "com.example.denied")
+            .find(|item| item.application.application_id == "com.example.pos")
             .unwrap()
             .authorization_id;
         restarted_consent
@@ -711,10 +703,7 @@ mod tests {
             .await;
 
         let expiring = restarted_authorization
-            .request(
-                test_application("com.example.expired"),
-                vec![BrokerCapability::ObserveStatus],
-            )
+            .request(vec![BrokerCapability::ObserveStatus])
             .await
             .unwrap();
         let expired = BrokerAuthorizationHandle {
@@ -735,13 +724,10 @@ mod tests {
         socket: &std::path::Path,
     ) {
         let partial = authorization
-            .request(
-                test_application("com.example.partial"),
-                vec![
-                    BrokerCapability::ObserveStatus,
-                    BrokerCapability::ObservePrinters,
-                ],
-            )
+            .request(vec![
+                BrokerCapability::ObserveStatus,
+                BrokerCapability::ObservePrinters,
+            ])
             .await
             .unwrap();
         consent
@@ -810,7 +796,16 @@ mod tests {
         let socket = socket.to_path_buf();
         let server_socket = socket.clone();
         let server = tokio::spawn(async move {
-            serve_unix_broker(server_socket, state).await.unwrap();
+            let peer = piqae_local_ipc::deterministic_test_connection(
+                "com.example.pos",
+                "example-signer",
+                "node-client-test-process",
+            )
+            .evidence()
+            .clone();
+            serve_unix_broker_with_test_peer(server_socket, state, peer)
+                .await
+                .unwrap();
         });
         for _ in 0..100 {
             if tokio::net::UnixStream::connect(&socket).await.is_ok() {
@@ -820,14 +815,5 @@ mod tests {
         }
         assert!(tokio::net::UnixStream::connect(&socket).await.is_ok());
         (consent, server)
-    }
-
-    #[cfg(unix)]
-    fn test_application(application_id: &str) -> BrokerApplicationIdentity {
-        BrokerApplicationIdentity {
-            application_id: application_id.into(),
-            display_name: "Example app".into(),
-            signing_identity_sha256: None,
-        }
     }
 }

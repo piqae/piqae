@@ -22,6 +22,12 @@ application and its requested capabilities. If embedded isolation is selected,
 the app receives a distinct installation identity, state root, connector set,
 and printer route.
 
+The application does not tell the broker who it is. The accepted Unix socket or
+named-pipe connection supplies the verified application principal displayed in
+the consent prompt. Unsigned, invalid, other-user/session, or otherwise
+unverifiable clients fail closed. Capabilities are stored against that verified
+principal, so replacing the signer requires fresh consent.
+
 On macOS, automatic fallback to that distinct embedded installation is opt-in.
 An unavailable broker may use it only when `allowsEmbeddedFallback` is true;
 incompatible protocol, denied or partial consent, invalid proof, replay, and

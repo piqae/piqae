@@ -9,9 +9,8 @@ using System.Runtime.InteropServices;
 
 namespace Piqae.Node;
 
-public enum BrokerCapability { ObserveStatus, ObservePrinters, ManageProfiles, SubmitLocalJobs, ManageConnectors }
+public enum BrokerCapability { ObserveStatus, ObservePrinters, ObserveJobHistory, ManageProfiles, SubmitLocalJobs, ManageConnectors }
 
-public sealed record BrokerApplication(string ApplicationId, string DisplayName, string? SigningIdentitySha256 = null);
 public sealed record BrokerAuthorizationHandle(Guid AuthorizationId, string Nonce, long ExpiresUnixMs);
 public sealed record BrokerCredential(string ApplicationId, string Token)
 {
@@ -50,13 +49,11 @@ public sealed class PiqaeBrokerClient
     }
 
     public async Task<BrokerAuthorizationHandle> RequestAuthorizationAsync(
-        BrokerApplication application,
         IReadOnlyCollection<BrokerCapability> capabilities,
         CancellationToken cancellationToken = default)
     {
         var result = await RequestAsync("request_authorization", new
         {
-            application,
             requested_capabilities = capabilities
         }, cancellationToken).ConfigureAwait(false);
         return JsonSerializer.Deserialize<BrokerAuthorizationHandle>(result.GetRawText(), JsonOptions)
@@ -76,14 +73,18 @@ public sealed class PiqaeBrokerClient
         var credential = result.Deserialize<BrokerCredential>(JsonOptions)
             ?? throw new PiqaeNodeException("invalid_broker_response", "The broker response was incomplete.");
         var credentialBytes = JsonSerializer.SerializeToUtf8Bytes(credential, JsonOptions);
-        try { WindowsCredentialStore.WriteBytes(CredentialTarget(credential.ApplicationId), credentialBytes); }
+        try
+        {
+            WindowsCredentialStore.WriteBytes(CredentialTarget(), credentialBytes);
+            WindowsCredentialStore.DeleteRequired(LegacyCredentialTarget(credential.ApplicationId));
+        }
         finally { CryptographicOperations.ZeroMemory(credentialBytes); }
         return credential;
     }
 
-    public BrokerCredential? LoadStoredCredential(string applicationId)
+    public BrokerCredential? LoadStoredCredential()
     {
-        var stored = WindowsCredentialStore.ReadBytes(CredentialTarget(applicationId));
+        var stored = WindowsCredentialStore.ReadBytes(CredentialTarget());
         if (stored is null) return null;
         try { return JsonSerializer.Deserialize<BrokerCredential>(stored, JsonOptions); }
         finally { CryptographicOperations.ZeroMemory(stored); }
@@ -142,7 +143,17 @@ public sealed class PiqaeBrokerClient
         }, cancellationToken).ConfigureAwait(false);
     }
 
-    private string CredentialTarget(string applicationId) => $"Piqae.Node/{_pipeName}/{applicationId}";
+    private string CredentialTarget()
+    {
+        var executable = Path.GetFullPath(Environment.ProcessPath
+            ?? throw new InvalidOperationException("The current executable path is unavailable."))
+            .Replace('/', '\\').ToLowerInvariant();
+        var processSlot = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(executable))
+            .AsSpan(0, 16)).ToLowerInvariant();
+        return $"Piqae.Node/{_pipeName}/{processSlot}";
+    }
+
+    private string LegacyCredentialTarget(string applicationId) => $"Piqae.Node/{_pipeName}/{applicationId}";
 
     private async Task<JsonElement> RequestAsync(string operationType, object fields, CancellationToken cancellationToken)
     {

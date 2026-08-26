@@ -125,6 +125,13 @@ broker. Presence discovery reveals no tenant or printer information. Attaching
 an app requires an explicit local consent transaction and issues an app-scoped,
 revocable capability. The app never reads the node's bootstrap token.
 
+Consent identity comes only from the accepted local transport. macOS binds the
+socket audit token and current user to a strictly valid Security.framework code
+identity. Windows binds the named-pipe client process, user, session, package
+family or verified Authenticode signer, and canonical executable while holding
+the process handle. An unverifiable peer cannot request consent or use a
+capability. A signer/principal change invalidates the durable grant.
+
 One installation lock protects each state root. A second runtime must attach,
 choose a different app-scoped root, or fail with a typed `nodeAlreadyRunning`
 error. It may never recover by opening the existing SQLite files directly.
