@@ -17,6 +17,8 @@ print jobs through the same API used by the dashboard.
   printer, capture a native profile, and send a test job.
 - [legacy-provider migration](api/legacy-compatibility.md) — switch the tested
   compatibility subset, then adopt native Piqae resources.
+- [Embeddable node runtime RFC](rfcs/0001-embeddable-node-runtime.md) — shared
+  desktop/iPad SDK, lifecycle, identity, queue, and coexistence contract.
 
 ## Build an integration
 
