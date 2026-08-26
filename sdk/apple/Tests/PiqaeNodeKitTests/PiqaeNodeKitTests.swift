@@ -4,6 +4,37 @@ import XCTest
 import PiqaeNodeKitTesting
 
 final class PiqaeNodeKitTests: XCTestCase {
+    func testLinkedNativeRuntimeArtifactStartsWhenPresent() async throws {
+        let applicationID = "com.piqae.tests.linked.\(UUID().uuidString.lowercased())"
+        let stateDirectory = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/Piqae/embedded", isDirectory: true)
+            .appendingPathComponent(applicationID, isDirectory: true)
+        let runtime = PiqaeNativeRuntime(
+            configuration: PiqaeNativeRuntimeConfiguration(
+                applicationID: applicationID,
+                dataDirectory: "linked-test",
+                availability: .continuousWhileAwake,
+                localOnly: true
+            ),
+            keyStore: PiqaeFixedHostKeyStore()
+        )
+        do {
+            try await runtime.start()
+        } catch PiqaeNativeRuntimeError.libraryUnavailable {
+            throw XCTSkip("The source-only package intentionally has no linked native artifact.")
+        }
+        addTeardownBlock {
+            try await runtime.stop()
+            try? FileManager.default.removeItem(at: stateDirectory)
+        }
+        let opaque = try await runtime.deriveOpaqueID(
+            namespace: "linked-test",
+            canonicalIdentity: Data("printer-fixture".utf8)
+        )
+        XCTAssertTrue(opaque.hasPrefix("pid_"))
+        try await runtime.stop()
+    }
+
     func testNativeRuntimeBindsLifecycleAndOpaqueEvidenceWhenArtifactIsProvided() async throws {
         guard
             let path = ProcessInfo.processInfo.environment["PIQAE_NODE_FFI_LIBRARY"],

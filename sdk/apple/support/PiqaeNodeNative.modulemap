@@ -1,0 +1,4 @@
+module PiqaeNodeNative {
+  header "piqae_node.h"
+  export *
+}
