@@ -1611,6 +1611,7 @@ fn reconcile_content_root(store: &AgentStore, content_root: &Path) -> Result<()>
         }
         entries.push(entry?);
     }
+    #[cfg(unix)]
     let mut removed = false;
     for entry in entries {
         let path = entry.path();
@@ -1619,7 +1620,10 @@ fn reconcile_content_root(store: &AgentStore, content_root: &Path) -> Result<()>
             && !tracked.contains(&path)
         {
             std::fs::remove_file(&path)?;
-            removed = true;
+            #[cfg(unix)]
+            {
+                removed = true;
+            }
         }
     }
     #[cfg(unix)]

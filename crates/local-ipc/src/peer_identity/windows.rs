@@ -50,6 +50,11 @@ const MAX_SIGNED_IMAGE_BYTES: u64 = 512 * 1024 * 1024;
 #[derive(Debug)]
 pub(super) struct OwnedProcess(HANDLE);
 
+// SAFETY: this type exclusively owns a process HANDLE returned by OpenProcess.
+// Windows process handles may be used and closed from any thread, and the raw
+// value is never exposed or accessed without ownership of `OwnedProcess`.
+unsafe impl Send for OwnedProcess {}
+
 impl Drop for OwnedProcess {
     fn drop(&mut self) {
         if !self.0.is_null() {
