@@ -108,7 +108,8 @@ class CiChangedPathsTests(unittest.TestCase):
         selected = classify([".github/workflows/release.yml"])
         self.assertTrue(selected["release_tooling"])
         self.assertTrue(selected["macos_packaging"] and selected["windows_installer"])
-        self.assertFalse(selected["sdk"] or selected["web"] or selected["terraform"])
+        self.assertTrue(selected["sdk"])
+        self.assertFalse(selected["web"] or selected["terraform"])
 
     def test_ci_classifier_change_exercises_all_scopes(self) -> None:
         self.assertEqual(

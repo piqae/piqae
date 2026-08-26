@@ -110,7 +110,7 @@ def classify(paths: Iterable[str], *, run_all: bool = False) -> dict[str, bool]:
         if path.startswith(".github/workflows/"):
             selected["release_tooling"] = True
             name = path.removeprefix(".github/workflows/")
-            selected["sdk"] |= name == "sdk-release.yml"
+            selected["sdk"] |= name in {"sdk-release.yml", "release.yml"}
             selected["mcp"] |= name == "mcp-release.yml"
             selected["shopify"] |= name == "shopify-deploy.yml"
             selected["dependency_policy"] |= name == "supply-chain.yml"
