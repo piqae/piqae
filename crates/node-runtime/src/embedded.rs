@@ -451,6 +451,16 @@ impl EmbeddedQueue {
         } else {
             revision
         };
+        let runtime_sequence = store
+            .setting("runtime_observation_sequence")?
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(0)
+            .checked_add(1)
+            .context("embedded runtime observation sequence exhausted")?;
+        store.set_setting(
+            "runtime_observation_sequence",
+            &runtime_sequence.to_string(),
+        )?;
         let counts = store.queue_counts()?;
         let events = store
             .pending_cloud_events(0, 100)?
@@ -493,7 +503,11 @@ impl EmbeddedQueue {
             route_observations: Vec::new(),
             topology_changes: Vec::new(),
             native_handoffs: Vec::new(),
-            runtime: Some(runtime.observation(1, Utc::now(), std::time::Duration::from_secs(90))),
+            runtime: Some(runtime.observation(
+                runtime_sequence,
+                Utc::now(),
+                std::time::Duration::from_secs(90),
+            )),
         })
     }
 
@@ -1636,6 +1650,47 @@ mod tests {
             },
             route_reservation: None,
         }
+    }
+
+    #[test]
+    fn connector_runtime_presence_sequence_is_monotonic_across_restart() {
+        let root = tempfile::tempdir().unwrap();
+        let runtime = crate::NodeRuntime::start(crate::RuntimeConfiguration {
+            data_directory: root.path().join("runtime"),
+            mode: crate::NodeRuntimeMode::CloudCapable,
+            host: crate::HostCapabilities {
+                host_kind: crate::HostKind::EmbeddedApplication,
+                availability: crate::AvailabilityClass::ForegroundOnly,
+                secure_storage: true,
+                local_ipc_broker: false,
+                can_prevent_idle_sleep_during_handoff: false,
+                can_receive_remote_wake_hint: false,
+                printer_transports: BTreeSet::new(),
+            },
+        })
+        .unwrap();
+        let started_at = Utc::now();
+        let agent_id = AgentId::new();
+        let mut queue =
+            EmbeddedQueue::open(root.path().join("embedded"), SupportPackRegistry::default())
+                .unwrap();
+        let first = queue
+            .connector_sync_snapshot("ncon_presence", agent_id, started_at, false, None, &runtime)
+            .unwrap();
+        let second = queue
+            .connector_sync_snapshot("ncon_presence", agent_id, started_at, false, None, &runtime)
+            .unwrap();
+        assert_eq!(first.runtime.unwrap().sequence, 1);
+        assert_eq!(second.runtime.unwrap().sequence, 2);
+        drop(queue);
+
+        let mut restarted =
+            EmbeddedQueue::open(root.path().join("embedded"), SupportPackRegistry::default())
+                .unwrap();
+        let third = restarted
+            .connector_sync_snapshot("ncon_presence", agent_id, started_at, false, None, &runtime)
+            .unwrap();
+        assert_eq!(third.runtime.unwrap().sequence, 3);
     }
 
     #[test]
