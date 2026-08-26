@@ -230,33 +230,46 @@ public sealed class WindowsCredentialHostKeyProvider(string installationScope) :
         if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException();
         if (string.IsNullOrWhiteSpace(keyScope) || keyScope.Length > 64) throw new ArgumentException("Invalid key scope.", nameof(keyScope));
         var target = $"{_targetPrefix}/{keyScope}";
-        var stored = WindowsCredentialStore.Read(target);
-        byte[] key;
-        if (stored is null)
+        var mutexName = $@"Local\Piqae.Node.opaque-key.{Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(target)))}";
+        using var mutex = new Mutex(false, mutexName);
+        var ownsMutex = false;
+        try
         {
-            key = RandomNumberGenerator.GetBytes(32);
-            WindowsCredentialStore.Write(target, Convert.ToBase64String(key));
-            var verified = WindowsCredentialStore.Read(target);
-            byte[]? verifiedKey = null;
-            try
+            try { ownsMutex = mutex.WaitOne(TimeSpan.FromSeconds(5)); }
+            catch (AbandonedMutexException) { ownsMutex = true; }
+            if (!ownsMutex) throw new TimeoutException("Timed out waiting for the installation host-key lock.");
+            // Re-read only after acquiring the installation/scope mutex so two
+            // app processes can never both create different keys and race the
+            // Credential Manager replacement.
+            var stored = WindowsCredentialStore.Read(target);
+            byte[] key;
+            if (stored is null)
             {
-                verifiedKey = verified is null ? null : Convert.FromBase64String(verified);
-                if (verifiedKey is null || !CryptographicOperations.FixedTimeEquals(key, verifiedKey))
-                    throw new CryptographicException("The host key could not be verified in Windows Credential Manager.");
+                key = RandomNumberGenerator.GetBytes(32);
+                WindowsCredentialStore.Write(target, Convert.ToBase64String(key));
+                var verified = WindowsCredentialStore.Read(target);
+                byte[]? verifiedKey = null;
+                try
+                {
+                    verifiedKey = verified is null ? null : Convert.FromBase64String(verified);
+                    if (verifiedKey is null || !CryptographicOperations.FixedTimeEquals(key, verifiedKey))
+                        throw new CryptographicException("The host key could not be verified in Windows Credential Manager.");
+                }
+                catch { CryptographicOperations.ZeroMemory(key); throw; }
+                finally { if (verifiedKey is not null) CryptographicOperations.ZeroMemory(verifiedKey); }
             }
-            catch { CryptographicOperations.ZeroMemory(key); throw; }
-            finally { if (verifiedKey is not null) CryptographicOperations.ZeroMemory(verifiedKey); }
-        }
-        else
-        {
-            key = Convert.FromBase64String(stored);
-            if (key.Length != 32)
+            else
             {
-                CryptographicOperations.ZeroMemory(key);
-                throw new CryptographicException("Windows Credential Manager returned invalid host key material.");
+                key = Convert.FromBase64String(stored);
+                if (key.Length != 32)
+                {
+                    CryptographicOperations.ZeroMemory(key);
+                    throw new CryptographicException("Windows Credential Manager returned invalid host key material.");
+                }
             }
+            try { return HMACSHA256.HashData(key, message); }
+            finally { CryptographicOperations.ZeroMemory(key); }
         }
-        try { return HMACSHA256.HashData(key, message); }
-        finally { CryptographicOperations.ZeroMemory(key); }
+        finally { if (ownsMutex) mutex.ReleaseMutex(); }
     }
 }

@@ -33,6 +33,8 @@ public sealed record PrinterObservation(
     bool IsDefault,
     JsonElement NativeOptions);
 
+public sealed record PrinterProfileInput(string Name, bool IsDefault, string OptionsJson);
+
 public enum AdapterOperationOutcomeKind
 {
     RejectedBeforeHandoff,
@@ -50,6 +52,7 @@ public sealed class PiqaeNode : IDisposable
         Converters = { new JsonStringEnumConverter(JsonNamingPolicy.SnakeCaseLower) }
     };
 
+    private readonly object _gate = new();
     private ulong _handle;
     private bool _disposed;
     private GCHandle? _hostKeyHandle;
@@ -58,6 +61,9 @@ public sealed class PiqaeNode : IDisposable
     public PiqaeNode(PiqaeNodeOptions options)
     {
         ArgumentNullException.ThrowIfNull(options);
+        var descriptor = NativeMethods.piqae_node_abi_descriptor();
+        if (descriptor.AbiVersion != 1 || descriptor.ContractMin > 1 || descriptor.ContractMax < 1)
+            throw new PiqaeNodeException("unsupported_native_abi", "The native Piqae runtime ABI is not compatible with this SDK.");
         var payload = JsonSerializer.SerializeToUtf8Bytes(new
         {
             contract = 1,
@@ -176,6 +182,38 @@ public sealed class PiqaeNode : IDisposable
         printer_id = printerId
     });
 
+    public JsonElement CreateProfile(string printerId, PrinterProfileInput profile) => Command(new
+    {
+        type = "create_profile",
+        printer_id = printerId,
+        name = profile.Name,
+        is_default = profile.IsDefault,
+        options_json = profile.OptionsJson
+    });
+
+    public JsonElement UpdateProfile(
+        string printerId,
+        string profileId,
+        ulong expectedRevision,
+        PrinterProfileInput profile) => Command(new
+    {
+        type = "update_profile",
+        printer_id = printerId,
+        profile_id = profileId,
+        expected_revision = expectedRevision,
+        name = profile.Name,
+        is_default = profile.IsDefault,
+        options_json = profile.OptionsJson
+    });
+
+    public JsonElement DeleteProfile(string printerId, string profileId, ulong expectedRevision) => Command(new
+    {
+        type = "delete_profile",
+        printer_id = printerId,
+        profile_id = profileId,
+        expected_revision = expectedRevision
+    });
+
     public JsonElement ConnectorSnapshots() => Command(new { type = "connector_snapshots" });
 
     public JsonElement RevokeConnector(string connectorId) => Command(new
@@ -186,70 +224,96 @@ public sealed class PiqaeNode : IDisposable
 
     public void ConfigureHostKeyProvider(IPiqaeHostKeyProvider provider)
     {
-        ThrowIfDisposed();
         ArgumentNullException.ThrowIfNull(provider);
-        if (_hostKeyHandle.HasValue) throw new InvalidOperationException("A host key provider is already configured.");
-        var handle = GCHandle.Alloc(provider);
-        HmacCallback callback = HostHmacCallback;
-        var native = new NativeHostKeyProvider
+        lock (_gate)
         {
-            Context = GCHandle.ToIntPtr(handle),
-            HmacSha256 = Marshal.GetFunctionPointerForDelegate(callback)
-        };
-        try
-        {
-            using var ignored = NativeResponse.Call(_handle, native, NativeMethods.piqae_node_set_host_key_provider);
-            _hostKeyHandle = handle;
-            _hostKeyCallback = callback;
+            ThrowIfDisposed();
+            if (_hostKeyHandle.HasValue) throw new InvalidOperationException("A host key provider is already configured.");
+            var handle = GCHandle.Alloc(provider);
+            HmacCallback callback = HostHmacCallback;
+            var native = new NativeHostKeyProvider
+            {
+                Context = GCHandle.ToIntPtr(handle),
+                HmacSha256 = Marshal.GetFunctionPointerForDelegate(callback)
+            };
+            try
+            {
+                using var ignored = NativeResponse.Call(_handle, native, NativeMethods.piqae_node_set_host_key_provider);
+                _hostKeyHandle = handle;
+                _hostKeyCallback = callback;
+            }
+            catch { handle.Free(); throw; }
         }
-        catch { handle.Free(); throw; }
     }
 
     public string DeriveOpaqueEvidence(string namespaceName, string canonicalIdentity)
     {
-        ThrowIfDisposed();
-        var payload = JsonSerializer.SerializeToUtf8Bytes(new
+        lock (_gate)
         {
-            type = "derive_opaque_evidence",
-            @namespace = namespaceName,
-            canonical_identity = canonicalIdentity
-        }, JsonOptions);
-        using var response = NativeResponse.Call(_handle, payload, NativeMethods.piqae_node_command);
-        return response.Data.GetProperty("opaque_evidence").GetString()
-            ?? throw new PiqaeNodeException("invalid_native_response", "The native runtime returned incomplete evidence.");
+            ThrowIfDisposed();
+            var payload = JsonSerializer.SerializeToUtf8Bytes(new
+            {
+                type = "derive_opaque_evidence",
+                @namespace = namespaceName,
+                canonical_identity = canonicalIdentity
+            }, JsonOptions);
+            using var response = NativeResponse.Call(_handle, payload, NativeMethods.piqae_node_command);
+            return response.Data.GetProperty("opaque_evidence").GetString()
+                ?? throw new PiqaeNodeException("invalid_native_response", "The native runtime returned incomplete evidence.");
+        }
     }
+
+    ~PiqaeNode() => Dispose(false);
 
     public void Dispose()
     {
-        if (_disposed) return;
-        _disposed = true;
-        if (_handle != 0)
-        {
-            using var ignored = NativeResponse.Call(_handle, NativeMethods.piqae_node_destroy, throwOnError: false);
-            _handle = 0;
-        }
-        if (_hostKeyHandle is { } hostKeyHandle)
-        {
-            hostKeyHandle.Free();
-            _hostKeyHandle = null;
-            _hostKeyCallback = null;
-        }
+        Dispose(true);
         GC.SuppressFinalize(this);
+    }
+
+    private void Dispose(bool disposing)
+    {
+        lock (_gate)
+        {
+            if (_disposed) return;
+            _disposed = true;
+            if (_handle != 0)
+            {
+                try
+                {
+                    using var ignored = NativeResponse.Call(_handle, NativeMethods.piqae_node_destroy, throwOnError: false);
+                }
+                catch when (!disposing) { }
+                finally { _handle = 0; }
+            }
+            if (_hostKeyHandle is { } hostKeyHandle)
+            {
+                hostKeyHandle.Free();
+                _hostKeyHandle = null;
+                _hostKeyCallback = null;
+            }
+        }
     }
 
     private JsonElement CallHandle(Func<ulong, NativeBuffer> operation)
     {
-        ThrowIfDisposed();
-        using var response = NativeResponse.Call(_handle, operation);
-        return response.Data.Clone();
+        lock (_gate)
+        {
+            ThrowIfDisposed();
+            using var response = NativeResponse.Call(_handle, operation);
+            return response.Data.Clone();
+        }
     }
 
     private JsonElement Command(object command)
     {
-        ThrowIfDisposed();
-        var payload = JsonSerializer.SerializeToUtf8Bytes(command, JsonOptions);
-        using var response = NativeResponse.Call(_handle, payload, NativeMethods.piqae_node_command);
-        return response.Data.Clone();
+        lock (_gate)
+        {
+            ThrowIfDisposed();
+            var payload = JsonSerializer.SerializeToUtf8Bytes(command, JsonOptions);
+            using var response = NativeResponse.Call(_handle, payload, NativeMethods.piqae_node_command);
+            return response.Data.Clone();
+        }
     }
 
     private void ThrowIfDisposed() => ObjectDisposedException.ThrowIf(_disposed, this);
@@ -312,10 +376,19 @@ internal readonly struct NativeBuffer
     public readonly nuint Length;
 }
 
+[StructLayout(LayoutKind.Sequential)]
+internal readonly struct NativeAbiDescriptor
+{
+    public readonly ushort AbiVersion;
+    public readonly ushort ContractMin;
+    public readonly ushort ContractMax;
+}
+
 internal static class NativeMethods
 {
     private const string Library = "piqae_node_ffi";
 
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)] internal static extern NativeAbiDescriptor piqae_node_abi_descriptor();
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)] internal static extern NativeBuffer piqae_node_create(byte[] data, nuint length);
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)] internal static extern NativeBuffer piqae_node_start(ulong handle);
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)] internal static extern NativeBuffer piqae_node_set_host_key_provider(ulong handle, NativeHostKeyProvider provider);

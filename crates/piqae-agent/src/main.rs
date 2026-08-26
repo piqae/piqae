@@ -777,6 +777,12 @@ async fn main() -> Result<()> {
 
     std::fs::create_dir_all(&arguments.data_dir)
         .with_context(|| format!("create {}", arguments.data_dir.display()))?;
+    // Loading is intentionally fail-closed: a corrupt or unsupported
+    // multi-connector registry must not silently fall back to another tenant's
+    // legacy identity. Approved connectors make even the otherwise local
+    // launch mode cloud-capable.
+    let connector_registry = connector_runtime::ConnectorRegistry::load(&arguments.data_dir)?;
+    let configured_connectors = connector_registry.enabled().count();
     let printer_transports = match arguments.executor {
         ExecutorMode::Disabled => std::collections::BTreeSet::new(),
         ExecutorMode::Fake => std::iter::once(PrinterTransport::Fake).collect(),
@@ -786,11 +792,7 @@ async fn main() -> Result<()> {
     };
     let node_runtime = Arc::new(NodeRuntime::start(RuntimeConfiguration {
         data_directory: arguments.data_dir.clone(),
-        mode: if arguments.mode == AgentMode::Local {
-            NodeRuntimeMode::LocalOnly
-        } else {
-            NodeRuntimeMode::CloudCapable
-        },
+        mode: runtime_mode(arguments.mode, configured_connectors),
         host: HostCapabilities {
             host_kind: HostKind::UserAgent,
             availability: AvailabilityClass::ContinuousWhileAwake,
@@ -802,11 +804,6 @@ async fn main() -> Result<()> {
         },
     })?);
     let _ = node_runtime.apply_lifecycle(LifecycleEvent::Started);
-    // Loading is intentionally fail-closed: a corrupt or unsupported
-    // multi-connector registry must not silently fall back to another tenant's
-    // legacy identity. An absent registry preserves single-connector behavior.
-    let connector_registry = connector_runtime::ConnectorRegistry::load(&arguments.data_dir)?;
-    let configured_connectors = connector_registry.enabled().count();
     let database_path = arguments.data_dir.join("agent.sqlite3");
     let store = AgentStore::open(&database_path)
         .with_context(|| format!("open {}", database_path.display()))?;
@@ -4184,19 +4181,21 @@ async fn sync_succeeded(response: AgentSyncResponse, context: SyncContext<'_>) -
             .store(true, Ordering::Release);
     }
     if let Some(sequence) = acknowledged_handoff_sequence {
-        if let Err(error) = context
+        // Compact the coordinator's durable replay barriers first. If the
+        // process stops between these two commits it may resend an already
+        // acknowledged range, but it can never advance a cursor past retained
+        // native-handoff evidence.
+        let acknowledgement = {
+            let mut coordinator = context.route_coordinator.lock().await;
+            coordinator.acknowledge_handoffs(&context.cloud.connector_id, sequence)
+        };
+        if let Err(error) = acknowledgement {
+            warn!(%error, "native handoff replay barriers could not be compacted");
+        } else if let Err(error) = context
             .store
             .set_setting("acknowledged_handoff_sequence", &sequence.to_string())
         {
-            warn!(%error, "native handoff acknowledgement could not be persisted");
-        } else {
-            let acknowledgement = {
-                let mut coordinator = context.route_coordinator.lock().await;
-                coordinator.acknowledge_handoffs(&context.cloud.connector_id, sequence)
-            };
-            if let Err(error) = acknowledgement {
-                warn!(%error, "native handoff replay barriers could not be compacted");
-            }
+            warn!(%error, "native handoff acknowledgement cursor could not be persisted");
         }
     }
     apply_commands(
@@ -4226,6 +4225,14 @@ async fn sync_succeeded(response: AgentSyncResponse, context: SyncContext<'_>) -
         }
     }
     Duration::from_millis(next_poll_after_ms.clamp(250, 60_000))
+}
+
+const fn runtime_mode(mode: AgentMode, configured_connectors: usize) -> NodeRuntimeMode {
+    if matches!(mode, AgentMode::Local) && configured_connectors == 0 {
+        NodeRuntimeMode::LocalOnly
+    } else {
+        NodeRuntimeMode::CloudCapable
+    }
 }
 
 fn wake_hints_request_reconcile(
@@ -5841,6 +5848,30 @@ mod tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    #[test]
+    fn approved_connectors_enable_cloud_runtime_in_every_launch_mode() {
+        assert_eq!(
+            runtime_mode(AgentMode::Local, 0),
+            NodeRuntimeMode::LocalOnly
+        );
+        assert_eq!(
+            runtime_mode(AgentMode::Local, 1),
+            NodeRuntimeMode::CloudCapable
+        );
+        assert_eq!(
+            runtime_mode(AgentMode::Local, 3),
+            NodeRuntimeMode::CloudCapable
+        );
+        assert_eq!(
+            runtime_mode(AgentMode::Hosted, 0),
+            NodeRuntimeMode::CloudCapable
+        );
+        assert_eq!(
+            runtime_mode(AgentMode::SelfHosted, 0),
+            NodeRuntimeMode::CloudCapable
+        );
+    }
 
     fn test_node_runtime(root: &Path) -> NodeRuntime {
         NodeRuntime::start(RuntimeConfiguration {
