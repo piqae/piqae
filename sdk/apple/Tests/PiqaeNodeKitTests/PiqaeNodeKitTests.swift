@@ -490,12 +490,16 @@ final class PiqaeNodeKitTests: XCTestCase {
     }
 
     func testExplicitCloudConnectionReplacesLocalOnlySentinel() async throws {
+        let runtime = PiqaeFakeEmbeddedRuntime(
+            connector: runtimeConnector(id: "ncon_explicit", workspace: "Explicit workspace")
+        )
         let node = PiqaeNode(
             .localOnly(
                 startupMode: .embedded,
                 identityStore: PiqaeMemoryInstallationIdentityStore(
                     id: .init(rawValue: "ins_explicit_connect")
-                )
+                ),
+                embeddedRuntime: runtime
             )
         )
         try await node.start()
@@ -508,8 +512,7 @@ final class PiqaeNodeKitTests: XCTestCase {
         )
         let cloud = try PiqaeCloudConfiguration(
             authorityURL: XCTUnwrap(URL(string: "https://api.piqae.com")),
-            invitation: PiqaeSensitiveString("invitation"),
-            provider: PiqaeFakeEnrollmentProvider(connection: connection)
+            invitation: PiqaeSensitiveString("invitation")
         )
 
         _ = try await node.connections.connect(cloud)
@@ -517,9 +520,20 @@ final class PiqaeNodeKitTests: XCTestCase {
         XCTAssertEqual(connections, [connection])
     }
 
+    func testConnectionEnrollmentRequiresStartedNode() async throws {
+        let node = PiqaeNode(.localOnly(startupMode: .embedded))
+        let cloud = try PiqaeCloudConfiguration(
+            authorityURL: XCTUnwrap(URL(string: "https://api.piqae.com")),
+            invitation: PiqaeSensitiveString("invitation")
+        )
+        await XCTAssertThrowsErrorAsync(try await node.connections.connect(cloud)) { error in
+            XCTAssertEqual(error as? PiqaeNodeError, .notStarted)
+        }
+    }
+
     func testAutomaticDesktopModeAttachesBeforeStartingEmbeddedRuntime() async throws {
         let remote = attachedSnapshot()
-        let ipc = PiqaeFakeInstalledNodeIPC(protocolVersion: 1, snapshot: remote)
+        let ipc = PiqaeFakeInstalledNodeIPC(protocolVersion: 4, snapshot: remote)
         let embeddedAdapter = PiqaeFakePrinterAdapter(
             printers: [PiqaeFakePrinterAdapter.printer(id: "must_not_be_used")]
         )
@@ -559,7 +573,7 @@ final class PiqaeNodeKitTests: XCTestCase {
         } catch let error as PiqaeNodeError {
             XCTAssertEqual(
                 error,
-                .incompatibleInstalledNode(found: 99, supported: 1 ... 1)
+                .incompatibleInstalledNode(found: 99, supported: 4 ... 4)
             )
         }
         let degradedSnapshot = await node.snapshot()
@@ -573,12 +587,13 @@ final class PiqaeNodeKitTests: XCTestCase {
             workspaceName: "Managed shop",
             state: .connected
         )
-        let provider = PiqaeFakeEnrollmentProvider(connection: connection)
+        let runtime = PiqaeFakeEmbeddedRuntime(
+            connector: runtimeConnector(id: "ncon_cloud", workspace: "Managed shop")
+        )
         let invitation = try PiqaeSensitiveString("one-use-invitation")
         let cloud = try PiqaeCloudConfiguration(
             authorityURL: XCTUnwrap(URL(string: "https://api.piqae.com")),
-            invitation: invitation,
-            provider: provider
+            invitation: invitation
         )
         let node = PiqaeNode(
             PiqaeNodeConfiguration(
@@ -586,14 +601,15 @@ final class PiqaeNodeKitTests: XCTestCase {
                 connectivity: .cloud(cloud),
                 identityStore: PiqaeMemoryInstallationIdentityStore(
                     id: .init(rawValue: "ins_cloud_test")
-                )
+                ),
+                embeddedRuntime: runtime
             )
         )
         try await node.start()
         defer { Task { await node.stop() } }
 
         let connections = try await node.connections.list()
-        let enrollmentRequestCount = await provider.requestCount()
+        let enrollmentRequestCount = await runtime.connectCount
         XCTAssertEqual(connections, [connection])
         XCTAssertEqual(enrollmentRequestCount, 1)
         XCTAssertEqual(invitation.description, "<redacted>")
@@ -606,14 +622,14 @@ final class PiqaeNodeKitTests: XCTestCase {
         )
         let cloud = try PiqaeCloudConfiguration(
             authorityURL: XCTUnwrap(URL(string: "https://api.piqae.com")),
-            invitation: PiqaeSensitiveString("single-use-invitation"),
-            provider: RejectingEnrollmentProvider()
+            invitation: PiqaeSensitiveString("single-use-invitation")
         )
         let failed = PiqaeNode(
             PiqaeNodeConfiguration(
                 startupMode: .embedded,
                 connectivity: .cloud(cloud),
-                identityStore: identity
+                identityStore: identity,
+                embeddedRuntime: PiqaeFakeEmbeddedRuntime(failsToConnect: true)
             )
         )
 
@@ -629,19 +645,16 @@ final class PiqaeNodeKitTests: XCTestCase {
 
     func testCloudAuthorityRejectsCredentialsAndQuerySecrets() throws {
         let invitation = try PiqaeSensitiveString("invitation")
-        let provider = RejectingEnrollmentProvider()
         XCTAssertThrowsError(
             try PiqaeCloudConfiguration(
                 authorityURL: XCTUnwrap(URL(string: "https://api.piqae.com?token=secret")),
-                invitation: invitation,
-                provider: provider
+                invitation: invitation
             )
         )
         XCTAssertThrowsError(
             try PiqaeCloudConfiguration(
                 authorityURL: XCTUnwrap(URL(string: "https://user:pass@api.piqae.com")),
-                invitation: invitation,
-                provider: provider
+                invitation: invitation
             )
         )
     }
@@ -868,13 +881,15 @@ final class PiqaeNodeKitTests: XCTestCase {
             lastUpdatedAt: Date(timeIntervalSince1970: 1_700_000_000)
         )
     }
-}
 
-private actor RejectingEnrollmentProvider: PiqaeCloudEnrollmentProvider {
-    struct Rejected: Error {}
-
-    func enroll(_ request: PiqaeEnrollmentRequest) async throws -> PiqaeConnection {
-        throw Rejected()
+    private func runtimeConnector(id: String, workspace: String) -> PiqaeRuntimeConnectorSnapshot {
+        PiqaeRuntimeConnectorSnapshot(
+            connectorID: id,
+            controlPlaneURL: URL(string: "https://api.piqae.com")!,
+            displayName: "Piqae Cloud",
+            workspaceName: workspace,
+            enabled: true
+        )
     }
 }
 

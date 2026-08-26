@@ -186,6 +186,12 @@ pub struct LocalCreateJob {
     #[serde(default)]
     pub printer_native_id: Option<String>,
     pub title: String,
+    /// Caller-scoped retry identity. Broker callers prefix this with their
+    /// durable application identity before it enters the shared queue.
+    #[serde(default)]
+    pub idempotency_key: Option<String>,
+    #[serde(default)]
+    pub profile_id: Option<String>,
     pub content_kind: piqae_domain::ContentKind,
     pub content: LocalContent,
     #[serde(default)]

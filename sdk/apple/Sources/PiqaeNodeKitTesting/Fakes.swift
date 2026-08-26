@@ -13,14 +13,24 @@ public actor PiqaeMemoryInstallationIdentityStore: PiqaeInstallationIdentityStor
 
 public actor PiqaeFakeEmbeddedRuntime: PiqaeEmbeddedNodeRuntime {
     public enum StartFailure: Error { case requested }
+    public enum ConnectFailure: Error { case requested }
 
     private let failsToStart: Bool
+    private let failsToConnect: Bool
+    private let connector: PiqaeRuntimeConnectorSnapshot?
     public private(set) var startCount = 0
     public private(set) var stopCount = 0
+    public private(set) var connectCount = 0
     public private(set) var lifecycleEvents: [PiqaeHostLifecycleEvent] = []
 
-    public init(failsToStart: Bool = false) {
+    public init(
+        failsToStart: Bool = false,
+        failsToConnect: Bool = false,
+        connector: PiqaeRuntimeConnectorSnapshot? = nil
+    ) {
         self.failsToStart = failsToStart
+        self.failsToConnect = failsToConnect
+        self.connector = connector
     }
 
     public func start() async throws {
@@ -32,6 +42,17 @@ public actor PiqaeFakeEmbeddedRuntime: PiqaeEmbeddedNodeRuntime {
 
     public func report(_ event: PiqaeHostLifecycleEvent) async throws {
         lifecycleEvents.append(event)
+    }
+
+    public func connectInvitation(_ request: PiqaeEnrollmentRequest) async throws
+        -> PiqaeRuntimeConnectorSnapshot
+    {
+        connectCount += 1
+        if failsToConnect { throw ConnectFailure.requested }
+        guard let connector else {
+            throw PiqaeNodeError.unsupportedOperation("No fake connector was configured.")
+        }
+        return connector
     }
 }
 

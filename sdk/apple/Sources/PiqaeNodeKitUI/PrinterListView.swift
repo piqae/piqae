@@ -8,6 +8,7 @@ public final class PiqaeNodeViewModel: ObservableObject {
 
     public let node: PiqaeNode
     private var observationTask: Task<Void, Never>?
+    private var isStarting = false
 
     public init(node: PiqaeNode) {
         self.node = node
@@ -16,7 +17,9 @@ public final class PiqaeNodeViewModel: ObservableObject {
     deinit { observationTask?.cancel() }
 
     public func start() async {
-        guard observationTask == nil else { return }
+        guard observationTask == nil, !isStarting else { return }
+        isStarting = true
+        defer { isStarting = false }
         do {
             try await node.start()
             let stream = await node.observe()

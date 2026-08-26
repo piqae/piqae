@@ -1041,6 +1041,62 @@ pub extern "C" fn piqae_node_command(handle: u64, data: *const u8, length: usize
     })
 }
 
+/// Sends one exact presence or consent request to the installed local broker.
+///
+/// Authenticated operations must use `piqae_node_broker_execute`; the broker
+/// rejects the legacy raw-token execution variant. This bridge owns no
+/// capability, authorization decision, or retry state.
+#[unsafe(no_mangle)]
+pub extern "C" fn piqae_node_broker_request(
+    endpoint: *const u8,
+    endpoint_length: usize,
+    request: *const u8,
+    request_length: usize,
+) -> PiqaeBuffer {
+    ffi_entry(|| {
+        use piqae_node_client::BrokerTransport as _;
+
+        let endpoint = std::str::from_utf8(input_bytes(endpoint, endpoint_length)?)
+            .map_err(|_| FfiError::InvalidInput)?;
+        if endpoint.is_empty()
+            || endpoint.len() > 1024
+            || !std::path::Path::new(endpoint).is_absolute()
+        {
+            return Err(FfiError::InvalidInput);
+        }
+        let request = serde_json::from_slice::<piqae_local_ipc::BrokerRequest>(input_bytes(
+            request,
+            request_length,
+        )?)
+        .map_err(|_| FfiError::InvalidInput)?;
+        if !matches!(
+            &request.operation,
+            piqae_local_ipc::BrokerOperation::Presence
+                | piqae_local_ipc::BrokerOperation::RequestAuthorization { .. }
+                | piqae_local_ipc::BrokerOperation::AuthorizationStatus { .. }
+                | piqae_local_ipc::BrokerOperation::ExchangeAuthorization { .. }
+        ) {
+            return Err(FfiError::InvalidInput);
+        }
+        #[cfg(unix)]
+        {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|_| FfiError::Internal)?;
+            let response = runtime
+                .block_on(piqae_node_client::UnixBrokerTransport::new(endpoint).request(request))
+                .map_err(|_| FfiError::BrokerTransport)?;
+            serde_json::to_value(response).map_err(|_| FfiError::Internal)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = request;
+            Err(FfiError::BrokerTransport)
+        }
+    })
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn piqae_node_destroy(handle: u64) -> PiqaeBuffer {
     ffi_entry(|| {
@@ -1100,6 +1156,7 @@ enum FfiError {
     ConnectorOperation,
     SecureConnectorProviderRequired,
     RuntimeTransition,
+    BrokerTransport,
     Contract(String),
     Internal,
 }
@@ -1131,6 +1188,7 @@ impl FfiError {
             Self::ConnectorOperation => "connector_operation_failed",
             Self::SecureConnectorProviderRequired => "secure_connector_provider_required",
             Self::RuntimeTransition => "runtime_transition_in_progress",
+            Self::BrokerTransport => "broker_transport_failed",
             Self::Contract(_) => "invalid_configuration",
             Self::Internal => "internal_error",
         }
@@ -1162,6 +1220,7 @@ impl FfiError {
                 "cloud connector enrollment requires a non-exporting platform signing-key provider"
             }
             Self::RuntimeTransition => "the runtime is stopping or changing ownership",
+            Self::BrokerTransport => "the installed local node broker request failed",
             Self::Internal => "the runtime operation failed",
         }
     }
@@ -1259,6 +1318,33 @@ mod tests {
     fn abi_descriptor_is_fixed_width_and_versioned() {
         assert_eq!(std::mem::size_of::<PiqaeNodeAbiDescriptor>(), 6);
         assert_eq!(piqae_node_abi_descriptor().abi_version, 1);
+    }
+
+    #[test]
+    fn raw_broker_bridge_rejects_secret_bearing_execution() {
+        let request = piqae_local_ipc::BrokerRequest {
+            protocol: piqae_local_ipc::BROKER_PROTOCOL_VERSION,
+            request_id: uuid::Uuid::new_v4(),
+            operation: piqae_local_ipc::BrokerOperation::Execute {
+                credential: piqae_local_ipc::BrokerCredential {
+                    application_id: "com.example.pos".into(),
+                    token: "must-not-cross-ipc".into(),
+                    granted_capabilities: vec![piqae_local_ipc::BrokerCapability::ObserveStatus],
+                },
+                capability: piqae_local_ipc::BrokerCapability::ObserveStatus,
+                operation: piqae_local_ipc::LocalOperation::Status,
+            },
+        };
+        let request = serde_json::to_vec(&request).unwrap();
+        let endpoint = b"/tmp/piqae-unused.sock";
+        let response = read_and_free(piqae_node_broker_request(
+            endpoint.as_ptr(),
+            endpoint.len(),
+            request.as_ptr(),
+            request.len(),
+        ));
+        assert_eq!(response["error"]["code"], "invalid_input");
+        assert!(!response.to_string().contains("must-not-cross-ipc"));
     }
 
     #[test]

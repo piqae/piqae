@@ -9,12 +9,18 @@ final class AirPrintEndpointTests: XCTestCase {
         )
         let canonical = try PiqaeAirPrintEndpoint.canonicalize(source)
 
-        XCTAssertEqual(canonical.route.absoluteString, "ipps://printer.example:631/ipp/print")
+        XCTAssertEqual(canonical.route.absoluteString, "ipps://printer.example/ipp/print")
         XCTAssertEqual(String(data: canonical.identityInput, encoding: .utf8), canonical.route.absoluteString)
         XCTAssertNil(canonical.route.user)
         XCTAssertNil(canonical.route.password)
         XCTAssertNil(canonical.route.query)
         XCTAssertNil(canonical.route.fragment)
+    }
+
+    func testCanonicalEndpointNormalizesDefaultPortAndTrailingSlash() throws {
+        let source = try XCTUnwrap(URL(string: "ipp://Printer.Example:631/ipp/print///"))
+        let canonical = try PiqaeAirPrintEndpoint.canonicalize(source)
+        XCTAssertEqual(canonical.route.absoluteString, "ipp://printer.example/ipp/print")
     }
 
     func testCanonicalEndpointNormalizesEmptyPath() throws {

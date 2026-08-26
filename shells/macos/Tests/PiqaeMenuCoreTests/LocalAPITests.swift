@@ -386,6 +386,9 @@ final class LocalAPITests: XCTestCase {
             pending.first?.requestedCapabilities,
             [.observePrinters, .submitLocalJobs]
         )
+        let request = try XCTUnwrap(pending.first)
+        XCTAssertFalse(request.isExpired(at: Date(timeIntervalSince1970: 9_999_999_998)))
+        XCTAssertTrue(request.isExpired(at: Date(timeIntervalSince1970: 10_000_000_000)))
 
         StubURLProtocol.handler = { request in
             XCTAssertEqual(request.httpMethod, "POST")

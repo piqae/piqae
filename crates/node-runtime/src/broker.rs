@@ -41,6 +41,8 @@ pub type ApplicationIdentity = BrokerApplicationIdentity;
 pub struct ApplicationCapabilities {
     pub observe_status: bool,
     pub observe_printers: bool,
+    #[serde(default)]
+    pub observe_job_history: bool,
     pub manage_profiles: bool,
     pub submit_local_jobs: bool,
     pub manage_connectors: bool,
@@ -50,6 +52,7 @@ impl ApplicationCapabilities {
     pub const OBSERVE_ONLY: Self = Self {
         observe_status: true,
         observe_printers: true,
+        observe_job_history: false,
         manage_profiles: false,
         submit_local_jobs: false,
         manage_connectors: false,
@@ -59,6 +62,7 @@ impl ApplicationCapabilities {
     pub const fn allows(&self, requested: Self) -> bool {
         (!requested.observe_status || self.observe_status)
             && (!requested.observe_printers || self.observe_printers)
+            && (!requested.observe_job_history || self.observe_job_history)
             && (!requested.manage_profiles || self.manage_profiles)
             && (!requested.submit_local_jobs || self.submit_local_jobs)
             && (!requested.manage_connectors || self.manage_connectors)
@@ -361,6 +365,7 @@ impl ApplicationCapabilities {
         let mut requested = Self {
             observe_status: false,
             observe_printers: false,
+            observe_job_history: false,
             manage_profiles: false,
             submit_local_jobs: false,
             manage_connectors: false,
@@ -368,6 +373,7 @@ impl ApplicationCapabilities {
         match capability {
             BrokerCapability::ObserveStatus => requested.observe_status = true,
             BrokerCapability::ObservePrinters => requested.observe_printers = true,
+            BrokerCapability::ObserveJobHistory => requested.observe_job_history = true,
             BrokerCapability::ManageProfiles => requested.manage_profiles = true,
             BrokerCapability::SubmitLocalJobs => requested.submit_local_jobs = true,
             BrokerCapability::ManageConnectors => requested.manage_connectors = true,
@@ -380,6 +386,7 @@ impl ApplicationCapabilities {
             Self {
                 observe_status: false,
                 observe_printers: false,
+                observe_job_history: false,
                 manage_profiles: false,
                 submit_local_jobs: false,
                 manage_connectors: false,
@@ -388,6 +395,7 @@ impl ApplicationCapabilities {
                 let requested = Self::requiring(*capability);
                 result.observe_status |= requested.observe_status;
                 result.observe_printers |= requested.observe_printers;
+                result.observe_job_history |= requested.observe_job_history;
                 result.manage_profiles |= requested.manage_profiles;
                 result.submit_local_jobs |= requested.submit_local_jobs;
                 result.manage_connectors |= requested.manage_connectors;
@@ -623,6 +631,7 @@ impl BrokerConsentHandle {
         let credential = BrokerCredential {
             application_id: application.application_id,
             token: issued.token.expose_for_client().to_owned(),
+            granted_capabilities: capabilities,
         };
         drop(state);
         Ok(credential)
@@ -631,7 +640,7 @@ impl BrokerConsentHandle {
 
 fn validated_capabilities(capabilities: &[BrokerCapability]) -> Result<Vec<BrokerCapability>, ()> {
     let unique = capabilities.iter().copied().collect::<BTreeSet<_>>();
-    if unique.is_empty() || unique.len() != capabilities.len() || unique.len() > 5 {
+    if unique.is_empty() || unique.len() != capabilities.len() || unique.len() > 6 {
         return Err(());
     }
     Ok(unique.into_iter().collect())
@@ -775,7 +784,7 @@ impl BrokerServerState {
                         match authentication {
                             Ok(Some(key)) => {
                                 response_authentication = Some((key, nonce));
-                                dispatch_operation(&self.commands, operation)
+                                dispatch_operation(&self.commands, operation, Some(&application_id))
                                     .await
                                     .map(|result| BrokerResult::Local { result })
                             }
@@ -906,9 +915,8 @@ const fn required_capability(operation: &LocalOperation) -> Option<BrokerCapabil
             | SdkBrokerOperation::RevokeConnector { .. } => BrokerCapability::ManageConnectors,
             SdkBrokerOperation::SubmitLocalJob { .. } => BrokerCapability::SubmitLocalJobs,
             SdkBrokerOperation::Profiles { .. } => BrokerCapability::ObservePrinters,
-            SdkBrokerOperation::JobHistory { .. } | SdkBrokerOperation::ConnectorSnapshots => {
-                BrokerCapability::ObserveStatus
-            }
+            SdkBrokerOperation::JobHistory { .. } => BrokerCapability::ObserveJobHistory,
+            SdkBrokerOperation::ConnectorSnapshots => BrokerCapability::ObserveStatus,
         }),
         LocalOperation::RestartAgent
         | LocalOperation::ExportSupportBundle { .. }
@@ -923,6 +931,7 @@ const fn required_capability(operation: &LocalOperation) -> Option<BrokerCapabil
 async fn dispatch_operation(
     commands: &mpsc::Sender<RuntimeCommand>,
     operation: LocalOperation,
+    application_id: Option<&str>,
 ) -> Result<LocalResult, LocalFailure> {
     match operation {
         LocalOperation::Status => {
@@ -941,7 +950,9 @@ async fn dispatch_operation(
                 .map(|printers| LocalResult::Printers { printers })
                 .map_err(|_| unavailable())
         }
-        LocalOperation::Sdk { operation } => dispatch_sdk_operation(commands, operation).await,
+        LocalOperation::Sdk { operation } => {
+            dispatch_sdk_operation(commands, operation, application_id).await
+        }
         LocalOperation::Pause | LocalOperation::Resume => {
             let (send, receive) = oneshot::channel();
             let command = if matches!(operation, LocalOperation::Pause) {
@@ -1064,6 +1075,7 @@ async fn dispatch_operation(
 async fn dispatch_sdk_operation(
     commands: &mpsc::Sender<RuntimeCommand>,
     operation: SdkBrokerOperation,
+    application_id: Option<&str>,
 ) -> Result<LocalResult, LocalFailure> {
     let data = match operation {
         SdkBrokerOperation::ConnectInvitation {
@@ -1100,11 +1112,27 @@ async fn dispatch_sdk_operation(
         SdkBrokerOperation::SubmitLocalJob {
             printer_id,
             title,
+            idempotency_key,
+            profile_id,
             content_kind,
             content_base64,
             options,
             expires_unix_ms,
         } => {
+            let application_id = application_id.ok_or_else(|| {
+                local_failure(
+                    "application_identity_required",
+                    "SDK printing requires an authenticated application identity",
+                    false,
+                )
+            })?;
+            if idempotency_key.is_empty() || idempotency_key.len() > 200 {
+                return Err(local_failure(
+                    "invalid_idempotency_key",
+                    "idempotency keys must contain 1 to 200 bytes",
+                    false,
+                ));
+            }
             let (send, receive) = oneshot::channel();
             send_command(
                 commands,
@@ -1113,6 +1141,10 @@ async fn dispatch_sdk_operation(
                         printer_id,
                         printer_native_id: None,
                         title,
+                        idempotency_key: Some(format!(
+                            "broker\0{application_id}\0{idempotency_key}"
+                        )),
+                        profile_id,
                         content_kind,
                         content: crate::command::LocalContent::Base64 {
                             data: content_base64,
@@ -1533,6 +1565,7 @@ mod tests {
                     credential: piqae_local_ipc::BrokerCredential {
                         application_id: "com.example.pos".into(),
                         token: issued.token.expose_for_client().into(),
+                        granted_capabilities: vec![BrokerCapability::ObserveStatus],
                     },
                     capability: BrokerCapability::ObserveStatus,
                     operation: LocalOperation::Status,

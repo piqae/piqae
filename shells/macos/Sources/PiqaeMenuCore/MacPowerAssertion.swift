@@ -38,7 +38,15 @@ public enum PiqaeMacActiveWorkPowerGuard {
         guard maximumDuration > 0, maximumDuration <= 300 else {
             throw PiqaeMacPowerAssertionError.invalidDuration
         }
-        let identifier = try driver.acquire(reason: "Piqae \(phase.rawValue)")
+        let identifier: UInt32
+        do {
+            identifier = try driver.acquire(reason: "Piqae \(phase.rawValue)")
+        } catch {
+            // Power assertions improve reliability but are not the print
+            // boundary. A sandbox or entitlement failure must not suppress
+            // the one and only handoff attempt.
+            return try operation()
+        }
         let lease = PiqaePowerAssertionLease(identifier: identifier, driver: driver)
         let cancelExpiry = scheduler.schedule(after: maximumDuration) { lease.finish() }
         defer {

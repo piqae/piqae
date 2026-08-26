@@ -28,6 +28,20 @@ final class MacHostLifecycleTests: XCTestCase {
         )
         monitor.stop()
         XCTAssertEqual(network.cancelCount, 1)
+
+        monitor.start()
+        network.emit(.available)
+        await monitor.flushForTesting()
+        let restartedEvents = await reporter.events()
+        XCTAssertEqual(
+            restartedEvents,
+            [
+                .started, .suspendImminent, .sleeping, .woke, .networkConstrained,
+                .started, .networkAvailable,
+            ]
+        )
+        monitor.stop()
+        XCTAssertEqual(network.cancelCount, 2)
     }
 }
 

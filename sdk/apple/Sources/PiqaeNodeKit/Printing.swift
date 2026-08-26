@@ -87,11 +87,15 @@ public struct PiqaePrintRequest: Sendable {
         idempotencyKey: String
     ) throws {
         let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
-        let normalizedIdempotencyValue = idempotencyKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedIdempotencyValue = idempotencyKey.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
         guard !trimmedTitle.isEmpty, trimmedTitle.utf8.count <= 256 else {
             throw PiqaeNodeError.invalidConfiguration("Job titles must contain 1 to 256 UTF-8 bytes.")
         }
-        guard !normalizedIdempotencyValue.isEmpty, normalizedIdempotencyValue.utf8.count <= 200 else {
+        guard !normalizedIdempotencyValue.isEmpty,
+            normalizedIdempotencyValue.utf8.count <= 200
+        else {
             throw PiqaeNodeError.invalidConfiguration("Idempotency keys must contain 1 to 200 UTF-8 bytes.")
         }
         guard content.byteCount > 0, content.byteCount <= 100 * 1024 * 1024 else {
@@ -136,6 +140,45 @@ public struct PiqaeJobReceipt: Codable, Equatable, Sendable {
         self.nativeJobID = nativeJobID
         self.handoffState = handoffState
         self.acceptedAt = acceptedAt
+    }
+}
+
+public struct PiqaeJobHistoryEntry: Identifiable, Codable, Equatable, Sendable {
+    public var id: PiqaeJobID { jobID }
+    public let jobID: PiqaeJobID
+    public let printerID: PiqaePrinterID
+    public let title: String
+    public let state: String
+    public let nativeJobID: String?
+    public let canReprint: Bool
+    public let createdAt: Date?
+
+    public init(
+        jobID: PiqaeJobID,
+        printerID: PiqaePrinterID,
+        title: String,
+        state: String,
+        nativeJobID: String?,
+        canReprint: Bool,
+        createdAt: Date?
+    ) {
+        self.jobID = jobID
+        self.printerID = printerID
+        self.title = title
+        self.state = state
+        self.nativeJobID = nativeJobID
+        self.canReprint = canReprint
+        self.createdAt = createdAt
+    }
+}
+
+public struct PiqaeJobHistoryPage: Codable, Equatable, Sendable {
+    public let jobs: [PiqaeJobHistoryEntry]
+    public let nextOffset: Int?
+
+    public init(jobs: [PiqaeJobHistoryEntry], nextOffset: Int?) {
+        self.jobs = jobs
+        self.nextOffset = nextOffset
     }
 }
 

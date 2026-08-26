@@ -41,15 +41,43 @@ final class MacPowerAssertionTests: XCTestCase {
             ) {}
         )
     }
+
+    func testAcquisitionFailureRunsOperationOnceAndPropagatesItsError() {
+        let driver = PowerDriverSpy(acquisitionError: TestFailure.acquisition)
+        var attempts = 0
+        XCTAssertThrowsError(
+            try PiqaeMacActiveWorkPowerGuard.withAssertion(
+                phase: .nativeHandoff,
+                maximumDuration: 30,
+                driver: driver,
+                scheduler: PowerSchedulerFake()
+            ) {
+                attempts += 1
+                throw TestFailure.operation
+            }
+        ) { error in
+            XCTAssertEqual(error as? TestFailure, .operation)
+        }
+        XCTAssertEqual(attempts, 1)
+        XCTAssertTrue(driver.released.isEmpty)
+    }
 }
+
+private enum TestFailure: Error { case acquisition, operation }
 
 private final class PowerDriverSpy: @unchecked Sendable, PiqaePowerAssertionDriver {
     private let lock = NSLock()
     private(set) var acquiredReasons: [String] = []
     private(set) var released: [UInt32] = []
+    private let acquisitionError: Error?
+
+    init(acquisitionError: Error? = nil) {
+        self.acquisitionError = acquisitionError
+    }
 
     func acquire(reason: String) throws -> UInt32 {
         lock.withLock { acquiredReasons.append(reason) }
+        if let acquisitionError { throw acquisitionError }
         return 7
     }
 

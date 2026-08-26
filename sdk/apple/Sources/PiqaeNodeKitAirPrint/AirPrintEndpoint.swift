@@ -20,8 +20,15 @@ enum PiqaeAirPrintEndpoint {
         components.password = nil
         components.query = nil
         components.fragment = nil
+        if components.port == 631 {
+            components.port = nil
+        }
         if components.percentEncodedPath.isEmpty {
             components.percentEncodedPath = "/"
+        } else if components.percentEncodedPath.count > 1 {
+            while components.percentEncodedPath.hasSuffix("/") {
+                components.percentEncodedPath.removeLast()
+            }
         }
         guard let route = components.url else { throw invalidEndpoint() }
         return (route, Data(route.absoluteString.utf8))

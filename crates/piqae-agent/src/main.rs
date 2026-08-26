@@ -3047,6 +3047,16 @@ async fn submit_local_job(
         ));
     }
     validate_options(&printer, &request.options)?;
+    let profile_pin = if let Some(profile_id) = request.profile_id.as_deref() {
+        let profile = engine
+            .store()
+            .named_profile(&request.printer_id, profile_id)
+            .map_err(storage_control_failure)?
+            .ok_or_else(|| control_failure("profile_not_found", "print profile was not found"))?;
+        Some((profile.profile_id, profile.revision))
+    } else {
+        None
+    };
     let mut request = request;
     request.printer_native_id = Some(printer.native_id);
     let input: Box<dyn tokio::io::AsyncRead + Unpin + Send> = match &request.content {
@@ -3061,14 +3071,14 @@ async fn submit_local_job(
                 .fetch_to_store(content_store, uri, None, None)
                 .await
                 .map_err(|error| control_failure("content_unavailable", &error.to_string()))?;
-            return accept_stored_local_job(engine, request, stored, None).await;
+            return accept_stored_local_job(engine, request, stored, profile_pin).await;
         }
     };
     let stored = content_store
         .put(input)
         .await
         .map_err(|error| control_failure("content_store_failed", &error.to_string()))?;
-    accept_stored_local_job(engine, request, stored, None).await
+    accept_stored_local_job(engine, request, stored, profile_pin).await
 }
 
 async fn refresh_local_printers(
@@ -3830,6 +3840,8 @@ async fn submit_test_page(
             printer_id: printer_id.to_owned(),
             printer_native_id: Some(printer.native_id),
             title: "Piqae A4 diagnostic".into(),
+            idempotency_key: None,
+            profile_id: Some(profile.profile_id.clone()),
             content_kind: ContentKind::Pdf,
             content: LocalContent::Base64 {
                 data: String::new(),
@@ -3956,13 +3968,21 @@ async fn accept_stored_local_job(
     stored: piqae_agent_core::StoredContent,
     profile_pin: Option<(String, u64)>,
 ) -> Result<LocalJobAccepted, ControlFailure> {
-    let job_id = JobId::new().to_string();
+    let (job_id, submission_id) = request.idempotency_key.as_deref().map_or_else(
+        || {
+            (
+                JobId::new().to_string(),
+                format!("sub_{}", uuid::Uuid::new_v4()),
+            )
+        },
+        local_job_identity,
+    );
     let options_json = serde_json::to_string(&request.options)
         .map_err(|_| control_failure("invalid_options", "print options are invalid"))?;
     engine
         .accept(&AcceptedJob {
             job_id: job_id.clone(),
-            submission_id: format!("sub_{}", uuid::Uuid::new_v4()),
+            submission_id,
             printer_id: request.printer_id,
             printer_native_id: request.printer_native_id.ok_or_else(|| {
                 control_failure(
@@ -4000,6 +4020,16 @@ async fn accept_stored_local_job(
         .map_err(|error| control_failure("local_query_failed", &error.to_string()))?
         .map_or_else(|| "unknown".to_owned(), |job| job.state);
     Ok(LocalJobAccepted { job_id, state })
+}
+
+fn local_job_identity(idempotency_key: &str) -> (String, String) {
+    let digest = hex::encode(Sha256::digest(
+        format!("local-submit\0{idempotency_key}").as_bytes(),
+    ));
+    (
+        format!("job_local_{}", &digest[..32]),
+        format!("local:{digest}"),
+    )
 }
 
 fn control_failure(code: &str, message: &str) -> ControlFailure {
@@ -7219,6 +7249,17 @@ mod tests {
         assert_eq!(pin.profile_id, "prf_shipping");
         assert_eq!(pin.profile_revision, 7);
         assert_eq!(pin.stock_id.as_deref(), Some("stk_a4"));
+    }
+
+    #[test]
+    fn local_submission_identity_is_stable_and_caller_scoped() {
+        let first = local_job_identity("broker\0com.example.a\0retry-1");
+        let repeated = local_job_identity("broker\0com.example.a\0retry-1");
+        let other_application = local_job_identity("broker\0com.example.b\0retry-1");
+        assert_eq!(first, repeated);
+        assert_ne!(first, other_application);
+        assert!(first.0.starts_with("job_local_"));
+        assert!(first.1.starts_with("local:"));
     }
 
     #[test]

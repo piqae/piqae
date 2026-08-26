@@ -147,6 +147,10 @@ public final class PiqaeJobsService: @unchecked Sendable {
     public func status(_ jobID: PiqaeJobID) async throws -> PiqaeRuntimeJobSnapshot {
         try await engine.job(jobID)
     }
+
+    public func history(offset: Int = 0, limit: Int = 50) async throws -> PiqaeJobHistoryPage {
+        try await engine.jobHistory(offset: offset, limit: limit)
+    }
 }
 
 public final class PiqaeProfilesService: @unchecked Sendable {
@@ -249,6 +253,9 @@ actor PiqaeNodeEngine {
                 if let ipc = configuration.installedNodeIPC {
                     switch await ipc.probe().state {
                     case .unavailable:
+                        guard configuration.allowsEmbeddedFallback else {
+                            throw PiqaeNodeError.installedNodeUnavailable
+                        }
                         try await startEmbedded()
                     case let .available(version):
                         guard Self.supports(version) else {
@@ -260,6 +267,9 @@ actor PiqaeNodeEngine {
                         try await attach(ipc)
                     }
                 } else {
+                    guard configuration.allowsEmbeddedFallback else {
+                        throw PiqaeNodeError.installedNodeUnavailable
+                    }
                     try await startEmbedded()
                 }
             }
@@ -343,7 +353,7 @@ actor PiqaeNodeEngine {
                 PiqaePrinterAdapterDescriptor(
                     id: "piqae.installed-node",
                     displayName: "Installed Piqae node",
-                    version: "local-protocol-1",
+                    version: "local-protocol-4",
                     transports: [.installedDriver],
                     portableOptions: PiqaePortableOption.allCases,
                     supportsProfiles: true
@@ -373,6 +383,7 @@ actor PiqaeNodeEngine {
     }
 
     func connect(_ cloud: PiqaeCloudConfiguration) async throws -> PiqaeConnection {
+        try requireStarted()
         guard let installationID = snapshotValue.installationID else {
             throw PiqaeNodeError.notStarted
         }
@@ -387,7 +398,12 @@ actor PiqaeNodeEngine {
         if let selectedIPC {
             connection = try await selectedIPC.connect(request)
         } else {
-            connection = try await cloud.provider.enroll(request)
+            guard let runtime = configuration.embeddedRuntime else {
+                throw PiqaeNodeError.unsupportedOperation(
+                    "Cloud invitations require the shared durable native runtime."
+                )
+            }
+            connection = Self.connection(try await runtime.connectInvitation(request))
         }
         var connections = snapshotValue.connections.filter {
             $0.id != connection.id && $0.state != .localOnly
@@ -459,6 +475,14 @@ actor PiqaeNodeEngine {
         return try await runtime.job(id: jobID)
     }
 
+    func jobHistory(offset: Int, limit: Int) async throws -> PiqaeJobHistoryPage {
+        try requireStarted()
+        if let selectedIPC { return try await selectedIPC.jobHistory(offset: offset, limit: limit) }
+        throw PiqaeNodeError.unsupportedOperation(
+            "Embedded print history pagination is not exposed by this runtime contract."
+        )
+    }
+
     func profiles(for printerID: PiqaePrinterID) async throws -> [PiqaePrintProfile] {
         try requireStarted()
         if let selectedIPC { return try await selectedIPC.profiles(for: printerID) }
@@ -505,6 +529,11 @@ actor PiqaeNodeEngine {
         -> PiqaePrintProfile
     {
         try requireStarted()
+        guard selectedIPC == nil else {
+            throw PiqaeNodeError.unsupportedOperation(
+                "Profile changes must be made in the installed Piqae node."
+            )
+        }
         guard let runtime = configuration.embeddedRuntime else {
             throw PiqaeNodeError.unsupportedOperation("Profiles require the durable native runtime.")
         }
@@ -515,6 +544,11 @@ actor PiqaeNodeEngine {
         -> PiqaePrintProfile
     {
         try requireStarted()
+        guard selectedIPC == nil else {
+            throw PiqaeNodeError.unsupportedOperation(
+                "Profile changes must be made in the installed Piqae node."
+            )
+        }
         guard let runtime = configuration.embeddedRuntime else {
             throw PiqaeNodeError.unsupportedOperation("Profiles require the durable native runtime.")
         }
@@ -527,6 +561,11 @@ actor PiqaeNodeEngine {
         expectedRevision: UInt64
     ) async throws {
         try requireStarted()
+        guard selectedIPC == nil else {
+            throw PiqaeNodeError.unsupportedOperation(
+                "Profile changes must be made in the installed Piqae node."
+            )
+        }
         guard let runtime = configuration.embeddedRuntime else {
             throw PiqaeNodeError.unsupportedOperation("Profiles require the durable native runtime.")
         }
@@ -685,6 +724,7 @@ actor PiqaeNodeEngine {
     }
 
     private func attach(_ ipc: any PiqaeInstalledNodeIPC) async throws {
+        try await ipc.prepareForAttachment()
         selectedIPC = ipc
         snapshotValue = normalizedAttachedSnapshot(try await ipc.snapshot())
         emit()

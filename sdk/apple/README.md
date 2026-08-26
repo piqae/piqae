@@ -58,13 +58,40 @@ PiqaePrinterListView(node: node)
 
 On macOS, `automatic` probes an authenticated installed-node implementation
 first. A compatible installed node becomes an `attached_client`; an incompatible
-node fails closed instead of silently starting a second runtime. The current
-menu shell supplies `PiqaeMacInstalledNodeIPC` as a compatibility adapter over
-the shipped loopback API. Applications continue to depend on the versioned
-`PiqaeInstalledNodeIPC` protocol when that adapter moves to a Unix-domain socket.
-The compatibility adapter is currently read-only for inventory and profiles;
-job submission and cloud enrollment through an attached node remain unavailable
-until the authenticated runtime ABI is published.
+node, denied capability, stale credential, or forged broker response fails
+closed instead of silently starting a second runtime. Embedded fallback must be
+enabled explicitly with `allowsEmbeddedFallback`; it is never inferred from an
+attachment error. `PiqaeMacInstalledNodeBroker` uses the installed node's
+private Unix-domain socket and explicit menu-bar consent. Protocol-v4 execution
+uses one-time, time-bounded HMAC proofs verified inside the shared Rust client;
+the bearer capability never crosses IPC. Approved applications can observe
+status/printers, list profiles and retained history, and submit idempotent PDF or
+raw jobs into the installed node's existing durable queue. They never open its
+database or start a parallel queue. `manage_connectors` is a separate, explicit
+consent grant. When granted, `node.connections.connect(...)` sends the
+short-lived invitation through the installed node, which verifies the authority
+and durably starts its own connector worker.
+
+A macOS host supplies its stable application identity when it opts into the
+installed node:
+
+```swift
+let installed = try PiqaeMacInstalledNodeBroker(
+    application: try PiqaeBrokerApplication(
+        applicationID: "com.example.pos",
+        displayName: "Example POS"
+    )
+)
+let node = PiqaeNode(.localOnly(
+    startupMode: .automatic,
+    installedNodeIPC: installed
+))
+```
+
+If an installed node is deliberately replaced or its app grants are reset,
+call `installed.resetAuthorization()` before retrying attachment. This deletes
+only the current application's device-local broker credential; it never removes
+the node queue, print history, cloud connectors, or connector signing keys.
 
 On iPadOS, `automatic` and `embedded` select `embedded_application`. `attach` is
 rejected because App Store applications can't install or rely on an arbitrary
@@ -81,6 +108,7 @@ let printers = try await node.printers.list(refresh: true)
 let profiles = try await node.profiles.list(for: printers[0].id)
 let receipt = try await node.jobs.submit(request)
 let status = try await node.jobs.status(receipt.jobID)
+let history = try await node.jobs.history(offset: 0, limit: 50)
 ```
 
 For an embedded host, NodeKit calls `adapter.submit` only after the shared
@@ -93,15 +121,21 @@ an explicitly approved broker capability.
 
 Named profile create, update, delete, and list operations are stored by the same
 runtime. An adapter may capture native settings, but the durable profile record
-is authoritative. Connector listing and revocation are likewise runtime-owned.
-Completing a new connector invitation remains intentionally unavailable in the
-raw ABI until the host supplies the secure signer/exchange provider; NodeKit
-does not fabricate or persist a partial cloud credential.
+is authoritative. Attached clients currently list the installed node's profiles;
+driver UI capture and mutation remain node-owned. Invitation exchange is
+available to an attached client only with `manage_connectors`; listing and
+revocation remain runtime-owned. Embedded cloud enrollment
+hands a short-lived invitation to the shared Rust worker. Its signing key is a
+device-only Keychain Ed25519 key reached through synchronous non-exporting
+callbacks; Swift never fabricates a connector record or receives private key
+bytes. Origin, expiry, exchange response, and returned tenant identifiers are
+verified before the connector is durably committed.
 
-`PiqaeCloudEnrollmentProvider` is deliberately injected. It exchanges a
-short-lived invitation and returns a connector summary. Platform service-account
-keys stay on the integrator's backend; they must not be compiled into the app.
-`PiqaeSensitiveString` is redacted from normal and debug descriptions.
+Create `PiqaeCloudConfiguration` with only an HTTPS authority and the
+short-lived invitation. `PiqaeSensitiveString` is redacted from normal and
+debug descriptions. The preview `PiqaeCloudEnrollmentProvider` initializer is
+retained only for source compatibility and is ignored; it cannot bypass the
+shared worker or install a caller-fabricated connector.
 
 Remote notification registration is also opt-in and backend-injected:
 
