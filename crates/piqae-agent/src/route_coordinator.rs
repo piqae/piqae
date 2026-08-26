@@ -504,6 +504,30 @@ impl RouteCoordinator {
         generation: u64,
         resolution: piqae_protocol::agent::AmbiguousHandoffResolution,
     ) -> Result<()> {
+        let resolved_outcome = match resolution {
+            piqae_protocol::agent::AmbiguousHandoffResolution::ReleaseForRetry => {
+                NativeHandoffOutcome::RejectedBeforeHandoff
+            }
+            piqae_protocol::agent::AmbiguousHandoffResolution::ConfirmAccepted => {
+                NativeHandoffOutcome::Accepted
+            }
+        };
+        if let Some(existing) = self.document.handoffs.iter().rev().find(|handoff| {
+            handoff.connector_id == connector_id
+                && handoff.job_id == job_id
+                && handoff.local_route_key == local_route_key
+                && handoff.reservation_id == reservation_id
+                && handoff.fencing_generation == generation
+        }) && existing.outcome != NativeHandoffOutcome::Ambiguous
+        {
+            if existing.outcome == resolved_outcome {
+                // Coordinator persistence and connector command-cursor
+                // persistence are separate durable stores. A crash between
+                // them must make an exact command replay succeed.
+                return Ok(());
+            }
+            bail!("ambiguous handoff was already resolved differently");
+        }
         let coordination_key = self
             .document
             .reservations
@@ -531,14 +555,7 @@ impl RouteCoordinator {
                     && handoff.outcome == NativeHandoffOutcome::Ambiguous
             })
             .context("matching native handoff is not ambiguous")?;
-        handoff.outcome = match resolution {
-            piqae_protocol::agent::AmbiguousHandoffResolution::ReleaseForRetry => {
-                NativeHandoffOutcome::RejectedBeforeHandoff
-            }
-            piqae_protocol::agent::AmbiguousHandoffResolution::ConfirmAccepted => {
-                NativeHandoffOutcome::Accepted
-            }
-        };
+        handoff.outcome = resolved_outcome;
         self.document.reservations.remove(&coordination_key);
         self.persist()
     }
@@ -575,9 +592,52 @@ impl RouteCoordinator {
         file.write_all(&bytes)?;
         file.sync_all()?;
         drop(file);
-        std::fs::rename(&staged, &path)?;
+        replace_file_atomically(&staged, &path)?;
+        #[cfg(unix)]
+        std::fs::File::open(&self.root)
+            .and_then(|directory| directory.sync_all())
+            .with_context(|| format!("sync {}", self.root.display()))?;
         Ok(())
     }
+}
+
+#[cfg(not(windows))]
+fn replace_file_atomically(staged: &Path, destination: &Path) -> Result<()> {
+    std::fs::rename(staged, destination)
+        .with_context(|| format!("replace {}", destination.display()))
+}
+
+#[cfg(windows)]
+fn replace_file_atomically(staged: &Path, destination: &Path) -> Result<()> {
+    use std::os::windows::ffi::OsStrExt as _;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    };
+
+    let staged = staged
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let destination_wide = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    // SAFETY: both paths are live NUL-terminated UTF-16 buffers. Replace and
+    // write-through preserve an existing journal without a delete gap.
+    if unsafe {
+        MoveFileExW(
+            staged.as_ptr(),
+            destination_wide.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    } == 0
+    {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("replace {}", destination.display()));
+    }
+    Ok(())
 }
 
 fn trim_front<T>(values: &mut Vec<T>, limit: usize) {
@@ -1010,6 +1070,29 @@ mod tests {
                 piqae_protocol::agent::AmbiguousHandoffResolution::ReleaseForRetry,
             )
             .unwrap();
+        restarted
+            .resolve_ambiguous_handoff(
+                "hosted",
+                "job_a",
+                &reservation.local_route_key,
+                reservation.reservation_id,
+                reservation.generation,
+                piqae_protocol::agent::AmbiguousHandoffResolution::ReleaseForRetry,
+            )
+            .unwrap();
+        assert!(
+            restarted
+                .resolve_ambiguous_handoff(
+                    "hosted",
+                    "job_a",
+                    &reservation.local_route_key,
+                    reservation.reservation_id,
+                    reservation.generation,
+                    piqae_protocol::agent::AmbiguousHandoffResolution::ConfirmAccepted,
+                )
+                .is_err(),
+            "a replay is idempotent but a conflicting resolution must fail"
+        );
         assert!(
             restarted
                 .reserve("hosted", "native-a", "job_a", 100)
