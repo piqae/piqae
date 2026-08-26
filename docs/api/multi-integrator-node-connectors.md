@@ -114,6 +114,14 @@ but not who owns work ahead of it. Jobs submitted directly to the OS spooler
 remain visible only as privacy-safe occupancy and are outside Piqae's ordering
 and idempotency boundary.
 
+When one locally verified physical group is granted to connectors using
+different control-plane origins, the node still serializes their final native
+handoffs. The independent servers do not share a reservation ledger, however,
+so the local Connections view warns that multiple scheduling authorities are
+active and that automatic cross-server failover is disabled. Piqae does not
+claim global exactly-once delivery across hosted and independently self-hosted
+authorities.
+
 When several computers can drive the same physical printer, use an explicit
 logical target with primary/standby bindings. The control plane leases one job
 to one route. It may reroute only after a terminal rejection proves native

@@ -10,7 +10,7 @@ use anyhow::{Context, Result, bail};
 use piqae_protocol::agent::PrinterGrant;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs::OpenOptions,
     io::Write as _,
     path::{Path, PathBuf},
@@ -19,6 +19,50 @@ use url::Url;
 
 const REGISTRY_VERSION: u16 = 1;
 const MAX_CONNECTORS: usize = 128;
+
+/// Identifies connectors whose allowed local queues share a physical
+/// serialization group across independent control-plane origins. This is a
+/// diagnostic only: the node serializes their native handoffs locally, but it
+/// cannot promise global exactly-once scheduling or fail over work between
+/// authorities which do not share a reservation ledger.
+pub fn cross_authority_connectors(
+    records: &[ConnectorRecord],
+    printer_groups: &[(String, String)],
+) -> BTreeSet<String> {
+    let mut groups = BTreeMap::<String, BTreeMap<String, BTreeSet<String>>>::new();
+    for record in records.iter().filter(|record| record.enabled) {
+        let origin = record.control_plane_url.origin().ascii_serialization();
+        let allowed = match record.printer_grant {
+            PrinterGrant::AllLocalPrinters => None,
+            PrinterGrant::SelectedPrinters => Some(
+                record
+                    .allowed_printer_ids
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<BTreeSet<_>>(),
+            ),
+        };
+        for (printer_id, coordination_key) in printer_groups {
+            if allowed
+                .as_ref()
+                .is_some_and(|selected| !selected.contains(printer_id.as_str()))
+            {
+                continue;
+            }
+            groups
+                .entry(coordination_key.clone())
+                .or_default()
+                .entry(origin.clone())
+                .or_default()
+                .insert(record.connector_id.clone());
+        }
+    }
+    groups
+        .into_values()
+        .filter(|origins| origins.len() > 1)
+        .flat_map(|origins| origins.into_values().flatten())
+        .collect()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -358,6 +402,37 @@ mod tests {
                 0o600
             );
         }
+    }
+
+    #[test]
+    fn cross_authority_warning_requires_a_shared_allowed_physical_group() {
+        let mut hosted = record("ncon_hosted");
+        hosted.allowed_printer_ids = vec!["ptr_shared".into()];
+        let mut same_origin = record("ncon_same_origin");
+        same_origin.allowed_printer_ids = vec!["ptr_shared".into()];
+        let mut self_hosted = record("ncon_self_hosted");
+        self_hosted.control_plane_url = Url::parse("https://print.internal.example/").unwrap();
+        self_hosted.allowed_printer_ids = vec!["ptr_shared".into()];
+        let mut unrelated = record("ncon_unrelated");
+        unrelated.control_plane_url = Url::parse("https://other.example/").unwrap();
+        unrelated.allowed_printer_ids = vec!["ptr_other".into()];
+
+        let warnings = cross_authority_connectors(
+            &[hosted, same_origin, self_hosted, unrelated],
+            &[
+                ("ptr_shared".into(), "physical-a".into()),
+                ("ptr_other".into(), "physical-b".into()),
+            ],
+        );
+        assert_eq!(
+            warnings,
+            BTreeSet::from([
+                "ncon_hosted".to_owned(),
+                "ncon_same_origin".to_owned(),
+                "ncon_self_hosted".to_owned(),
+            ])
+        );
+        assert!(!warnings.contains("ncon_unrelated"));
     }
 
     #[test]
