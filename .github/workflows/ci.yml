@@ -285,7 +285,9 @@ jobs:
           $env:PATH = "$(Split-Path $native);$env:PATH"
           $env:PIQAE_NODE_NATIVE_TEST = "1"
           dotnet test sdk/dotnet/tests/Piqae.Node.Tests/Piqae.Node.Tests.csproj --configuration Release
+          if ($LASTEXITCODE -ne 0) { throw ".NET node SDK tests failed" }
           dotnet pack sdk/dotnet/src/Piqae.Node/Piqae.Node.csproj --configuration Release --output artifacts/dotnet /p:PiqaeNativeLibrary="$native"
+          if ($LASTEXITCODE -ne 0) { throw ".NET node SDK package build failed" }
           if (-not (Get-ChildItem artifacts/dotnet/Piqae.Node.*.nupkg)) { throw "Piqae.Node package was not produced" }
       - name: Build Windows binaries
         if: needs.changes.outputs.windows_installer == 'true'

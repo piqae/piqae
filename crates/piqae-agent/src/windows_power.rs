@@ -9,6 +9,7 @@ use anyhow::{Result, bail};
 use piqae_node_runtime::{LifecycleEvent, NodeRuntime};
 use std::sync::Arc;
 use tokio::sync::Notify;
+use tracing::error;
 use windows_sys::Win32::{
     Foundation::HANDLE,
     System::Power::{
@@ -28,7 +29,7 @@ struct CallbackContext {
 
 pub struct PowerLifecycleRegistration {
     handle: HPOWERNOTIFY,
-    context: Box<CallbackContext>,
+    context: Option<Box<CallbackContext>>,
 }
 
 impl std::fmt::Debug for PowerLifecycleRegistration {
@@ -57,7 +58,10 @@ impl PowerLifecycleRegistration {
         if status != 0 || handle.is_null() {
             bail!("register Windows power lifecycle notification: Windows error {status}");
         }
-        Ok(Self { handle, context })
+        Ok(Self {
+            handle,
+            context: Some(context),
+        })
     }
 }
 
@@ -65,10 +69,25 @@ impl Drop for PowerLifecycleRegistration {
     fn drop(&mut self) {
         // SAFETY: handle is owned and unregistered once. A successful return
         // guarantees no future callbacks reference `context`.
-        unsafe {
-            PowerUnregisterSuspendResumeNotification(self.handle);
+        let status = unsafe { PowerUnregisterSuspendResumeNotification(self.handle) };
+        if let Some(context) = self.context.take() {
+            release_callback_context(status, context);
         }
-        let _ = &self.context;
+    }
+}
+
+fn release_callback_context<T>(unregister_status: u32, context: Box<T>) {
+    if unregister_status == 0 {
+        drop(context);
+    } else {
+        // Windows does not guarantee callbacks have stopped after a failed
+        // unregister. Intentionally retain this small context for the process
+        // lifetime rather than permit a callback-after-free.
+        error!(
+            windows_status = unregister_status,
+            "Windows power callback could not be unregistered; retaining callback context"
+        );
+        let _ = Box::into_raw(context);
     }
 }
 
@@ -100,4 +119,30 @@ unsafe extern "system" fn power_callback(
         _ => {}
     }
     0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::release_callback_context;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    struct DropProbe(Arc<AtomicUsize>);
+
+    impl Drop for DropProbe {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn failed_unregister_retains_callback_context() {
+        let dropped = Arc::new(AtomicUsize::new(0));
+        release_callback_context(5, Box::new(DropProbe(Arc::clone(&dropped))));
+        assert_eq!(dropped.load(Ordering::SeqCst), 0);
+        release_callback_context(0, Box::new(DropProbe(Arc::clone(&dropped))));
+        assert_eq!(dropped.load(Ordering::SeqCst), 1);
+    }
 }
