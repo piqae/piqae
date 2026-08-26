@@ -18,6 +18,7 @@ use piqae_control_plane::{
     identity::LocalIdentityState,
     repository::Repository,
     router,
+    wake_hint_worker::WakeHintWorker,
     webhook_worker::WebhookWorker,
 };
 use piqae_domain::{EnvironmentId, WorkspaceId};
@@ -295,6 +296,9 @@ async fn run() -> Result<()> {
     } else {
         None
     };
+    let _wake_hint_worker = service_role
+        .runs_workers()
+        .then(|| spawn_wake_hint_worker(WakeHintWorker::new(application.clone())));
     let _uncertain_delivery_worker = service_role
         .runs_workers()
         .then(|| spawn_uncertain_delivery_sweep(store.clone(), application.clone()));
@@ -373,6 +377,23 @@ fn spawn_auth_maintenance_worker(worker: AuthMaintenanceWorker) -> tokio::task::
                 ),
                 Err(error) => {
                     tracing::error!(error.type = "auth_state_purge", %error);
+                }
+            }
+        }
+    })
+}
+
+fn spawn_wake_hint_worker(worker: WakeHintWorker) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_millis(500));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            match worker.run_once(25).await {
+                Ok(0) => {}
+                Ok(count) => tracing::debug!(count, "dispatched node wake hints"),
+                Err(error) => {
+                    tracing::error!(error.type = "node_wake_hint_dispatch", %error);
                 }
             }
         }

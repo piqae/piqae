@@ -1700,6 +1700,22 @@ async fn create_job_impl(
     }
     match created? {
         CreateResult::Existing(existing) => {
+            if let Err(error) = state
+                .repository
+                .ensure_waiting_job_wake_hints(
+                    tenant.workspace_id,
+                    tenant.environment_id,
+                    existing.id,
+                )
+                .await
+            {
+                tracing::warn!(
+                    error.type = "wake_hint_reconciliation",
+                    job_id = %existing.id,
+                    %error,
+                    "durable job wake hint will be repaired by the worker"
+                );
+            }
             Ok((StatusCode::OK, Json(JobResponse::from(existing))).into_response())
         }
         CreateResult::Created(created) => {
@@ -1716,6 +1732,22 @@ async fn create_job_impl(
                     None,
                 )
                 .await?;
+            if let Err(error) = state
+                .repository
+                .ensure_waiting_job_wake_hints(
+                    tenant.workspace_id,
+                    tenant.environment_id,
+                    queued.id,
+                )
+                .await
+            {
+                tracing::warn!(
+                    error.type = "wake_hint_reconciliation",
+                    job_id = %queued.id,
+                    %error,
+                    "durable job wake hint will be repaired by the worker"
+                );
+            }
             state.publish(tenant, "job.updated", &queued).await?;
             Ok((StatusCode::CREATED, Json(JobResponse::from(queued))).into_response())
         }

@@ -25,6 +25,37 @@ class Gate:
 
 GATES = (
     Gate(
+        identifier="automatic_wake_outbox",
+        command=(
+            "cargo",
+            "test",
+            "-p",
+            "piqae-storage-postgres",
+            "--test",
+            "automatic_wake_outbox",
+            "--locked",
+            "--",
+            "--nocapture",
+        ),
+        expected_test="postgres_wake_outbox_is_idempotent_content_free_and_at_least_once",
+    ),
+    Gate(
+        identifier="automatic_wake_outbox_n_minus_one_upgrade",
+        command=(
+            "cargo",
+            "test",
+            "-p",
+            "piqae-storage-postgres",
+            "--test",
+            "migrations",
+            "automatic_wake_outbox_upgrades_43_and_is_tenant_isolated",
+            "--locked",
+            "--",
+            "--nocapture",
+        ),
+        expected_test="automatic_wake_outbox_upgrades_43_and_is_tenant_isolated",
+    ),
+    Gate(
         identifier="destination_topology_fencing_fifo",
         command=(
             "cargo",
@@ -187,7 +218,9 @@ def validate_output(gate: Gate, returncode: int, output: str) -> None:
             f"{gate.identifier}: test command failed with exit code {returncode}"
         )
     lowered = output.lower()
-    if "skipped:" in lowered or "0 passed" in lowered:
+    if "skipped:" in lowered or re.search(
+        r"(?m)^test result: ok\. 0 passed;", lowered
+    ):
         raise PostgresEvidenceError(
             f"{gate.identifier}: PostgreSQL evidence was skipped or ran zero tests"
         )
