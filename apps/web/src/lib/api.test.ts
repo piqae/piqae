@@ -14,6 +14,74 @@ const uncertainJob = (id: string, since: string) => ({
 });
 
 describe('live dashboard overview', () => {
+  it('maps runtime availability and advisory refresh hints without upgrading them to remote wake', async () => {
+    const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input));
+      if (url.pathname === '/v1/nodes/runtime-observations') {
+        return Response.json({
+          data: [{
+            node_id: 'agt_ipad',
+            sequence: 9,
+            host_mode: 'embedded_application',
+            availability_class: 'background_opportunistic',
+            lifecycle_state: 'background',
+            accepts_cloud_jobs: false,
+            execution_budget_ms: 24_000,
+            wake_mechanisms: ['apns_background', 'bluetooth_accessory'],
+            observed_at: '2026-08-27T00:00:00.000Z',
+            expires_at: '2026-08-27T00:01:00.000Z',
+            freshness: 'recent'
+          }],
+          next_cursor: null,
+          has_more: false
+        });
+      }
+      if (url.pathname === '/v1/nodes/agt_ipad/wake-hints' && init?.method === 'POST') {
+        expect(new Headers(init.headers).get('idempotency-key')).toBe('refresh-1');
+        expect(JSON.parse(String(init.body))).toEqual({
+          reason: 'operator_request',
+          expires_in_seconds: 300
+        });
+        return Response.json({
+          id: 'wkh_01',
+          node_id: 'agt_ipad',
+          reason: 'operator_request',
+          delivery_channel: 'connected_session',
+          status: 'observed',
+          requested_at: '2026-08-27T00:00:00.000Z',
+          expires_at: '2026-08-27T00:05:00.000Z',
+          observed_at: '2026-08-27T00:00:02.000Z'
+        });
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    const api = createLiveApi(fetcher as typeof fetch, 'https://api.example.test');
+
+    await expect(api.nodeRuntimeObservations()).resolves.toMatchObject({
+      data: [{
+        nodeId: 'agt_ipad',
+        hostMode: 'embedded_application',
+        availabilityClass: 'background_opportunistic',
+        acceptsCloudJobs: false,
+        executionBudgetMs: 24_000
+      }]
+    });
+    await expect(api.requestNodeRefresh('agt_ipad', 'refresh-1')).resolves.toMatchObject({
+      deliveryChannel: 'connected_session',
+      status: 'observed'
+    });
+  });
+
+  it('treats an already absent node projection as a completed remove action', async () => {
+    const fetcher = vi.fn(async () => Response.json(
+      { error: { code: 'not_found', message: 'Node not found.' } },
+      { status: 404 }
+    ));
+    await expect(
+      createLiveApi(fetcher as typeof fetch, 'https://api.example.test').removeNode('agt_old')
+    ).resolves.toEqual({ alreadyRemoved: true });
+  });
+
   it('loads customer operations with immutable attribution and no tenant selector headers', async () => {
     const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = new URL(String(input));
@@ -41,7 +109,7 @@ describe('live dashboard overview', () => {
       data: [{
         customer: { id: 'wsp_child', externalId: 'c4beta', name: 'C4 Beta' },
         environment: { id: 'env_live', kind: 'live' },
-        agents: [], printers: [], jobs: [], destinations: [], routes: [], routeObservations: []
+        agents: [], printers: [], jobs: [], destinations: [], routes: [], routeObservations: [], runtimeObservations: []
       }],
       nextCursor: 'next-shop',
       hasMore: true
