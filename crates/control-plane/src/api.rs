@@ -2593,6 +2593,8 @@ pub async fn agent_sync(
         .await?;
     let inventory_projection =
         crate::destination_topology::project_agent_topology(&state, tenant, &request).await?;
+    let runtime_admission =
+        crate::destination_topology::record_runtime_availability(&state, tenant, &request).await?;
     if let Some(projection) = inventory_projection.as_ref() {
         let invalidation = serde_json::json!({
             "agent_id": request.agent_id,
@@ -2697,7 +2699,7 @@ pub async fn agent_sync(
         request.agent_id,
     )
     .await?;
-    let leases = if request.queue.accepts_jobs {
+    let leases = if request.queue.accepts_jobs && runtime_admission.eligible_for_offers {
         state
             .repository
             .claim_jobs(
@@ -2944,6 +2946,7 @@ pub async fn agent_sync(
         inventory_projection_acknowledgement_supported: true,
         inventory_projection,
         acknowledged_handoff_sequence,
+        wake_hints: runtime_admission.wake_hints,
     }))
 }
 

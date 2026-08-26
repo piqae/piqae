@@ -18,10 +18,15 @@ export type DestinationIdentityEvidence = components['schemas']['DestinationIden
 export type DestinationIdentityDecision = components['schemas']['DestinationIdentityDecision'];
 export type CreateDestinationIdentityDecision = components['schemas']['CreateDestinationIdentityDecision'];
 export type RouteObservation = components['schemas']['RouteObservation'];
+export type PrivacySafeQueueOccupancy = components['schemas']['PrivacySafeQueueOccupancy'];
 export type RouteReservation = components['schemas']['RouteReservation'];
 export type DeliveryAttempt = components['schemas']['DeliveryAttempt'];
 export type ResolveUncertainDelivery = components['schemas']['ResolveUncertainDelivery'];
 export type UncertainDeliveryResolution = components['schemas']['UncertainDeliveryResolution'];
+export type NodeRuntimeObservation = components['schemas']['NodeRuntimeObservation'];
+export type NodeRuntimeObservationPage = components['schemas']['NodeRuntimeObservationPage'];
+export type NodeWakeHint = components['schemas']['NodeWakeHint'];
+export type CreateNodeWakeHint = components['schemas']['CreateNodeWakeHint'];
 
 export type BusinessDocumentV1 = components['schemas']['BusinessDocumentV1'];
 export type BusinessDocumentNode = components['schemas']['BusinessDocumentNode'];

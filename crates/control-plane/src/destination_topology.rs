@@ -25,14 +25,18 @@ use piqae_storage_postgres::{
     StorageError,
     destination_topology::{
         DeliveryAttempt, DeliveryAttemptState, IdentityConfidence, IdentityDecision,
-        IdentityDecisionKind, IdentityEvidence, NewDeliveryAttempt, ProjectionAcknowledgement,
-        RouteObservation, RouteReservation, SchedulingAuthority, SiteCoordinatorMembership,
-        StoredPhysicalDestination, StoredPrinterRoute, TenantScope,
+        IdentityDecisionKind, IdentityEvidence, NewDeliveryAttempt,
+        NodeRuntimeObservation as StoredNodeRuntimeObservation, NodeWakeHint,
+        ProjectionAcknowledgement, RouteObservation, RouteReservation, SchedulingAuthority,
+        SiteCoordinatorMembership, StoredPhysicalDestination, StoredPrinterRoute, TenantScope,
     },
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::{
+    collections::{BTreeMap, HashMap, HashSet},
+    str::FromStr,
+};
 
 const fn stored_observation_state(value: piqae_domain::PrinterState) -> &'static str {
     match value {
@@ -180,9 +184,20 @@ pub struct RouteObservationResponse {
     pub connector_jobs: u32,
     pub other_piqae_or_external_jobs: u32,
     pub unknown_jobs: u32,
+    /// Preferred privacy-safe queue view. `piqae_owned_jobs` is scoped to the
+    /// authenticated connector; `external_jobs` is only an opaque count and
+    /// never reveals another tenant's job identity or content.
+    pub queue_occupancy: PrivacySafeQueueOccupancyResponse,
     pub estimated_busy_seconds: Option<u64>,
     pub observed_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct PrivacySafeQueueOccupancyResponse {
+    pub piqae_owned_jobs: u32,
+    pub external_jobs: u32,
+    pub unknown_jobs: u32,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -352,6 +367,63 @@ pub struct ObservationQuery {
     limit: u32,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct NodeRuntimeListQuery {
+    #[serde(default = "default_runtime_list_limit")]
+    limit: u32,
+    after: Option<String>,
+}
+
+const fn default_runtime_list_limit() -> u32 {
+    100
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct NodeRuntimeObservationPage {
+    pub data: Vec<NodeRuntimeObservationResponse>,
+    pub next_cursor: Option<String>,
+    pub has_more: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CreateWakeHintRequest {
+    reason: String,
+    #[serde(default = "default_wake_hint_ttl_seconds")]
+    expires_in_seconds: u32,
+}
+
+const fn default_wake_hint_ttl_seconds() -> u32 {
+    300
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct NodeRuntimeObservationResponse {
+    pub node_id: String,
+    pub sequence: u64,
+    pub host_mode: String,
+    pub availability_class: String,
+    pub lifecycle_state: String,
+    pub accepts_cloud_jobs: bool,
+    pub execution_budget_ms: Option<u64>,
+    pub wake_mechanisms: Vec<String>,
+    pub observed_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    pub freshness: &'static str,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct NodeWakeHintResponse {
+    pub id: String,
+    pub node_id: String,
+    pub reason: String,
+    pub delivery_channel: String,
+    pub status: String,
+    pub requested_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    pub observed_at: Option<DateTime<Utc>>,
+}
+
 const fn default_observation_limit() -> u32 {
     100
 }
@@ -393,6 +465,16 @@ fn observation_response(value: RouteObservation) -> RouteObservationResponse {
         connector_jobs: value.connector_jobs,
         other_piqae_or_external_jobs: value.other_piqae_or_external_jobs,
         unknown_jobs: value.unknown_jobs,
+        queue_occupancy: PrivacySafeQueueOccupancyResponse {
+            piqae_owned_jobs: value.connector_jobs,
+            // The N-1 aggregate includes unknown ownership. The preferred
+            // projection partitions that aggregate so consumers never double
+            // count the native queue.
+            external_jobs: value
+                .other_piqae_or_external_jobs
+                .saturating_sub(value.unknown_jobs),
+            unknown_jobs: value.unknown_jobs,
+        },
         estimated_busy_seconds: value.estimated_busy_seconds.map(u64::from),
         observed_at: value.observed_at,
         expires_at: value.fresh_until,
@@ -1215,6 +1297,21 @@ pub(crate) async fn project_agent_topology(
             ));
         }
         let queue = observation.queue.clone().unwrap_or_default();
+        let classified_total = queue
+            .connector_jobs
+            .checked_add(queue.other_piqae_or_external_jobs);
+        if observation.sequence == 0
+            || observation.observed_at > Utc::now() + TimeDelta::minutes(5)
+            || queue.active_jobs > queue.total_jobs
+            || queue.held_jobs > queue.total_jobs
+            || queue.unknown_jobs > queue.other_piqae_or_external_jobs
+            || classified_total != Some(queue.total_jobs)
+        {
+            return Err(AppError::invalid(
+                "invalid_route_observation",
+                "Route sequence, timestamp, or privacy-safe queue counts are inconsistent.",
+            ));
+        }
         state
             .destination_topology
             .record_route_observation(
@@ -1262,6 +1359,202 @@ pub(crate) async fn project_agent_topology(
             projected_at: now,
         }
     }))
+}
+
+pub(crate) struct RuntimeAdmission {
+    pub eligible_for_offers: bool,
+    pub wake_hints: Vec<piqae_protocol::agent::AgentWakeHint>,
+}
+
+const fn host_mode_name(value: piqae_protocol::agent::NodeHostMode) -> &'static str {
+    use piqae_protocol::agent::NodeHostMode;
+    match value {
+        NodeHostMode::MachineService => "machine_service",
+        NodeHostMode::UserAgent => "user_agent",
+        NodeHostMode::EmbeddedApplication => "embedded_application",
+        NodeHostMode::AttachedClient => "attached_client",
+    }
+}
+
+const fn availability_class_name(
+    value: piqae_protocol::agent::NodeAvailabilityClass,
+) -> &'static str {
+    use piqae_protocol::agent::NodeAvailabilityClass;
+    match value {
+        NodeAvailabilityClass::ContinuousWhileAwake => "continuous_while_awake",
+        NodeAvailabilityClass::ForegroundOnly => "foreground_only",
+        NodeAvailabilityClass::BackgroundOpportunistic => "background_opportunistic",
+        NodeAvailabilityClass::ManagedKiosk => "managed_kiosk",
+        NodeAvailabilityClass::WakeRelayCapable => "wake_relay_capable",
+    }
+}
+
+const fn lifecycle_state_name(value: piqae_protocol::agent::NodeAvailability) -> &'static str {
+    use piqae_protocol::agent::NodeAvailability;
+    match value {
+        NodeAvailability::Available => "available",
+        NodeAvailability::Foreground => "foreground",
+        NodeAvailability::Background => "background",
+        NodeAvailability::Suspending => "suspending",
+        NodeAvailability::Suspended => "suspended",
+        NodeAvailability::Waking => "waking",
+        NodeAvailability::Unavailable => "unavailable",
+    }
+}
+
+const fn wake_mechanism_name(value: piqae_protocol::agent::WakeMechanism) -> &'static str {
+    use piqae_protocol::agent::WakeMechanism;
+    match value {
+        WakeMechanism::LocalBroker => "local_broker",
+        WakeMechanism::ApnsBackground => "apns_background",
+        WakeMechanism::BluetoothAccessory => "bluetooth_accessory",
+        WakeMechanism::ExternalAccessory => "external_accessory",
+        WakeMechanism::WakeOnLan => "wake_on_lan",
+        WakeMechanism::Manual => "manual",
+    }
+}
+
+pub(crate) async fn record_runtime_availability(
+    state: &AppState,
+    tenant: crate::authentication::TenantContext,
+    request: &piqae_protocol::agent::AgentSyncRequest,
+) -> Result<RuntimeAdmission, AppError> {
+    let tenant_scope = scope(tenant);
+    let now = Utc::now();
+    let eligible_for_offers = if let Some(runtime) = &request.runtime {
+        let mut wake_mechanisms = runtime.wake_mechanisms.clone();
+        wake_mechanisms.sort();
+        wake_mechanisms.dedup();
+        if runtime.sequence == 0
+            || runtime.observed_at > now + TimeDelta::minutes(5)
+            || runtime.fresh_until < runtime.observed_at
+            || runtime.fresh_until > runtime.observed_at + TimeDelta::minutes(10)
+            || runtime.wake_mechanisms.len() > 8
+            || wake_mechanisms.len() != runtime.wake_mechanisms.len()
+        {
+            return Err(AppError::invalid(
+                "invalid_runtime_observation",
+                "Runtime availability is outside protocol bounds.",
+            ));
+        }
+        let background_budget_ok = !matches!(
+            runtime.availability_class,
+            piqae_protocol::agent::NodeAvailabilityClass::BackgroundOpportunistic
+        ) || !runtime.accepts_cloud_jobs
+            || runtime
+                .execution_budget_ms
+                .is_some_and(|budget| budget >= 30_000);
+        let attached_client_safe = !matches!(
+            runtime.host_mode,
+            piqae_protocol::agent::NodeHostMode::AttachedClient
+        ) || !runtime.accepts_cloud_jobs;
+        let lifecycle_acceptance_safe = !runtime.accepts_cloud_jobs
+            || matches!(
+                runtime.lifecycle_state,
+                piqae_protocol::agent::NodeAvailability::Available
+                    | piqae_protocol::agent::NodeAvailability::Foreground
+                    | piqae_protocol::agent::NodeAvailability::Background
+            );
+        let availability_class_safe = !runtime.accepts_cloud_jobs
+            || !matches!(
+                runtime.availability_class,
+                piqae_protocol::agent::NodeAvailabilityClass::ForegroundOnly
+            )
+            || matches!(
+                runtime.lifecycle_state,
+                piqae_protocol::agent::NodeAvailability::Foreground
+            );
+        // A runtime's self-report cannot establish a trusted relay. The
+        // authority has no endpoint registry/dispatcher yet, so accepting this
+        // class would falsely advertise remote-wake readiness.
+        let wake_relay_verified = !matches!(
+            runtime.availability_class,
+            piqae_protocol::agent::NodeAvailabilityClass::WakeRelayCapable
+        );
+        if !background_budget_ok
+            || !attached_client_safe
+            || !lifecycle_acceptance_safe
+            || !availability_class_safe
+            || !wake_relay_verified
+        {
+            return Err(AppError::invalid(
+                "unsafe_runtime_admission",
+                "This host cannot safely accept cloud work or advertise an unverified wake relay in its current execution mode.",
+            ));
+        }
+        let stored = StoredNodeRuntimeObservation {
+            id: format!(
+                "nro_{}",
+                &hex::encode(Sha256::digest(format!(
+                    "{}\0{}",
+                    request.agent_id, runtime.sequence
+                )))[..32]
+            ),
+            agent_id: request.agent_id.to_string(),
+            sequence: runtime.sequence,
+            host_mode: host_mode_name(runtime.host_mode).into(),
+            availability_class: availability_class_name(runtime.availability_class).into(),
+            lifecycle_state: lifecycle_state_name(runtime.lifecycle_state).into(),
+            accepts_cloud_jobs: runtime.accepts_cloud_jobs,
+            execution_budget_ms: runtime.execution_budget_ms,
+            wake_mechanisms: runtime
+                .wake_mechanisms
+                .iter()
+                .copied()
+                .map(wake_mechanism_name)
+                .map(str::to_owned)
+                .collect(),
+            observed_at: runtime.observed_at,
+            fresh_until: runtime.fresh_until,
+        };
+        state
+            .destination_topology
+            .record_node_runtime_observation(tenant_scope, &stored)
+            .await
+            .map_err(storage_error)?;
+        runtime.accepts_cloud_jobs
+            && runtime.fresh_until >= now
+            && matches!(
+                runtime.lifecycle_state,
+                piqae_protocol::agent::NodeAvailability::Available
+                    | piqae_protocol::agent::NodeAvailability::Foreground
+                    | piqae_protocol::agent::NodeAvailability::Background
+            )
+    } else {
+        // Legacy desktop agents have no mobile execution budget. Their current
+        // authenticated sync plus queue acceptance remains the N-1 admission.
+        request.queue.accepts_jobs
+    };
+    let can_observe_hints = request.runtime.as_ref().is_none_or(|runtime| {
+        !matches!(
+            runtime.lifecycle_state,
+            piqae_protocol::agent::NodeAvailability::Suspending
+                | piqae_protocol::agent::NodeAvailability::Suspended
+                | piqae_protocol::agent::NodeAvailability::Unavailable
+        )
+    });
+    let wake_hints = if can_observe_hints {
+        state
+            .destination_topology
+            .observe_pending_node_wake_hints(tenant_scope, &request.agent_id.to_string(), now, 32)
+            .await
+            .map_err(storage_error)?
+            .into_iter()
+            .map(|hint| piqae_protocol::agent::AgentWakeHint {
+                id: hint.id,
+                reason: hint.reason,
+                delivery_channel: piqae_protocol::agent::WakeDeliveryChannel::ConnectedSession,
+                requested_at: hint.requested_at,
+                expires_at: hint.expires_at,
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    Ok(RuntimeAdmission {
+        eligible_for_offers,
+        wake_hints,
+    })
 }
 
 /// Acquires the destination-wide native-handoff fence for an already leased
@@ -1326,6 +1619,22 @@ pub(crate) async fn reserve_job_route(
             route_id: Some(route.id),
         });
     };
+    let observation = match state
+        .destination_topology
+        .latest_route_observation(tenant_scope, &route.id)
+        .await
+    {
+        Ok(observation) => observation,
+        Err(StorageError::NotFound) => return Ok(JobRouteReservation::Busy),
+        Err(error) => return Err(storage_error(error)),
+    };
+    let now = Utc::now();
+    if observation.fresh_until < now
+        || observation.accepting_jobs != Some(true)
+        || !matches!(observation.printer_state.as_str(), "idle" | "processing")
+    {
+        return Ok(JobRouteReservation::Busy);
+    }
     let destination = state
         .destination_topology
         .get_destination(tenant_scope, &route.destination_id)
@@ -1676,6 +1985,199 @@ pub async fn list_routes(
         .await
         .map_err(storage_error)?;
     Ok(Json(route_responses(&state, tenant_scope, stored).await?))
+}
+
+pub(crate) fn runtime_observation_response(
+    value: StoredNodeRuntimeObservation,
+) -> NodeRuntimeObservationResponse {
+    let now = Utc::now();
+    let freshness = if value.fresh_until >= now {
+        "live"
+    } else if value.observed_at + TimeDelta::minutes(5) >= now {
+        "recent"
+    } else {
+        "stale"
+    };
+    NodeRuntimeObservationResponse {
+        node_id: value.agent_id,
+        sequence: value.sequence,
+        host_mode: value.host_mode,
+        availability_class: value.availability_class,
+        lifecycle_state: value.lifecycle_state,
+        accepts_cloud_jobs: value.accepts_cloud_jobs,
+        execution_budget_ms: value.execution_budget_ms,
+        wake_mechanisms: value.wake_mechanisms,
+        observed_at: value.observed_at,
+        expires_at: value.fresh_until,
+        freshness,
+    }
+}
+
+pub async fn list_node_runtime_observations(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<NodeRuntimeListQuery>,
+) -> Result<Json<NodeRuntimeObservationPage>, AppError> {
+    let tenant = authenticate_native(&state, &headers, Scope::AgentsRead).await?;
+    let limit = query.limit.clamp(1, 1_000);
+    let after = query
+        .after
+        .as_deref()
+        .map(parse_node_id)
+        .transpose()?
+        .map(|value| value.to_string());
+    let mut observations = state
+        .destination_topology
+        .list_latest_node_runtime_observations(
+            scope(tenant),
+            after.as_deref(),
+            limit.saturating_add(1),
+        )
+        .await
+        .map_err(storage_error)?;
+    let has_more = observations.len() > usize::try_from(limit).unwrap_or(1_000);
+    observations.truncate(usize::try_from(limit).unwrap_or(1_000));
+    let next_cursor = has_more
+        .then(|| observations.last().map(|value| value.agent_id.clone()))
+        .flatten();
+    Ok(Json(NodeRuntimeObservationPage {
+        data: observations
+            .into_iter()
+            .map(runtime_observation_response)
+            .collect(),
+        next_cursor,
+        has_more,
+    }))
+}
+
+fn wake_hint_response(value: NodeWakeHint) -> NodeWakeHintResponse {
+    NodeWakeHintResponse {
+        id: value.id,
+        node_id: value.agent_id,
+        reason: value.reason,
+        delivery_channel: value.delivery_channel,
+        status: value.status,
+        requested_at: value.requested_at,
+        expires_at: value.expires_at,
+        observed_at: value.observed_at,
+    }
+}
+
+pub async fn get_node_runtime(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(node_id): Path<String>,
+) -> Result<Json<NodeRuntimeObservationResponse>, AppError> {
+    let node_id = parse_node_id(&node_id)?;
+    let tenant = authenticate_native(&state, &headers, Scope::AgentsRead).await?;
+    state
+        .repository
+        .get_agent(tenant.workspace_id, tenant.environment_id, node_id)
+        .await?;
+    let observation = state
+        .destination_topology
+        .latest_node_runtime_observation(scope(tenant), &node_id.to_string())
+        .await
+        .map_err(storage_error)?;
+    Ok(Json(runtime_observation_response(observation)))
+}
+
+pub async fn list_node_wake_hints(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(node_id): Path<String>,
+    Query(query): Query<ObservationQuery>,
+) -> Result<Json<Vec<NodeWakeHintResponse>>, AppError> {
+    let node_id = parse_node_id(&node_id)?;
+    let tenant = authenticate_native(&state, &headers, Scope::AgentsRead).await?;
+    state
+        .repository
+        .get_agent(tenant.workspace_id, tenant.environment_id, node_id)
+        .await?;
+    Ok(Json(
+        state
+            .destination_topology
+            .list_node_wake_hints(
+                scope(tenant),
+                &node_id.to_string(),
+                query.limit.clamp(1, 100),
+            )
+            .await
+            .map_err(storage_error)?
+            .into_iter()
+            .map(wake_hint_response)
+            .collect(),
+    ))
+}
+
+pub async fn create_node_wake_hint(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(node_id): Path<String>,
+    Json(request): Json<CreateWakeHintRequest>,
+) -> Result<Response, AppError> {
+    let node_id = parse_node_id(&node_id)?;
+    let tenant = authenticate_native(&state, &headers, Scope::AgentsWrite).await?;
+    state
+        .repository
+        .get_agent(tenant.workspace_id, tenant.environment_id, node_id)
+        .await?;
+    let idempotency_key = headers
+        .get("idempotency-key")
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| (8..=255).contains(&value.len()))
+        .ok_or_else(|| {
+            AppError::invalid(
+                "invalid_idempotency_key",
+                "Idempotency-Key must be between 8 and 255 bytes.",
+            )
+        })?;
+    if !matches!(
+        request.reason.as_str(),
+        "job_available" | "operator_request" | "inventory_refresh" | "diagnostics"
+    ) || !(30..=900).contains(&request.expires_in_seconds)
+    {
+        return Err(AppError::invalid(
+            "invalid_wake_hint",
+            "Wake reason or expiry is outside protocol bounds.",
+        ));
+    }
+    let requested_at = Utc::now();
+    let hint = state
+        .destination_topology
+        .create_node_wake_hint(
+            scope(tenant),
+            &NodeWakeHint {
+                id: format!("wkh_{}", ulid::Ulid::new()),
+                agent_id: node_id.to_string(),
+                reason: request.reason,
+                // No external dispatcher is configured yet. Returning this
+                // through a later signed sync is explicitly not remote wake.
+                delivery_channel: "connected_session".into(),
+                status: "pending".into(),
+                requested_at,
+                expires_at: requested_at
+                    + TimeDelta::seconds(i64::from(request.expires_in_seconds)),
+                observed_at: None,
+            },
+            idempotency_key,
+        )
+        .await
+        .map_err(storage_error)?;
+    let response = wake_hint_response(hint);
+    state
+        .publish(tenant, "node.wake_hint.requested", &response)
+        .await?;
+    Ok((StatusCode::ACCEPTED, Json(response)).into_response())
+}
+
+fn parse_node_id(value: &str) -> Result<piqae_domain::AgentId, AppError> {
+    piqae_domain::AgentId::from_str(value).map_err(|_| {
+        AppError::invalid(
+            "invalid_node_id",
+            "Node ID must be an agt_<ULID> identifier.",
+        )
+    })
 }
 
 pub async fn get_route(
@@ -2817,6 +3319,7 @@ mod tests {
                 }],
                 topology_changes: Vec::new(),
                 native_handoffs: Vec::new(),
+                runtime: None,
             };
             let token = format!("piq_destination_test_{index}");
             authenticator.insert(&token, tenant).await;

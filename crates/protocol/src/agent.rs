@@ -331,6 +331,11 @@ pub struct AgentSyncRequest {
     /// this connector and intentionally omit document metadata.
     #[serde(default)]
     pub native_handoffs: Vec<NativeHandoffEvidence>,
+    /// Host lifecycle and execution availability reported by runtimes which
+    /// can be embedded in foreground-constrained applications. Missing keeps
+    /// the legacy desktop-node admission behaviour during rolling upgrades.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<NodeRuntimeObservation>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -357,6 +362,9 @@ pub enum AgentFeature {
     RouteObservationSequenceV1,
     RouteLeaseRenewalV1,
     AmbiguousHandoffResolutionV1,
+    EmbeddedHostV1,
+    RuntimeAvailabilityV1,
+    WakeHintsV1,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -437,6 +445,92 @@ pub struct AgentSyncResponse {
     /// Highest local handoff evidence sequence durably consumed by the server.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acknowledged_handoff_sequence: Option<u64>,
+    /// Wake requests are advisory and never carry a job lease or document.
+    /// A runtime only claims work after it is authenticated and eligible.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub wake_hints: Vec<AgentWakeHint>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NodeHostMode {
+    MachineService,
+    UserAgent,
+    EmbeddedApplication,
+    AttachedClient,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NodeAvailabilityClass {
+    ContinuousWhileAwake,
+    ForegroundOnly,
+    BackgroundOpportunistic,
+    ManagedKiosk,
+    WakeRelayCapable,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NodeAvailability {
+    Available,
+    Foreground,
+    Background,
+    Suspending,
+    Suspended,
+    Waking,
+    Unavailable,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WakeMechanism {
+    LocalBroker,
+    ApnsBackground,
+    BluetoothAccessory,
+    ExternalAccessory,
+    WakeOnLan,
+    Manual,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct NodeRuntimeObservation {
+    /// Monotonic per connector so replayed lifecycle observations are
+    /// idempotent and out-of-order suspension reports fail closed.
+    pub sequence: u64,
+    pub host_mode: NodeHostMode,
+    pub availability_class: NodeAvailabilityClass,
+    pub lifecycle_state: NodeAvailability,
+    pub accepts_cloud_jobs: bool,
+    pub observed_at: DateTime<Utc>,
+    pub fresh_until: DateTime<Utc>,
+    /// Remaining operating-system execution budget, when the host can measure
+    /// it. Opportunistic background hosts require a bounded positive budget
+    /// before the server may offer work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_budget_ms: Option<u64>,
+    #[serde(default)]
+    pub wake_mechanisms: Vec<WakeMechanism>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AgentWakeHint {
+    pub id: String,
+    pub reason: String,
+    /// This hint was observed through the already-authenticated sync session.
+    /// It is not evidence that an external push woke the host.
+    pub delivery_channel: WakeDeliveryChannel,
+    pub requested_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WakeDeliveryChannel {
+    ConnectedSession,
+    ExternalPush,
+    LocalRelay,
+    Manual,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
