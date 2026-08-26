@@ -366,32 +366,8 @@ fn test_macos(root: &Path) -> TaskResult {
     ))?;
     run(command(
         root,
-        "swift",
-        [
-            "test",
-            "--package-path",
-            "sdk/apple",
-            "-Xswiftc",
-            "-strict-concurrency=complete",
-            "-Xswiftc",
-            "-warnings-as-errors",
-        ],
-    ))?;
-    run(command(
-        root,
-        "xcodebuild",
-        [
-            "-scheme",
-            "PiqaeNodeKit-Package",
-            "-destination",
-            "generic/platform=iOS Simulator",
-            "-derivedDataPath",
-            ".piqae-test-fixtures/apple-sdk-derived-data",
-            "CODE_SIGNING_ALLOWED=NO",
-            "SWIFT_TREAT_WARNINGS_AS_ERRORS=YES",
-            "SWIFT_STRICT_CONCURRENCY=complete",
-            "build",
-        ],
+        "release/tools/test_apple_node_sdk.sh",
+        std::iter::empty::<&str>(),
     ))
 }
 
@@ -823,29 +799,7 @@ const CHECKS: &[Check] = &[
         needs: &[Need::Os("macos"), Need::Tool("swift")],
         steps: &[
             &["swift", "test", "--package-path", "shells/macos"],
-            &[
-                "swift",
-                "test",
-                "--package-path",
-                "sdk/apple",
-                "-Xswiftc",
-                "-strict-concurrency=complete",
-                "-Xswiftc",
-                "-warnings-as-errors",
-            ],
-            &[
-                "xcodebuild",
-                "-scheme",
-                "PiqaeNodeKit-Package",
-                "-destination",
-                "generic/platform=iOS Simulator",
-                "-derivedDataPath",
-                ".piqae-test-fixtures/apple-sdk-derived-data",
-                "CODE_SIGNING_ALLOWED=NO",
-                "SWIFT_TREAT_WARNINGS_AS_ERRORS=YES",
-                "SWIFT_STRICT_CONCURRENCY=complete",
-                "build",
-            ],
+            &["release/tools/test_apple_node_sdk.sh"],
         ],
     },
     Check {
