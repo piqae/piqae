@@ -1,4 +1,5 @@
 import Foundation
+import PiqaeNodeKit
 import XCTest
 @testable import PiqaeMenuCore
 
@@ -294,6 +295,54 @@ final class LocalAPITests: XCTestCase {
                 .queryItems?.first(where: { $0.name == "handoff" })?.value,
             "once"
         )
+    }
+
+    func testLifecycleRouteUsesAuthenticatedSharedEventContract() async throws {
+        let tokenFile = FileManager.default.temporaryDirectory
+            .appendingPathComponent("piqae-lifecycle-\(UUID().uuidString).token")
+        try Data("lifecycle-secret\n".utf8).write(to: tokenFile, options: .atomic)
+        defer { try? FileManager.default.removeItem(at: tokenFile) }
+
+        let sessionConfiguration = URLSessionConfiguration.ephemeral
+        sessionConfiguration.protocolClasses = [StubURLProtocol.self]
+        let client = LocalAPIClient(
+            configuration: try LocalAPIConfiguration(
+                baseURL: XCTUnwrap(URL(string: "http://127.0.0.1:39100")),
+                tokenFile: tokenFile
+            ),
+            session: URLSession(configuration: sessionConfiguration)
+        )
+        StubURLProtocol.handler = { request in
+            XCTAssertEqual(request.httpMethod, "POST")
+            XCTAssertEqual(request.url?.path, "/v1/local/lifecycle")
+            XCTAssertEqual(
+                request.value(forHTTPHeaderField: "Authorization"),
+                "Bearer lifecycle-secret"
+            )
+            XCTAssertEqual(
+                try JSONSerialization.jsonObject(with: try Self.body(of: request))
+                    as? [String: String],
+                ["event": "suspend_imminent"]
+            )
+            return Self.response(
+                for: request,
+                body: """
+                {
+                  "foreground":true,
+                  "power":"suspending",
+                  "network":"available",
+                  "accepting_cloud_leases":false,
+                  "shutdown_requested":false,
+                  "generation":9
+                }
+                """
+            )
+        }
+
+        let snapshot = try await client.reportLifecycle(.suspendImminent)
+        XCTAssertEqual(snapshot.power, "suspending")
+        XCTAssertEqual(snapshot.generation, 9)
+        XCTAssertFalse(snapshot.acceptingCloudLeases)
     }
 
     func testDashboardSessionRejectsRemoteHandoff() async throws {

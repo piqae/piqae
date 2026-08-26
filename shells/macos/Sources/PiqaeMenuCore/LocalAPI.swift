@@ -1,4 +1,5 @@
 import Foundation
+import PiqaeNodeKit
 
 public struct LocalAPIConfiguration: Equatable, Sendable {
     public static let defaultAPIURL = URL(string: "http://127.0.0.1:39100")!
@@ -190,6 +191,28 @@ public struct LocalJobAccepted: Codable, Equatable, Sendable {
     }
 }
 
+public struct LocalLifecycleSnapshot: Codable, Equatable, Sendable {
+    public let foreground: Bool
+    public let power: String
+    public let network: String
+    public let acceptingCloudLeases: Bool
+    public let shutdownRequested: Bool
+    public let generation: UInt64
+
+    enum CodingKeys: String, CodingKey {
+        case foreground
+        case power
+        case network
+        case acceptingCloudLeases = "accepting_cloud_leases"
+        case shutdownRequested = "shutdown_requested"
+        case generation
+    }
+}
+
+private struct LocalLifecycleRequest: Encodable {
+    let event: PiqaeHostLifecycleEvent
+}
+
 private struct APIMessage: Codable {
     let message: String?
 }
@@ -334,6 +357,16 @@ public final class LocalAPIClient: @unchecked Sendable {
 
     public func resume() async throws {
         try await sendWithoutResponse(method: "POST", path: "/v1/local/resume")
+    }
+
+    public func reportLifecycle(
+        _ event: PiqaeHostLifecycleEvent
+    ) async throws -> LocalLifecycleSnapshot {
+        try await request(
+            method: "POST",
+            path: "/v1/local/lifecycle",
+            body: try encoder.encode(LocalLifecycleRequest(event: event))
+        )
     }
 
     public func submitDriverTest(
@@ -522,5 +555,17 @@ public final class LocalAPIClient: @unchecked Sendable {
                 "Cannot read the local node token. Check PIQAE_LOCAL_TOKEN_FILE."
             )
         }
+    }
+}
+
+public struct PiqaeLocalAPIHostLifecycleReporter: PiqaeHostLifecycleReporter {
+    private let client: LocalAPIClient
+
+    public init(client: LocalAPIClient) {
+        self.client = client
+    }
+
+    public func report(_ event: PiqaeHostLifecycleEvent) async throws {
+        _ = try await client.reportLifecycle(event)
     }
 }

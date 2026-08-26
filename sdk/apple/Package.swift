@@ -31,5 +31,9 @@ let package = Package(
             name: "PiqaeNodeKitTests",
             dependencies: ["PiqaeNodeKit", "PiqaeNodeKitTesting"]
         ),
+        .testTarget(
+            name: "PiqaeNodeKitAirPrintTests",
+            dependencies: ["PiqaeNodeKitAirPrint"]
+        ),
     ]
 )

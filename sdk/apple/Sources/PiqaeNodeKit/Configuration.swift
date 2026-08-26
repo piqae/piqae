@@ -150,6 +150,8 @@ public struct PiqaeNodeConfiguration: Sendable {
     public let identityStore: any PiqaeInstallationIdentityStore
     public let installedNodeIPC: (any PiqaeInstalledNodeIPC)?
     public let printerAdapters: [any PiqaePrinterAdapter]
+    public let hostLifecycleReporter: (any PiqaeHostLifecycleReporter)?
+    public let remoteNotificationProvider: (any PiqaeRemoteNotificationRegistrationProvider)?
 
     public init(
         startupMode: PiqaeNodeStartupMode = .automatic,
@@ -157,7 +159,9 @@ public struct PiqaeNodeConfiguration: Sendable {
         availability: PiqaeNodeAvailabilityClass? = nil,
         identityStore: any PiqaeInstallationIdentityStore = PiqaeKeychainInstallationIdentityStore(),
         installedNodeIPC: (any PiqaeInstalledNodeIPC)? = nil,
-        printerAdapters: [any PiqaePrinterAdapter] = []
+        printerAdapters: [any PiqaePrinterAdapter] = [],
+        hostLifecycleReporter: (any PiqaeHostLifecycleReporter)? = nil,
+        remoteNotificationProvider: (any PiqaeRemoteNotificationRegistrationProvider)? = nil
     ) {
         self.startupMode = startupMode
         self.connectivity = connectivity
@@ -165,6 +169,8 @@ public struct PiqaeNodeConfiguration: Sendable {
         self.identityStore = identityStore
         self.installedNodeIPC = installedNodeIPC
         self.printerAdapters = printerAdapters
+        self.hostLifecycleReporter = hostLifecycleReporter
+        self.remoteNotificationProvider = remoteNotificationProvider
     }
 
     public static func localOnly(
@@ -172,7 +178,8 @@ public struct PiqaeNodeConfiguration: Sendable {
         availability: PiqaeNodeAvailabilityClass? = nil,
         identityStore: any PiqaeInstallationIdentityStore = PiqaeKeychainInstallationIdentityStore(),
         installedNodeIPC: (any PiqaeInstalledNodeIPC)? = nil,
-        printerAdapters: [any PiqaePrinterAdapter] = []
+        printerAdapters: [any PiqaePrinterAdapter] = [],
+        hostLifecycleReporter: (any PiqaeHostLifecycleReporter)? = nil
     ) -> PiqaeNodeConfiguration {
         PiqaeNodeConfiguration(
             startupMode: startupMode,
@@ -180,7 +187,8 @@ public struct PiqaeNodeConfiguration: Sendable {
             availability: availability,
             identityStore: identityStore,
             installedNodeIPC: installedNodeIPC,
-            printerAdapters: printerAdapters
+            printerAdapters: printerAdapters,
+            hostLifecycleReporter: hostLifecycleReporter
         )
     }
 
