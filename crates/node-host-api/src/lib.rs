@@ -2,6 +2,28 @@
 
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, path::PathBuf};
+use thiserror::Error;
+
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum HostKeyError {
+    #[error("the host secure key store is unavailable")]
+    Unavailable,
+    #[error("the host secure key store returned invalid key material")]
+    InvalidKeyMaterial,
+}
+
+/// Non-exporting secure-store adapter. Implementations generate and retain the
+/// key in Keychain/Credential Manager and return only keyed digest output.
+pub trait HostKeyProvider: std::fmt::Debug + Send + Sync {
+    /// Produces a keyed digest without exporting the installation key.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Unavailable` when the platform secure store cannot safely
+    /// load or create the scoped key, and `InvalidKeyMaterial` for a provider
+    /// contract violation.
+    fn hmac_sha256(&self, key_scope: &str, message: &[u8]) -> Result<[u8; 32], HostKeyError>;
+}
 
 /// Whether this runtime has no remote authority or may hold isolated cloud
 /// connectors. `CloudCapable` does not imply that a connector is configured.

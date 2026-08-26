@@ -15,8 +15,8 @@ use piqae_executor_windows::native_profile::{
     WINDOWS_PROFILE_HOST_PROTOCOL_VERSION, WindowsNativeProfileCapture,
 };
 use piqae_local_ipc::{
-    LocalPrinter, LocalPrinterProfile, LocalStatus, NativeProfileCapturePayload,
-    ProfileCaptureAuthorized,
+    BrokerAuthorizationDecision, BrokerCapability, LocalPrinter, LocalPrinterProfile, LocalStatus,
+    NativeProfileCapturePayload, PendingBrokerAuthorization, ProfileCaptureAuthorized,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use sha2::{Digest as _, Sha256};
@@ -155,6 +155,33 @@ impl LocalAgentClient {
     /// Returns an error when authentication, transport, or decoding fails.
     pub fn printers(&self) -> Result<Vec<LocalPrinter>, ShellError> {
         self.get("/v1/local/printers")
+    }
+
+    pub fn pending_broker_authorizations(
+        &self,
+    ) -> Result<Vec<PendingBrokerAuthorization>, ShellError> {
+        self.get("/v1/local/broker/authorization-requests")
+    }
+
+    pub fn decide_broker_authorization(
+        &self,
+        authorization_id: Uuid,
+        approved: bool,
+        granted_capabilities: Vec<BrokerCapability>,
+    ) -> Result<(), ShellError> {
+        let body = serde_json::to_vec(&BrokerAuthorizationDecision {
+            approved,
+            granted_capabilities,
+        })
+        .map_err(ShellError::Json)?;
+        let _: serde_json::Value = self.send(
+            "POST",
+            &format!("/v1/local/broker/authorization-requests/{authorization_id}/decision"),
+            Some(&body),
+            None,
+            true,
+        )?;
+        Ok(())
     }
 
     /// Opens a short-lived native profile capture session.

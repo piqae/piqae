@@ -16,8 +16,8 @@ pub mod runtime;
 pub mod supervision;
 
 pub use broker::{
-    ApplicationAuthorization, ApplicationCapabilities, ApplicationIdentity, BrokerRegistry,
-    BrokerServerState, BrokerToken,
+    ApplicationAuthorization, ApplicationCapabilities, ApplicationIdentity, BrokerConsentHandle,
+    BrokerRegistry, BrokerServerState, BrokerToken,
 };
 pub use command::*;
 pub use installation::{
@@ -25,9 +25,9 @@ pub use installation::{
     RuntimeSelectionError, select_runtime,
 };
 pub use piqae_node_host_api::{
-    AvailabilityClass, HostCapabilities, HostKind, HostLifecycle, LeaseAdmission, LifecycleEvent,
-    LifecycleSnapshot, NetworkAvailability, NodeRuntimeMode, PowerAvailability, PrinterTransport,
-    RuntimeConfiguration,
+    AvailabilityClass, HostCapabilities, HostKeyError, HostKeyProvider, HostKind, HostLifecycle,
+    LeaseAdmission, LifecycleEvent, LifecycleSnapshot, NetworkAvailability, NodeRuntimeMode,
+    PowerAvailability, PrinterTransport, RuntimeConfiguration,
 };
 pub use runtime::NodeRuntime;
 pub use supervision::{ConnectorReconciliation, WorkerObservation, plan_connector_reconciliation};

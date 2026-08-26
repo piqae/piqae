@@ -17,8 +17,37 @@ use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use uuid::Uuid;
 
+#[cfg(windows)]
+mod windows_pipe;
+
+#[cfg(windows)]
+pub use windows_pipe::create_current_user_server as create_current_user_pipe_server;
+
+#[must_use]
+pub fn broker_endpoint_for_data_directory(data_directory: &std::path::Path) -> String {
+    #[cfg(unix)]
+    {
+        data_directory
+            .join("runtime")
+            .join("node.sock")
+            .to_string_lossy()
+            .into_owned()
+    }
+    #[cfg(windows)]
+    {
+        let digest = Sha256::digest(data_directory.as_os_str().to_string_lossy().as_bytes());
+        format!(r"\\.\pipe\piqae-node-{}", hex::encode(&digest[..12]))
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = data_directory;
+        "piqae-node".to_owned()
+    }
+}
+
 pub const LOCAL_PROTOCOL_VERSION: u16 = 2;
-pub const BROKER_PROTOCOL_VERSION: u16 = 1;
+pub const BROKER_PROTOCOL_MIN_VERSION: u16 = 1;
+pub const BROKER_PROTOCOL_VERSION: u16 = 2;
 pub const MAX_MESSAGE_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_NATIVE_CAPTURE_BYTES: usize = 1024 * 1024;
 
@@ -36,6 +65,59 @@ pub struct BrokerCredential {
     pub token: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BrokerApplicationIdentity {
+    pub application_id: String,
+    pub display_name: String,
+    /// Evidence shown to the operator. A claimed digest never grants access.
+    pub signing_identity_sha256: Option<String>,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrokerAuthorizationHandle {
+    pub authorization_id: Uuid,
+    pub nonce: String,
+    pub expires_unix_ms: i64,
+}
+
+impl std::fmt::Debug for BrokerAuthorizationHandle {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("BrokerAuthorizationHandle")
+            .field("authorization_id", &self.authorization_id)
+            .field("nonce", &"[REDACTED]")
+            .field("expires_unix_ms", &self.expires_unix_ms)
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BrokerAuthorizationState {
+    Pending,
+    Approved,
+    Denied,
+    Expired,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingBrokerAuthorization {
+    pub authorization_id: Uuid,
+    pub application: BrokerApplicationIdentity,
+    pub requested_capabilities: Vec<BrokerCapability>,
+    pub requested_unix_ms: i64,
+    pub expires_unix_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BrokerAuthorizationDecision {
+    pub approved: bool,
+    #[serde(default)]
+    pub granted_capabilities: Vec<BrokerCapability>,
+}
+
 impl std::fmt::Debug for BrokerCredential {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -46,7 +128,7 @@ impl std::fmt::Debug for BrokerCredential {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BrokerCapability {
     ObserveStatus,
@@ -67,6 +149,16 @@ pub struct BrokerRequest {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum BrokerOperation {
     Presence,
+    RequestAuthorization {
+        application: BrokerApplicationIdentity,
+        requested_capabilities: Vec<BrokerCapability>,
+    },
+    AuthorizationStatus {
+        handle: BrokerAuthorizationHandle,
+    },
+    ExchangeAuthorization {
+        handle: BrokerAuthorizationHandle,
+    },
     Execute {
         credential: BrokerCredential,
         capability: BrokerCapability,
@@ -85,6 +177,9 @@ pub struct BrokerResponse {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum BrokerResult {
     Presence(BrokerPresence),
+    AuthorizationRequested(BrokerAuthorizationHandle),
+    AuthorizationStatus { state: BrokerAuthorizationState },
+    AuthorizationExchanged(BrokerCredential),
     Local(LocalResult),
 }
 
@@ -654,6 +749,43 @@ mod tests {
                 protocol_max: 1
             }))
         ));
+    }
+
+    #[test]
+    fn checked_in_broker_consent_fixtures_pin_protocol_two_without_trusting_claims() {
+        let request: BrokerRequest = serde_json::from_slice(include_bytes!(
+            "../../../contracts/node-sdk/v1/broker-authorization-request.json"
+        ))
+        .unwrap();
+        assert_eq!(request.protocol, 2);
+        assert!(matches!(
+            request.operation,
+            BrokerOperation::RequestAuthorization {
+                application: BrokerApplicationIdentity { ref application_id, .. },
+                ..
+            } if application_id == "com.example.pos"
+        ));
+        let response: BrokerResponse = serde_json::from_slice(include_bytes!(
+            "../../../contracts/node-sdk/v1/broker-authorization-requested-response.json"
+        ))
+        .unwrap();
+        assert!(matches!(
+            response.result,
+            Ok(BrokerResult::AuthorizationRequested(_))
+        ));
+        for fixture in [
+            include_bytes!(
+                "../../../contracts/node-sdk/v1/broker-authorization-status-request.json"
+            )
+            .as_slice(),
+            include_bytes!(
+                "../../../contracts/node-sdk/v1/broker-authorization-exchange-request.json"
+            )
+            .as_slice(),
+        ] {
+            let request: BrokerRequest = serde_json::from_slice(fixture).unwrap();
+            assert_eq!(request.protocol, 2);
+        }
     }
 
     #[tokio::test]

@@ -11,20 +11,35 @@
 
 use async_trait::async_trait;
 use piqae_local_ipc::{
-    BROKER_PROTOCOL_VERSION, BrokerCapability, BrokerCredential, BrokerOperation, BrokerRequest,
-    BrokerResponse, BrokerResult, LocalOperation, LocalPrinter, LocalResult, LocalStatus,
+    BROKER_PROTOCOL_MIN_VERSION, BROKER_PROTOCOL_VERSION, BrokerApplicationIdentity,
+    BrokerAuthorizationHandle, BrokerAuthorizationState, BrokerCapability, BrokerCredential,
+    BrokerOperation, BrokerRequest, BrokerResponse, BrokerResult, LocalOperation, LocalPrinter,
+    LocalResult, LocalStatus,
 };
 use piqae_node_runtime::{
     AttachPolicy, BrokerEndpoint, RuntimeDisposition, RuntimeSelectionError, select_runtime,
 };
-use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::path::Path;
+use std::path::PathBuf;
 use thiserror::Error;
 use uuid::Uuid;
+
+#[cfg(not(test))]
+const BROKER_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+#[cfg(test)]
+const BROKER_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(100);
 
 #[derive(Debug, Error)]
 pub enum NodeClientError {
     #[error("local broker transport failed: {0}")]
     Transport(String),
+    #[error("local broker request timed out")]
+    Timeout,
+    #[error("local broker returned a response for a different request")]
+    ResponseIdMismatch,
+    #[error("local broker protocol range {minimum}..={maximum} is incompatible")]
+    UnsupportedProtocol { minimum: u16, maximum: u16 },
     #[error("local broker rejected the request: {code}: {message}")]
     Rejected {
         code: String,
@@ -35,6 +50,108 @@ pub enum NodeClientError {
     UnexpectedResponse,
     #[error("runtime selection failed: {0}")]
     Selection(#[from] RuntimeSelectionError),
+}
+
+#[derive(Debug, Clone)]
+pub struct NodeAuthorizationClient<T> {
+    transport: T,
+}
+
+impl<T: BrokerTransport> NodeAuthorizationClient<T> {
+    #[must_use]
+    pub const fn new(transport: T) -> Self {
+        Self { transport }
+    }
+
+    pub async fn request(
+        &self,
+        application: BrokerApplicationIdentity,
+        requested_capabilities: Vec<BrokerCapability>,
+    ) -> Result<BrokerAuthorizationHandle, NodeClientError> {
+        match request_transport(
+            &self.transport,
+            BrokerOperation::RequestAuthorization {
+                application,
+                requested_capabilities,
+            },
+        )
+        .await?
+        {
+            BrokerResult::AuthorizationRequested(handle) => Ok(handle),
+            _ => Err(NodeClientError::UnexpectedResponse),
+        }
+    }
+
+    pub async fn status(
+        &self,
+        handle: BrokerAuthorizationHandle,
+    ) -> Result<BrokerAuthorizationState, NodeClientError> {
+        match request_transport(
+            &self.transport,
+            BrokerOperation::AuthorizationStatus { handle },
+        )
+        .await?
+        {
+            BrokerResult::AuthorizationStatus { state } => Ok(state),
+            _ => Err(NodeClientError::UnexpectedResponse),
+        }
+    }
+
+    pub async fn exchange(
+        &self,
+        handle: BrokerAuthorizationHandle,
+    ) -> Result<BrokerCredential, NodeClientError> {
+        match request_transport(
+            &self.transport,
+            BrokerOperation::ExchangeAuthorization { handle },
+        )
+        .await?
+        {
+            BrokerResult::AuthorizationExchanged(credential) => Ok(credential),
+            _ => Err(NodeClientError::UnexpectedResponse),
+        }
+    }
+}
+
+async fn request_transport<T: BrokerTransport>(
+    transport: &T,
+    operation: BrokerOperation,
+) -> Result<BrokerResult, NodeClientError> {
+    let request_id = Uuid::new_v4();
+    let response = transport
+        .request(BrokerRequest {
+            protocol: BROKER_PROTOCOL_VERSION,
+            request_id,
+            operation,
+        })
+        .await?;
+    if response.request_id != request_id {
+        return Err(NodeClientError::ResponseIdMismatch);
+    }
+    if !(BROKER_PROTOCOL_MIN_VERSION..=BROKER_PROTOCOL_VERSION).contains(&response.protocol) {
+        return Err(NodeClientError::UnsupportedProtocol {
+            minimum: response.protocol,
+            maximum: response.protocol,
+        });
+    }
+    let result = response
+        .result
+        .map_err(|failure| NodeClientError::Rejected {
+            code: failure.code,
+            message: failure.message,
+            retryable: failure.retryable,
+        })?;
+    if let BrokerResult::Presence(presence) = &result
+        && (presence.protocol_min > presence.protocol_max
+            || presence.protocol_max < BROKER_PROTOCOL_MIN_VERSION
+            || presence.protocol_min > BROKER_PROTOCOL_VERSION)
+    {
+        return Err(NodeClientError::UnsupportedProtocol {
+            minimum: presence.protocol_min,
+            maximum: presence.protocol_max,
+        });
+    }
+    Ok(result)
 }
 
 #[async_trait]
@@ -73,7 +190,7 @@ impl<T: BrokerTransport> NodeClient<T> {
     pub async fn presence(&self) -> Result<piqae_local_ipc::BrokerPresence, NodeClientError> {
         match self.request(BrokerOperation::Presence).await? {
             BrokerResult::Presence(presence) => Ok(presence),
-            BrokerResult::Local(_) => Err(NodeClientError::UnexpectedResponse),
+            _ => Err(NodeClientError::UnexpectedResponse),
         }
     }
 
@@ -132,26 +249,12 @@ impl<T: BrokerTransport> NodeClient<T> {
             .await?
         {
             BrokerResult::Local(result) => Ok(result),
-            BrokerResult::Presence(_) => Err(NodeClientError::UnexpectedResponse),
+            _ => Err(NodeClientError::UnexpectedResponse),
         }
     }
 
     async fn request(&self, operation: BrokerOperation) -> Result<BrokerResult, NodeClientError> {
-        let response = self
-            .transport
-            .request(BrokerRequest {
-                protocol: BROKER_PROTOCOL_VERSION,
-                request_id: Uuid::new_v4(),
-                operation,
-            })
-            .await?;
-        response
-            .result
-            .map_err(|failure| NodeClientError::Rejected {
-                code: failure.code,
-                message: failure.message,
-                retryable: failure.retryable,
-            })
+        request_transport(&self.transport, operation).await
     }
 }
 
@@ -192,15 +295,61 @@ impl UnixBrokerTransport {
 #[async_trait]
 impl BrokerTransport for UnixBrokerTransport {
     async fn request(&self, request: BrokerRequest) -> Result<BrokerResponse, NodeClientError> {
-        let mut stream = tokio::net::UnixStream::connect(&self.path)
-            .await
-            .map_err(|error| NodeClientError::Transport(error.to_string()))?;
-        piqae_local_ipc::write_message(&mut stream, &request)
-            .await
-            .map_err(|error| NodeClientError::Transport(error.to_string()))?;
-        piqae_local_ipc::read_message(&mut stream)
-            .await
-            .map_err(|error| NodeClientError::Transport(error.to_string()))
+        tokio::time::timeout(BROKER_IO_TIMEOUT, async {
+            let mut stream = tokio::net::UnixStream::connect(&self.path)
+                .await
+                .map_err(|error| NodeClientError::Transport(error.to_string()))?;
+            piqae_local_ipc::write_message(&mut stream, &request)
+                .await
+                .map_err(|error| NodeClientError::Transport(error.to_string()))?;
+            piqae_local_ipc::read_message(&mut stream)
+                .await
+                .map_err(|error| NodeClientError::Transport(error.to_string()))
+        })
+        .await
+        .map_err(|_| NodeClientError::Timeout)?
+    }
+}
+
+#[cfg(windows)]
+#[derive(Debug, Clone)]
+pub struct WindowsBrokerTransport {
+    pipe_name: String,
+}
+
+#[cfg(windows)]
+impl WindowsBrokerTransport {
+    #[must_use]
+    pub fn new(pipe_name: impl Into<String>) -> Self {
+        Self {
+            pipe_name: pipe_name.into(),
+        }
+    }
+}
+
+#[cfg(windows)]
+#[async_trait]
+impl BrokerTransport for WindowsBrokerTransport {
+    async fn request(&self, request: BrokerRequest) -> Result<BrokerResponse, NodeClientError> {
+        tokio::time::timeout(BROKER_IO_TIMEOUT, async {
+            let mut stream = loop {
+                match tokio::net::windows::named_pipe::ClientOptions::new().open(&self.pipe_name) {
+                    Ok(stream) => break stream,
+                    Err(error) if error.raw_os_error() == Some(231) => {
+                        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                    }
+                    Err(error) => return Err(NodeClientError::Transport(error.to_string())),
+                }
+            };
+            piqae_local_ipc::write_message(&mut stream, &request)
+                .await
+                .map_err(|error| NodeClientError::Transport(error.to_string()))?;
+            piqae_local_ipc::read_message(&mut stream)
+                .await
+                .map_err(|error| NodeClientError::Transport(error.to_string()))
+        })
+        .await
+        .map_err(|_| NodeClientError::Timeout)?
     }
 }
 
@@ -215,6 +364,53 @@ mod tests {
     #[derive(Debug, Clone)]
     struct FakeTransport {
         requests: Arc<Mutex<Vec<BrokerRequest>>>,
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    enum ResponseFault {
+        MismatchedId,
+        UnsupportedProtocol,
+        InvalidPresenceRange,
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    struct FaultTransport(ResponseFault);
+
+    #[async_trait]
+    impl BrokerTransport for FaultTransport {
+        async fn request(&self, request: BrokerRequest) -> Result<BrokerResponse, NodeClientError> {
+            let (request_id, protocol, result) = match self.0 {
+                ResponseFault::MismatchedId => (
+                    Uuid::new_v4(),
+                    BROKER_PROTOCOL_VERSION,
+                    Ok(BrokerResult::Presence(BrokerPresence {
+                        protocol_min: 1,
+                        protocol_max: BROKER_PROTOCOL_VERSION,
+                    })),
+                ),
+                ResponseFault::UnsupportedProtocol => (
+                    request.request_id,
+                    BROKER_PROTOCOL_VERSION.saturating_add(1),
+                    Ok(BrokerResult::Presence(BrokerPresence {
+                        protocol_min: 1,
+                        protocol_max: BROKER_PROTOCOL_VERSION,
+                    })),
+                ),
+                ResponseFault::InvalidPresenceRange => (
+                    request.request_id,
+                    BROKER_PROTOCOL_VERSION,
+                    Ok(BrokerResult::Presence(BrokerPresence {
+                        protocol_min: BROKER_PROTOCOL_VERSION.saturating_add(1),
+                        protocol_max: BROKER_PROTOCOL_VERSION.saturating_add(2),
+                    })),
+                ),
+            };
+            Ok(BrokerResponse {
+                protocol,
+                request_id,
+                result,
+            })
+        }
     }
 
     #[async_trait]
@@ -239,7 +435,10 @@ mod tests {
                     printer_warnings: 0,
                     paused: false,
                 }))),
-                BrokerOperation::Execute { .. } => Err(LocalFailure {
+                BrokerOperation::Execute { .. }
+                | BrokerOperation::RequestAuthorization { .. }
+                | BrokerOperation::AuthorizationStatus { .. }
+                | BrokerOperation::ExchangeAuthorization { .. } => Err(LocalFailure {
                     code: "unsupported".into(),
                     message: "unsupported".into(),
                     retryable: false,
@@ -282,5 +481,44 @@ mod tests {
             configuration.resolve_runtime().unwrap(),
             RuntimeDisposition::Attached(_)
         ));
+    }
+
+    #[tokio::test]
+    async fn response_id_and_protocol_are_validated_before_data_is_accepted() {
+        for (fault, expected) in [
+            (ResponseFault::MismatchedId, "response_id"),
+            (ResponseFault::UnsupportedProtocol, "protocol"),
+            (ResponseFault::InvalidPresenceRange, "protocol"),
+        ] {
+            let client = NodeClient::new(FaultTransport(fault), "com.example.pos", "token");
+            let error = client.presence().await.unwrap_err();
+            match (expected, error) {
+                ("response_id", NodeClientError::ResponseIdMismatch)
+                | ("protocol", NodeClientError::UnsupportedProtocol { .. }) => {}
+                (_, other) => panic!("unexpected error: {other}"),
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unix_transport_bounds_a_peer_that_never_replies() {
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("broker.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let server = tokio::spawn(async move {
+            let (_stream, _) = listener.accept().await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        });
+        let client = NodeClient::new(
+            UnixBrokerTransport::new(&socket),
+            "com.example.pos",
+            "token",
+        );
+        assert!(matches!(
+            client.presence().await,
+            Err(NodeClientError::Timeout)
+        ));
+        server.abort();
     }
 }
