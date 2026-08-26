@@ -2161,6 +2161,82 @@ paths:
       responses:
         "202": { description: Command queued. }
         "404": { $ref: "#/components/responses/Error" }
+  /v1/nodes/{node_id}/runtime:
+    parameters:
+      - $ref: "#/components/parameters/NodeId"
+    get:
+      summary: Get the latest node host and execution-availability observation
+      description: A missing observation means the node predates embedded-host capability reporting; it does not imply background execution.
+      tags: [Nodes]
+      operationId: getNodeRuntime
+      responses:
+        "200":
+          description: Latest authenticated lifecycle observation.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NodeRuntimeObservation" }
+        "404": { $ref: "#/components/responses/Error" }
+  /v1/nodes/runtime-observations:
+    get:
+      summary: List the latest runtime observation for each node in this tenant
+      description: Bounded, node-ID ordered projection for operational tables. The cursor and every returned observation remain workspace/environment scoped.
+      tags: [Nodes]
+      operationId: listNodeRuntimeObservations
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 1000, default: 100 }
+        - name: after
+          in: query
+          description: Last node ID returned by the previous page.
+          schema: { type: string, pattern: '^agt_[0-9A-HJKMNP-TV-Z]{26}$' }
+      responses:
+        "200":
+          description: Latest authenticated runtime observation per reporting node.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NodeRuntimeObservationPage" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+  /v1/nodes/{node_id}/wake-hints:
+    parameters:
+      - $ref: "#/components/parameters/NodeId"
+    get:
+      summary: List advisory wake requests for a node
+      tags: [Nodes]
+      operationId: listNodeWakeHints
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: Newest tenant-scoped wake requests first.
+          content:
+            application/json:
+              schema:
+                type: array
+                maxItems: 100
+                items: { $ref: "#/components/schemas/NodeWakeHint" }
+        "404": { $ref: "#/components/responses/Error" }
+    post:
+      summary: Request an advisory node wake
+      description: This records and emits a wake hint only. It never leases a job or authorizes spooler handoff; work remains queued until a fresh authenticated eligible node sync.
+      tags: [Nodes]
+      operationId: createNodeWakeHint
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateNodeWakeHint" }
+      responses:
+        "202":
+          description: Advisory wake request recorded.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NodeWakeHint" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
   /v1/nodes/{node_id}/diagnostics:
     parameters:
       - $ref: "#/components/parameters/NodeId"
@@ -3590,6 +3666,11 @@ components:
           type: array
           maxItems: 100
           items: { $ref: "#/components/schemas/RouteObservation" }
+        runtime_observations:
+          description: Latest authenticated host/runtime availability per reporting customer node. Customer attribution is inherited only from this immutable containing row.
+          type: array
+          maxItems: 100
+          items: { $ref: "#/components/schemas/NodeRuntimeObservation" }
     PlatformOperationsPage:
       type: object
       additionalProperties: false
@@ -4224,6 +4305,102 @@ components:
         printer_grant: { type: string, enum: [all_or_selected] }
         expires_at: { type: string, format: date-time }
         return_url: { type: [string, "null"], format: uri, description: Server-bound completion destination; never accepted from an application-link fragment. }
+    NodeRuntimeObservation:
+      type: object
+      additionalProperties: false
+      required:
+        [node_id, sequence, host_mode, availability_class, lifecycle_state, accepts_cloud_jobs, execution_budget_ms, wake_mechanisms, observed_at, expires_at, freshness]
+      properties:
+        node_id: { type: string, pattern: '^agt_' }
+        sequence: { type: integer, format: int64, minimum: 1 }
+        host_mode: { type: string, enum: [machine_service, user_agent, embedded_application, attached_client] }
+        availability_class:
+          type: string
+          enum: [continuous_while_awake, foreground_only, background_opportunistic, managed_kiosk, wake_relay_capable]
+        lifecycle_state:
+          type: string
+          enum: [available, foreground, background, suspending, suspended, waking, unavailable]
+        accepts_cloud_jobs: { type: boolean }
+        execution_budget_ms: { type: [integer, "null"], format: int64, minimum: 0 }
+        wake_mechanisms:
+          type: array
+          maxItems: 8
+          uniqueItems: true
+          items: { type: string, enum: [local_broker, apns_background, bluetooth_accessory, external_accessory, wake_on_lan, manual] }
+        observed_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
+        freshness: { type: string, enum: [live, recent, stale] }
+    NodeRuntimeObservationPage:
+      type: object
+      additionalProperties: false
+      required: [data, next_cursor, has_more]
+      properties:
+        data:
+          type: array
+          maxItems: 1000
+          items: { $ref: "#/components/schemas/NodeRuntimeObservation" }
+        next_cursor: { type: [string, "null"] }
+        has_more: { type: boolean }
+    AgentRuntimeObservation:
+      type: object
+      additionalProperties: false
+      required:
+        [sequence, host_mode, availability_class, lifecycle_state, accepts_cloud_jobs, observed_at, fresh_until]
+      properties:
+        sequence: { type: integer, format: int64, minimum: 1 }
+        host_mode: { type: string, enum: [machine_service, user_agent, embedded_application, attached_client] }
+        availability_class:
+          type: string
+          enum: [continuous_while_awake, foreground_only, background_opportunistic, managed_kiosk, wake_relay_capable]
+        lifecycle_state:
+          type: string
+          enum: [available, foreground, background, suspending, suspended, waking, unavailable]
+        accepts_cloud_jobs: { type: boolean }
+        execution_budget_ms: { type: [integer, "null"], format: int64, minimum: 0 }
+        wake_mechanisms:
+          type: array
+          maxItems: 8
+          uniqueItems: true
+          default: []
+          items: { type: string, enum: [local_broker, apns_background, bluetooth_accessory, external_accessory, wake_on_lan, manual] }
+        observed_at: { type: string, format: date-time }
+        fresh_until: { type: string, format: date-time }
+    CreateNodeWakeHint:
+      type: object
+      additionalProperties: false
+      required: [reason]
+      properties:
+        reason: { type: string, enum: [job_available, operator_request, inventory_refresh, diagnostics] }
+        expires_in_seconds: { type: integer, minimum: 30, maximum: 900, default: 300 }
+    NodeWakeHint:
+      type: object
+      additionalProperties: false
+      required: [id, node_id, reason, status, requested_at, expires_at, observed_at]
+      properties:
+        id: { type: string, pattern: '^wkh_' }
+        node_id: { type: string, pattern: '^agt_' }
+        reason: { type: string, enum: [job_available, operator_request, inventory_refresh, diagnostics] }
+        delivery_channel:
+          type: string
+          enum: [connected_session, external_push, local_relay, manual]
+          description: Actual durable delivery path. connected_session means the already-awake node observed the hint on signed sync; it is not remote-wake evidence.
+        status: { type: string, enum: [pending, observed, expired, cancelled] }
+        requested_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
+        observed_at: { type: [string, "null"], format: date-time }
+    AgentWakeHint:
+      type: object
+      additionalProperties: false
+      required: [id, reason, requested_at, expires_at]
+      properties:
+        id: { type: string, pattern: '^wkh_' }
+        reason: { type: string, enum: [job_available, operator_request, inventory_refresh, diagnostics] }
+        delivery_channel:
+          type: string
+          enum: [connected_session]
+          description: The node observed this hint through its already-authenticated active sync session.
+        requested_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
     QueueSnapshot:
       type: object
       additionalProperties: false
@@ -4319,6 +4496,10 @@ components:
           items: { $ref: "#/components/schemas/DiagnosticReport" }
         document_render:
           $ref: "#/components/schemas/DocumentRenderCapabilities"
+        runtime:
+          oneOf:
+            - { $ref: "#/components/schemas/AgentRuntimeObservation" }
+            - { type: "null" }
     DocumentRenderCapabilities:
       type: object
       additionalProperties: false
@@ -4390,6 +4571,11 @@ components:
           type: [integer, "null"]
           format: int64
           minimum: 0
+        wake_hints:
+          type: array
+          maxItems: 32
+          default: []
+          items: { $ref: "#/components/schemas/AgentWakeHint" }
     DiagnosticReport:
       type: object
       additionalProperties: false
@@ -5478,9 +5664,29 @@ components:
         connector_jobs: { type: integer, minimum: 0 }
         other_piqae_or_external_jobs: { type: integer, minimum: 0 }
         unknown_jobs: { type: integer, minimum: 0 }
+        queue_occupancy:
+          $ref: "#/components/schemas/PrivacySafeQueueOccupancy"
         estimated_busy_seconds: { type: [integer, "null"], minimum: 0 }
         observed_at: { type: string, format: date-time }
         expires_at: { type: string, format: date-time }
+    PrivacySafeQueueOccupancy:
+      type: object
+      additionalProperties: false
+      description: Counts only. External and unknown work never exposes job identifiers, titles, documents, owners, or another tenant's data.
+      required: [piqae_owned_jobs, external_jobs, unknown_jobs]
+      properties:
+        piqae_owned_jobs:
+          type: integer
+          minimum: 0
+          description: Jobs attributable to this authenticated Piqae connector.
+        external_jobs:
+          type: integer
+          minimum: 0
+          description: Opaque count known not to belong to this connector, excluding unknown ownership so the three preferred categories partition total_jobs.
+        unknown_jobs:
+          type: integer
+          minimum: 0
+          description: Opaque count whose ownership cannot be safely classified.
     RouteReservation:
       type: object
       additionalProperties: false

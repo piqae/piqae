@@ -47,6 +47,10 @@ import type {
   ListOptions,
   LocalOwnerSession,
   NodeConnector,
+  NodeRuntimeObservation,
+  NodeRuntimeObservationPage,
+  NodeWakeHint,
+  CreateNodeWakeHint,
   NodeContentEncryptionKey,
   NodeUpdate,
   NodeConnectSession,
@@ -271,6 +275,21 @@ export class PiqaeClient {
       this.request<void>('POST', `/v1/nodes/${encodeURIComponent(id)}/pause`),
     resume: (id: string) =>
       this.request<void>('POST', `/v1/nodes/${encodeURIComponent(id)}/resume`),
+    runtime: (id: string) =>
+      this.request<NodeRuntimeObservation>('GET', `/v1/nodes/${encodeURIComponent(id)}/runtime`),
+    runtimes: (options: Pick<ListOptions, 'limit' | 'after'> = {}) =>
+      this.request<NodeRuntimeObservationPage>('GET', '/v1/nodes/runtime-observations', {
+        query: options
+      }),
+    wakeHints: (id: string, options: Pick<ListOptions, 'limit'> = {}) =>
+      this.request<NodeWakeHint[]>('GET', `/v1/nodes/${encodeURIComponent(id)}/wake-hints`, {
+        query: options
+      }),
+    requestWake: (id: string, input: CreateNodeWakeHint, idempotencyKey: string) =>
+      this.request<NodeWakeHint>('POST', `/v1/nodes/${encodeURIComponent(id)}/wake-hints`, {
+        body: input,
+        idempotencyKey
+      }),
     diagnostics: (id: string) =>
       this.request<{ request_id: string; state: 'requested' }>(
         'POST',

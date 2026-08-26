@@ -606,6 +606,10 @@ fn node_operator_router() -> Router<AppState> {
     Router::new()
         .route("/v1/nodes", get(api::list_agents))
         .route(
+            "/v1/nodes/runtime-observations",
+            get(destination_topology::list_node_runtime_observations),
+        )
+        .route(
             "/v1/nodes/{node_id}",
             get(api::get_node)
                 .patch(api::patch_node)
@@ -613,6 +617,15 @@ fn node_operator_router() -> Router<AppState> {
         )
         .route("/v1/nodes/{node_id}/pause", post(api::pause_node))
         .route("/v1/nodes/{node_id}/resume", post(api::resume_node))
+        .route(
+            "/v1/nodes/{node_id}/runtime",
+            get(destination_topology::get_node_runtime),
+        )
+        .route(
+            "/v1/nodes/{node_id}/wake-hints",
+            get(destination_topology::list_node_wake_hints)
+                .post(destination_topology::create_node_wake_hint),
+        )
         .route(
             "/v1/nodes/{node_id}/diagnostics",
             get(api::list_node_diagnostics).post(api::request_node_diagnostics),
@@ -706,7 +719,9 @@ mod tests {
     use piqae_object_store::{ObjectStoreError, StoredObject};
     use piqae_protocol::agent::{
         AgentAcceptJobRequest, AgentCommand, AgentHealth, AgentSyncRequest, AgentSyncResponse,
-        PrinterProfileSnapshot, PrinterRouteSnapshot, PrinterSnapshot, QueueSnapshot,
+        NodeAvailability, NodeAvailabilityClass, NodeHostMode, NodeRuntimeObservation,
+        PrinterProfileSnapshot, PrinterRouteSnapshot, PrinterSnapshot, PrivacySafeQueueObservation,
+        QueueSnapshot, RouteObservation as AgentRouteObservation,
     };
     use rand::rngs::OsRng;
     use sha2::{Digest, Sha256};
@@ -959,6 +974,7 @@ mod tests {
             route_observations: Vec::new(),
             topology_changes: Vec::new(),
             native_handoffs: Vec::new(),
+            runtime: None,
         })
         .expect("sync body");
 
@@ -1017,6 +1033,181 @@ mod tests {
         assert!(
             (server_time - Utc::now().timestamp_millis()).abs() < 60_000,
             "server time {server_time} is not the current server clock"
+        );
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the end-to-end assertion keeps wake, stale admission, fencing, and the public projection in one scenario"
+    )]
+    async fn wake_hint_never_leases_until_embedded_host_is_fresh_and_eligible() {
+        let application = application().await;
+        let created = application
+            .router
+            .clone()
+            .oneshot(api_request(
+                "POST",
+                "/v1/jobs",
+                "piq_test_integration",
+                Some(
+                    &serde_json::json!({
+                        "printer_id": application.printer_id,
+                        "title": "Wake-gated job",
+                        "content_type": "pdf",
+                        "content": {"type": "base64", "data": "cHJpbnQ="}
+                    })
+                    .to_string(),
+                ),
+            ))
+            .await
+            .expect("create wake-gated job");
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let wake = application
+            .router
+            .clone()
+            .oneshot(idempotent_api_request(
+                "POST",
+                &format!("/v1/nodes/{}/wake-hints", application.agent_id),
+                "piq_test_integration",
+                "wake-test-0001",
+                Some(r#"{"reason":"job_available","expires_in_seconds":300}"#),
+            ))
+            .await
+            .expect("request advisory wake");
+        let wake_status = wake.status();
+        let wake_body = wake
+            .into_body()
+            .collect()
+            .await
+            .expect("wake response body")
+            .to_bytes();
+        assert_eq!(
+            wake_status,
+            StatusCode::ACCEPTED,
+            "{}",
+            String::from_utf8_lossy(&wake_body)
+        );
+
+        let sync = |sequence, lifecycle_state, accepts_cloud_jobs| {
+            let now = Utc::now();
+            AgentSyncRequest {
+                agent_id: application.agent_id,
+                protocol_version: 1,
+                agent_version: "embedded-test".into(),
+                printer_revision: sequence,
+                acknowledged_command_cursor: None,
+                event_cursor: None,
+                queue: QueueSnapshot {
+                    queued_jobs: 0,
+                    active_jobs: 0,
+                    content_bytes: 0,
+                    accepts_jobs: true,
+                },
+                health: AgentHealth {
+                    started_at: now,
+                    observed_at: now,
+                    sqlite_integrity_ok: true,
+                    executor_crashes: 0,
+                    last_error_code: None,
+                },
+                printers: Some(vec![profiled_printer_snapshot(application.printer_id)]),
+                events: Vec::new(),
+                diagnostics: Vec::new(),
+                document_render: piqae_protocol::agent::DocumentRenderCapabilities::default(),
+                capabilities: piqae_protocol::agent::AgentProtocolCapabilities::default(),
+                route_observations: vec![live_route_observation(application.printer_id, sequence)],
+                topology_changes: Vec::new(),
+                native_handoffs: Vec::new(),
+                runtime: Some(NodeRuntimeObservation {
+                    sequence,
+                    host_mode: NodeHostMode::EmbeddedApplication,
+                    availability_class: NodeAvailabilityClass::ForegroundOnly,
+                    lifecycle_state,
+                    accepts_cloud_jobs,
+                    observed_at: now,
+                    fresh_until: now + chrono::Duration::minutes(1),
+                    execution_budget_ms: None,
+                    wake_mechanisms: Vec::new(),
+                }),
+            }
+        };
+        let suspended = sync(1, NodeAvailability::Suspended, false);
+        let suspended_response = sync_agent_request(&application, &suspended).await;
+        assert!(suspended_response.candidate_jobs.is_empty());
+        assert!(suspended_response.wake_hints.is_empty());
+
+        let mut stale = sync(2, NodeAvailability::Foreground, true);
+        if let Some(runtime) = &mut stale.runtime {
+            runtime.observed_at = Utc::now() - chrono::Duration::minutes(2);
+            runtime.fresh_until = Utc::now() - chrono::Duration::minutes(1);
+        }
+        let stale_response = sync_agent_request(&application, &stale).await;
+        assert!(stale_response.candidate_jobs.is_empty());
+        assert_eq!(stale_response.wake_hints.len(), 1);
+        assert_eq!(
+            stale_response.wake_hints[0].delivery_channel,
+            piqae_protocol::agent::WakeDeliveryChannel::ConnectedSession
+        );
+
+        let foreground = sync(3, NodeAvailability::Foreground, true);
+        let foreground_response = sync_agent_request(&application, &foreground).await;
+        assert_eq!(foreground_response.candidate_jobs.len(), 1);
+        assert!(foreground_response.wake_hints.is_empty());
+
+        let runtime = application
+            .router
+            .clone()
+            .oneshot(api_request(
+                "GET",
+                &format!("/v1/nodes/{}/runtime", application.agent_id),
+                "piq_test_integration",
+                None,
+            ))
+            .await
+            .expect("read runtime projection");
+        assert_eq!(runtime.status(), StatusCode::OK);
+        let runtime_page = json_response(
+            &application.router,
+            api_request(
+                "GET",
+                "/v1/nodes/runtime-observations?limit=1",
+                "piq_test_integration",
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(runtime_page["data"].as_array().map(Vec::len), Some(1));
+        assert_eq!(
+            runtime_page["data"][0]["node_id"],
+            application.agent_id.to_string()
+        );
+        let cross_tenant_runtime = application
+            .router
+            .clone()
+            .oneshot(api_request(
+                "GET",
+                &format!("/v1/nodes/{}/runtime", application.agent_id),
+                "piq_test_other",
+                None,
+            ))
+            .await
+            .expect("cross-tenant runtime probe");
+        assert_eq!(cross_tenant_runtime.status(), StatusCode::NOT_FOUND);
+        let cross_tenant_page = json_response(
+            &application.router,
+            api_request(
+                "GET",
+                "/v1/nodes/runtime-observations",
+                "piq_test_other",
+                None,
+            ),
+        )
+        .await;
+        assert!(
+            cross_tenant_page["data"]
+                .as_array()
+                .is_some_and(Vec::is_empty)
         );
     }
 
@@ -1603,9 +1794,10 @@ mod tests {
             diagnostics: Vec::new(),
             document_render: piqae_protocol::agent::DocumentRenderCapabilities::default(),
             capabilities: piqae_protocol::agent::AgentProtocolCapabilities::default(),
-            route_observations: Vec::new(),
+            route_observations: vec![live_route_observation(application.printer_id, 1)],
             topology_changes: Vec::new(),
             native_handoffs: Vec::new(),
+            runtime: None,
         };
         let sync_response = application
             .router
@@ -1947,6 +2139,29 @@ mod tests {
         assert_eq!(ready.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
+    async fn sync_agent_request(
+        application: &TestApplication,
+        request: &AgentSyncRequest,
+    ) -> AgentSyncResponse {
+        let body = serde_json::to_vec(request).expect("sync JSON");
+        let response = application
+            .router
+            .clone()
+            .oneshot(signed_request(application, "POST", "/v1/agent/sync", body))
+            .await
+            .expect("sync response");
+        assert_eq!(response.status(), StatusCode::OK);
+        serde_json::from_slice(
+            &response
+                .into_body()
+                .collect()
+                .await
+                .expect("sync body")
+                .to_bytes(),
+        )
+        .expect("sync response JSON")
+    }
+
     async fn sync_test_agent(
         application: &TestApplication,
         acknowledged_command_cursor: Option<String>,
@@ -1980,24 +2195,9 @@ mod tests {
             route_observations: Vec::new(),
             topology_changes: Vec::new(),
             native_handoffs: Vec::new(),
+            runtime: None,
         };
-        let body = serde_json::to_vec(&request).expect("sync JSON");
-        let response = application
-            .router
-            .clone()
-            .oneshot(signed_request(application, "POST", "/v1/agent/sync", body))
-            .await
-            .expect("sync response");
-        assert_eq!(response.status(), StatusCode::OK);
-        serde_json::from_slice(
-            &response
-                .into_body()
-                .collect()
-                .await
-                .expect("sync body")
-                .to_bytes(),
-        )
-        .expect("sync response JSON")
+        sync_agent_request(application, &request).await
     }
 
     #[allow(clippy::too_many_lines)]
@@ -2112,6 +2312,24 @@ mod tests {
         }
     }
 
+    fn live_route_observation(printer_id: PrinterId, sequence: u64) -> AgentRouteObservation {
+        AgentRouteObservation {
+            local_route_key: format!(
+                "rte_{}",
+                &format!("{:x}", Sha256::digest(printer_id.to_string().as_bytes()))[..32]
+            ),
+            sequence,
+            observed_at: Utc::now(),
+            inventory_revision: 1,
+            state: PrinterState::Online,
+            accepts_jobs: true,
+            state_reasons: Vec::new(),
+            queue: Some(PrivacySafeQueueObservation::default()),
+            profile_observed_at: Some(Utc::now()),
+            stock_observed_at: Some(Utc::now()),
+        }
+    }
+
     fn stored_profiled_printer(printer_id: PrinterId) -> piqae_storage_postgres::SyncedPrinter {
         let printer = profiled_printer_snapshot(printer_id);
         piqae_storage_postgres::SyncedPrinter {
@@ -2182,9 +2400,10 @@ mod tests {
             diagnostics: Vec::new(),
             document_render: piqae_protocol::agent::DocumentRenderCapabilities::default(),
             capabilities: piqae_protocol::agent::AgentProtocolCapabilities::default(),
-            route_observations: Vec::new(),
+            route_observations: vec![live_route_observation(printer_id, 1)],
             topology_changes: Vec::new(),
             native_handoffs: Vec::new(),
+            runtime: None,
         };
         let body = serde_json::to_vec(&request).expect("sync JSON");
         let sync = application
@@ -2356,9 +2575,10 @@ mod tests {
             diagnostics: Vec::new(),
             document_render: piqae_protocol::agent::DocumentRenderCapabilities::default(),
             capabilities: piqae_protocol::agent::AgentProtocolCapabilities::default(),
-            route_observations: Vec::new(),
+            route_observations: vec![live_route_observation(printer_id, 1)],
             topology_changes: Vec::new(),
             native_handoffs: Vec::new(),
+            runtime: None,
         };
         let body = serde_json::to_vec(&sync_request).expect("sync JSON");
         let response = application
@@ -2536,9 +2756,10 @@ mod tests {
             diagnostics: Vec::new(),
             document_render: piqae_protocol::agent::DocumentRenderCapabilities::default(),
             capabilities: piqae_protocol::agent::AgentProtocolCapabilities::default(),
-            route_observations: Vec::new(),
+            route_observations: vec![live_route_observation(printer_id, 2)],
             topology_changes: Vec::new(),
             native_handoffs: Vec::new(),
+            runtime: None,
         };
         let reconnect_body = serde_json::to_vec(&reconnect).expect("reconnect JSON");
         let reconnect_response = application
@@ -3587,9 +3808,10 @@ mod tests {
             diagnostics: Vec::new(),
             document_render: piqae_protocol::agent::DocumentRenderCapabilities::default(),
             capabilities: piqae_protocol::agent::AgentProtocolCapabilities::default(),
-            route_observations: Vec::new(),
+            route_observations: vec![live_route_observation(application.printer_id, 1)],
             topology_changes: Vec::new(),
             native_handoffs: Vec::new(),
+            runtime: None,
         };
         let sync_body = serde_json::to_vec(&sync).expect("sync JSON");
         let sync_response = application

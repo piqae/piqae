@@ -1782,6 +1782,71 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/nodes/{node_id}/runtime": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                node_id: components["parameters"]["NodeId"];
+            };
+            cookie?: never;
+        };
+        /**
+         * Get the latest node host and execution-availability observation
+         * @description A missing observation means the node predates embedded-host capability reporting; it does not imply background execution.
+         */
+        get: operations["getNodeRuntime"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/nodes/runtime-observations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List the latest runtime observation for each node in this tenant
+         * @description Bounded, node-ID ordered projection for operational tables. The cursor and every returned observation remain workspace/environment scoped.
+         */
+        get: operations["listNodeRuntimeObservations"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/nodes/{node_id}/wake-hints": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                node_id: components["parameters"]["NodeId"];
+            };
+            cookie?: never;
+        };
+        /** List advisory wake requests for a node */
+        get: operations["listNodeWakeHints"];
+        put?: never;
+        /**
+         * Request an advisory node wake
+         * @description This records and emits a wake hint only. It never leases a job or authorizes spooler handoff; work remains queued until a fresh authenticated eligible node sync.
+         */
+        post: operations["createNodeWakeHint"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/nodes/{node_id}/diagnostics": {
         parameters: {
             query?: never;
@@ -2610,6 +2675,8 @@ export interface components {
             routes?: components["schemas"]["PrinterRoute"][];
             /** @description Latest privacy-safe observation per returned route. */
             route_observations?: components["schemas"]["RouteObservation"][];
+            /** @description Latest authenticated host/runtime availability per reporting customer node. Customer attribution is inherited only from this immutable containing row. */
+            runtime_observations?: components["schemas"]["NodeRuntimeObservation"][];
         };
         PlatformOperationsPage: {
             data: components["schemas"]["PlatformOperationsRow"][];
@@ -3034,6 +3101,90 @@ export interface components {
              */
             return_url: string | null;
         };
+        NodeRuntimeObservation: {
+            node_id: string;
+            /** Format: int64 */
+            sequence: number;
+            /** @enum {string} */
+            host_mode: "machine_service" | "user_agent" | "embedded_application" | "attached_client";
+            /** @enum {string} */
+            availability_class: "continuous_while_awake" | "foreground_only" | "background_opportunistic" | "managed_kiosk" | "wake_relay_capable";
+            /** @enum {string} */
+            lifecycle_state: "available" | "foreground" | "background" | "suspending" | "suspended" | "waking" | "unavailable";
+            accepts_cloud_jobs: boolean;
+            /** Format: int64 */
+            execution_budget_ms: number | null;
+            wake_mechanisms: ("local_broker" | "apns_background" | "bluetooth_accessory" | "external_accessory" | "wake_on_lan" | "manual")[];
+            /** Format: date-time */
+            observed_at: string;
+            /** Format: date-time */
+            expires_at: string;
+            /** @enum {string} */
+            freshness: "live" | "recent" | "stale";
+        };
+        NodeRuntimeObservationPage: {
+            data: components["schemas"]["NodeRuntimeObservation"][];
+            next_cursor: string | null;
+            has_more: boolean;
+        };
+        AgentRuntimeObservation: {
+            /** Format: int64 */
+            sequence: number;
+            /** @enum {string} */
+            host_mode: "machine_service" | "user_agent" | "embedded_application" | "attached_client";
+            /** @enum {string} */
+            availability_class: "continuous_while_awake" | "foreground_only" | "background_opportunistic" | "managed_kiosk" | "wake_relay_capable";
+            /** @enum {string} */
+            lifecycle_state: "available" | "foreground" | "background" | "suspending" | "suspended" | "waking" | "unavailable";
+            accepts_cloud_jobs: boolean;
+            /** Format: int64 */
+            execution_budget_ms?: number | null;
+            /** @default [] */
+            wake_mechanisms?: ("local_broker" | "apns_background" | "bluetooth_accessory" | "external_accessory" | "wake_on_lan" | "manual")[];
+            /** Format: date-time */
+            observed_at: string;
+            /** Format: date-time */
+            fresh_until: string;
+        };
+        CreateNodeWakeHint: {
+            /** @enum {string} */
+            reason: "job_available" | "operator_request" | "inventory_refresh" | "diagnostics";
+            /** @default 300 */
+            expires_in_seconds?: number;
+        };
+        NodeWakeHint: {
+            id: string;
+            node_id: string;
+            /** @enum {string} */
+            reason: "job_available" | "operator_request" | "inventory_refresh" | "diagnostics";
+            /**
+             * @description Actual durable delivery path. connected_session means the already-awake node observed the hint on signed sync; it is not remote-wake evidence.
+             * @enum {string}
+             */
+            delivery_channel?: "connected_session" | "external_push" | "local_relay" | "manual";
+            /** @enum {string} */
+            status: "pending" | "observed" | "expired" | "cancelled";
+            /** Format: date-time */
+            requested_at: string;
+            /** Format: date-time */
+            expires_at: string;
+            /** Format: date-time */
+            observed_at: string | null;
+        };
+        AgentWakeHint: {
+            id: string;
+            /** @enum {string} */
+            reason: "job_available" | "operator_request" | "inventory_refresh" | "diagnostics";
+            /**
+             * @description The node observed this hint through its already-authenticated active sync session.
+             * @enum {string}
+             */
+            delivery_channel?: "connected_session";
+            /** Format: date-time */
+            requested_at: string;
+            /** Format: date-time */
+            expires_at: string;
+        };
         QueueSnapshot: {
             queued_jobs: number;
             active_jobs: number;
@@ -3075,6 +3226,7 @@ export interface components {
             /** @default [] */
             diagnostics?: components["schemas"]["DiagnosticReport"][];
             document_render?: components["schemas"]["DocumentRenderCapabilities"];
+            runtime?: components["schemas"]["AgentRuntimeObservation"] | null;
         };
         DocumentRenderCapabilities: {
             renderer_abi?: string | null;
@@ -3111,6 +3263,8 @@ export interface components {
             } | null;
             /** Format: int64 */
             acknowledged_handoff_sequence?: number | null;
+            /** @default [] */
+            wake_hints?: components["schemas"]["AgentWakeHint"][];
         };
         DiagnosticReport: {
             request_id: string;
@@ -3789,11 +3943,21 @@ export interface components {
             connector_jobs: number;
             other_piqae_or_external_jobs: number;
             unknown_jobs: number;
+            queue_occupancy?: components["schemas"]["PrivacySafeQueueOccupancy"];
             estimated_busy_seconds?: number | null;
             /** Format: date-time */
             observed_at: string;
             /** Format: date-time */
             expires_at: string;
+        };
+        /** @description Counts only. External and unknown work never exposes job identifiers, titles, documents, owners, or another tenant's data. */
+        PrivacySafeQueueOccupancy: {
+            /** @description Jobs attributable to this authenticated Piqae connector. */
+            piqae_owned_jobs: number;
+            /** @description Opaque count known not to belong to this connector, excluding unknown ownership so the three preferred categories partition total_jobs. */
+            external_jobs: number;
+            /** @description Opaque count whose ownership cannot be safely classified. */
+            unknown_jobs: number;
         };
         RouteReservation: {
             id: string;
@@ -7324,6 +7488,110 @@ export interface operations {
                 };
                 content?: never;
             };
+            404: components["responses"]["Error"];
+        };
+    };
+    getNodeRuntime: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                node_id: components["parameters"]["NodeId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Latest authenticated lifecycle observation. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NodeRuntimeObservation"];
+                };
+            };
+            404: components["responses"]["Error"];
+        };
+    };
+    listNodeRuntimeObservations: {
+        parameters: {
+            query?: {
+                limit?: number;
+                /** @description Last node ID returned by the previous page. */
+                after?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Latest authenticated runtime observation per reporting node. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NodeRuntimeObservationPage"];
+                };
+            };
+            400: components["responses"]["Error"];
+            401: components["responses"]["Error"];
+        };
+    };
+    listNodeWakeHints: {
+        parameters: {
+            query?: {
+                limit?: components["parameters"]["Limit"];
+            };
+            header?: never;
+            path: {
+                node_id: components["parameters"]["NodeId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Newest tenant-scoped wake requests first. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NodeWakeHint"][];
+                };
+            };
+            404: components["responses"]["Error"];
+        };
+    };
+    createNodeWakeHint: {
+        parameters: {
+            query?: never;
+            header?: {
+                "Idempotency-Key"?: components["parameters"]["IdempotencyKey"];
+            };
+            path: {
+                node_id: components["parameters"]["NodeId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateNodeWakeHint"];
+            };
+        };
+        responses: {
+            /** @description Advisory wake request recorded. */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NodeWakeHint"];
+                };
+            };
+            400: components["responses"]["Error"];
             404: components["responses"]["Error"];
         };
     };
