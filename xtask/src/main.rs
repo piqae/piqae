@@ -805,7 +805,12 @@ const CHECKS: &[Check] = &[
     Check {
         scopes: &["windows_rust"],
         job: "CI / Rust (windows-latest)",
-        needs: &[Need::Os("windows"), Need::Tool("cargo")],
+        needs: &[
+            Need::Os("windows"),
+            Need::Tool("cargo"),
+            Need::Tool("pwsh"),
+            Need::Tool("dotnet"),
+        ],
         steps: &[
             &[
                 "cargo",
@@ -860,6 +865,12 @@ const CHECKS: &[Check] = &[
                 "piqae-node-client",
                 "-p",
                 "piqae-node-ffi",
+            ],
+            &[
+                "pwsh",
+                "-NoProfile",
+                "-File",
+                "release/tools/test_windows_node_sdk.ps1",
             ],
         ],
     },
