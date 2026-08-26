@@ -2,33 +2,35 @@
 
 use anyhow::{Context as _, Result, bail};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use chrono::Utc;
 use rand::RngCore as _;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
-use std::{collections::BTreeMap, fs::OpenOptions, io::Write as _, path::PathBuf};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs::OpenOptions,
+    io::Write as _,
+    path::PathBuf,
+};
 use tokio::sync::{Mutex, mpsc, oneshot};
 
 use crate::command::{CommandFailure, RuntimeCommand};
 use piqae_local_ipc::{
-    BROKER_PROTOCOL_VERSION, BrokerCapability, BrokerOperation, BrokerPresence, BrokerRequest,
-    BrokerResponse, BrokerResult, LocalFailure, LocalOperation, LocalResult, read_message,
-    write_message,
+    BROKER_PROTOCOL_MIN_VERSION, BROKER_PROTOCOL_VERSION, BrokerApplicationIdentity,
+    BrokerAuthorizationDecision, BrokerAuthorizationHandle, BrokerAuthorizationState,
+    BrokerCapability, BrokerCredential, BrokerOperation, BrokerPresence, BrokerRequest,
+    BrokerResponse, BrokerResult, LocalFailure, LocalOperation, LocalResult,
+    PendingBrokerAuthorization, read_message, write_message,
 };
 
 const DOCUMENT_VERSION: u16 = 1;
 const MAX_APPLICATIONS: usize = 128;
+const MAX_PENDING_AUTHORIZATIONS: usize = 64;
+const AUTHORIZATION_LIFETIME_MS: i64 = 5 * 60 * 1_000;
+const MAX_BROKER_CONNECTIONS: usize = 32;
+const BROKER_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ApplicationIdentity {
-    /// Reverse-DNS application identifier or an equivalently stable package ID.
-    pub application_id: String,
-    /// Human-readable label shown in the local consent UI only.
-    pub display_name: String,
-    /// Optional platform signing identity digest. This is supporting evidence,
-    /// never a replacement for a user-approved broker capability.
-    pub signing_identity_sha256: Option<String>,
-}
+pub type ApplicationIdentity = BrokerApplicationIdentity;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -258,11 +260,305 @@ impl ApplicationCapabilities {
         }
         requested
     }
+
+    fn from_capabilities(capabilities: &[BrokerCapability]) -> Self {
+        capabilities.iter().fold(
+            Self {
+                observe_status: false,
+                observe_printers: false,
+                manage_profiles: false,
+                submit_local_jobs: false,
+                manage_connectors: false,
+            },
+            |mut result, capability| {
+                let requested = Self::requiring(*capability);
+                result.observe_status |= requested.observe_status;
+                result.observe_printers |= requested.observe_printers;
+                result.manage_profiles |= requested.manage_profiles;
+                result.submit_local_jobs |= requested.submit_local_jobs;
+                result.manage_connectors |= requested.manage_connectors;
+                result
+            },
+        )
+    }
+}
+
+#[derive(Debug)]
+struct PendingAuthorization {
+    view: PendingBrokerAuthorization,
+    nonce_sha256: String,
+    decision: Option<Result<Vec<BrokerCapability>, ()>>,
+}
+
+#[derive(Debug, Default)]
+struct ConsentState {
+    pending: BTreeMap<uuid::Uuid, PendingAuthorization>,
+}
+
+#[derive(Clone)]
+pub struct BrokerConsentHandle {
+    registry: std::sync::Arc<Mutex<BrokerRegistry>>,
+    consent: std::sync::Arc<Mutex<ConsentState>>,
+}
+
+impl std::fmt::Debug for BrokerConsentHandle {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("BrokerConsentHandle(<redacted>)")
+    }
+}
+
+impl BrokerConsentHandle {
+    pub async fn pending(&self) -> Vec<PendingBrokerAuthorization> {
+        let now = Utc::now().timestamp_millis();
+        let mut state = self.consent.lock().await;
+        prune_expired(&mut state, now);
+        state
+            .pending
+            .values()
+            .filter(|pending| pending.decision.is_none())
+            .map(|pending| pending.view.clone())
+            .collect()
+    }
+
+    /// Applies an operator decision. Granted capabilities must be a subset of
+    /// the application's request; claimed identity evidence is never trusted.
+    ///
+    /// # Errors
+    ///
+    /// Returns a bounded command failure when the request is absent, expired,
+    /// already decided, or the granted set is not a subset of the request.
+    #[allow(
+        clippy::significant_drop_tightening,
+        reason = "one consent lock makes decision validation and mutation atomic"
+    )]
+    pub async fn decide(
+        &self,
+        authorization_id: uuid::Uuid,
+        decision: BrokerAuthorizationDecision,
+    ) -> Result<(), CommandFailure> {
+        let now = Utc::now().timestamp_millis();
+        let mut state = self.consent.lock().await;
+        prune_expired(&mut state, now);
+        let pending = state
+            .pending
+            .get_mut(&authorization_id)
+            .ok_or_else(|| CommandFailure {
+                code: "broker_authorization_not_found".into(),
+                message: "the authorization request was not found or expired".into(),
+            })?;
+        if pending.decision.is_some() {
+            return Err(CommandFailure {
+                code: "broker_authorization_already_decided".into(),
+                message: "the authorization request has already been decided".into(),
+            });
+        }
+        if !decision.approved {
+            if !decision.granted_capabilities.is_empty() {
+                return Err(CommandFailure {
+                    code: "broker_authorization_invalid_decision".into(),
+                    message: "a denied request cannot grant capabilities".into(),
+                });
+            }
+            pending.decision = Some(Err(()));
+            return Ok(());
+        }
+        let granted = validated_capabilities(&decision.granted_capabilities).map_err(|()| {
+            CommandFailure {
+                code: "broker_authorization_invalid_capabilities".into(),
+                message: "approved capabilities must be a non-empty subset of the request".into(),
+            }
+        })?;
+        let requested = pending
+            .view
+            .requested_capabilities
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        if !granted
+            .iter()
+            .all(|capability| requested.contains(capability))
+        {
+            return Err(CommandFailure {
+                code: "broker_authorization_invalid_capabilities".into(),
+                message: "approved capabilities must be a non-empty subset of the request".into(),
+            });
+        }
+        pending.decision = Some(Ok(granted));
+        Ok(())
+    }
+
+    async fn request(
+        &self,
+        application: BrokerApplicationIdentity,
+        capabilities: Vec<BrokerCapability>,
+    ) -> Result<BrokerAuthorizationHandle, LocalFailure> {
+        validate_identity(&application).map_err(|_| {
+            local_failure(
+                "invalid_application_identity",
+                "the application identity is invalid",
+                false,
+            )
+        })?;
+        let capabilities = validated_capabilities(&capabilities).map_err(|()| {
+            local_failure(
+                "invalid_requested_capabilities",
+                "at least one unique supported capability is required",
+                false,
+            )
+        })?;
+        let now = Utc::now().timestamp_millis();
+        let mut state = self.consent.lock().await;
+        prune_expired(&mut state, now);
+        if state.pending.len() >= MAX_PENDING_AUTHORIZATIONS {
+            return Err(local_failure(
+                "authorization_capacity_reached",
+                "the node has too many pending authorization requests",
+                true,
+            ));
+        }
+        let authorization_id = uuid::Uuid::new_v4();
+        let nonce = generate_token();
+        let expires_unix_ms = now.saturating_add(AUTHORIZATION_LIFETIME_MS);
+        state.pending.insert(
+            authorization_id,
+            PendingAuthorization {
+                view: PendingBrokerAuthorization {
+                    authorization_id,
+                    application,
+                    requested_capabilities: capabilities,
+                    requested_unix_ms: now,
+                    expires_unix_ms,
+                },
+                nonce_sha256: token_digest(nonce.expose_for_client()),
+                decision: None,
+            },
+        );
+        let handle = BrokerAuthorizationHandle {
+            authorization_id,
+            nonce: nonce.expose_for_client().to_owned(),
+            expires_unix_ms,
+        };
+        drop(state);
+        Ok(handle)
+    }
+
+    #[allow(
+        clippy::significant_drop_tightening,
+        reason = "the authenticated consent state is read under one bounded lock"
+    )]
+    async fn status(
+        &self,
+        handle: &BrokerAuthorizationHandle,
+    ) -> Result<BrokerAuthorizationState, LocalFailure> {
+        let now = Utc::now().timestamp_millis();
+        if handle.expires_unix_ms <= now {
+            return Ok(BrokerAuthorizationState::Expired);
+        }
+        let mut state = self.consent.lock().await;
+        prune_expired(&mut state, now);
+        let pending = authenticated_pending(&state, handle)?;
+        Ok(match &pending.decision {
+            None => BrokerAuthorizationState::Pending,
+            Some(Ok(_)) => BrokerAuthorizationState::Approved,
+            Some(Err(())) => BrokerAuthorizationState::Denied,
+        })
+    }
+
+    async fn exchange(
+        &self,
+        handle: &BrokerAuthorizationHandle,
+    ) -> Result<BrokerCredential, LocalFailure> {
+        let now = Utc::now().timestamp_millis();
+        let mut state = self.consent.lock().await;
+        prune_expired(&mut state, now);
+        let pending = authenticated_pending(&state, handle)?;
+        let capabilities = match &pending.decision {
+            None => {
+                return Err(local_failure(
+                    "authorization_pending",
+                    "the authorization request is awaiting a node-side decision",
+                    true,
+                ));
+            }
+            Some(Err(())) => {
+                return Err(local_failure(
+                    "authorization_denied",
+                    "the node operator denied the authorization request",
+                    false,
+                ));
+            }
+            Some(Ok(capabilities)) => capabilities.clone(),
+        };
+        let application = pending.view.application.clone();
+        let issued = self
+            .registry
+            .lock()
+            .await
+            .authorize(
+                application.clone(),
+                ApplicationCapabilities::from_capabilities(&capabilities),
+            )
+            .map_err(|_| {
+                local_failure(
+                    "authorization_persistence_failed",
+                    "the approved capability could not be persisted",
+                    true,
+                )
+            })?;
+        state.pending.remove(&handle.authorization_id);
+        let credential = BrokerCredential {
+            application_id: application.application_id,
+            token: issued.token.expose_for_client().to_owned(),
+        };
+        drop(state);
+        Ok(credential)
+    }
+}
+
+fn validated_capabilities(capabilities: &[BrokerCapability]) -> Result<Vec<BrokerCapability>, ()> {
+    let unique = capabilities.iter().copied().collect::<BTreeSet<_>>();
+    if unique.is_empty() || unique.len() != capabilities.len() || unique.len() > 5 {
+        return Err(());
+    }
+    Ok(unique.into_iter().collect())
+}
+
+fn authenticated_pending<'a>(
+    state: &'a ConsentState,
+    handle: &BrokerAuthorizationHandle,
+) -> Result<&'a PendingAuthorization, LocalFailure> {
+    let pending = state.pending.get(&handle.authorization_id).ok_or_else(|| {
+        local_failure(
+            "authorization_not_found",
+            "the authorization request was not found or has expired",
+            false,
+        )
+    })?;
+    if handle.expires_unix_ms != pending.view.expires_unix_ms
+        || !constant_time_eq(
+            pending.nonce_sha256.as_bytes(),
+            token_digest(&handle.nonce).as_bytes(),
+        )
+    {
+        return Err(local_failure(
+            "authorization_invalid_nonce",
+            "the authorization exchange secret is invalid",
+            false,
+        ));
+    }
+    Ok(pending)
+}
+
+fn prune_expired(state: &mut ConsentState, now: i64) {
+    state
+        .pending
+        .retain(|_, pending| pending.view.expires_unix_ms > now);
 }
 
 #[derive(Clone)]
 pub struct BrokerServerState {
     registry: std::sync::Arc<Mutex<BrokerRegistry>>,
+    consent: std::sync::Arc<Mutex<ConsentState>>,
     commands: mpsc::Sender<RuntimeCommand>,
 }
 
@@ -271,6 +567,7 @@ impl std::fmt::Debug for BrokerServerState {
         formatter
             .debug_struct("BrokerServerState")
             .field("registry", &"<redacted>")
+            .field("consent", &"<redacted>")
             .field("commands", &self.commands)
             .finish()
     }
@@ -281,17 +578,53 @@ impl BrokerServerState {
     pub fn new(registry: BrokerRegistry, commands: mpsc::Sender<RuntimeCommand>) -> Self {
         Self {
             registry: std::sync::Arc::new(Mutex::new(registry)),
+            consent: std::sync::Arc::new(Mutex::new(ConsentState::default())),
             commands,
         }
     }
 
+    #[must_use]
+    pub fn consent_handle(&self) -> BrokerConsentHandle {
+        BrokerConsentHandle {
+            registry: std::sync::Arc::clone(&self.registry),
+            consent: std::sync::Arc::clone(&self.consent),
+        }
+    }
+
     async fn handle(&self, request: BrokerRequest) -> BrokerResponse {
-        let result = if request.protocol == BROKER_PROTOCOL_VERSION {
+        let result = if (BROKER_PROTOCOL_MIN_VERSION..=BROKER_PROTOCOL_VERSION)
+            .contains(&request.protocol)
+        {
             match request.operation {
                 BrokerOperation::Presence => Ok(BrokerResult::Presence(BrokerPresence {
-                    protocol_min: BROKER_PROTOCOL_VERSION,
+                    protocol_min: BROKER_PROTOCOL_MIN_VERSION,
                     protocol_max: BROKER_PROTOCOL_VERSION,
                 })),
+                BrokerOperation::RequestAuthorization {
+                    application,
+                    requested_capabilities,
+                } if request.protocol >= 2 => self
+                    .consent_handle()
+                    .request(application, requested_capabilities)
+                    .await
+                    .map(BrokerResult::AuthorizationRequested),
+                BrokerOperation::AuthorizationStatus { handle } if request.protocol >= 2 => self
+                    .consent_handle()
+                    .status(&handle)
+                    .await
+                    .map(|state| BrokerResult::AuthorizationStatus { state }),
+                BrokerOperation::ExchangeAuthorization { handle } if request.protocol >= 2 => self
+                    .consent_handle()
+                    .exchange(&handle)
+                    .await
+                    .map(BrokerResult::AuthorizationExchanged),
+                BrokerOperation::RequestAuthorization { .. }
+                | BrokerOperation::AuthorizationStatus { .. }
+                | BrokerOperation::ExchangeAuthorization { .. } => Err(local_failure(
+                    "unsupported_broker_protocol",
+                    "authorization consent requires broker protocol version 2",
+                    false,
+                )),
                 BrokerOperation::Execute {
                     credential,
                     capability,
@@ -347,17 +680,61 @@ pub async fn serve_unix_broker(
     state: BrokerServerState,
 ) -> Result<(), piqae_local_ipc::LocalIpcError> {
     let endpoint = piqae_local_ipc::LocalEndpoint::bind(path)?;
+    let capacity = std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_BROKER_CONNECTIONS));
     loop {
         let mut stream = endpoint.accept().await?;
+        let Ok(permit) = std::sync::Arc::clone(&capacity).try_acquire_owned() else {
+            continue;
+        };
         let state = state.clone();
         tokio::spawn(async move {
-            let response = match read_message::<BrokerRequest>(&mut stream).await {
-                Ok(request) => state.handle(request).await,
-                Err(_) => return,
-            };
-            let _ = write_message(&mut stream, &response).await;
+            let _permit = permit;
+            serve_connection(&mut stream, state).await;
         });
     }
+}
+
+#[cfg(windows)]
+/// Serves the broker on a remote-client-rejecting, current-user-only named
+/// pipe. Creation fails closed if the pipe name is already squatted or its ACL
+/// cannot be established.
+///
+/// # Errors
+///
+/// Returns a local IPC error when the protected endpoint cannot be created or
+/// a pipe instance cannot accept a client.
+pub async fn serve_windows_broker(
+    name: &str,
+    state: BrokerServerState,
+) -> Result<(), piqae_local_ipc::LocalIpcError> {
+    let mut server = piqae_local_ipc::create_current_user_pipe_server(name, true)?;
+    let capacity = std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_BROKER_CONNECTIONS));
+    loop {
+        server.connect().await?;
+        let mut connected = server;
+        server = piqae_local_ipc::create_current_user_pipe_server(name, false)?;
+        let Ok(permit) = std::sync::Arc::clone(&capacity).try_acquire_owned() else {
+            continue;
+        };
+        let state = state.clone();
+        tokio::spawn(async move {
+            let _permit = permit;
+            serve_connection(&mut connected, state).await;
+        });
+    }
+}
+
+async fn serve_connection(
+    stream: &mut (impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send),
+    state: BrokerServerState,
+) {
+    let Ok(Ok(request)) =
+        tokio::time::timeout(BROKER_IO_TIMEOUT, read_message::<BrokerRequest>(stream)).await
+    else {
+        return;
+    };
+    let response = state.handle(request).await;
+    let _ = tokio::time::timeout(BROKER_IO_TIMEOUT, write_message(stream, &response)).await;
 }
 
 const fn required_capability(operation: &LocalOperation) -> Option<BrokerCapability> {
@@ -702,6 +1079,88 @@ mod tests {
         assert!(matches!(
             response.result,
             Ok(BrokerResult::Local(LocalResult::Status(_)))
+        ));
+    }
+
+    #[tokio::test]
+    async fn consent_requires_node_decision_and_exchange_is_one_time() {
+        let directory = tempfile::tempdir().unwrap();
+        let (commands, _receive) = mpsc::channel(1);
+        let state =
+            BrokerServerState::new(BrokerRegistry::load(directory.path()).unwrap(), commands);
+        let consent = state.consent_handle();
+        let handle = consent
+            .request(
+                identity(),
+                vec![
+                    BrokerCapability::ObserveStatus,
+                    BrokerCapability::ObservePrinters,
+                ],
+            )
+            .await
+            .unwrap();
+        assert!(!format!("{handle:?}").contains(&handle.nonce));
+        assert_eq!(consent.pending().await.len(), 1);
+        assert!(!state.registry.lock().await.authenticate(
+            "com.example.pos",
+            "claimed-signing-identity-is-not-a-token",
+            ApplicationCapabilities::OBSERVE_ONLY,
+        ));
+        consent
+            .decide(
+                handle.authorization_id,
+                BrokerAuthorizationDecision {
+                    approved: true,
+                    granted_capabilities: vec![BrokerCapability::ObserveStatus],
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            consent.status(&handle).await.unwrap(),
+            BrokerAuthorizationState::Approved
+        );
+        let credential = consent.exchange(&handle).await.unwrap();
+        assert!(!format!("{credential:?}").contains(&credential.token));
+        assert!(matches!(
+            consent.exchange(&handle).await,
+            Err(LocalFailure { code, .. }) if code == "authorization_not_found"
+        ));
+    }
+
+    #[tokio::test]
+    async fn pending_consent_expires_and_never_survives_restart() {
+        let directory = tempfile::tempdir().unwrap();
+        let (commands, _receive) = mpsc::channel(1);
+        let state =
+            BrokerServerState::new(BrokerRegistry::load(directory.path()).unwrap(), commands);
+        let consent = state.consent_handle();
+        let handle = consent
+            .request(identity(), vec![BrokerCapability::ObserveStatus])
+            .await
+            .unwrap();
+        {
+            let mut pending = consent.consent.lock().await;
+            pending
+                .pending
+                .get_mut(&handle.authorization_id)
+                .unwrap()
+                .view
+                .expires_unix_ms = Utc::now().timestamp_millis() - 1;
+        }
+        assert!(consent.pending().await.is_empty());
+
+        let handle = consent
+            .request(identity(), vec![BrokerCapability::ObserveStatus])
+            .await
+            .unwrap();
+        drop(state);
+        let (commands, _receive) = mpsc::channel(1);
+        let restarted =
+            BrokerServerState::new(BrokerRegistry::load(directory.path()).unwrap(), commands);
+        assert!(matches!(
+            restarted.consent_handle().status(&handle).await,
+            Err(LocalFailure { code, .. }) if code == "authorization_not_found"
         ));
     }
 }

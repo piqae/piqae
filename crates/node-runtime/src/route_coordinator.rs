@@ -390,6 +390,15 @@ impl RouteCoordinator {
             // elapsed; explicit terminal evidence is required first.
             bail!("printer route is reserved by another connector");
         }
+        if self
+            .document
+            .handoffs
+            .len()
+            .saturating_add(self.document.reservations.len())
+            >= MAX_HANDOFFS
+        {
+            bail!("native handoff journal is full pending control-plane acknowledgement");
+        }
         if route.is_some_and(|route| route.coordination_conflict) {
             bail!("printer route has conflicting unresolved physical reservations");
         }
@@ -559,7 +568,19 @@ impl RouteCoordinator {
                 .reservations
                 .remove(&reservation.coordination_key);
         }
-        trim_front(&mut self.document.handoffs, MAX_HANDOFFS);
+        self.persist()
+    }
+
+    /// Removes only handoff evidence explicitly acknowledged by its connector.
+    /// Capacity pressure never discards replay barriers implicitly.
+    pub fn acknowledge_handoffs(
+        &mut self,
+        connector_id: &str,
+        through_sequence: u64,
+    ) -> Result<()> {
+        self.document.handoffs.retain(|handoff| {
+            handoff.connector_id != connector_id || handoff.sequence > through_sequence
+        });
         self.persist()
     }
 
@@ -1448,6 +1469,47 @@ mod tests {
             restarted
                 .handoffs_for_connector("self_hosted", 0)
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn replay_barriers_fail_closed_at_bound_and_compact_only_after_acknowledgement() {
+        let root = TempDir::new().unwrap();
+        let mut coordinator = RouteCoordinator::open(root.path()).unwrap();
+        for sequence in 1..=MAX_HANDOFFS {
+            coordinator.document.handoffs.push(DurableHandoff {
+                sequence: u64::try_from(sequence).unwrap(),
+                connector_id: "hosted".into(),
+                server_route_id: None,
+                local_route_key: format!("route-{sequence}"),
+                job_id: piqae_domain::JobId::new().to_string(),
+                reservation_id: Uuid::new_v4(),
+                fencing_generation: 1,
+                fencing_token: format!("fence-{sequence}"),
+                observed_at: Utc::now(),
+                outcome: NativeHandoffOutcome::Accepted,
+                native_job_id: Some(format!("native-{sequence}")),
+            });
+        }
+        coordinator.document.handoff_sequence = u64::try_from(MAX_HANDOFFS).unwrap();
+        coordinator.persist().unwrap();
+        assert!(
+            coordinator
+                .reserve("hosted", "native-new", "job-new", 1)
+                .is_err(),
+            "an unacknowledged replay barrier must never be evicted to admit new work"
+        );
+
+        drop(coordinator);
+        let mut restarted = RouteCoordinator::open(root.path()).unwrap();
+        assert_eq!(restarted.document.handoffs.len(), MAX_HANDOFFS);
+        restarted.acknowledge_handoffs("hosted", 256).unwrap();
+        assert_eq!(restarted.document.handoffs.len(), 256);
+        assert!(
+            restarted
+                .reserve("hosted", "native-new", "job-new", 2)
+                .is_ok(),
+            "explicit durable acknowledgement is the only compaction gate"
         );
     }
 

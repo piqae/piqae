@@ -1,6 +1,7 @@
 //! Single-installation ownership and attach-versus-embed selection.
 
 use fs2::FileExt as _;
+use piqae_local_ipc::{BROKER_PROTOCOL_MIN_VERSION, BROKER_PROTOCOL_VERSION};
 use serde::{Deserialize, Serialize};
 use std::{fs::OpenOptions, path::PathBuf};
 use thiserror::Error;
@@ -36,6 +37,8 @@ pub enum RuntimeSelectionError {
     BrokerRequired,
     #[error("embedded mode requires an application-scoped data directory")]
     EmbeddedDataDirectoryRequired,
+    #[error("local broker protocol range {minimum}..={maximum} is incompatible")]
+    IncompatibleBrokerProtocol { minimum: u16, maximum: u16 },
 }
 
 /// Makes mode selection explicit before any database or private key is opened.
@@ -51,14 +54,31 @@ pub fn select_runtime(
     embedded_data_directory: Option<&std::path::Path>,
 ) -> Result<RuntimeDisposition, RuntimeSelectionError> {
     match (policy, broker) {
-        (AttachPolicy::Automatic | AttachPolicy::Attach, Some(endpoint)) => {
+        (AttachPolicy::Automatic | AttachPolicy::Attach, Some(endpoint))
+            if broker_is_compatible(&endpoint) =>
+        {
             Ok(RuntimeDisposition::Attached(endpoint))
         }
+        (AttachPolicy::Attach, Some(endpoint)) => {
+            Err(RuntimeSelectionError::IncompatibleBrokerProtocol {
+                minimum: endpoint.protocol_min,
+                maximum: endpoint.protocol_max,
+            })
+        }
+        (AttachPolicy::Automatic, Some(_)) => embedded_data_directory
+            .map(|_| RuntimeDisposition::Embedded)
+            .ok_or(RuntimeSelectionError::EmbeddedDataDirectoryRequired),
         (AttachPolicy::Attach, None) => Err(RuntimeSelectionError::BrokerRequired),
         (AttachPolicy::Automatic | AttachPolicy::Embedded, _) => embedded_data_directory
             .map(|_| RuntimeDisposition::Embedded)
             .ok_or(RuntimeSelectionError::EmbeddedDataDirectoryRequired),
     }
+}
+
+const fn broker_is_compatible(endpoint: &BrokerEndpoint) -> bool {
+    endpoint.protocol_min <= endpoint.protocol_max
+        && endpoint.protocol_max >= BROKER_PROTOCOL_MIN_VERSION
+        && endpoint.protocol_min <= BROKER_PROTOCOL_VERSION
 }
 
 #[derive(Debug, Error)]
@@ -151,6 +171,27 @@ mod tests {
         assert!(matches!(
             select_runtime(AttachPolicy::Embedded, None, None),
             Err(RuntimeSelectionError::EmbeddedDataDirectoryRequired)
+        ));
+    }
+
+    #[test]
+    fn incompatible_broker_falls_back_only_for_automatic_policy() {
+        let endpoint = BrokerEndpoint {
+            address: "test".into(),
+            protocol_min: 99,
+            protocol_max: 100,
+        };
+        assert!(matches!(
+            select_runtime(
+                AttachPolicy::Automatic,
+                Some(endpoint.clone()),
+                Some(std::path::Path::new("app"))
+            ),
+            Ok(RuntimeDisposition::Embedded)
+        ));
+        assert!(matches!(
+            select_runtime(AttachPolicy::Attach, Some(endpoint), None),
+            Err(RuntimeSelectionError::IncompatibleBrokerProtocol { .. })
         ));
     }
 

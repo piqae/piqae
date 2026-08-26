@@ -10,12 +10,15 @@ use axum::{
     response::{Html, IntoResponse, Redirect, Response},
     routing::{get, post, put},
 };
-use piqae_local_ipc::{ConfirmLoadedMedia, NativeProfileCapturePayload, SessionAuthenticator};
+use piqae_local_ipc::{
+    BrokerAuthorizationDecision, ConfirmLoadedMedia, NativeProfileCapturePayload,
+    SessionAuthenticator,
+};
 pub use piqae_node_runtime::command::{
     CommandFailure as ControlFailure, ConfirmLoadedMediaRequest, DeleteProfileQuery,
-    ExposureUpdate, LocalConnectorDetail, LocalContent, LocalCreateJob, LocalHistoryJob,
-    LocalJobAccepted, LocalJobHistory, ProfileCaptureBeginRequest, ProfileCreate, ProfileUpdate,
-    RuntimeCommand as ControlRequest, TestPageRequest, ValidateProfileRequest,
+    ExposureUpdate, HostLifecycleRequest, LocalConnectorDetail, LocalContent, LocalCreateJob,
+    LocalHistoryJob, LocalJobAccepted, LocalJobHistory, ProfileCaptureBeginRequest, ProfileCreate,
+    ProfileUpdate, RuntimeCommand as ControlRequest, TestPageRequest, ValidateProfileRequest,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -91,6 +94,15 @@ pub fn router(state: LocalApiState) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/v1/local/status", get(status))
+        .route("/v1/local/lifecycle", post(apply_host_lifecycle))
+        .route(
+            "/v1/local/broker/authorization-requests",
+            get(pending_broker_authorizations),
+        )
+        .route(
+            "/v1/local/broker/authorization-requests/{authorization_id}/decision",
+            post(decide_broker_authorization),
+        )
         .route("/v1/local/printers", get(printers))
         .route(
             "/v1/local/printers/{printer_id}/exposure",
@@ -430,6 +442,68 @@ async fn status(State(state): State<LocalApiState>, headers: HeaderMap) -> Respo
     receive
         .await
         .map_or_else(|_| unavailable(), |status| Json(status).into_response())
+}
+
+async fn apply_host_lifecycle(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+    Json(request): Json<HostLifecycleRequest>,
+) -> Response {
+    if !authenticate(&state, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let (send, receive) = oneshot::channel();
+    if state
+        .control
+        .send(ControlRequest::ApplyHostLifecycle {
+            event: request.event,
+            respond_to: send,
+        })
+        .await
+        .is_err()
+    {
+        return unavailable();
+    }
+    receive
+        .await
+        .map_or_else(|_| unavailable(), |snapshot| Json(snapshot).into_response())
+}
+
+async fn pending_broker_authorizations(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+) -> Response {
+    if !authenticate(&state, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let (send, receive) = oneshot::channel();
+    if state
+        .control
+        .send(ControlRequest::PendingBrokerAuthorizations { respond_to: send })
+        .await
+        .is_err()
+    {
+        return unavailable();
+    }
+    receive
+        .await
+        .map_or_else(|_| unavailable(), |pending| Json(pending).into_response())
+}
+
+async fn decide_broker_authorization(
+    State(state): State<LocalApiState>,
+    Path(authorization_id): Path<uuid::Uuid>,
+    headers: HeaderMap,
+    Json(decision): Json<BrokerAuthorizationDecision>,
+) -> Response {
+    control_action(state, headers, |respond_to| {
+        ControlRequest::DecideBrokerAuthorization {
+            authorization_id,
+            decision,
+            respond_to,
+        }
+    })
+    .await
 }
 
 async fn printers(State(state): State<LocalApiState>, headers: HeaderMap) -> Response {
@@ -826,9 +900,10 @@ async fn request_response<T: Serialize>(
 
 fn failure_status(code: &str) -> StatusCode {
     match code {
-        "printer_not_found" | "profile_not_found" | "profile_capture_not_found" => {
-            StatusCode::NOT_FOUND
-        }
+        "printer_not_found"
+        | "profile_not_found"
+        | "profile_capture_not_found"
+        | "broker_authorization_not_found" => StatusCode::NOT_FOUND,
         "profile_revision_conflict" => StatusCode::CONFLICT,
         "profile_capture_token_invalid" => StatusCode::UNAUTHORIZED,
         "profile_capture_timed_out"
@@ -879,7 +954,13 @@ mod tests {
         body::{Body, to_bytes},
         http::Request,
     };
-    use piqae_local_ipc::{LocalPrinterProfile, LocalStatus};
+    use piqae_local_ipc::{
+        BrokerApplicationIdentity, BrokerCapability, LocalPrinterProfile, LocalStatus,
+        PendingBrokerAuthorization,
+    };
+    use piqae_node_runtime::{
+        LifecycleEvent, LifecycleSnapshot, NetworkAvailability, PowerAvailability,
+    };
     use tower::ServiceExt;
 
     fn test_state() -> (LocalApiState, mpsc::Receiver<ControlRequest>) {
@@ -1015,6 +1096,109 @@ mod tests {
             .expect("response");
         responder.await.expect("responder");
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn authenticated_lifecycle_event_is_dispatched_to_the_durable_host() {
+        let (state, mut receive) = test_state();
+        let responder = tokio::spawn(async move {
+            if let Some(ControlRequest::ApplyHostLifecycle { event, respond_to }) =
+                receive.recv().await
+            {
+                assert_eq!(event, LifecycleEvent::Sleeping);
+                let _ = respond_to.send(LifecycleSnapshot {
+                    foreground: false,
+                    power: PowerAvailability::Sleeping,
+                    network: NetworkAvailability::Unknown,
+                    accepting_cloud_leases: false,
+                    shutdown_requested: false,
+                    generation: 2,
+                });
+            }
+        });
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/local/lifecycle")
+                    .header("authorization", "Bearer secret")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"event":"sleeping"}"#))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        responder.await.expect("responder");
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn broker_consent_listing_and_decision_require_local_auth_and_dispatch() {
+        let (state, mut receive) = test_state();
+        let authorization_id = uuid::Uuid::new_v4();
+        let responder = tokio::spawn(async move {
+            if let Some(ControlRequest::PendingBrokerAuthorizations { respond_to }) =
+                receive.recv().await
+            {
+                let _ = respond_to.send(vec![PendingBrokerAuthorization {
+                    authorization_id,
+                    application: BrokerApplicationIdentity {
+                        application_id: "com.example.pos".into(),
+                        display_name: "Example POS".into(),
+                        signing_identity_sha256: Some("a".repeat(64)),
+                    },
+                    requested_capabilities: vec![BrokerCapability::ObservePrinters],
+                    requested_unix_ms: 1,
+                    expires_unix_ms: 2,
+                }]);
+            }
+            if let Some(ControlRequest::DecideBrokerAuthorization {
+                authorization_id: received,
+                decision,
+                respond_to,
+            }) = receive.recv().await
+            {
+                assert_eq!(received, authorization_id);
+                assert!(decision.approved);
+                assert_eq!(
+                    decision.granted_capabilities,
+                    vec![BrokerCapability::ObservePrinters]
+                );
+                let _ = respond_to.send(Ok(()));
+            }
+        });
+        let pending = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/local/broker/authorization-requests")
+                    .header("authorization", "Bearer secret")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(pending.status(), StatusCode::OK);
+        let pending_body = to_bytes(pending.into_body(), 4096).await.expect("body");
+        assert!(!String::from_utf8_lossy(&pending_body).contains("nonce"));
+
+        let decided = router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/v1/local/broker/authorization-requests/{authorization_id}/decision"
+                    ))
+                    .header("authorization", "Bearer secret")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"approved":true,"granted_capabilities":["observe_printers"]}"#,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        responder.await.expect("responder");
+        assert_eq!(decided.status(), StatusCode::NO_CONTENT);
     }
 
     #[tokio::test]

@@ -1,0 +1,12 @@
+{
+  "protocol": 2,
+  "request_id": "00000000-0000-0000-0000-000000000002",
+  "result": {
+    "Ok": {
+      "type": "authorization_requested",
+      "authorization_id": "00000000-0000-0000-0000-000000000003",
+      "nonce": "synthetic-one-time-authorization-nonce",
+      "expires_unix_ms": 4102444800000
+    }
+  }
+}

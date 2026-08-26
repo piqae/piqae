@@ -35,6 +35,10 @@ NATIVE_SHARED = (
     "crates/executor-supervisor/",
     "crates/local-api/",
     "crates/local-ipc/",
+    "crates/node-client/",
+    "crates/node-ffi/",
+    "crates/node-host-api/",
+    "crates/node-runtime/",
     "crates/piqae-agent/",
     "crates/protocol/",
     "crates/update-guardian/",
@@ -73,7 +77,12 @@ def classify(paths: Iterable[str], *, run_all: bool = False) -> dict[str, bool]:
         selected["rust_server"] |= server
         selected["macos_rust"] |= shared or path.startswith("crates/executor-cups/")
         selected["windows_rust"] |= shared or path.startswith(
-            ("crates/executor-windows/", "crates/shell-windows/")
+            (
+                "crates/executor-windows/",
+                "crates/shell-windows/",
+                "sdk/dotnet/",
+                "sdk/native/",
+            )
         )
         selected["macos_shell"] |= path.startswith("shells/macos/")
         selected["macos_packaging"] |= path.startswith("packaging/macos/")
