@@ -61,6 +61,7 @@ PIQAE_NODE_API PiqaeBuffer piqae_node_set_host_key_provider(uint64_t handle, Piq
 PIQAE_NODE_API PiqaeBuffer piqae_node_set_connector_key_provider(uint64_t handle, PiqaeConnectorKeyProvider provider);
 PIQAE_NODE_API PiqaeBuffer piqae_node_stop(uint64_t handle);
 PIQAE_NODE_API PiqaeBuffer piqae_node_snapshot(uint64_t handle);
+PIQAE_NODE_API PiqaeBuffer piqae_node_broker_execute(const uint8_t *endpoint_data, size_t endpoint_length, const uint8_t *credential_json, size_t credential_length, const uint8_t *capability_json, size_t capability_length, const uint8_t *operation_json, size_t operation_length);
 PIQAE_NODE_API PiqaeBuffer piqae_node_command(uint64_t handle, const uint8_t *data, size_t length);
 PIQAE_NODE_API PiqaeBuffer piqae_node_destroy(uint64_t handle);
 PIQAE_NODE_API void piqae_node_free(PiqaeBuffer buffer);

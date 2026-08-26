@@ -1,0 +1,13 @@
+{
+  "protocol": 4,
+  "request_id": "00000000-0000-0000-0000-000000000044",
+  "result": {
+    "Ok": {
+      "type": "local",
+      "result": {
+        "type": "accepted"
+      }
+    }
+  },
+  "proof": "fixture-response-proof"
+}

@@ -11,14 +11,16 @@
 )]
 
 use base64::Engine as _;
-use piqae_node_runtime::connector_registry::{ConnectorRecord, ConnectorRegistry};
+use piqae_node_runtime::connector_registry::ConnectorRegistry;
 use piqae_node_runtime::{
-    AdapterOperationOutcome, AvailabilityClass, ConnectorKeyError, EmbeddedAdapterRegistration,
-    EmbeddedJobRequest, EmbeddedPrinterObservation, EmbeddedQueue, GeneratedConnectorKey,
-    HostCapabilities, HostKeyError, HostKeyProvider, HostKind, LifecycleEvent, NodeRuntime,
-    NodeRuntimeMode, PrinterTransport, RuntimeConfiguration, SecureConnectorSigner,
-    SecureKeyHandle,
+    AdapterOperationOutcome, AvailabilityClass, ConnectorInvitationExchange, ConnectorKeyError,
+    EmbeddedAdapterRegistration, EmbeddedJobRequest, EmbeddedPrinterObservation, EmbeddedQueue,
+    GeneratedConnectorKey, HostCapabilities, HostKeyError, HostKeyProvider, HostKind,
+    LifecycleEvent, NodeRuntime, NodeRuntimeMode, PrinterTransport, RuntimeConfiguration,
+    SecureConnectorSigner, SecureKeyHandle, ensure_installation_identity,
+    exchange_connector_invitation, prepare_connector_identity,
 };
+use piqae_protocol::agent::PrinterGrant;
 use piqae_support_packs::SupportPackRegistry;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -251,6 +253,9 @@ pub enum NativeCommand {
     PrepareConnectorKey {
         application_scope: String,
     },
+    CancelPreparedConnectorKey {
+        key_handle: SecureKeyHandle,
+    },
     RegisterAdapter {
         registration: EmbeddedAdapterRegistration,
     },
@@ -313,10 +318,15 @@ pub enum NativeCommand {
         adapter_id: String,
         printer_id: String,
     },
-    CompleteConnectorInvitationExchange {
-        invitation_nonce: String,
-        expires_unix_ms: i64,
-        connector: ConnectorRecord,
+    ConnectInvitation {
+        control_plane_url: url::Url,
+        invitation_token: String,
+        connector_key_handle: SecureKeyHandle,
+        printer_grant: PrinterGrant,
+        #[serde(default)]
+        allowed_printer_ids: Vec<String>,
+        node_name: String,
+        hostname: String,
     },
     ConnectorSnapshots,
     RevokeConnector {
@@ -392,28 +402,60 @@ struct Instance {
     embedded_queue: Option<std::sync::Arc<Mutex<EmbeddedQueue>>>,
     connector_registry: Option<std::sync::Arc<Mutex<ConnectorRegistry>>>,
     in_flight: std::sync::Arc<InFlight>,
+    stopping: bool,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct InFlight {
-    count: Mutex<usize>,
+    state: Mutex<InFlightState>,
     idle: Condvar,
+}
+
+#[derive(Debug)]
+struct InFlightState {
+    count: usize,
+    accepting: bool,
+}
+
+impl Default for InFlight {
+    fn default() -> Self {
+        Self {
+            state: Mutex::new(InFlightState {
+                count: 0,
+                accepting: true,
+            }),
+            idle: Condvar::new(),
+        }
+    }
 }
 
 impl InFlight {
     fn begin(self: &std::sync::Arc<Self>) -> Result<InFlightGuard, FfiError> {
-        let mut count = self.count.lock().map_err(|_| FfiError::Internal)?;
-        *count = count.checked_add(1).ok_or(FfiError::Internal)?;
-        drop(count);
+        let mut state = self.state.lock().map_err(|_| FfiError::Internal)?;
+        if !state.accepting {
+            return Err(FfiError::RuntimeTransition);
+        }
+        state.count = state.count.checked_add(1).ok_or(FfiError::Internal)?;
+        drop(state);
         Ok(InFlightGuard(std::sync::Arc::clone(self)))
     }
 
+    fn close_admission(&self) -> Result<(), FfiError> {
+        self.state.lock().map_err(|_| FfiError::Internal)?.accepting = false;
+        Ok(())
+    }
+
+    fn open_admission(&self) -> Result<(), FfiError> {
+        self.state.lock().map_err(|_| FfiError::Internal)?.accepting = true;
+        Ok(())
+    }
+
     fn wait_until_idle(&self) -> Result<(), FfiError> {
-        let mut count = self.count.lock().map_err(|_| FfiError::Internal)?;
-        while *count != 0 {
-            count = self.idle.wait(count).map_err(|_| FfiError::Internal)?;
+        let mut state = self.state.lock().map_err(|_| FfiError::Internal)?;
+        while state.count != 0 {
+            state = self.idle.wait(state).map_err(|_| FfiError::Internal)?;
         }
-        drop(count);
+        drop(state);
         Ok(())
     }
 }
@@ -422,9 +464,9 @@ struct InFlightGuard(std::sync::Arc<InFlight>);
 
 impl Drop for InFlightGuard {
     fn drop(&mut self) {
-        if let Ok(mut count) = self.0.count.lock() {
-            *count = count.saturating_sub(1);
-            if *count == 0 {
+        if let Ok(mut state) = self.0.state.lock() {
+            state.count = state.count.saturating_sub(1);
+            if state.count == 0 {
                 self.0.idle.notify_all();
             }
         }
@@ -463,6 +505,7 @@ pub extern "C" fn piqae_node_create(data: *const u8, length: usize) -> PiqaeBuff
                 embedded_queue: None,
                 connector_registry: None,
                 in_flight: std::sync::Arc::new(InFlight::default()),
+                stopping: false,
             },
         );
         Ok(json!({ "handle": handle }))
@@ -480,6 +523,9 @@ pub extern "C" fn piqae_node_set_connector_key_provider(
         }
         let mut instances = lock_instances()?;
         let instance = instances.get_mut(&handle).ok_or(FfiError::InvalidHandle)?;
+        if instance.stopping {
+            return Err(FfiError::RuntimeTransition);
+        }
         if instance.runtime.is_some() || instance.connector_key_provider.is_some() {
             return Err(FfiError::ProviderLocked);
         }
@@ -514,6 +560,9 @@ pub extern "C" fn piqae_node_start(handle: u64) -> PiqaeBuffer {
     ffi_entry(|| {
         let mut instances = lock_instances()?;
         let instance = instances.get_mut(&handle).ok_or(FfiError::InvalidHandle)?;
+        if instance.stopping {
+            return Err(FfiError::RuntimeTransition);
+        }
         if instance.runtime.is_none() {
             let root = app_scoped_root(&instance.configuration)?;
             let runtime = NodeRuntime::start(RuntimeConfiguration {
@@ -534,12 +583,28 @@ pub extern "C" fn piqae_node_start(handle: u64) -> PiqaeBuffer {
                 },
             })
             .map_err(|_| FfiError::StartFailed)?;
-            instance.runtime = Some(std::sync::Arc::new(runtime));
             let queue = EmbeddedQueue::open(root.join("embedded"), SupportPackRegistry::default())
                 .map_err(|_| FfiError::StartFailed)?;
-            instance.embedded_queue = Some(std::sync::Arc::new(Mutex::new(queue)));
-            let connectors = ConnectorRegistry::load(root.join("embedded"))
+            let mut connectors = ConnectorRegistry::load(root.join("embedded"))
                 .map_err(|_| FfiError::StartFailed)?;
+            if !instance.configuration.local_only {
+                let provider = instance
+                    .connector_key_provider
+                    .as_ref()
+                    .ok_or(FfiError::SecureConnectorProviderRequired)?;
+                ensure_installation_identity(
+                    &mut connectors,
+                    provider,
+                    &instance.configuration.application_id,
+                )
+                .map_err(|_| FfiError::SecureConnectorProviderRequired)?;
+                connectors
+                    .expire_prepared_keys(chrono::Utc::now().timestamp_millis())
+                    .map_err(|_| FfiError::ConnectorOperation)?;
+                retry_connector_key_cleanup(&mut connectors, provider);
+            }
+            instance.runtime = Some(std::sync::Arc::new(runtime));
+            instance.embedded_queue = Some(std::sync::Arc::new(Mutex::new(queue)));
             instance.connector_registry = Some(std::sync::Arc::new(Mutex::new(connectors)));
         }
         let snapshot = instance_snapshot(handle, instance);
@@ -592,11 +657,26 @@ fn app_scoped_root(
 #[unsafe(no_mangle)]
 pub extern "C" fn piqae_node_stop(handle: u64) -> PiqaeBuffer {
     ffi_entry(|| {
+        let in_flight = {
+            let mut instances = lock_instances()?;
+            let instance = instances.get_mut(&handle).ok_or(FfiError::InvalidHandle)?;
+            if instance.stopping {
+                return Err(FfiError::RuntimeTransition);
+            }
+            instance.stopping = true;
+            instance.in_flight.close_admission()?;
+            let in_flight = std::sync::Arc::clone(&instance.in_flight);
+            drop(instances);
+            in_flight
+        };
+        in_flight.wait_until_idle()?;
         let mut instances = lock_instances()?;
         let instance = instances.get_mut(&handle).ok_or(FfiError::InvalidHandle)?;
         instance.runtime = None;
         instance.embedded_queue = None;
         instance.connector_registry = None;
+        instance.stopping = false;
+        instance.in_flight.open_admission()?;
         let snapshot = instance_snapshot(handle, instance);
         drop(instances);
         Ok(snapshot)
@@ -611,6 +691,59 @@ pub extern "C" fn piqae_node_snapshot(handle: u64) -> PiqaeBuffer {
         let snapshot = instance_snapshot(handle, instance);
         drop(instances);
         Ok(snapshot)
+    })
+}
+
+/// Executes one installed-broker operation through the Rust v4 client.
+///
+/// Native SDKs never implement canonicalization and receive data only after
+/// the response proof has been verified.
+#[unsafe(no_mangle)]
+pub extern "C" fn piqae_node_broker_execute(
+    endpoint_data: *const u8,
+    endpoint_length: usize,
+    credential_data: *const u8,
+    credential_length: usize,
+    capability_data: *const u8,
+    capability_length: usize,
+    operation_data: *const u8,
+    operation_length: usize,
+) -> PiqaeBuffer {
+    ffi_entry(|| {
+        let endpoint = std::str::from_utf8(input_bytes(endpoint_data, endpoint_length)?)
+            .map_err(|_| FfiError::InvalidInput)?;
+        let credential: piqae_local_ipc::BrokerCredential =
+            serde_json::from_slice(input_bytes(credential_data, credential_length)?)
+                .map_err(|_| FfiError::InvalidInput)?;
+        let capability: piqae_local_ipc::BrokerCapability =
+            serde_json::from_slice(input_bytes(capability_data, capability_length)?)
+                .map_err(|_| FfiError::InvalidInput)?;
+        let operation: piqae_local_ipc::LocalOperation =
+            serde_json::from_slice(input_bytes(operation_data, operation_length)?)
+                .map_err(|_| FfiError::InvalidInput)?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|_| FfiError::BrokerOperation)?;
+        #[cfg(unix)]
+        let client = piqae_node_client::NodeClient::new(
+            piqae_node_client::UnixBrokerTransport::new(endpoint),
+            credential.application_id,
+            credential.token,
+        );
+        #[cfg(windows)]
+        let client = piqae_node_client::NodeClient::new(
+            piqae_node_client::WindowsBrokerTransport::new(endpoint),
+            credential.application_id,
+            credential.token,
+        );
+        #[cfg(not(any(unix, windows)))]
+        return Err(FfiError::BrokerOperation);
+        #[cfg(any(unix, windows))]
+        let result = runtime
+            .block_on(client.execute_operation(capability, operation))
+            .map_err(|_| FfiError::BrokerOperation)?;
+        Ok(json!({"result":result}))
     })
 }
 
@@ -669,11 +802,28 @@ pub extern "C" fn piqae_node_command(handle: u64, data: *const u8, length: usize
                 let provider = connector_provider
                     .as_ref()
                     .ok_or(FfiError::SecureConnectorProviderRequired)?;
-                let generated = provider
-                    .generate(&application_scope)
-                    .map_err(|_| FfiError::SecureConnectorProviderRequired)?;
+                let mut registry = lock_connectors(&connector_registry)?;
+                let prepared =
+                    prepare_connector_identity(&mut registry, provider, &application_scope)
+                        .map_err(|_| FfiError::SecureConnectorProviderRequired)?;
+                drop(registry);
                 return Ok(
-                    json!({"handle":handle,"key_handle":generated.handle,"public_key_base64":base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(generated.public_key)}),
+                    json!({"handle":handle,"key_handle":prepared.handle,"public_key_base64":prepared.public_key_base64,"expires_unix_ms":prepared.expires_unix_ms}),
+                );
+            }
+            NativeCommand::CancelPreparedConnectorKey { key_handle } => {
+                let provider = connector_provider
+                    .as_ref()
+                    .ok_or(FfiError::SecureConnectorProviderRequired)?;
+                let mut registry = lock_connectors(&connector_registry)?;
+                let cancelled = registry
+                    .cancel_prepared_key(&key_handle)
+                    .map_err(|_| FfiError::ConnectorOperation)?;
+                retry_connector_key_cleanup(&mut registry, provider);
+                let cleanup_pending = registry.key_cleanup().contains(&key_handle);
+                drop(registry);
+                return Ok(
+                    json!({"handle":handle,"cancelled":cancelled,"cleanup_pending":cleanup_pending}),
                 );
             }
             NativeCommand::RegisterAdapter { registration } => {
@@ -807,38 +957,60 @@ pub extern "C" fn piqae_node_command(handle: u64, data: *const u8, length: usize
             NativeCommand::CaptureNativeProfile { .. } => {
                 return Err(FfiError::UnsupportedAdapterCapture);
             }
-            NativeCommand::CompleteConnectorInvitationExchange {
-                invitation_nonce,
-                expires_unix_ms,
-                connector,
+            NativeCommand::ConnectInvitation {
+                control_plane_url,
+                invitation_token,
+                connector_key_handle,
+                printer_grant,
+                allowed_printer_ids,
+                node_name,
+                hostname,
             } => {
-                if invitation_nonce.is_empty()
-                    || invitation_nonce.len() > 256
-                    || expires_unix_ms <= chrono::Utc::now().timestamp_millis()
-                {
-                    return Err(FfiError::InvalidCommand);
-                }
                 let provider = connector_provider
                     .as_ref()
                     .ok_or(FfiError::SecureConnectorProviderRequired)?;
-                let key = connector
-                    .secure_key_handle
-                    .as_ref()
-                    .ok_or(FfiError::SecureConnectorProviderRequired)?;
-                provider
-                    .sign(
-                        key,
-                        format!(
-                            "piqae-connector-bind-v1\0{}\0{}",
-                            connector.connector_id, invitation_nonce
-                        )
-                        .as_bytes(),
-                    )
-                    .map_err(|_| FfiError::SecureConnectorProviderRequired)?;
-                lock_connectors(&connector_registry)?
-                    .add(connector)
-                    .map_err(|_| FfiError::ConnectorOperation)?;
-                return Ok(json!({"handle":handle,"connected":true}));
+                let application_scope = {
+                    let instances = lock_instances()?;
+                    instances
+                        .get(&handle)
+                        .ok_or(FfiError::InvalidHandle)?
+                        .configuration
+                        .application_id
+                        .clone()
+                };
+                let registry = std::sync::Arc::clone(&connector_registry);
+                let provider = *provider;
+                let record = std::thread::scope(|scope| {
+                    scope
+                        .spawn(move || {
+                            let runtime = tokio::runtime::Builder::new_current_thread()
+                                .enable_all()
+                                .build()
+                                .map_err(|_| FfiError::ConnectorOperation)?;
+                            let mut registry = lock_connectors(&registry)?;
+                            runtime
+                                .block_on(exchange_connector_invitation(
+                                    &mut registry,
+                                    &provider,
+                                    ConnectorInvitationExchange {
+                                        control_plane_url,
+                                        invitation_token,
+                                        connector_key_handle,
+                                        application_scope,
+                                        printer_grant,
+                                        allowed_printer_ids,
+                                        node_name,
+                                        hostname,
+                                        platform: std::env::consts::OS.into(),
+                                        architecture: std::env::consts::ARCH.into(),
+                                    },
+                                ))
+                                .map_err(|_| FfiError::ConnectorOperation)
+                        })
+                        .join()
+                        .map_err(|_| FfiError::ConnectorOperation)?
+                })?;
+                return Ok(json!({"handle":handle,"connected":true,"connector":record}));
             }
             NativeCommand::ConnectorSnapshots => {
                 let connectors = lock_connectors(&connector_registry)?
@@ -848,10 +1020,17 @@ pub extern "C" fn piqae_node_command(handle: u64, data: *const u8, length: usize
                 return Ok(json!({ "handle": handle, "connectors": connectors }));
             }
             NativeCommand::RevokeConnector { connector_id } => {
-                let revoked = lock_connectors(&connector_registry)?
+                let provider = connector_provider
+                    .as_ref()
+                    .ok_or(FfiError::SecureConnectorProviderRequired)?;
+                let mut registry = lock_connectors(&connector_registry)?;
+                let revoked = registry
                     .revoke(&connector_id)
                     .map_err(|_| FfiError::ConnectorOperation)?;
-                return Ok(json!({ "handle": handle, "revoked": revoked }));
+                retry_connector_key_cleanup(&mut registry, provider);
+                return Ok(
+                    json!({ "handle": handle, "revoked": revoked, "cleanup_pending": !registry.key_cleanup().is_empty() }),
+                );
             }
         }
         let instances = lock_instances()?;
@@ -865,9 +1044,13 @@ pub extern "C" fn piqae_node_command(handle: u64, data: *const u8, length: usize
 #[unsafe(no_mangle)]
 pub extern "C" fn piqae_node_destroy(handle: u64) -> PiqaeBuffer {
     ffi_entry(|| {
-        let removed = lock_instances()?
-            .remove(&handle)
-            .ok_or(FfiError::InvalidHandle)?;
+        let removed = {
+            let mut instances = lock_instances()?;
+            let instance = instances.get_mut(&handle).ok_or(FfiError::InvalidHandle)?;
+            instance.stopping = true;
+            instance.in_flight.close_admission()?;
+            instances.remove(&handle).ok_or(FfiError::InvalidHandle)?
+        };
         removed.in_flight.wait_until_idle()?;
         Ok(json!({ "handle": handle, "destroyed": true }))
     })
@@ -907,6 +1090,7 @@ enum FfiError {
     InvalidInput,
     InvalidHandle,
     InvalidCommand,
+    BrokerOperation,
     NotStarted,
     StartFailed,
     HostKeyUnavailable,
@@ -915,6 +1099,7 @@ enum FfiError {
     UnsupportedAdapterCapture,
     ConnectorOperation,
     SecureConnectorProviderRequired,
+    RuntimeTransition,
     Contract(String),
     Internal,
 }
@@ -936,6 +1121,7 @@ impl FfiError {
             Self::InvalidInput => "invalid_input",
             Self::InvalidHandle => "invalid_handle",
             Self::InvalidCommand => "invalid_command",
+            Self::BrokerOperation => "broker_operation_failed",
             Self::NotStarted => "runtime_not_started",
             Self::StartFailed => "runtime_start_failed",
             Self::HostKeyUnavailable => "host_key_unavailable",
@@ -944,6 +1130,7 @@ impl FfiError {
             Self::UnsupportedAdapterCapture => "adapter_capture_unsupported",
             Self::ConnectorOperation => "connector_operation_failed",
             Self::SecureConnectorProviderRequired => "secure_connector_provider_required",
+            Self::RuntimeTransition => "runtime_transition_in_progress",
             Self::Contract(_) => "invalid_configuration",
             Self::Internal => "internal_error",
         }
@@ -955,6 +1142,9 @@ impl FfiError {
             Self::InvalidInput => "the ABI input was null or exceeded its bound",
             Self::InvalidHandle => "the runtime handle is invalid",
             Self::InvalidCommand => "the runtime command is invalid",
+            Self::BrokerOperation => {
+                "the installed broker request or response authentication failed"
+            }
             Self::NotStarted => "the runtime has not been started",
             Self::StartFailed => "the runtime could not acquire its application state root",
             Self::HostKeyUnavailable => {
@@ -971,6 +1161,7 @@ impl FfiError {
             Self::SecureConnectorProviderRequired => {
                 "cloud connector enrollment requires a non-exporting platform signing-key provider"
             }
+            Self::RuntimeTransition => "the runtime is stopping or changing ownership",
             Self::Internal => "the runtime operation failed",
         }
     }
@@ -986,6 +1177,18 @@ fn lock_connectors(
     registry: &std::sync::Arc<Mutex<ConnectorRegistry>>,
 ) -> Result<std::sync::MutexGuard<'_, ConnectorRegistry>, FfiError> {
     registry.lock().map_err(|_| FfiError::Internal)
+}
+
+fn retry_connector_key_cleanup(
+    registry: &mut ConnectorRegistry,
+    provider: &dyn SecureConnectorSigner,
+) {
+    let pending = registry.key_cleanup().to_vec();
+    for handle in pending {
+        if provider.delete(&handle).is_ok() {
+            let _ = registry.confirm_key_cleanup(&handle);
+        }
+    }
 }
 
 fn lock_instances() -> Result<std::sync::MutexGuard<'static, BTreeMap<u64, Instance>>, FfiError> {

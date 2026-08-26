@@ -14,7 +14,8 @@ use piqae_local_ipc::{
     BROKER_PROTOCOL_MIN_VERSION, BROKER_PROTOCOL_VERSION, BrokerApplicationIdentity,
     BrokerAuthorizationHandle, BrokerAuthorizationState, BrokerCapability, BrokerCredential,
     BrokerOperation, BrokerRequest, BrokerResponse, BrokerResult, LocalOperation, LocalPrinter,
-    LocalResult, LocalStatus,
+    LocalResult, LocalStatus, broker_proof_key, broker_request_proof, broker_response_proof,
+    constant_time_proof_eq,
 };
 use piqae_node_runtime::{
     AttachPolicy, BrokerEndpoint, RuntimeDisposition, RuntimeSelectionError, select_runtime,
@@ -235,22 +236,77 @@ impl<T: BrokerTransport> NodeClient<T> {
         }
     }
 
+    /// Executes one capability-bound operation using protocol-v4 request and
+    /// response authentication. The bearer credential never crosses IPC.
+    pub async fn execute_operation(
+        &self,
+        capability: BrokerCapability,
+        operation: LocalOperation,
+    ) -> Result<LocalResult, NodeClientError> {
+        let request_id = Uuid::new_v4();
+        let nonce = Uuid::new_v4().simple().to_string();
+        let issued_unix_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| NodeClientError::UnexpectedResponse)?
+            .as_millis()
+            .try_into()
+            .map_err(|_| NodeClientError::UnexpectedResponse)?;
+        let key = broker_proof_key(&self.credential.token);
+        let proof = broker_request_proof(
+            &key,
+            request_id,
+            &self.credential.application_id,
+            capability,
+            &operation,
+            &nonce,
+            issued_unix_ms,
+        )
+        .map_err(|_| NodeClientError::UnexpectedResponse)?;
+        let response = self
+            .transport
+            .request(BrokerRequest {
+                protocol: BROKER_PROTOCOL_VERSION,
+                request_id,
+                operation: BrokerOperation::ExecuteAuthenticated {
+                    application_id: self.credential.application_id.clone(),
+                    capability,
+                    operation,
+                    nonce: nonce.clone(),
+                    issued_unix_ms,
+                    proof,
+                },
+            })
+            .await?;
+        if response.request_id != request_id || response.protocol != BROKER_PROTOCOL_VERSION {
+            return Err(NodeClientError::ResponseIdMismatch);
+        }
+        let expected = broker_response_proof(&key, request_id, &nonce, &response.result)
+            .map_err(|_| NodeClientError::UnexpectedResponse)?;
+        if !response
+            .proof
+            .as_deref()
+            .is_some_and(|proof| constant_time_proof_eq(proof, &expected))
+        {
+            return Err(NodeClientError::UnexpectedResponse);
+        }
+        match response
+            .result
+            .map_err(|failure| NodeClientError::Rejected {
+                code: failure.code,
+                message: failure.message,
+                retryable: failure.retryable,
+            })? {
+            BrokerResult::Local { result } => Ok(result),
+            _ => Err(NodeClientError::UnexpectedResponse),
+        }
+    }
+
     async fn execute(
         &self,
         capability: BrokerCapability,
         operation: LocalOperation,
     ) -> Result<LocalResult, NodeClientError> {
-        match self
-            .request(BrokerOperation::Execute {
-                credential: self.credential.clone(),
-                capability,
-                operation,
-            })
-            .await?
-        {
-            BrokerResult::Local(result) => Ok(result),
-            _ => Err(NodeClientError::UnexpectedResponse),
-        }
+        self.execute_operation(capability, operation).await
     }
 
     async fn request(&self, operation: BrokerOperation) -> Result<BrokerResult, NodeClientError> {
@@ -409,6 +465,7 @@ mod tests {
                 protocol,
                 request_id,
                 result,
+                proof: None,
             })
         }
     }
@@ -417,25 +474,32 @@ mod tests {
     impl BrokerTransport for FakeTransport {
         async fn request(&self, request: BrokerRequest) -> Result<BrokerResponse, NodeClientError> {
             self.requests.lock().await.push(request.clone());
+            let response_nonce = match &request.operation {
+                BrokerOperation::ExecuteAuthenticated { nonce, .. } => Some(nonce.clone()),
+                _ => None,
+            };
             let result = match request.operation {
                 BrokerOperation::Presence => Ok(BrokerResult::Presence(BrokerPresence {
                     protocol_min: 1,
                     protocol_max: 1,
                 })),
-                BrokerOperation::Execute {
+                BrokerOperation::ExecuteAuthenticated {
                     operation: LocalOperation::Status,
                     ..
-                } => Ok(BrokerResult::Local(LocalResult::Status(LocalStatus {
-                    agent_id: None,
-                    workspace_name: None,
-                    version: "test".into(),
-                    connection: ConnectionState::LocalOnly,
-                    queued_jobs: 0,
-                    active_jobs: 0,
-                    printer_warnings: 0,
-                    paused: false,
-                }))),
+                } => Ok(BrokerResult::Local {
+                    result: LocalResult::Status(LocalStatus {
+                        agent_id: None,
+                        workspace_name: None,
+                        version: "test".into(),
+                        connection: ConnectionState::LocalOnly,
+                        queued_jobs: 0,
+                        active_jobs: 0,
+                        printer_warnings: 0,
+                        paused: false,
+                    }),
+                }),
                 BrokerOperation::Execute { .. }
+                | BrokerOperation::ExecuteAuthenticated { .. }
                 | BrokerOperation::RequestAuthorization { .. }
                 | BrokerOperation::AuthorizationStatus { .. }
                 | BrokerOperation::ExchangeAuthorization { .. } => Err(LocalFailure {
@@ -444,10 +508,20 @@ mod tests {
                     retryable: false,
                 }),
             };
+            let proof = response_nonce.and_then(|nonce| {
+                broker_response_proof(
+                    &broker_proof_key("secret-token"),
+                    request.request_id,
+                    &nonce,
+                    &result,
+                )
+                .ok()
+            });
             Ok(BrokerResponse {
-                protocol: 1,
+                protocol: BROKER_PROTOCOL_VERSION,
                 request_id: request.request_id,
                 result,
+                proof,
             })
         }
     }
@@ -455,15 +529,19 @@ mod tests {
     #[tokio::test]
     async fn client_uses_app_scoped_credential_without_exposing_it_in_debug() {
         let token = "secret-token";
+        let requests = Arc::new(Mutex::new(Vec::new()));
         let client = NodeClient::new(
             FakeTransport {
-                requests: Arc::new(Mutex::new(Vec::new())),
+                requests: Arc::clone(&requests),
             },
             "com.example.pos",
             token,
         );
         assert!(!format!("{client:?}").contains(token));
         assert_eq!(client.status().await.unwrap().version, "test");
+        let wire = serde_json::to_string(&requests.lock().await[0]).unwrap();
+        assert!(!wire.contains(token));
+        assert!(wire.contains("execute_authenticated"));
     }
 
     #[test]

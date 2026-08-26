@@ -10,6 +10,7 @@
 pub mod broker;
 pub mod cloud_worker;
 pub mod command;
+pub mod connector_enrollment;
 pub mod connector_registry;
 mod durable_file;
 pub mod embedded;
@@ -25,6 +26,7 @@ pub use broker::{
 };
 pub use cloud_worker::*;
 pub use command::*;
+pub use connector_enrollment::*;
 pub use embedded::*;
 pub use installation::{
     AttachPolicy, BrokerEndpoint, InstallationGuard, InstallationLockError, RuntimeDisposition,
@@ -37,5 +39,8 @@ pub use piqae_node_host_api::{
     RuntimeConfiguration, SecureConnectorSigner, SecureKeyHandle,
 };
 pub use runtime::NodeRuntime;
-pub use secure_connector::HostBackedDeviceIdentity;
+pub use secure_connector::{
+    CONNECTOR_KEY_SCOPE_PREFIX, HostBackedDeviceIdentity, INSTALLATION_KEY_SCOPE_PREFIX,
+    connector_key_scope, installation_key_scope, verify_generated_key,
+};
 pub use supervision::{ConnectorReconciliation, WorkerObservation, plan_connector_reconciliation};

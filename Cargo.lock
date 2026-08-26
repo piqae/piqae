@@ -2820,6 +2820,7 @@ dependencies = [
  "piqae-local-ipc",
  "piqae-node-runtime",
  "serde",
+ "serde_json",
  "tempfile",
  "thiserror",
  "tokio",
@@ -2832,11 +2833,16 @@ version = "0.1.21"
 dependencies = [
  "base64 0.22.1",
  "chrono",
+ "piqae-local-ipc",
+ "piqae-node-client",
  "piqae-node-runtime",
+ "piqae-protocol",
  "piqae-support-packs",
  "serde",
  "serde_json",
  "thiserror",
+ "tokio",
+ "url",
  "uuid",
 ]
 

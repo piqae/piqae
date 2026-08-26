@@ -14,19 +14,21 @@ use tokio::sync::{Mutex, mpsc, oneshot};
 
 use crate::command::{CommandFailure, RuntimeCommand};
 use piqae_local_ipc::{
-    BROKER_PROTOCOL_MIN_VERSION, BROKER_PROTOCOL_VERSION, BrokerApplicationIdentity,
-    BrokerAuthorizationDecision, BrokerAuthorizationHandle, BrokerAuthorizationState,
-    BrokerCapability, BrokerCredential, BrokerOperation, BrokerPresence, BrokerRequest,
-    BrokerResponse, BrokerResult, LocalFailure, LocalOperation, LocalResult,
-    PendingBrokerAuthorization, SdkBrokerOperation, read_message, write_message,
+    BROKER_PROOF_MAX_SKEW_MS, BROKER_PROTOCOL_MIN_VERSION, BROKER_PROTOCOL_VERSION,
+    BrokerApplicationIdentity, BrokerAuthorizationDecision, BrokerAuthorizationHandle,
+    BrokerAuthorizationState, BrokerCapability, BrokerCredential, BrokerOperation, BrokerPresence,
+    BrokerRequest, BrokerResponse, BrokerResult, LocalFailure, LocalOperation, LocalResult,
+    PendingBrokerAuthorization, SdkBrokerOperation, broker_request_proof, broker_response_proof,
+    constant_time_proof_eq, read_message, write_message,
 };
 
-const DOCUMENT_VERSION: u16 = 1;
+const DOCUMENT_VERSION: u16 = 2;
 const MAX_APPLICATIONS: usize = 128;
 const MAX_PENDING_AUTHORIZATIONS: usize = 64;
 const AUTHORIZATION_LIFETIME_MS: i64 = 5 * 60 * 1_000;
 const MAX_BROKER_CONNECTIONS: usize = 32;
 const BROKER_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const MAX_REPLAY_PROOFS: usize = 4_096;
 
 pub type ApplicationIdentity = BrokerApplicationIdentity;
 
@@ -95,17 +97,28 @@ struct DurableApplicationAuthorization {
     revoked: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DurableReplayProof {
+    application_id: String,
+    nonce_sha256: String,
+    expires_unix_ms: i64,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BrokerDocument {
     version: u16,
     applications: Vec<DurableApplicationAuthorization>,
+    #[serde(default)]
+    replay_proofs: Vec<DurableReplayProof>,
 }
 
 #[derive(Debug)]
 pub struct BrokerRegistry {
     root: PathBuf,
     applications: BTreeMap<String, DurableApplicationAuthorization>,
+    replay_proofs: BTreeMap<(String, String), i64>,
 }
 
 impl BrokerRegistry {
@@ -123,10 +136,11 @@ impl BrokerRegistry {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => BrokerDocument {
                 version: DOCUMENT_VERSION,
                 applications: Vec::new(),
+                replay_proofs: Vec::new(),
             },
             Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
         };
-        if document.version != DOCUMENT_VERSION {
+        if !matches!(document.version, 1 | DOCUMENT_VERSION) {
             bail!("unsupported broker registry version {}", document.version);
         }
         if document.applications.len() > MAX_APPLICATIONS {
@@ -142,7 +156,26 @@ impl BrokerRegistry {
                 bail!("broker application registry contains a duplicate application id");
             }
         }
-        Ok(Self { root, applications })
+        if document.replay_proofs.len() > MAX_REPLAY_PROOFS {
+            bail!("broker replay registry exceeds supported bounds");
+        }
+        let now = Utc::now().timestamp_millis();
+        let replay_proofs = document
+            .replay_proofs
+            .into_iter()
+            .filter(|proof| proof.expires_unix_ms > now)
+            .map(|proof| {
+                (
+                    (proof.application_id, proof.nonce_sha256),
+                    proof.expires_unix_ms,
+                )
+            })
+            .collect();
+        Ok(Self {
+            root,
+            applications,
+            replay_proofs,
+        })
     }
 
     /// Creates or rotates one app's capability. The plaintext token is
@@ -199,6 +232,76 @@ impl BrokerRegistry {
         })
     }
 
+    /// Verifies a protocol-v4 request and durably consumes its nonce before
+    /// the authorized operation is dispatched. Returns the response proof key.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the one-time replay reservation cannot be persisted.
+    #[allow(clippy::too_many_arguments)]
+    pub fn authenticate_proof(
+        &mut self,
+        request_id: uuid::Uuid,
+        application_id: &str,
+        capability: BrokerCapability,
+        operation: &LocalOperation,
+        nonce: &str,
+        issued_unix_ms: i64,
+        proof: &str,
+        now_unix_ms: i64,
+    ) -> Result<Option<[u8; 32]>> {
+        if application_id.is_empty()
+            || nonce.len() < 32
+            || nonce.len() > 128
+            || now_unix_ms.abs_diff(issued_unix_ms) > BROKER_PROOF_MAX_SKEW_MS.unsigned_abs()
+        {
+            return Ok(None);
+        }
+        let Some(entry) = self.applications.get(application_id) else {
+            return Ok(None);
+        };
+        if entry.revoked
+            || !entry
+                .capabilities
+                .allows(ApplicationCapabilities::requiring(capability))
+        {
+            return Ok(None);
+        }
+        let key: [u8; 32] = match hex::decode(&entry.token_sha256)
+            .ok()
+            .and_then(|value| value.try_into().ok())
+        {
+            Some(key) => key,
+            None => return Ok(None),
+        };
+        let expected = broker_request_proof(
+            &key,
+            request_id,
+            application_id,
+            capability,
+            operation,
+            nonce,
+            issued_unix_ms,
+        )?;
+        if !constant_time_proof_eq(&expected, proof) {
+            return Ok(None);
+        }
+        let nonce_sha256 = hex::encode(Sha256::digest(nonce.as_bytes()));
+        let replay_key = (application_id.to_owned(), nonce_sha256);
+        let mut replay_proofs = self.replay_proofs.clone();
+        replay_proofs.retain(|_, expiry| *expiry > now_unix_ms);
+        if replay_proofs.contains_key(&replay_key) || replay_proofs.len() >= MAX_REPLAY_PROOFS {
+            return Ok(None);
+        }
+        replay_proofs.insert(
+            replay_key,
+            issued_unix_ms.saturating_add(BROKER_PROOF_MAX_SKEW_MS),
+        );
+        self.persist_state(&self.applications, &replay_proofs)?;
+        self.replay_proofs = replay_proofs;
+        Ok(Some(key))
+    }
+
     /// Revokes a capability durably before returning success.
     ///
     /// # Errors
@@ -216,7 +319,7 @@ impl BrokerRegistry {
             .get_mut(application_id)
             .context("broker authorization disappeared")?
             .revoked = true;
-        self.persist_applications(&applications)?;
+        self.persist_state(&applications, &self.replay_proofs)?;
         self.applications = applications;
         Ok(true)
     }
@@ -225,10 +328,28 @@ impl BrokerRegistry {
         &self,
         applications: &BTreeMap<String, DurableApplicationAuthorization>,
     ) -> Result<()> {
+        self.persist_state(applications, &self.replay_proofs)
+    }
+
+    fn persist_state(
+        &self,
+        applications: &BTreeMap<String, DurableApplicationAuthorization>,
+        replay_proofs: &BTreeMap<(String, String), i64>,
+    ) -> Result<()> {
         let path = self.root.join("broker-applications.json");
         let document = BrokerDocument {
             version: DOCUMENT_VERSION,
             applications: applications.values().cloned().collect(),
+            replay_proofs: replay_proofs
+                .iter()
+                .map(
+                    |((application_id, nonce_sha256), expires_unix_ms)| DurableReplayProof {
+                        application_id: application_id.clone(),
+                        nonce_sha256: nonce_sha256.clone(),
+                        expires_unix_ms: *expires_unix_ms,
+                    },
+                )
+                .collect(),
         };
         let bytes = serde_json::to_vec_pretty(&document)?;
         crate::durable_file::replace_json(&path, &bytes)
@@ -584,7 +705,12 @@ impl BrokerServerState {
         }
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the exhaustive protocol-version dispatch is intentionally kept at one boundary"
+    )]
     async fn handle(&self, request: BrokerRequest) -> BrokerResponse {
+        let mut response_authentication = None;
         let result = if (BROKER_PROTOCOL_MIN_VERSION..=BROKER_PROTOCOL_VERSION)
             .contains(&request.protocol)
         {
@@ -618,45 +744,65 @@ impl BrokerServerState {
                     "authorization consent requires broker protocol version 2",
                     false,
                 )),
-                BrokerOperation::Execute {
-                    credential,
+                BrokerOperation::Execute { operation, .. } => {
+                    let _ = operation;
+                    Err(local_failure(
+                        "broker_protocol_upgrade_required",
+                        "secret-bearing broker execution requires protocol version 4",
+                        false,
+                    ))
+                }
+                BrokerOperation::ExecuteAuthenticated {
+                    application_id,
                     capability,
                     operation,
-                } => {
-                    if request.protocol < 3 && matches!(operation, LocalOperation::Sdk { .. }) {
-                        return BrokerResponse {
-                            protocol: BROKER_PROTOCOL_VERSION,
-                            request_id: request.request_id,
-                            result: Err(local_failure(
-                                "unsupported_broker_protocol",
-                                "SDK broker operations require protocol version 3",
+                    nonce,
+                    issued_unix_ms,
+                    proof,
+                } if request.protocol == 4 => {
+                    let required = required_capability(&operation);
+                    if required == Some(capability) {
+                        let authentication = self.registry.lock().await.authenticate_proof(
+                            request.request_id,
+                            &application_id,
+                            capability,
+                            &operation,
+                            &nonce,
+                            issued_unix_ms,
+                            &proof,
+                            Utc::now().timestamp_millis(),
+                        );
+                        match authentication {
+                            Ok(Some(key)) => {
+                                response_authentication = Some((key, nonce));
+                                dispatch_operation(&self.commands, operation)
+                                    .await
+                                    .map(|result| BrokerResult::Local { result })
+                            }
+                            Ok(None) => Err(local_failure(
+                                "application_unauthorized",
+                                "the application proof is invalid, stale, replayed, or revoked",
                                 false,
                             )),
-                        };
-                    }
-                    let required = required_capability(&operation);
-                    if required != Some(capability) {
+                            Err(_) => Err(local_failure(
+                                "broker_state_unavailable",
+                                "the broker could not durably reserve this request",
+                                true,
+                            )),
+                        }
+                    } else {
                         Err(local_failure(
                             "capability_mismatch",
                             "the declared capability does not authorize this operation",
                             false,
                         ))
-                    } else if !self.registry.lock().await.authenticate(
-                        &credential.application_id,
-                        &credential.token,
-                        ApplicationCapabilities::requiring(capability),
-                    ) {
-                        Err(local_failure(
-                            "application_unauthorized",
-                            "the application capability is invalid or revoked",
-                            false,
-                        ))
-                    } else {
-                        dispatch_operation(&self.commands, operation)
-                            .await
-                            .map(BrokerResult::Local)
                     }
                 }
+                BrokerOperation::ExecuteAuthenticated { .. } => Err(local_failure(
+                    "unsupported_broker_protocol",
+                    "authenticated execution requires broker protocol version 4",
+                    false,
+                )),
             }
         } else {
             Err(local_failure(
@@ -665,10 +811,14 @@ impl BrokerServerState {
                 false,
             ))
         };
+        let proof = response_authentication.and_then(|(key, nonce)| {
+            broker_response_proof(&key, request.request_id, &nonce, &result).ok()
+        });
         BrokerResponse {
             protocol: BROKER_PROTOCOL_VERSION,
             request_id: request.request_id,
             result,
+            proof,
         }
     }
 }
@@ -1097,7 +1247,9 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use piqae_local_ipc::{BrokerCredential, BrokerOperation, BrokerRequest, ConnectionState};
+    use piqae_local_ipc::{
+        BrokerOperation, BrokerRequest, ConnectionState, broker_proof_key, broker_request_proof,
+    };
     use uuid::Uuid;
 
     fn identity() -> ApplicationIdentity {
@@ -1225,12 +1377,128 @@ mod tests {
                 });
             }
         });
-        let response = state
+        let request_id = Uuid::new_v4();
+        let nonce = Uuid::new_v4().simple().to_string();
+        let issued_unix_ms = Utc::now().timestamp_millis();
+        let proof = broker_request_proof(
+            &broker_proof_key(issued.token.expose_for_client()),
+            request_id,
+            "com.example.pos",
+            BrokerCapability::ObserveStatus,
+            &LocalOperation::Status,
+            &nonce,
+            issued_unix_ms,
+        )
+        .unwrap();
+        let request = BrokerRequest {
+            protocol: BROKER_PROTOCOL_VERSION,
+            request_id,
+            operation: BrokerOperation::ExecuteAuthenticated {
+                application_id: "com.example.pos".into(),
+                capability: BrokerCapability::ObserveStatus,
+                operation: LocalOperation::Status,
+                nonce,
+                issued_unix_ms,
+                proof,
+            },
+        };
+        let serialized = serde_json::to_string(&request).unwrap();
+        assert!(!serialized.contains(issued.token.expose_for_client()));
+        let response = state.handle(request).await;
+        assert!(matches!(
+            response.result,
+            Ok(BrokerResult::Local {
+                result: LocalResult::Status(_)
+            })
+        ));
+        assert!(response.proof.is_some());
+    }
+
+    #[test]
+    fn authenticated_proofs_reject_tamper_and_replay_across_restart() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut registry = BrokerRegistry::load(directory.path()).unwrap();
+        let issued = registry
+            .authorize(identity(), ApplicationCapabilities::OBSERVE_ONLY)
+            .unwrap();
+        let key = broker_proof_key(issued.token.expose_for_client());
+        let request_id = Uuid::new_v4();
+        let nonce = Uuid::new_v4().simple().to_string();
+        let now = Utc::now().timestamp_millis();
+        let proof = broker_request_proof(
+            &key,
+            request_id,
+            "com.example.pos",
+            BrokerCapability::ObserveStatus,
+            &LocalOperation::Status,
+            &nonce,
+            now,
+        )
+        .unwrap();
+        assert!(
+            registry
+                .authenticate_proof(
+                    request_id,
+                    "com.example.pos",
+                    BrokerCapability::ObserveStatus,
+                    &LocalOperation::Status,
+                    &nonce,
+                    now,
+                    &proof,
+                    now,
+                )
+                .unwrap()
+                .is_some()
+        );
+        drop(registry);
+
+        let mut restarted = BrokerRegistry::load(directory.path()).unwrap();
+        assert!(
+            restarted
+                .authenticate_proof(
+                    request_id,
+                    "com.example.pos",
+                    BrokerCapability::ObserveStatus,
+                    &LocalOperation::Status,
+                    &nonce,
+                    now,
+                    &proof,
+                    now,
+                )
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            restarted
+                .authenticate_proof(
+                    Uuid::new_v4(),
+                    "com.example.pos",
+                    BrokerCapability::ObserveStatus,
+                    &LocalOperation::Printers,
+                    &Uuid::new_v4().simple().to_string(),
+                    now,
+                    &proof,
+                    now,
+                )
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn raw_token_execute_is_rejected_after_protocol_upgrade() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut registry = BrokerRegistry::load(directory.path()).unwrap();
+        let issued = registry
+            .authorize(identity(), ApplicationCapabilities::OBSERVE_ONLY)
+            .unwrap();
+        let (commands, _receive) = mpsc::channel(1);
+        let response = BrokerServerState::new(registry, commands)
             .handle(BrokerRequest {
-                protocol: BROKER_PROTOCOL_VERSION,
+                protocol: 3,
                 request_id: Uuid::new_v4(),
                 operation: BrokerOperation::Execute {
-                    credential: BrokerCredential {
+                    credential: piqae_local_ipc::BrokerCredential {
                         application_id: "com.example.pos".into(),
                         token: issued.token.expose_for_client().into(),
                     },
@@ -1241,8 +1509,9 @@ mod tests {
             .await;
         assert!(matches!(
             response.result,
-            Ok(BrokerResult::Local(LocalResult::Status(_)))
+            Err(LocalFailure { ref code, .. }) if code == "broker_protocol_upgrade_required"
         ));
+        assert!(response.proof.is_none());
     }
 
     #[tokio::test]
