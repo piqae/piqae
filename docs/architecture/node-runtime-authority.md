@@ -29,12 +29,27 @@ a job ID, lease, reservation, fence token, document location, or document
 metadata. Observing a wake hint does not accept a job. The server waits for a
 new authenticated availability and printer observation before normal routing.
 Hints expire after at most 15 minutes and are idempotent per node and tenant.
-The current durable channel is `connected_session`: a node which is already
-awake observes pending hints on signed sync. This is never described as remote
-wake. `external_push`, `local_relay`, and `manual` are reserved delivery-channel
-values, but the server does not select them until a provider-neutral dispatcher
-has a tenant-bound verified endpoint. No APNs token or provider credential is
-accepted by this API, and provider credentials must never be shipped in an SDK.
+An operator-created `connected_session` hint is observed by a node which is
+already awake on signed sync. This is never described as remote wake.
+
+When a durable job enters `waiting_for_agent`, the same transaction creates
+content-free `external_push` hints for up to 16 active, enabled routes to the
+same tenant destination (or its active assigned node when no destination is
+bound). Paused, rejecting, disabled, retired, and revoked candidates are
+excluded. A zero-candidate reconciliation is persisted so repair does not spin.
+A durable worker emits each hint as
+`node.wake_hint.requested`; receivers may subscribe to `node.*` and use their
+own APNs or vendor provider backend. The event is content-free and contains no
+job ID, title, document metadata, lease, or content reference. Delivery is
+at-least-once, so a crash may repeat the event, but every repeat carries the
+same opaque hint ID. The receiver must deduplicate on that ID.
+
+Piqae stores no APNs token or provider credential in this path. Enqueuing the
+webhook proves only that the tenant relay was notified; it does not prove a
+provider delivered a push or woke the device. The app must reconcile, report a
+fresh authenticated runtime and printer observation, and become eligible
+before the scheduler may lease work. `local_relay` and `manual` remain reserved
+until their endpoint contracts are implemented.
 
 During an N/N-1 rolling upgrade, a legacy desktop node without a runtime field
 may continue to request one job from its current authenticated sync. It still
@@ -65,6 +80,10 @@ Runtime observations and wake hints have composite tenant keys and composite
 foreign keys to the tenant's node. Every read and write includes workspace and
 environment. A node ID from another tenant returns no state, and idempotency
 keys are tenant- and node-scoped.
+
+The waiting-transition reconciliation marker and wake outbox are durable and
+tenant-scoped. N-1 jobs missing a marker are repaired by a bounded worker scan.
+Processed wake outbox rows follow the seven-day hint retention window.
 
 This implementation does not coordinate routes across tenants. Doing so would
 require a separately reviewed internal envelope that proves authorization,

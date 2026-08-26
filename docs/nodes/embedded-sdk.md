@@ -82,6 +82,14 @@ queue estimates; their titles, owners, and documents are never projected.
 
 A wake hint is not a lease and contains no job or document metadata. The server
 waits for a fresh authenticated runtime observation before it offers work.
+For a queued job the server emits a content-free `node.wake_hint.requested`
+event to the tenant's signed webhook stream. An app backend may translate that
+event into APNs or a vendor notification and then ask the runtime to reconcile.
+Piqae does not store the provider credential or device token in this flow, and
+the notification never contains a job ID, title, document reference, or lease.
+Webhook delivery and mobile background execution are both at-least-once or
+best-effort boundaries; deduplicate by the opaque wake-hint ID and never treat
+a notification as acceptance.
 
 - macOS and Windows may hold a bounded power assertion while downloading,
   rendering, or crossing native handoff. They do not prevent idle sleep merely

@@ -5,6 +5,105 @@ use sqlx::{PgPool, migrate::Migrator, postgres::PgPoolOptions};
 use std::{borrow::Cow, env};
 
 #[tokio::test]
+async fn automatic_wake_outbox_upgrades_43_and_is_tenant_isolated() {
+    let Some(database_url) = env::var("PIQAE_TEST_DATABASE_URL").ok() else {
+        eprintln!("skipped: set PIQAE_TEST_DATABASE_URL to run PostgreSQL migration evidence");
+        return;
+    };
+    let schema = format!("piqae_wake_outbox_{}", ulid::Ulid::new()).to_ascii_lowercase();
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&database_url)
+        .await
+        .expect("connect PostgreSQL test database");
+    sqlx::query(&format!("CREATE SCHEMA {schema}"))
+        .execute(&admin)
+        .await
+        .expect("create exact disposable schema");
+    let pool = schema_pool(&database_url, &schema).await;
+    let all = sqlx::migrate!("../../migrations/postgres");
+    let previous = Migrator {
+        migrations: Cow::Owned(
+            all.iter()
+                .filter(|migration| migration.version < 44)
+                .cloned()
+                .collect(),
+        ),
+        ignore_missing: false,
+        locking: true,
+        no_tx: false,
+    };
+    previous.run(&pool).await.expect("apply version 43 schema");
+    for suffix in ["a", "b"] {
+        sqlx::query("INSERT INTO workspaces (id,name,slug) VALUES ($1,$2,$3)")
+            .bind(format!("wsp_wake_{suffix}"))
+            .bind(format!("Wake {suffix}"))
+            .bind(format!("wake-{suffix}"))
+            .execute(&pool)
+            .await
+            .expect("insert workspace fixture");
+        sqlx::query(
+            "INSERT INTO environments (id,workspace_id,kind,name) VALUES ($1,$2,'test','Test')",
+        )
+        .bind(format!("env_wake_{suffix}"))
+        .bind(format!("wsp_wake_{suffix}"))
+        .execute(&pool)
+        .await
+        .expect("insert environment fixture");
+        sqlx::query("INSERT INTO agents (id,workspace_id,environment_id,name,installation_id,os,architecture,version,protocol_version) VALUES ($1,$2,$3,'Node',$4,'linux','x86_64','test',1)")
+            .bind(format!("agt_wake_{suffix}"))
+            .bind(format!("wsp_wake_{suffix}"))
+            .bind(format!("env_wake_{suffix}"))
+            .bind(format!("install-wake-{suffix}"))
+            .execute(&pool).await.expect("insert agent fixture");
+        sqlx::query("INSERT INTO printers (id,workspace_id,environment_id,agent_id,native_id,name) VALUES ($1,$2,$3,$4,$5,'Printer')")
+            .bind(format!("prt_wake_{suffix}"))
+            .bind(format!("wsp_wake_{suffix}"))
+            .bind(format!("env_wake_{suffix}"))
+            .bind(format!("agt_wake_{suffix}"))
+            .bind(format!("native-wake-{suffix}"))
+            .execute(&pool).await.expect("insert printer fixture");
+        sqlx::query("INSERT INTO jobs (id,workspace_id,environment_id,printer_id,agent_id,payload,state,state_sequence,per_printer_sequence,expires_at) VALUES ($1,$2,$3,$4,$5,'{}','waiting_for_agent',2,1,now()+interval '1 hour')")
+            .bind(format!("job_wake_{suffix}"))
+            .bind(format!("wsp_wake_{suffix}"))
+            .bind(format!("env_wake_{suffix}"))
+            .bind(format!("prt_wake_{suffix}"))
+            .bind(format!("agt_wake_{suffix}"))
+            .execute(&pool).await.expect("insert waiting job fixture");
+    }
+    PostgresStore::from_pool(pool.clone())
+        .migrate()
+        .await
+        .expect("upgrade 43 to automatic wake outbox");
+    sqlx::query("INSERT INTO job_wake_reconciliations (workspace_id,environment_id,job_id,state_sequence,candidate_count) VALUES ('wsp_wake_a','env_wake_a','job_wake_a',2,0)")
+        .execute(&pool).await.expect("insert zero-candidate tenant reconciliation");
+    let cross_tenant = sqlx::query("INSERT INTO job_wake_reconciliations (workspace_id,environment_id,job_id,state_sequence,candidate_count) VALUES ('wsp_wake_b','env_wake_b','job_wake_a',2,1)")
+        .execute(&pool).await;
+    assert!(
+        cross_tenant.is_err(),
+        "composite job foreign key must reject a cross-tenant wake marker"
+    );
+    let other_tenant_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM job_wake_reconciliations WHERE workspace_id='wsp_wake_b'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("probe isolated tenant markers");
+    assert_eq!(other_tenant_count, 0);
+    let latest: i64 = sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations WHERE success")
+        .fetch_one(&pool)
+        .await
+        .expect("read schema version");
+    assert_eq!(latest, 44);
+
+    pool.close().await;
+    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+        .execute(&admin)
+        .await
+        .expect("drop exact disposable schema");
+}
+
+#[tokio::test]
 async fn runtime_availability_upgrade_is_additive_and_tenant_isolated() {
     let Some(database_url) = env::var("PIQAE_TEST_DATABASE_URL").ok() else {
         eprintln!("skipped: set PIQAE_TEST_DATABASE_URL to run PostgreSQL migration evidence");
@@ -341,7 +440,7 @@ async fn postgres_reported_complete_billing_upgrades_from_previous_schema() {
         .fetch_one(&pool)
         .await
         .expect("read latest schema version");
-    assert_eq!(latest, 43);
+    assert_eq!(latest, 44);
     let billable_index: Option<String> =
         sqlx::query_scalar("SELECT to_regclass('usage_one_billable_print_per_job_idx')::text")
             .fetch_one(&pool)
@@ -553,7 +652,7 @@ async fn documents_migrate_and_enforce_tenant_scoped_references() {
         .fetch_one(&pool)
         .await
         .expect("read schema version");
-    assert_eq!(latest, 43);
+    assert_eq!(latest, 44);
     pool.close().await;
     sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
         .execute(&admin)
@@ -947,7 +1046,7 @@ async fn agent_health_migrates_empty_and_previous_schemas_with_tenant_fencing() 
         .fetch_one(&empty_pool)
         .await
         .expect("read empty-database schema version");
-    assert_eq!(latest, 43);
+    assert_eq!(latest, 44);
     empty_pool.close().await;
     sqlx::query(&format!("DROP SCHEMA {empty_schema} CASCADE"))
         .execute(&admin)
@@ -1096,7 +1195,7 @@ async fn content_encryption_key_algorithm_migrates_fresh_and_legacy_schemas() {
         .fetch_one(&empty_pool)
         .await
         .expect("read empty-database schema version");
-    assert_eq!(empty_latest, 43);
+    assert_eq!(empty_latest, 44);
     empty_pool.close().await;
     sqlx::query(&format!("DROP SCHEMA {empty_schema} CASCADE"))
         .execute(&admin)
@@ -1164,7 +1263,7 @@ async fn content_encryption_key_algorithm_migrates_fresh_and_legacy_schemas() {
         .fetch_one(&upgrade_pool)
         .await
         .expect("read upgraded schema version");
-    assert_eq!(latest, 43);
+    assert_eq!(latest, 44);
     let reference_guard_config: Vec<String> = sqlx::query_scalar(
         "SELECT coalesce(proconfig, ARRAY[]::text[])
          FROM pg_proc JOIN pg_namespace ON pg_namespace.oid = pg_proc.pronamespace

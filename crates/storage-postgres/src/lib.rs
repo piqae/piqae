@@ -73,6 +73,21 @@ pub struct JobLease {
     pub lease_until: DateTime<Utc>,
 }
 
+/// A claimed, content-free wake notification waiting to be projected into the
+/// tenant event/webhook stream.
+///
+/// A crash may cause this item to be claimed and published again; `hint.id`
+/// remains stable across every attempt.
+#[derive(Clone, Debug)]
+pub struct PendingWakeHintDispatch {
+    pub outbox_id: String,
+    pub workspace_id: WorkspaceId,
+    pub environment_id: EnvironmentId,
+    pub hint: destination_topology::NodeWakeHint,
+    pub idempotency_key: String,
+    pub attempt: u32,
+}
+
 #[derive(Clone, Debug)]
 pub struct ExpiredBusinessDocumentResource {
     pub workspace_id: WorkspaceId,
@@ -7034,6 +7049,18 @@ impl PostgresStore {
         .execute(&mut *transaction)
         .await?;
 
+        if event.state == JobState::WaitingForAgent {
+            ensure_waiting_job_wake_hints_in_transaction(
+                &mut transaction,
+                workspace_id,
+                environment_id,
+                event.job_id,
+                event.sequence,
+                event.occurred_at,
+            )
+            .await?;
+        }
+
         if event.state == JobState::CompletedReported {
             record_reported_complete_usage(
                 &mut transaction,
@@ -7047,6 +7074,232 @@ impl PostgresStore {
 
         transaction.commit().await?;
         Ok(job)
+    }
+
+    /// Repairs an N-1 or interrupted API request after the job itself already
+    /// reached `waiting_for_agent`. Inserts are idempotent for the exact state
+    /// transition, so an idempotent job retry cannot create another hint.
+    pub async fn ensure_waiting_job_wake_hints(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        job_id: JobId,
+    ) -> Result<usize, StorageError> {
+        let mut transaction = self.pool.begin().await?;
+        let row = sqlx::query(
+            "SELECT state,state_sequence FROM jobs
+             WHERE workspace_id=$1 AND environment_id=$2 AND id=$3
+             FOR UPDATE",
+        )
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(job_id.to_string())
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(StorageError::NotFound)?;
+        if row.try_get::<String, _>("state")? != "waiting_for_agent" {
+            transaction.commit().await?;
+            return Ok(0);
+        }
+        let sequence = u64::try_from(row.try_get::<i64, _>("state_sequence")?)
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        let count = ensure_waiting_job_wake_hints_in_transaction(
+            &mut transaction,
+            workspace_id,
+            environment_id,
+            job_id,
+            sequence,
+            Utc::now(),
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(count)
+    }
+
+    /// Finds waiting transitions produced by an N-1 server or interrupted
+    /// repair and recreates their bounded content-free wake outbox atomically.
+    pub async fn repair_waiting_job_wake_hints(&self, limit: i64) -> Result<usize, StorageError> {
+        let jobs = sqlx::query(
+            "SELECT job.workspace_id,job.environment_id,job.id
+             FROM jobs job
+             LEFT JOIN job_wake_reconciliations reconciliation
+               ON reconciliation.workspace_id=job.workspace_id
+              AND reconciliation.environment_id=job.environment_id
+              AND reconciliation.job_id=job.id
+              AND reconciliation.state_sequence=job.state_sequence
+             WHERE job.state='waiting_for_agent' AND job.final_at IS NULL
+               AND job.expires_at>now() AND reconciliation.job_id IS NULL
+             ORDER BY job.updated_at,job.id LIMIT $1",
+        )
+        .bind(limit.clamp(1, 100))
+        .fetch_all(&self.pool)
+        .await?;
+        let mut repaired = 0_usize;
+        for row in jobs {
+            let workspace_id = WorkspaceId::from_str(&row.try_get::<String, _>("workspace_id")?)
+                .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+            let environment_id =
+                EnvironmentId::from_str(&row.try_get::<String, _>("environment_id")?)
+                    .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+            let job_id = JobId::from_str(&row.try_get::<String, _>("id")?)
+                .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+            repaired = repaired.saturating_add(
+                self.ensure_waiting_job_wake_hints(workspace_id, environment_id, job_id)
+                    .await?,
+            );
+        }
+        Ok(repaired)
+    }
+
+    /// Claims the provider-neutral webhook outbox. Claim expiry deliberately
+    /// permits duplicate publication after worker failure; the opaque hint ID
+    /// is unchanged, so receivers can deduplicate without seeing job metadata.
+    pub async fn claim_wake_hint_dispatches(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<PendingWakeHintDispatch>, StorageError> {
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query(
+            "UPDATE node_wake_hints SET status='expired'
+             WHERE status='pending' AND expires_at<=now()",
+        )
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "UPDATE routing_outbox outbox SET processed_at=COALESCE(processed_at,now()),claimed_until=NULL
+             FROM node_wake_hints hint
+             WHERE outbox.aggregate_type='node_wake_hint'
+               AND outbox.event_type='node.wake_hint.requested'
+               AND outbox.workspace_id=hint.workspace_id
+               AND outbox.environment_id=hint.environment_id
+               AND outbox.aggregate_id=hint.id
+               AND outbox.processed_at IS NULL AND hint.expires_at<=now()",
+        )
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "DELETE FROM routing_outbox
+             WHERE aggregate_type='node_wake_hint'
+               AND event_type='node.wake_hint.requested'
+               AND processed_at < now() - interval '7 days'",
+        )
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "DELETE FROM routing_outbox outbox
+             WHERE outbox.aggregate_type='node_wake_hint'
+               AND outbox.event_type='node.wake_hint.requested'
+               AND NOT EXISTS (
+                   SELECT 1 FROM node_wake_hints hint
+                   WHERE hint.workspace_id=outbox.workspace_id
+                     AND hint.environment_id=outbox.environment_id
+                     AND hint.id=outbox.aggregate_id
+               )",
+        )
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "DELETE FROM node_wake_hints
+             WHERE status<>'pending' AND expires_at < now() - interval '7 days'",
+        )
+        .execute(&mut *transaction)
+        .await?;
+        let rows = sqlx::query(
+            "WITH selected AS (
+                 SELECT outbox.id
+                 FROM routing_outbox outbox
+                 JOIN node_wake_hints hint
+                   ON hint.workspace_id=outbox.workspace_id
+                  AND hint.environment_id=outbox.environment_id
+                  AND hint.id=outbox.aggregate_id
+                 WHERE outbox.aggregate_type='node_wake_hint'
+                   AND outbox.event_type='node.wake_hint.requested'
+                   AND outbox.processed_at IS NULL
+                   AND outbox.available_at<=now()
+                   AND (outbox.claimed_until IS NULL OR outbox.claimed_until<=now())
+                   AND hint.expires_at>now()
+                 ORDER BY outbox.available_at,outbox.created_at,outbox.id
+                 FOR UPDATE OF outbox SKIP LOCKED LIMIT $1
+             ), claimed AS (
+                 UPDATE routing_outbox outbox
+                 SET attempts=attempts+1,claimed_until=now()+interval '30 seconds'
+                 FROM selected WHERE outbox.id=selected.id
+                 RETURNING outbox.id,outbox.workspace_id,outbox.environment_id,
+                           outbox.aggregate_id,outbox.attempts
+             )
+             SELECT claimed.id,claimed.workspace_id,claimed.environment_id,claimed.attempts,
+                    hint.id AS hint_id,hint.agent_id,hint.idempotency_key,hint.reason,
+                    hint.delivery_channel,hint.status,hint.requested_at,hint.expires_at,
+                    hint.observed_at
+             FROM claimed JOIN node_wake_hints hint
+               ON hint.workspace_id=claimed.workspace_id
+              AND hint.environment_id=claimed.environment_id
+              AND hint.id=claimed.aggregate_id
+             ORDER BY claimed.id",
+        )
+        .bind(limit.clamp(1, 100))
+        .fetch_all(&mut *transaction)
+        .await?;
+        let mut work = Vec::with_capacity(rows.len());
+        for row in rows {
+            work.push(PendingWakeHintDispatch {
+                outbox_id: row.try_get("id")?,
+                workspace_id: WorkspaceId::from_str(&row.try_get::<String, _>("workspace_id")?)
+                    .map_err(|error| StorageError::InvalidData(error.to_string()))?,
+                environment_id: EnvironmentId::from_str(
+                    &row.try_get::<String, _>("environment_id")?,
+                )
+                .map_err(|error| StorageError::InvalidData(error.to_string()))?,
+                hint: destination_topology::NodeWakeHint {
+                    id: row.try_get("hint_id")?,
+                    agent_id: row.try_get("agent_id")?,
+                    reason: row.try_get("reason")?,
+                    delivery_channel: row.try_get("delivery_channel")?,
+                    status: row.try_get("status")?,
+                    requested_at: row.try_get("requested_at")?,
+                    expires_at: row.try_get("expires_at")?,
+                    observed_at: row.try_get("observed_at")?,
+                },
+                idempotency_key: row.try_get("idempotency_key")?,
+                attempt: u32::try_from(row.try_get::<i32, _>("attempts")?)
+                    .map_err(|error| StorageError::InvalidData(error.to_string()))?,
+            });
+        }
+        transaction.commit().await?;
+        Ok(work)
+    }
+
+    pub async fn complete_wake_hint_dispatch(&self, outbox_id: &str) -> Result<(), StorageError> {
+        let result = sqlx::query(
+            "UPDATE routing_outbox SET processed_at=now(),claimed_until=NULL
+             WHERE id=$1 AND aggregate_type='node_wake_hint'
+               AND event_type='node.wake_hint.requested' AND processed_at IS NULL",
+        )
+        .bind(outbox_id)
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() == 0 {
+            return Err(StorageError::ConcurrentStateChange);
+        }
+        Ok(())
+    }
+
+    pub async fn retry_wake_hint_dispatch(
+        &self,
+        outbox_id: &str,
+        delay: Duration,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            "UPDATE routing_outbox
+             SET available_at=now()+($2 * interval '1 millisecond'),claimed_until=NULL
+             WHERE id=$1 AND aggregate_type='node_wake_hint'
+               AND event_type='node.wake_hint.requested' AND processed_at IS NULL",
+        )
+        .bind(outbox_id)
+        .bind(i64::try_from(delay.as_millis()).unwrap_or(i64::MAX))
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
     pub async fn request_job_cancellation(
@@ -9735,6 +9988,163 @@ fn workos_workspace_slug(organization_id: &str, workspace_id: &str) -> String {
             .take(120 - suffix.len() - 1)
             .collect::<String>()
     )
+}
+
+const MAX_AUTOMATIC_WAKE_CANDIDATES: usize = 16;
+
+async fn ensure_waiting_job_wake_hints_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    workspace_id: WorkspaceId,
+    environment_id: EnvironmentId,
+    job_id: JobId,
+    state_sequence: u64,
+    requested_at: DateTime<Utc>,
+) -> Result<usize, StorageError> {
+    let sequence = i64::try_from(state_sequence)
+        .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+    if let Some(count) = sqlx::query_scalar::<_, i32>(
+        "SELECT candidate_count FROM job_wake_reconciliations
+         WHERE workspace_id=$1 AND environment_id=$2 AND job_id=$3 AND state_sequence=$4",
+    )
+    .bind(workspace_id.to_string())
+    .bind(environment_id.to_string())
+    .bind(job_id.to_string())
+    .bind(sequence)
+    .fetch_optional(&mut **transaction)
+    .await?
+    {
+        return usize::try_from(count)
+            .map_err(|error| StorageError::InvalidData(error.to_string()));
+    }
+
+    let job = sqlx::query(
+        "SELECT agent_id,destination_id FROM jobs
+         WHERE workspace_id=$1 AND environment_id=$2 AND id=$3
+           AND state='waiting_for_agent' AND state_sequence=$4
+         FOR UPDATE",
+    )
+    .bind(workspace_id.to_string())
+    .bind(environment_id.to_string())
+    .bind(job_id.to_string())
+    .bind(sequence)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(StorageError::ConcurrentStateChange)?;
+    let assigned_agent: String = job.try_get("agent_id")?;
+    let destination_id: Option<String> = job.try_get("destination_id")?;
+    let mut candidate_agents = Vec::new();
+    if let Some(destination_id) = destination_id {
+        let routes = sqlx::query_scalar::<_, String>(
+            "SELECT route.agent_id FROM printer_routes route
+             JOIN agents agent
+               ON agent.workspace_id=route.workspace_id
+              AND agent.environment_id=route.environment_id
+              AND agent.id=route.agent_id
+             WHERE route.workspace_id=$1 AND route.environment_id=$2
+               AND route.destination_id=$3 AND route.enabled
+               AND route.role<>'disabled'
+               AND route.retired_at IS NULL
+               AND route.state IN ('unknown','available','unavailable','stale')
+               AND agent.revoked_at IS NULL
+             GROUP BY route.agent_id
+             ORDER BY CASE WHEN route.agent_id=$4 THEN 0 ELSE 1 END,
+                      min(CASE route.role WHEN 'primary' THEN 0 ELSE 1 END),
+                      min(route.priority),route.agent_id
+             LIMIT $5",
+        )
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(destination_id)
+        .bind(&assigned_agent)
+        .bind(i64::try_from(MAX_AUTOMATIC_WAKE_CANDIDATES).unwrap_or(16))
+        .fetch_all(&mut **transaction)
+        .await?;
+        candidate_agents.extend(routes);
+    } else if sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (
+             SELECT 1 FROM agents
+             WHERE workspace_id=$1 AND environment_id=$2 AND id=$3
+               AND revoked_at IS NULL
+         )",
+    )
+    .bind(workspace_id.to_string())
+    .bind(environment_id.to_string())
+    .bind(&assigned_agent)
+    .fetch_one(&mut **transaction)
+    .await?
+    {
+        candidate_agents.push(assigned_agent);
+    }
+
+    let expires_at = requested_at + chrono::Duration::minutes(5);
+    for agent_id in &candidate_agents {
+        let digest = Sha256::digest(
+            format!("{workspace_id}:{environment_id}:{job_id}:{state_sequence}:{agent_id}")
+                .as_bytes(),
+        );
+        let idempotency_key = format!("automatic-wake:{digest:x}");
+        let proposed_id = format!("wkh_{}", ulid::Ulid::new());
+        let row = sqlx::query(
+            "INSERT INTO node_wake_hints
+                (workspace_id,environment_id,id,agent_id,idempotency_key,reason,
+                 delivery_channel,status,requested_at,expires_at,observed_at)
+             VALUES ($1,$2,$3,$4,$5,'job_available','external_push','pending',$6,$7,NULL)
+             ON CONFLICT (workspace_id,environment_id,agent_id,idempotency_key)
+             DO UPDATE SET idempotency_key=EXCLUDED.idempotency_key
+             RETURNING id,agent_id,reason,delivery_channel,status,requested_at,expires_at,observed_at",
+        )
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(proposed_id)
+        .bind(agent_id)
+        .bind(&idempotency_key)
+        .bind(requested_at)
+        .bind(expires_at)
+        .fetch_one(&mut **transaction)
+        .await?;
+        let hint_id: String = row.try_get("id")?;
+        let payload = serde_json::json!({
+            "id": hint_id,
+            "node_id": row.try_get::<String, _>("agent_id")?,
+            "reason": row.try_get::<String, _>("reason")?,
+            "delivery_channel": row.try_get::<String, _>("delivery_channel")?,
+            "status": row.try_get::<String, _>("status")?,
+            "requested_at": row.try_get::<DateTime<Utc>, _>("requested_at")?,
+            "expires_at": row.try_get::<DateTime<Utc>, _>("expires_at")?,
+            "observed_at": row.try_get::<Option<DateTime<Utc>>, _>("observed_at")?,
+        });
+        sqlx::query(
+            "INSERT INTO routing_outbox
+                (id,workspace_id,environment_id,aggregate_type,aggregate_id,event_type,payload)
+             VALUES ($1,$2,$3,'node_wake_hint',$4,'node.wake_hint.requested',$5)
+             ON CONFLICT (workspace_id,environment_id,event_type,aggregate_id)
+                 WHERE aggregate_type='node_wake_hint'
+                   AND event_type='node.wake_hint.requested'
+             DO NOTHING",
+        )
+        .bind(EventId::new().to_string())
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(hint_id)
+        .bind(payload)
+        .execute(&mut **transaction)
+        .await?;
+    }
+    let candidate_count = i32::try_from(candidate_agents.len())
+        .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+    sqlx::query(
+        "INSERT INTO job_wake_reconciliations
+            (workspace_id,environment_id,job_id,state_sequence,candidate_count,reconciled_at)
+         VALUES ($1,$2,$3,$4,$5,now()) ON CONFLICT DO NOTHING",
+    )
+    .bind(workspace_id.to_string())
+    .bind(environment_id.to_string())
+    .bind(job_id.to_string())
+    .bind(sequence)
+    .bind(candidate_count)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(candidate_agents.len())
 }
 
 async fn insert_event(

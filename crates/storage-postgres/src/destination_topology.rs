@@ -1344,7 +1344,7 @@ impl DestinationTopologyRepository for PostgresStore {
             .bind(WAKE_HINT_RETENTION_DAYS)
             .execute(&mut *tx)
             .await?;
-        let rows = sqlx::query("WITH selected AS (SELECT id FROM node_wake_hints WHERE workspace_id=$1 AND environment_id=$2 AND agent_id=$3 AND status='pending' AND delivery_channel='connected_session' AND expires_at>$4 ORDER BY requested_at,id FOR UPDATE SKIP LOCKED LIMIT $5) UPDATE node_wake_hints hint SET status='observed',observed_at=$4 FROM selected WHERE hint.workspace_id=$1 AND hint.environment_id=$2 AND hint.id=selected.id RETURNING hint.id,hint.agent_id,hint.reason,hint.delivery_channel,hint.status,hint.requested_at,hint.expires_at,hint.observed_at")
+        let rows = sqlx::query("WITH selected AS (SELECT id FROM node_wake_hints WHERE workspace_id=$1 AND environment_id=$2 AND agent_id=$3 AND status='pending' AND expires_at>$4 ORDER BY requested_at,id FOR UPDATE SKIP LOCKED LIMIT $5) UPDATE node_wake_hints hint SET status='observed',observed_at=$4 FROM selected WHERE hint.workspace_id=$1 AND hint.environment_id=$2 AND hint.id=selected.id RETURNING hint.id,hint.agent_id,hint.reason,hint.delivery_channel,hint.status,hint.requested_at,hint.expires_at,hint.observed_at")
             .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).bind(agent_id).bind(observed_at).bind(i64::from(limit.clamp(1, 100)))
             .fetch_all(&mut *tx).await?;
         tx.commit().await?;
@@ -4414,7 +4414,7 @@ mod tests {
             id: "wkh_first".into(),
             agent_id: "agt_shared".into(),
             reason: "job_available".into(),
-            delivery_channel: "connected_session".into(),
+            delivery_channel: "external_push".into(),
             status: "pending".into(),
             requested_at: observed_at,
             expires_at: observed_at + chrono::Duration::minutes(5),
@@ -4466,6 +4466,7 @@ mod tests {
             .unwrap();
         assert_eq!(observed.len(), 1);
         assert_eq!(observed[0].status, "observed");
+        assert_eq!(observed[0].delivery_channel, "external_push");
         assert!(
             repository
                 .observe_pending_node_wake_hints(first, "agt_shared", Utc::now(), 10)

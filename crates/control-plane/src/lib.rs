@@ -22,6 +22,7 @@ pub mod repository;
 pub mod request_id;
 pub mod routing;
 pub mod updates;
+pub mod wake_hint_worker;
 pub mod webhook_worker;
 pub mod workos_identity;
 
@@ -1063,30 +1064,13 @@ mod tests {
             .await
             .expect("create wake-gated job");
         assert_eq!(created.status(), StatusCode::CREATED);
-        let wake = application
-            .router
-            .clone()
-            .oneshot(idempotent_api_request(
-                "POST",
-                &format!("/v1/nodes/{}/wake-hints", application.agent_id),
-                "piq_test_integration",
-                "wake-test-0001",
-                Some(r#"{"reason":"job_available","expires_in_seconds":300}"#),
-            ))
-            .await
-            .expect("request advisory wake");
-        let wake_status = wake.status();
-        let wake_body = wake
-            .into_body()
-            .collect()
-            .await
-            .expect("wake response body")
-            .to_bytes();
+        let wake_worker = crate::wake_hint_worker::WakeHintWorker::new(application.state.clone());
         assert_eq!(
-            wake_status,
-            StatusCode::ACCEPTED,
-            "{}",
-            String::from_utf8_lossy(&wake_body)
+            wake_worker
+                .run_once(10)
+                .await
+                .expect("publish automatic external wake"),
+            1
         );
 
         let sync = |sequence, lifecycle_state, accepts_cloud_jobs| {
@@ -1147,7 +1131,7 @@ mod tests {
         assert_eq!(stale_response.wake_hints.len(), 1);
         assert_eq!(
             stale_response.wake_hints[0].delivery_channel,
-            piqae_protocol::agent::WakeDeliveryChannel::ConnectedSession
+            piqae_protocol::agent::WakeDeliveryChannel::ExternalPush
         );
 
         let foreground = sync(3, NodeAvailability::Foreground, true);
@@ -1208,6 +1192,117 @@ mod tests {
             cross_tenant_page["data"]
                 .as_array()
                 .is_some_and(Vec::is_empty)
+        );
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the HTTP idempotency and content-free event assertions share one durable job fixture"
+    )]
+    async fn waiting_job_dispatches_one_content_free_wake_hint_across_idempotent_retries() {
+        let application = application().await;
+        let body = serde_json::json!({
+            "printer_id": application.printer_id,
+            "title": "private wake title",
+            "content_type": "pdf",
+            "content": {"type": "base64", "data": "cHJpbnQ="}
+        })
+        .to_string();
+        let create = || {
+            idempotent_api_request(
+                "POST",
+                "/v1/jobs",
+                "piq_test_integration",
+                "automatic-wake-test-0001",
+                Some(&body),
+            )
+        };
+        let first = application
+            .router
+            .clone()
+            .oneshot(create())
+            .await
+            .expect("first create response");
+        assert_eq!(first.status(), StatusCode::CREATED);
+
+        let worker = crate::wake_hint_worker::WakeHintWorker::new(application.state.clone());
+        assert_eq!(worker.run_once(10).await.expect("first wake dispatch"), 1);
+        let events = application
+            .repository
+            .list_tenant_events(
+                application.tenant.workspace_id,
+                application.tenant.environment_id,
+                None,
+                100,
+            )
+            .await
+            .expect("tenant events");
+        let wakes = events
+            .iter()
+            .filter(|event| event.event_type == "node.wake_hint.requested")
+            .collect::<Vec<_>>();
+        assert_eq!(wakes.len(), 1);
+        let wake = wakes[0].payload.as_object().expect("wake object");
+        assert_eq!(
+            wake.get("reason"),
+            Some(&serde_json::json!("job_available"))
+        );
+        assert_eq!(
+            wake.get("delivery_channel"),
+            Some(&serde_json::json!("external_push"))
+        );
+        assert_eq!(
+            wake.get("node_id"),
+            Some(&serde_json::json!(application.agent_id.to_string()))
+        );
+        assert_eq!(
+            wake.keys()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>(),
+            [
+                "delivery_channel",
+                "expires_at",
+                "id",
+                "node_id",
+                "observed_at",
+                "reason",
+                "requested_at",
+                "status",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+        );
+        assert!(!wakes[0].payload.to_string().contains("private wake title"));
+        assert!(!wake.contains_key("job_id"));
+        assert!(!wake.contains_key("title"));
+        assert!(!wake.contains_key("content"));
+
+        let retry = application
+            .router
+            .clone()
+            .oneshot(create())
+            .await
+            .expect("idempotent retry response");
+        assert_eq!(retry.status(), StatusCode::OK);
+        assert_eq!(worker.run_once(10).await.expect("retry wake dispatch"), 0);
+        let events = application
+            .repository
+            .list_tenant_events(
+                application.tenant.workspace_id,
+                application.tenant.environment_id,
+                None,
+                100,
+            )
+            .await
+            .expect("tenant events after retry");
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.event_type == "node.wake_hint.requested")
+                .count(),
+            1
         );
     }
 

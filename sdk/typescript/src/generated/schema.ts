@@ -1838,7 +1838,7 @@ export interface paths {
         put?: never;
         /**
          * Request an advisory node wake
-         * @description This records and emits a wake hint only. It never leases a job or authorizes spooler handoff; work remains queued until a fresh authenticated eligible node sync.
+         * @description This operator route records and emits a connected-session hint only. It never leases a job or authorizes spooler handoff; work remains queued until a fresh authenticated eligible node sync. Separately, a durable job entering waiting_for_agent creates content-free external_push hints for bounded same-destination candidates and emits node.wake_hint.requested for a tenant webhook relay.
          */
         post: operations["createNodeWakeHint"];
         delete?: never;
@@ -3158,7 +3158,7 @@ export interface components {
             /** @enum {string} */
             reason: "job_available" | "operator_request" | "inventory_refresh" | "diagnostics";
             /**
-             * @description Actual durable delivery path. connected_session means the already-awake node observed the hint on signed sync; it is not remote-wake evidence.
+             * @description Actual durable delivery path. connected_session means the already-awake node observed the hint on signed sync and is not remote-wake evidence. external_push means the content-free hint was handed to the tenant event/webhook stream; it does not prove APNs or another provider woke the device.
              * @enum {string}
              */
             delivery_channel?: "connected_session" | "external_push" | "local_relay" | "manual";
@@ -3176,10 +3176,10 @@ export interface components {
             /** @enum {string} */
             reason: "job_available" | "operator_request" | "inventory_refresh" | "diagnostics";
             /**
-             * @description The node observed this hint through its already-authenticated active sync session.
+             * @description The hint's durable delivery path. A signed sync observes any pending hint after the host wakes while preserving whether it was originally requested through the active session, an external push, a local relay, or manually.
              * @enum {string}
              */
-            delivery_channel?: "connected_session";
+            delivery_channel?: "connected_session" | "external_push" | "local_relay" | "manual";
             /** Format: date-time */
             requested_at: string;
             /** Format: date-time */
