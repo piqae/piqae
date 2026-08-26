@@ -140,9 +140,9 @@ public struct PiqaeWakeHint: Equatable, Sendable {
 }
 
 public enum PiqaeWakeHintResult: Equatable, Sendable {
-    /// Inventory and connector state were reconciled. A wake hint never leases
-    /// or accepts a job by itself.
-    case reconciledWithoutLeasing
+    /// Inventory and durable adapter work were reconciled within the execution
+    /// budget. The hint carries no job data and grants no eligibility itself.
+    case reconciled
     case deferred(reason: String)
 }
 

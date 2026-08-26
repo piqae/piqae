@@ -72,8 +72,10 @@ consent grant. When granted, `node.connections.connect(...)` sends the
 short-lived invitation through the installed node, which verifies the authority
 and durably starts its own connector worker.
 
-A macOS host supplies its stable application identity when it opts into the
-installed node:
+A macOS host supplies a stable local identifier to namespace its device-only
+credential and a display hint for SDK-owned connector names. Broker consent
+does not trust these caller values: the installed node derives the requesting
+application's authoritative identity from the accepted Unix-socket peer:
 
 ```swift
 let installed = try PiqaeMacInstalledNodeBroker(
@@ -118,6 +120,16 @@ restart never replays a `handoff_started` or `accepted` operation. Unverifiable
 native acceptance becomes `delivery_uncertain`; a retry with the same
 idempotency key returns the original durable job. Attached clients also require
 an explicitly approved broker capability.
+
+The embedded cloud worker emits a data-free, coalesced work-available signal
+when it durably activates a remote job. NodeKit immediately reconciles the
+registered adapters while the host is in the foreground; no UI refresh is
+required and no second Swift queue is created. Repeated signals share one drain,
+and a stopped node cancels and joins that drain before the native runtime is
+destroyed. Foreground entry, wake, and restored network availability also retry
+pending durable work. Each adapter pass is bounded and yields between batches.
+In the background, NodeKit begins no new native handoff unless the host supplies
+an explicit remaining-time budget that passes the admission margin.
 
 Named profile create, update, delete, and list operations are stored by the same
 runtime. An adapter may capture native settings, but the durable profile record

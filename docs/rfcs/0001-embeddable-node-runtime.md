@@ -213,7 +213,8 @@ The iPad runtime uses:
 
 - foreground execution for discovery, setup, profile selection, and normal
   submission;
-- bounded background time only to finish already-started durable work;
+- bounded background time to finish an in-flight handoff or begin durable work
+  only when the host supplies enough explicit remaining execution budget;
 - silent push as an unreliable wake hint, never as acceptance;
 - scheduled background processing for reconciliation and maintenance, not
   immediate print delivery;

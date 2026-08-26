@@ -211,10 +211,14 @@ actor PiqaeNodeEngine {
     private var acquiredInstallationID: PiqaeInstallationID?
     private var embeddedRuntimeStarted = false
     private var executionContext = PiqaeExecutionContext.foreground
+    private var executionDeadline: Date?
     private var selectedIPC: (any PiqaeInstalledNodeIPC)?
     private var adaptersByID: [String: any PiqaePrinterAdapter] = [:]
     private var localPrintersByLogicalID: [PiqaePrinterID: PiqaePrinter] = [:]
     private var executingAdapters: Set<String> = []
+    private var automaticDrainGeneration: UInt64 = 0
+    private var automaticDrainRequested = false
+    private var automaticDrainTask: Task<Void, Never>?
     private var observers: [UUID: AsyncStream<PiqaeNodeSnapshot>.Continuation] = [:]
     private var snapshotValue: PiqaeNodeSnapshot
 
@@ -281,7 +285,10 @@ actor PiqaeNodeEngine {
             }
             snapshotValue = replacingSnapshot(phase: .ready, statusMessage: nil)
             emit()
+            startAutomaticDrainIfPossible()
         } catch {
+            started = false
+            await cancelAutomaticDrain()
             if embeddedRuntimeStarted {
                 try? await configuration.embeddedRuntime?.stop()
                 embeddedRuntimeStarted = false
@@ -291,7 +298,6 @@ actor PiqaeNodeEngine {
                 ownsEmbeddedRuntime = false
                 acquiredInstallationID = nil
             }
-            started = false
             selectedIPC = nil
             adaptersByID.removeAll(keepingCapacity: true)
             localPrintersByLogicalID.removeAll(keepingCapacity: true)
@@ -306,6 +312,8 @@ actor PiqaeNodeEngine {
     }
 
     func stop() async {
+        started = false
+        await cancelAutomaticDrain()
         if embeddedRuntimeStarted {
             try? await configuration.embeddedRuntime?.stop()
             embeddedRuntimeStarted = false
@@ -318,7 +326,6 @@ actor PiqaeNodeEngine {
         selectedIPC = nil
         localPrintersByLogicalID.removeAll(keepingCapacity: true)
         executingAdapters.removeAll(keepingCapacity: true)
-        started = false
         snapshotValue = replacingSnapshot(phase: .stopped, statusMessage: nil)
         emit()
     }
@@ -377,7 +384,7 @@ actor PiqaeNodeEngine {
             canExecuteDurableHandoff()
         {
             for adapterID in adaptersByID.keys.sorted() {
-                try await drainAdapter(adapterID, runtime: runtime)
+                _ = try await drainAdapter(adapterID, runtime: runtime)
             }
         }
     }
@@ -454,11 +461,11 @@ actor PiqaeNodeEngine {
         )
         switch admissionPolicy.evaluate(
             handoff,
-            context: executionContext,
+            context: effectiveExecutionContext,
             availability: snapshotValue.availability
         ) {
         case .admit, .finishAlreadyStarted:
-            try await drainAdapter(printer.adapterID, runtime: runtime)
+            _ = try await drainAdapter(printer.adapterID, runtime: runtime)
         case .deferUntilForeground:
             return try Self.receipt(jobID: jobID, state: accepted.state, nativeJobID: nil)
         }
@@ -578,12 +585,20 @@ actor PiqaeNodeEngine {
 
     func updateExecutionContext(_ context: PiqaeExecutionContext) {
         executionContext = context
+        if context.phase == .background, let remaining = context.remainingSeconds {
+            executionDeadline = Date().addingTimeInterval(max(0, remaining))
+        } else {
+            executionDeadline = nil
+        }
         if context.phase == .suspended {
             snapshotValue = replacingSnapshot(phase: .suspended, statusMessage: nil)
         } else if started {
             snapshotValue = replacingSnapshot(phase: .ready, statusMessage: nil)
         }
         emit()
+        if context.phase != .suspended {
+            requestAutomaticDrain()
+        }
     }
 
     func reportHostLifecycle(_ event: PiqaeHostLifecycleEvent) async throws {
@@ -602,7 +617,11 @@ actor PiqaeNodeEngine {
             updateExecutionContext(
                 PiqaeExecutionContext(phase: .suspended, source: .foreground)
             )
-        case .started, .woke, .networkAvailable, .networkConstrained, .networkUnavailable:
+        case .woke:
+            updateExecutionContext(.foreground)
+        case .networkAvailable:
+            requestAutomaticDrain()
+        case .started, .networkConstrained, .networkUnavailable:
             break
         }
     }
@@ -642,13 +661,13 @@ actor PiqaeNodeEngine {
         guard context.phase != .suspended else {
             return .deferred(reason: "The host application is suspended.")
         }
-        executionContext = context
+        updateExecutionContext(context)
         do {
             try await refresh()
             guard !Task.isCancelled else {
                 return .deferred(reason: "The host execution budget expired.")
             }
-            return .reconciledWithoutLeasing
+            return .reconciled
         } catch {
             return .deferred(reason: "Reconciliation is temporarily unavailable.")
         }
@@ -662,6 +681,11 @@ actor PiqaeNodeEngine {
         ownsEmbeddedRuntime = true
         acquiredInstallationID = installationID
         if let runtime = configuration.embeddedRuntime {
+            automaticDrainGeneration &+= 1
+            let generation = automaticDrainGeneration
+            try await runtime.setWorkAvailableHandler { [weak self] in
+                Task { await self?.workBecameAvailable(generation: generation) }
+            }
             try await runtime.start()
             embeddedRuntimeStarted = true
         }
@@ -677,7 +701,7 @@ actor PiqaeNodeEngine {
         let printers = try await refreshEmbeddedInventory()
         if let runtime = configuration.embeddedRuntime {
             for adapterID in adaptersByID.keys.sorted() {
-                try await drainAdapter(adapterID, runtime: runtime)
+                _ = try await drainAdapter(adapterID, runtime: runtime)
             }
         }
         let initialConnections: [PiqaeConnection]
@@ -816,35 +840,50 @@ actor PiqaeNodeEngine {
         }
     }
 
+    private enum AdapterDrainResult: Equatable {
+        case empty
+        case blockedOnNativeObservation
+        case deferred
+        case alreadyExecuting
+        case capped
+    }
+
     private func drainAdapter(
         _ adapterID: String,
         runtime: any PiqaeEmbeddedNodeRuntime
-    ) async throws {
-        guard executingAdapters.insert(adapterID).inserted else { return }
-        do {
-            for _ in 0..<32 {
-                guard let operation = try await runtime.nextOperation(adapterID: adapterID) else {
-                    break
-                }
-                switch operation.phase {
-                case .accepted:
-                    try await reconcileAccepted(operation, runtime: runtime)
-                    executingAdapters.remove(adapterID)
-                    return
-                case .handoffStarted:
-                    _ = try await runtime.complete(
-                        operation,
-                        outcome: .ambiguous(code: "recovered_after_handoff")
-                    )
-                case .claimed:
-                    try await executeClaimed(operation, runtime: runtime)
-                }
+    ) async throws -> AdapterDrainResult {
+        guard executingAdapters.insert(adapterID).inserted else { return .alreadyExecuting }
+        defer { executingAdapters.remove(adapterID) }
+        for _ in 0..<32 {
+            try Task.checkCancellation()
+            guard canExecuteDurableHandoff() else { return .deferred }
+            guard let operation = try await runtime.nextOperation(adapterID: adapterID) else {
+                return .empty
             }
-            executingAdapters.remove(adapterID)
-        } catch {
-            executingAdapters.remove(adapterID)
-            throw error
+            guard !Task.isCancelled, canExecuteDurableHandoff() else {
+                _ = try await runtime.complete(
+                    operation,
+                    outcome: .rejectedBeforeHandoff(
+                        code: "host_execution_ended",
+                        retryable: true
+                    )
+                )
+                return .deferred
+            }
+            switch operation.phase {
+            case .accepted:
+                try await reconcileAccepted(operation, runtime: runtime)
+                return .blockedOnNativeObservation
+            case .handoffStarted:
+                _ = try await runtime.complete(
+                    operation,
+                    outcome: .ambiguous(code: "recovered_after_handoff")
+                )
+            case .claimed:
+                try await executeClaimed(operation, runtime: runtime)
+            }
         }
+        return .capped
     }
 
     private func canExecuteDurableHandoff() -> Bool {
@@ -853,12 +892,88 @@ actor PiqaeNodeEngine {
                 payloadIsDurable: true,
                 estimatedSecondsToNativeAcceptance: 10
             ),
-            context: executionContext,
+            context: effectiveExecutionContext,
             availability: snapshotValue.availability
         ) {
         case .admit, .finishAlreadyStarted: true
         case .deferUntilForeground: false
         }
+    }
+
+    private var effectiveExecutionContext: PiqaeExecutionContext {
+        guard executionContext.phase == .background, let executionDeadline else {
+            return executionContext
+        }
+        return PiqaeExecutionContext(
+            phase: .background,
+            source: executionContext.source,
+            remainingSeconds: max(0, executionDeadline.timeIntervalSinceNow)
+        )
+    }
+
+    private func workBecameAvailable(generation: UInt64) {
+        guard generation == automaticDrainGeneration, ownsEmbeddedRuntime else { return }
+        automaticDrainRequested = true
+        startAutomaticDrainIfPossible()
+    }
+
+    private func requestAutomaticDrain() {
+        guard ownsEmbeddedRuntime else { return }
+        automaticDrainRequested = true
+        startAutomaticDrainIfPossible()
+    }
+
+    private func startAutomaticDrainIfPossible() {
+        guard started, embeddedRuntimeStarted, selectedIPC == nil,
+            automaticDrainRequested, automaticDrainTask == nil,
+            canExecuteDurableHandoff()
+        else { return }
+        let generation = automaticDrainGeneration
+        automaticDrainTask = Task { [weak self] in
+            await self?.runAutomaticDrain(generation: generation)
+        }
+    }
+
+    private func runAutomaticDrain(generation: UInt64) async {
+        while !Task.isCancelled,
+            generation == automaticDrainGeneration,
+            started,
+            automaticDrainRequested,
+            canExecuteDurableHandoff(),
+            let runtime = configuration.embeddedRuntime
+        {
+            automaticDrainRequested = false
+            do {
+                let printers = try await refreshEmbeddedInventory()
+                snapshotValue = replacingSnapshot(printers: printers, statusMessage: nil)
+                emit()
+                var capped = false
+                for adapterID in adaptersByID.keys.sorted() {
+                    let result = try await drainAdapter(adapterID, runtime: runtime)
+                    capped = capped || result == .capped
+                }
+                if capped {
+                    automaticDrainRequested = true
+                    await Task.yield()
+                }
+            } catch is CancellationError {
+                break
+            } catch {
+                break
+            }
+        }
+        guard generation == automaticDrainGeneration else { return }
+        automaticDrainTask = nil
+        startAutomaticDrainIfPossible()
+    }
+
+    private func cancelAutomaticDrain() async {
+        automaticDrainGeneration &+= 1
+        automaticDrainRequested = false
+        let task = automaticDrainTask
+        automaticDrainTask = nil
+        task?.cancel()
+        await task?.value
     }
 
     private func reconcileAccepted(

@@ -44,6 +44,7 @@ private actor ScriptedBroker: PiqaeBrokerWireTransport {
     var executeRequests = 0
     var lastConnectRequest: [String: String]?
     var requestedCapabilities: [String] = []
+    var authorizationClaimedApplication = false
 
     init(_ decision: Decision) { self.decision = decision }
 
@@ -59,6 +60,7 @@ private actor ScriptedBroker: PiqaeBrokerWireTransport {
             value = ["type": "presence", "protocol_min": 2, "protocol_max": 4]
         case "request_authorization":
             authorizationRequests += 1
+            authorizationClaimedApplication = operation["application"] != nil
             requestedCapabilities = try XCTUnwrap(
                 operation["requested_capabilities"] as? [String]
             )
@@ -167,6 +169,7 @@ private actor ScriptedBroker: PiqaeBrokerWireTransport {
 
     func counts() -> (Int, Int) { (authorizationRequests, executeRequests) }
     func connectedRequest() -> [String: String]? { lastConnectRequest }
+    func didClaimAuthorizationApplication() -> Bool { authorizationClaimedApplication }
 }
 
 final class MacInstalledNodeBrokerTests: XCTestCase {
@@ -179,6 +182,8 @@ final class MacInstalledNodeBrokerTests: XCTestCase {
         let probe = await broker.probe()
         XCTAssertEqual(probe.state, .available(protocolVersion: 4))
         try await broker.prepareForAttachment()
+        let claimedAuthorizationApplication = await server.didClaimAuthorizationApplication()
+        XCTAssertFalse(claimedAuthorizationApplication)
         let snapshot = try await broker.snapshot()
         XCTAssertEqual(snapshot.printers.first?.nativeID, "fake-printer")
         let profiles = try await broker.profiles(for: .init(rawValue: "prn_fixture"))

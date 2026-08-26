@@ -59,7 +59,7 @@ public final class PiqaeUIKitLifecycleCoordinator {
 
     /// Call from the app delegate's background notification handler. Return the
     /// result through Apple's fetch completion mapping. The hint contains no job
-    /// metadata and only reconciles; it never accepts a job by itself.
+    /// metadata and only asks the durable runtime to reconcile eligible work.
     public func handleBackgroundPush(collapseID: String) async -> PiqaeWakeHintResult {
         guard let hint = try? PiqaeWakeHint(collapseID: collapseID, source: .backgroundPush) else {
             return .deferred(reason: "The wake hint was invalid.")
@@ -223,7 +223,7 @@ public final class PiqaeUIKitMaintenanceScheduler {
             if !Task.isCancelled {
                 try? scheduleNext(identifier: identifier)
             }
-            return result == .reconciledWithoutLeasing && !Task.isCancelled
+            return result == .reconciled && !Task.isCancelled
         }
         task.expirationHandler = { worker.cancel() }
         task.setTaskCompleted(success: await worker.value)

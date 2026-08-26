@@ -453,14 +453,8 @@ public actor PiqaeMacInstalledNodeBroker: PiqaeInstalledNodeIPC {
     }
 
     private func requestAuthorization() async throws -> AuthorizationHandle {
-        let identity: [String: Any] = [
-            "application_id": application.applicationID,
-            "display_name": application.displayName,
-            "signing_identity_sha256": application.signingIdentitySHA256 ?? NSNull(),
-        ]
         let result = try await request(operation: [
             "type": "request_authorization",
-            "application": identity,
             "requested_capabilities": requiredCapabilities.sorted { $0.rawValue < $1.rawValue }
                 .map(\.rawValue),
         ])

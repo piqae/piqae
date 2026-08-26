@@ -9,6 +9,8 @@ PiqaeBuffer piqae_node_linked_set_host_key_provider(
     uint64_t handle, PiqaeHostKeyProvider provider);
 PiqaeBuffer piqae_node_linked_set_connector_key_provider(
     uint64_t handle, PiqaeConnectorKeyProvider provider);
+PiqaeBuffer piqae_node_linked_set_work_available_provider(
+    uint64_t handle, PiqaeWorkAvailableProvider provider);
 PiqaeBuffer piqae_node_linked_stop(uint64_t handle);
 PiqaeBuffer piqae_node_linked_command(
     uint64_t handle, const uint8_t *data, size_t length);
