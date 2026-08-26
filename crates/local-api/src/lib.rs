@@ -202,6 +202,10 @@ pub struct LocalConnectorDetail {
     pub inventory_revision: u64,
     /// True when a local inventory change still needs a sync attempt.
     pub inventory_refresh_pending: bool,
+    /// True only when this connector can reach a locally coordinated physical
+    /// destination also granted to a different control-plane origin. No
+    /// origin, route key, job identity, or reservation proof is exposed.
+    pub cross_authority_route_warning: bool,
     /// Present only when connector enrolment records an authenticated,
     /// operator-safe management destination. Never guess provider paths.
     pub manage_url: Option<String>,
@@ -1147,6 +1151,9 @@ mod tests {
         assert!(html.contains("prefers-color-scheme:dark"));
         assert!(html.contains("type=\"datetime-local\""));
         assert!(html.contains("aria-label=\"Search print history\""));
+        assert!(html.contains(
+            "Multiple scheduling authorities; local handoffs serialized; automatic cross-server failover disabled."
+        ));
     }
 
     #[test]
@@ -1169,6 +1176,7 @@ mod tests {
             eligible_printer_count: 3,
             inventory_revision: 1,
             inventory_refresh_pending: true,
+            cross_authority_route_warning: true,
             manage_url: Some("https://shop.example/settings".into()),
         };
         let encoded = serde_json::to_value(detail).expect("serialize diagnostics");
@@ -1178,8 +1186,11 @@ mod tests {
         assert_eq!(encoded["workspace_id"], "wsp_test");
         assert_eq!(encoded["requesting_service_account_id"], "svc_shopify");
         assert_eq!(encoded["manage_url"], "https://shop.example/settings");
+        assert_eq!(encoded["cross_authority_route_warning"], true);
         assert!(encoded.get("device_key").is_none());
         assert!(encoded.get("token").is_none());
+        assert!(encoded.get("identity_evidence").is_none());
+        assert!(encoded.get("fencing_token").is_none());
     }
 
     fn profile(profile_id: &str, name: String) -> LocalPrinterProfile {

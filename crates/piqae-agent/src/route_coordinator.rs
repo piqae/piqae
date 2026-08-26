@@ -32,7 +32,7 @@ const MAX_HANDOFFS: usize = 512;
 const MAX_TOPOLOGY_CHANGES: usize = 512;
 const RESERVATION_LIFETIME_MS: i64 = 2 * 60 * 1_000;
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 struct CoordinatorDocument {
     version: u16,
     installation_namespace: Uuid,
@@ -57,7 +57,7 @@ struct DurableRoute {
     identity_confidence: IdentityConfidence,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 struct DurableReservation {
     server_route_id: Option<String>,
     local_route_key: String,
@@ -69,7 +69,7 @@ struct DurableReservation {
     expires_unix_ms: i64,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 struct DurableHandoff {
     sequence: u64,
     connector_id: String,
@@ -84,7 +84,7 @@ struct DurableHandoff {
     native_job_id: Option<String>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct RouteReservation {
     pub local_route_key: String,
     pub server_route_id: Option<String>,
@@ -94,10 +94,35 @@ pub struct RouteReservation {
     fencing_token: String,
 }
 
-#[derive(Debug)]
 pub struct RouteCoordinator {
     root: PathBuf,
     document: CoordinatorDocument,
+}
+
+impl std::fmt::Debug for RouteReservation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RouteReservation")
+            .field("local_route_key", &self.local_route_key)
+            .field("server_route_id", &self.server_route_id)
+            .field("coordination_key", &self.coordination_key)
+            .field("reservation_id", &self.reservation_id)
+            .field("generation", &self.generation)
+            .field("fencing_token", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for RouteCoordinator {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RouteCoordinator")
+            .field("routes", &self.document.routes.len())
+            .field("reservations", &self.document.reservations.len())
+            .field("handoffs", &self.document.handoffs.len())
+            .field("topology_changes", &self.document.topology_changes.len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl RouteCoordinator {
@@ -218,6 +243,17 @@ impl RouteCoordinator {
         digest.update(self.document.installation_namespace.as_bytes());
         digest.update(native_id.as_bytes());
         format!("rte_{}", &hex::encode(digest.finalize())[..32])
+    }
+
+    /// Returns the installation-local serialization group for a present OS
+    /// route. Separate queues share this only when discovery supplied enough
+    /// independent identity evidence to coordinate them safely.
+    pub fn coordination_key(&self, native_id: &str) -> Option<&str> {
+        self.document
+            .routes
+            .get(native_id)
+            .filter(|route| route.present)
+            .map(|route| route.coordination_key.as_str())
     }
 
     pub fn topology_changes(&self) -> Vec<RouteTopologyChange> {
@@ -1155,6 +1191,11 @@ mod tests {
             Some(cloud.route_id.as_str())
         );
         assert_eq!(evidence[0].local_route_key, local_route_key);
+        let reservation_debug = format!("{reserved:?}");
+        let coordinator_debug = format!("{coordinator:?}");
+        assert!(!reservation_debug.contains("opaque-cloud-fence"));
+        assert!(!coordinator_debug.contains("opaque-cloud-fence"));
+        assert!(reservation_debug.contains("[REDACTED]"));
     }
 
     #[test]

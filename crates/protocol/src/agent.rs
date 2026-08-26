@@ -458,7 +458,7 @@ pub struct DiagnosticReport {
     pub collection_error_code: Option<String>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 pub struct JobOffer {
     pub job: Job,
     /// Capability revision against which job-scoped options were resolved.
@@ -480,6 +480,25 @@ pub struct JobOffer {
     pub route_reservation: Option<CloudRouteReservation>,
 }
 
+impl std::fmt::Debug for JobOffer {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("JobOffer")
+            .field("job_id", &self.job.id)
+            .field(
+                "expected_capability_revision",
+                &self.expected_capability_revision,
+            )
+            .field("resolved_ticket_digest", &self.resolved_ticket_digest)
+            .field("lease_id", &self.lease_id)
+            .field("lease_token", &"[REDACTED]")
+            .field("lease_expires_at", &self.lease_expires_at)
+            .field("content", &"[REDACTED]")
+            .field("route_reservation", &self.route_reservation)
+            .finish()
+    }
+}
+
 #[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
 pub struct CloudRouteReservation {
     /// Canonical control-plane route resource. This identity may predate the
@@ -490,8 +509,10 @@ pub struct CloudRouteReservation {
     pub local_route_key: String,
     pub reservation_id: Uuid,
     pub generation: u64,
-    /// Opaque server capability. It is persisted owner-only and must never be
-    /// logged, included in evidence, or forwarded to a native executor.
+    /// Opaque server capability. It is persisted owner-only, echoed only in
+    /// the authenticated control-plane acceptance/handoff protocol, and must
+    /// never be logged, returned through operator APIs, or forwarded to a
+    /// native executor.
     pub fencing_token: String,
     pub lease_expires_at: DateTime<Utc>,
 }
@@ -612,11 +633,22 @@ pub struct AgentRenewLeaseResponse {
     pub lease_expires_at: DateTime<Utc>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 pub struct AgentReleaseLeaseRequest {
     pub lease_id: Uuid,
     pub lease_token: String,
     pub reason: String,
+}
+
+impl std::fmt::Debug for AgentReleaseLeaseRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AgentReleaseLeaseRequest")
+            .field("lease_id", &self.lease_id)
+            .field("lease_token", &"[REDACTED]")
+            .field("reason", &self.reason)
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -906,5 +938,54 @@ mod route_protocol_tests {
         assert!(!debug.contains("lease-secret"));
         assert!(!debug.contains("fence-secret"));
         assert!(debug.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn job_offer_and_release_debug_omit_content_and_lease_tokens() {
+        let offer = JobOffer {
+            job: piqae_domain::Job {
+                id: piqae_domain::JobId::new(),
+                workspace_id: piqae_domain::WorkspaceId::new(),
+                environment_id: piqae_domain::EnvironmentId::new(),
+                printer_id: piqae_domain::PrinterId::new(),
+                title: "private title".into(),
+                source: None,
+                content_kind: piqae_domain::ContentKind::Pdf,
+                content: piqae_domain::ContentSource::Base64 {
+                    data: "private-document".into(),
+                },
+                options: piqae_domain::JobOptions::default(),
+                metadata: std::collections::BTreeMap::new(),
+                deliveries: 0,
+                state: piqae_domain::JobState::Registered,
+                created_at: Utc::now(),
+                expires_at: Utc::now(),
+                delivery_uncertain_since: None,
+            },
+            expected_capability_revision: None,
+            resolved_ticket_digest: None,
+            lease_id: Uuid::nil(),
+            lease_token: "lease-secret".into(),
+            lease_expires_at: Utc::now(),
+            content: ContentDescriptor::InlineBase64 {
+                data: "private-document".into(),
+                sha256: None,
+                bytes: None,
+            },
+            route_reservation: None,
+        };
+        let offer_debug = format!("{offer:?}");
+        assert!(!offer_debug.contains("lease-secret"));
+        assert!(!offer_debug.contains("private-document"));
+        assert!(!offer_debug.contains("private title"));
+
+        let release = AgentReleaseLeaseRequest {
+            lease_id: Uuid::nil(),
+            lease_token: "release-secret".into(),
+            reason: "bounded reason".into(),
+        };
+        let release_debug = format!("{release:?}");
+        assert!(!release_debug.contains("release-secret"));
+        assert!(release_debug.contains("[REDACTED]"));
     }
 }

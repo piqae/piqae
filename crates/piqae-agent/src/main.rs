@@ -1967,6 +1967,22 @@ async fn connector_supervisor_loop(
                                 continue;
                             }
                         };
+                        let printer_groups = {
+                            let coordinator = executor.coordinator.lock().await;
+                            local_printers
+                                .iter()
+                                .filter_map(|printer| {
+                                    coordinator
+                                        .coordination_key(&printer.native_id)
+                                        .map(|key| (printer.printer_id.clone(), key.to_owned()))
+                                })
+                                .collect::<Vec<_>>()
+                        };
+                        let cross_authority_connectors =
+                            connector_runtime::cross_authority_connectors(
+                                &records,
+                                &printer_groups,
+                            );
                         let mut details = Vec::with_capacity(records.len());
                         for record in records {
                             let connection =
@@ -2003,6 +2019,8 @@ async fn connector_supervisor_loop(
                                     .flatten()
                                     .and_then(|revision| revision.parse::<u64>().ok())
                                     .unwrap_or(0);
+                            let cross_authority_route_warning =
+                                cross_authority_connectors.contains(&record.connector_id);
                             details.push(LocalConnectorDetail {
                                 connector_id: record.connector_id,
                                 display_name: record
@@ -2023,6 +2041,7 @@ async fn connector_supervisor_loop(
                                 eligible_printer_count,
                                 inventory_revision,
                                 inventory_refresh_pending,
+                                cross_authority_route_warning,
                                 manage_url: record.manage_url.map(|url| url.to_string()),
                             });
                         }
