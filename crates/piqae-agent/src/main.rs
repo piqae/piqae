@@ -3954,6 +3954,7 @@ async fn run_cloud_sync_loop(
             paused.load(Ordering::Relaxed),
             refresh_printers,
             cloud.allowed_printer_ids.as_ref(),
+            &node_runtime,
         )
         .await
         {
@@ -4000,6 +4001,7 @@ async fn run_cloud_sync_loop(
                         stop: &stop,
                         route_coordinator: &route_coordinator,
                         node_runtime: &node_runtime,
+                        printer_inventory_dirty: &printer_inventory_dirty,
                     },
                 )
                 .await
@@ -4067,6 +4069,7 @@ async fn prepare_sync_request(
     paused: bool,
     refresh_printers: bool,
     allowed_printer_ids: Option<&std::collections::BTreeSet<String>>,
+    node_runtime: &NodeRuntime,
 ) -> Result<AgentSyncRequest> {
     let mut inventory_revision = store
         .setting("printer_inventory_revision")?
@@ -4108,8 +4111,8 @@ async fn prepare_sync_request(
         inventory_revision,
     )
     .await;
-    let (topology_changes, native_handoffs) = {
-        let coordinator = route_coordinator.lock().await;
+    let (topology_changes, native_handoffs, runtime_sequence) = {
+        let mut coordinator = route_coordinator.lock().await;
         let acknowledged_handoff = store
             .setting("acknowledged_handoff_sequence")?
             .and_then(|sequence| sequence.parse::<u64>().ok())
@@ -4117,12 +4120,24 @@ async fn prepare_sync_request(
         (
             coordinator.topology_changes(),
             coordinator.handoffs_for_connector(connector_id, acknowledged_handoff),
+            coordinator
+                .allocate_observation_sequences(1)?
+                .into_iter()
+                .next()
+                .context("runtime observation sequence was not allocated")?,
         )
     };
     let mut request = sync_request(store, agent_id, started_at, paused, printers)?;
     request.route_observations = route_observations;
     request.topology_changes = topology_changes;
     request.native_handoffs = native_handoffs;
+    request.runtime =
+        Some(node_runtime.observation(runtime_sequence, Utc::now(), Duration::from_secs(90)));
+    request.capabilities.features.extend([
+        piqae_protocol::agent::AgentFeature::EmbeddedHostV1,
+        piqae_protocol::agent::AgentFeature::RuntimeAvailabilityV1,
+        piqae_protocol::agent::AgentFeature::WakeHintsV1,
+    ]);
     Ok(request)
 }
 
@@ -4138,6 +4153,7 @@ struct SyncContext<'a> {
     stop: &'a StopSignal,
     route_coordinator: &'a Arc<Mutex<route_coordinator::RouteCoordinator>>,
     node_runtime: &'a NodeRuntime,
+    printer_inventory_dirty: &'a AtomicBool,
 }
 
 #[allow(
@@ -4153,12 +4169,20 @@ async fn sync_succeeded(response: AgentSyncResponse, context: SyncContext<'_>) -
         commands,
         candidate_jobs,
         next_poll_after_ms,
+        wake_hints,
         ..
     } = response;
     *context.failures = 0;
     *context.connection.write().await = ConnectionState::Connected;
     apply_event_acknowledgement(context.store, acknowledged_event_cursor);
     acknowledge_diagnostics(context.store, &acknowledged_diagnostics);
+    if wake_hints_request_reconcile(&wake_hints, Utc::now()) {
+        // A hint never changes lifecycle admission and never accepts work. It
+        // only asks the normal authenticated sync path for fresh inventory.
+        context
+            .printer_inventory_dirty
+            .store(true, Ordering::Release);
+    }
     if let Some(sequence) = acknowledged_handoff_sequence {
         if let Err(error) = context
             .store
@@ -4202,6 +4226,13 @@ async fn sync_succeeded(response: AgentSyncResponse, context: SyncContext<'_>) -
         }
     }
     Duration::from_millis(next_poll_after_ms.clamp(250, 60_000))
+}
+
+fn wake_hints_request_reconcile(
+    hints: &[piqae_protocol::agent::AgentWakeHint],
+    observed_at: chrono::DateTime<Utc>,
+) -> bool {
+    hints.iter().any(|hint| hint.expires_at > observed_at)
 }
 
 fn apply_event_acknowledgement(store: &mut AgentStore, cursor: Option<EventId>) {
@@ -5423,6 +5454,7 @@ fn sync_request(
         route_observations: Vec::new(),
         topology_changes: Vec::new(),
         native_handoffs: Vec::new(),
+        runtime: None,
     })
 }
 
@@ -5810,6 +5842,23 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
+    fn test_node_runtime(root: &Path) -> NodeRuntime {
+        NodeRuntime::start(RuntimeConfiguration {
+            data_directory: root.join("runtime"),
+            mode: NodeRuntimeMode::LocalOnly,
+            host: HostCapabilities {
+                host_kind: HostKind::UserAgent,
+                availability: AvailabilityClass::ContinuousWhileAwake,
+                secure_storage: true,
+                local_ipc_broker: false,
+                can_prevent_idle_sleep_during_handoff: false,
+                can_receive_remote_wake_hint: false,
+                printer_transports: std::collections::BTreeSet::new(),
+            },
+        })
+        .expect("test node runtime")
+    }
+
     fn test_connector_record(id: &str) -> connector_runtime::ConnectorRecord {
         connector_runtime::ConnectorRecord {
             connector_id: id.to_owned(),
@@ -5837,6 +5886,30 @@ mod tests {
             .await
             .expect("pre-existing stop must not be lost");
         assert!(stop.is_stopped());
+    }
+
+    #[test]
+    fn wake_hints_only_request_reconciliation_while_live() {
+        use piqae_protocol::agent::{AgentWakeHint, WakeDeliveryChannel};
+
+        let now = Utc::now();
+        let live = AgentWakeHint {
+            id: "wake-live".into(),
+            reason: "queued_work".into(),
+            delivery_channel: WakeDeliveryChannel::ConnectedSession,
+            requested_at: now,
+            expires_at: now + chrono::TimeDelta::seconds(30),
+        };
+        let expired = AgentWakeHint {
+            id: "wake-expired".into(),
+            reason: "queued_work".into(),
+            delivery_channel: WakeDeliveryChannel::ExternalPush,
+            requested_at: now - chrono::TimeDelta::seconds(60),
+            expires_at: now,
+        };
+        assert!(wake_hints_request_reconcile(&[expired.clone(), live], now));
+        assert!(!wake_hints_request_reconcile(&[expired], now));
+        assert!(!wake_hints_request_reconcile(&[], now));
     }
 
     #[tokio::test]
@@ -6942,6 +7015,7 @@ mod tests {
                 .expect("route coordinator"),
         ));
         let observation_cache = Arc::new(Mutex::new(RouteObservationCache::default()));
+        let node_runtime = test_node_runtime(coordinator_dir.path());
         // Initial discovery creates the node-owned stable printer identity.
         let initial = discover_cloud_printers(
             &mut node_inventory,
@@ -6975,6 +7049,7 @@ mod tests {
             false,
             true,
             None,
+            &node_runtime,
         )
         .await
         .expect("connector sync");
@@ -7019,6 +7094,7 @@ mod tests {
             false,
             true,
             Some(&selected),
+            &node_runtime,
         )
         .await
         .expect("selected connector sync");
@@ -7034,6 +7110,7 @@ mod tests {
                 .expect("route coordinator"),
         ));
         let observation_cache = Arc::new(Mutex::new(RouteObservationCache::default()));
+        let node_runtime = test_node_runtime(directory.path());
         let expected_printer_id = {
             let mut node_inventory = AgentStore::open(&inventory_path).expect("node inventory");
             discover_cloud_printers(
@@ -7072,6 +7149,7 @@ mod tests {
                 false,
                 true,
                 None,
+                &node_runtime,
             )
             .await
             .expect("connector sync");
