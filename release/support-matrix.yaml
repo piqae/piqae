@@ -55,6 +55,24 @@ features:
   multi_integrator_node_runtime:
     tier: preview
     reason: isolated connector runtime and macOS consent flow are implemented, but Windows/Linux native consent, signed packages, fleet concurrency and revocation soak evidence are incomplete
+  embeddable_node_runtime:
+    tier: preview
+    reason: the shared runtime, versioned broker and native ABI have deterministic local-only, connector-isolation, lifecycle and restart evidence; signed SDK artifacts, host-app fleet soak and physical printing remain release gates
+  apple_nodekit:
+    tier: preview
+    reason: the source Swift package exposes attach-first and app-scoped APIs with foreground-safe AirPrint and lifecycle tests; signed binary distribution, App Store review, accessory entitlements, prolonged kiosk and physical printer evidence remain incomplete
+  windows_node_sdk:
+    tier: disabled
+    reason: the native ABI and managed facade require Windows CI, signed NuGet publication, Credential Manager, named-pipe consent, suspend-resume and physical Winspool evidence before use outside development
+  unattended_ipados_printing:
+    tier: disabled
+    reason: iPadOS background execution and silent notifications are opportunistic; no force-quit or sleeping-device guarantee exists, and APNs, managed-kiosk, BLE, MFi, vendor-adapter and physical soak gates remain open
+  external_node_wake_relay:
+    tier: disabled
+    reason: wake hints are durable and never carry job content or leases, but only already-connected session delivery is verified; APNs and LAN wake dispatchers, tenant-bound registration, rate limiting and hardware wake evidence remain open
+  mobile_printer_adapter_registry:
+    tier: preview
+    reason: exact adapter-version, transport, device-family and firmware matching is bounded and fail-closed; vendor licensing, entitlement review and physical option-mapping certification remain adapter-specific release gates
   content_confidential_printing:
     tier: disabled
     reason: encrypted transport and local decryption are implemented for evaluation but lack independent cryptographic review, hardware-backed keys and physical release evidence
