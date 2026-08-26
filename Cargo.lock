@@ -2831,6 +2831,7 @@ name = "piqae-node-ffi"
 version = "0.1.21"
 dependencies = [
  "base64 0.22.1",
+ "chrono",
  "piqae-node-runtime",
  "piqae-support-packs",
  "serde",

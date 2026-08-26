@@ -10,11 +10,14 @@
     reason = "isolated C ABI pointer validation and paired buffer deallocation"
 )]
 
+use base64::Engine as _;
 use piqae_node_runtime::connector_registry::{ConnectorRecord, ConnectorRegistry};
 use piqae_node_runtime::{
-    AdapterOperationOutcome, AvailabilityClass, EmbeddedAdapterRegistration, EmbeddedJobRequest,
-    EmbeddedPrinterObservation, EmbeddedQueue, HostCapabilities, HostKeyError, HostKeyProvider,
-    HostKind, LifecycleEvent, NodeRuntime, NodeRuntimeMode, PrinterTransport, RuntimeConfiguration,
+    AdapterOperationOutcome, AvailabilityClass, ConnectorKeyError, EmbeddedAdapterRegistration,
+    EmbeddedJobRequest, EmbeddedPrinterObservation, EmbeddedQueue, GeneratedConnectorKey,
+    HostCapabilities, HostKeyError, HostKeyProvider, HostKind, LifecycleEvent, NodeRuntime,
+    NodeRuntimeMode, PrinterTransport, RuntimeConfiguration, SecureConnectorSigner,
+    SecureKeyHandle,
 };
 use piqae_support_packs::SupportPackRegistry;
 use serde::{Deserialize, Serialize};
@@ -65,6 +68,110 @@ pub type PiqaeHmacSha256Callback = unsafe extern "C" fn(
 pub struct PiqaeHostKeyProvider {
     pub context: *mut core::ffi::c_void,
     pub hmac_sha256: Option<PiqaeHmacSha256Callback>,
+}
+
+pub type PiqaeGenerateConnectorKeyCallback = unsafe extern "C" fn(
+    *mut core::ffi::c_void,
+    *const u8,
+    usize,
+    *mut u8,
+    usize,
+    *mut usize,
+    *mut u8,
+    usize,
+) -> i32;
+pub type PiqaeSignConnectorCallback = unsafe extern "C" fn(
+    *mut core::ffi::c_void,
+    *const u8,
+    usize,
+    *const u8,
+    usize,
+    *mut u8,
+    usize,
+) -> i32;
+pub type PiqaeDeleteConnectorKeyCallback =
+    unsafe extern "C" fn(*mut core::ffi::c_void, *const u8, usize) -> i32;
+
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub struct PiqaeConnectorKeyProvider {
+    pub context: *mut core::ffi::c_void,
+    pub generate: Option<PiqaeGenerateConnectorKeyCallback>,
+    pub sign: Option<PiqaeSignConnectorCallback>,
+    pub delete: Option<PiqaeDeleteConnectorKeyCallback>,
+}
+
+impl std::fmt::Debug for PiqaeConnectorKeyProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PiqaeConnectorKeyProvider(<opaque host context>)")
+    }
+}
+unsafe impl Send for PiqaeConnectorKeyProvider {}
+unsafe impl Sync for PiqaeConnectorKeyProvider {}
+
+impl SecureConnectorSigner for PiqaeConnectorKeyProvider {
+    fn generate(&self, scope: &str) -> Result<GeneratedConnectorKey, ConnectorKeyError> {
+        let callback = self.generate.ok_or(ConnectorKeyError::Unavailable)?;
+        let mut handle = [0_u8; 256];
+        let mut handle_len = 0_usize;
+        let mut public = [0_u8; 32];
+        let status = unsafe {
+            callback(
+                self.context,
+                scope.as_ptr(),
+                scope.len(),
+                handle.as_mut_ptr(),
+                handle.len(),
+                &raw mut handle_len,
+                public.as_mut_ptr(),
+                public.len(),
+            )
+        };
+        if status != 0 || handle_len > handle.len() {
+            return Err(ConnectorKeyError::Unavailable);
+        }
+        let value = String::from_utf8(handle[..handle_len].to_vec())
+            .map_err(|_| ConnectorKeyError::InvalidKeyMaterial)?;
+        Ok(GeneratedConnectorKey {
+            handle: SecureKeyHandle::new(value)?,
+            public_key: public,
+        })
+    }
+    fn sign(
+        &self,
+        handle: &SecureKeyHandle,
+        message: &[u8],
+    ) -> Result<[u8; 64], ConnectorKeyError> {
+        let callback = self.sign.ok_or(ConnectorKeyError::Unavailable)?;
+        let mut output = [0_u8; 64];
+        let status = unsafe {
+            callback(
+                self.context,
+                handle.as_str().as_ptr(),
+                handle.as_str().len(),
+                message.as_ptr(),
+                message.len(),
+                output.as_mut_ptr(),
+                output.len(),
+            )
+        };
+        (status == 0)
+            .then_some(output)
+            .ok_or(ConnectorKeyError::Rejected)
+    }
+    fn delete(&self, handle: &SecureKeyHandle) -> Result<(), ConnectorKeyError> {
+        let callback = self.delete.ok_or(ConnectorKeyError::Unavailable)?;
+        let status = unsafe {
+            callback(
+                self.context,
+                handle.as_str().as_ptr(),
+                handle.as_str().len(),
+            )
+        };
+        (status == 0)
+            .then_some(())
+            .ok_or(ConnectorKeyError::Rejected)
+    }
 }
 
 impl std::fmt::Debug for PiqaeHostKeyProvider {
@@ -140,6 +247,9 @@ pub enum NativeCommand {
     DeriveOpaqueEvidence {
         namespace: String,
         canonical_identity: String,
+    },
+    PrepareConnectorKey {
+        application_scope: String,
     },
     RegisterAdapter {
         registration: EmbeddedAdapterRegistration,
@@ -278,6 +388,7 @@ struct Instance {
     configuration: NativeRuntimeConfiguration,
     runtime: Option<std::sync::Arc<NodeRuntime>>,
     host_key_provider: Option<PiqaeHostKeyProvider>,
+    connector_key_provider: Option<PiqaeConnectorKeyProvider>,
     embedded_queue: Option<std::sync::Arc<Mutex<EmbeddedQueue>>>,
     connector_registry: Option<std::sync::Arc<Mutex<ConnectorRegistry>>>,
     in_flight: std::sync::Arc<InFlight>,
@@ -348,12 +459,33 @@ pub extern "C" fn piqae_node_create(data: *const u8, length: usize) -> PiqaeBuff
                 configuration,
                 runtime: None,
                 host_key_provider: None,
+                connector_key_provider: None,
                 embedded_queue: None,
                 connector_registry: None,
                 in_flight: std::sync::Arc::new(InFlight::default()),
             },
         );
         Ok(json!({ "handle": handle }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn piqae_node_set_connector_key_provider(
+    handle: u64,
+    provider: PiqaeConnectorKeyProvider,
+) -> PiqaeBuffer {
+    ffi_entry(|| {
+        if provider.generate.is_none() || provider.sign.is_none() || provider.delete.is_none() {
+            return Err(FfiError::SecureConnectorProviderRequired);
+        }
+        let mut instances = lock_instances()?;
+        let instance = instances.get_mut(&handle).ok_or(FfiError::InvalidHandle)?;
+        if instance.runtime.is_some() || instance.connector_key_provider.is_some() {
+            return Err(FfiError::ProviderLocked);
+        }
+        instance.connector_key_provider = Some(provider);
+        drop(instances);
+        Ok(json!({"handle":handle,"connector_key_provider":"configured"}))
     })
 }
 
@@ -493,11 +625,12 @@ pub extern "C" fn piqae_node_command(handle: u64, data: *const u8, length: usize
         let bytes = input_bytes(data, length)?;
         let command =
             serde_json::from_slice::<NativeCommand>(bytes).map_err(|_| FfiError::InvalidCommand)?;
-        let (runtime, provider, embedded_queue, connector_registry, _in_flight) = {
+        let (runtime, provider, connector_provider, embedded_queue, connector_registry, _in_flight) = {
             let instances = lock_instances()?;
             let instance = instances.get(&handle).ok_or(FfiError::InvalidHandle)?;
             let runtime = instance.runtime.clone().ok_or(FfiError::NotStarted)?;
             let provider = instance.host_key_provider;
+            let connector_provider = instance.connector_key_provider;
             let embedded_queue = instance
                 .embedded_queue
                 .clone()
@@ -511,6 +644,7 @@ pub extern "C" fn piqae_node_command(handle: u64, data: *const u8, length: usize
             (
                 runtime,
                 provider,
+                connector_provider,
                 embedded_queue,
                 connector_registry,
                 in_flight,
@@ -530,6 +664,17 @@ pub extern "C" fn piqae_node_command(handle: u64, data: *const u8, length: usize
                     .opaque_evidence(provider, &namespace, canonical_identity.as_bytes())
                     .map_err(|_| FfiError::HostKeyUnavailable)?;
                 return Ok(json!({ "handle": handle, "opaque_evidence": evidence }));
+            }
+            NativeCommand::PrepareConnectorKey { application_scope } => {
+                let provider = connector_provider
+                    .as_ref()
+                    .ok_or(FfiError::SecureConnectorProviderRequired)?;
+                let generated = provider
+                    .generate(&application_scope)
+                    .map_err(|_| FfiError::SecureConnectorProviderRequired)?;
+                return Ok(
+                    json!({"handle":handle,"key_handle":generated.handle,"public_key_base64":base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(generated.public_key)}),
+                );
             }
             NativeCommand::RegisterAdapter { registration } => {
                 lock_embedded(&embedded_queue)?
@@ -562,7 +707,6 @@ pub extern "C" fn piqae_node_command(handle: u64, data: *const u8, length: usize
                 options_json,
                 expires_unix_ms,
             } => {
-                use base64::Engine as _;
                 let content = base64::engine::general_purpose::STANDARD
                     .decode(content_base64)
                     .map_err(|_| FfiError::InvalidCommand)?;
@@ -664,11 +808,37 @@ pub extern "C" fn piqae_node_command(handle: u64, data: *const u8, length: usize
                 return Err(FfiError::UnsupportedAdapterCapture);
             }
             NativeCommand::CompleteConnectorInvitationExchange {
-                invitation_nonce: _,
-                expires_unix_ms: _,
-                connector: _,
+                invitation_nonce,
+                expires_unix_ms,
+                connector,
             } => {
-                return Err(FfiError::SecureConnectorProviderRequired);
+                if invitation_nonce.is_empty()
+                    || invitation_nonce.len() > 256
+                    || expires_unix_ms <= chrono::Utc::now().timestamp_millis()
+                {
+                    return Err(FfiError::InvalidCommand);
+                }
+                let provider = connector_provider
+                    .as_ref()
+                    .ok_or(FfiError::SecureConnectorProviderRequired)?;
+                let key = connector
+                    .secure_key_handle
+                    .as_ref()
+                    .ok_or(FfiError::SecureConnectorProviderRequired)?;
+                provider
+                    .sign(
+                        key,
+                        format!(
+                            "piqae-connector-bind-v1\0{}\0{}",
+                            connector.connector_id, invitation_nonce
+                        )
+                        .as_bytes(),
+                    )
+                    .map_err(|_| FfiError::SecureConnectorProviderRequired)?;
+                lock_connectors(&connector_registry)?
+                    .add(connector)
+                    .map_err(|_| FfiError::ConnectorOperation)?;
+                return Ok(json!({"handle":handle,"connected":true}));
             }
             NativeCommand::ConnectorSnapshots => {
                 let connectors = lock_connectors(&connector_registry)?
@@ -856,7 +1026,6 @@ fn ffi_entry(operation: impl FnOnce() -> Result<Value, FfiError>) -> PiqaeBuffer
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use base64::Engine as _;
 
     fn unique_fixture() -> Vec<u8> {
         let mut fixture: Value = serde_json::from_slice(include_bytes!(

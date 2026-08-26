@@ -49,11 +49,16 @@ typedef struct PiqaeHostKeyProvider {
   void *context;
   PiqaeHmacSha256Callback hmac_sha256;
 } PiqaeHostKeyProvider;
+typedef int32_t (*PiqaeGenerateConnectorKeyCallback)(void *, const uint8_t *, size_t, uint8_t *, size_t, size_t *, uint8_t *, size_t);
+typedef int32_t (*PiqaeSignConnectorCallback)(void *, const uint8_t *, size_t, const uint8_t *, size_t, uint8_t *, size_t);
+typedef int32_t (*PiqaeDeleteConnectorKeyCallback)(void *, const uint8_t *, size_t);
+typedef struct PiqaeConnectorKeyProvider { void *context; PiqaeGenerateConnectorKeyCallback generate; PiqaeSignConnectorCallback sign; PiqaeDeleteConnectorKeyCallback delete_key; } PiqaeConnectorKeyProvider;
 
 PIQAE_NODE_API PiqaeNodeAbiDescriptor piqae_node_abi_descriptor(void);
 PIQAE_NODE_API PiqaeBuffer piqae_node_create(const uint8_t *data, size_t length);
 PIQAE_NODE_API PiqaeBuffer piqae_node_start(uint64_t handle);
 PIQAE_NODE_API PiqaeBuffer piqae_node_set_host_key_provider(uint64_t handle, PiqaeHostKeyProvider provider);
+PIQAE_NODE_API PiqaeBuffer piqae_node_set_connector_key_provider(uint64_t handle, PiqaeConnectorKeyProvider provider);
 PIQAE_NODE_API PiqaeBuffer piqae_node_stop(uint64_t handle);
 PIQAE_NODE_API PiqaeBuffer piqae_node_snapshot(uint64_t handle);
 PIQAE_NODE_API PiqaeBuffer piqae_node_command(uint64_t handle, const uint8_t *data, size_t length);

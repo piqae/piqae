@@ -12,6 +12,7 @@ crate-type = ["rlib", "staticlib", "cdylib"]
 
 [dependencies]
 base64.workspace = true
+chrono.workspace = true
 piqae-node-runtime = { path = "../node-runtime" }
 piqae-support-packs = { path = "../support-packs" }
 serde.workspace = true
