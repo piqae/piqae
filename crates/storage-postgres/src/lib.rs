@@ -3658,6 +3658,24 @@ impl PostgresStore {
         agent_id: AgentId,
     ) -> Result<(), StorageError> {
         let mut transaction = self.pool.begin().await?;
+        // Revocation is the serialization boundary for every topology write
+        // made on behalf of this node. Route projection takes a key-share lock
+        // on the same row, so either the projection commits first and is
+        // included below, or it observes the revocation and fails closed.
+        let active_agent: Option<String> = sqlx::query_scalar(
+            "SELECT id FROM agents
+             WHERE id = $1 AND workspace_id = $2 AND environment_id = $3
+               AND revoked_at IS NULL
+             FOR UPDATE",
+        )
+        .bind(agent_id.to_string())
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .fetch_optional(&mut *transaction)
+        .await?;
+        if active_agent.is_none() {
+            return Err(StorageError::NotFound);
+        }
         let route_ids: Vec<String> = sqlx::query_scalar(
             "SELECT id FROM printer_routes
              WHERE agent_id = $1 AND workspace_id = $2 AND environment_id = $3
@@ -3725,10 +3743,21 @@ impl PostgresStore {
             .await?;
             sqlx::query(
                 "UPDATE physical_destinations destination
-                 SET state = 'unavailable', updated_at = now()
+                 SET state = CASE
+                         WHEN destination.state = 'attention' THEN destination.state
+                         ELSE 'unavailable'
+                     END,
+                     updated_at = now()
                  WHERE destination.workspace_id = $1
                    AND destination.environment_id = $2
                    AND destination.retired_at IS NULL
+                   AND destination.id IN (
+                       SELECT DISTINCT route.destination_id
+                       FROM printer_routes route
+                       WHERE route.workspace_id = destination.workspace_id
+                         AND route.environment_id = destination.environment_id
+                         AND route.id = ANY($3)
+                   )
                    AND NOT EXISTS (
                        SELECT 1 FROM printer_routes route
                        WHERE route.workspace_id = destination.workspace_id
@@ -3739,6 +3768,7 @@ impl PostgresStore {
             )
             .bind(workspace_id.to_string())
             .bind(environment_id.to_string())
+            .bind(&route_ids)
             .execute(&mut *transaction)
             .await?;
         }
@@ -3765,6 +3795,26 @@ impl PostgresStore {
         .execute(&mut *transaction)
         .await?;
         sqlx::query(
+            "UPDATE routing_outbox outbox
+             SET processed_at = COALESCE(processed_at, now()), claimed_until = NULL
+             WHERE outbox.workspace_id = $1 AND outbox.environment_id = $2
+               AND outbox.aggregate_type = 'node_wake_hint'
+               AND outbox.event_type = 'node.wake_hint.requested'
+               AND EXISTS (
+                   SELECT 1 FROM node_wake_hints hint
+                   WHERE hint.workspace_id = outbox.workspace_id
+                     AND hint.environment_id = outbox.environment_id
+                     AND hint.id = outbox.aggregate_id
+                     AND hint.agent_id = $3
+                     AND hint.status = 'cancelled'
+               )",
+        )
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(agent_id.to_string())
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
             "UPDATE node_connectors SET revoked_at = now(), updated_at = now()
              WHERE agent_id = $1 AND workspace_id = $2 AND environment_id = $3
                AND revoked_at IS NULL",
@@ -3786,9 +3836,7 @@ impl PostgresStore {
         .execute(&mut *transaction)
         .await?
         .rows_affected();
-        if affected != 1 {
-            return Err(StorageError::NotFound);
-        }
+        debug_assert_eq!(affected, 1, "the active agent row is locked above");
         sqlx::query(
             "UPDATE jobs
              SET state = 'waiting_for_agent', lease_owner = NULL, lease_until = NULL,
@@ -7265,6 +7313,23 @@ impl PostgresStore {
         limit: i64,
     ) -> Result<Vec<PendingWakeHintDispatch>, StorageError> {
         let mut transaction = self.pool.begin().await?;
+        // Terminal hints are never dispatchable. Mark their outbox rows
+        // complete before claiming so cancellation/observation that won a race
+        // cannot later emit a stale wake request.
+        sqlx::query(
+            "UPDATE routing_outbox outbox
+             SET processed_at = COALESCE(processed_at, now()), claimed_until = NULL
+             FROM node_wake_hints hint
+             WHERE outbox.aggregate_type='node_wake_hint'
+               AND outbox.event_type='node.wake_hint.requested'
+               AND outbox.processed_at IS NULL
+               AND hint.workspace_id=outbox.workspace_id
+               AND hint.environment_id=outbox.environment_id
+               AND hint.id=outbox.aggregate_id
+               AND (hint.status<>'pending' OR hint.expires_at<=now())",
+        )
+        .execute(&mut *transaction)
+        .await?;
         sqlx::query(
             "UPDATE node_wake_hints SET status='expired'
              WHERE status='pending' AND expires_at<=now()",
@@ -7323,6 +7388,7 @@ impl PostgresStore {
                    AND outbox.processed_at IS NULL
                    AND outbox.available_at<=now()
                    AND (outbox.claimed_until IS NULL OR outbox.claimed_until<=now())
+                   AND hint.status='pending'
                    AND hint.expires_at>now()
                  ORDER BY outbox.available_at,outbox.created_at,outbox.id
                  FOR UPDATE OF outbox SKIP LOCKED LIMIT $1
