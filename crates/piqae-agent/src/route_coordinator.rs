@@ -50,6 +50,11 @@ struct CoordinatorDocument {
 struct DurableRoute {
     route_id: String,
     coordination_key: String,
+    /// Set when independently occupied exclusion domains are later observed
+    /// as one physical group. New reservations fail closed until the active
+    /// fences resolve and a later reconciliation can safely regroup routes.
+    #[serde(default)]
+    coordination_conflict: bool,
     native_fingerprint: String,
     generation: u64,
     present: bool,
@@ -154,7 +159,12 @@ impl RouteCoordinator {
         {
             bail!("route coordinator state exceeds supported bounds");
         }
-        let coordinator = Self { root, document };
+        let mut coordinator = Self { root, document };
+        // Repair an intermediate journal written by an older coordinator
+        // which re-keyed route evidence without moving the unresolved fence.
+        // This also restores the persisted exclusion domain before any worker
+        // can reserve after process restart.
+        coordinator.reconcile_coordination_keys();
         coordinator.persist()?;
         Ok(coordinator)
     }
@@ -173,7 +183,7 @@ impl RouteCoordinator {
             let evidence = canonical_evidence(printer);
             let confidence = identity_confidence(&evidence);
             let fingerprint = topology_fingerprint(&evidence);
-            let coordination_key = physical_coordination_key(&route_id, &evidence);
+            let desired_coordination_key = physical_coordination_key(&route_id, &evidence);
             let change = match self.document.routes.get(&printer.native_id) {
                 None => Some(TopologyChange::Added),
                 Some(route) if !route.present || route.native_fingerprint != fingerprint => {
@@ -184,16 +194,23 @@ impl RouteCoordinator {
             if change.is_some() {
                 self.document.topology_revision = self.document.topology_revision.saturating_add(1);
             }
-            let generation = self
-                .document
-                .routes
-                .get(&printer.native_id)
-                .map_or(0, |route| route.generation);
+            let previous = self.document.routes.get(&printer.native_id);
+            let generation = previous.map_or(0, |route| route.generation);
+            // Preserve the prior exclusion domain until the batch planner has
+            // considered every active reservation and every alias. Writing
+            // the newly observed key directly here would create a window in
+            // which a reservation remained under the old map key while this
+            // route escaped to a new one.
+            let coordination_key = previous.map_or_else(
+                || desired_coordination_key.clone(),
+                |route| route.coordination_key.clone(),
+            );
             self.document.routes.insert(
                 printer.native_id.clone(),
                 DurableRoute {
                     route_id: route_id.clone(),
                     coordination_key,
+                    coordination_conflict: false,
                     native_fingerprint: fingerprint,
                     generation,
                     present: true,
@@ -233,6 +250,7 @@ impl RouteCoordinator {
             }
             self.record_topology_change(&route_id, TopologyChange::Removed, observed_at);
         }
+        self.reconcile_coordination_keys();
         self.persist()?;
         Ok(snapshots)
     }
@@ -281,11 +299,9 @@ impl RouteCoordinator {
         now_unix_ms: i64,
     ) -> Result<RouteReservation> {
         let route_id = self.route_id(native_id);
-        let coordination_key = self
-            .document
-            .routes
-            .get(native_id)
-            .map_or_else(|| route_id.clone(), |route| route.coordination_key.clone());
+        let route = self.document.routes.get(native_id);
+        let coordination_key =
+            route.map_or_else(|| route_id.clone(), |route| route.coordination_key.clone());
         if self.document.handoffs.iter().rev().any(|handoff| {
             handoff.job_id == job_id
                 && matches!(
@@ -311,6 +327,9 @@ impl RouteCoordinator {
             // an unresolved reservation solely because its advisory deadline
             // elapsed; explicit terminal evidence is required first.
             bail!("printer route is reserved by another connector");
+        }
+        if route.is_some_and(|route| route.coordination_conflict) {
+            bail!("printer route has conflicting unresolved physical reservations");
         }
         let generation = self
             .document
@@ -384,13 +403,13 @@ impl RouteCoordinator {
         {
             bail!("cloud route reservation generation is stale for this job");
         }
-        let coordination_key = self
+        let route = self
             .document
             .routes
             .values()
             .find(|route| route.route_id == expected_route)
-            .map(|route| route.coordination_key.clone())
             .context("cloud reservation references an unknown local route")?;
+        let coordination_key = route.coordination_key.clone();
         if let Some(existing) = self.document.reservations.get(&coordination_key) {
             if existing.connector_id == connector_id
                 && existing.job_id == job_id
@@ -402,6 +421,9 @@ impl RouteCoordinator {
                 return Ok(());
             }
             bail!("printer route already has an unresolved reservation");
+        }
+        if route.coordination_conflict {
+            bail!("printer route has conflicting unresolved physical reservations");
         }
         self.document.reservations.insert(
             coordination_key,
@@ -609,6 +631,75 @@ impl RouteCoordinator {
             change,
         });
         trim_front(&mut self.document.topology_changes, MAX_TOPOLOGY_CHANGES);
+    }
+
+    /// Reconciles newly observed physical identity with the exclusion domains
+    /// already occupied by unresolved reservations. An occupied domain wins
+    /// over a newly derived physical key. If a proposed physical group would
+    /// combine two independently occupied domains, every involved route is
+    /// marked conflicted and refuses new reservations until later evidence is
+    /// reconciled after those fences resolve.
+    fn reconcile_coordination_keys(&mut self) {
+        let active_keys = self
+            .document
+            .reservations
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let mut desired_by_native = BTreeMap::new();
+        let mut occupied_by_desired = BTreeMap::<String, BTreeSet<String>>::new();
+        for (native_id, route) in &self.document.routes {
+            let desired = physical_coordination_key(&route.route_id, &route.identity_evidence);
+            if active_keys.contains(&route.coordination_key) {
+                occupied_by_desired
+                    .entry(desired.clone())
+                    .or_default()
+                    .insert(route.coordination_key.clone());
+            }
+            desired_by_native.insert(native_id.clone(), desired);
+        }
+        // The reservation's local route is authoritative even when an older
+        // buggy journal already wrote a different effective key onto it.
+        for (active_key, reservation) in &self.document.reservations {
+            if let Some((_, desired)) = desired_by_native.iter().find(|(native_id, _)| {
+                self.document
+                    .routes
+                    .get(*native_id)
+                    .is_some_and(|route| route.route_id == reservation.local_route_key)
+            }) {
+                occupied_by_desired
+                    .entry(desired.clone())
+                    .or_default()
+                    .insert(active_key.clone());
+            }
+        }
+        for (native_id, route) in &mut self.document.routes {
+            let Some(desired) = desired_by_native.get(native_id) else {
+                continue;
+            };
+            match occupied_by_desired.get(desired) {
+                Some(occupied) if occupied.len() > 1 => {
+                    route.coordination_conflict = true;
+                    // Preserve an occupied prior key so existing reservation
+                    // handles still validate and can reach terminal evidence.
+                    // Unoccupied aliases retain the observed key but cannot
+                    // reserve while the conflict flag is set.
+                    if !active_keys.contains(&route.coordination_key) {
+                        route.coordination_key.clone_from(desired);
+                    }
+                }
+                Some(occupied) if occupied.len() == 1 => {
+                    if let Some(active_key) = occupied.first() {
+                        route.coordination_key.clone_from(active_key);
+                    }
+                    route.coordination_conflict = false;
+                }
+                _ => {
+                    route.coordination_key.clone_from(desired);
+                    route.coordination_conflict = false;
+                }
+            }
+        }
     }
 
     fn persist(&self) -> Result<()> {
@@ -822,6 +913,31 @@ mod tests {
         }
     }
 
+    fn strong_aliases(evidence: &PhysicalIdentityEvidence) -> Vec<DiscoveredPrinter> {
+        ["native-a", "native-b", "native-new-alias"]
+            .into_iter()
+            .map(|native_id| printer(native_id, vec![evidence.clone()]))
+            .collect()
+    }
+
+    fn reject_before_handoff(
+        coordinator: &mut RouteCoordinator,
+        connector_id: &str,
+        job_id: &str,
+        reservation: &RouteReservation,
+    ) {
+        coordinator
+            .finish(
+                connector_id,
+                job_id,
+                reservation,
+                NativeHandoffOutcome::RejectedBeforeHandoff,
+                None,
+                Utc::now(),
+            )
+            .unwrap();
+    }
+
     #[test]
     fn route_identity_is_shared_by_connectors_and_survives_restart() {
         let root = TempDir::new().unwrap();
@@ -964,6 +1080,162 @@ mod tests {
                 .reserve("self_hosted", "native-alias", "job_b", 4)
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn reservation_evidence_upgrade_and_new_alias_keep_the_old_fence_after_restart() {
+        let root = TempDir::new().unwrap();
+        let mut coordinator = RouteCoordinator::open(root.path()).unwrap();
+        coordinator
+            .reconcile(&[printer("native-primary", Vec::new())], 1, Utc::now())
+            .unwrap();
+        let held = coordinator
+            .reserve("hosted", "native-primary", "job_a", 1)
+            .unwrap();
+        let old_exclusion_domain = held.coordination_key.clone();
+        let strong = PhysicalIdentityEvidence {
+            kind: PhysicalIdentityEvidenceKind::IppPrinterUuid,
+            value_sha256: "a".repeat(64),
+            strength: IdentityEvidenceStrength::Strong,
+        };
+        coordinator
+            .reconcile(
+                &[
+                    printer("native-primary", vec![strong.clone()]),
+                    printer("native-alias", vec![strong]),
+                ],
+                2,
+                Utc::now(),
+            )
+            .unwrap();
+        assert_eq!(
+            coordinator.coordination_key("native-primary"),
+            Some(old_exclusion_domain.as_str())
+        );
+        assert_eq!(
+            coordinator.coordination_key("native-alias"),
+            Some(old_exclusion_domain.as_str())
+        );
+        assert!(
+            coordinator
+                .reserve("self_hosted", "native-alias", "job_b", 2)
+                .is_err(),
+            "new physical aliases must join the unresolved old exclusion domain"
+        );
+
+        drop(coordinator);
+        let mut restarted = RouteCoordinator::open(root.path()).unwrap();
+        assert_eq!(
+            restarted.coordination_key("native-alias"),
+            Some(old_exclusion_domain.as_str())
+        );
+        assert!(
+            restarted
+                .reserve("self_hosted", "native-alias", "job_b", 3)
+                .is_err(),
+            "restart must not let evidence re-keying escape an active fence"
+        );
+        restarted
+            .finish(
+                "hosted",
+                "job_a",
+                &held,
+                NativeHandoffOutcome::RejectedBeforeHandoff,
+                None,
+                Utc::now(),
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn independently_reserved_groups_fail_closed_then_regroup_after_resolution() {
+        let root = TempDir::new().unwrap();
+        let mut coordinator = RouteCoordinator::open(root.path()).unwrap();
+        coordinator
+            .reconcile(
+                &[
+                    printer("native-a", Vec::new()),
+                    printer("native-b", Vec::new()),
+                ],
+                1,
+                Utc::now(),
+            )
+            .unwrap();
+        let first = coordinator
+            .reserve("hosted", "native-a", "job_a", 1)
+            .unwrap();
+        let second = coordinator
+            .reserve("self_hosted", "native-b", "job_b", 1)
+            .unwrap();
+        let strong = PhysicalIdentityEvidence {
+            kind: PhysicalIdentityEvidenceKind::IppPrinterUuid,
+            value_sha256: "b".repeat(64),
+            strength: IdentityEvidenceStrength::Strong,
+        };
+        coordinator
+            .reconcile(&strong_aliases(&strong), 2, Utc::now())
+            .unwrap();
+        assert!(
+            coordinator
+                .document
+                .routes
+                .values()
+                .all(|route| route.coordination_conflict)
+        );
+        assert!(
+            coordinator
+                .reserve("third", "native-new-alias", "job_c", 2)
+                .is_err(),
+            "an alias cannot enter a physical group with two occupied domains"
+        );
+
+        drop(coordinator);
+        let mut restarted = RouteCoordinator::open(root.path()).unwrap();
+        assert!(
+            restarted
+                .reserve("third", "native-new-alias", "job_c", 3)
+                .is_err(),
+            "the merge conflict must remain fail-closed across restart"
+        );
+        reject_before_handoff(&mut restarted, "hosted", "job_a", &first);
+        reject_before_handoff(&mut restarted, "self_hosted", "job_b", &second);
+        assert!(
+            restarted
+                .reserve("third", "native-new-alias", "job_c", 4)
+                .is_err(),
+            "terminal resolution is persisted before a later reconcile clears the conflict"
+        );
+        restarted
+            .reconcile(&strong_aliases(&strong), 3, Utc::now())
+            .unwrap();
+        assert!(
+            restarted
+                .document
+                .routes
+                .values()
+                .all(|route| !route.coordination_conflict)
+        );
+        assert_eq!(
+            restarted.coordination_key("native-a"),
+            restarted.coordination_key("native-b")
+        );
+        let regrouped = restarted
+            .reserve("third", "native-new-alias", "job_c", 5)
+            .unwrap();
+        assert!(
+            restarted.reserve("hosted", "native-a", "job_d", 6).is_err(),
+            "safely regrouped aliases must share the next reservation"
+        );
+        restarted
+            .finish(
+                "third",
+                "job_c",
+                &regrouped,
+                NativeHandoffOutcome::RejectedBeforeHandoff,
+                None,
+                Utc::now(),
+            )
+            .unwrap();
     }
 
     #[test]
