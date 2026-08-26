@@ -150,6 +150,16 @@ public actor PiqaeFakeRemoteNotificationProvider:
     }
 }
 
+public struct PiqaeFixedHostKeyStore: PiqaeHostKeyStore {
+    private let key: Data
+
+    public init(key: Data = Data(repeating: 7, count: 32)) {
+        self.key = key
+    }
+
+    public func loadOrCreateKey() throws -> Data { key }
+}
+
 public actor PiqaeFakeInstalledNodeIPC: PiqaeInstalledNodeIPC {
     private let protocolVersion: UInt32?
     private var snapshotValue: PiqaeNodeSnapshot
