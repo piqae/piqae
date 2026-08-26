@@ -91,6 +91,7 @@ impl PeerApplicationEvidence {
         }
     }
 
+    #[cfg(any(target_os = "macos", windows))]
     const fn verified(
         application: BrokerApplicationIdentity,
         principal_sha256: String,
