@@ -46,7 +46,7 @@ impl WakeHintWorker {
                 )
                 .await;
             let published = match ensure {
-                Ok(hint) => {
+                Ok(hint) if hint.status == "pending" && hint.expires_at > chrono::Utc::now() => {
                     self.state
                         .publish(
                             tenant,
@@ -55,6 +55,9 @@ impl WakeHintWorker {
                         )
                         .await
                 }
+                // Observation, cancellation, or expiry won before dispatch.
+                // Completing the stale outbox item emits no wake event.
+                Ok(_) => Ok(()),
                 Err(error) => Err(crate::repository::RepositoryError::Persistence(
                     error.to_string(),
                 )),

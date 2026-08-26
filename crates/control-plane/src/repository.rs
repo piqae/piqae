@@ -11,6 +11,9 @@ use piqae_domain::{
     PrinterCapabilities, PrinterId, PrinterState, WorkspaceId, validate_transition,
 };
 use piqae_protocol::agent::AgentCommand;
+use piqae_storage_postgres::destination_topology::{
+    DestinationTopologyRepository, MemoryDestinationTopologyRepository, TenantScope,
+};
 use piqae_storage_postgres::{
     AgentAuthenticationRecord, CreateDocumentResult, CreateJobResult as PgCreateJobResult,
     DeliveryAttemptProof, DestinationRouteReassignment, DocumentRenderWork, EnrolledAgent,
@@ -88,6 +91,10 @@ impl From<StorageError> for RepositoryError {
 
 #[async_trait]
 pub trait Repository: Send + Sync + 'static {
+    fn memory_destination_topology(&self) -> Option<Arc<dyn DestinationTopologyRepository>> {
+        None
+    }
+
     async fn ready(&self) -> Result<(), RepositoryError>;
     async fn create_document_template(
         &self,
@@ -3377,9 +3384,20 @@ struct MemoryState {
 #[derive(Clone, Debug, Default)]
 pub struct MemoryRepository {
     state: Arc<RwLock<MemoryState>>,
+    destination_topology: MemoryDestinationTopologyRepository,
 }
 
 impl MemoryRepository {
+    #[must_use]
+    pub fn with_destination_topology(
+        destination_topology: MemoryDestinationTopologyRepository,
+    ) -> Self {
+        Self {
+            state: Arc::default(),
+            destination_topology,
+        }
+    }
+
     #[cfg(test)]
     pub async fn expire_document_render_lease_for_test(&self, id: &str) {
         if let Some((_, _, _, _, render)) = self.state.write().await.document_renders.get_mut(id) {
@@ -3480,6 +3498,10 @@ impl MemoryRepository {
 
 #[async_trait]
 impl Repository for MemoryRepository {
+    fn memory_destination_topology(&self) -> Option<Arc<dyn DestinationTopologyRepository>> {
+        Some(Arc::new(self.destination_topology.clone()))
+    }
+
     async fn ready(&self) -> Result<(), RepositoryError> {
         Ok(())
     }
@@ -4653,7 +4675,66 @@ impl Repository for MemoryRepository {
         if !belongs_to_tenant {
             return Err(RepositoryError::NotFound);
         }
+        let revoked_at = Utc::now();
+        for ((connector_workspace, connector_environment, connector_agent, _), connector) in
+            &mut state.node_connectors
+        {
+            if *connector_workspace == workspace_id
+                && *connector_environment == environment_id
+                && *connector_agent == agent_id
+                && connector.revoked_at.is_none()
+            {
+                connector.revoked_at = Some(revoked_at);
+            }
+        }
+        for item in state.wake_hint_outbox.values_mut().filter(|item| {
+            item.workspace_id == workspace_id
+                && item.environment_id == environment_id
+                && item.hint.agent_id == agent_id.to_string()
+        }) {
+            if item.hint.status == "pending" {
+                item.hint.status = "cancelled".into();
+            }
+            item.processed_at.get_or_insert(revoked_at);
+            item.claimed_until = None;
+        }
+        let waiting_jobs = state
+            .jobs
+            .iter()
+            .filter(|(_, record)| {
+                record.job.workspace_id == workspace_id
+                    && record.job.environment_id == environment_id
+                    && record.agent_id == agent_id
+                    && matches!(
+                        record.job.state,
+                        JobState::Registered
+                            | JobState::ContentPending
+                            | JobState::WaitingForAgent
+                            | JobState::AgentDownloading
+                    )
+            })
+            .map(|(job_id, _)| *job_id)
+            .collect::<Vec<_>>();
+        for job_id in waiting_jobs {
+            if let Some(record) = state.jobs.get_mut(&job_id) {
+                record.job.state = JobState::WaitingForAgent;
+            }
+            state.leases.remove(&job_id);
+        }
+        state
+            .agent_installations
+            .retain(|_, installed_agent| *installed_agent != agent_id);
         state.agents.remove(&agent_id);
+        drop(state);
+        self.destination_topology
+            .revoke_agent_topology(
+                TenantScope {
+                    workspace_id,
+                    environment_id,
+                },
+                &agent_id.to_string(),
+            )
+            .map_err(RepositoryError::from)?;
         Ok(())
     }
 
@@ -6516,6 +6597,7 @@ impl Repository for MemoryRepository {
                 item.processed_at.is_none()
                     && item.available_at <= now
                     && item.claimed_until.is_none_or(|until| until <= now)
+                    && item.hint.status == "pending"
                     && item.hint.expires_at > now
             })
             .map(|(id, item)| (item.available_at, id.clone()))
@@ -6971,7 +7053,13 @@ impl Repository for MemoryRepository {
 mod routing_repository_tests {
     use super::*;
     use piqae_domain::JobOptions;
-    use piqae_storage_postgres::PrinterProfileSnapshot;
+    use piqae_storage_postgres::{
+        PrinterProfileSnapshot,
+        destination_topology::{
+            DestinationTopologyRepository, IdentityConfidence, NodeWakeHint,
+            StoredPhysicalDestination, StoredPrinterRoute,
+        },
+    };
     use std::collections::BTreeMap;
 
     #[tokio::test]
@@ -7553,6 +7641,204 @@ mod routing_repository_tests {
                 .await,
             Err(RepositoryError::NotFound)
         ));
+    }
+
+    #[tokio::test]
+    async fn memory_node_revocation_retires_linked_state_and_fences_stale_projection() {
+        let repository = MemoryRepository::default();
+        let workspace = WorkspaceId::new();
+        let environment = EnvironmentId::new();
+        let scope = TenantScope {
+            workspace_id: workspace,
+            environment_id: environment,
+        };
+        let node = AgentId::new();
+        let printer = PrinterId::new();
+        let job_id = JobId::new();
+        let now = Utc::now();
+        let connector_id = format!("ncon_{node}");
+        let wake_id = "wkh_memory_revoke".to_owned();
+        let outbox_id = "evt_memory_revoke".to_owned();
+        let lease_id = Uuid::new_v4();
+        {
+            let mut state = repository.state.write().await;
+            state.agents.insert(
+                node,
+                (
+                    workspace,
+                    environment,
+                    StoredAgent {
+                        id: node,
+                        name: "Revoked memory node".into(),
+                        platform: "test".into(),
+                        state: "connected".into(),
+                        version: "1".into(),
+                        last_seen_at: now,
+                        health_started_at: None,
+                        health_observed_at: None,
+                        sqlite_integrity_ok: None,
+                        executor_crashes: 0,
+                        last_error_code: None,
+                    },
+                ),
+            );
+            state.node_connectors.insert(
+                (workspace, environment, node, connector_id.clone()),
+                StoredNodeConnector {
+                    id: connector_id,
+                    node_id: node,
+                    permissions: serde_json::json!({"printers":"all"}),
+                    revoked_at: None,
+                    created_at: now,
+                },
+            );
+            state.jobs.insert(
+                job_id,
+                MemoryJob {
+                    job: Job {
+                        id: job_id,
+                        workspace_id: workspace,
+                        environment_id: environment,
+                        printer_id: printer,
+                        title: "Queued fixture".into(),
+                        source: None,
+                        content_kind: piqae_domain::ContentKind::Pdf,
+                        content: piqae_domain::ContentSource::Base64 {
+                            data: "JVBERi0=".into(),
+                        },
+                        options: JobOptions::default(),
+                        metadata: BTreeMap::new(),
+                        deliveries: 1,
+                        state: JobState::AgentDownloading,
+                        created_at: now,
+                        expires_at: now + chrono::Duration::hours(1),
+                        delivery_uncertain_since: None,
+                    },
+                    agent_id: node,
+                    sequence: 3,
+                    events: Vec::new(),
+                },
+            );
+            state.leases.insert(
+                job_id,
+                (
+                    node,
+                    lease_id,
+                    "memory-lease-token".into(),
+                    now + chrono::Duration::minutes(1),
+                ),
+            );
+            state.wake_hint_outbox.insert(
+                outbox_id.clone(),
+                MemoryWakeHintOutbox {
+                    workspace_id: workspace,
+                    environment_id: environment,
+                    hint: NodeWakeHint {
+                        id: wake_id,
+                        agent_id: node.to_string(),
+                        reason: "job_available".into(),
+                        delivery_channel: "external_push".into(),
+                        status: "pending".into(),
+                        requested_at: now,
+                        expires_at: now + chrono::Duration::minutes(5),
+                        observed_at: None,
+                    },
+                    idempotency_key: "memory-revoke-wake".into(),
+                    attempts: 0,
+                    available_at: now,
+                    claimed_until: None,
+                    processed_at: None,
+                },
+            );
+        }
+        let destination = StoredPhysicalDestination {
+            id: "pdst_memory_revoke".into(),
+            name: "Attention destination".into(),
+            identity_confidence: IdentityConfidence::Conflict,
+            state: "attention".into(),
+            scheduling_authority_id: None,
+            identity_revision: 1,
+            created_at: now,
+            updated_at: now,
+        };
+        repository
+            .destination_topology
+            .upsert_destination(scope, &destination)
+            .await
+            .expect("memory destination fixture");
+        let route = StoredPrinterRoute {
+            id: "rte_memory_revoke".into(),
+            destination_id: destination.id.clone(),
+            printer_id: printer.to_string(),
+            agent_id: node.to_string(),
+            native_queue_id: "native-memory".into(),
+            local_route_key: Some("local-memory".into()),
+            state: "available".into(),
+            role: "primary".into(),
+            priority: 0,
+            enabled: true,
+            capability_revision: 1,
+            profile_revision: 1,
+            last_seen_at: Some(now),
+            created_at: now,
+            updated_at: now,
+        };
+        repository
+            .destination_topology
+            .upsert_route(scope, &route)
+            .await
+            .expect("memory route fixture");
+
+        repository
+            .revoke_agent(workspace, environment, node)
+            .await
+            .expect("memory node revocation");
+
+        let state = repository.state.read().await;
+        assert!(!state.agents.contains_key(&node));
+        assert_eq!(state.jobs[&job_id].job.state, JobState::WaitingForAgent);
+        assert!(!state.leases.contains_key(&job_id));
+        assert!(
+            state
+                .node_connectors
+                .values()
+                .all(|item| item.revoked_at.is_some())
+        );
+        assert_eq!(state.wake_hint_outbox[&outbox_id].hint.status, "cancelled");
+        assert!(state.wake_hint_outbox[&outbox_id].processed_at.is_some());
+        drop(state);
+        assert_eq!(
+            repository
+                .destination_topology
+                .get_route(scope, &route.id)
+                .await
+                .expect("retained route audit")
+                .state,
+            "retired"
+        );
+        assert_eq!(
+            repository
+                .destination_topology
+                .get_destination(scope, &destination.id)
+                .await
+                .expect("retained attention destination")
+                .state,
+            "attention"
+        );
+        assert!(matches!(
+            repository
+                .destination_topology
+                .upsert_route(scope, &route)
+                .await,
+            Err(StorageError::NotFound)
+        ));
+        assert!(
+            repository
+                .claim_wake_hint_dispatches(10)
+                .await
+                .expect("terminal wake claim")
+                .is_empty()
+        );
     }
 
     #[tokio::test]
