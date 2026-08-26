@@ -15,21 +15,22 @@ use piqae_storage_postgres::{
     AgentAuthenticationRecord, CreateDocumentResult, CreateJobResult as PgCreateJobResult,
     DeliveryAttemptProof, DestinationRouteReassignment, DocumentRenderWork, EnrolledAgent,
     ExpiredDocumentArtifactWork, JobLease, NewDeviceAuthorization, NodeUpdatePolicy,
-    NodeUpdateState, PostgresStore, StorageError, StoredAgent, StoredAgentCommandBatch,
-    StoredApiKey, StoredBillingSummary, StoredConnectSessionPreview, StoredContentEncryptionKey,
-    StoredDeviceAuthorization, StoredDocumentPreview, StoredDocumentRender, StoredDocumentTemplate,
-    StoredDocumentTemplateRevision, StoredLoadedMedia, StoredNodeConnector, StoredNodeDiagnostic,
-    StoredNodeUpdate, StoredPlatformAccount, StoredPlatformCredential, StoredPrintWorkflow,
-    StoredPrinter, StoredResolvedPrintTicket, StoredStock, StoredTarget, StoredTargetBinding,
-    StoredTenantEvent, StoredUpload, StoredUsageSummary, StoredWebhook, StoredWebhookDelivery,
-    StoredWorkspace, StoredWorkspaceMember, StripeBillingEvent, StripeProjectionResult,
-    SyncedPrinter, UpsertedPlatformAccount, WebhookDeliveryWork, WorkOsIdentityEvent,
-    WorkOsProjectionResult,
+    NodeUpdateState, PendingWakeHintDispatch, PostgresStore, StorageError, StoredAgent,
+    StoredAgentCommandBatch, StoredApiKey, StoredBillingSummary, StoredConnectSessionPreview,
+    StoredContentEncryptionKey, StoredDeviceAuthorization, StoredDocumentPreview,
+    StoredDocumentRender, StoredDocumentTemplate, StoredDocumentTemplateRevision,
+    StoredLoadedMedia, StoredNodeConnector, StoredNodeDiagnostic, StoredNodeUpdate,
+    StoredPlatformAccount, StoredPlatformCredential, StoredPrintWorkflow, StoredPrinter,
+    StoredResolvedPrintTicket, StoredStock, StoredTarget, StoredTargetBinding, StoredTenantEvent,
+    StoredUpload, StoredUsageSummary, StoredWebhook, StoredWebhookDelivery, StoredWorkspace,
+    StoredWorkspaceMember, StripeBillingEvent, StripeProjectionResult, SyncedPrinter,
+    UpsertedPlatformAccount, WebhookDeliveryWork, WorkOsIdentityEvent, WorkOsProjectionResult,
 };
 use sha2::Digest as _;
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
+    time::Duration as StdDuration,
 };
 use thiserror::Error;
 use tokio::sync::RwLock;
@@ -1000,6 +1001,23 @@ pub trait Repository: Send + Sync + 'static {
         agent_id: Option<AgentId>,
         native_job_id: Option<String>,
     ) -> Result<Job, RepositoryError>;
+    async fn ensure_waiting_job_wake_hints(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        job_id: JobId,
+    ) -> Result<usize, RepositoryError>;
+    async fn repair_waiting_job_wake_hints(&self, limit: i64) -> Result<usize, RepositoryError>;
+    async fn claim_wake_hint_dispatches(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<PendingWakeHintDispatch>, RepositoryError>;
+    async fn complete_wake_hint_dispatch(&self, outbox_id: &str) -> Result<(), RepositoryError>;
+    async fn retry_wake_hint_dispatch(
+        &self,
+        outbox_id: &str,
+        delay: StdDuration,
+    ) -> Result<(), RepositoryError>;
     async fn request_job_cancellation(
         &self,
         workspace_id: WorkspaceId,
@@ -2919,6 +2937,48 @@ impl Repository for PostgresStore {
             .map_err(Into::into)
     }
 
+    async fn ensure_waiting_job_wake_hints(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        job_id: JobId,
+    ) -> Result<usize, RepositoryError> {
+        PostgresStore::ensure_waiting_job_wake_hints(self, workspace_id, environment_id, job_id)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn repair_waiting_job_wake_hints(&self, limit: i64) -> Result<usize, RepositoryError> {
+        PostgresStore::repair_waiting_job_wake_hints(self, limit)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn claim_wake_hint_dispatches(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<PendingWakeHintDispatch>, RepositoryError> {
+        PostgresStore::claim_wake_hint_dispatches(self, limit)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn complete_wake_hint_dispatch(&self, outbox_id: &str) -> Result<(), RepositoryError> {
+        PostgresStore::complete_wake_hint_dispatch(self, outbox_id)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn retry_wake_hint_dispatch(
+        &self,
+        outbox_id: &str,
+        delay: StdDuration,
+    ) -> Result<(), RepositoryError> {
+        PostgresStore::retry_wake_hint_dispatch(self, outbox_id, delay)
+            .await
+            .map_err(Into::into)
+    }
+
     async fn request_job_cancellation(
         &self,
         workspace_id: WorkspaceId,
@@ -3155,6 +3215,18 @@ struct MemoryJobAcceptance {
 }
 
 #[derive(Clone, Debug)]
+struct MemoryWakeHintOutbox {
+    workspace_id: WorkspaceId,
+    environment_id: EnvironmentId,
+    hint: piqae_storage_postgres::destination_topology::NodeWakeHint,
+    idempotency_key: String,
+    attempts: u32,
+    available_at: DateTime<Utc>,
+    claimed_until: Option<DateTime<Utc>>,
+    processed_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Clone, Debug)]
 struct MemoryDeviceAuthorization {
     record: StoredDeviceAuthorization,
     device_code_hash: String,
@@ -3162,6 +3234,69 @@ struct MemoryDeviceAuthorization {
     public_key: Vec<u8>,
     agent_version: String,
     installation_id: String,
+}
+
+fn ensure_memory_waiting_job_wake_hint(
+    state: &mut MemoryState,
+    workspace_id: WorkspaceId,
+    environment_id: EnvironmentId,
+    job_id: JobId,
+) -> Result<usize, RepositoryError> {
+    let record = state.jobs.get(&job_id).ok_or(RepositoryError::NotFound)?;
+    if record.job.workspace_id != workspace_id || record.job.environment_id != environment_id {
+        return Err(RepositoryError::NotFound);
+    }
+    if record.job.state != JobState::WaitingForAgent {
+        return Ok(0);
+    }
+    let (sequence, agent_id) = (record.sequence, record.agent_id);
+    let reconciliation_key = (workspace_id, environment_id, job_id, sequence);
+    if let Some(candidate_count) = state.wake_reconciliations.get(&reconciliation_key) {
+        return Ok(*candidate_count);
+    }
+    let active_assignee =
+        state
+            .agents
+            .get(&agent_id)
+            .is_some_and(|(agent_workspace_id, agent_environment_id, _)| {
+                *agent_workspace_id == workspace_id && *agent_environment_id == environment_id
+            });
+    let candidate_count = usize::from(active_assignee);
+    state
+        .wake_reconciliations
+        .insert(reconciliation_key, candidate_count);
+    if !active_assignee {
+        return Ok(0);
+    }
+    let digest = sha2::Sha256::digest(
+        format!("{workspace_id}:{environment_id}:{job_id}:{sequence}:{agent_id}").as_bytes(),
+    );
+    let idempotency_key = format!("automatic-wake:{digest:x}");
+    let now = Utc::now();
+    let hint = piqae_storage_postgres::destination_topology::NodeWakeHint {
+        id: format!("wkh_{}", ulid::Ulid::new()),
+        agent_id: agent_id.to_string(),
+        reason: "job_available".into(),
+        delivery_channel: "external_push".into(),
+        status: "pending".into(),
+        requested_at: now,
+        expires_at: now + chrono::Duration::minutes(5),
+        observed_at: None,
+    };
+    state.wake_hint_outbox.insert(
+        EventId::new().to_string(),
+        MemoryWakeHintOutbox {
+            workspace_id,
+            environment_id,
+            hint,
+            idempotency_key,
+            attempts: 0,
+            available_at: now,
+            claimed_until: None,
+            processed_at: None,
+        },
+    );
+    Ok(1)
 }
 
 /// Workspace, environment, installation identifier, expiry, and the node whose
@@ -3231,6 +3366,8 @@ struct MemoryState {
     job_acceptances: HashMap<JobId, MemoryJobAcceptance>,
     routing_attempts: Vec<(JobId, String, String)>,
     idempotency: HashMap<(WorkspaceId, EnvironmentId, String), (Vec<u8>, JobId)>,
+    wake_hint_outbox: HashMap<String, MemoryWakeHintOutbox>,
+    wake_reconciliations: HashMap<(WorkspaceId, EnvironmentId, JobId, u64), usize>,
     consumed_envelopes: HashMap<(WorkspaceId, EnvironmentId, String), (String, JobId)>,
     compatibility: HashMap<(WorkspaceId, EnvironmentId, String, String), i64>,
     reverse_compatibility: HashMap<(WorkspaceId, EnvironmentId, String, i64), String>,
@@ -6317,6 +6454,121 @@ impl Repository for MemoryRepository {
             occurred_at: Utc::now(),
         });
         Ok(record.job.clone())
+    }
+
+    async fn ensure_waiting_job_wake_hints(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        job_id: JobId,
+    ) -> Result<usize, RepositoryError> {
+        let mut state = self.state.write().await;
+        ensure_memory_waiting_job_wake_hint(&mut state, workspace_id, environment_id, job_id)
+    }
+
+    async fn repair_waiting_job_wake_hints(&self, limit: i64) -> Result<usize, RepositoryError> {
+        let mut state = self.state.write().await;
+        let mut pending = state
+            .jobs
+            .iter()
+            .filter(|(_, record)| record.job.state == JobState::WaitingForAgent)
+            .filter(|(job_id, record)| {
+                !state.wake_reconciliations.contains_key(&(
+                    record.job.workspace_id,
+                    record.job.environment_id,
+                    **job_id,
+                    record.sequence,
+                ))
+            })
+            .map(|(job_id, record)| {
+                (
+                    record.job.created_at,
+                    *job_id,
+                    record.job.workspace_id,
+                    record.job.environment_id,
+                )
+            })
+            .collect::<Vec<_>>();
+        pending.sort_by_key(|(created_at, job_id, _, _)| (*created_at, *job_id));
+        pending.truncate(usize::try_from(limit.clamp(1, 100)).unwrap_or(100));
+        let mut repaired = 0_usize;
+        for (_, job_id, workspace_id, environment_id) in pending {
+            repaired = repaired.saturating_add(ensure_memory_waiting_job_wake_hint(
+                &mut state,
+                workspace_id,
+                environment_id,
+                job_id,
+            )?);
+        }
+        Ok(repaired)
+    }
+
+    async fn claim_wake_hint_dispatches(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<PendingWakeHintDispatch>, RepositoryError> {
+        let now = Utc::now();
+        let mut state = self.state.write().await;
+        let mut ids = state
+            .wake_hint_outbox
+            .iter()
+            .filter(|(_, item)| {
+                item.processed_at.is_none()
+                    && item.available_at <= now
+                    && item.claimed_until.is_none_or(|until| until <= now)
+                    && item.hint.expires_at > now
+            })
+            .map(|(id, item)| (item.available_at, id.clone()))
+            .collect::<Vec<_>>();
+        ids.sort();
+        ids.truncate(usize::try_from(limit.clamp(1, 100)).unwrap_or(100));
+        let mut claimed = Vec::with_capacity(ids.len());
+        for (_, outbox_id) in ids {
+            if let Some(item) = state.wake_hint_outbox.get_mut(&outbox_id) {
+                item.attempts = item.attempts.saturating_add(1);
+                item.claimed_until = Some(now + chrono::Duration::seconds(30));
+                claimed.push(PendingWakeHintDispatch {
+                    outbox_id,
+                    workspace_id: item.workspace_id,
+                    environment_id: item.environment_id,
+                    hint: item.hint.clone(),
+                    idempotency_key: item.idempotency_key.clone(),
+                    attempt: item.attempts,
+                });
+            }
+        }
+        Ok(claimed)
+    }
+
+    async fn complete_wake_hint_dispatch(&self, outbox_id: &str) -> Result<(), RepositoryError> {
+        let mut state = self.state.write().await;
+        let item = state
+            .wake_hint_outbox
+            .get_mut(outbox_id)
+            .ok_or(RepositoryError::NotFound)?;
+        if item.processed_at.is_some() {
+            return Err(RepositoryError::ConcurrentStateChange);
+        }
+        item.processed_at = Some(Utc::now());
+        item.claimed_until = None;
+        Ok(())
+    }
+
+    async fn retry_wake_hint_dispatch(
+        &self,
+        outbox_id: &str,
+        delay: StdDuration,
+    ) -> Result<(), RepositoryError> {
+        let mut state = self.state.write().await;
+        let item = state
+            .wake_hint_outbox
+            .get_mut(outbox_id)
+            .ok_or(RepositoryError::NotFound)?;
+        item.available_at = Utc::now()
+            + chrono::Duration::from_std(delay)
+                .map_err(|error| RepositoryError::Persistence(error.to_string()))?;
+        item.claimed_until = None;
+        Ok(())
     }
 
     async fn request_job_cancellation(

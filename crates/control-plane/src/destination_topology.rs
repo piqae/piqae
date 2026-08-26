@@ -1540,14 +1540,30 @@ pub(crate) async fn record_runtime_availability(
             .await
             .map_err(storage_error)?
             .into_iter()
-            .map(|hint| piqae_protocol::agent::AgentWakeHint {
-                id: hint.id,
-                reason: hint.reason,
-                delivery_channel: piqae_protocol::agent::WakeDeliveryChannel::ConnectedSession,
-                requested_at: hint.requested_at,
-                expires_at: hint.expires_at,
+            .map(|hint| {
+                let delivery_channel = match hint.delivery_channel.as_str() {
+                    "connected_session" => {
+                        piqae_protocol::agent::WakeDeliveryChannel::ConnectedSession
+                    }
+                    "external_push" => piqae_protocol::agent::WakeDeliveryChannel::ExternalPush,
+                    "local_relay" => piqae_protocol::agent::WakeDeliveryChannel::LocalRelay,
+                    "manual" => piqae_protocol::agent::WakeDeliveryChannel::Manual,
+                    other => {
+                        return Err(StorageError::InvalidData(format!(
+                            "unsupported wake delivery channel: {other}"
+                        )));
+                    }
+                };
+                Ok(piqae_protocol::agent::AgentWakeHint {
+                    id: hint.id,
+                    reason: hint.reason,
+                    delivery_channel,
+                    requested_at: hint.requested_at,
+                    expires_at: hint.expires_at,
+                })
             })
-            .collect()
+            .collect::<Result<Vec<_>, StorageError>>()
+            .map_err(storage_error)?
     } else {
         Vec::new()
     };
@@ -2050,7 +2066,7 @@ pub async fn list_node_runtime_observations(
     }))
 }
 
-fn wake_hint_response(value: NodeWakeHint) -> NodeWakeHintResponse {
+pub(crate) fn wake_hint_response(value: NodeWakeHint) -> NodeWakeHintResponse {
     NodeWakeHintResponse {
         id: value.id,
         node_id: value.agent_id,
