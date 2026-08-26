@@ -39,6 +39,20 @@ components:
     version_kind: cargo_workspace
     consumes:
       node: 1
+  apple_node_sdk:
+    version_file: Cargo.toml
+    version_kind: cargo_workspace
+    release_version_locked: true
+    consumes:
+      node: 1
+    depends_on: [node]
+  dotnet_node_sdk:
+    version_file: sdk/dotnet/src/Piqae.Node/Piqae.Node.csproj
+    version_kind: dotnet
+    release_version_locked: true
+    consumes:
+      node: 1
+    depends_on: [node]
   shopify:
     version_file: apps/shopify/package.json
     version_kind: npm
@@ -63,4 +77,3 @@ deployment:
   rollback:
     application: previous_immutable_digest
     database: forward_only
-
