@@ -100,6 +100,13 @@ public protocol PiqaeInstallationIdentityStore: Sendable {
     func loadOrCreateInstallationID() async throws -> PiqaeInstallationID
 }
 
+/// The shared durable node runtime hosted inside an application process.
+/// Platform facades must never implement a second queue beside this runtime.
+public protocol PiqaeEmbeddedNodeRuntime: PiqaeHostLifecycleReporter, Sendable {
+    func start() async throws
+    func stop() async throws
+}
+
 public struct PiqaeInstalledNodeProbe: Equatable, Sendable {
     public enum State: Equatable, Sendable {
         case unavailable
@@ -149,6 +156,7 @@ public struct PiqaeNodeConfiguration: Sendable {
     public let availability: PiqaeNodeAvailabilityClass
     public let identityStore: any PiqaeInstallationIdentityStore
     public let installedNodeIPC: (any PiqaeInstalledNodeIPC)?
+    public let embeddedRuntime: (any PiqaeEmbeddedNodeRuntime)?
     public let printerAdapters: [any PiqaePrinterAdapter]
     public let hostLifecycleReporter: (any PiqaeHostLifecycleReporter)?
     public let remoteNotificationProvider: (any PiqaeRemoteNotificationRegistrationProvider)?
@@ -159,6 +167,7 @@ public struct PiqaeNodeConfiguration: Sendable {
         availability: PiqaeNodeAvailabilityClass? = nil,
         identityStore: any PiqaeInstallationIdentityStore = PiqaeKeychainInstallationIdentityStore(),
         installedNodeIPC: (any PiqaeInstalledNodeIPC)? = nil,
+        embeddedRuntime: (any PiqaeEmbeddedNodeRuntime)? = nil,
         printerAdapters: [any PiqaePrinterAdapter] = [],
         hostLifecycleReporter: (any PiqaeHostLifecycleReporter)? = nil,
         remoteNotificationProvider: (any PiqaeRemoteNotificationRegistrationProvider)? = nil
@@ -168,6 +177,7 @@ public struct PiqaeNodeConfiguration: Sendable {
         self.availability = availability ?? Self.defaultAvailability
         self.identityStore = identityStore
         self.installedNodeIPC = installedNodeIPC
+        self.embeddedRuntime = embeddedRuntime
         self.printerAdapters = printerAdapters
         self.hostLifecycleReporter = hostLifecycleReporter
         self.remoteNotificationProvider = remoteNotificationProvider
@@ -178,6 +188,7 @@ public struct PiqaeNodeConfiguration: Sendable {
         availability: PiqaeNodeAvailabilityClass? = nil,
         identityStore: any PiqaeInstallationIdentityStore = PiqaeKeychainInstallationIdentityStore(),
         installedNodeIPC: (any PiqaeInstalledNodeIPC)? = nil,
+        embeddedRuntime: (any PiqaeEmbeddedNodeRuntime)? = nil,
         printerAdapters: [any PiqaePrinterAdapter] = [],
         hostLifecycleReporter: (any PiqaeHostLifecycleReporter)? = nil
     ) -> PiqaeNodeConfiguration {
@@ -187,6 +198,7 @@ public struct PiqaeNodeConfiguration: Sendable {
             availability: availability,
             identityStore: identityStore,
             installedNodeIPC: installedNodeIPC,
+            embeddedRuntime: embeddedRuntime,
             printerAdapters: printerAdapters,
             hostLifecycleReporter: hostLifecycleReporter
         )

@@ -171,6 +171,7 @@ actor PiqaeNodeEngine {
     private let admissionPolicy = PiqaeBackgroundAdmissionPolicy()
     private var started = false
     private var ownsEmbeddedRuntime = false
+    private var embeddedRuntimeStarted = false
     private var executionContext = PiqaeExecutionContext.foreground
     private var selectedIPC: (any PiqaeInstalledNodeIPC)?
     private var adaptersByID: [String: any PiqaePrinterAdapter] = [:]
@@ -235,6 +236,10 @@ actor PiqaeNodeEngine {
             snapshotValue = replacingSnapshot(phase: .ready, statusMessage: nil)
             emit()
         } catch {
+            if embeddedRuntimeStarted {
+                try? await configuration.embeddedRuntime?.stop()
+                embeddedRuntimeStarted = false
+            }
             if ownsEmbeddedRuntime, let id = snapshotValue.installationID {
                 await PiqaeProcessRuntimeRegistry.shared.release(id)
                 ownsEmbeddedRuntime = false
@@ -252,6 +257,10 @@ actor PiqaeNodeEngine {
     }
 
     func stop() async {
+        if embeddedRuntimeStarted {
+            try? await configuration.embeddedRuntime?.stop()
+            embeddedRuntimeStarted = false
+        }
         if ownsEmbeddedRuntime, let id = snapshotValue.installationID {
             await PiqaeProcessRuntimeRegistry.shared.release(id)
         }
@@ -414,6 +423,9 @@ actor PiqaeNodeEngine {
     }
 
     func reportHostLifecycle(_ event: PiqaeHostLifecycleEvent) async throws {
+        if embeddedRuntimeStarted {
+            try await configuration.embeddedRuntime?.report(event)
+        }
         try await configuration.hostLifecycleReporter?.report(event)
         switch event {
         case .enteredForeground:
@@ -484,6 +496,10 @@ actor PiqaeNodeEngine {
             throw PiqaeNodeError.nodeAlreadyRunning
         }
         ownsEmbeddedRuntime = true
+        if let runtime = configuration.embeddedRuntime {
+            try await runtime.start()
+            embeddedRuntimeStarted = true
+        }
         adaptersByID.removeAll(keepingCapacity: true)
         for adapter in configuration.printerAdapters {
             guard adaptersByID[adapter.adapterID] == nil else {
