@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 public final class PiqaeNode: @unchecked Sendable {
@@ -83,6 +84,10 @@ public final class PiqaeConnectionsService: @unchecked Sendable {
         try await engine.connect(configuration)
     }
 
+    public func disconnect(_ connectionID: PiqaeConnectionID) async throws {
+        try await engine.disconnect(connectionID)
+    }
+
     public func observe() async -> AsyncStream<[PiqaeConnection]> {
         let snapshots = await engine.observe()
         return AsyncStream(bufferingPolicy: .bufferingNewest(1)) { continuation in
@@ -138,6 +143,10 @@ public final class PiqaeJobsService: @unchecked Sendable {
     public func submit(_ request: PiqaePrintRequest) async throws -> PiqaeJobReceipt {
         try await engine.submit(request)
     }
+
+    public func status(_ jobID: PiqaeJobID) async throws -> PiqaeRuntimeJobSnapshot {
+        try await engine.job(jobID)
+    }
 }
 
 public final class PiqaeProfilesService: @unchecked Sendable {
@@ -150,6 +159,30 @@ public final class PiqaeProfilesService: @unchecked Sendable {
 
     public func capture(_ request: PiqaeProfileCaptureRequest) async throws -> PiqaePrintProfile {
         try await engine.captureProfile(request)
+    }
+
+    public func create(_ request: PiqaeRuntimeProfileCreateRequest) async throws
+        -> PiqaePrintProfile
+    {
+        try await engine.createProfile(request)
+    }
+
+    public func update(_ request: PiqaeRuntimeProfileUpdateRequest) async throws
+        -> PiqaePrintProfile
+    {
+        try await engine.updateProfile(request)
+    }
+
+    public func delete(
+        printerID: PiqaePrinterID,
+        profileID: PiqaeProfileID,
+        expectedRevision: UInt64
+    ) async throws {
+        try await engine.deleteProfile(
+            printerID: printerID,
+            profileID: profileID,
+            expectedRevision: expectedRevision
+        )
     }
 }
 
@@ -176,6 +209,8 @@ actor PiqaeNodeEngine {
     private var executionContext = PiqaeExecutionContext.foreground
     private var selectedIPC: (any PiqaeInstalledNodeIPC)?
     private var adaptersByID: [String: any PiqaePrinterAdapter] = [:]
+    private var localPrintersByLogicalID: [PiqaePrinterID: PiqaePrinter] = [:]
+    private var executingAdapters: Set<String> = []
     private var observers: [UUID: AsyncStream<PiqaeNodeSnapshot>.Continuation] = [:]
     private var snapshotValue: PiqaeNodeSnapshot
 
@@ -249,6 +284,8 @@ actor PiqaeNodeEngine {
             started = false
             selectedIPC = nil
             adaptersByID.removeAll(keepingCapacity: true)
+            localPrintersByLogicalID.removeAll(keepingCapacity: true)
+            executingAdapters.removeAll(keepingCapacity: true)
             snapshotValue = replacingSnapshot(
                 phase: .degraded,
                 statusMessage: Self.redactedMessage(for: error)
@@ -269,6 +306,8 @@ actor PiqaeNodeEngine {
         ownsEmbeddedRuntime = false
         acquiredInstallationID = nil
         selectedIPC = nil
+        localPrintersByLogicalID.removeAll(keepingCapacity: true)
+        executingAdapters.removeAll(keepingCapacity: true)
         started = false
         snapshotValue = replacingSnapshot(phase: .stopped, statusMessage: nil)
         emit()
@@ -321,9 +360,16 @@ actor PiqaeNodeEngine {
             emit()
             return
         }
-        let discovered = try await discoverEmbeddedPrinters()
+        let discovered = try await refreshEmbeddedInventory()
         snapshotValue = replacingSnapshot(printers: discovered, statusMessage: nil)
         emit()
+        if let runtime = configuration.embeddedRuntime,
+            canExecuteDurableHandoff()
+        {
+            for adapterID in adaptersByID.keys.sorted() {
+                try await drainAdapter(adapterID, runtime: runtime)
+            }
+        }
     }
 
     func connect(_ cloud: PiqaeCloudConfiguration) async throws -> PiqaeConnection {
@@ -355,10 +401,39 @@ actor PiqaeNodeEngine {
         return connection
     }
 
+    func disconnect(_ connectionID: PiqaeConnectionID) async throws {
+        try requireStarted()
+        guard selectedIPC == nil, let runtime = configuration.embeddedRuntime else {
+            throw PiqaeNodeError.unsupportedOperation(
+                "Disconnect must be authorized by the runtime which owns the connection."
+            )
+        }
+        try await runtime.revokeConnector(id: connectionID)
+        snapshotValue = replacingSnapshot(
+            connections: snapshotValue.connections.filter { $0.id != connectionID },
+            statusMessage: nil
+        )
+        emit()
+    }
+
     func submit(_ request: PiqaePrintRequest) async throws -> PiqaeJobReceipt {
         try requireStarted()
+        if let selectedIPC {
+            return try await selectedIPC.submit(request)
+        }
+        guard let runtime = configuration.embeddedRuntime else {
+            throw PiqaeNodeError.unsupportedOperation(
+                "Embedded job submission requires the durable native runtime executor"
+            )
+        }
+        guard let printer = snapshotValue.printers.first(where: { $0.id == request.printerID }) else {
+            throw PiqaeNodeError.printerNotFound(request.printerID)
+        }
+        let encoded = try Self.runtimeJobRequest(request, adapterID: printer.adapterID)
+        let accepted = try await runtime.enqueue(encoded)
+        let jobID = PiqaeJobID(rawValue: accepted.jobID)
         let handoff = PiqaePendingHandoff(
-            payloadIsDurable: false,
+            payloadIsDurable: true,
             estimatedSecondsToNativeAcceptance: 10
         )
         switch admissionPolicy.evaluate(
@@ -367,36 +442,35 @@ actor PiqaeNodeEngine {
             availability: snapshotValue.availability
         ) {
         case .admit, .finishAlreadyStarted:
-            break
+            try await drainAdapter(printer.adapterID, runtime: runtime)
         case .deferUntilForeground:
-            throw PiqaeNodeError.backgroundExecutionUnavailable
+            return try Self.receipt(jobID: jobID, state: accepted.state, nativeJobID: nil)
         }
+        return try Self.receipt(from: await runtime.job(id: jobID))
+    }
 
-        let receipt: PiqaeJobReceipt
-        if let selectedIPC {
-            receipt = try await selectedIPC.submit(request)
-        } else {
-            // A native handoff is irreversible and must only happen after the shared
-            // runtime has durably persisted the job, fence, and idempotency key. The
-            // Swift facade deliberately cannot bypass that queue while the executor
-            // ABI is unavailable.
+    func job(_ jobID: PiqaeJobID) async throws -> PiqaeRuntimeJobSnapshot {
+        try requireStarted()
+        guard selectedIPC == nil, let runtime = configuration.embeddedRuntime else {
             throw PiqaeNodeError.unsupportedOperation(
-                "Embedded job submission requires the durable native runtime executor"
+                "Job status is unavailable from this installed-node protocol."
             )
         }
-        return receipt
+        return try await runtime.job(id: jobID)
     }
 
     func profiles(for printerID: PiqaePrinterID) async throws -> [PiqaePrintProfile] {
         try requireStarted()
         if let selectedIPC { return try await selectedIPC.profiles(for: printerID) }
-        guard let printer = snapshotValue.printers.first(where: { $0.id == printerID }) else {
+        guard let printer = localPrintersByLogicalID[printerID] else {
             throw PiqaeNodeError.printerNotFound(printerID)
         }
-        guard let adapter = adaptersByID[printer.adapterID] else {
-            throw PiqaeNodeError.adapterUnavailable(printer.adapterID)
+        guard configuration.embeddedRuntime != nil else {
+            throw PiqaeNodeError.unsupportedOperation(
+                "Profiles require the durable native runtime."
+            )
         }
-        return try await adapter.profiles(for: printer)
+        return try await persistedProfiles(for: printer.id)
     }
 
     func captureProfile(_ request: PiqaeProfileCaptureRequest) async throws -> PiqaePrintProfile {
@@ -406,13 +480,61 @@ actor PiqaeNodeEngine {
                 "Profile capture must be authorized and presented by the installed node."
             )
         }
-        guard let printer = snapshotValue.printers.first(where: { $0.id == request.printerID }) else {
+        guard let printer = localPrintersByLogicalID[request.printerID] else {
             throw PiqaeNodeError.printerNotFound(request.printerID)
         }
         guard let adapter = adaptersByID[printer.adapterID] else {
             throw PiqaeNodeError.adapterUnavailable(printer.adapterID)
         }
-        return try await adapter.captureProfile(request, for: printer)
+        guard let runtime = configuration.embeddedRuntime else {
+            throw PiqaeNodeError.unsupportedOperation("Profiles require the durable native runtime.")
+        }
+        let captured = try await adapter.captureProfile(request, for: printer)
+        return Self.profile(
+            try await runtime.createProfile(
+                PiqaeRuntimeProfileCreateRequest(
+                    printerID: request.printerID,
+                    name: captured.name,
+                    isDefault: captured.isDefault
+                )
+            )
+        )
+    }
+
+    func createProfile(_ request: PiqaeRuntimeProfileCreateRequest) async throws
+        -> PiqaePrintProfile
+    {
+        try requireStarted()
+        guard let runtime = configuration.embeddedRuntime else {
+            throw PiqaeNodeError.unsupportedOperation("Profiles require the durable native runtime.")
+        }
+        return Self.profile(try await runtime.createProfile(request))
+    }
+
+    func updateProfile(_ request: PiqaeRuntimeProfileUpdateRequest) async throws
+        -> PiqaePrintProfile
+    {
+        try requireStarted()
+        guard let runtime = configuration.embeddedRuntime else {
+            throw PiqaeNodeError.unsupportedOperation("Profiles require the durable native runtime.")
+        }
+        return Self.profile(try await runtime.updateProfile(request))
+    }
+
+    func deleteProfile(
+        printerID: PiqaePrinterID,
+        profileID: PiqaeProfileID,
+        expectedRevision: UInt64
+    ) async throws {
+        try requireStarted()
+        guard let runtime = configuration.embeddedRuntime else {
+            throw PiqaeNodeError.unsupportedOperation("Profiles require the durable native runtime.")
+        }
+        try await runtime.deleteProfile(
+            printerID: printerID,
+            profileID: profileID,
+            expectedRevision: expectedRevision
+        )
     }
 
     func updateExecutionContext(_ context: PiqaeExecutionContext) {
@@ -513,10 +635,21 @@ actor PiqaeNodeEngine {
             }
             adaptersByID[adapter.adapterID] = adapter
         }
-        let printers = try await discoverEmbeddedPrinters()
+        let printers = try await refreshEmbeddedInventory()
+        if let runtime = configuration.embeddedRuntime {
+            for adapterID in adaptersByID.keys.sorted() {
+                try await drainAdapter(adapterID, runtime: runtime)
+            }
+        }
         let initialConnections: [PiqaeConnection]
         switch configuration.connectivity {
-        case .localOnly: initialConnections = [.localOnly]
+        case .localOnly:
+            if let runtime = configuration.embeddedRuntime {
+                let persisted = try await runtime.connectors().map(Self.connection)
+                initialConnections = persisted.isEmpty ? [.localOnly] : persisted
+            } else {
+                initialConnections = [.localOnly]
+            }
         case .cloud: initialConnections = []
         }
         snapshotValue = PiqaeNodeSnapshot(
@@ -579,6 +712,322 @@ actor PiqaeNodeEngine {
         return result.sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
     }
 
+    private func refreshEmbeddedInventory() async throws -> [PiqaePrinter] {
+        let discovered = try await discoverEmbeddedPrinters()
+        guard let runtime = configuration.embeddedRuntime else {
+            localPrintersByLogicalID = Dictionary(uniqueKeysWithValues: discovered.map { ($0.id, $0) })
+            return discovered
+        }
+        var projected: [PiqaePrinter] = []
+        localPrintersByLogicalID.removeAll(keepingCapacity: true)
+        for adapter in configuration.printerAdapters {
+            guard adapter.runtimeFingerprint.adapterID == adapter.adapterID else {
+                throw PiqaeNodeError.invalidConfiguration(
+                    "Adapter runtime fingerprint must use the adapter's stable ID."
+                )
+            }
+            try await runtime.registerAdapter(
+                PiqaeRuntimeAdapterRegistration(
+                    fingerprint: adapter.runtimeFingerprint,
+                    capabilityContract: .init(descriptor: adapter.descriptor)
+                )
+            )
+            let local = discovered.filter { $0.adapterID == adapter.adapterID }
+            let observations = local.map {
+                PiqaeRuntimePrinterObservation(
+                    nativeID: $0.nativeID,
+                    name: $0.displayName,
+                    state: $0.state.rawValue
+                )
+            }
+            let snapshots = try await runtime.observePrinterInventory(
+                adapterID: adapter.adapterID,
+                printers: observations
+            )
+            let localByNativeID = Dictionary(uniqueKeysWithValues: local.map { ($0.nativeID, $0) })
+            for runtimePrinter in snapshots {
+                guard let source = localByNativeID[runtimePrinter.nativeID] else { continue }
+                let logicalID = PiqaePrinterID(rawValue: runtimePrinter.printerID)
+                let printer = PiqaePrinter(
+                    id: logicalID,
+                    adapterID: source.adapterID,
+                    adapterFingerprint: source.adapterFingerprint,
+                    nativeID: source.nativeID,
+                    displayName: runtimePrinter.name,
+                    model: source.model,
+                    location: source.location,
+                    state: PiqaePrinterState(rawValue: runtimePrinter.state) ?? .unknown,
+                    capabilities: source.capabilities,
+                    queue: source.queue,
+                    loadedMedia: source.loadedMedia,
+                    alerts: source.alerts,
+                    observedAt: Date(
+                        timeIntervalSince1970:
+                            TimeInterval(runtimePrinter.observedUnixMilliseconds) / 1_000
+                    ),
+                    freshUntil: source.freshUntil
+                )
+                projected.append(printer)
+                localPrintersByLogicalID[logicalID] = printer
+            }
+        }
+        return projected.sorted {
+            $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending
+        }
+    }
+
+    private func drainAdapter(
+        _ adapterID: String,
+        runtime: any PiqaeEmbeddedNodeRuntime
+    ) async throws {
+        guard executingAdapters.insert(adapterID).inserted else { return }
+        do {
+            for _ in 0..<32 {
+                guard let operation = try await runtime.nextOperation(adapterID: adapterID) else {
+                    break
+                }
+                switch operation.phase {
+                case .accepted:
+                    try await reconcileAccepted(operation, runtime: runtime)
+                    executingAdapters.remove(adapterID)
+                    return
+                case .handoffStarted:
+                    _ = try await runtime.complete(
+                        operation,
+                        outcome: .ambiguous(code: "recovered_after_handoff")
+                    )
+                case .claimed:
+                    try await executeClaimed(operation, runtime: runtime)
+                }
+            }
+            executingAdapters.remove(adapterID)
+        } catch {
+            executingAdapters.remove(adapterID)
+            throw error
+        }
+    }
+
+    private func canExecuteDurableHandoff() -> Bool {
+        switch admissionPolicy.evaluate(
+            PiqaePendingHandoff(
+                payloadIsDurable: true,
+                estimatedSecondsToNativeAcceptance: 10
+            ),
+            context: executionContext,
+            availability: snapshotValue.availability
+        ) {
+        case .admit, .finishAlreadyStarted: true
+        case .deferUntilForeground: false
+        }
+    }
+
+    private func reconcileAccepted(
+        _ operation: PiqaeRuntimeAdapterOperation,
+        runtime: any PiqaeEmbeddedNodeRuntime
+    ) async throws {
+        guard let nativeJobID = operation.nativeJobID,
+            let adapter = adaptersByID[operation.adapterID],
+            let printer = localPrintersByLogicalID[PiqaePrinterID(rawValue: operation.printerID)]
+        else { return }
+        switch try await adapter.observeNativeJob(nativeJobID: nativeJobID, printer: printer) {
+        case .accepted, .printing, .unknown:
+            return
+        case .completedReported:
+            _ = try await runtime.complete(
+                operation,
+                outcome: .completedReported(nativeJobID: nativeJobID)
+            )
+        case let .failedTerminal(code):
+            _ = try await runtime.complete(
+                operation,
+                outcome: .failedTerminal(nativeJobID: nativeJobID, code: code)
+            )
+        }
+    }
+
+    private func executeClaimed(
+        _ operation: PiqaeRuntimeAdapterOperation,
+        runtime: any PiqaeEmbeddedNodeRuntime
+    ) async throws {
+        guard let adapter = adaptersByID[operation.adapterID],
+            let printer = localPrintersByLogicalID[PiqaePrinterID(rawValue: operation.printerID)]
+        else {
+            _ = try await runtime.complete(
+                operation,
+                outcome: .rejectedBeforeHandoff(code: "adapter_or_printer_unavailable", retryable: true)
+            )
+            return
+        }
+        let request: PiqaePrintRequest
+        do {
+            request = try Self.request(for: operation)
+            try await adapter.validate(request, for: printer)
+        } catch {
+            _ = try await runtime.complete(
+                operation,
+                outcome: .rejectedBeforeHandoff(code: "adapter_validation_failed", retryable: false)
+            )
+            return
+        }
+        let started: PiqaeRuntimeAdapterOperation
+        do {
+            started = try await runtime.beginHandoff(operation)
+        } catch {
+            _ = try await runtime.complete(
+                operation,
+                outcome: .rejectedBeforeHandoff(code: "handoff_deadline_elapsed", retryable: true)
+            )
+            return
+        }
+        do {
+            let receipt = try await adapter.submit(request, to: printer)
+            if receipt.handoffState == .acceptedBySpooler,
+                let nativeJobID = receipt.nativeJobID,
+                !nativeJobID.isEmpty
+            {
+                _ = try await runtime.complete(started, outcome: .accepted(nativeJobID: nativeJobID))
+            } else {
+                _ = try await runtime.complete(
+                    started,
+                    outcome: .ambiguous(code: "native_acceptance_unverifiable")
+                )
+            }
+        } catch {
+            _ = try await runtime.complete(
+                started,
+                outcome: .ambiguous(code: "native_handoff_error")
+            )
+        }
+    }
+
+    private func persistedProfiles(for printerID: PiqaePrinterID) async throws
+        -> [PiqaePrintProfile]
+    {
+        guard let runtime = configuration.embeddedRuntime else { return [] }
+        return try await runtime.profiles(printerID: printerID).map(Self.profile)
+    }
+
+    private static func runtimeJobRequest(
+        _ request: PiqaePrintRequest,
+        adapterID: String
+    ) throws -> PiqaeRuntimeJobRequest {
+        let content: Data
+        let kind: String
+        switch request.content {
+        case let .pdf(data):
+            content = data
+            kind = "pdf"
+        case let .image(data, typeIdentifier):
+            content = data
+            kind = "image.\(typeIdentifier)"
+        case let .raw(data, mediaType):
+            content = data
+            kind = "raw.\(mediaType)"
+        }
+        let options = RuntimePrintOptions(intent: request.intent, profileID: request.profileID?.rawValue)
+        let optionsData = try JSONEncoder().encode(options)
+        guard let optionsJSON = String(data: optionsData, encoding: .utf8) else {
+            throw PiqaeNodeError.invalidConfiguration("Print options could not be encoded.")
+        }
+        return PiqaeRuntimeJobRequest(
+            adapterID: adapterID,
+            idempotencyKey: request.idempotencyKey,
+            printerID: request.printerID,
+            title: request.title,
+            contentKind: kind,
+            content: content,
+            optionsJSON: optionsJSON
+        )
+    }
+
+    private static func request(for operation: PiqaeRuntimeAdapterOperation) throws
+        -> PiqaePrintRequest
+    {
+        let file = try FileHandle(forReadingFrom: URL(fileURLWithPath: operation.contentPath))
+        defer { try? file.close() }
+        let maximum = 16 * 1024 * 1024
+        guard let data = try file.read(upToCount: maximum + 1), !data.isEmpty,
+            data.count <= maximum
+        else {
+            throw PiqaeNodeError.submissionRejected("Durable content is unavailable or unbounded.")
+        }
+        let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        guard digest == operation.contentSHA256 else {
+            throw PiqaeNodeError.submissionRejected("Durable content integrity check failed.")
+        }
+        let options = try JSONDecoder().decode(
+            RuntimePrintOptions.self,
+            from: Data(operation.optionsJSON.utf8)
+        )
+        let content: PiqaePrintContent
+        if operation.contentKind == "pdf" {
+            content = .pdf(data)
+        } else if operation.contentKind.hasPrefix("image.") {
+            content = .image(data, typeIdentifier: String(operation.contentKind.dropFirst(6)))
+        } else if operation.contentKind.hasPrefix("raw.") {
+            content = .raw(data, mediaType: String(operation.contentKind.dropFirst(4)))
+        } else {
+            throw PiqaeNodeError.submissionRejected("Durable content kind is unsupported.")
+        }
+        return try PiqaePrintRequest(
+            printerID: PiqaePrinterID(rawValue: operation.printerID),
+            title: operation.title,
+            content: content,
+            intent: options.intent,
+            profileID: options.profileID.map(PiqaeProfileID.init(rawValue:)),
+            idempotencyKey: operation.idempotencyKey
+        )
+    }
+
+    private static func receipt(from job: PiqaeRuntimeJobSnapshot) throws -> PiqaeJobReceipt {
+        try receipt(
+            jobID: PiqaeJobID(rawValue: job.jobID),
+            state: job.state,
+            nativeJobID: job.nativeJobID
+        )
+    }
+
+    private static func receipt(
+        jobID: PiqaeJobID,
+        state: String,
+        nativeJobID: String?
+    ) throws -> PiqaeJobReceipt {
+        let handoff: PiqaeNativeHandoffState
+        switch state {
+        case "accepted_by_spooler", "completed_reported": handoff = .acceptedBySpooler
+        case "delivery_uncertain": handoff = .deliveryUncertain
+        case "queued", "pending", "spool_intent", "failed_retryable": handoff = .queuedLocally
+        case "failed_terminal":
+            throw PiqaeNodeError.submissionRejected("The durable runtime rejected the print job.")
+        default: handoff = .queuedLocally
+        }
+        return PiqaeJobReceipt(
+            jobID: jobID,
+            nativeJobID: nativeJobID,
+            handoffState: handoff,
+            acceptedAt: Date()
+        )
+    }
+
+    private static func profile(_ snapshot: PiqaeRuntimeProfileSnapshot) -> PiqaePrintProfile {
+        PiqaePrintProfile(
+            id: .init(rawValue: snapshot.profileID),
+            printerID: .init(rawValue: snapshot.printerID),
+            name: snapshot.name,
+            revision: snapshot.revision,
+            isDefault: snapshot.isDefault
+        )
+    }
+
+    private static func connection(_ snapshot: PiqaeRuntimeConnectorSnapshot) -> PiqaeConnection {
+        PiqaeConnection(
+            id: .init(rawValue: snapshot.connectorID),
+            authorityURL: snapshot.controlPlaneURL,
+            workspaceName: snapshot.workspaceName ?? snapshot.displayName,
+            state: snapshot.enabled ? .connected : .offline
+        )
+    }
+
     private func requireStarted() throws {
         guard started else { throw PiqaeNodeError.notStarted }
     }
@@ -635,4 +1084,10 @@ actor PiqaeNodeEngine {
         if let nodeError = error as? PiqaeNodeError { return nodeError.localizedDescription }
         return "The node could not start."
     }
+}
+
+private struct RuntimePrintOptions: Codable {
+    let intent: PiqaePortablePrintIntent
+    let profileID: String?
+    enum CodingKeys: String, CodingKey { case intent; case profileID = "profile_id" }
 }

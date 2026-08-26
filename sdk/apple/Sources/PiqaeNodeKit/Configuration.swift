@@ -105,6 +105,86 @@ public protocol PiqaeInstallationIdentityStore: Sendable {
 public protocol PiqaeEmbeddedNodeRuntime: PiqaeHostLifecycleReporter, Sendable {
     func start() async throws
     func stop() async throws
+    func registerAdapter(_ registration: PiqaeRuntimeAdapterRegistration) async throws
+    func observePrinterInventory(
+        adapterID: String,
+        printers: [PiqaeRuntimePrinterObservation]
+    ) async throws -> [PiqaeRuntimePrinterSnapshot]
+    func printerInventory() async throws -> [PiqaeRuntimePrinterSnapshot]
+    func enqueue(_ request: PiqaeRuntimeJobRequest) async throws -> PiqaeRuntimeJobAccepted
+    func nextOperation(adapterID: String) async throws -> PiqaeRuntimeAdapterOperation?
+    func beginHandoff(_ operation: PiqaeRuntimeAdapterOperation) async throws
+        -> PiqaeRuntimeAdapterOperation
+    func complete(
+        _ operation: PiqaeRuntimeAdapterOperation,
+        outcome: PiqaeRuntimeAdapterOutcome
+    ) async throws -> PiqaeRuntimeAdapterAcknowledgement
+    func job(id: PiqaeJobID) async throws -> PiqaeRuntimeJobSnapshot
+    func profiles(printerID: PiqaePrinterID) async throws -> [PiqaeRuntimeProfileSnapshot]
+    func createProfile(_ request: PiqaeRuntimeProfileCreateRequest) async throws
+        -> PiqaeRuntimeProfileSnapshot
+    func updateProfile(_ request: PiqaeRuntimeProfileUpdateRequest) async throws
+        -> PiqaeRuntimeProfileSnapshot
+    func deleteProfile(
+        printerID: PiqaePrinterID,
+        profileID: PiqaeProfileID,
+        expectedRevision: UInt64
+    ) async throws
+    func connectors() async throws -> [PiqaeRuntimeConnectorSnapshot]
+    func revokeConnector(id: PiqaeConnectionID) async throws
+}
+
+public extension PiqaeEmbeddedNodeRuntime {
+    func registerAdapter(_ registration: PiqaeRuntimeAdapterRegistration) async throws {
+        throw PiqaeNodeError.unsupportedOperation("The embedded runtime does not expose adapters.")
+    }
+    func observePrinterInventory(
+        adapterID: String,
+        printers: [PiqaeRuntimePrinterObservation]
+    ) async throws -> [PiqaeRuntimePrinterSnapshot] {
+        throw PiqaeNodeError.unsupportedOperation("The embedded runtime does not expose inventory.")
+    }
+    func printerInventory() async throws -> [PiqaeRuntimePrinterSnapshot] { [] }
+    func enqueue(_ request: PiqaeRuntimeJobRequest) async throws -> PiqaeRuntimeJobAccepted {
+        throw PiqaeNodeError.unsupportedOperation("The embedded runtime does not expose its queue.")
+    }
+    func nextOperation(adapterID: String) async throws -> PiqaeRuntimeAdapterOperation? { nil }
+    func beginHandoff(_ operation: PiqaeRuntimeAdapterOperation) async throws
+        -> PiqaeRuntimeAdapterOperation
+    {
+        throw PiqaeNodeError.unsupportedOperation("The embedded runtime does not expose handoff.")
+    }
+    func complete(
+        _ operation: PiqaeRuntimeAdapterOperation,
+        outcome: PiqaeRuntimeAdapterOutcome
+    ) async throws -> PiqaeRuntimeAdapterAcknowledgement {
+        throw PiqaeNodeError.unsupportedOperation("The embedded runtime does not expose handoff.")
+    }
+    func job(id: PiqaeJobID) async throws -> PiqaeRuntimeJobSnapshot {
+        throw PiqaeNodeError.unsupportedOperation("The embedded runtime does not expose jobs.")
+    }
+    func profiles(printerID: PiqaePrinterID) async throws -> [PiqaeRuntimeProfileSnapshot] { [] }
+    func createProfile(_ request: PiqaeRuntimeProfileCreateRequest) async throws
+        -> PiqaeRuntimeProfileSnapshot
+    {
+        throw PiqaeNodeError.unsupportedOperation("The embedded runtime does not expose profiles.")
+    }
+    func updateProfile(_ request: PiqaeRuntimeProfileUpdateRequest) async throws
+        -> PiqaeRuntimeProfileSnapshot
+    {
+        throw PiqaeNodeError.unsupportedOperation("The embedded runtime does not expose profiles.")
+    }
+    func deleteProfile(
+        printerID: PiqaePrinterID,
+        profileID: PiqaeProfileID,
+        expectedRevision: UInt64
+    ) async throws {
+        throw PiqaeNodeError.unsupportedOperation("The embedded runtime does not expose profiles.")
+    }
+    func connectors() async throws -> [PiqaeRuntimeConnectorSnapshot] { [] }
+    func revokeConnector(id: PiqaeConnectionID) async throws {
+        throw PiqaeNodeError.unsupportedOperation("The embedded runtime does not expose connectors.")
+    }
 }
 
 public struct PiqaeInstalledNodeProbe: Equatable, Sendable {

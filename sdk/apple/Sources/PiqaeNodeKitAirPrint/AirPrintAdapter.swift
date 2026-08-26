@@ -14,6 +14,11 @@ public actor PiqaeAirPrintAdapter: PiqaePrinterAdapter {
         portableOptions: [.orientation],
         supportsProfiles: false
     )
+    public nonisolated let runtimeFingerprint = PiqaeAdapterFingerprint(
+        platform: .iosAirPrint,
+        adapterID: "apple.airprint",
+        adapterVersion: "1"
+    )
     private var knownPrinterURLs: Set<URL>
     private let identityProvider: any PiqaeOpaqueIdentityProvider
 
@@ -90,7 +95,7 @@ public actor PiqaeAirPrintAdapter: PiqaePrinterAdapter {
     ) async throws -> PiqaeJobReceipt {
         try await validate(request, for: printer)
         var matchingURL: URL?
-        for url in knownPrinterURLs where try await id(for: url) == printer.id {
+        for url in knownPrinterURLs where try await id(for: url).rawValue == printer.nativeID {
             matchingURL = url
             break
         }
