@@ -22,6 +22,7 @@ export interface DashboardCustomerOperations {
   destinations: DashboardDestination[];
   routes: DashboardPrinterRoute[];
   routeObservations: DashboardRouteObservation[];
+  runtimeObservations: DashboardNodeRuntimeObservation[];
 }
 
 export interface DashboardCustomerOperationsPage {
@@ -35,7 +36,7 @@ export interface DashboardAgent {
   id: string;
   name: string;
   state: ResourceState;
-  os: 'windows' | 'macos' | 'linux';
+  os: 'windows' | 'macos' | 'linux' | 'ipados';
   architecture: string;
   version: string;
   protocolVersion: string;
@@ -43,6 +44,63 @@ export interface DashboardAgent {
   queueDepth: number;
   printerCount: number;
   labels: string[];
+}
+
+export type DashboardNodeHostMode =
+  | 'machine_service'
+  | 'user_agent'
+  | 'embedded_application'
+  | 'attached_client';
+
+export type DashboardNodeAvailabilityClass =
+  | 'continuous_while_awake'
+  | 'foreground_only'
+  | 'background_opportunistic'
+  | 'managed_kiosk'
+  | 'wake_relay_capable';
+
+export type DashboardNodeLifecycleState =
+  | 'available'
+  | 'foreground'
+  | 'background'
+  | 'suspending'
+  | 'suspended'
+  | 'waking'
+  | 'unavailable';
+
+export type DashboardNodeWakeMechanism =
+  | 'local_broker'
+  | 'apns_background'
+  | 'bluetooth_accessory'
+  | 'external_accessory'
+  | 'wake_on_lan'
+  | 'manual';
+
+/** Latest authenticated host observation. It is availability evidence, not proof of paper output. */
+export interface DashboardNodeRuntimeObservation {
+  customer?: DashboardResourceOwner | null;
+  nodeId: string;
+  sequence: number;
+  hostMode: DashboardNodeHostMode;
+  availabilityClass: DashboardNodeAvailabilityClass;
+  lifecycleState: DashboardNodeLifecycleState;
+  acceptsCloudJobs: boolean;
+  executionBudgetMs: number | null;
+  wakeMechanisms: DashboardNodeWakeMechanism[];
+  observedAt: string;
+  expiresAt: string;
+  freshness: 'live' | 'recent' | 'stale';
+}
+
+export interface DashboardNodeWakeHint {
+  id: string;
+  nodeId: string;
+  reason: 'job_available' | 'operator_request' | 'inventory_refresh' | 'diagnostics';
+  deliveryChannel: 'connected_session' | 'external_push' | 'local_relay' | 'manual' | null;
+  status: 'pending' | 'observed' | 'expired' | 'cancelled';
+  requestedAt: string;
+  expiresAt: string;
+  observedAt: string | null;
 }
 
 export interface DashboardPrinter {

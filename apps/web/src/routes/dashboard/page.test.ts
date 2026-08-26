@@ -110,6 +110,8 @@ function pageData(jobs: DashboardJob[], stateFilter = 'all') {
     destinations: [],
     routes: [],
     routeObservations: [],
+    runtimeObservations: [],
+    runtimeDataError: null,
     detail: null,
     dataError: null
   };
@@ -345,7 +347,7 @@ describe('managed customer operations', () => {
     await fireEvent.change(view.getByLabelText('Filter by customer'), { target: { value: account.externalId } });
     expect(view.getByText('Warehouse Mac mini')).toBeInTheDocument();
     expect(view.queryByText('Other warehouse')).not.toBeInTheDocument();
-    expect(view.getByRole('link', { name: 'Warehouse Mac mini agt_01' })).toHaveAttribute(
+    expect(view.getByRole('link', { name: /Warehouse Mac mini.*agt_01/ })).toHaveAttribute(
       'href',
       expect.stringContaining('managed_customer=')
     );
@@ -399,5 +401,133 @@ describe('managed customer operations', () => {
     expect(screen.getByText('Failed')).toBeInTheDocument();
     expect(screen.getByText('auth_cloud')).toBeInTheDocument();
     expect(screen.queryByText(/filename|username/i)).not.toBeInTheDocument();
+  });
+
+  it('explains embedded host admission and partitions queue counts in a scoped node drawer', async () => {
+    const runtime = {
+      nodeId: agent.id,
+      sequence: 19,
+      hostMode: 'embedded_application',
+      availabilityClass: 'background_opportunistic',
+      lifecycleState: 'background',
+      acceptsCloudJobs: false,
+      executionBudgetMs: 24_000,
+      wakeMechanisms: ['apns_background', 'bluetooth_accessory'],
+      observedAt: minutesAgo(1),
+      expiresAt: new Date(NOW + 60_000).toISOString(),
+      freshness: 'recent'
+    } as const;
+    const route = {
+      id: 'rte_01',
+      physicalDestinationId: 'pdst_01',
+      printerId: printer.id,
+      agentId: agent.id,
+      nativeQueueId: 'Kitchen-labels',
+      enabled: true,
+      health: 'busy',
+      telemetryFreshness: 'live',
+      projectionHealth: 'current',
+      capabilityRevision: 1,
+      profileRevision: 1,
+      profileObservedAt: minutesAgo(1),
+      stockObservedAt: minutesAgo(1),
+      stockState: 'current',
+      schedulingAuthorityId: 'auth_cloud',
+      latestObservation: {
+        id: 'obs_01',
+        routeId: 'rte_01',
+        sequence: 3,
+        printerState: 'busy',
+        acceptingJobs: true,
+        totalJobs: 7,
+        activeJobs: 1,
+        heldJobs: 0,
+        connectorJobs: 2,
+        otherPiqaeOrExternalJobs: 5,
+        unknownJobs: 2,
+        estimatedBusySeconds: 30,
+        observedAt: minutesAgo(1),
+        expiresAt: new Date(NOW + 60_000).toISOString()
+      },
+      updatedAt: minutesAgo(1)
+    };
+    page.url = new URL(
+      `https://piqae.test/dashboard?view=nodes&managed_customer=${encodeURIComponent(account.externalId)}&node=${agent.id}`
+    ) as never;
+    const view = render(Page, {
+      data: {
+        ...pageData([]),
+        view: 'nodes',
+        managedAccount: account,
+        agents: [agent],
+        routes: [route],
+        runtimeObservations: [runtime],
+        detail: {
+          kind: 'node',
+          node: agent,
+          printers: [printer],
+          runtime,
+          diagnostics: Promise.resolve({ reports: [], dataError: null }),
+          wakeHints: Promise.resolve({
+            dataError: null,
+            hints: [{
+              id: 'wkh_01',
+              nodeId: agent.id,
+              reason: 'operator_request',
+              deliveryChannel: 'connected_session',
+              status: 'observed',
+              requestedAt: minutesAgo(2),
+              expiresAt: minutesAgo(-3),
+              observedAt: minutesAgo(1)
+            }]
+          })
+        }
+      } as never,
+      form: null as never
+    });
+
+    expect(view.getByText('embedded application')).toBeInTheDocument();
+    expect(view.getByText('background opportunistic')).toBeInTheDocument();
+    expect(view.getByText('24 s remaining')).toBeInTheDocument();
+    expect(view.getByText(/already-awake node saw it/i)).toBeInTheDocument();
+    expect(view.getByText('Piqae-owned jobs').parentElement).toHaveTextContent('2');
+    expect(view.getByText('External jobs').parentElement).toHaveTextContent('3');
+    expect(view.getByText('Unknown source').parentElement).toHaveTextContent('2');
+    expect(view.queryByText('secret-order.pdf')).not.toBeInTheDocument();
+    expect(view.getByRole('button', { name: 'Request refresh' })).toBeInTheDocument();
+    await fireEvent.click(view.getByRole('button', { name: 'Remove node' }));
+    const confirmation = view.getByLabelText(`Type “${agent.name}” to confirm`);
+    const destructive = view.getAllByRole('button', { name: 'Remove node' })
+      .find((button) => button.getAttribute('type') === 'submit')!;
+    expect(destructive).toBeDisabled();
+    await fireEvent.input(confirmation, { target: { value: agent.name } });
+    expect(destructive).toBeEnabled();
+  });
+
+  it('does not expose node mutation controls before an aggregate row is tenant-scoped', () => {
+    cleanup();
+    page.url = new URL('https://piqae.test/dashboard?view=nodes&node=agt_01') as never;
+    render(Page, {
+      data: {
+        ...pageData([]),
+        meta: { ...pageData([]).meta, platform: { accounts: true } },
+        platformEnabled: true,
+        scope: 'customers',
+        managedAccount: null,
+        agents: [{ ...agent, customer: { id: account.id, externalId: account.externalId, name: account.name } }],
+        detail: {
+          kind: 'node',
+          node: agent,
+          printers: [],
+          runtime: null,
+          diagnostics: Promise.resolve({ reports: [], dataError: null }),
+          wakeHints: Promise.resolve({ hints: [], dataError: null })
+        }
+      } as never,
+      form: null as never
+    });
+
+    expect(screen.queryByRole('button', { name: 'Request refresh' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Remove node' })).not.toBeInTheDocument();
   });
 });

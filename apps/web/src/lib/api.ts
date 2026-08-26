@@ -1,4 +1,4 @@
-import { PiqaeClient } from '@piqae/sdk';
+import { PiqaeClient, PiqaeError } from '@piqae/sdk';
 import type {
   DashboardAccount,
   DashboardCustomerOperationsPage,
@@ -10,6 +10,8 @@ import type {
   DashboardJob,
   DashboardJobEvent,
   DashboardMeta,
+  DashboardNodeRuntimeObservation,
+  DashboardNodeWakeHint,
   DashboardOverview,
   DashboardPage,
   DashboardPrinter,
@@ -50,6 +52,10 @@ export interface DashboardApi {
   renameWorkspace(name: string): Promise<DashboardWorkspace>;
   nodeDiagnostics(nodeId: string): Promise<DashboardNodeDiagnostic[]>;
   collectNodeDiagnostics(nodeId: string): Promise<{ requestId: string }>;
+  nodeRuntimeObservations(): Promise<DashboardPage<DashboardNodeRuntimeObservation>>;
+  nodeWakeHints(nodeId: string): Promise<DashboardNodeWakeHint[]>;
+  requestNodeRefresh(nodeId: string, requestId: string): Promise<DashboardNodeWakeHint>;
+  removeNode(nodeId: string): Promise<{ alreadyRemoved: boolean }>;
 }
 
 const MAX_OVERVIEW_JOB_PAGES = 100;
@@ -147,7 +153,21 @@ export const mockApi: DashboardApi = {
         jobs: demo.jobs.map((job) => ({ ...job, customer: { id: account.id, externalId: account.externalId, name: account.name } })),
         destinations: [],
         routes: [],
-        routeObservations: []
+        routeObservations: [],
+        runtimeObservations: demo.agents.map((agent, index) => ({
+          customer: { id: account.id, externalId: account.externalId, name: account.name },
+          nodeId: agent.id,
+          sequence: index + 1,
+          hostMode: 'machine_service' as const,
+          availabilityClass: 'continuous_while_awake' as const,
+          lifecycleState: 'available' as const,
+          acceptsCloudJobs: true,
+          executionBudgetMs: null,
+          wakeMechanisms: ['local_broker' as const],
+          observedAt: agent.lastSeenAt,
+          expiresAt: new Date(Date.parse(agent.lastSeenAt) + 120_000).toISOString(),
+          freshness: 'live' as const
+        }))
       })),
       nextCursor: null,
       hasMore: false
@@ -158,7 +178,34 @@ export const mockApi: DashboardApi = {
   workspace: () => delay({ id: 'wsp_demo', name: 'Demo workspace', slug: 'demo-workspace' }),
   renameWorkspace: (name) => delay({ id: 'wsp_demo', name, slug: 'demo-workspace' }),
   nodeDiagnostics: () => delay([]),
-  collectNodeDiagnostics: () => delay({ requestId: 'diag_demo' })
+  collectNodeDiagnostics: () => delay({ requestId: 'diag_demo' }),
+  nodeRuntimeObservations: () => delay(page(demo.agents.map((agent, index) => ({
+    nodeId: agent.id,
+    sequence: index + 1,
+    hostMode: index === 1 ? 'embedded_application' as const : 'machine_service' as const,
+    availabilityClass: index === 1 ? 'background_opportunistic' as const : 'continuous_while_awake' as const,
+    lifecycleState: index === 1 ? 'background' as const : 'available' as const,
+    acceptsCloudJobs: index !== 1,
+    executionBudgetMs: index === 1 ? 24_000 : null,
+    wakeMechanisms: index === 1
+      ? ['apns_background' as const, 'bluetooth_accessory' as const]
+      : ['local_broker' as const],
+    observedAt: agent.lastSeenAt,
+    expiresAt: new Date(Date.parse(agent.lastSeenAt) + 120_000).toISOString(),
+    freshness: index === 2 ? 'stale' as const : 'live' as const
+  })))),
+  nodeWakeHints: () => delay([]),
+  requestNodeRefresh: (nodeId) => delay({
+    id: 'wkh_demo',
+    nodeId,
+    reason: 'operator_request',
+    deliveryChannel: 'connected_session',
+    status: 'pending',
+    requestedAt: new Date().toISOString(),
+    expiresAt: new Date(Date.now() + 300_000).toISOString(),
+    observedAt: null
+  }),
+  removeNode: () => delay({ alreadyRemoved: false })
 };
 
 /**
@@ -196,7 +243,9 @@ export function createLiveApi(
         : agent.state === 'disconnected'
           ? 'offline'
           : agent.state,
-    os: agent.platform.toLowerCase().includes('win')
+    os: /ipad|ipados|ios/.test(agent.platform.toLowerCase())
+      ? 'ipados'
+      : agent.platform.toLowerCase().includes('win')
       ? 'windows'
       : agent.platform.toLowerCase().includes('mac')
         ? 'macos'
@@ -208,6 +257,35 @@ export function createLiveApi(
     queueDepth: 0,
     printerCount: 0,
     labels: []
+  });
+
+  const toRuntimeObservation = (
+    observation: Awaited<ReturnType<typeof client.nodes.runtime>>
+  ): DashboardNodeRuntimeObservation => ({
+    nodeId: observation.node_id,
+    sequence: observation.sequence,
+    hostMode: observation.host_mode,
+    availabilityClass: observation.availability_class,
+    lifecycleState: observation.lifecycle_state,
+    acceptsCloudJobs: observation.accepts_cloud_jobs,
+    executionBudgetMs: observation.execution_budget_ms,
+    wakeMechanisms: observation.wake_mechanisms,
+    observedAt: observation.observed_at,
+    expiresAt: observation.expires_at,
+    freshness: observation.freshness
+  });
+
+  const toWakeHint = (
+    hint: Awaited<ReturnType<typeof client.nodes.requestWake>>
+  ): DashboardNodeWakeHint => ({
+    id: hint.id,
+    nodeId: hint.node_id,
+    reason: hint.reason,
+    deliveryChannel: hint.delivery_channel ?? null,
+    status: hint.status,
+    requestedAt: hint.requested_at,
+    expiresAt: hint.expires_at,
+    observedAt: hint.observed_at
   });
 
   const toPrinter = (
@@ -442,6 +520,43 @@ export function createLiveApi(
       };
     },
     agents: async () => page((await client.agents.list()).map(toAgent)),
+    nodeRuntimeObservations: async () => {
+      const data: DashboardNodeRuntimeObservation[] = [];
+      const seen = new Set<string>();
+      let after: string | undefined;
+      for (let pageNumber = 0; pageNumber < 100; pageNumber += 1) {
+        const result = await client.nodes.runtimes({ limit: 100, ...(after ? { after } : {}) });
+        data.push(...result.data.map(toRuntimeObservation));
+        if (!result.has_more) return { data, nextCursor: null };
+        if (!result.next_cursor || seen.has(result.next_cursor)) {
+          throw new Error('Piqae runtime observations pagination returned an invalid cursor.');
+        }
+        seen.add(result.next_cursor);
+        after = result.next_cursor;
+      }
+      throw new Error('Piqae runtime observations exceeded its pagination bound.');
+    },
+    nodeWakeHints: async (nodeId) =>
+      (await client.nodes.wakeHints(nodeId, { limit: 10 })).map(toWakeHint),
+    requestNodeRefresh: async (nodeId, requestId) =>
+      toWakeHint(await client.nodes.requestWake(
+        nodeId,
+        { reason: 'operator_request', expires_in_seconds: 300 },
+        requestId
+      )),
+    removeNode: async (nodeId) => {
+      try {
+        await client.nodes.revoke(nodeId);
+        return { alreadyRemoved: false };
+      } catch (error) {
+        // DELETE is not server-idempotent yet. Treat an already absent projection
+        // as the desired UI outcome while preserving every other failure.
+        if (error instanceof PiqaeError && error.status === 404) {
+          return { alreadyRemoved: true };
+        }
+        throw error;
+      }
+    },
     printers: async () => {
       const result = await client.printers.list({ limit: 100 });
       return { data: result.data.map(toPrinter), nextCursor: result.next_cursor ?? null };
@@ -603,7 +718,9 @@ export function createLiveApi(
           routes: (Array.isArray(raw.routes) ? raw.routes : [])
             .map((route) => ({ ...toRoute(route as Parameters<typeof toRoute>[0]), customer: owner })),
           routeObservations: (Array.isArray(raw.route_observations) ? raw.route_observations : [])
-            .map((observation) => ({ ...toRouteObservation(observation as Parameters<typeof toRouteObservation>[0]), customer: owner }))
+            .map((observation) => ({ ...toRouteObservation(observation as Parameters<typeof toRouteObservation>[0]), customer: owner })),
+          runtimeObservations: (Array.isArray(raw.runtime_observations) ? raw.runtime_observations : [])
+            .map((observation) => ({ ...toRuntimeObservation(observation as Parameters<typeof toRuntimeObservation>[0]), customer: owner }))
         };
       });
       return {

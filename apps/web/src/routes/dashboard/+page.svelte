@@ -220,6 +220,56 @@
   const nodeName = (agentId: string, customerExternalId?: string | null) =>
     data.agents.find((agent) => agent.id === agentId && agent.customer?.externalId === customerExternalId)?.name ??
     data.agents.find((agent) => agent.id === agentId)?.name ?? 'Unknown';
+  const runtimeFor = (node: (typeof data.agents)[number]) =>
+    data.runtimeObservations.find(
+      (runtime) =>
+        runtime.nodeId.replace(/^agt_/, '') === node.id.replace(/^agt_/, '') &&
+        (!node.customer || runtime.customer?.externalId === node.customer.externalId)
+    ) ?? null;
+  const queueFor = (node: (typeof data.agents)[number]) => {
+    const observations = data.routes
+      .filter(
+        (route) =>
+          route.agentId.replace(/^agt_/, '') === node.id.replace(/^agt_/, '') &&
+          (!node.customer || route.customer?.externalId === node.customer.externalId)
+      )
+      .map((route) => route.latestObservation)
+      .filter((observation) => observation !== null);
+    if (observations.length === 0) return null;
+    const owned = observations.reduce((sum, observation) => sum + observation.connectorJobs, 0);
+    const unknown = observations.reduce((sum, observation) => sum + observation.unknownJobs, 0);
+    const external = observations.reduce(
+      (sum, observation) =>
+        sum + Math.max(0, observation.otherPiqaeOrExternalJobs - observation.unknownJobs),
+      0
+    );
+    return {
+      total: observations.reduce((sum, observation) => sum + observation.totalJobs, 0),
+      active: observations.reduce((sum, observation) => sum + observation.activeJobs, 0),
+      owned,
+      external,
+      unknown,
+      observedAt: observations.map((observation) => observation.observedAt).sort()[0],
+      stale: observations.some((observation) => Date.parse(observation.expiresAt) <= Date.now())
+    };
+  };
+  const humanise = (value: string) => value.replaceAll('_', ' ');
+  const admissionSummary = (runtime: (typeof data.runtimeObservations)[number] | null) => {
+    if (!runtime) return 'No runtime evidence';
+    if (runtime.freshness === 'stale') return 'Blocked · stale observation';
+    if (runtime.acceptsCloudJobs) return 'Accepting cloud jobs';
+    if (runtime.lifecycleState === 'suspended' || runtime.lifecycleState === 'suspending') {
+      return `Blocked · ${humanise(runtime.lifecycleState)}`;
+    }
+    if (runtime.executionBudgetMs === 0) return 'Blocked · no execution budget';
+    return 'Cloud leasing paused';
+  };
+  const executionBudget = (milliseconds: number | null) =>
+    milliseconds === null
+      ? 'Not time-limited'
+      : milliseconds < 1_000
+        ? `${milliseconds} ms`
+        : `${Math.round(milliseconds / 1_000)} s remaining`;
   const printerName = (printerId: string, customerExternalId?: string | null) =>
     data.printers.find((printer) => printer.id === printerId && printer.customer?.externalId === customerExternalId)?.name ??
     data.printers.find((printer) => printer.id === printerId)?.name ?? 'Unknown';
@@ -277,6 +327,10 @@
   let printOpen = $state(false);
   let printPending = $state(false);
   let diagnosticsPending = $state(false);
+  let refreshPending = $state(false);
+  let removeNodeOpen = $state(false);
+  let removeNodePending = $state(false);
+  let removeNodeConfirmation = $state('');
   let printAttempted = $state(false);
   let printPrinterId = $state('');
   let printProfileId = $state('');
@@ -463,6 +517,20 @@
   />
 </section>
 
+{#if data.view === 'nodes' && data.runtimeDataError}
+  <DataError error={data.runtimeDataError} />
+{:else if data.view === 'nodes' && data.agents.length > 0 && data.runtimeObservations.length === 0}
+  <p class="ui-note warning" role="status">
+    These nodes have not reported host lifecycle data yet. Heartbeats can show a node online, but
+    cloud job admission remains unverified until a fresh runtime observation arrives.
+  </p>
+{:else if data.view === 'nodes' && data.runtimeObservations.some((runtime) => runtime.freshness === 'stale')}
+  <p class="ui-note warning" role="status">
+    One or more host observations are stale. Piqae keeps those nodes out of cloud leasing until
+    they report fresh lifecycle and execution-budget evidence.
+  </p>
+{/if}
+
 <Toolbar meta={`${resultCount} ${data.view}`}>
   <SegmentedControl
     value={data.view}
@@ -493,7 +561,7 @@
   {/if}
 </Toolbar>
 
-<DataPanel minWidth={data.view === 'jobs' ? '860px' : '760px'}>
+<DataPanel minWidth={data.view === 'jobs' ? '860px' : data.view === 'nodes' ? '1040px' : '760px'}>
   {#if data.view === 'needs_review'}
     <table class="ui-data-table">
       <thead><tr><th>Resource</th>{#if aggregateCustomers}<th>Customer</th>{/if}<th>Needs review</th><th class="right">Observed</th></tr></thead>
@@ -707,27 +775,48 @@
         <tr>
           <th>Node</th>
           {#if aggregateCustomers}<th>Customer</th>{/if}
-          <th>Status</th>
-          <th>Platform</th>
+          <th>Runtime</th>
+          <th>Cloud admission</th>
           <th>Printers</th>
-          <th>Queue</th>
+          <th>Privacy-safe queue</th>
           <th class="right">Last seen</th>
         </tr>
       </thead>
       <tbody>
         {#each visibleNodes as node}
+          {@const runtime = runtimeFor(node)}
+          {@const queue = queueFor(node)}
           <tr>
             <td>
               <a class="cell-stack" href={detailHref('node', node.id, node.customer?.externalId)}>
                 <strong>{node.name}</strong>
+                <small>{node.os} · {node.architecture}</small>
                 <small class="mono">{node.id}</small>
               </a>
             </td>
             {#if aggregateCustomers}<td><a class="customer-link" href={operationalHref({ managed_customer: node.customer?.externalId ?? null, scope: null })}>{node.customer?.name ?? 'Unknown'}</a></td>{/if}
-            <td><Status value={node.state} /></td>
-            <td class="muted">{node.os} · {node.architecture}</td>
+            <td>
+              <span class="runtime-cell">
+                <Status value={runtime?.freshness === 'stale' ? 'stale' : node.state} />
+                <small>{runtime ? `${humanise(runtime.hostMode)} · ${humanise(runtime.lifecycleState)}` : 'Not reported'}</small>
+              </span>
+            </td>
+            <td>
+              <span class:admission-ok={runtime?.acceptsCloudJobs && runtime.freshness !== 'stale'} class="admission">
+                {admissionSummary(runtime)}
+              </span>
+            </td>
             <td class="numeric">{node.printerCount}</td>
-            <td class="numeric">{node.queueDepth}</td>
+            <td>
+              {#if queue}
+                <span class="queue-summary">
+                  <strong>{queue.total}</strong>
+                  <small>{queue.owned} Piqae · {queue.external} external · {queue.unknown} unknown</small>
+                </span>
+              {:else}
+                <span class="muted">Not reported</span>
+              {/if}
+            </td>
             <td class="right muted numeric"><RelativeTime value={node.lastSeenAt} /></td>
           </tr>
         {:else}
@@ -824,6 +913,33 @@
         onclick={() => openPrintDialog(detail.printer.id)}
       >Print PDF</button>
       <a class="button compact" href={detailHref('node', detail.printer.agentId)}>Open node</a>
+    {:else if detail?.kind === 'node' && (managedAccount || data.scope === 'own')}
+      <form
+        method="POST"
+        action="?/requestNodeRefresh"
+        class="inline-action"
+        use:enhance={() => {
+          refreshPending = true;
+          return async ({ update }) => {
+            await update({ reset: false, invalidateAll: true });
+            refreshPending = false;
+          };
+        }}
+      >
+        {#if managedAccount}<input type="hidden" name="managed_customer" value={managedAccount.externalId} />{/if}
+        <input type="hidden" name="node_id" value={detail.node.id} />
+        <input type="hidden" name="expected_node_name" value={detail.node.name} />
+        <button class="button compact" type="submit" disabled={refreshPending || data.dashboardMode !== 'live'}>
+          {refreshPending ? 'Requesting…' : 'Request refresh'}
+        </button>
+      </form>
+      <button
+        class="button compact danger"
+        onclick={() => {
+          removeNodeConfirmation = '';
+          removeNodeOpen = true;
+        }}
+      >Remove node</button>
     {:else if detail?.kind === 'customer'}
       <a
         class="button compact primary"
@@ -985,6 +1101,7 @@
       <p class="ui-note warning">This route has not reported spooler observations. Printer inventory and node heartbeat do not prove queue telemetry is healthy.</p>
     {/if}
   {:else if detail?.kind === 'node'}
+    {@const runtimeQueue = queueFor(detail.node)}
     <div class="drawer-status">
       <Status value={detail.node.state} />
       <span class="muted">Seen <RelativeTime value={detail.node.lastSeenAt} /></span>
@@ -995,11 +1112,102 @@
         { term: 'Platform', value: `${detail.node.os} · ${detail.node.architecture}` },
         { term: 'Node version', value: `v${detail.node.version}`, mono: true },
         { term: 'Protocol', value: detail.node.protocolVersion, mono: true },
-        { term: 'Local queue', value: `${detail.node.queueDepth} jobs` },
+        { term: 'Reported queue', value: runtimeQueue ? `${runtimeQueue.total} jobs · ${runtimeQueue.active} active` : 'Not reported' },
         { term: 'Labels', value: detail.node.labels.join(', ') || null },
         { term: 'Node ID', value: detail.node.id, mono: true }
       ]}
     />
+
+    <div class="drawer-section runtime-detail">
+      <h3>Host availability<span>{detail.runtime?.freshness ?? 'never reported'}</span></h3>
+      {#if detail.runtime}
+        <p
+          class:neutral={detail.runtime.acceptsCloudJobs && detail.runtime.freshness !== 'stale'}
+          class:warning={!detail.runtime.acceptsCloudJobs || detail.runtime.freshness === 'stale'}
+          class="ui-note"
+        >
+          {admissionSummary(detail.runtime)}. A fresh authenticated runtime observation controls
+          cloud leasing; an ordinary heartbeat alone does not.
+        </p>
+        <DefinitionList
+          items={[
+            { term: 'Host mode', value: humanise(detail.runtime.hostMode) },
+            { term: 'Availability', value: humanise(detail.runtime.availabilityClass) },
+            { term: 'Lifecycle', value: humanise(detail.runtime.lifecycleState) },
+            { term: 'Cloud jobs', value: detail.runtime.acceptsCloudJobs && detail.runtime.freshness !== 'stale' ? 'Admitted' : 'Not admitted' },
+            { term: 'Execution budget', value: executionBudget(detail.runtime.executionBudgetMs) },
+            { term: 'Wake capabilities', value: detail.runtime.wakeMechanisms.map(humanise).join(', ') || 'Manual only' },
+            { term: 'Observation sequence', value: detail.runtime.sequence, mono: true },
+            { term: 'Observed', value: detail.runtime.observedAt },
+            { term: 'Expires', value: detail.runtime.expiresAt }
+          ]}
+        />
+      {:else}
+        <p class="ui-note warning">
+          No host observation is available. The node may predate runtime telemetry or may not have
+          completed a signed sync since upgrading.
+        </p>
+      {/if}
+
+      <p class="muted empty-line">
+        Request refresh adds an advisory hint to the node’s next signed sync. A
+        <span class="mono">connected_session</span> delivery means the already-awake node saw it;
+        it is not evidence that Piqae remotely woke a sleeping device.
+      </p>
+      {#if form?.mutation === 'requestNodeRefresh'}
+        {#if form?.error}
+          <p class="ui-note error" role="alert">{form.error.message}</p>
+        {:else if form?.nodeRefreshHint}
+          <p class="ui-note neutral" role="status">
+            Refresh hint queued. Delivery is {form.nodeRefreshHint.deliveryChannel === 'connected_session'
+              ? 'waiting for or using the active signed session'
+              : form.nodeRefreshHint.deliveryChannel ?? 'pending'}.
+          </p>
+        {/if}
+      {/if}
+
+      <div class="wake-history" aria-label="Recent refresh hints">
+        {#await detail.wakeHints}
+          <p class="muted empty-line">Loading recent refresh hints…</p>
+        {:then wakeData}
+          {#if wakeData.dataError}<DataError error={wakeData.dataError} />{/if}
+          {#each wakeData.hints.slice(0, 5) as hint}
+            <div class="mini-row">
+              <span class="cell-stack">
+                <strong>{humanise(hint.reason)}</strong>
+                <small>{hint.deliveryChannel ? humanise(hint.deliveryChannel) : 'Delivery pending'}</small>
+              </span>
+              <Status value={hint.status} />
+            </div>
+          {:else}
+            <p class="muted empty-line">No refresh hints have been requested.</p>
+          {/each}
+        {/await}
+      </div>
+    </div>
+
+    <div class="drawer-section">
+      <h3>Privacy-safe queue<span>{runtimeQueue ? `${runtimeQueue.total} jobs` : 'not reported'}</span></h3>
+      {#if runtimeQueue}
+        <DefinitionList items={[
+          { term: 'Piqae-owned jobs', value: runtimeQueue.owned },
+          { term: 'External jobs', value: runtimeQueue.external },
+          { term: 'Unknown source', value: runtimeQueue.unknown },
+          { term: 'Active jobs', value: runtimeQueue.active },
+          { term: 'Telemetry', value: runtimeQueue.stale ? 'Stale' : 'Current' },
+          { term: 'Oldest observation', value: runtimeQueue.observedAt }
+        ]} />
+        <p class="muted empty-line">
+          Other connections can see that work is ahead of them, but never its titles, filenames,
+          users, native job IDs or document data.
+        </p>
+      {:else}
+        <p class="ui-note warning">
+          No privacy-safe spooler observation is available. A node heartbeat does not prove its
+          operating-system queues are empty.
+        </p>
+      {/if}
+    </div>
 
     <div class="drawer-section">
       <h3>Printers<span>{detail.printers.length}</span></h3>
@@ -1071,6 +1279,67 @@
     <EmptyState message={`That ${detail.label} no longer exists.`} compact />
   {/if}
 </Drawer>
+
+{#if detail?.kind === 'node' && (managedAccount || data.scope === 'own')}
+  <Dialog
+    bind:open={removeNodeOpen}
+    labelledBy="remove-node-title"
+    title="Remove this node?"
+    description="Revoke this node from the currently selected workspace."
+  >
+    <div class="ui-dialog__body">
+      <form
+        id="remove-node-form"
+        method="POST"
+        action="?/removeNode"
+        use:enhance={() => {
+          removeNodePending = true;
+          return async ({ result, update }) => {
+            removeNodePending = false;
+            if (result.type === 'success') {
+              removeNodeOpen = false;
+              await goto(listHref, { invalidateAll: true, keepFocus: true, noScroll: true });
+              return;
+            }
+            await update({ reset: false });
+          };
+        }}
+      >
+        {#if managedAccount}<input type="hidden" name="managed_customer" value={managedAccount.externalId} />{/if}
+        <input type="hidden" name="node_id" value={detail.node.id} />
+        <p class="ui-note error">
+          This revokes the node’s cloud identity and removes its server projection from
+          <strong>{managedAccount?.name ?? 'this workspace'}</strong>. It does not uninstall the
+          local app, erase its durable local queue, or delete operating-system printers.
+        </p>
+        <Field label={`Type “${detail.node.name}” to confirm`}>
+          <input
+            class="input"
+            name="confirmation"
+            bind:value={removeNodeConfirmation}
+            autocomplete="off"
+            spellcheck="false"
+            required
+          />
+        </Field>
+      </form>
+      {#if form?.mutation === 'removeNode' && form?.error}
+        <p class="ui-note error" role="alert">{form.error.message}</p>
+      {/if}
+    </div>
+    {#snippet footer()}
+      <button class="button" type="button" onclick={() => (removeNodeOpen = false)}>Keep node</button>
+      <button
+        class="button danger-solid"
+        type="submit"
+        form="remove-node-form"
+        disabled={removeNodePending || removeNodeConfirmation !== detail.node.name || data.dashboardMode !== 'live'}
+      >
+        {removeNodePending ? 'Removing…' : 'Remove node'}
+      </button>
+    {/snippet}
+  </Dialog>
+{/if}
 
 <!-- Hosted PDF print -->
 <Dialog
@@ -1409,6 +1678,47 @@
 
   .customer-link:hover {
     color: var(--accent);
+  }
+
+  .runtime-cell,
+  .queue-summary {
+    display: grid;
+    gap: 3px;
+    min-width: 0;
+  }
+
+  .runtime-cell small,
+  .queue-summary small {
+    color: var(--text-tertiary);
+    font-size: var(--text-meta);
+    white-space: nowrap;
+  }
+
+  .queue-summary strong {
+    font-weight: 560;
+  }
+
+  .admission {
+    color: var(--warning);
+    font-size: var(--text-compact);
+    white-space: nowrap;
+  }
+
+  .admission.admission-ok {
+    color: var(--success);
+  }
+
+  .inline-action {
+    display: inline-flex;
+    gap: 0;
+  }
+
+  .wake-history {
+    margin-top: 10px;
+  }
+
+  .runtime-detail :global(.definition-list) {
+    margin-top: 12px;
   }
 
   .managed-context {
