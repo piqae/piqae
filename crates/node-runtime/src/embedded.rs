@@ -14,7 +14,7 @@ use anyhow::{Context as _, Result, bail};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::Utc;
 use piqae_agent_storage::{
-    AcceptedJob, AgentStore, CloudAcceptIntent, LocalJob, StoredNamedProfile,
+    AcceptedJob, AgentStore, CloudAcceptIntent, CloudRouteProof, LocalJob, StoredNamedProfile,
 };
 use piqae_domain::{
     AgentId, EventId, JobFailureReason, JobId, JobState, NativePrinterOption, PrinterCapabilities,
@@ -45,6 +45,7 @@ const MAX_ACTIVE_OPERATIONS: usize = 256;
 const MAX_COMPLETED_ACKS: usize = 1024;
 const MAX_DOCUMENT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_CONTENT_STORE_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_CONTENT_FILES: usize = 4_096;
 const OPERATION_DEADLINE_MS: i64 = 30_000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -257,6 +258,7 @@ impl EmbeddedQueue {
             support_packs,
             document,
         };
+        queue.reconcile_content_for_scope("local")?;
         queue.open_persisted_connector_scopes()?;
         queue.repair_after_restart()?;
         Ok(queue)
@@ -405,6 +407,7 @@ impl EmbeddedQueue {
         let root = self.root.join("connectors").join(connector_id);
         std::fs::create_dir_all(&root)?;
         let store = AgentStore::open(root.join("agent.sqlite3"))?;
+        reconcile_content_root(&store, &root.join("content"))?;
         self.document
             .connector_scopes
             .insert(connector_id.to_owned());
@@ -573,14 +576,22 @@ impl EmbeddedQueue {
             .into_iter()
             .find(|printer| printer.printer_id == printer_id)
             .context("offered embedded printer is not present")?;
+        let reservation = offer
+            .route_reservation
+            .as_ref()
+            .context("embedded cloud offer has no route reservation")?;
+        let route_proof = CloudRouteProof {
+            reservation_id: reservation.reservation_id.to_string(),
+            generation: reservation.generation,
+            fencing_token: reservation.fencing_token.clone(),
+        };
         let digest = hex::encode(Sha256::digest(content));
         let expected = offer_content_digest(offer);
         if expected.is_some_and(|expected| expected != digest) {
             bail!("offered embedded content digest does not match");
         }
         let path = self.persist_content_for_scope(connector_id, &digest, content)?;
-        let store = self.store_for_scope_mut(connector_id)?;
-        let local = store.prepare_cloud_job(
+        let prepared = self.store_for_scope_mut(connector_id)?.prepare_cloud_job(
             &AcceptedJob {
                 job_id: offer.job.id.to_string(),
                 submission_id: format!("sub_{}", offer.job.id),
@@ -602,7 +613,15 @@ impl EmbeddedQueue {
             &offer.lease_id.to_string(),
             &offer.lease_token,
             offer.lease_expires_at.timestamp_millis(),
-        )?;
+            &route_proof,
+        );
+        let local = match prepared {
+            Ok(local) => local,
+            Err(error) => {
+                self.reconcile_content_for_scope(connector_id)?;
+                return Err(error.into());
+            }
+        };
         Ok(CloudAcceptIntent {
             job_id: offer.job.id.to_string(),
             lease_id: offer.lease_id.to_string(),
@@ -610,6 +629,9 @@ impl EmbeddedQueue {
             lease_expires_unix_ms: offer.lease_expires_at.timestamp_millis(),
             content_sha256: digest,
             local_sequence: u64::try_from(local.printer_sequence).unwrap_or(u64::MAX),
+            route_reservation_id: Some(route_proof.reservation_id),
+            route_generation: Some(route_proof.generation),
+            route_fencing_token: Some(route_proof.fencing_token),
         })
     }
 
@@ -653,7 +675,14 @@ impl EmbeddedQueue {
             expires_unix_ms: request.expires_unix_ms,
             accepted_unix_ms: Utc::now().timestamp_millis(),
             cloud_managed: false,
-        })?;
+        });
+        let accepted = match accepted {
+            Ok(accepted) => accepted,
+            Err(error) => {
+                self.reconcile_content_for_scope("local")?;
+                return Err(error.into());
+            }
+        };
         Ok(EmbeddedJobAccepted {
             job_id,
             state: accepted.state,
@@ -725,6 +754,24 @@ impl EmbeddedQueue {
             now,
         )?;
         Ok(Some(operation))
+    }
+
+    /// Proves whether any adapter in this installation still has durable work.
+    /// This is intentionally installation-wide: an empty pull for one adapter
+    /// cannot clear the coalesced host notification for another adapter.
+    pub fn has_adapter_work(&self) -> Result<bool> {
+        if !self.document.operations.is_empty() {
+            return Ok(true);
+        }
+        if self.store.has_queued_work()? {
+            return Ok(true);
+        }
+        for store in self.connector_stores.values() {
+            if store.has_queued_work()? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// Durably records that the host is about to call a native printing API.
@@ -1044,7 +1091,7 @@ impl EmbeddedQueue {
                 file.write_all(content)?;
                 file.sync_all()?;
                 #[cfg(unix)]
-                std::fs::File::open(self.root.join("content"))?.sync_all()?;
+                std::fs::File::open(&content_root)?.sync_all()?;
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                 let existing = std::fs::read(&path)?;
@@ -1141,11 +1188,23 @@ impl EmbeddedQueue {
     fn open_connector_store(&mut self, connector_id: &str) -> Result<()> {
         let root = self.root.join("connectors").join(connector_id);
         std::fs::create_dir_all(&root)?;
-        self.connector_stores.insert(
-            connector_id.to_owned(),
-            AgentStore::open(root.join("agent.sqlite3"))?,
-        );
+        let store = AgentStore::open(root.join("agent.sqlite3"))?;
+        reconcile_content_root(&store, &root.join("content"))?;
+        self.connector_stores.insert(connector_id.to_owned(), store);
         Ok(())
+    }
+
+    fn reconcile_content_for_scope(&self, queue_scope: &str) -> Result<()> {
+        let content_root = if queue_scope == "local" {
+            self.root.join("content")
+        } else {
+            validate_queue_scope(queue_scope)?;
+            self.root
+                .join("connectors")
+                .join(queue_scope)
+                .join("content")
+        };
+        reconcile_content_root(self.store_for_scope(queue_scope)?, &content_root)
     }
 
     fn repair_active_operation(&mut self, operation_id: &str) -> Result<()> {
@@ -1481,6 +1540,38 @@ fn directory_bytes(path: &Path) -> Result<u64> {
     Ok(total)
 }
 
+fn reconcile_content_root(store: &AgentStore, content_root: &Path) -> Result<()> {
+    std::fs::create_dir_all(content_root)?;
+    let tracked = store
+        .tracked_content_paths()?
+        .into_iter()
+        .map(PathBuf::from)
+        .collect::<BTreeSet<_>>();
+    let mut entries = Vec::new();
+    for entry in std::fs::read_dir(content_root)? {
+        if entries.len() >= MAX_CONTENT_FILES {
+            bail!("embedded content inventory exceeds reconciliation bounds");
+        }
+        entries.push(entry?);
+    }
+    let mut removed = false;
+    for entry in entries {
+        let path = entry.path();
+        if entry.file_type()?.is_file()
+            && path.extension().is_some_and(|extension| extension == "bin")
+            && !tracked.contains(&path)
+        {
+            std::fs::remove_file(&path)?;
+            removed = true;
+        }
+    }
+    #[cfg(unix)]
+    if removed {
+        std::fs::File::open(content_root)?.sync_all()?;
+    }
+    Ok(())
+}
+
 fn scoped_native_id(adapter_id: &str, native_id: &str) -> String {
     format!("{adapter_id}\0{native_id}")
 }
@@ -1648,7 +1739,14 @@ mod tests {
                 sha256: Some(hex::encode(Sha256::digest(content))),
                 bytes: Some(u64::try_from(content.len()).unwrap()),
             },
-            route_reservation: None,
+            route_reservation: Some(piqae_protocol::agent::CloudRouteReservation {
+                route_id: "route_fixture".into(),
+                local_route_key: format!("{}\0{}", printer.adapter_id, printer.native_id),
+                reservation_id: uuid::Uuid::new_v4(),
+                generation: 1,
+                fencing_token: "deterministic-route-fence".into(),
+                lease_expires_at: Utc::now() + chrono::TimeDelta::minutes(1),
+            }),
         }
     }
 
@@ -1794,6 +1892,103 @@ mod tests {
                 .job_id,
             expected_next.to_string()
         );
+    }
+
+    #[test]
+    fn connector_content_reconcile_removes_only_untracked_files_after_restart() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut queue, printer) = prepare(root.path());
+        let job_id = JobId::new();
+        let content = b"tracked connector fixture";
+        let offer = cloud_offer(&printer, job_id, content);
+        queue
+            .prepare_connector_offer("ncon_reconcile", &offer, content, None)
+            .unwrap();
+        let tracked = queue.connector_stores["ncon_reconcile"]
+            .get_job(&job_id.to_string())
+            .unwrap()
+            .unwrap()
+            .content_path;
+        let content_root = root.path().join("connectors/ncon_reconcile/content");
+        let orphan = content_root.join(format!("{}.bin", "f".repeat(64)));
+        std::fs::write(&orphan, b"orphan after sqlite failure").unwrap();
+        drop(queue);
+
+        let restarted = EmbeddedQueue::open(root.path(), SupportPackRegistry::default()).unwrap();
+        assert!(Path::new(&tracked).exists());
+        assert!(!orphan.exists());
+        assert_eq!(
+            restarted.connector_stores["ncon_reconcile"]
+                .pending_cloud_accepts()
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn sqlite_prepare_failure_reclaims_new_connector_content_before_returning() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut queue, printer) = prepare(root.path());
+        let content = b"sqlite rollback fixture";
+        let mut offer = cloud_offer(&printer, JobId::new(), content);
+        offer.route_reservation.as_mut().unwrap().generation = u64::MAX;
+        assert!(
+            queue
+                .prepare_connector_offer("ncon_failed", &offer, content, None)
+                .is_err()
+        );
+        let digest = hex::encode(Sha256::digest(content));
+        assert!(
+            !root
+                .path()
+                .join("connectors/ncon_failed/content")
+                .join(format!("{digest}.bin"))
+                .exists()
+        );
+        drop(queue);
+        EmbeddedQueue::open(root.path(), SupportPackRegistry::default()).unwrap();
+    }
+
+    #[test]
+    fn empty_adapter_pull_does_not_hide_another_adapters_work() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut queue, _) = prepare(root.path());
+        let second_id = "com.example.pos.second";
+        let mut second = registration();
+        second.fingerprint.adapter_id = second_id.into();
+        queue.register_adapter(second).unwrap();
+        let printer = queue
+            .observe_inventory(
+                second_id,
+                &[EmbeddedPrinterObservation {
+                    native_id: "ipp://second/ipp/print".into(),
+                    name: "Second kitchen".into(),
+                    state: "available".into(),
+                    is_default: false,
+                    native_options: BTreeMap::new(),
+                }],
+            )
+            .unwrap()
+            .remove(0);
+        let job_id = JobId::new();
+        let content = b"second adapter only";
+        let offer = cloud_offer(&printer, job_id, content);
+        queue
+            .prepare_connector_offer("ncon_second_adapter", &offer, content, None)
+            .unwrap();
+        queue
+            .activate_connector_offer("ncon_second_adapter", job_id)
+            .unwrap();
+
+        assert!(
+            queue
+                .next_operation("com.example.pos.airprint")
+                .unwrap()
+                .is_none()
+        );
+        assert!(queue.has_adapter_work().unwrap());
+        assert!(queue.next_operation(second_id).unwrap().is_some());
     }
 
     #[test]

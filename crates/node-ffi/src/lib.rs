@@ -138,6 +138,7 @@ unsafe impl Sync for PiqaeWorkAvailableProvider {}
 struct FfiWorkAvailableNotifier {
     provider: PiqaeWorkAvailableProvider,
     pending: AtomicBool,
+    epoch: std::sync::atomic::AtomicU64,
 }
 
 impl FfiWorkAvailableNotifier {
@@ -145,12 +146,11 @@ impl FfiWorkAvailableNotifier {
         Self {
             provider,
             pending: AtomicBool::new(false),
+            epoch: std::sync::atomic::AtomicU64::new(0),
         }
     }
-}
 
-impl piqae_node_runtime::WorkAvailableNotifier for FfiWorkAvailableNotifier {
-    fn notify(&self) {
+    fn signal_pending(&self) {
         if self
             .pending
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -160,6 +160,29 @@ impl piqae_node_runtime::WorkAvailableNotifier for FfiWorkAvailableNotifier {
         }
         if let Some(callback) = self.provider.notify {
             unsafe { callback(self.provider.context) };
+        }
+    }
+}
+
+impl piqae_node_runtime::WorkAvailableNotifier for FfiWorkAvailableNotifier {
+    fn notify(&self) {
+        self.epoch.fetch_add(1, Ordering::AcqRel);
+        self.signal_pending();
+    }
+
+    fn epoch(&self) -> u64 {
+        self.epoch.load(Ordering::Acquire)
+    }
+
+    fn clear_if_epoch(&self, observed_epoch: u64) {
+        if self.epoch.load(Ordering::Acquire) != observed_epoch {
+            return;
+        }
+        self.pending.store(false, Ordering::Release);
+        // A producer can increment after the first comparison but before the
+        // clear. Re-arm in that window so its coalesced signal is not lost.
+        if self.epoch.load(Ordering::Acquire) != observed_epoch {
+            self.signal_pending();
         }
     }
 
@@ -1019,13 +1042,23 @@ pub extern "C" fn piqae_node_command(handle: u64, data: *const u8, length: usize
             NativeCommand::NextAdapterOperation { adapter_id } => {
                 let operation = {
                     let mut queue = lock_embedded(&embedded_queue)?;
+                    let observed_epoch = work_notifier.as_ref().map(|notifier| {
+                        piqae_node_runtime::WorkAvailableNotifier::epoch(notifier.as_ref())
+                    });
                     let operation = queue
                         .next_operation(&adapter_id)
                         .map_err(|_| FfiError::AdapterOperation)?;
                     if operation.is_none()
+                        && !queue
+                            .has_adapter_work()
+                            .map_err(|_| FfiError::AdapterOperation)?
                         && let Some(notifier) = &work_notifier
+                        && let Some(observed_epoch) = observed_epoch
                     {
-                        piqae_node_runtime::WorkAvailableNotifier::clear(notifier.as_ref());
+                        piqae_node_runtime::WorkAvailableNotifier::clear_if_epoch(
+                            notifier.as_ref(),
+                            observed_epoch,
+                        );
                     }
                     drop(queue);
                     operation
@@ -1584,7 +1617,31 @@ mod tests {
         piqae_node_runtime::WorkAvailableNotifier::notify(&notifier);
         piqae_node_runtime::WorkAvailableNotifier::notify(&notifier);
         assert_eq!(counter.load(Ordering::Acquire), 1);
-        piqae_node_runtime::WorkAvailableNotifier::clear(&notifier);
+        let epoch = piqae_node_runtime::WorkAvailableNotifier::epoch(&notifier);
+        piqae_node_runtime::WorkAvailableNotifier::clear_if_epoch(&notifier, epoch);
+        piqae_node_runtime::WorkAvailableNotifier::notify(&notifier);
+        assert_eq!(counter.load(Ordering::Acquire), 2);
+    }
+
+    #[test]
+    fn stale_no_work_epoch_cannot_clear_a_concurrent_activation() {
+        let counter = std::sync::atomic::AtomicUsize::new(0);
+        let notifier = FfiWorkAvailableNotifier::new(PiqaeWorkAvailableProvider {
+            context: std::ptr::from_ref(&counter)
+                .cast_mut()
+                .cast::<core::ffi::c_void>(),
+            notify: Some(test_work_available),
+        });
+        piqae_node_runtime::WorkAvailableNotifier::notify(&notifier);
+        let stale_epoch = piqae_node_runtime::WorkAvailableNotifier::epoch(&notifier);
+        // Models an activation racing after a host captured its no-work proof.
+        piqae_node_runtime::WorkAvailableNotifier::notify(&notifier);
+        piqae_node_runtime::WorkAvailableNotifier::clear_if_epoch(&notifier, stale_epoch);
+        piqae_node_runtime::WorkAvailableNotifier::notify(&notifier);
+        assert_eq!(counter.load(Ordering::Acquire), 1);
+
+        let current_epoch = piqae_node_runtime::WorkAvailableNotifier::epoch(&notifier);
+        piqae_node_runtime::WorkAvailableNotifier::clear_if_epoch(&notifier, current_epoch);
         piqae_node_runtime::WorkAvailableNotifier::notify(&notifier);
         assert_eq!(counter.load(Ordering::Acquire), 2);
     }
