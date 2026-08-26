@@ -82,6 +82,9 @@
       'agent.enrolled',
       'agent.updated',
       'printer.updated',
+      'destination.updated',
+      'route.updated',
+      'attempt.updated',
       'webhook.created',
       'webhook.deleted',
       'resync_required'

@@ -16,6 +16,7 @@ externalSecret:
   remoteKeys:
     databaseUrl: ci/database-url
     webhookMasterKey: ci/webhook-key
+    destinationIdentityKey: ci/destination-identity-key
     s3AccessKeyId: ci/s3-access
     s3SecretAccessKey: ci/s3-secret
 dashboard:

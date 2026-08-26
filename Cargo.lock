@@ -2690,6 +2690,7 @@ name = "piqae-executor-cups"
 version = "0.1.20"
 dependencies = [
  "base64 0.22.1",
+ "hex",
  "piqae-domain",
  "piqae-executor-protocol",
  "piqae-executor-supervisor",
@@ -2698,6 +2699,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tokio",
+ "url",
  "uuid",
 ]
 
@@ -2862,6 +2864,7 @@ dependencies = [
 name = "piqae-storage-postgres"
 version = "0.1.20"
 dependencies = [
+ "async-trait",
  "base64 0.22.1",
  "chrono",
  "piqae-auth",

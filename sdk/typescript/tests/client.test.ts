@@ -674,6 +674,29 @@ describe("PiqaeClient", () => {
     );
   });
 
+  it("addresses destination topology, privacy-safe queues, and delivery attempts", async () => {
+    const fetcher = vi.fn<typeof fetch>().mockImplementation(async () => Response.json([]));
+    const client = new PiqaeClient({
+      apiKey: "piq_live_redacted",
+      fetch: fetcher,
+      baseUrl: "https://print.example.test",
+    });
+
+    await client.destinations.routes("pdst / one");
+    await client.destinations.identityEvidence("pdst / one");
+    await client.routes.observations("rte / one");
+    await client.routes.reservations();
+    await client.jobs.deliveryAttempts("job / one");
+
+    expect(fetcher.mock.calls.map(([url]) => String(url))).toEqual([
+      "https://print.example.test/v1/physical-destinations/pdst%20%2F%20one/routes",
+      "https://print.example.test/v1/physical-destinations/pdst%20%2F%20one/identity-evidence",
+      "https://print.example.test/v1/printer-routes/rte%20%2F%20one/observations",
+      "https://print.example.test/v1/route-reservations",
+      "https://print.example.test/v1/jobs/job%20%2F%20one/delivery-attempts",
+    ]);
+  });
+
   it("uploads declared content through the authenticated proxy without base64", async () => {
     const created = {
       id: "upl_01",

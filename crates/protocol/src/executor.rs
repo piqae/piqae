@@ -59,6 +59,11 @@ pub enum ExecutorOperation {
         /// `None` preserves direct printer submissions without a profile.
         #[serde(default)]
         native_profile: Option<NativeProfilePayload>,
+        /// Installation-local route fence. Native executors must echo this
+        /// exact value after handoff so a stale/superseded worker cannot be
+        /// mistaken for the current reservation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        route_fence: Option<LocalRouteFence>,
     },
     Observe {
         native_printer_id: String,
@@ -95,11 +100,20 @@ pub enum ExecutorResult {
     },
     Submitted {
         native_job_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        route_fence: Option<LocalRouteFence>,
     },
     Observation {
         observation: NativeJobObservation,
     },
     Cancelled,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct LocalRouteFence {
+    pub route_id: String,
+    pub reservation_id: Uuid,
+    pub generation: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -149,6 +163,12 @@ pub struct DiscoveredPrinter {
     /// must never activate vendor support-pack mappings.
     #[serde(default)]
     pub driver_fingerprint: Option<DriverFingerprint>,
+    /// Privacy-safe evidence for correlating routes which reach the same
+    /// physical device. Native executors hash canonical identifiers before
+    /// crossing the process boundary; raw serials, addresses and certificates
+    /// are never returned here.
+    #[serde(default)]
+    pub identity_evidence: Vec<crate::agent::PhysicalIdentityEvidence>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

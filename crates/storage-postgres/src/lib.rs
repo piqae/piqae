@@ -23,6 +23,8 @@ use std::{collections::BTreeMap, str::FromStr, time::Duration};
 use thiserror::Error;
 use uuid::Uuid;
 
+pub mod destination_topology;
+
 #[derive(Clone, Copy)]
 struct PlanDefaults {
     included_jobs: i64,
@@ -581,6 +583,25 @@ pub struct StoredTargetBinding {
     pub enabled: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug)]
+pub struct DestinationRouteReassignment<'a> {
+    pub job_id: JobId,
+    pub target_id: Option<&'a str>,
+    pub route_id: &'a str,
+    pub profile_id: Option<&'a str>,
+    pub profile_revision: Option<u64>,
+    pub expected_capability_revision: Option<u64>,
+    pub resolved_ticket_digest: Option<&'a str>,
+    pub reason: &'a str,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct DeliveryAttemptProof<'a> {
+    pub reservation_id: &'a str,
+    pub generation: u64,
+    pub fencing_token: &'a str,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -4442,8 +4463,18 @@ impl PostgresStore {
         let row = sqlx::query(
             "INSERT INTO target_bindings (
                 id, workspace_id, environment_id, target_id, printer_id, agent_id,
-                profile_id, profile_revision, role, enabled
-             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+                profile_id, profile_revision, role, enabled, destination_id, route_id
+             ) VALUES (
+                $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,
+                (SELECT route.destination_id FROM printer_routes AS route
+                 WHERE route.workspace_id=$2 AND route.environment_id=$3
+                   AND route.printer_id=$5 AND route.agent_id=$6
+                   AND route.retired_at IS NULL LIMIT 1),
+                (SELECT route.id FROM printer_routes AS route
+                 WHERE route.workspace_id=$2 AND route.environment_id=$3
+                   AND route.printer_id=$5 AND route.agent_id=$6
+                   AND route.retired_at IS NULL LIMIT 1)
+             )
              RETURNING id, target_id, printer_id, agent_id, profile_id, profile_revision,
                        role, enabled, created_at, updated_at",
         )
@@ -5799,23 +5830,55 @@ impl PostgresStore {
         }
 
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-            .bind(job.printer_id.to_string())
+            .bind(format!(
+                "{}:{}:{}",
+                job.workspace_id, job.environment_id, job.printer_id
+            ))
             .execute(&mut *transaction)
             .await?;
         let per_printer_sequence: i64 = sqlx::query_scalar(
             "SELECT COALESCE(MAX(per_printer_sequence), 0) + 1
-             FROM jobs WHERE printer_id = $1",
+             FROM jobs WHERE workspace_id=$1 AND environment_id=$2 AND printer_id=$3",
         )
+        .bind(job.workspace_id.to_string())
+        .bind(job.environment_id.to_string())
         .bind(job.printer_id.to_string())
         .fetch_one(&mut *transaction)
         .await?;
 
         let payload = serde_json::to_value(job)?;
+        let destination_id = job.metadata.get("piqae.destination_id");
+        let route_id = job.metadata.get("piqae.route_id");
+        if destination_id.is_some() != route_id.is_some() {
+            return Err(StorageError::InvalidData(
+                "destination and route metadata must be provided together".into(),
+            ));
+        }
+        if let (Some(destination_id), Some(route_id)) = (destination_id, route_id) {
+            let valid: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM printer_routes
+                 WHERE workspace_id=$1 AND environment_id=$2 AND id=$3
+                   AND destination_id=$4 AND printer_id=$5 AND agent_id=$6
+                   AND enabled AND retired_at IS NULL)",
+            )
+            .bind(job.workspace_id.to_string())
+            .bind(job.environment_id.to_string())
+            .bind(route_id)
+            .bind(destination_id)
+            .bind(job.printer_id.to_string())
+            .bind(agent_id.to_string())
+            .fetch_one(&mut *transaction)
+            .await?;
+            if !valid {
+                return Err(StorageError::NotFound);
+            }
+        }
         sqlx::query(
             "INSERT INTO jobs (
                 id, workspace_id, environment_id, printer_id, agent_id, payload, state,
-                state_sequence, per_printer_sequence, expires_at, created_at, updated_at
-             ) VALUES ($1,$2,$3,$4,$5,$6,$7,1,$8,$9,$10,$10)",
+                state_sequence, per_printer_sequence, expires_at, created_at, updated_at,
+                destination_id, route_id
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7,1,$8,$9,$10,$10,$11,$12)",
         )
         .bind(job.id.to_string())
         .bind(job.workspace_id.to_string())
@@ -5827,6 +5890,8 @@ impl PostgresStore {
         .bind(per_printer_sequence)
         .bind(job.expires_at)
         .bind(job.created_at)
+        .bind(destination_id)
+        .bind(route_id)
         .execute(&mut *transaction)
         .await?;
 
@@ -5929,7 +5994,7 @@ impl PostgresStore {
         }
         let mut transaction = self.pool.begin().await?;
         let row = sqlx::query(
-            "SELECT payload, state, agent_id, printer_id, lease_until
+            "SELECT payload, state, agent_id, printer_id, lease_until, destination_id, route_id
              FROM jobs
              WHERE id = $1 AND workspace_id = $2 AND environment_id = $3
              FOR UPDATE",
@@ -5987,7 +6052,8 @@ impl PostgresStore {
         }
 
         let destination = sqlx::query(
-            "SELECT target.stock_id, printer.profiles
+            "SELECT target.stock_id, printer.profiles,
+                    binding.destination_id, binding.route_id
              FROM targets AS target
              JOIN target_bindings AS binding
                ON binding.target_id = target.id
@@ -6024,6 +6090,14 @@ impl PostgresStore {
         .await?
         .ok_or(StorageError::ConcurrentStateChange)?;
         let stock_id: Option<String> = destination.try_get("stock_id")?;
+        let binding_destination_id: Option<String> = destination.try_get("destination_id")?;
+        let binding_route_id: Option<String> = destination.try_get("route_id")?;
+        let current_destination_id: Option<String> = row.try_get("destination_id")?;
+        if current_destination_id.is_some()
+            && binding_destination_id.as_ref() != current_destination_id.as_ref()
+        {
+            return Err(StorageError::ConcurrentStateChange);
+        }
         let intended_stock = job
             .metadata
             .get("piqae.stock_id")
@@ -6048,13 +6122,18 @@ impl PostgresStore {
         }
 
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-            .bind(binding.printer_id.to_string())
+            .bind(format!(
+                "{}:{}:{}",
+                workspace_id, environment_id, binding.printer_id
+            ))
             .execute(&mut *transaction)
             .await?;
         let per_printer_sequence: i64 = sqlx::query_scalar(
             "SELECT COALESCE(MAX(per_printer_sequence), 0) + 1
-             FROM jobs WHERE printer_id = $1",
+             FROM jobs WHERE workspace_id=$1 AND environment_id=$2 AND printer_id=$3",
         )
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
         .bind(binding.printer_id.to_string())
         .fetch_one(&mut *transaction)
         .await?;
@@ -6090,7 +6169,7 @@ impl PostgresStore {
         let updated = sqlx::query(
             "UPDATE jobs
              SET printer_id = $4, agent_id = $5, payload = $6,
-                 per_printer_sequence = $7,
+                 per_printer_sequence = $7, route_id = COALESCE($8, route_id),
                  lease_owner = NULL, lease_id = NULL,
                  lease_token_hash = NULL, lease_until = NULL, updated_at = now()
              WHERE id = $1 AND workspace_id = $2 AND environment_id = $3
@@ -6110,6 +6189,7 @@ impl PostgresStore {
         .bind(binding.agent_id.to_string())
         .bind(serde_json::to_value(&job)?)
         .bind(per_printer_sequence)
+        .bind(binding_route_id)
         .execute(&mut *transaction)
         .await?;
         if updated.rows_affected() != 1 {
@@ -6167,6 +6247,306 @@ impl PostgresStore {
         Ok(Some(job))
     }
 
+    /// Atomically reassign a pre-acceptance job to another route of the same
+    /// physical destination. Target jobs require a published immutable profile;
+    /// direct jobs require an exact candidate-printer resolved ticket. Encrypted
+    /// content additionally requires a key envelope already produced for the
+    /// candidate agent.
+    pub async fn reroute_job_to_destination_route_before_acceptance(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        request: DestinationRouteReassignment<'_>,
+    ) -> Result<Option<Job>, StorageError> {
+        if !matches!(request.reason, "node_recovered" | "standby_recovery") {
+            return Err(StorageError::InvalidData(
+                "unsupported routing attempt reason".into(),
+            ));
+        }
+        let mut transaction = self.pool.begin().await?;
+        let row = sqlx::query(
+            "SELECT payload,state,agent_id,printer_id,lease_until,destination_id,route_id
+             FROM jobs WHERE id=$1 AND workspace_id=$2 AND environment_id=$3 FOR UPDATE",
+        )
+        .bind(request.job_id.to_string())
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(StorageError::NotFound)?;
+        let state: String = row.try_get("state")?;
+        let lease_until: Option<DateTime<Utc>> = row.try_get("lease_until")?;
+        if !matches!(state.as_str(), "waiting_for_agent" | "failed_retryable")
+            || lease_until.is_some_and(|expiry| expiry > Utc::now())
+        {
+            transaction.commit().await?;
+            return Ok(None);
+        }
+        let accepted: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM job_acceptances
+             WHERE job_id=$1 AND workspace_id=$2 AND environment_id=$3)",
+        )
+        .bind(request.job_id.to_string())
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .fetch_one(&mut *transaction)
+        .await?;
+        if accepted {
+            transaction.commit().await?;
+            return Ok(None);
+        }
+        let destination_id: String = row
+            .try_get::<Option<String>, _>("destination_id")?
+            .ok_or_else(|| StorageError::InvalidData("job has no physical destination".into()))?;
+        let from_route_id: Option<String> = row.try_get("route_id")?;
+        if from_route_id.as_deref() == Some(request.route_id) {
+            transaction.commit().await?;
+            return Ok(None);
+        }
+        let candidate = sqlx::query(
+            "SELECT route.printer_id,route.agent_id,printer.profiles,
+                    printer.capabilities_revision,target.stock_id
+             FROM printer_routes route
+             JOIN printers printer
+               ON printer.workspace_id=route.workspace_id
+              AND printer.environment_id=route.environment_id
+              AND printer.id=route.printer_id AND printer.agent_id=route.agent_id
+             JOIN agents agent
+               ON agent.workspace_id=route.workspace_id
+              AND agent.environment_id=route.environment_id AND agent.id=route.agent_id
+             LEFT JOIN targets target
+               ON target.workspace_id=route.workspace_id
+              AND target.environment_id=route.environment_id AND target.id=$5
+             WHERE route.workspace_id=$1 AND route.environment_id=$2
+               AND route.id=$3 AND route.destination_id=$4
+               AND route.enabled AND route.retired_at IS NULL
+               AND printer.removed_at IS NULL AND agent.revoked_at IS NULL
+               AND ($5::text IS NULL OR target.enabled)
+             FOR SHARE OF route,printer,agent",
+        )
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(request.route_id)
+        .bind(&destination_id)
+        .bind(request.target_id)
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(StorageError::ConcurrentStateChange)?;
+        let candidate_printer: String = candidate.try_get("printer_id")?;
+        let candidate_agent: String = candidate.try_get("agent_id")?;
+        let mut job = job_from_row(row.try_get("payload")?, &state)?;
+        let job_target = job
+            .metadata
+            .get("piqae.target_id")
+            .or_else(|| job.metadata.get("spool.target_id"))
+            .map(String::as_str);
+        if job_target != request.target_id {
+            return Err(StorageError::ConcurrentStateChange);
+        }
+        if request.target_id.is_some() {
+            let (Some(profile_id), Some(profile_revision)) =
+                (request.profile_id, request.profile_revision)
+            else {
+                return Err(StorageError::InvalidData(
+                    "target reroute requires a profile ID and revision".into(),
+                ));
+            };
+            let intended_stock = job
+                .metadata
+                .get("piqae.stock_id")
+                .or_else(|| job.metadata.get("spool.stock_id"));
+            let target_stock: Option<String> = candidate.try_get("stock_id")?;
+            if target_stock.as_ref() != intended_stock {
+                return Err(StorageError::ConcurrentStateChange);
+            }
+            let profiles: Vec<PrinterProfileSnapshot> =
+                serde_json::from_value(candidate.try_get("profiles")?)?;
+            let compatible = profiles.iter().any(|profile| {
+                profile.profile_id == profile_id
+                    && profile.revision == profile_revision
+                    && profile.published
+                    && matches!(profile.status.as_deref(), None | Some("ready"))
+                    && profile.stock_id.as_ref() == intended_stock
+            });
+            if !compatible {
+                return Err(StorageError::ConcurrentStateChange);
+            }
+            job.metadata
+                .insert("piqae.profile_id".into(), profile_id.into());
+            job.metadata.insert(
+                "piqae.profile_revision".into(),
+                profile_revision.to_string(),
+            );
+        } else {
+            let (Some(expected_revision), Some(ticket_digest)) = (
+                request.expected_capability_revision,
+                request.resolved_ticket_digest,
+            ) else {
+                return Err(StorageError::InvalidData(
+                    "direct reroute requires an immutable resolved ticket".into(),
+                ));
+            };
+            let candidate_revision =
+                u64::try_from(candidate.try_get::<i64, _>("capabilities_revision")?)
+                    .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+            let ticket_valid: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM resolved_print_tickets
+                 WHERE workspace_id=$1 AND environment_id=$2 AND digest=$3
+                   AND printer_id=$4 AND capability_revision=$5 AND expires_at>now())",
+            )
+            .bind(workspace_id.to_string())
+            .bind(environment_id.to_string())
+            .bind(ticket_digest)
+            .bind(&candidate_printer)
+            .bind(i64::try_from(expected_revision).map_err(|error| {
+                StorageError::InvalidData(format!("capability revision is too large: {error}"))
+            })?)
+            .fetch_one(&mut *transaction)
+            .await?;
+            if candidate_revision != expected_revision || !ticket_valid {
+                return Err(StorageError::ConcurrentStateChange);
+            }
+            job.metadata.insert(
+                "piqae.capability_revision".into(),
+                expected_revision.to_string(),
+            );
+            job.metadata
+                .insert("piqae.resolved_ticket_digest".into(), ticket_digest.into());
+        }
+        if matches!(
+            job.content,
+            piqae_domain::ContentSource::EncryptedUpload { .. }
+        ) {
+            let candidate_has_envelope: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM encrypted_job_key_references
+                 WHERE workspace_id=$1 AND environment_id=$2 AND job_id=$3 AND agent_id=$4)",
+            )
+            .bind(workspace_id.to_string())
+            .bind(environment_id.to_string())
+            .bind(request.job_id.to_string())
+            .bind(&candidate_agent)
+            .fetch_one(&mut *transaction)
+            .await?;
+            if !candidate_has_envelope {
+                return Err(StorageError::ConcurrentStateChange);
+            }
+        }
+        for suffix in [
+            "target_id",
+            "binding_id",
+            "profile_id",
+            "profile_revision",
+            "stock_id",
+        ] {
+            if let Some(value) = job.metadata.remove(&format!("spool.{suffix}")) {
+                job.metadata
+                    .entry(format!("piqae.{suffix}"))
+                    .or_insert(value);
+            }
+        }
+        job.printer_id = PrinterId::from_str(&candidate_printer)
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        job.metadata
+            .insert("piqae.destination_id".into(), destination_id.clone());
+        job.metadata
+            .insert("piqae.route_id".into(), request.route_id.into());
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
+            .bind(format!(
+                "{workspace_id}:{environment_id}:{candidate_printer}"
+            ))
+            .execute(&mut *transaction)
+            .await?;
+        let sequence: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(MAX(per_printer_sequence),0)+1 FROM jobs
+             WHERE workspace_id=$1 AND environment_id=$2 AND printer_id=$3",
+        )
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(&candidate_printer)
+        .fetch_one(&mut *transaction)
+        .await?;
+        let updated = sqlx::query(
+            "UPDATE jobs SET printer_id=$4,agent_id=$5,route_id=$6,payload=$7,
+                    per_printer_sequence=$8,lease_owner=NULL,lease_id=NULL,
+                    lease_token_hash=NULL,lease_until=NULL,updated_at=now()
+             WHERE id=$1 AND workspace_id=$2 AND environment_id=$3
+               AND destination_id=$9
+               AND state IN ('waiting_for_agent','failed_retryable')
+               AND (lease_until IS NULL OR lease_until<=now())
+               AND NOT EXISTS(SELECT 1 FROM job_acceptances acceptance
+                   WHERE acceptance.job_id=jobs.id
+                     AND acceptance.workspace_id=jobs.workspace_id
+                     AND acceptance.environment_id=jobs.environment_id)",
+        )
+        .bind(request.job_id.to_string())
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(&candidate_printer)
+        .bind(&candidate_agent)
+        .bind(request.route_id)
+        .bind(serde_json::to_value(&job)?)
+        .bind(sequence)
+        .bind(&destination_id)
+        .execute(&mut *transaction)
+        .await?;
+        if updated.rows_affected() != 1 {
+            transaction.rollback().await?;
+            return Ok(None);
+        }
+        let attempt_id = format!("jra_{}", ulid::Ulid::new());
+        let from_agent: String = row.try_get("agent_id")?;
+        let from_printer: String = row.try_get("printer_id")?;
+        sqlx::query(
+            "INSERT INTO job_routing_attempts
+             (id,workspace_id,environment_id,job_id,target_id,from_binding_id,to_binding_id,
+              from_agent_id,to_agent_id,from_printer_id,to_printer_id,reason,
+              destination_id,from_route_id,to_route_id)
+             VALUES ($1,$2,$3,$4,$5,NULL,NULL,$6,$7,$8,$9,$10,$11,$12,$13)",
+        )
+        .bind(&attempt_id)
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(request.job_id.to_string())
+        .bind(request.target_id)
+        .bind(&from_agent)
+        .bind(&candidate_agent)
+        .bind(&from_printer)
+        .bind(&candidate_printer)
+        .bind(request.reason)
+        .bind(&destination_id)
+        .bind(&from_route_id)
+        .bind(request.route_id)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "INSERT INTO routing_outbox
+             (id,workspace_id,environment_id,aggregate_type,aggregate_id,event_type,payload)
+             VALUES ($1,$2,$3,'job',$4,'job.routing_attempted',$5)",
+        )
+        .bind(EventId::new().to_string())
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(request.job_id.to_string())
+        .bind(serde_json::json!({
+            "attempt_id": attempt_id,
+            "job_id": request.job_id,
+            "target_id": request.target_id,
+            "destination_id": destination_id,
+            "from_route_id": from_route_id,
+            "to_route_id": request.route_id,
+            "from_agent_id": from_agent,
+            "to_agent_id": candidate_agent,
+            "from_printer_id": from_printer,
+            "to_printer_id": candidate_printer,
+            "reason": request.reason,
+            "occurred_at": Utc::now(),
+        }))
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(Some(job))
+    }
+
     pub async fn list_reroutable_target_jobs(
         &self,
         workspace_id: WorkspaceId,
@@ -6196,6 +6576,42 @@ impl PostgresStore {
         .bind(workspace_id.to_string())
         .bind(environment_id.to_string())
         .bind(limit.clamp(1, 100))
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                let state: String = row.try_get("state")?;
+                job_from_row(row.try_get("payload")?, &state)
+            })
+            .collect()
+    }
+
+    /// Lists every pre-acceptance job bound to a physical destination in
+    /// stable global queue order, including direct and target jobs.
+    pub async fn list_reroutable_destination_jobs(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        limit: i64,
+    ) -> Result<Vec<Job>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT payload,state FROM jobs
+             WHERE workspace_id=$1 AND environment_id=$2
+               AND destination_id IS NOT NULL
+               AND state IN ('waiting_for_agent','failed_retryable')
+               AND expires_at>now()
+               AND (lease_until IS NULL OR lease_until<=now())
+               AND NOT EXISTS (
+                   SELECT 1 FROM job_acceptances acceptance
+                   WHERE acceptance.workspace_id=jobs.workspace_id
+                     AND acceptance.environment_id=jobs.environment_id
+                     AND acceptance.job_id=jobs.id
+               )
+             ORDER BY created_at,id LIMIT $3",
+        )
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(limit.clamp(1, 1_000))
         .fetch_all(&self.pool)
         .await?;
         rows.into_iter()
@@ -6798,6 +7214,99 @@ impl PostgresStore {
         Ok(lease_until)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub async fn renew_agent_lease_with_delivery_attempt(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        job_id: JobId,
+        lease_id: Uuid,
+        lease_token: &str,
+        delivery_proof: DeliveryAttemptProof<'_>,
+    ) -> Result<DateTime<Utc>, StorageError> {
+        let job_token_hash = Sha256::digest(lease_token.as_bytes()).to_vec();
+        let fence_hash = format!(
+            "{:x}",
+            Sha256::digest(delivery_proof.fencing_token.as_bytes())
+        );
+        let generation = i64::try_from(delivery_proof.generation)
+            .map_err(|_| StorageError::ConcurrentStateChange)?;
+        let mut transaction = self.pool.begin().await?;
+        let lease_until: DateTime<Utc> = sqlx::query_scalar(
+            "UPDATE jobs SET lease_until=now()+interval '30 seconds',updated_at=now()
+             WHERE id=$1 AND workspace_id=$2 AND environment_id=$3 AND agent_id=$4
+               AND lease_id=$5 AND lease_token_hash=$6 AND lease_until>now()
+               AND destination_id IS NOT NULL
+             RETURNING lease_until",
+        )
+        .bind(job_id.to_string())
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(agent_id.to_string())
+        .bind(lease_id)
+        .bind(job_token_hash)
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(StorageError::ConcurrentStateChange)?;
+        let updated = sqlx::query(
+            "UPDATE delivery_attempts attempt
+             SET lease_until=$9,updated_at=now()
+             FROM route_reservations reservation,printer_routes route
+             WHERE attempt.workspace_id=$1 AND attempt.environment_id=$2
+               AND attempt.job_id=$3 AND attempt.generation=$4
+               AND attempt.fencing_token_hash=$5
+               AND attempt.state IN ('route_leased','accepted_by_node','queued_local','handing_to_spooler')
+               AND reservation.workspace_id=attempt.workspace_id
+               AND reservation.environment_id=attempt.environment_id
+               AND reservation.attempt_id=attempt.id AND reservation.id=$6
+               AND reservation.state='active' AND reservation.generation=$4
+               AND reservation.fencing_token_hash=$5
+               AND route.workspace_id=attempt.workspace_id
+               AND route.environment_id=attempt.environment_id
+               AND route.id=attempt.route_id AND route.agent_id=$7
+               AND attempt.job_id=$8",
+        )
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(job_id.to_string())
+        .bind(generation)
+        .bind(&fence_hash)
+        .bind(delivery_proof.reservation_id)
+        .bind(agent_id.to_string())
+        .bind(job_id.to_string())
+        .bind(lease_until)
+        .execute(&mut *transaction)
+        .await?;
+        if updated.rows_affected() != 1 {
+            return Err(StorageError::ConcurrentStateChange);
+        }
+        let reservation_updated = sqlx::query(
+            "UPDATE route_reservations SET lease_until=$4,updated_at=now()
+             WHERE workspace_id=$1 AND environment_id=$2 AND id=$3 AND state='active'",
+        )
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(delivery_proof.reservation_id)
+        .bind(lease_until)
+        .execute(&mut *transaction)
+        .await?;
+        if reservation_updated.rows_affected() != 1 {
+            return Err(StorageError::ConcurrentStateChange);
+        }
+        sqlx::query(
+            "UPDATE agents SET state='connected',last_seen_at=now()
+             WHERE id=$1 AND workspace_id=$2 AND environment_id=$3 AND revoked_at IS NULL",
+        )
+        .bind(agent_id.to_string())
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(lease_until)
+    }
+
     pub async fn release_agent_lease(
         &self,
         workspace_id: WorkspaceId,
@@ -6969,8 +7478,126 @@ impl PostgresStore {
         content_sha256: Option<&str>,
         local_sequence: u64,
     ) -> Result<Job, StorageError> {
+        self.accept_agent_job_transactional(
+            workspace_id,
+            environment_id,
+            agent_id,
+            job_id,
+            lease_id,
+            lease_token,
+            content_sha256,
+            local_sequence,
+            None,
+        )
+        .await
+    }
+
+    pub async fn accept_agent_job_with_delivery_attempt(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        job_id: JobId,
+        lease_id: Uuid,
+        lease_token: &str,
+        content_sha256: Option<&str>,
+        local_sequence: u64,
+        delivery_proof: DeliveryAttemptProof<'_>,
+    ) -> Result<Job, StorageError> {
+        self.accept_agent_job_transactional(
+            workspace_id,
+            environment_id,
+            agent_id,
+            job_id,
+            lease_id,
+            lease_token,
+            content_sha256,
+            local_sequence,
+            Some(delivery_proof),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn accept_agent_job_transactional(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        job_id: JobId,
+        lease_id: Uuid,
+        lease_token: &str,
+        content_sha256: Option<&str>,
+        local_sequence: u64,
+        delivery_proof: Option<DeliveryAttemptProof<'_>>,
+    ) -> Result<Job, StorageError> {
         let mut transaction = self.pool.begin().await?;
         let token_hash = Sha256::digest(lease_token.as_bytes()).to_vec();
+        let destination_id: Option<String> = sqlx::query_scalar(
+            "SELECT destination_id FROM jobs
+             WHERE id=$1 AND workspace_id=$2 AND environment_id=$3 AND agent_id=$4
+             FOR UPDATE",
+        )
+        .bind(job_id.to_string())
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(agent_id.to_string())
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(StorageError::NotFound)?;
+        let mut delivery_attempt_id = None;
+        let mut delivery_attempt_state = None;
+        if destination_id.is_some() {
+            let proof = delivery_proof.ok_or_else(|| {
+                StorageError::InvalidData(
+                    "destination-routed jobs require an atomic delivery-attempt proof".into(),
+                )
+            })?;
+            let generation =
+                i64::try_from(proof.generation).map_err(|_| StorageError::ConcurrentStateChange)?;
+            let fence_hash = format!("{:x}", Sha256::digest(proof.fencing_token.as_bytes()));
+            let attempt = sqlx::query(
+                "SELECT attempt.id,attempt.state
+                 FROM route_reservations reservation
+                 JOIN delivery_attempts attempt
+                   ON attempt.workspace_id=reservation.workspace_id
+                  AND attempt.environment_id=reservation.environment_id
+                  AND attempt.id=reservation.attempt_id
+                 JOIN printer_routes route
+                   ON route.workspace_id=attempt.workspace_id
+                  AND route.environment_id=attempt.environment_id
+                  AND route.id=attempt.route_id
+                 WHERE reservation.workspace_id=$1 AND reservation.environment_id=$2
+                   AND reservation.id=$3 AND reservation.job_id=$4
+                   AND reservation.generation=$5 AND reservation.fencing_token_hash=$6
+                   AND attempt.generation=$5 AND attempt.fencing_token_hash=$6
+                   AND attempt.job_id=$4 AND attempt.destination_id=$7
+                   AND route.agent_id=$8 AND reservation.state='active'
+                 FOR UPDATE OF reservation,attempt",
+            )
+            .bind(workspace_id.to_string())
+            .bind(environment_id.to_string())
+            .bind(proof.reservation_id)
+            .bind(job_id.to_string())
+            .bind(generation)
+            .bind(fence_hash)
+            .bind(destination_id.as_deref())
+            .bind(agent_id.to_string())
+            .fetch_optional(&mut *transaction)
+            .await?
+            .ok_or(StorageError::ConcurrentStateChange)?;
+            let state: String = attempt.try_get("state")?;
+            if !matches!(
+                state.as_str(),
+                "route_leased" | "accepted_by_node" | "queued_local"
+            ) {
+                return Err(StorageError::ConcurrentStateChange);
+            }
+            delivery_attempt_id = Some(attempt.try_get::<String, _>("id")?);
+            delivery_attempt_state = Some(state);
+        } else if delivery_proof.is_some() {
+            return Err(StorageError::ConcurrentStateChange);
+        }
         if let Some(row) = sqlx::query(
             "SELECT lease_id, lease_token_hash, content_sha256, local_sequence
              FROM job_acceptances
@@ -7021,6 +7648,10 @@ impl PostgresStore {
                     .execute(&mut *transaction)
                     .await?;
                 }
+            }
+            if destination_id.is_some() && delivery_attempt_state.as_deref() != Some("queued_local")
+            {
+                return Err(StorageError::IdempotencyConflict);
             }
             transaction.commit().await?;
             return self.get_job(workspace_id, environment_id, job_id).await;
@@ -7123,6 +7754,22 @@ impl PostgresStore {
         })?)
         .execute(&mut *transaction)
         .await?;
+        if let Some(attempt_id) = delivery_attempt_id {
+            let updated = sqlx::query(
+                "UPDATE delivery_attempts
+                 SET state='queued_local',accepted_at=COALESCE(accepted_at,now()),updated_at=now()
+                 WHERE workspace_id=$1 AND environment_id=$2 AND id=$3
+                   AND state IN ('route_leased','accepted_by_node')",
+            )
+            .bind(workspace_id.to_string())
+            .bind(environment_id.to_string())
+            .bind(attempt_id)
+            .execute(&mut *transaction)
+            .await?;
+            if updated.rows_affected() != 1 {
+                return Err(StorageError::ConcurrentStateChange);
+            }
+        }
         transaction.commit().await?;
         Ok(job)
     }

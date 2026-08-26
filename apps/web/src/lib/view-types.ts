@@ -19,6 +19,9 @@ export interface DashboardCustomerOperations {
   agents: DashboardAgent[];
   printers: DashboardPrinter[];
   jobs: DashboardJob[];
+  destinations: DashboardDestination[];
+  routes: DashboardPrinterRoute[];
+  routeObservations: DashboardRouteObservation[];
 }
 
 export interface DashboardCustomerOperationsPage {
@@ -67,6 +70,64 @@ export interface DashboardPrinter {
     revision: string;
     observedAt: string;
   };
+}
+
+export type DashboardIdentityConfidence =
+  | 'verified'
+  | 'high'
+  | 'possible'
+  | 'conflict'
+  | 'unknown';
+
+export interface DashboardDestination {
+  customer?: DashboardResourceOwner | null;
+  id: string;
+  displayName: string;
+  manufacturer: string | null;
+  model: string | null;
+  identityConfidence: DashboardIdentityConfidence;
+  status: 'active' | 'needs_review' | 'split' | 'retired';
+  routeCount: number;
+  updatedAt: string;
+}
+
+export interface DashboardRouteObservation {
+  customer?: DashboardResourceOwner | null;
+  id: string;
+  routeId: string;
+  sequence: number;
+  printerState: 'online' | 'busy' | 'paused' | 'paper_out' | 'error' | 'offline' | 'unknown';
+  acceptingJobs: boolean;
+  totalJobs: number;
+  activeJobs: number;
+  heldJobs: number;
+  connectorJobs: number;
+  otherPiqaeOrExternalJobs: number;
+  unknownJobs: number;
+  estimatedBusySeconds: number | null;
+  observedAt: string;
+  expiresAt: string;
+}
+
+export interface DashboardPrinterRoute {
+  customer?: DashboardResourceOwner | null;
+  id: string;
+  physicalDestinationId: string;
+  printerId: string;
+  agentId: string;
+  nativeQueueId: string;
+  enabled: boolean;
+  health: 'ready' | 'busy' | 'needs_operator' | 'offline' | 'stale' | 'unknown';
+  telemetryFreshness: 'live' | 'recent' | 'stale' | 'never';
+  projectionHealth: 'current' | 'pending' | 'failed' | 'unsupported';
+  capabilityRevision: number;
+  profileRevision: number;
+  profileObservedAt: string | null;
+  stockObservedAt: string | null;
+  stockState: 'current' | 'stale' | 'unknown';
+  schedulingAuthorityId: string | null;
+  latestObservation: DashboardRouteObservation | null;
+  updatedAt: string;
 }
 
 export interface DashboardPrinterProfile {
@@ -122,6 +183,7 @@ export interface DashboardJob {
   createdAt: string;
   updatedAt: string;
   deliveryUncertainSince?: string | null;
+  deliveryResolution?: string | null;
   expiresAt: string | null;
   contentRetained: boolean;
 }

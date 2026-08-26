@@ -57,6 +57,17 @@ impl AppError {
         }
     }
 
+    #[must_use]
+    pub fn not_found() -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
+            code: "not_found",
+            message: "The requested resource does not exist.".into(),
+            retryable: false,
+            compatibility: false,
+        }
+    }
+
     pub fn payload_too_large(code: &'static str, message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::PAYLOAD_TOO_LARGE,

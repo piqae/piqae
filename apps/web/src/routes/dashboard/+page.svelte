@@ -110,6 +110,47 @@
     data.accounts.filter((account) => matches(account.name, account.externalId))
   );
 
+  const visibleDestinations = $derived(
+    data.destinations.filter(
+      (destination) =>
+        matches(destination.displayName, destination.manufacturer, destination.model, destination.id, destination.customer?.name, destination.customer?.externalId) &&
+        (customerFilter === 'all' || destination.customer?.externalId === customerFilter)
+    )
+  );
+
+  const visibleRoutes = $derived(
+    data.routes.filter(
+      (route) =>
+        matches(route.id, route.nativeQueueId, route.physicalDestinationId, route.customer?.name, route.customer?.externalId) &&
+        (customerFilter === 'all' || route.customer?.externalId === customerFilter) &&
+        (stateFilter === 'all' || route.health === stateFilter)
+    )
+  );
+
+  const visibleQueueRoutes = $derived(
+    data.routes.filter(
+      (route) =>
+        route.latestObservation !== null &&
+        matches(route.id, route.nativeQueueId, route.customer?.name, route.customer?.externalId) &&
+        (customerFilter === 'all' || route.customer?.externalId === customerFilter)
+    )
+  );
+  const reviewJobs = $derived(data.jobs.filter((job) =>
+    ((job.state === 'delivery_uncertain' && !job.deliveryResolution) || job.state.startsWith('failed')) &&
+    matches(job.title, job.id, job.customer?.name) &&
+    (customerFilter === 'all' || job.customer?.externalId === customerFilter)
+  ));
+  const reviewDestinations = $derived(data.destinations.filter((destination) =>
+    (destination.status === 'needs_review' || destination.identityConfidence === 'possible' || destination.identityConfidence === 'conflict' || destination.identityConfidence === 'unknown') &&
+    matches(destination.displayName, destination.id, destination.customer?.name) &&
+    (customerFilter === 'all' || destination.customer?.externalId === customerFilter)
+  ));
+  const reviewRoutes = $derived(data.routes.filter((route) =>
+    (route.health === 'needs_operator' || route.health === 'stale' || route.projectionHealth === 'failed' || route.telemetryFreshness === 'stale') &&
+    matches(route.nativeQueueId, route.id, route.customer?.name) &&
+    (customerFilter === 'all' || route.customer?.externalId === customerFilter)
+  ));
+
   const resultCount = $derived(
     data.view === 'jobs'
       ? visibleJobs.length
@@ -117,12 +158,20 @@
         ? visiblePrinters.length
         : data.view === 'nodes'
           ? visibleNodes.length
-          : visibleAccounts.length
+          : data.view === 'destinations'
+            ? visibleDestinations.length
+            : data.view === 'routes'
+              ? visibleRoutes.length
+              : data.view === 'queue'
+                ? visibleQueueRoutes.length
+                : data.view === 'needs_review'
+                  ? reviewJobs.length + reviewDestinations.length + reviewRoutes.length
+                  : visibleAccounts.length
   );
 
   const stateOptions = $derived(stateFilters(data.view));
 
-  const DETAIL_KEYS = ['job', 'printer', 'node', 'customer'];
+  const DETAIL_KEYS = ['job', 'printer', 'node', 'destination', 'route', 'customer'];
 
   function buildHref(overrides: Record<string, string | null>): string {
     const params = new URLSearchParams(page.url.searchParams);
@@ -176,6 +225,9 @@
     data.printers.find((printer) => printer.id === printerId)?.name ?? 'Unknown';
   const readyProfiles = (printer: (typeof data.printers)[number]) =>
     printer.profiles.filter((profile) => profile.status === 'ready').length;
+  const destinationName = (destinationId: string, customerExternalId?: string | null) =>
+    data.destinations.find((destination) => destination.id === destinationId && destination.customer?.externalId === customerExternalId)?.displayName ??
+    data.destinations.find((destination) => destination.id === destinationId)?.displayName ?? 'Unknown destination';
 
   // Enrolment dialog.
   let enrolmentOpen = $state(false);
@@ -204,6 +256,10 @@
   let cancelOpen = $state(false);
   let cancelPending = $state(false);
   let cancelAttempted = $state(false);
+  let resolutionOpen = $state(false);
+  let resolutionPending = $state(false);
+  let resolutionAttempted = $state(false);
+  let resolutionRequestId = $state('');
 
   // Reuse the summary so the drawer and the tile can never disagree about age.
   const uncertainFor = $derived(
@@ -403,10 +459,7 @@
     detail={uncertainDetail}
     tone={uncertain.count > 0 ? 'attention' : 'neutral'}
     title={uncertainTitle}
-    href={operationalHref({
-      view: 'jobs',
-      state: uncertain.count > 0 ? 'delivery_uncertain' : null
-    })}
+    href={operationalHref({ view: 'needs_review', state: null })}
   />
 </section>
 
@@ -441,7 +494,40 @@
 </Toolbar>
 
 <DataPanel minWidth={data.view === 'jobs' ? '860px' : '760px'}>
-  {#if data.view === 'jobs'}
+  {#if data.view === 'needs_review'}
+    <table class="ui-data-table">
+      <thead><tr><th>Resource</th>{#if aggregateCustomers}<th>Customer</th>{/if}<th>Needs review</th><th class="right">Observed</th></tr></thead>
+      <tbody>
+        {#each reviewJobs as job}
+          <tr>
+            <td><a class="cell-stack" href={detailHref('job', job.id, job.customer?.externalId)}><strong>{job.title}</strong><small class="mono">{job.id}</small></a></td>
+            {#if aggregateCustomers}<td>{job.customer?.name ?? 'Unknown'}</td>{/if}
+            <td><Status value={job.state} /></td>
+            <td class="right muted"><RelativeTime value={job.updatedAt} /></td>
+          </tr>
+        {/each}
+        {#each reviewDestinations as destination}
+          <tr>
+            <td><a class="cell-stack" href={detailHref('destination', destination.id, destination.customer?.externalId)}><strong>{destination.displayName}</strong><small>Physical destination</small></a></td>
+            {#if aggregateCustomers}<td>{destination.customer?.name ?? 'Unknown'}</td>{/if}
+            <td><Status value={destination.identityConfidence} /></td>
+            <td class="right muted"><RelativeTime value={destination.updatedAt} /></td>
+          </tr>
+        {/each}
+        {#each reviewRoutes as route}
+          <tr>
+            <td><a class="cell-stack" href={detailHref('route', route.id, route.customer?.externalId)}><strong>{destinationName(route.physicalDestinationId, route.customer?.externalId)}</strong><small class="mono">{route.nativeQueueId}</small></a></td>
+            {#if aggregateCustomers}<td>{route.customer?.name ?? 'Unknown'}</td>{/if}
+            <td>{#if route.projectionHealth === 'failed'}<Status value="projection_failed" />{:else}<Status value={route.health === 'ready' ? route.telemetryFreshness : route.health} />{/if}</td>
+            <td class="right muted"><RelativeTime value={route.latestObservation?.observedAt ?? route.updatedAt} /></td>
+          </tr>
+        {/each}
+        {#if reviewJobs.length + reviewDestinations.length + reviewRoutes.length === 0}
+          <tr><td colspan={aggregateCustomers ? 4 : 3}><EmptyState message="Nothing needs review." compact /></td></tr>
+        {/if}
+      </tbody>
+    </table>
+  {:else if data.view === 'jobs'}
     <table class="ui-data-table">
       <thead>
         <tr>
@@ -475,6 +561,107 @@
           </tr>
         {:else}
           <tr><td colspan={aggregateCustomers ? 6 : 5}><EmptyState message="No jobs match this view." compact /></td></tr>
+        {/each}
+      </tbody>
+    </table>
+  {:else if data.view === 'queue'}
+    <table class="ui-data-table">
+      <thead>
+        <tr>
+          <th>Destination / route</th>
+          {#if aggregateCustomers}<th>Customer</th>{/if}
+          <th>Printer status</th>
+          <th>Queue occupancy</th>
+          <th>Privacy-safe sources</th>
+          <th class="right">Observed</th>
+        </tr>
+      </thead>
+      <tbody>
+        {#each visibleQueueRoutes as route}
+          {@const observation = route.latestObservation}
+          {#if observation}
+            <tr>
+              <td>
+                <a class="cell-stack" href={detailHref('route', route.id, route.customer?.externalId)}>
+                  <strong>{destinationName(route.physicalDestinationId, route.customer?.externalId)}</strong>
+                  <small class="mono">{route.nativeQueueId}</small>
+                </a>
+              </td>
+              {#if aggregateCustomers}<td><a class="customer-link" href={operationalHref({ managed_customer: route.customer?.externalId ?? null, scope: null })}>{route.customer?.name ?? 'Unknown'}</a></td>{/if}
+              <td><Status value={observation.printerState} /></td>
+              <td class="numeric">{observation.totalJobs} total · {observation.activeJobs} active · {observation.heldJobs} held</td>
+              <td>{observation.connectorJobs} this connection · {observation.otherPiqaeOrExternalJobs} other · {observation.unknownJobs} unknown</td>
+              <td class="right"><span class:stale={route.telemetryFreshness === 'stale' || route.telemetryFreshness === 'never'}>{route.telemetryFreshness}</span> · <RelativeTime value={observation.observedAt} /></td>
+            </tr>
+          {/if}
+        {:else}
+          <tr><td colspan={aggregateCustomers ? 6 : 5}><EmptyState message="No privacy-safe queue telemetry has been reported yet." compact /></td></tr>
+        {/each}
+      </tbody>
+    </table>
+  {:else if data.view === 'destinations'}
+    <table class="ui-data-table">
+      <thead>
+        <tr>
+          <th>Physical destination</th>
+          {#if aggregateCustomers}<th>Customer</th>{/if}
+          <th>Identity</th>
+          <th>Status</th>
+          <th>Routes</th>
+          <th class="right">Updated</th>
+        </tr>
+      </thead>
+      <tbody>
+        {#each visibleDestinations as destination}
+          <tr>
+            <td>
+              <a class="cell-stack" href={detailHref('destination', destination.id, destination.customer?.externalId)}>
+                <strong>{destination.displayName}</strong>
+                <small>{[destination.manufacturer, destination.model].filter(Boolean).join(' · ') || destination.id}</small>
+              </a>
+            </td>
+            {#if aggregateCustomers}<td><a class="customer-link" href={operationalHref({ managed_customer: destination.customer?.externalId ?? null, scope: null })}>{destination.customer?.name ?? 'Unknown'}</a></td>{/if}
+            <td><Status value={destination.identityConfidence} /></td>
+            <td><Status value={destination.status} /></td>
+            <td class="numeric">{destination.routeCount}</td>
+            <td class="right muted numeric"><RelativeTime value={destination.updatedAt} /></td>
+          </tr>
+        {:else}
+          <tr><td colspan={aggregateCustomers ? 6 : 5}><EmptyState message="No physical destinations match this view." compact /></td></tr>
+        {/each}
+      </tbody>
+    </table>
+  {:else if data.view === 'routes'}
+    <table class="ui-data-table">
+      <thead>
+        <tr>
+          <th>Route</th>
+          {#if aggregateCustomers}<th>Customer</th>{/if}
+          <th>Route health</th>
+          <th>Inventory projection</th>
+          <th>Telemetry</th>
+          <th>Profiles / stock</th>
+          <th>Scheduling authority</th>
+        </tr>
+      </thead>
+      <tbody>
+        {#each visibleRoutes as route}
+          <tr>
+            <td>
+              <a class="cell-stack" href={detailHref('route', route.id, route.customer?.externalId)}>
+                <strong>{destinationName(route.physicalDestinationId, route.customer?.externalId)}</strong>
+                <small class="mono">{route.nativeQueueId}</small>
+              </a>
+            </td>
+            {#if aggregateCustomers}<td><a class="customer-link" href={operationalHref({ managed_customer: route.customer?.externalId ?? null, scope: null })}>{route.customer?.name ?? 'Unknown'}</a></td>{/if}
+            <td><Status value={route.health} /></td>
+            <td><Status value={route.projectionHealth} /></td>
+            <td><Status value={route.telemetryFreshness} /></td>
+            <td><Status value={route.stockState ?? 'unknown'} /></td>
+            <td class="mono muted">{route.schedulingAuthorityId ?? 'Local connector only'}</td>
+          </tr>
+        {:else}
+          <tr><td colspan={aggregateCustomers ? 7 : 6}><EmptyState message="No printer routes match this view." compact /></td></tr>
         {/each}
       </tbody>
     </table>
@@ -589,6 +776,10 @@
       ? 'Destination'
       : detail?.kind === 'node'
         ? 'Node'
+        : detail?.kind === 'destination'
+          ? 'Physical destination'
+          : detail?.kind === 'route'
+            ? 'Printer route'
         : detail?.kind === 'customer'
           ? 'Customer'
           : 'Detail'}
@@ -598,6 +789,10 @@
       ? detail.printer.name
       : detail?.kind === 'node'
         ? detail.node.name
+        : detail?.kind === 'destination'
+          ? detail.destination.displayName
+          : detail?.kind === 'route'
+            ? destinationName(detail.route.physicalDestinationId)
         : detail?.kind === 'customer'
           ? detail.account.name
           : 'Not found'}
@@ -605,17 +800,23 @@
 >
   {#snippet actions()}
     {#if detail?.kind === 'job'}
-      <button
-        class="button compact"
-        disabled={!cancellable}
-        title={cancellable ? 'Request job cancellation' : 'This job is already terminal'}
-        onclick={() => {
-          cancelAttempted = false;
-          cancelOpen = true;
-        }}
-      >
-        Cancel
-      </button>
+      {#if detail.job.state === 'delivery_uncertain' && !detail.job.deliveryResolution}
+        <button class="button compact primary" onclick={() => {
+          resolutionAttempted = false;
+          resolutionRequestId = `resolve-${crypto.randomUUID()}`;
+          resolutionOpen = true;
+        }}>Resolve</button>
+      {:else}
+        <button
+          class="button compact"
+          disabled={!cancellable}
+          title={cancellable ? 'Request job cancellation' : 'This job is already terminal'}
+          onclick={() => {
+            cancelAttempted = false;
+            cancelOpen = true;
+          }}
+        >Cancel</button>
+      {/if}
     {:else if detail?.kind === 'printer'}
       <button
         class="button compact"
@@ -642,12 +843,17 @@
       <span class="muted">{detail.job.message}</span>
     </div>
 
-    {#if detail.job.state === 'delivery_uncertain'}
+    {#if detail.job.state === 'delivery_uncertain' && !detail.job.deliveryResolution}
       <p class="ui-note error">
         Piqae cannot safely determine whether this job printed after it was handed to the operating
         system. Automatic retry is disabled because it could produce a duplicate.{#if uncertainFor}
           Unresolved for {uncertainFor}.
         {/if}
+      </p>
+    {:else if detail.job.deliveryResolution}
+      <p class="ui-note neutral">
+        This uncertain handoff was resolved by an operator. The original delivery state remains in
+        the audit history and is not silently rewritten.
       </p>
     {/if}
 
@@ -716,6 +922,68 @@
         <p class="muted empty-line">No jobs recorded for this printer.</p>
       {/each}
     </div>
+  {:else if detail?.kind === 'destination'}
+    <div class="drawer-status">
+      <Status value={detail.destination.status} />
+      <span class="muted">Identity {detail.destination.identityConfidence.replaceAll('_', ' ')}</span>
+    </div>
+    <DefinitionList
+      items={[
+        { term: 'Manufacturer', value: detail.destination.manufacturer },
+        { term: 'Model', value: detail.destination.model },
+        { term: 'Identity confidence', value: detail.destination.identityConfidence.replaceAll('_', ' ') },
+        { term: 'Installed routes', value: detail.routes.length },
+        { term: 'Destination ID', value: detail.destination.id, mono: true }
+      ]}
+    />
+    <div class="drawer-section">
+      <h3>Routes<span>{detail.routes.length}</span></h3>
+      {#each detail.routes as route}
+        <a class="mini-row" href={detailHref('route', route.id)}>
+          <span class="cell-stack"><strong>{nodeName(route.agentId)}</strong><small class="mono">{route.nativeQueueId}</small></span>
+          <Status value={route.health} />
+        </a>
+      {:else}
+        <p class="muted empty-line">No installed route currently reaches this destination.</p>
+      {/each}
+    </div>
+  {:else if detail?.kind === 'route'}
+    <div class="drawer-status">
+      <Status value={detail.route.health} />
+      <span class="muted">Telemetry {detail.route.telemetryFreshness}</span>
+    </div>
+    <DefinitionList
+      items={[
+        { term: 'Physical destination', value: detail.destination?.displayName ?? 'Unknown' },
+        { term: 'Node heartbeat', value: nodeName(detail.route.agentId) },
+        { term: 'OS queue', value: detail.route.nativeQueueId, mono: true },
+        { term: 'Inventory projection', value: detail.route.projectionHealth.replaceAll('_', ' ') },
+        { term: 'Telemetry freshness', value: detail.route.telemetryFreshness },
+        { term: 'Capabilities revision', value: detail.route.capabilityRevision ?? 0 },
+        { term: 'Profile revision', value: detail.route.profileRevision ?? 0 },
+        { term: 'Profile observed', value: detail.route.profileObservedAt ?? 'Never' },
+        { term: 'Stock projection', value: detail.route.stockState ?? 'unknown' },
+        { term: 'Stock observed', value: detail.route.stockObservedAt ?? 'Never' },
+        { term: 'Scheduling authority', value: detail.route.schedulingAuthorityId ?? 'Local connector only', mono: true },
+        { term: 'Route ID', value: detail.route.id, mono: true }
+      ]}
+    />
+    {#if detail.route.latestObservation}
+      <div class="drawer-section">
+        <h3>Privacy-safe queue<span><RelativeTime value={detail.route.latestObservation.observedAt} /></span></h3>
+        <DefinitionList items={[
+          { term: 'Total jobs', value: detail.route.latestObservation.totalJobs },
+          { term: 'Active', value: detail.route.latestObservation.activeJobs },
+          { term: 'Held', value: detail.route.latestObservation.heldJobs },
+          { term: 'This connector', value: detail.route.latestObservation.connectorJobs },
+          { term: 'Other Piqae or external', value: detail.route.latestObservation.otherPiqaeOrExternalJobs },
+          { term: 'Unknown source', value: detail.route.latestObservation.unknownJobs }
+        ]} />
+        <p class="muted empty-line">External titles, users, filenames, native job IDs and document data are intentionally not shared.</p>
+      </div>
+    {:else}
+      <p class="ui-note warning">This route has not reported spooler observations. Printer inventory and node heartbeat do not prove queue telemetry is healthy.</p>
+    {/if}
   {:else if detail?.kind === 'node'}
     <div class="drawer-status">
       <Status value={detail.node.state} />
@@ -981,6 +1249,70 @@
     </button>
   {/snippet}
 </Dialog>
+
+<!-- Uncertain delivery resolution -->
+{#if detail?.kind === 'job' && detail.job.state === 'delivery_uncertain' && !detail.job.deliveryResolution}
+  <Dialog
+    bind:open={resolutionOpen}
+    labelledBy="resolve-uncertain-title"
+    title="Resolve uncertain delivery"
+    description="Record an operator decision without silently retrying a possibly printed document."
+  >
+    <div class="ui-dialog__body">
+      <form
+        id="resolve-uncertain-form"
+        method="POST"
+        action="?/resolveUncertainJob"
+        use:enhance={() => {
+          resolutionPending = true;
+          resolutionAttempted = true;
+          return async ({ result, update }) => {
+            await update({ reset: false });
+            resolutionPending = false;
+            const value = result.type === 'success'
+              ? result.data as { resolutionState?: unknown } | undefined
+              : undefined;
+            if (value?.resolutionState === 'resolved') resolutionOpen = false;
+          };
+        }}
+      >
+        {#if managedAccount}<input type="hidden" name="managed_customer" value={managedAccount.externalId} />{/if}
+        <input type="hidden" name="job_id" value={detail.job.id} />
+        <input type="hidden" name="request_id" value={resolutionRequestId} />
+        <Field label="Decision">
+          <select class="select" name="resolution" required>
+            <option value="acknowledge_printed">Printed — close the warning</option>
+            <option value="acknowledge_missing">Missing — accept without reprint</option>
+            <option value="cancelled">Close without claiming an outcome</option>
+            <option value="reprint">Authorize one explicit linked reprint</option>
+          </select>
+        </Field>
+        <Field label="Operator note">
+          <textarea class="input" name="note" rows="4" maxlength="2000" required
+            placeholder="What did you check, and why is this decision safe?"></textarea>
+        </Field>
+        <p class="ui-note warning">
+          Reprint may produce a duplicate if the first handoff reached paper. Piqae waits for this
+          node to acknowledge the exact local fence before the decision becomes final.
+        </p>
+      </form>
+      {#if resolutionAttempted && !resolutionPending && form?.mutation === 'resolveUncertainJob'}
+        {#if form?.error}
+          <p class="ui-note error" role="alert">{form.error.message}</p>
+        {:else if form?.resolutionState === 'pending_node_ack'}
+          <p class="ui-note neutral" role="status">Decision saved. Waiting for the node to acknowledge it.</p>
+        {/if}
+      {/if}
+    </div>
+    {#snippet footer()}
+      <button class="button" type="button" onclick={() => (resolutionOpen = false)}>Keep reviewing</button>
+      <button class="button primary" type="submit" form="resolve-uncertain-form"
+        disabled={resolutionPending || data.dashboardMode !== 'live'}>
+        {resolutionPending ? 'Saving decision…' : 'Save decision'}
+      </button>
+    {/snippet}
+  </Dialog>
+{/if}
 
 <!-- Job cancellation -->
 {#if detail?.kind === 'job'}

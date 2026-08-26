@@ -1264,6 +1264,64 @@ paths:
           $ref: "#/components/responses/Error"
         "404":
           $ref: "#/components/responses/Error"
+  /v1/jobs/{job_id}/delivery-attempts:
+    parameters:
+      - $ref: "#/components/parameters/JobId"
+    get:
+      summary: List fenced delivery attempts for a job
+      description: |
+        Attempts are immutable execution history. Exactly one attempt may hold
+        an active route reservation. Automatic failover is limited to attempts
+        that have not reached native spooler acceptance.
+      tags: [Jobs, Routing]
+      operationId: listJobDeliveryAttempts
+      responses:
+        "200":
+          description: Ordered delivery attempts.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/DeliveryAttempt" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /v1/jobs/{job_id}/resolve-uncertain:
+    parameters:
+      - $ref: "#/components/parameters/JobId"
+      - name: Idempotency-Key
+        in: header
+        required: true
+        schema: { type: string, minLength: 8, maxLength: 255 }
+    post:
+      summary: Resolve an uncertain delivery with an explicit operator decision
+      description: |
+        Never silently retries a spooler-accepted attempt. Reprint creates a new
+        linked job; acknowledge_missing and acknowledge_printed record the
+        operator's evidence without claiming more than was observed.
+      tags: [Jobs]
+      operationId: resolveUncertainDelivery
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ResolveUncertainDelivery" }
+      responses:
+        "200":
+          description: The node acknowledged the exact local fence release and the decision is final.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UncertainDeliveryResolution" }
+        "202":
+          description: The exact node fence resolution command is durably queued but not yet acknowledged.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UncertainDeliveryResolution" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
   /v1/jobs/{job_id}/cancel:
     parameters:
       - $ref: "#/components/parameters/JobId"
@@ -1667,6 +1725,203 @@ paths:
         "401": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
+  /v1/physical-destinations:
+    get:
+      summary: List inferred physical printer destinations
+      description: |
+        Lists tenant-visible physical devices and their identity confidence.
+        A physical destination can have multiple installed routes. Piqae never
+        groups routes by friendly name alone and exposes ambiguous matches for
+        explicit review.
+      tags: [Routing, Printers]
+      operationId: listPhysicalDestinations
+      responses:
+        "200":
+          description: Physical destinations in the active environment.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/PhysicalDestination" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+  /v1/physical-destinations/{destination_id}:
+    parameters:
+      - $ref: "#/components/parameters/DestinationId"
+    get:
+      summary: Get a physical destination
+      tags: [Routing, Printers]
+      operationId: getPhysicalDestination
+      responses:
+        "200":
+          description: Physical destination with its current identity confidence.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PhysicalDestination" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /v1/physical-destinations/{destination_id}/routes:
+    parameters:
+      - $ref: "#/components/parameters/DestinationId"
+    get:
+      summary: List installed routes to a physical destination
+      tags: [Routing, Printers]
+      operationId: listPhysicalDestinationRoutes
+      responses:
+        "200":
+          description: Node and operating-system queue routes for the destination.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/PrinterRoute" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /v1/physical-destinations/{destination_id}/identity-evidence:
+    parameters:
+      - $ref: "#/components/parameters/DestinationId"
+    get:
+      summary: List redacted identity evidence for a physical destination
+      tags: [Routing, Printers]
+      operationId: listDestinationIdentityEvidence
+      responses:
+        "200":
+          description: Bounded identity evidence; raw sensitive hardware values are never returned.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/DestinationIdentityEvidence" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /v1/physical-destinations/{destination_id}/identity-decisions:
+    parameters:
+      - $ref: "#/components/parameters/DestinationId"
+    get:
+      summary: List merge and split decisions for a physical destination
+      tags: [Routing, Printers]
+      operationId: listDestinationIdentityDecisions
+      responses:
+        "200":
+          description: Auditable and reversible identity decisions.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/DestinationIdentityDecision" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+    post:
+      summary: Confirm a destination merge or route split
+      description: A decision is append-only. Reverse it through the decision-specific endpoint.
+      tags: [Routing, Printers]
+      operationId: createDestinationIdentityDecision
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateDestinationIdentityDecision" }
+      responses:
+        "201":
+          description: Identity decision recorded.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DestinationIdentityDecision" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /v1/physical-destinations/{destination_id}/identity-decisions/{decision_id}/reverse:
+    parameters:
+      - $ref: "#/components/parameters/DestinationId"
+      - $ref: "#/components/parameters/IdentityDecisionId"
+    post:
+      summary: Reverse a prior physical-identity decision
+      tags: [Routing, Printers]
+      operationId: reverseDestinationIdentityDecision
+      responses:
+        "200":
+          description: Reversal audit record.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DestinationIdentityDecision" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /v1/printer-routes:
+    get:
+      summary: List node and operating-system routes
+      tags: [Routing, Printers]
+      operationId: listPrinterRoutes
+      responses:
+        "200":
+          description: Tenant-visible routes with telemetry and projection freshness.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/PrinterRoute" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+  /v1/printer-routes/{route_id}:
+    parameters:
+      - $ref: "#/components/parameters/RouteId"
+    get:
+      summary: Get a printer route
+      tags: [Routing, Printers]
+      operationId: getPrinterRoute
+      responses:
+        "200":
+          description: Route details.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PrinterRoute" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /v1/printer-routes/{route_id}/observations:
+    parameters:
+      - $ref: "#/components/parameters/RouteId"
+    get:
+      summary: List privacy-safe route and spooler observations
+      description: |
+        Returns bounded aggregate occupancy and health. External job titles,
+        usernames, filenames, native identifiers and document data are never
+        exposed across tenants.
+      tags: [Routing, Printers]
+      operationId: listPrinterRouteObservations
+      responses:
+        "200":
+          description: Newest-first route observations.
+          content:
+            application/json:
+              schema:
+                type: array
+                maxItems: 100
+                items: { $ref: "#/components/schemas/RouteObservation" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /v1/route-reservations:
+    get:
+      summary: List current and recent fenced route reservations
+      tags: [Routing, Jobs]
+      operationId: listRouteReservations
+      responses:
+        "200":
+          description: Tenant-scoped reservation history. Fencing tokens are redacted.
+          content:
+            application/json:
+              schema:
+                type: array
+                maxItems: 100
+                items: { $ref: "#/components/schemas/RouteReservation" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
   /v1/targets:
     get:
       summary: List print targets
@@ -3041,6 +3296,27 @@ components:
       schema:
         type: string
         pattern: ^tgb_[0-9A-HJKMNP-TV-Z]{26}$
+    DestinationId:
+      name: destination_id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: ^pdst_[0-9A-HJKMNP-TV-Z]{26}$
+    RouteId:
+      name: route_id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: ^rte_[0-9A-HJKMNP-TV-Z]{26}$
+    IdentityDecisionId:
+      name: decision_id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: ^idd_[0-9A-HJKMNP-TV-Z]{26}$
     WebhookId:
       name: webhook_id
       in: path
@@ -3299,6 +3575,21 @@ components:
           type: array
           maxItems: 100
           items: { $ref: "#/components/schemas/Job" }
+        physical_destinations:
+          description: Present when destination_identity_v1 is supported by the deployment.
+          type: array
+          maxItems: 100
+          items: { $ref: "#/components/schemas/PhysicalDestination" }
+        routes:
+          description: Present when route_inventory_v1 is supported by the deployment.
+          type: array
+          maxItems: 100
+          items: { $ref: "#/components/schemas/PrinterRoute" }
+        route_observations:
+          description: Latest privacy-safe observation per returned route.
+          type: array
+          maxItems: 100
+          items: { $ref: "#/components/schemas/RouteObservation" }
     PlatformOperationsPage:
       type: object
       additionalProperties: false
@@ -5035,6 +5326,195 @@ components:
           uniqueItems: true
           maxItems: 64
           items: { $ref: "#/components/schemas/Sha256Hex" }
+    PhysicalDestination:
+      type: object
+      additionalProperties: false
+      required: [id, display_name, identity_confidence, status, created_at, updated_at]
+      properties:
+        id:
+          type: string
+          pattern: '^pdst_(?:[0-9A-HJKMNP-TV-Z]{26}|[0-9a-f]{32})$'
+          description: Opaque destination identifier. Deterministic identities use lowercase hexadecimal; newly inferred identities may use ULIDs.
+        display_name: { type: string, minLength: 1, maxLength: 255 }
+        manufacturer: { type: [string, "null"], maxLength: 255 }
+        model: { type: [string, "null"], maxLength: 255 }
+        identity_confidence:
+          type: string
+          enum: [verified, high, possible, conflict, unknown]
+        status: { type: string, enum: [active, needs_review, split, retired] }
+        route_count: { type: integer, minimum: 0 }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    PrinterRoute:
+      type: object
+      additionalProperties: false
+      required:
+        [id, physical_destination_id, printer_id, agent_id, native_queue_id, enabled, health, telemetry_freshness, created_at, updated_at]
+      properties:
+        id:
+          type: string
+          pattern: '^rte_(?:[0-9A-HJKMNP-TV-Z]{26}|[0-9a-f]{32})$'
+          description: Opaque installation-route identifier. Clients must not derive meaning from the suffix.
+        physical_destination_id: { type: string }
+        printer_id: { type: string }
+        agent_id: { type: string }
+        native_queue_id: { type: string, maxLength: 1024 }
+        local_route_key:
+          type: [string, "null"]
+          description: Opaque installation-local key used to reconcile a route across rolling upgrades; not a server resource identifier.
+        enabled: { type: boolean }
+        health:
+          type: string
+          enum: [ready, busy, needs_operator, offline, stale, unknown]
+        telemetry_freshness:
+          type: string
+          enum: [live, recent, stale, never]
+        projection_health:
+          type: string
+          enum: [current, pending, failed, unsupported]
+        capability_revision: { type: integer, format: int64, minimum: 0 }
+        profile_revision: { type: integer, format: int64, minimum: 0 }
+        profile_observed_at: { type: [string, "null"], format: date-time }
+        stock_observed_at: { type: [string, "null"], format: date-time }
+        stock_state:
+          type: string
+          enum: [current, stale, unknown]
+          description: Privacy-safe freshness of the loaded-media projection; no driver-private values are exposed.
+        latest_observation:
+          oneOf:
+            - { $ref: "#/components/schemas/RouteObservation" }
+            - { type: "null" }
+        scheduling_authority_id: { type: [string, "null"] }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    DestinationIdentityEvidence:
+      type: object
+      additionalProperties: false
+      required: [id, destination_id, route_id, kind, confidence, observed_at]
+      properties:
+        id: { type: string }
+        destination_id: { type: string }
+        route_id: { type: string }
+        kind:
+          type: string
+          enum:
+            [ipp_uuid, device_serial, usb_serial, usb_vid_pid, certificate_key, network_mac, network_endpoint, native_queue, manufacturer_model, driver_fingerprint, capability_fingerprint, operator_confirmation]
+        confidence:
+          type: string
+          enum: [verified, high, possible, conflict, unknown]
+        observed_at: { type: string, format: date-time }
+    CreateDestinationIdentityDecision:
+      type: object
+      additionalProperties: false
+      required: [kind, route_ids, reason]
+      properties:
+        kind: { type: string, enum: [merge, split] }
+        route_ids:
+          type: array
+          minItems: 1
+          maxItems: 100
+          uniqueItems: true
+          items: { type: string }
+        reason: { type: string, minLength: 1, maxLength: 2000 }
+        display_name:
+          type: string
+          minLength: 1
+          maxLength: 255
+          description: Optional name for the new destination created by a split decision.
+    DestinationIdentityDecision:
+      type: object
+      additionalProperties: false
+      required: [id, destination_id, kind, route_ids, reason, actor_id, created_at]
+      properties:
+        id: { type: string, pattern: '^idd_[0-9A-HJKMNP-TV-Z]{26}$' }
+        destination_id: { type: string }
+        kind: { type: string, enum: [merge, split, reversal] }
+        route_ids:
+          type: array
+          items: { type: string }
+        reason: { type: string }
+        actor_id: { type: string }
+        reverses_decision_id: { type: [string, "null"] }
+        reversed_by_decision_id: { type: [string, "null"] }
+        created_at: { type: string, format: date-time }
+    RouteObservation:
+      type: object
+      additionalProperties: false
+      required:
+        [id, route_id, sequence, printer_state, accepting_jobs, total_jobs, active_jobs, held_jobs, connector_jobs, other_piqae_or_external_jobs, unknown_jobs, observed_at, expires_at]
+      properties:
+        id: { type: string }
+        route_id: { type: string }
+        sequence: { type: integer, format: int64, minimum: 1 }
+        printer_state: { type: string, enum: [online, busy, paused, paper_out, error, offline, unknown] }
+        state_reasons:
+          type: array
+          maxItems: 64
+          items: { type: string, maxLength: 255 }
+        accepting_jobs: { type: boolean }
+        total_jobs: { type: integer, minimum: 0 }
+        active_jobs: { type: integer, minimum: 0 }
+        held_jobs: { type: integer, minimum: 0 }
+        connector_jobs: { type: integer, minimum: 0 }
+        other_piqae_or_external_jobs: { type: integer, minimum: 0 }
+        unknown_jobs: { type: integer, minimum: 0 }
+        estimated_busy_seconds: { type: [integer, "null"], minimum: 0 }
+        observed_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
+    RouteReservation:
+      type: object
+      additionalProperties: false
+      required: [id, route_id, job_id, attempt_id, generation, state, acquired_at, expires_at]
+      properties:
+        id: { type: string }
+        route_id: { type: string }
+        job_id: { type: string }
+        attempt_id: { type: string }
+        generation: { type: integer, format: int64, minimum: 1 }
+        state: { type: string, enum: [active, released, expired, fenced] }
+        acquired_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
+        released_at: { type: [string, "null"], format: date-time }
+    DeliveryAttempt:
+      type: object
+      additionalProperties: false
+      required: [id, job_id, target_id, route_id, generation, state, created_at, updated_at]
+      properties:
+        id: { type: string }
+        job_id: { type: string }
+        target_id: { type: [string, "null"] }
+        route_id: { type: string }
+        generation: { type: integer, format: int64, minimum: 1 }
+        state:
+          type: string
+          enum: [route_leased, accepted_by_node, queued_local, handing_to_spooler, accepted_by_spooler, printing_reported, completed_reported, rejected_before_handoff, cancelled_before_handoff, delivery_uncertain, failed]
+        native_spool_id: { type: [string, "null"] }
+        failure_reason: { type: [string, "null"] }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        completed_at: { type: [string, "null"], format: date-time }
+    ResolveUncertainDelivery:
+      type: object
+      additionalProperties: false
+      required: [resolution, note]
+      properties:
+        resolution: { type: string, enum: [acknowledge_printed, acknowledge_missing, cancelled, reprint] }
+        note: { type: string, minLength: 1, maxLength: 2000 }
+    UncertainDeliveryResolution:
+      type: object
+      additionalProperties: false
+      required: [job, resolution, state, request_id, created_at]
+      properties:
+        job: { $ref: "#/components/schemas/Job" }
+        resolution: { type: string, enum: [acknowledge_printed, acknowledge_missing, cancelled, reprint] }
+        state: { type: string, enum: [pending_node_ack, resolved] }
+        request_id: { type: string, minLength: 1, maxLength: 200 }
+        replacement_job:
+          oneOf:
+            - { $ref: "#/components/schemas/Job" }
+            - { type: "null" }
+        created_at: { type: string, format: date-time }
+        resolved_at: { type: [string, "null"], format: date-time }
     CreateTarget:
       type: object
       additionalProperties: false

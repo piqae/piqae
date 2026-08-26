@@ -12,7 +12,15 @@ export function dashboardNavigation(_meta: Pick<DashboardMeta, 'platform'>) {
   ] as const;
 }
 
-export type OperationalView = 'jobs' | 'printers' | 'nodes' | 'customers';
+export type OperationalView =
+  | 'jobs'
+  | 'queue'
+  | 'destinations'
+  | 'routes'
+  | 'needs_review'
+  | 'printers'
+  | 'nodes'
+  | 'customers';
 
 /**
  * View switcher options for `/dashboard?view=`. Customers only appears on
@@ -21,6 +29,10 @@ export type OperationalView = 'jobs' | 'printers' | 'nodes' | 'customers';
 export function operationalViews(meta: Pick<DashboardMeta, 'platform'>) {
   return [
     { value: 'jobs', label: 'Jobs' },
+    { value: 'queue', label: 'Queue' },
+    { value: 'destinations', label: 'Destinations' },
+    { value: 'routes', label: 'Routes' },
+    { value: 'needs_review', label: 'Needs review' },
     { value: 'printers', label: 'Printers' },
     { value: 'nodes', label: 'Nodes' },
     ...(meta.platform.accounts ? [{ value: 'customers', label: 'Customers' }] : [])
@@ -62,7 +74,7 @@ export interface StateFilterOption {
  * operational state, so they offer no filter.
  */
 export function stateFilters(view: OperationalView): StateFilterOption[] {
-  if (view === 'customers') return [];
+  if (view === 'customers' || view === 'queue' || view === 'destinations' || view === 'needs_review') return [];
   return [...(view === 'jobs' ? JOB_STATE_FILTERS : RESOURCE_STATE_FILTERS)];
 }
 
