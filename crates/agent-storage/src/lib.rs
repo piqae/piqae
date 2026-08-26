@@ -52,6 +52,8 @@ pub enum StorageError {
     NativeBlobTooLarge(usize),
     #[error("document resource {0} was not found")]
     DocumentResourceNotFound(String),
+    #[error("content {0} is being reclaimed")]
+    ContentReclaimInProgress(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -591,6 +593,19 @@ impl AgentStore {
             "document_resources",
             "evicting",
             "INTEGER NOT NULL DEFAULT 0 CHECK (evicting IN (0, 1))",
+        )?;
+        ensure_column(
+            &connection,
+            "content_files",
+            "reclaiming",
+            "INTEGER NOT NULL DEFAULT 0 CHECK (reclaiming IN (0, 1))",
+        )?;
+        // A claim is process-transient but persisted to close the delete race.
+        // On restart the claimant is gone, so make the file eligible for a
+        // fresh existence check and claim/finalize attempt.
+        connection.execute(
+            "UPDATE content_files SET reclaiming = 0 WHERE reclaiming = 1",
+            [],
         )?;
         let has_cloud_managed: bool = connection.query_row(
             "SELECT EXISTS (
@@ -2284,14 +2299,20 @@ impl AgentStore {
                 job.accepted_unix_ms
             ],
         )?;
-        tx.execute(
+        let content_recorded = tx.execute(
             "INSERT INTO content_files
              (sha256, path, reference_count, verified_unix_ms)
              VALUES (?1, ?2, 1, ?3)
              ON CONFLICT (sha256)
-             DO UPDATE SET reference_count = reference_count + 1",
+             DO UPDATE SET reference_count = reference_count + 1
+             WHERE content_files.reclaiming = 0",
             params![job.content_sha256, job.content_path, job.accepted_unix_ms],
         )?;
+        if content_recorded == 0 {
+            return Err(StorageError::ContentReclaimInProgress(
+                job.content_sha256.clone(),
+            ));
+        }
         tx.execute(
             "INSERT INTO jobs
              (job_id, submission_id, printer_id, printer_native_id,
@@ -2408,14 +2429,20 @@ impl AgentStore {
                 job.accepted_unix_ms
             ],
         )?;
-        transaction.execute(
+        let content_recorded = transaction.execute(
             "INSERT INTO content_files
              (sha256, path, reference_count, verified_unix_ms)
              VALUES (?1, ?2, 1, ?3)
              ON CONFLICT (sha256)
-             DO UPDATE SET reference_count = reference_count + 1",
+             DO UPDATE SET reference_count = reference_count + 1
+             WHERE content_files.reclaiming = 0",
             params![job.content_sha256, job.content_path, job.accepted_unix_ms],
         )?;
+        if content_recorded == 0 {
+            return Err(StorageError::ContentReclaimInProgress(
+                job.content_sha256.clone(),
+            ));
+        }
         let confidential = std::path::Path::new(&job.content_path)
             .file_name()
             .and_then(|name| name.to_str())
@@ -2501,15 +2528,18 @@ impl AgentStore {
     /// # Errors
     ///
     /// Returns an error when the bounded candidate query cannot be executed.
-    pub fn reclaimable_terminal_content(
-        &self,
+    pub fn claim_reclaimable_terminal_content(
+        &mut self,
         limit: usize,
     ) -> Result<Vec<ReclaimableContent>, StorageError> {
         let bounded = i64::try_from(limit.clamp(1, 256)).unwrap_or(256);
-        let mut statement = self.connection.prepare(
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut statement = transaction.prepare(
             "SELECT c.sha256, c.path
              FROM content_files c
-             WHERE NOT EXISTS (
+             WHERE c.reclaiming = 0 AND NOT EXISTS (
                SELECT 1 FROM jobs retained
                WHERE retained.content_sha256 = c.sha256
                  AND retained.content_path = c.path
@@ -2520,13 +2550,36 @@ impl AgentStore {
              ORDER BY c.verified_unix_ms, c.sha256
              LIMIT ?1",
         )?;
-        let rows = statement.query_map([bounded], |row| {
-            Ok(ReclaimableContent {
-                sha256: row.get(0)?,
-                path: row.get(1)?,
-            })
-        })?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+        let candidates = statement
+            .query_map([bounded], |row| {
+                Ok(ReclaimableContent {
+                    sha256: row.get(0)?,
+                    path: row.get(1)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(statement);
+        let mut claimed = Vec::new();
+        for candidate in candidates {
+            let changed = transaction.execute(
+                "UPDATE content_files SET reclaiming = 1
+                 WHERE sha256 = ?1 AND path = ?2 AND reclaiming = 0
+                   AND NOT EXISTS (
+                     SELECT 1 FROM jobs retained
+                     WHERE retained.content_sha256 = ?1
+                       AND retained.content_path = ?2
+                       AND retained.state NOT IN (
+                         'completed_reported','failed_terminal','cancelled','expired'
+                       )
+                   )",
+                params![candidate.sha256, candidate.path],
+            )?;
+            if changed == 1 {
+                claimed.push(candidate);
+            }
+        }
+        transaction.commit()?;
+        Ok(claimed)
     }
 
     /// Retires one file after the caller has removed it. The reference check
@@ -2557,6 +2610,11 @@ impl AgentStore {
             |row| row.get(0),
         )?;
         if retained {
+            transaction.execute(
+                "UPDATE content_files SET reclaiming = 0
+                 WHERE sha256 = ?1 AND path = ?2 AND reclaiming = 1",
+                params![sha256, path],
+            )?;
             transaction.commit()?;
             return Ok(false);
         }
@@ -2569,11 +2627,30 @@ impl AgentStore {
             params![sha256, path],
         )?;
         transaction.execute(
-            "DELETE FROM content_files WHERE sha256 = ?1 AND path = ?2",
+            "DELETE FROM content_files
+             WHERE sha256 = ?1 AND path = ?2 AND reclaiming = 1",
             params![sha256, path],
         )?;
         transaction.commit()?;
         Ok(true)
+    }
+
+    /// Releases a reclaim claim after filesystem deletion failed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the durable claim cannot be cleared.
+    pub fn cancel_terminal_content_reclaim(
+        &self,
+        sha256: &str,
+        path: &str,
+    ) -> Result<(), StorageError> {
+        self.connection.execute(
+            "UPDATE content_files SET reclaiming = 0
+             WHERE sha256 = ?1 AND path = ?2 AND reclaiming = 1",
+            params![sha256, path],
+        )?;
+        Ok(())
     }
 
     /// Returns accepted cloud jobs whose acknowledgement has not reached the control plane.
@@ -5239,6 +5316,63 @@ mod tests {
                     params![uppercase, "sha256/AA/uppercase"],
                 )
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn content_reclaim_claim_blocks_new_references_until_cancel_or_finalize() {
+        let mut store = AgentStore::in_memory().unwrap();
+        let original = job("terminal", "printer", 1);
+        store.accept_job(&original).unwrap();
+        store
+            .connection
+            .execute(
+                "UPDATE jobs SET state = 'completed_reported' WHERE job_id = 'terminal'",
+                [],
+            )
+            .unwrap();
+        let claimed = store.claim_reclaimable_terminal_content(1).unwrap();
+        assert_eq!(claimed.len(), 1);
+
+        let mut concurrent = job("concurrent", "printer", 2);
+        concurrent.content_sha256 = original.content_sha256.clone();
+        concurrent.content_path = original.content_path.clone();
+        assert!(matches!(
+            store.accept_job(&concurrent),
+            Err(StorageError::ContentReclaimInProgress(_))
+        ));
+        store
+            .cancel_terminal_content_reclaim(&claimed[0].sha256, &claimed[0].path)
+            .unwrap();
+        store.accept_job(&concurrent).unwrap();
+    }
+
+    #[test]
+    fn content_reclaim_claim_is_safely_reset_on_restart() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("agent.db");
+        let mut store = AgentStore::open(&database).unwrap();
+        store.accept_job(&job("terminal", "printer", 1)).unwrap();
+        store
+            .connection
+            .execute(
+                "UPDATE jobs SET state = 'completed_reported' WHERE job_id = 'terminal'",
+                [],
+            )
+            .unwrap();
+        assert_eq!(
+            store.claim_reclaimable_terminal_content(1).unwrap().len(),
+            1
+        );
+        drop(store);
+
+        let mut restarted = AgentStore::open(&database).unwrap();
+        assert_eq!(
+            restarted
+                .claim_reclaimable_terminal_content(1)
+                .unwrap()
+                .len(),
+            1
         );
     }
 }

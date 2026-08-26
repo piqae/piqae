@@ -730,11 +730,15 @@ impl EmbeddedQueue {
         if used.saturating_add(additional) <= MAX_CONTENT_STORE_BYTES {
             return Ok(());
         }
-        for candidate in self.store.reclaimable_terminal_content(256)? {
+        for candidate in self.store.claim_reclaimable_terminal_content(256)? {
             match std::fs::remove_file(&candidate.path) {
                 Ok(()) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error.into()),
+                Err(error) => {
+                    self.store
+                        .cancel_terminal_content_reclaim(&candidate.sha256, &candidate.path)?;
+                    return Err(error.into());
+                }
             }
             let _ = self
                 .store

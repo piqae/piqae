@@ -874,23 +874,49 @@ pub async fn enrol_agent(
     }
     let secret_hash = format!("{:x}", Sha256::digest(request.token.as_bytes()));
     validate_connector_printer_grant(&request)?;
-    if let Some(installation_id) = request.installation_id.as_deref() {
-        let existing_key = match state
-            .repository
-            .node_installation_public_key(installation_id)
-            .await
-        {
-            Ok(key) => key,
-            Err(RepositoryError::NotFound) => public_key.clone(),
-            Err(_) => return Err(AppError::unauthorized()),
-        };
-        let proof = request
-            .installation_proof
-            .as_deref()
-            .ok_or_else(AppError::unauthorized)?;
-        let message = connector_proof_for_request(&request, installation_id);
-        verify_connector_proof(&existing_key, proof, &message)?;
+    let installation_public_key = request
+        .installation_public_key
+        .as_deref()
+        .map(decode_agent_public_key)
+        .transpose()?;
+    if installation_public_key
+        .as_ref()
+        .is_some_and(|key| key.len() != 32)
+    {
+        return Err(AppError::invalid(
+            "invalid_installation_public_key",
+            "Installation public key must contain exactly 32 bytes.",
+        ));
     }
+    let verified_installation_key =
+        if let Some(installation_id) = request.installation_id.as_deref() {
+            let existing_key = match state
+                .repository
+                .node_installation_public_key(installation_id)
+                .await
+            {
+                Ok(key) => key,
+                Err(RepositoryError::NotFound) => installation_public_key
+                    .clone()
+                    .ok_or_else(AppError::unauthorized)?,
+                Err(_) => return Err(AppError::unauthorized()),
+            };
+            if installation_public_key
+                .as_ref()
+                .is_some_and(|candidate| candidate != &existing_key)
+            {
+                return Err(AppError::unauthorized());
+            }
+            let proof = request
+                .installation_proof
+                .as_deref()
+                .ok_or_else(AppError::unauthorized)?;
+            let message = connector_proof_for_request(&request, installation_id);
+            verify_connector_proof(&existing_key, proof, &message)?;
+            Some(existing_key)
+        } else {
+            None
+        };
     let enrolled = if let Some(installation_id) = request.installation_id.as_deref() {
         state
             .repository
@@ -905,6 +931,9 @@ pub async fn enrol_agent(
                 request.protocol_version,
                 state.capabilities.billing.enabled,
                 installation_id,
+                verified_installation_key
+                    .as_deref()
+                    .ok_or_else(AppError::unauthorized)?,
                 match request.printer_grant {
                     piqae_protocol::agent::PrinterGrant::SelectedPrinters => "selected_printers",
                     piqae_protocol::agent::PrinterGrant::AllLocalPrinters => "all_local_printers",

@@ -184,6 +184,7 @@ pub async fn exchange_connector_invitation(
             agent_version: env!("CARGO_PKG_VERSION").into(),
             protocol_version: CURRENT_PROTOCOL_VERSION,
             installation_id: Some(installation.installation_id),
+            installation_public_key: Some(URL_SAFE_NO_PAD.encode(installation.public_key)),
             printer_grant: request.printer_grant,
             allowed_printer_ids: request.allowed_printer_ids.clone(),
             installation_proof: Some(installation_proof),

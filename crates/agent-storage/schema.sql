@@ -240,7 +240,8 @@ CREATE TABLE IF NOT EXISTS content_files (
   sha256 TEXT PRIMARY KEY,
   path TEXT NOT NULL,
   reference_count INTEGER NOT NULL CHECK (reference_count >= 0),
-  verified_unix_ms INTEGER NOT NULL
+  verified_unix_ms INTEGER NOT NULL,
+  reclaiming INTEGER NOT NULL DEFAULT 0 CHECK (reclaiming IN (0, 1))
 );
 
 CREATE TABLE IF NOT EXISTS jobs (

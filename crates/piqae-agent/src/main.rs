@@ -51,17 +51,20 @@ use piqae_local_ipc::{
     capture_token_digest, generate_capture_token,
 };
 use piqae_node_runtime::{
-    AvailabilityClass, BrokerConsentHandle, BrokerRegistry, BrokerServerState, HostCapabilities,
-    HostKind, LifecycleEvent, NodeRuntime, NodeRuntimeMode, PrinterTransport, RuntimeConfiguration,
+    AgentClientAuthority, AvailabilityClass, BrokerConsentHandle, BrokerRegistry,
+    BrokerServerState, CloudCommandApplier, CloudConnectorWorker, CloudWorkerError,
+    ContentMaterializer, DurableOfferAcceptor, EventAcknowledger, HostCapabilities, HostKind,
+    InventorySnapshotProvider, LifecycleEvent, NodeRuntime, NodeRuntimeMode,
+    PendingCloudAcceptance, PrinterTransport, RuntimeConfiguration, WakeReconciler,
     connector_registry as connector_runtime, route_coordinator,
 };
 use piqae_protocol::{
     CURRENT_PROTOCOL_VERSION,
     agent::{
-        AgentAcceptJobRequest, AgentCommand, AgentHealth, AgentReleaseLeaseRequest,
-        AgentRenewLeaseRequest, AgentSyncRequest, AgentSyncResponse, ContentDescriptor,
-        CreateDeviceAuthorizationRequest, EnrolRequest, InstallationMode, JobOffer, PrinterGrant,
-        PrinterProfileSnapshot, PrinterSnapshot, QueueSnapshot,
+        AgentAcceptJobRequest, AgentCommand, AgentHealth, AgentSyncRequest, ContentDescriptor,
+        CreateDeviceAuthorizationRequest, EnrolRequest, InstallationMode,
+        InventoryProjectionAcknowledgement, JobOffer, PrinterGrant, PrinterProfileSnapshot,
+        PrinterSnapshot, QueueSnapshot,
     },
     executor::{DiscoveredPrinter, ExecutorOperation, ExecutorResult, NativeJobObservation},
 };
@@ -86,8 +89,6 @@ use tracing_subscriber::EnvFilter;
 use uri_fetch::UriFetcher;
 use url::Url;
 
-const LEASE_RENEWAL_INTERVAL: Duration = Duration::from_secs(10);
-const LEASE_RENEWAL_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const PROFILE_CAPTURE_LIFETIME: Duration = Duration::from_secs(5 * 60);
 const LOCAL_PROFILE_HOST_ID: &str = "authenticated-loopback-profile-host";
 const DOCUMENT_RESOURCE_CACHE_BYTES: u64 = 512 * 1024 * 1024;
@@ -1251,6 +1252,7 @@ async fn add_connector(arguments: &Arguments, consent: ConnectorConsentInput) ->
             agent_version: env!("CARGO_PKG_VERSION").to_owned(),
             protocol_version: CURRENT_PROTOCOL_VERSION,
             installation_id: Some(installation.installation_id),
+            installation_public_key: Some(installation_identity.public_key_base64()),
             printer_grant,
             allowed_printer_ids: allowed_printer_ids.clone(),
             installation_proof: Some(installation_proof),
@@ -1404,6 +1406,7 @@ async fn enrol_installation(arguments: &Arguments, token: &str) -> Result<()> {
             agent_version: env!("CARGO_PKG_VERSION").to_owned(),
             protocol_version: CURRENT_PROTOCOL_VERSION,
             installation_id: None,
+            installation_public_key: None,
             printer_grant: PrinterGrant::SelectedPrinters,
             allowed_printer_ids: Vec::new(),
             installation_proof: None,
@@ -3807,6 +3810,469 @@ fn inventory_projection_confirmed(
     })
 }
 
+#[derive(Debug)]
+struct InstalledConnectorStores {
+    queue: AgentStore,
+    inventory: AgentStore,
+}
+
+#[derive(Clone)]
+struct InstalledInventoryAdapter {
+    stores: Arc<Mutex<InstalledConnectorStores>>,
+    printer_discovery: PrinterDiscovery,
+    route_coordinator: Arc<Mutex<route_coordinator::RouteCoordinator>>,
+    observation_cache: Arc<Mutex<RouteObservationCache>>,
+    support_packs: Arc<SupportPackRegistry>,
+    connector_id: String,
+    agent_id: AgentId,
+    started_at: chrono::DateTime<Utc>,
+    paused: Arc<AtomicBool>,
+    allowed_printer_ids: Option<std::collections::BTreeSet<String>>,
+    node_runtime: Arc<NodeRuntime>,
+    inventory_dirty: Arc<AtomicBool>,
+}
+
+impl std::fmt::Debug for InstalledInventoryAdapter {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("InstalledInventoryAdapter([connector-isolated])")
+    }
+}
+
+#[async_trait]
+impl InventorySnapshotProvider for InstalledInventoryAdapter {
+    #[allow(
+        clippy::significant_drop_tightening,
+        reason = "both connector stores must remain exclusively paired across asynchronous inventory discovery"
+    )]
+    async fn snapshot(&mut self, refresh: bool) -> Result<AgentSyncRequest, CloudWorkerError> {
+        let refresh = refresh || self.inventory_dirty.swap(false, Ordering::AcqRel);
+        let mut stores = self.stores.lock().await;
+        let InstalledConnectorStores { queue, inventory } = &mut *stores;
+        prepare_sync_request(
+            queue,
+            inventory,
+            &self.printer_discovery,
+            &self.route_coordinator,
+            &self.observation_cache,
+            &self.support_packs,
+            &self.connector_id,
+            self.agent_id,
+            self.started_at,
+            self.paused.load(Ordering::Relaxed),
+            refresh,
+            self.allowed_printer_ids.as_ref(),
+            &self.node_runtime,
+        )
+        .await
+        .map_err(|_| CloudWorkerError::new("inventory_snapshot_failed"))
+    }
+
+    async fn projection_acknowledged(
+        &mut self,
+        submitted_revision: u64,
+        supported: bool,
+        acknowledgement: Option<&InventoryProjectionAcknowledgement>,
+    ) -> Result<(), CloudWorkerError> {
+        if !inventory_projection_confirmed(supported, acknowledgement, submitted_revision) {
+            self.inventory_dirty.store(true, Ordering::Release);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
+struct InstalledEventAdapter {
+    stores: Arc<Mutex<InstalledConnectorStores>>,
+    route_coordinator: Arc<Mutex<route_coordinator::RouteCoordinator>>,
+    connector_id: String,
+}
+
+impl std::fmt::Debug for InstalledEventAdapter {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("InstalledEventAdapter([connector-isolated])")
+    }
+}
+
+#[async_trait]
+impl EventAcknowledger for InstalledEventAdapter {
+    async fn acknowledge(
+        &mut self,
+        event_cursor: Option<EventId>,
+        handoff_sequence: Option<u64>,
+        diagnostics: &[String],
+    ) -> Result<(), CloudWorkerError> {
+        {
+            let mut stores = self.stores.lock().await;
+            if let Some(cursor) = event_cursor {
+                stores
+                    .queue
+                    .acknowledge_cloud_event(&cursor.to_string(), Utc::now().timestamp_millis())
+                    .map_err(|_| CloudWorkerError::new("event_ack_failed"))?;
+            }
+            acknowledge_diagnostics(&mut stores.queue, diagnostics);
+        }
+        if let Some(sequence) = handoff_sequence {
+            self.route_coordinator
+                .lock()
+                .await
+                .acknowledge_handoffs(&self.connector_id, sequence)
+                .map_err(|_| CloudWorkerError::new("handoff_ack_failed"))?;
+            self.stores
+                .lock()
+                .await
+                .queue
+                .set_setting("acknowledged_handoff_sequence", &sequence.to_string())
+                .map_err(|_| CloudWorkerError::new("handoff_cursor_failed"))?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
+struct InstalledCommandAdapter {
+    stores: Arc<Mutex<InstalledConnectorStores>>,
+    paused: Arc<AtomicBool>,
+    route_coordinator: Arc<Mutex<route_coordinator::RouteCoordinator>>,
+    connector_id: String,
+}
+
+impl std::fmt::Debug for InstalledCommandAdapter {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("InstalledCommandAdapter([connector-isolated])")
+    }
+}
+
+#[async_trait]
+impl CloudCommandApplier for InstalledCommandAdapter {
+    #[allow(
+        clippy::significant_drop_tightening,
+        reason = "the connector queue remains exclusively owned while ordered commands are durably applied"
+    )]
+    async fn apply(
+        &mut self,
+        command_cursor: Option<&str>,
+        commands: Vec<AgentCommand>,
+    ) -> Result<(), CloudWorkerError> {
+        let mut stores = self.stores.lock().await;
+        apply_commands(
+            &mut stores.queue,
+            &self.paused,
+            &self.route_coordinator,
+            &self.connector_id,
+            commands,
+            command_cursor.map(ToOwned::to_owned),
+        )
+        .await;
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+struct InstalledMaterializedOffer {
+    stored: piqae_agent_core::StoredContent,
+    printer: StoredPrinter,
+    profile_pin: Option<ProfilePinMetadata>,
+    uses_current_printer_defaults: bool,
+}
+
+#[derive(Clone)]
+struct InstalledMaterializer {
+    cloud: CloudConfiguration,
+    stores: Arc<Mutex<InstalledConnectorStores>>,
+    content_store: ContentStore,
+    uri_fetcher: UriFetcher,
+}
+
+impl std::fmt::Debug for InstalledMaterializer {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("InstalledMaterializer([redacted connector content])")
+    }
+}
+
+#[async_trait]
+impl ContentMaterializer for InstalledMaterializer {
+    type Materialized = InstalledMaterializedOffer;
+
+    async fn materialize(
+        &mut self,
+        offer: &JobOffer,
+    ) -> Result<Self::Materialized, CloudWorkerError> {
+        materialize_installed_offer(
+            &self.cloud,
+            &self.stores,
+            &self.content_store,
+            &self.uri_fetcher,
+            offer,
+        )
+        .await
+    }
+}
+
+#[derive(Clone)]
+struct InstalledOfferAcceptor {
+    stores: Arc<Mutex<InstalledConnectorStores>>,
+    route_coordinator: Arc<Mutex<route_coordinator::RouteCoordinator>>,
+    connector_id: String,
+}
+
+impl std::fmt::Debug for InstalledOfferAcceptor {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("InstalledOfferAcceptor([connector-isolated])")
+    }
+}
+
+#[async_trait]
+impl DurableOfferAcceptor<InstalledMaterializedOffer> for InstalledOfferAcceptor {
+    async fn pending(&mut self) -> Result<Vec<PendingCloudAcceptance>, CloudWorkerError> {
+        let intents = self
+            .stores
+            .lock()
+            .await
+            .queue
+            .pending_cloud_accepts()
+            .map_err(|_| CloudWorkerError::new("pending_accept_read_failed"))?;
+        let mut pending = Vec::with_capacity(intents.len());
+        for intent in intents {
+            pending.push(
+                pending_cloud_acceptance(&self.route_coordinator, &self.connector_id, intent)
+                    .await?,
+            );
+        }
+        Ok(pending)
+    }
+
+    async fn prepare(
+        &mut self,
+        offer: &JobOffer,
+        materialized: InstalledMaterializedOffer,
+    ) -> Result<PendingCloudAcceptance, CloudWorkerError> {
+        let mut stores = self.stores.lock().await;
+        let job_id = offer.job.id;
+        let local = stores
+            .queue
+            .prepare_cloud_job(
+                &AcceptedJob {
+                    job_id: job_id.to_string(),
+                    submission_id: format!("sub_{job_id}"),
+                    printer_id: offer.job.printer_id.to_string(),
+                    printer_native_id: materialized.printer.native_id.clone(),
+                    title: offer.job.title.clone(),
+                    content_sha256: materialized.stored.sha256.clone(),
+                    content_path: materialized.stored.path.to_string_lossy().into_owned(),
+                    content_kind: match offer.job.content_kind {
+                        ContentKind::Pdf => "pdf",
+                        ContentKind::Raw => "raw",
+                    }
+                    .into(),
+                    options_json: serde_json::to_string(&offer.job.options)
+                        .map_err(|_| CloudWorkerError::new("job_options_invalid"))?,
+                    expires_unix_ms: Some(offer.job.expires_at.timestamp_millis()),
+                    accepted_unix_ms: Utc::now().timestamp_millis(),
+                    cloud_managed: true,
+                },
+                &offer.lease_id.to_string(),
+                &offer.lease_token,
+                offer.lease_expires_at.timestamp_millis(),
+            )
+            .map_err(|_| CloudWorkerError::new("durable_accept_prepare_failed"))?;
+        if let Some(reservation) = &offer.route_reservation {
+            self.route_coordinator
+                .lock()
+                .await
+                .register_authoritative(
+                    &self.connector_id,
+                    &materialized.printer.native_id,
+                    &job_id.to_string(),
+                    reservation,
+                    Utc::now(),
+                )
+                .map_err(|_| CloudWorkerError::new("route_reservation_failed"))?;
+        }
+        if let Some(pin) = materialized
+            .profile_pin
+            .filter(|_| !materialized.uses_current_printer_defaults)
+        {
+            stores
+                .queue
+                .pin_job_profile(
+                    &job_id.to_string(),
+                    pin.target_id.as_deref(),
+                    pin.binding_id.as_deref(),
+                    &pin.profile_id,
+                    pin.profile_revision,
+                    pin.stock_id.as_deref(),
+                    pin.loaded_media_snapshot_json.as_deref(),
+                )
+                .map_err(|_| CloudWorkerError::new("profile_pin_failed"))?;
+        }
+        let intent = CloudAcceptIntent {
+            job_id: job_id.to_string(),
+            lease_id: offer.lease_id.to_string(),
+            lease_token: offer.lease_token.clone(),
+            lease_expires_unix_ms: offer.lease_expires_at.timestamp_millis(),
+            content_sha256: materialized.stored.sha256,
+            local_sequence: u64::try_from(local.printer_sequence).unwrap_or(u64::MAX),
+        };
+        drop(stores);
+        pending_cloud_acceptance(&self.route_coordinator, &self.connector_id, intent).await
+    }
+
+    async fn activate(&mut self, job_id: JobId) -> Result<(), CloudWorkerError> {
+        self.stores
+            .lock()
+            .await
+            .queue
+            .activate_cloud_job(&job_id.to_string(), Utc::now().timestamp_millis())
+            .map(|_| ())
+            .map_err(|_| CloudWorkerError::new("durable_accept_activate_failed"))
+    }
+
+    async fn has_durable_intent(&mut self, job_id: JobId) -> Result<bool, CloudWorkerError> {
+        Ok(self
+            .stores
+            .lock()
+            .await
+            .queue
+            .pending_cloud_accepts()
+            .map_err(|_| CloudWorkerError::new("pending_accept_read_failed"))?
+            .iter()
+            .any(|intent| intent.job_id == job_id.to_string()))
+    }
+}
+
+#[derive(Clone)]
+struct InstalledWakeAdapter {
+    inventory_dirty: Arc<AtomicBool>,
+}
+
+impl std::fmt::Debug for InstalledWakeAdapter {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("InstalledWakeAdapter")
+    }
+}
+
+#[async_trait]
+impl WakeReconciler for InstalledWakeAdapter {
+    async fn reconcile(&mut self) -> Result<(), CloudWorkerError> {
+        self.inventory_dirty.store(true, Ordering::Release);
+        Ok(())
+    }
+}
+
+async fn pending_cloud_acceptance(
+    route_coordinator: &Arc<Mutex<route_coordinator::RouteCoordinator>>,
+    connector_id: &str,
+    intent: CloudAcceptIntent,
+) -> Result<PendingCloudAcceptance, CloudWorkerError> {
+    let job_id = intent
+        .job_id
+        .parse::<JobId>()
+        .map_err(|_| CloudWorkerError::new("pending_accept_invalid"))?;
+    let lease_id = intent
+        .lease_id
+        .parse()
+        .map_err(|_| CloudWorkerError::new("pending_accept_invalid"))?;
+    let route_proof = route_coordinator
+        .lock()
+        .await
+        .cloud_proof_for_job(connector_id, &intent.job_id);
+    Ok(PendingCloudAcceptance {
+        job_id,
+        request: AgentAcceptJobRequest {
+            lease_id,
+            lease_token: intent.lease_token,
+            content_sha256: intent.content_sha256,
+            local_sequence: intent.local_sequence,
+            route_reservation_id: route_proof.as_ref().map(|proof| proof.reservation_id),
+            route_generation: route_proof.as_ref().map(|proof| proof.generation),
+            route_fencing_token: route_proof.map(|proof| proof.fencing_token),
+        },
+    })
+}
+
+#[allow(
+    clippy::significant_drop_tightening,
+    reason = "printer identity and its exact profile revision are validated under one inventory snapshot"
+)]
+async fn materialize_installed_offer(
+    cloud: &CloudConfiguration,
+    stores: &Arc<Mutex<InstalledConnectorStores>>,
+    content_store: &ContentStore,
+    uri_fetcher: &UriFetcher,
+    offer: &JobOffer,
+) -> Result<InstalledMaterializedOffer, CloudWorkerError> {
+    let logical_printer_id = offer.job.printer_id.to_string();
+    if !printer_is_allowed(cloud.allowed_printer_ids.as_ref(), &logical_printer_id) {
+        return Err(CloudWorkerError::new("printer_not_granted"));
+    }
+    let profile_pin = profile_pin_metadata(&offer.job.metadata)
+        .map_err(|_| CloudWorkerError::new("profile_pin_invalid"))?;
+    if matches!(&offer.content, ContentDescriptor::EncryptedDownload { .. })
+        && profile_pin.is_none()
+    {
+        return Err(CloudWorkerError::new("encrypted_profile_pin_required"));
+    }
+    let (printer, uses_current_printer_defaults) = {
+        let stores = stores.lock().await;
+        let printer = resolve_cloud_offer_printer(&stores.inventory, &logical_printer_id)
+            .map_err(|_| CloudWorkerError::new("printer_not_found"))?;
+        if !printer.present {
+            return Err(CloudWorkerError::new("printer_not_present"));
+        }
+        let mut uses_current_printer_defaults = false;
+        if let Some(pin) = &profile_pin {
+            let profile = stores
+                .inventory
+                .named_profile_revision(&printer.printer_id, &pin.profile_id, pin.profile_revision)
+                .map_err(|_| CloudWorkerError::new("profile_read_failed"))?
+                .ok_or_else(|| CloudWorkerError::new("profile_not_found"))?;
+            let status: ProfileStatus =
+                serde_json::from_value(serde_json::Value::String(profile.status.clone()))
+                    .map_err(|_| CloudWorkerError::new("profile_invalid"))?;
+            if !status.permits_jobs() {
+                return Err(CloudWorkerError::new("profile_not_ready"));
+            }
+            uses_current_printer_defaults = profile.uses_current_printer_defaults;
+            if let ContentDescriptor::EncryptedDownload { manifest, .. } = &offer.content {
+                let expected = format!("{}:{}", pin.profile_id, pin.profile_revision);
+                if manifest.binding.profile_revision != expected
+                    || pin.target_id.as_deref() != Some(manifest.binding.target_id.as_str())
+                    || manifest.binding.content_type != offer.job.content_kind
+                    || manifest.binding.printer_id != logical_printer_id
+                    || manifest.binding.options != offer.job.options
+                    || manifest.binding.deliveries != offer.job.deliveries
+                    || manifest.binding.raw_authorized
+                        != (offer.job.content_kind == ContentKind::Raw)
+                    || manifest.version != piqae_domain::ENCRYPTED_JOB_V3_VERSION
+                    || manifest.suite != piqae_domain::ENCRYPTED_JOB_V3_SUITE
+                {
+                    return Err(CloudWorkerError::new("encrypted_binding_mismatch"));
+                }
+            }
+        }
+        validate_options(&printer, &offer.job.options)
+            .map_err(|_| CloudWorkerError::new("unsupported_profile_option"))?;
+        (printer, uses_current_printer_defaults)
+    };
+    let stored_content = materialize_descriptor(
+        cloud,
+        content_store,
+        uri_fetcher,
+        offer.job.id,
+        offer.lease_id,
+        &offer.lease_token,
+        offer.content.clone(),
+    )
+    .await
+    .map_err(|_| CloudWorkerError::new("content_materialization_failed"))?;
+    Ok(InstalledMaterializedOffer {
+        stored: stored_content,
+        printer,
+        profile_pin,
+        uses_current_printer_defaults,
+    })
+}
+
 #[allow(
     clippy::too_many_arguments,
     reason = "cloud synchronization dependencies are explicit process-boundary capabilities"
@@ -3880,8 +4346,8 @@ async fn cloud_sync_loop(
 )]
 async fn run_cloud_sync_loop(
     cloud: CloudConfiguration,
-    mut store: AgentStore,
-    mut inventory_store: AgentStore,
+    store: AgentStore,
+    inventory_store: AgentStore,
     content_store: ContentStore,
     uri_fetcher: UriFetcher,
     printer_discovery: PrinterDiscovery,
@@ -3932,91 +4398,105 @@ async fn run_cloud_sync_loop(
             }
         }
     }
+    let stores = Arc::new(Mutex::new(InstalledConnectorStores {
+        queue: store,
+        inventory: inventory_store,
+    }));
     let started_at = Utc::now();
+    let authority = AgentClientAuthority::new(cloud.client.clone(), Arc::clone(&cloud.identity));
+    let inventory = InstalledInventoryAdapter {
+        stores: Arc::clone(&stores),
+        printer_discovery,
+        route_coordinator: Arc::clone(&route_coordinator),
+        observation_cache,
+        support_packs,
+        connector_id: cloud.connector_id.clone(),
+        agent_id: cloud.agent_id,
+        started_at,
+        paused: Arc::clone(&paused),
+        allowed_printer_ids: cloud.allowed_printer_ids.clone(),
+        node_runtime: Arc::clone(&node_runtime),
+        inventory_dirty: Arc::clone(&printer_inventory_dirty),
+    };
+    let events = InstalledEventAdapter {
+        stores: Arc::clone(&stores),
+        route_coordinator: Arc::clone(&route_coordinator),
+        connector_id: cloud.connector_id.clone(),
+    };
+    let commands = InstalledCommandAdapter {
+        stores: Arc::clone(&stores),
+        paused,
+        route_coordinator: Arc::clone(&route_coordinator),
+        connector_id: cloud.connector_id.clone(),
+    };
+    let materializer = InstalledMaterializer {
+        cloud: cloud.clone(),
+        stores: Arc::clone(&stores),
+        content_store,
+        uri_fetcher,
+    };
+    let acceptor = InstalledOfferAcceptor {
+        stores: Arc::clone(&stores),
+        route_coordinator,
+        connector_id: cloud.connector_id,
+    };
+    let wake = InstalledWakeAdapter {
+        inventory_dirty: Arc::clone(&printer_inventory_dirty),
+    };
+    let mut worker = CloudConnectorWorker::new(
+        authority,
+        inventory,
+        events,
+        commands,
+        materializer,
+        acceptor,
+        wake,
+        node_runtime,
+    );
     let mut failures = 0_u32;
     let mut last_printer_refresh: Option<tokio::time::Instant> = None;
     loop {
         if stop.is_stopped() {
             break;
         }
-        sweep_confidential_files(&store);
-        resume_pending_cloud_accepts(&cloud, &mut store, &route_coordinator).await;
-        let refresh_printers = printer_inventory_dirty.swap(false, Ordering::AcqRel)
-            || last_printer_refresh.is_none_or(|last| last.elapsed() >= Duration::from_secs(60));
-        let request = match prepare_sync_request(
-            &mut store,
-            &mut inventory_store,
-            &printer_discovery,
-            &route_coordinator,
-            &observation_cache,
-            &support_packs,
-            &cloud.connector_id,
-            cloud.agent_id,
-            started_at,
-            paused.load(Ordering::Relaxed),
-            refresh_printers,
-            cloud.allowed_printer_ids.as_ref(),
-            &node_runtime,
-        )
-        .await
-        {
-            Ok(request) => request,
-            Err(error) => {
-                error!(%error, "cloud sync cannot read queue health");
-                *connection.write().await = ConnectionState::Degraded;
-                tokio::time::sleep(Duration::from_secs(5)).await;
-                continue;
-            }
-        };
-        let submitted_printer_inventory = request.printers.is_some();
-        let submitted_printer_revision = request.printer_revision;
-        if !submitted_printer_inventory && refresh_printers {
+        if last_printer_refresh.is_none_or(|last| last.elapsed() >= Duration::from_secs(60)) {
             printer_inventory_dirty.store(true, Ordering::Release);
         }
-        let delay = match cloud.client.sync(cloud.identity.as_ref(), &request).await {
-            Ok(response) => {
-                let projection_acknowledged = inventory_projection_confirmed(
-                    response.inventory_projection_acknowledgement_supported,
-                    response.inventory_projection.as_ref(),
-                    submitted_printer_revision,
-                );
-                if submitted_printer_inventory && projection_acknowledged {
+        {
+            let stores = stores.lock().await;
+            sweep_confidential_files(&stores.queue);
+        }
+        let delay = match worker.reconcile_once().await {
+            Ok(outcome) => {
+                if outcome.inventory_submitted {
                     last_printer_refresh = Some(tokio::time::Instant::now());
-                } else if submitted_printer_inventory {
-                    // A normal heartbeat response does not prove that printer
-                    // rows were committed. Keep retrying the exact connector
-                    // projection until the server acknowledges its revision.
-                    printer_inventory_dirty.store(true, Ordering::Release);
                 }
+                failures = 0;
+                *connection.write().await = ConnectionState::Connected;
                 *last_sync_error_code.write().await = None;
-                sync_succeeded(
-                    response,
-                    SyncContext {
-                        cloud: &cloud,
-                        store: &mut store,
-                        inventory_store: &mut inventory_store,
-                        content_store: &content_store,
-                        uri_fetcher: &uri_fetcher,
-                        paused: &paused,
-                        failures: &mut failures,
-                        connection: &connection,
-                        stop: &stop,
-                        route_coordinator: &route_coordinator,
-                        node_runtime: &node_runtime,
-                        printer_inventory_dirty: &printer_inventory_dirty,
-                    },
-                )
-                .await
+                outcome.next_poll_after
             }
             Err(error) => {
-                if submitted_printer_inventory {
-                    // A heartbeat succeeding after an inventory projection
-                    // failure must not mask missing printers for fifteen
-                    // minutes. Retry the same current inventory next cycle.
-                    printer_inventory_dirty.store(true, Ordering::Release);
-                }
-                *last_sync_error_code.write().await = redacted_sync_error_code(&error);
-                sync_failed(&error, &mut failures, &connection).await
+                failures = failures.saturating_add(1);
+                *last_sync_error_code.write().await = Some(error.code.into());
+                let state = match error.code {
+                    "unauthorized" => ConnectionState::Unauthorized,
+                    "transport_failed" => ConnectionState::Offline,
+                    _ => ConnectionState::Degraded,
+                };
+                *connection.write().await = state;
+                let exponent = failures.min(5);
+                let seconds = if state == ConnectionState::Unauthorized {
+                    UNAUTHORIZED_RETRY_SECONDS
+                } else {
+                    1_u64.checked_shl(exponent).unwrap_or(30).min(30)
+                };
+                warn!(
+                    code = error.code,
+                    retry_seconds = seconds,
+                    "cloud worker reconcile failed"
+                );
+                Duration::from_secs(seconds)
             }
         };
         tokio::select! {
@@ -4143,118 +4623,11 @@ async fn prepare_sync_request(
     Ok(request)
 }
 
-struct SyncContext<'a> {
-    cloud: &'a CloudConfiguration,
-    store: &'a mut AgentStore,
-    inventory_store: &'a mut AgentStore,
-    content_store: &'a ContentStore,
-    uri_fetcher: &'a UriFetcher,
-    paused: &'a AtomicBool,
-    failures: &'a mut u32,
-    connection: &'a RwLock<ConnectionState>,
-    stop: &'a StopSignal,
-    route_coordinator: &'a Arc<Mutex<route_coordinator::RouteCoordinator>>,
-    node_runtime: &'a NodeRuntime,
-    printer_inventory_dirty: &'a AtomicBool,
-}
-
-#[allow(
-    clippy::cognitive_complexity,
-    reason = "one sync success applies the ordered durable acknowledgements before commands and offers"
-)]
-async fn sync_succeeded(response: AgentSyncResponse, context: SyncContext<'_>) -> Duration {
-    let AgentSyncResponse {
-        acknowledged_event_cursor,
-        acknowledged_diagnostics,
-        acknowledged_handoff_sequence,
-        command_cursor,
-        commands,
-        candidate_jobs,
-        next_poll_after_ms,
-        wake_hints,
-        ..
-    } = response;
-    *context.failures = 0;
-    *context.connection.write().await = ConnectionState::Connected;
-    apply_event_acknowledgement(context.store, acknowledged_event_cursor);
-    acknowledge_diagnostics(context.store, &acknowledged_diagnostics);
-    if wake_hints_request_reconcile(&wake_hints, Utc::now()) {
-        // A hint never changes lifecycle admission and never accepts work. It
-        // only asks the normal authenticated sync path for fresh inventory.
-        context
-            .printer_inventory_dirty
-            .store(true, Ordering::Release);
-    }
-    if let Some(sequence) = acknowledged_handoff_sequence {
-        // Compact the coordinator's durable replay barriers first. If the
-        // process stops between these two commits it may resend an already
-        // acknowledged range, but it can never advance a cursor past retained
-        // native-handoff evidence.
-        let acknowledgement = {
-            let mut coordinator = context.route_coordinator.lock().await;
-            coordinator.acknowledge_handoffs(&context.cloud.connector_id, sequence)
-        };
-        if let Err(error) = acknowledgement {
-            warn!(%error, "native handoff replay barriers could not be compacted");
-        } else if let Err(error) = context
-            .store
-            .set_setting("acknowledged_handoff_sequence", &sequence.to_string())
-        {
-            warn!(%error, "native handoff acknowledgement cursor could not be persisted");
-        }
-    }
-    apply_commands(
-        context.store,
-        context.paused,
-        context.route_coordinator,
-        &context.cloud.connector_id,
-        commands,
-        command_cursor,
-    )
-    .await;
-    for offer in candidate_jobs {
-        if let Err(error) = accept_offer(
-            context.cloud,
-            context.store,
-            context.inventory_store,
-            context.content_store,
-            context.uri_fetcher,
-            context.route_coordinator,
-            offer,
-            context.stop,
-            context.node_runtime,
-        )
-        .await
-        {
-            warn!(%error, "job offer could not be durably accepted");
-        }
-    }
-    Duration::from_millis(next_poll_after_ms.clamp(250, 60_000))
-}
-
 const fn runtime_mode(mode: AgentMode, configured_connectors: usize) -> NodeRuntimeMode {
     if matches!(mode, AgentMode::Local) && configured_connectors == 0 {
         NodeRuntimeMode::LocalOnly
     } else {
         NodeRuntimeMode::CloudCapable
-    }
-}
-
-fn wake_hints_request_reconcile(
-    hints: &[piqae_protocol::agent::AgentWakeHint],
-    observed_at: chrono::DateTime<Utc>,
-) -> bool {
-    hints.iter().any(|hint| hint.expires_at > observed_at)
-}
-
-fn apply_event_acknowledgement(store: &mut AgentStore, cursor: Option<EventId>) {
-    let Some(cursor) = cursor else {
-        return;
-    };
-    if let Err(error) =
-        store.acknowledge_cloud_event(&cursor.to_string(), Utc::now().timestamp_millis())
-    {
-        warn!(%error, "server event acknowledgement could not be applied");
     }
 }
 
@@ -4399,313 +4772,11 @@ fn acknowledge_diagnostics(store: &mut AgentStore, acknowledged: &[String]) {
     }
 }
 
-#[allow(
-    clippy::needless_pass_by_ref_mut,
-    reason = "exclusive inventory access keeps the spawned sync future Send across awaits"
-)]
-#[allow(
-    clippy::too_many_arguments,
-    clippy::too_many_lines,
-    reason = "offer acceptance crosses explicit queue, content, route, and shutdown boundaries"
-)]
-async fn accept_offer(
-    cloud: &CloudConfiguration,
-    store: &mut AgentStore,
-    inventory_store: &mut AgentStore,
-    content_store: &ContentStore,
-    uri_fetcher: &UriFetcher,
-    route_coordinator: &Arc<Mutex<route_coordinator::RouteCoordinator>>,
-    offer: JobOffer,
-    stop: &StopSignal,
-    node_runtime: &NodeRuntime,
-) -> Result<()> {
-    if !node_runtime.snapshot().accepting_cloud_leases {
-        cloud
-            .client
-            .release_lease(
-                cloud.identity.as_ref(),
-                offer.job.id,
-                &AgentReleaseLeaseRequest {
-                    lease_id: offer.lease_id,
-                    lease_token: offer.lease_token.clone(),
-                    reason: "host_lifecycle_unavailable".into(),
-                },
-            )
-            .await
-            .context("release lease while host lifecycle denies admission")?;
-        anyhow::bail!("host lifecycle denies new cloud lease admission");
-    }
-    if !printer_is_allowed(
-        cloud.allowed_printer_ids.as_ref(),
-        &offer.job.printer_id.to_string(),
-    ) {
-        cloud
-            .client
-            .release_lease(
-                cloud.identity.as_ref(),
-                offer.job.id,
-                &AgentReleaseLeaseRequest {
-                    lease_id: offer.lease_id,
-                    lease_token: offer.lease_token.clone(),
-                    reason: "printer_not_granted".into(),
-                },
-            )
-            .await
-            .context("release lease for printer outside connector grant")?;
-        anyhow::bail!("cloud offered a job outside this connector's printer grant");
-    }
-    let lease_id = offer.lease_id;
-    let lease_token = offer.lease_token.clone();
-    let job_id = offer.job.id;
-    let route_reservation = offer.route_reservation.clone();
-    let result = tokio::select! {
-      result = maintain_lease(
-        offer.lease_expires_at,
-        LEASE_RENEWAL_INTERVAL,
-        accept_offer_under_lease(
-            cloud,
-            store,
-            inventory_store,
-            content_store,
-            uri_fetcher,
-            route_coordinator,
-            offer,
-        ),
-        || async {
-            tokio::time::timeout(
-                LEASE_RENEWAL_REQUEST_TIMEOUT,
-                cloud.client.renew_lease(
-                    cloud.identity.as_ref(),
-                    job_id,
-                    &AgentRenewLeaseRequest {
-                        lease_id,
-                        lease_token: lease_token.clone(),
-                        route_reservation_id: route_reservation
-                            .as_ref()
-                            .map(|reservation| reservation.reservation_id),
-                        route_generation: route_reservation
-                            .as_ref()
-                            .map(|reservation| reservation.generation),
-                        route_fencing_token: route_reservation
-                            .as_ref()
-                            .map(|reservation| reservation.fencing_token.clone()),
-                    },
-                ),
-            )
-            .await
-            .map_err(|_| anyhow::anyhow!("job lease renewal failed"))?
-            .map(|response| response.lease_expires_at)
-            .map_err(|_| anyhow::anyhow!("job lease renewal failed"))
-        },
-      ) => result,
-      () = stop.cancelled() => Err(anyhow::anyhow!("connector revoked while job was leased")),
-    };
-    if let Err(error) = &result {
-        let has_durable_intent = match store.pending_cloud_accepts() {
-            Ok(intents) => intents
-                .iter()
-                .any(|intent| intent.job_id == job_id.to_string()),
-            Err(read_error) => {
-                warn!(
-                    %read_error,
-                    %job_id,
-                    "cloud acceptance intent could not be read; retaining the lease to prevent duplicate handoff"
-                );
-                true
-            }
-        };
-        if !has_durable_intent {
-            let _ = cloud
-                .client
-                .release_lease(
-                    cloud.identity.as_ref(),
-                    job_id,
-                    &AgentReleaseLeaseRequest {
-                        lease_id,
-                        lease_token,
-                        reason: error
-                            .downcast_ref::<OfferRejection>()
-                            .map_or("acceptance_failed", |rejection| rejection.reason)
-                            .into(),
-                    },
-                )
-                .await;
-        }
-    }
-    result
-}
-
 fn printer_is_allowed(
     allowed: Option<&std::collections::BTreeSet<String>>,
     printer_id: &str,
 ) -> bool {
     allowed.is_none_or(|ids| ids.contains(printer_id))
-}
-
-#[allow(
-    clippy::too_many_lines,
-    clippy::needless_pass_by_ref_mut,
-    reason = "keeps the lease-fenced acceptance and durable-intent boundary auditable in one flow"
-)]
-async fn accept_offer_under_lease(
-    cloud: &CloudConfiguration,
-    store: &mut AgentStore,
-    inventory_store: &mut AgentStore,
-    content_store: &ContentStore,
-    uri_fetcher: &UriFetcher,
-    route_coordinator: &Arc<Mutex<route_coordinator::RouteCoordinator>>,
-    offer: JobOffer,
-) -> Result<()> {
-    let job_id = offer.job.id;
-    let route_reservation = offer.route_reservation.clone();
-    let logical_printer_id = offer.job.printer_id.to_string();
-    let profile_pin = profile_pin_metadata(&offer.job.metadata)?;
-    if matches!(&offer.content, ContentDescriptor::EncryptedDownload { .. })
-        && profile_pin.is_none()
-    {
-        return Err(OfferRejection::new(
-            "encrypted_profile_pin_required",
-            "encrypted content requires an exact local target/profile pin".into(),
-        )
-        .into());
-    }
-    // Connector stores intentionally contain only that connector's queue and
-    // cloud cursors. Printer identity, exposure, capabilities, and profiles
-    // are authoritative in the node-owned inventory store.
-    let printer = resolve_cloud_offer_printer(inventory_store, &logical_printer_id)?;
-    if !printer.present {
-        return Err(OfferRejection::new(
-            "printer_not_present",
-            format!("printer is not present: {logical_printer_id}"),
-        )
-        .into());
-    }
-    // Cloud access is authorized by the connector grant. `printer_exposure`
-    // predates multi-connector consent and remains a local compatibility
-    // preference; allowing it to veto a connector would make an approved
-    // all-printer grant publish printers that it then cannot use.
-    let mut uses_current_printer_defaults = false;
-    if let Some(pin) = &profile_pin {
-        let profile = inventory_store
-            .named_profile_revision(&printer.printer_id, &pin.profile_id, pin.profile_revision)?
-            .with_context(|| {
-                format!(
-                    "profile_not_found: {} revision {}",
-                    pin.profile_id, pin.profile_revision
-                )
-            })?;
-        let status: ProfileStatus =
-            serde_json::from_value(serde_json::Value::String(profile.status.clone()))
-                .context("profile status is invalid")?;
-        if !status.permits_jobs() {
-            return Err(OfferRejection::new(
-                "profile_not_ready",
-                format!(
-                    "profile {} revision {} is {}",
-                    pin.profile_id, pin.profile_revision, profile.status
-                ),
-            )
-            .into());
-        }
-        uses_current_printer_defaults = profile.uses_current_printer_defaults;
-        if let ContentDescriptor::EncryptedDownload { manifest, .. } = &offer.content {
-            let expected = format!("{}:{}", pin.profile_id, pin.profile_revision);
-            if manifest.binding.profile_revision != expected
-                || pin.target_id.as_deref() != Some(manifest.binding.target_id.as_str())
-                || manifest.binding.content_type != offer.job.content_kind
-                || manifest.binding.printer_id != offer.job.printer_id.to_string()
-                || manifest.binding.options != offer.job.options
-                || manifest.binding.deliveries != offer.job.deliveries
-                || manifest.binding.raw_authorized != (offer.job.content_kind == ContentKind::Raw)
-                || manifest.version != piqae_domain::ENCRYPTED_JOB_V3_VERSION
-                || manifest.suite != piqae_domain::ENCRYPTED_JOB_V3_SUITE
-            {
-                return Err(OfferRejection::new(
-                    "encrypted_binding_mismatch",
-                    "encrypted content is not bound to the locally pinned target/profile".into(),
-                )
-                .into());
-            }
-        }
-    }
-    validate_options(&printer, &offer.job.options).map_err(|failure| {
-        if failure.code == "unsupported_profile_option" {
-            anyhow::Error::new(OfferRejection::new(
-                "unsupported_profile_option",
-                failure.message,
-            ))
-        } else {
-            anyhow::anyhow!("{}: {}", failure.code, failure.message)
-        }
-    })?;
-    let stored = materialize_descriptor(
-        cloud,
-        content_store,
-        uri_fetcher,
-        job_id,
-        offer.lease_id,
-        &offer.lease_token,
-        offer.content,
-    )
-    .await?;
-    let accepted_unix_ms = Utc::now().timestamp_millis();
-    let local = store.prepare_cloud_job(
-        &AcceptedJob {
-            job_id: job_id.to_string(),
-            submission_id: format!("sub_{job_id}"),
-            printer_id: logical_printer_id,
-            printer_native_id: printer.native_id.clone(),
-            title: offer.job.title,
-            content_sha256: stored.sha256.clone(),
-            content_path: stored.path.to_string_lossy().into_owned(),
-            content_kind: match offer.job.content_kind {
-                ContentKind::Pdf => "pdf",
-                ContentKind::Raw => "raw",
-            }
-            .into(),
-            options_json: serde_json::to_string(&offer.job.options)?,
-            expires_unix_ms: Some(offer.job.expires_at.timestamp_millis()),
-            accepted_unix_ms,
-            cloud_managed: true,
-        },
-        &offer.lease_id.to_string(),
-        &offer.lease_token,
-        offer.lease_expires_at.timestamp_millis(),
-    )?;
-    if let Some(reservation) = &route_reservation {
-        route_coordinator.lock().await.register_authoritative(
-            &cloud.connector_id,
-            &printer.native_id,
-            &job_id.to_string(),
-            reservation,
-            Utc::now(),
-        )?;
-    }
-    if let Some(pin) = profile_pin.filter(|_| !uses_current_printer_defaults) {
-        store.pin_job_profile(
-            &job_id.to_string(),
-            pin.target_id.as_deref(),
-            pin.binding_id.as_deref(),
-            &pin.profile_id,
-            pin.profile_revision,
-            pin.stock_id.as_deref(),
-            pin.loaded_media_snapshot_json.as_deref(),
-        )?;
-    }
-    confirm_cloud_accept(
-        cloud,
-        store,
-        route_coordinator,
-        &CloudAcceptIntent {
-            job_id: job_id.to_string(),
-            lease_id: offer.lease_id.to_string(),
-            lease_token: offer.lease_token,
-            lease_expires_unix_ms: offer.lease_expires_at.timestamp_millis(),
-            content_sha256: stored.sha256,
-            local_sequence: u64::try_from(local.printer_sequence).unwrap_or(u64::MAX),
-        },
-    )
-    .await
 }
 
 fn resolve_cloud_offer_printer(
@@ -4716,26 +4787,6 @@ fn resolve_cloud_offer_printer(
         .printer(logical_printer_id)?
         .with_context(|| format!("printer_not_found: {logical_printer_id}"))
 }
-
-#[derive(Debug)]
-struct OfferRejection {
-    reason: &'static str,
-    message: String,
-}
-
-impl OfferRejection {
-    const fn new(reason: &'static str, message: String) -> Self {
-        Self { reason, message }
-    }
-}
-
-impl std::fmt::Display for OfferRejection {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(&self.message)
-    }
-}
-
-impl std::error::Error for OfferRejection {}
 
 #[derive(Debug)]
 struct ProfilePinMetadata {
@@ -4778,100 +4829,6 @@ fn profile_pin_metadata(
         stock_id: value("stock_id").cloned(),
         loaded_media_snapshot_json,
     }))
-}
-
-async fn resume_pending_cloud_accepts(
-    cloud: &CloudConfiguration,
-    store: &mut AgentStore,
-    route_coordinator: &Arc<Mutex<route_coordinator::RouteCoordinator>>,
-) {
-    let intents = match store.pending_cloud_accepts() {
-        Ok(intents) => intents,
-        Err(error) => {
-            warn!(%error, "pending cloud accept intents could not be read");
-            return;
-        }
-    };
-    for intent in intents {
-        let job_id = intent.job_id.clone();
-        let result = tokio::time::timeout(
-            LEASE_RENEWAL_REQUEST_TIMEOUT,
-            confirm_cloud_accept(cloud, store, route_coordinator, &intent),
-        )
-        .await;
-        if !matches!(result, Ok(Ok(()))) {
-            warn!(%job_id, "pending cloud acceptance retry deferred");
-        }
-    }
-}
-
-async fn confirm_cloud_accept(
-    cloud: &CloudConfiguration,
-    store: &mut AgentStore,
-    route_coordinator: &Arc<Mutex<route_coordinator::RouteCoordinator>>,
-    intent: &CloudAcceptIntent,
-) -> Result<()> {
-    let job_id = intent.job_id.parse::<JobId>()?;
-    let route_proof = route_coordinator
-        .lock()
-        .await
-        .cloud_proof_for_job(&cloud.connector_id, &intent.job_id);
-    cloud
-        .client
-        .accept_job(
-            cloud.identity.as_ref(),
-            job_id,
-            &AgentAcceptJobRequest {
-                lease_id: intent.lease_id.parse()?,
-                lease_token: intent.lease_token.clone(),
-                content_sha256: intent.content_sha256.clone(),
-                local_sequence: intent.local_sequence,
-                route_reservation_id: route_proof.as_ref().map(|proof| proof.reservation_id),
-                route_generation: route_proof.as_ref().map(|proof| proof.generation),
-                route_fencing_token: route_proof.map(|proof| proof.fencing_token),
-            },
-        )
-        .await
-        .map_err(|_| anyhow::anyhow!("remote cloud acceptance failed"))?;
-    store.activate_cloud_job(&intent.job_id, Utc::now().timestamp_millis())?;
-    Ok(())
-}
-
-async fn maintain_lease<T, Work, Renew, Renewal>(
-    initial_expires_at: chrono::DateTime<Utc>,
-    maximum_interval: Duration,
-    work: Work,
-    mut renew: Renew,
-) -> Result<T>
-where
-    Work: Future<Output = Result<T>>,
-    Renew: FnMut() -> Renewal,
-    Renewal: Future<Output = Result<chrono::DateTime<Utc>>>,
-{
-    let mut expires_at = initial_expires_at;
-    tokio::pin!(work);
-    loop {
-        let delay = lease_renewal_delay(expires_at, maximum_interval);
-        tokio::select! {
-            biased;
-            () = tokio::time::sleep(delay) => {
-                expires_at = renew().await?;
-            }
-            result = &mut work => return result,
-        }
-    }
-}
-
-fn lease_renewal_delay(expires_at: chrono::DateTime<Utc>, maximum_interval: Duration) -> Duration {
-    const SAFETY_MARGIN: Duration = Duration::from_secs(5);
-    const NORMAL_MINIMUM_DELAY: Duration = Duration::from_millis(250);
-    let maximum_interval = maximum_interval.max(Duration::from_millis(1));
-    let minimum_delay = maximum_interval.min(NORMAL_MINIMUM_DELAY);
-    let remaining = (expires_at - Utc::now()).to_std().unwrap_or(Duration::ZERO);
-    remaining
-        .saturating_sub(SAFETY_MARGIN)
-        .min(maximum_interval)
-        .max(minimum_delay)
 }
 
 #[allow(
@@ -5360,38 +5317,6 @@ fn redacted_sync_error_code(error: &ClientError) -> Option<String> {
     error.unauthorized_code().map(str::to_owned)
 }
 
-async fn sync_failed(
-    error: &ClientError,
-    failures: &mut u32,
-    connection: &RwLock<ConnectionState>,
-) -> Duration {
-    *failures = failures.saturating_add(1);
-    let state = failure_state(error);
-    *connection.write().await = state;
-    if state == ConnectionState::Unauthorized {
-        error!(
-            code = error.unauthorized_code().unwrap_or("unauthorized"),
-            retry_seconds = UNAUTHORIZED_RETRY_SECONDS,
-            "the control plane rejected this node's identity; it has been \
-             revoked or its device key no longer matches. Pair this node again \
-             to restore cloud printing."
-        );
-        return Duration::from_secs(UNAUTHORIZED_RETRY_SECONDS);
-    }
-    if let Some(code) = error.unauthorized_code() {
-        warn!(
-            code,
-            "this node's clock is outside the control-plane signing window; \
-             the offset has been corrected and the next attempt will use it. \
-             Enable time synchronization to avoid repeating this."
-        );
-    }
-    let exponent = (*failures).min(5);
-    let delay = 1_u64.checked_shl(exponent).unwrap_or(30).min(30);
-    warn!(%error, retry_seconds = delay, "agent sync failed");
-    Duration::from_secs(delay)
-}
-
 fn sync_request(
     store: &AgentStore,
     agent_id: AgentId,
@@ -5852,7 +5777,6 @@ fn load_or_create_private_token(path: &Path) -> Result<String> {
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
-    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     #[test]
     fn approved_connectors_enable_cloud_runtime_in_every_launch_mode() {
@@ -5923,30 +5847,6 @@ mod tests {
             .await
             .expect("pre-existing stop must not be lost");
         assert!(stop.is_stopped());
-    }
-
-    #[test]
-    fn wake_hints_only_request_reconciliation_while_live() {
-        use piqae_protocol::agent::{AgentWakeHint, WakeDeliveryChannel};
-
-        let now = Utc::now();
-        let live = AgentWakeHint {
-            id: "wake-live".into(),
-            reason: "queued_work".into(),
-            delivery_channel: WakeDeliveryChannel::ConnectedSession,
-            requested_at: now,
-            expires_at: now + chrono::TimeDelta::seconds(30),
-        };
-        let expired = AgentWakeHint {
-            id: "wake-expired".into(),
-            reason: "queued_work".into(),
-            delivery_channel: WakeDeliveryChannel::ExternalPush,
-            requested_at: now - chrono::TimeDelta::seconds(60),
-            expires_at: now,
-        };
-        assert!(wake_hints_request_reconcile(&[expired.clone(), live], now));
-        assert!(!wake_hints_request_reconcile(&[expired], now));
-        assert!(!wake_hints_request_reconcile(&[], now));
     }
 
     #[tokio::test]
@@ -6680,53 +6580,6 @@ mod tests {
         assert!(arguments.device_key_file.is_none());
     }
 
-    #[tokio::test]
-    async fn delayed_content_stream_renews_until_materialized() {
-        let directory = tempfile::tempdir().expect("tempdir");
-        let store = ContentStore::open(directory.path()).await.expect("store");
-        let (mut writer, reader) = tokio::io::duplex(64);
-        let source = tokio::spawn(async move {
-            writer.write_all(b"first").await.expect("first");
-            tokio::time::sleep(Duration::from_millis(11)).await;
-            writer.write_all(b"-second").await.expect("second");
-            tokio::time::sleep(Duration::from_millis(11)).await;
-            writer.write_all(b"-third").await.expect("third");
-        });
-        let renewals = Arc::new(AtomicUsize::new(0));
-        let renewal_counter = Arc::clone(&renewals);
-        let content = maintain_lease(
-            Utc::now() + chrono::Duration::seconds(30),
-            Duration::from_millis(10),
-            async { Ok(store.put(reader).await?) },
-            move || {
-                let counter = Arc::clone(&renewal_counter);
-                async move {
-                    counter.fetch_add(1, Ordering::Relaxed);
-                    Ok(Utc::now() + chrono::Duration::seconds(30))
-                }
-            },
-        )
-        .await
-        .expect("materialize");
-        source.await.expect("source");
-        assert_eq!(
-            tokio::fs::read(content.path).await.expect("content"),
-            b"first-second-third"
-        );
-        assert!(
-            renewals.load(Ordering::Relaxed) >= 2,
-            "the delayed stream must cross at least two renewal intervals"
-        );
-    }
-
-    #[test]
-    fn near_expiry_lease_renewal_never_busy_loops() {
-        let maximum = Duration::from_millis(10);
-        let delay = lease_renewal_delay(Utc::now() - chrono::Duration::seconds(1), maximum);
-        assert!(delay >= Duration::from_millis(1));
-        assert!(delay <= maximum);
-    }
-
     #[test]
     fn sync_uses_the_persisted_monotonic_printer_revision() {
         let mut store = AgentStore::in_memory().expect("store");
@@ -6751,202 +6604,6 @@ mod tests {
             request.health.last_error_code.as_deref(),
             Some("executor_timed_out")
         );
-    }
-
-    #[tokio::test]
-    async fn failed_renewal_prevents_acceptance_and_restart_accepts_once() {
-        let directory = tempfile::tempdir().expect("tempdir");
-        let database = directory.path().join("agent.sqlite");
-        let job = cloud_job();
-        let mut store = AgentStore::open(&database).expect("store");
-        let error = maintain_lease(
-            Utc::now() + chrono::Duration::seconds(30),
-            Duration::from_millis(10),
-            async {
-                tokio::time::sleep(Duration::from_millis(20)).await;
-                store.prepare_cloud_job(
-                    &job,
-                    &uuid::Uuid::new_v4().to_string(),
-                    "first-lease",
-                    Utc::now().timestamp_millis() + 30_000,
-                )?;
-                Ok(())
-            },
-            || async { Err(anyhow::anyhow!("renewal unavailable")) },
-        )
-        .await
-        .expect_err("renewal must fail");
-        assert_eq!(error.to_string(), "renewal unavailable");
-        assert!(store.get_job(&job.job_id).expect("query").is_none());
-        drop(store);
-
-        let mut restarted = AgentStore::open(&database).expect("restart");
-        let renewals = Arc::new(AtomicUsize::new(0));
-        let renewal_counter = Arc::clone(&renewals);
-        maintain_lease(
-            Utc::now() + chrono::Duration::seconds(30),
-            Duration::from_millis(10),
-            async {
-                tokio::time::sleep(Duration::from_millis(15)).await;
-                restarted.prepare_cloud_job(
-                    &job,
-                    &uuid::Uuid::new_v4().to_string(),
-                    "restart-lease",
-                    Utc::now().timestamp_millis() + 30_000,
-                )?;
-                Ok(())
-            },
-            move || {
-                let counter = Arc::clone(&renewal_counter);
-                async move {
-                    counter.fetch_add(1, Ordering::Relaxed);
-                    Ok(Utc::now() + chrono::Duration::seconds(30))
-                }
-            },
-        )
-        .await
-        .expect("accept after restart");
-        assert!(restarted.runnable_heads(10).expect("runnable").is_empty());
-        restarted
-            .activate_cloud_job(&job.job_id, 10)
-            .expect("remote accepted");
-        restarted
-            .activate_cloud_job(&job.job_id, 11)
-            .expect("duplicate response");
-        assert!(
-            renewals.load(Ordering::Relaxed) >= 1,
-            "the restarted materialization must renew its lease before acceptance"
-        );
-        assert_eq!(restarted.pending_events(0, 10).expect("events").len(), 1);
-    }
-
-    #[tokio::test]
-    async fn ambiguous_server_accept_retries_exact_intent_before_activation() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind");
-        let address = listener.local_addr().expect("address");
-        let server = tokio::spawn(async move {
-            let mut bodies = Vec::new();
-            for attempt in 0..2 {
-                let (mut stream, _) = listener.accept().await.expect("accept");
-                bodies.push(read_request_body(&mut stream).await);
-                if attempt == 0 {
-                    continue;
-                }
-                let body = br#"{"accepted_at":"2026-01-01T00:00:00Z","state":"agent_accepted"}"#;
-                stream
-                    .write_all(
-                        format!(
-                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                            body.len()
-                        )
-                        .as_bytes(),
-                    )
-                    .await
-                    .expect("headers");
-                stream.write_all(body).await.expect("body");
-            }
-            bodies
-        });
-
-        let agent_id = AgentId::new();
-        let test_encryption_key = SecretKey::random(&mut rand::rngs::OsRng);
-        let cloud = CloudConfiguration {
-            client: AgentClient::new(Url::parse(&format!("http://{address}/")).expect("base URL"))
-                .expect("client"),
-            identity: Arc::new(DeviceIdentity::generate(agent_id)),
-            agent_id,
-            content_encryption_keys: Arc::new(content_key_store::ContentKeyring::from_active(
-                "cek_test".into(),
-                test_encryption_key,
-            )),
-            allowed_printer_ids: None,
-            connector_id: "test".into(),
-        };
-        let mut store = AgentStore::in_memory().expect("store");
-        let job = cloud_job();
-        let lease_id = uuid::Uuid::new_v4();
-        let local = store
-            .prepare_cloud_job(&job, &lease_id.to_string(), "retry-secret", i64::MAX)
-            .expect("prepare");
-        let intent = CloudAcceptIntent {
-            job_id: job.job_id.clone(),
-            lease_id: lease_id.to_string(),
-            lease_token: "retry-secret".into(),
-            lease_expires_unix_ms: i64::MAX,
-            content_sha256: job.content_sha256.clone(),
-            local_sequence: u64::try_from(local.printer_sequence).expect("sequence"),
-        };
-        let coordinator_dir = tempfile::tempdir().expect("coordinator tempdir");
-        let route_coordinator = Arc::new(Mutex::new(
-            route_coordinator::RouteCoordinator::open(coordinator_dir.path())
-                .expect("route coordinator"),
-        ));
-        confirm_cloud_accept(&cloud, &mut store, &route_coordinator, &intent)
-            .await
-            .expect_err("first response is ambiguous");
-        assert!(store.runnable_heads(10).expect("runnable").is_empty());
-        assert_eq!(store.pending_cloud_accepts().expect("intents").len(), 1);
-
-        resume_pending_cloud_accepts(&cloud, &mut store, &route_coordinator).await;
-        let bodies = server.await.expect("server");
-        assert_eq!(bodies.len(), 2);
-        assert_eq!(bodies[0], bodies[1]);
-        assert!(bodies[0].contains("\"lease_token\":\"retry-secret\""));
-        assert_eq!(store.runnable_heads(10).expect("runnable").len(), 1);
-        assert_eq!(store.pending_events(0, 10).expect("events").len(), 1);
-        assert!(store.pending_cloud_accepts().expect("intents").is_empty());
-    }
-
-    async fn read_request_body(stream: &mut tokio::net::TcpStream) -> String {
-        let mut request = Vec::new();
-        let body_start;
-        let content_length;
-        loop {
-            let mut chunk = [0_u8; 1024];
-            let count = stream.read(&mut chunk).await.expect("request");
-            assert!(count > 0);
-            request.extend_from_slice(&chunk[..count]);
-            if let Some(index) = request.windows(4).position(|window| window == b"\r\n\r\n") {
-                body_start = index + 4;
-                let headers = String::from_utf8_lossy(&request[..index]);
-                content_length = headers
-                    .lines()
-                    .find_map(|line| {
-                        line.to_ascii_lowercase()
-                            .strip_prefix("content-length:")
-                            .and_then(|value| value.trim().parse::<usize>().ok())
-                    })
-                    .expect("content length");
-                break;
-            }
-        }
-        while request.len() < body_start + content_length {
-            let mut chunk = [0_u8; 1024];
-            let count = stream.read(&mut chunk).await.expect("body");
-            assert!(count > 0);
-            request.extend_from_slice(&chunk[..count]);
-        }
-        String::from_utf8(request[body_start..body_start + content_length].to_vec())
-            .expect("JSON body")
-    }
-
-    fn cloud_job() -> AcceptedJob {
-        AcceptedJob {
-            job_id: JobId::new().to_string(),
-            submission_id: "sub_restart".into(),
-            printer_id: "printer".into(),
-            printer_native_id: "native".into(),
-            title: "Restart-safe receipt".into(),
-            content_sha256: "abc".into(),
-            content_path: "/content/abc".into(),
-            content_kind: "pdf".into(),
-            options_json: "{}".into(),
-            expires_unix_ms: None,
-            accepted_unix_ms: 1,
-            cloud_managed: true,
-        }
     }
 
     #[test]

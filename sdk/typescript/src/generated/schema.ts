@@ -3052,6 +3052,8 @@ export interface components {
             protocol_version: 1;
             /** @description Stable physical installation ID when adding an isolated connector. */
             installation_id?: string;
+            /** @description Base64 Ed25519 public key for a new physical installation identity. Required only on the first connector for an installation; subsequent connectors are verified against the stored key. */
+            installation_public_key?: string;
             /** @description Exact printer IDs approved by the local operator when printer_grant is selected_printers; empty never means all. */
             allowed_printer_ids?: string[];
             /**
