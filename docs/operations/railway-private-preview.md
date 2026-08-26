@@ -70,6 +70,28 @@ values separately:
 The server still binds an HTTP listener in worker mode, but that listener must
 remain private.
 
+### Exactly-once migration lane
+
+[`railway.migrate.toml`](../../railway.migrate.toml) defines the one-shot
+migration service required by the promotion order. Activating that service is
+a Railway environment change, not something a repository merge can infer.
+Before removing the compatibility `preDeployCommand` from `railway.toml`, both
+staging and production must have a `piqae-migrate` service linked to the same
+reviewed repository commit and `/railway.migrate.toml`, with the same database
+connection and no public domain. A release operator must observe that one-shot
+deployment finish successfully at the expected commit before deploying the API
+and worker.
+
+The current private-preview `railway.toml` deliberately retains an idempotent
+pre-deploy migration fallback until that external service binding is verified
+in every environment. Consequently API and worker can both contend for sqlx's
+migration lock today; this is safe for append-only N/N-1-compatible migrations,
+but it is not evidence that the exactly-once promotion lane is active. The
+cutover is complete only after the one-shot service is verified and a separate
+reviewed change removes the fallback from ordinary services. Never remove the
+fallback first: a source-only change cannot activate the Railway service and
+would allow new binaries to start against an old schema.
+
 ### Staging before production
 
 Railway is the canonical hosted web and control-plane deployment target for

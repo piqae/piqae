@@ -25,6 +25,38 @@ class Gate:
 
 GATES = (
     Gate(
+        identifier="destination_topology_fencing_fifo",
+        command=(
+            "cargo",
+            "test",
+            "-p",
+            "piqae-storage-postgres",
+            "--test",
+            "destination_topology",
+            "postgres_topology_is_tenant_isolated_and_fences_delivery",
+            "--locked",
+            "--",
+            "--nocapture",
+        ),
+        expected_test="postgres_topology_is_tenant_isolated_and_fences_delivery",
+    ),
+    Gate(
+        identifier="destination_topology_n_minus_one_upgrade",
+        command=(
+            "cargo",
+            "test",
+            "-p",
+            "piqae-storage-postgres",
+            "--test",
+            "destination_topology",
+            "migration_42_upgrades_41_and_backfills_without_inferring_route_merges",
+            "--locked",
+            "--",
+            "--nocapture",
+        ),
+        expected_test="migration_42_upgrades_41_and_backfills_without_inferring_route_merges",
+    ),
+    Gate(
         identifier="routing_recovery",
         command=(
             "cargo",
