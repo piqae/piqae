@@ -186,7 +186,7 @@ describe('uncertain delivery on the operations dashboard', () => {
     expect(reviewTile().textContent).toContain('oldest under a minute');
   });
 
-  it('states the same age in the job drawer as on the tile', () => {
+  it('states the same age in the job drawer and opens the acknowledged resolution flow', async () => {
     const unproven = job({
       id: 'job_02',
       title: 'Unproven label',
@@ -208,6 +208,28 @@ describe('uncertain delivery on the operations dashboard', () => {
     expect(screen.getByText(/Automatic retry is disabled because it could produce a duplicate/)).toBeInTheDocument();
     expect(screen.queryByText(/node restarted between/i)).not.toBeInTheDocument();
     expect(reviewTile().textContent).toContain('oldest 2h');
+    await fireEvent.click(screen.getByRole('button', { name: 'Resolve' }));
+    expect(screen.getByRole('dialog', { name: 'Resolve uncertain delivery' })).toBeInTheDocument();
+    expect(screen.getByText(/waits for this node to acknowledge the exact local fence/i)).toBeInTheDocument();
+  });
+
+  it('keeps a resolved uncertain handoff in audit history without offering another resolution', () => {
+    const resolved = job({
+      id: 'job_resolved',
+      state: 'delivery_uncertain',
+      deliveryResolution: 'accept_missing',
+      deliveryUncertainSince: minutesAgo(40)
+    });
+    render(Page, {
+      data: {
+        ...pageData([resolved]),
+        detail: { kind: 'job', job: resolved, events: [], printer, agent }
+      } as never,
+      form: null as never
+    });
+
+    expect(screen.getByText(/resolved by an operator/i)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Resolve' })).not.toBeInTheDocument();
   });
 
   it('shows only uncertain jobs when the address selects that state', () => {

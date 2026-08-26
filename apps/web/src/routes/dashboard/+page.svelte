@@ -136,7 +136,7 @@
     )
   );
   const reviewJobs = $derived(data.jobs.filter((job) =>
-    (job.state === 'delivery_uncertain' || job.state.startsWith('failed')) &&
+    ((job.state === 'delivery_uncertain' && !job.deliveryResolution) || job.state.startsWith('failed')) &&
     matches(job.title, job.id, job.customer?.name) &&
     (customerFilter === 'all' || job.customer?.externalId === customerFilter)
   ));
@@ -256,6 +256,10 @@
   let cancelOpen = $state(false);
   let cancelPending = $state(false);
   let cancelAttempted = $state(false);
+  let resolutionOpen = $state(false);
+  let resolutionPending = $state(false);
+  let resolutionAttempted = $state(false);
+  let resolutionRequestId = $state('');
 
   // Reuse the summary so the drawer and the tile can never disagree about age.
   const uncertainFor = $derived(
@@ -796,17 +800,23 @@
 >
   {#snippet actions()}
     {#if detail?.kind === 'job'}
-      <button
-        class="button compact"
-        disabled={!cancellable}
-        title={cancellable ? 'Request job cancellation' : 'This job is already terminal'}
-        onclick={() => {
-          cancelAttempted = false;
-          cancelOpen = true;
-        }}
-      >
-        Cancel
-      </button>
+      {#if detail.job.state === 'delivery_uncertain' && !detail.job.deliveryResolution}
+        <button class="button compact primary" onclick={() => {
+          resolutionAttempted = false;
+          resolutionRequestId = `resolve-${crypto.randomUUID()}`;
+          resolutionOpen = true;
+        }}>Resolve</button>
+      {:else}
+        <button
+          class="button compact"
+          disabled={!cancellable}
+          title={cancellable ? 'Request job cancellation' : 'This job is already terminal'}
+          onclick={() => {
+            cancelAttempted = false;
+            cancelOpen = true;
+          }}
+        >Cancel</button>
+      {/if}
     {:else if detail?.kind === 'printer'}
       <button
         class="button compact"
@@ -833,12 +843,17 @@
       <span class="muted">{detail.job.message}</span>
     </div>
 
-    {#if detail.job.state === 'delivery_uncertain'}
+    {#if detail.job.state === 'delivery_uncertain' && !detail.job.deliveryResolution}
       <p class="ui-note error">
         Piqae cannot safely determine whether this job printed after it was handed to the operating
         system. Automatic retry is disabled because it could produce a duplicate.{#if uncertainFor}
           Unresolved for {uncertainFor}.
         {/if}
+      </p>
+    {:else if detail.job.deliveryResolution}
+      <p class="ui-note neutral">
+        This uncertain handoff was resolved by an operator. The original delivery state remains in
+        the audit history and is not silently rewritten.
       </p>
     {/if}
 
@@ -1234,6 +1249,70 @@
     </button>
   {/snippet}
 </Dialog>
+
+<!-- Uncertain delivery resolution -->
+{#if detail?.kind === 'job' && detail.job.state === 'delivery_uncertain' && !detail.job.deliveryResolution}
+  <Dialog
+    bind:open={resolutionOpen}
+    labelledBy="resolve-uncertain-title"
+    title="Resolve uncertain delivery"
+    description="Record an operator decision without silently retrying a possibly printed document."
+  >
+    <div class="ui-dialog__body">
+      <form
+        id="resolve-uncertain-form"
+        method="POST"
+        action="?/resolveUncertainJob"
+        use:enhance={() => {
+          resolutionPending = true;
+          resolutionAttempted = true;
+          return async ({ result, update }) => {
+            await update({ reset: false });
+            resolutionPending = false;
+            const value = result.type === 'success'
+              ? result.data as { resolutionState?: unknown } | undefined
+              : undefined;
+            if (value?.resolutionState === 'resolved') resolutionOpen = false;
+          };
+        }}
+      >
+        {#if managedAccount}<input type="hidden" name="managed_customer" value={managedAccount.externalId} />{/if}
+        <input type="hidden" name="job_id" value={detail.job.id} />
+        <input type="hidden" name="request_id" value={resolutionRequestId} />
+        <Field label="Decision">
+          <select class="select" name="resolution" required>
+            <option value="acknowledge_printed">Printed — close the warning</option>
+            <option value="acknowledge_missing">Missing — accept without reprint</option>
+            <option value="cancelled">Close without claiming an outcome</option>
+            <option value="reprint">Authorize one explicit linked reprint</option>
+          </select>
+        </Field>
+        <Field label="Operator note">
+          <textarea class="input" name="note" rows="4" maxlength="2000" required
+            placeholder="What did you check, and why is this decision safe?"></textarea>
+        </Field>
+        <p class="ui-note warning">
+          Reprint may produce a duplicate if the first handoff reached paper. Piqae waits for this
+          node to acknowledge the exact local fence before the decision becomes final.
+        </p>
+      </form>
+      {#if resolutionAttempted && !resolutionPending && form?.mutation === 'resolveUncertainJob'}
+        {#if form?.error}
+          <p class="ui-note error" role="alert">{form.error.message}</p>
+        {:else if form?.resolutionState === 'pending_node_ack'}
+          <p class="ui-note neutral" role="status">Decision saved. Waiting for the node to acknowledge it.</p>
+        {/if}
+      {/if}
+    </div>
+    {#snippet footer()}
+      <button class="button" type="button" onclick={() => (resolutionOpen = false)}>Keep reviewing</button>
+      <button class="button primary" type="submit" form="resolve-uncertain-form"
+        disabled={resolutionPending || data.dashboardMode !== 'live'}>
+        {resolutionPending ? 'Saving decision…' : 'Save decision'}
+      </button>
+    {/snippet}
+  </Dialog>
+{/if}
 
 <!-- Job cancellation -->
 {#if detail?.kind === 'job'}

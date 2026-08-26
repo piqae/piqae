@@ -13,11 +13,11 @@ use piqae_domain::{
 use piqae_protocol::agent::AgentCommand;
 use piqae_storage_postgres::{
     AgentAuthenticationRecord, CreateDocumentResult, CreateJobResult as PgCreateJobResult,
-    DocumentRenderWork, EnrolledAgent, ExpiredDocumentArtifactWork, JobLease,
-    NewDeviceAuthorization, NodeUpdatePolicy, NodeUpdateState, PostgresStore, StorageError,
-    StoredAgent, StoredAgentCommandBatch, StoredApiKey, StoredBillingSummary,
-    StoredConnectSessionPreview, StoredContentEncryptionKey, StoredDeviceAuthorization,
-    StoredDocumentPreview, StoredDocumentRender, StoredDocumentTemplate,
+    DeliveryAttemptProof, DestinationRouteReassignment, DocumentRenderWork, EnrolledAgent,
+    ExpiredDocumentArtifactWork, JobLease, NewDeviceAuthorization, NodeUpdatePolicy,
+    NodeUpdateState, PostgresStore, StorageError, StoredAgent, StoredAgentCommandBatch,
+    StoredApiKey, StoredBillingSummary, StoredConnectSessionPreview, StoredContentEncryptionKey,
+    StoredDeviceAuthorization, StoredDocumentPreview, StoredDocumentRender, StoredDocumentTemplate,
     StoredDocumentTemplateRevision, StoredLoadedMedia, StoredNodeConnector, StoredNodeDiagnostic,
     StoredNodeUpdate, StoredPlatformAccount, StoredPlatformCredential, StoredPrintWorkflow,
     StoredPrinter, StoredResolvedPrintTicket, StoredStock, StoredTarget, StoredTargetBinding,
@@ -947,12 +947,42 @@ pub trait Repository: Send + Sync + 'static {
         binding: &StoredTargetBinding,
         reason: &str,
     ) -> Result<Option<Job>, RepositoryError>;
+    async fn reroute_job_to_destination_route_before_acceptance(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        request: DestinationRouteReassignment<'_>,
+    ) -> Result<Option<Job>, RepositoryError> {
+        let _ = (workspace_id, environment_id, request);
+        Err(RepositoryError::Persistence(
+            "destination route reassignment is unavailable".into(),
+        ))
+    }
     async fn list_reroutable_target_jobs(
         &self,
         workspace_id: WorkspaceId,
         environment_id: EnvironmentId,
         limit: i64,
     ) -> Result<Vec<Job>, RepositoryError>;
+    async fn list_reroutable_destination_jobs(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        limit: i64,
+    ) -> Result<Vec<Job>, RepositoryError> {
+        let mut jobs = self
+            .list_jobs(workspace_id, environment_id, None, limit)
+            .await?;
+        jobs.retain(|job| {
+            matches!(
+                job.state,
+                JobState::WaitingForAgent | JobState::FailedRetryable
+            ) && job.expires_at > Utc::now()
+                && job.metadata.contains_key("piqae.destination_id")
+        });
+        jobs.sort_by_key(|job| (job.created_at, job.id));
+        Ok(jobs)
+    }
     async fn get_job(
         &self,
         workspace_id: WorkspaceId,
@@ -1011,6 +1041,27 @@ pub trait Repository: Send + Sync + 'static {
         lease_id: Uuid,
         lease_token: &str,
     ) -> Result<DateTime<Utc>, RepositoryError>;
+    async fn renew_agent_lease_with_delivery_attempt(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        job_id: JobId,
+        lease_id: Uuid,
+        lease_token: &str,
+        proof: DeliveryAttemptProof<'_>,
+    ) -> Result<DateTime<Utc>, RepositoryError> {
+        let _ = proof;
+        self.renew_agent_lease(
+            workspace_id,
+            environment_id,
+            agent_id,
+            job_id,
+            lease_id,
+            lease_token,
+        )
+        .await
+    }
     async fn release_agent_lease(
         &self,
         workspace_id: WorkspaceId,
@@ -1047,6 +1098,32 @@ pub trait Repository: Send + Sync + 'static {
         content_sha256: Option<&str>,
         local_sequence: u64,
     ) -> Result<Job, RepositoryError>;
+    #[allow(clippy::too_many_arguments)]
+    async fn accept_agent_job_with_delivery_attempt(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        job_id: JobId,
+        lease_id: Uuid,
+        lease_token: &str,
+        content_sha256: Option<&str>,
+        local_sequence: u64,
+        proof: DeliveryAttemptProof<'_>,
+    ) -> Result<Job, RepositoryError> {
+        let _ = proof;
+        self.accept_agent_job(
+            workspace_id,
+            environment_id,
+            agent_id,
+            job_id,
+            lease_id,
+            lease_token,
+            content_sha256,
+            local_sequence,
+        )
+        .await
+    }
     async fn compatibility_id(
         &self,
         workspace_id: WorkspaceId,
@@ -1164,6 +1241,74 @@ impl Repository for PostgresStore {
             name,
             ciphertext,
             sha256,
+        )
+        .await
+        .map_err(Into::into)
+    }
+
+    async fn reroute_job_to_destination_route_before_acceptance(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        request: DestinationRouteReassignment<'_>,
+    ) -> Result<Option<Job>, RepositoryError> {
+        PostgresStore::reroute_job_to_destination_route_before_acceptance(
+            self,
+            workspace_id,
+            environment_id,
+            request,
+        )
+        .await
+        .map_err(Into::into)
+    }
+
+    async fn renew_agent_lease_with_delivery_attempt(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        job_id: JobId,
+        lease_id: Uuid,
+        lease_token: &str,
+        proof: DeliveryAttemptProof<'_>,
+    ) -> Result<DateTime<Utc>, RepositoryError> {
+        PostgresStore::renew_agent_lease_with_delivery_attempt(
+            self,
+            workspace_id,
+            environment_id,
+            agent_id,
+            job_id,
+            lease_id,
+            lease_token,
+            proof,
+        )
+        .await
+        .map_err(Into::into)
+    }
+
+    async fn accept_agent_job_with_delivery_attempt(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        job_id: JobId,
+        lease_id: Uuid,
+        lease_token: &str,
+        content_sha256: Option<&str>,
+        local_sequence: u64,
+        proof: DeliveryAttemptProof<'_>,
+    ) -> Result<Job, RepositoryError> {
+        PostgresStore::accept_agent_job_with_delivery_attempt(
+            self,
+            workspace_id,
+            environment_id,
+            agent_id,
+            job_id,
+            lease_id,
+            lease_token,
+            content_sha256,
+            local_sequence,
+            proof,
         )
         .await
         .map_err(Into::into)
@@ -2707,6 +2852,17 @@ impl Repository for PostgresStore {
         limit: i64,
     ) -> Result<Vec<Job>, RepositoryError> {
         PostgresStore::list_reroutable_target_jobs(self, workspace_id, environment_id, limit)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn list_reroutable_destination_jobs(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        limit: i64,
+    ) -> Result<Vec<Job>, RepositoryError> {
+        PostgresStore::list_reroutable_destination_jobs(self, workspace_id, environment_id, limit)
             .await
             .map_err(Into::into)
     }

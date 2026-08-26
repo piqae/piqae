@@ -1,9 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { createJob, dashboardSource, listPrinters } = vi.hoisted(() => ({
+const { createJob, dashboardSource, listPrinters, resolveUncertain } = vi.hoisted(() => ({
   createJob: vi.fn(),
   dashboardSource: vi.fn(),
-  listPrinters: vi.fn()
+  listPrinters: vi.fn(),
+  resolveUncertain: vi.fn()
 }));
 
 vi.mock('$lib/server/dashboard-data', () => ({
@@ -22,6 +23,7 @@ vi.mock('$lib/server/dashboard-data', () => ({
 import { actions, load } from './+page.server';
 
 const createPrintJob = actions.createPrintJob!;
+const resolveUncertainJob = actions.resolveUncertainJob!;
 
 function event(form: FormData) {
   return {
@@ -106,6 +108,33 @@ describe('dashboard PDF printing', () => {
 
     expect(result).toMatchObject({ status: 409 });
     expect(createJob).not.toHaveBeenCalled();
+  });
+});
+
+describe('uncertain delivery resolution', () => {
+  it('passes the exact idempotency request through and reports pending node acknowledgement', async () => {
+    resolveUncertain.mockResolvedValue({ state: 'pending_node_ack', replacementJobId: null });
+    dashboardSource.mockReturnValue({
+      api: { resolveUncertainJob: resolveUncertain }
+    });
+    const form = new FormData();
+    form.set('job_id', 'job_01J00000000000000000000000');
+    form.set('resolution', 'acknowledge_missing');
+    form.set('note', 'Checked the output tray and accepted the missing document.');
+    form.set('request_id', 'resolve-browser-request-1');
+
+    const result = await resolveUncertainJob(event(form));
+
+    expect(result).toMatchObject({
+      mutation: 'resolveUncertainJob',
+      resolutionState: 'pending_node_ack'
+    });
+    expect(resolveUncertain).toHaveBeenCalledWith(
+      'job_01J00000000000000000000000',
+      'acknowledge_missing',
+      'Checked the output tray and accepted the missing document.',
+      'resolve-browser-request-1'
+    );
   });
 });
 

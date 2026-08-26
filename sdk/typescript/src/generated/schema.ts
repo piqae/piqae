@@ -1014,7 +1014,9 @@ export interface paths {
     "/v1/jobs/{job_id}/resolve-uncertain": {
         parameters: {
             query?: never;
-            header?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
             path: {
                 job_id: components["parameters"]["JobId"];
             };
@@ -3816,16 +3818,21 @@ export interface components {
         };
         ResolveUncertainDelivery: {
             /** @enum {string} */
-            resolution: "acknowledge_printed" | "acknowledge_missing" | "reprint";
+            resolution: "acknowledge_printed" | "acknowledge_missing" | "cancelled" | "reprint";
             note: string;
         };
         UncertainDeliveryResolution: {
             job: components["schemas"]["Job"];
             /** @enum {string} */
-            resolution: "acknowledge_printed" | "acknowledge_missing" | "reprint";
+            resolution: "acknowledge_printed" | "acknowledge_missing" | "cancelled" | "reprint";
+            /** @enum {string} */
+            state: "pending_node_ack" | "resolved";
+            request_id: string;
             replacement_job?: components["schemas"]["Job"] | null;
             /** Format: date-time */
-            resolved_at: string;
+            created_at: string;
+            /** Format: date-time */
+            resolved_at?: string | null;
         };
         CreateTarget: {
             name: string;
@@ -6126,7 +6133,9 @@ export interface operations {
     resolveUncertainDelivery: {
         parameters: {
             query?: never;
-            header?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
             path: {
                 job_id: components["parameters"]["JobId"];
             };
@@ -6138,8 +6147,17 @@ export interface operations {
             };
         };
         responses: {
-            /** @description Updated job or linked reprint result. */
+            /** @description The node acknowledged the exact local fence release and the decision is final. */
             200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UncertainDeliveryResolution"];
+                };
+            };
+            /** @description The exact node fence resolution command is durably queued but not yet acknowledged. */
+            202: {
                 headers: {
                     [name: string]: unknown;
                 };

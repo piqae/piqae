@@ -747,10 +747,29 @@ fn spawn_uncertain_delivery_sweep(
 
 /// Enqueued directly rather than through `AppState::publish`, which needs a
 /// tenant context built from an authenticated request. This sweep has none.
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "the sweep keeps job, attempt, destination, and webhook repair in one ordered operation"
+)]
 async fn report_unresolved_uncertain_job(
     application: &AppState,
     job: &piqae_storage_postgres::StuckUncertainJob,
 ) {
+    let scope = piqae_storage_postgres::destination_topology::TenantScope {
+        workspace_id: job.workspace_id,
+        environment_id: job.environment_id,
+    };
+    if let Err(error) = application
+        .destination_topology
+        .mark_post_spooler_attempt_uncertain(scope, &job.job_id.to_string())
+        .await
+    {
+        tracing::error!(
+            %error,
+            job_id = %job.job_id,
+            "could not reconcile the unresolved job with its destination attempt"
+        );
+    }
     match serde_json::to_value(job) {
         Ok(payload) => {
             if let Err(error) = application

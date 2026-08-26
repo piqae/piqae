@@ -183,6 +183,7 @@ export interface DashboardJob {
   createdAt: string;
   updatedAt: string;
   deliveryUncertainSince?: string | null;
+  deliveryResolution?: string | null;
   expiresAt: string | null;
   contentRetained: boolean;
 }

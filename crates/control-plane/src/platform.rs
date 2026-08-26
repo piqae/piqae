@@ -1,4 +1,4 @@
-#![allow(clippy::missing_errors_doc)]
+#![allow(clippy::missing_errors_doc, clippy::too_many_lines)]
 
 use crate::{AppState, authentication::PlatformManagerContext, error::AppError};
 use axum::{

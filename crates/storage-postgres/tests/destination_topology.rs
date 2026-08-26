@@ -18,6 +18,9 @@ use piqae_storage_postgres::{
 use sqlx::{PgPool, migrate::Migrator, postgres::PgPoolOptions};
 use std::{borrow::Cow, env};
 
+const FIRST_JOB_ID: &str = "job_01J00000000000000000000000";
+const FIRST_RESERVATION_ID: &str = "00000000-0000-0000-0000-000000000001";
+
 async fn schema_pool(database_url: &str, schema: &str) -> PgPool {
     let schema = schema.to_owned();
     PgPoolOptions::new()
@@ -76,7 +79,11 @@ async fn create_tenant_fixture(
         .bind(format!("native-{suffix}"))
         .execute(store.pool()).await.expect("printer fixture");
     sqlx::query("INSERT INTO jobs (id,workspace_id,environment_id,printer_id,agent_id,payload,state,per_printer_sequence,expires_at) VALUES ($1,$2,$3,$4,$5,'{}'::jsonb,'registered',1,now()+interval '1 hour')")
-        .bind(format!("job_{suffix}"))
+        .bind(if suffix == "first" {
+            FIRST_JOB_ID.to_owned()
+        } else {
+            format!("job_{suffix}")
+        })
         .bind(scope.workspace_id.to_string())
         .bind(scope.environment_id.to_string())
         .bind(printer_id)
@@ -150,7 +157,7 @@ async fn postgres_topology_is_tenant_isolated_and_fences_delivery() {
         environment_id: EnvironmentId::new(),
     };
     create_tenant_fixture(&store, first, "first", "ptr_shared").await;
-    create_tenant_fixture(&store, second, "second", "ptr_shared").await;
+    create_tenant_fixture(&store, second, "second", "ptr_second").await;
     sqlx::query("INSERT INTO agents (id,workspace_id,environment_id,name,installation_id,public_key,os,architecture,version,protocol_version) VALUES ('agt_first_backup',$1,$2,'Backup node','installation-first-backup',$3,'linux','x86_64','test',1)")
         .bind(first.workspace_id.to_string()).bind(first.environment_id.to_string()).bind(vec![9_u8;32]).execute(store.pool()).await.expect("backup route agent");
     sqlx::query("INSERT INTO printers (id,workspace_id,environment_id,agent_id,native_id,name,state,capabilities_revision) VALUES ('ptr_backup',$1,$2,'agt_first_backup','native-first-backup','Shared printer backup route','online',1)")
@@ -179,7 +186,11 @@ async fn postgres_topology_is_tenant_isolated_and_fences_delivery() {
                     &format!("route_{suffix}"),
                     "destination_shared",
                     suffix,
-                    "ptr_shared",
+                    if suffix == "first" {
+                        "ptr_shared"
+                    } else {
+                        "ptr_second"
+                    },
                     "primary",
                 ),
             )
@@ -525,8 +536,8 @@ async fn postgres_topology_is_tenant_isolated_and_fences_delivery() {
             first,
             NewDeliveryAttempt {
                 attempt_id: "attempt_1",
-                reservation_id: "reservation_1",
-                job_id: "job_first",
+                reservation_id: FIRST_RESERVATION_ID,
+                job_id: FIRST_JOB_ID,
                 destination_id: "destination_shared",
                 route_id: "route_first",
                 lease_until: Utc::now() + Duration::minutes(1),
@@ -542,7 +553,7 @@ async fn postgres_topology_is_tenant_isolated_and_fences_delivery() {
                 NewDeliveryAttempt {
                     attempt_id: "attempt_concurrent",
                     reservation_id: "reservation_concurrent",
-                    job_id: "job_first",
+                    job_id: FIRST_JOB_ID,
                     destination_id: "destination_shared",
                     route_id: "route_first",
                     lease_until: Utc::now() + Duration::minutes(1)
@@ -610,7 +621,7 @@ async fn postgres_topology_is_tenant_isolated_and_fences_delivery() {
                 NewDeliveryAttempt {
                     attempt_id: "attempt_unsafe_retry",
                     reservation_id: "reservation_unsafe_retry",
-                    job_id: "job_first",
+                    job_id: FIRST_JOB_ID,
                     destination_id: "destination_shared",
                     route_id: "route_first",
                     lease_until: Utc::now() + Duration::minutes(1),
@@ -628,7 +639,7 @@ async fn postgres_topology_is_tenant_isolated_and_fences_delivery() {
     let pending_resolution = store
         .enqueue_delivery_uncertainty_resolution(
             first,
-            "job_first",
+            FIRST_JOB_ID,
             "confirmed_delivered",
             Some("operator verified the physical output"),
             "operator_redacted",
@@ -640,9 +651,9 @@ async fn postgres_topology_is_tenant_isolated_and_fences_delivery() {
         pending_resolution.command,
         serde_json::json!({
             "type": "resolve_ambiguous_handoff",
-            "job_id": "job_first",
+            "job_id": "01J00000000000000000000000",
             "local_route_key": "rte_local_first",
-            "reservation_id": "reservation_1",
+            "reservation_id": FIRST_RESERVATION_ID,
             "generation": 1,
             "resolution": "confirm_accepted"
         })

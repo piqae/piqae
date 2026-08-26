@@ -6586,6 +6586,42 @@ impl PostgresStore {
             .collect()
     }
 
+    /// Lists every pre-acceptance job bound to a physical destination in
+    /// stable global queue order, including direct and target jobs.
+    pub async fn list_reroutable_destination_jobs(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        limit: i64,
+    ) -> Result<Vec<Job>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT payload,state FROM jobs
+             WHERE workspace_id=$1 AND environment_id=$2
+               AND destination_id IS NOT NULL
+               AND state IN ('waiting_for_agent','failed_retryable')
+               AND expires_at>now()
+               AND (lease_until IS NULL OR lease_until<=now())
+               AND NOT EXISTS (
+                   SELECT 1 FROM job_acceptances acceptance
+                   WHERE acceptance.workspace_id=jobs.workspace_id
+                     AND acceptance.environment_id=jobs.environment_id
+                     AND acceptance.job_id=jobs.id
+               )
+             ORDER BY created_at,id LIMIT $3",
+        )
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(limit.clamp(1, 1_000))
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                let state: String = row.try_get("state")?;
+                job_from_row(row.try_get("payload")?, &state)
+            })
+            .collect()
+    }
+
     pub async fn get_job(
         &self,
         workspace_id: WorkspaceId,

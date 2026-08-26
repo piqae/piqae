@@ -34,6 +34,12 @@ export interface DashboardApi {
   jobs(): Promise<DashboardPage<DashboardJob>>;
   job(id: string): Promise<DashboardJob | null>;
   jobEvents(id: string): Promise<DashboardPage<DashboardJobEvent>>;
+  resolveUncertainJob(
+    id: string,
+    resolution: 'acknowledge_printed' | 'acknowledge_missing' | 'cancelled' | 'reprint',
+    note: string,
+    requestId: string
+  ): Promise<{ state: 'pending_node_ack' | 'resolved'; replacementJobId: string | null }>;
   webhooks(): Promise<DashboardPage<DashboardWebhook>>;
   apiKeys(): Promise<DashboardPage<DashboardApiKey>>;
   accounts(): Promise<DashboardPage<DashboardAccount>>;
@@ -108,10 +114,12 @@ export const mockApi: DashboardApi = {
           ].includes(job.state)
         ).length,
         failed: demo.jobs.filter((job) => job.state.startsWith('failed')).length,
-        uncertain: demo.jobs.filter((job) => job.state === 'delivery_uncertain').length,
+        uncertain: demo.jobs.filter(
+          (job) => job.state === 'delivery_uncertain' && !job.deliveryResolution
+        ).length,
         oldestUncertainSince:
           demo.jobs
-            .filter((job) => job.state === 'delivery_uncertain')
+            .filter((job) => job.state === 'delivery_uncertain' && !job.deliveryResolution)
             .map((job) => job.deliveryUncertainSince)
             .filter((value): value is string => typeof value === 'string')
             .sort()[0] ?? null
@@ -125,6 +133,7 @@ export const mockApi: DashboardApi = {
   job: (id) => delay(demo.jobs.find((job) => job.id === id) ?? null),
   jobEvents: (id) =>
     delay(page(demo.jobEvents.map((event) => ({ ...event, jobId: id })))),
+  resolveUncertainJob: () => delay({ state: 'resolved', replacementJobId: null }),
   webhooks: () => delay(page(demo.webhooks)),
   apiKeys: () => delay(page(demo.apiKeys)),
   accounts: () => delay(page(demo.accounts)),
@@ -328,6 +337,7 @@ export function createLiveApi(
     createdAt: job.created_at,
     updatedAt: job.created_at,
     deliveryUncertainSince: job.delivery_uncertain_since ?? null,
+    deliveryResolution: job.metadata?.['piqae.delivery_resolution'] ?? null,
     expiresAt: job.expires_at,
     contentRetained: true
   });
@@ -349,8 +359,11 @@ export function createLiveApi(
         state: 'delivery_uncertain',
         ...(after ? { after } : {})
       });
-      count += result.data.length;
-      for (const job of result.data) {
+      const unresolved = result.data.filter(
+        (job) => !job.metadata?.['piqae.delivery_resolution']
+      );
+      count += unresolved.length;
+      for (const job of unresolved) {
         const since = job.delivery_uncertain_since;
         if (typeof since === 'string' && (oldestSince === null || since < oldestSince)) {
           oldestSince = since;
@@ -484,6 +497,17 @@ export function createLiveApi(
             createdAt: apiKey.created_at
           }))
       ),
+    resolveUncertainJob: async (id, resolution, note, requestId) => {
+      const result = await client.jobs.resolveUncertain(
+        id,
+        { resolution, note },
+        requestId
+      );
+      return {
+        state: result.state,
+        replacementJobId: result.replacement_job?.id ?? null
+      };
+    },
     platformEnabled: async () => {
       const response = await platformRequest('/v1/platform/status');
       if (!response.ok) {

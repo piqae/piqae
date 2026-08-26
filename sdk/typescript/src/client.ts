@@ -487,11 +487,15 @@ export class PiqaeClient {
         'GET',
         `/v1/jobs/${encodeURIComponent(id)}/delivery-attempts`
       ),
-    resolveUncertain: (id: string, input: ResolveUncertainDelivery) =>
+    resolveUncertain: (
+      id: string,
+      input: ResolveUncertainDelivery,
+      idempotencyKey: string
+    ) =>
       this.request<UncertainDeliveryResolution>(
         'POST',
         `/v1/jobs/${encodeURIComponent(id)}/resolve-uncertain`,
-        { body: input }
+        { body: input, idempotencyKey }
       ),
     create: (input: CreateJob, idempotencyKey?: string) =>
       this.request<Job>(

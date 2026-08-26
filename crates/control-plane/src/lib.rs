@@ -56,7 +56,7 @@ pub struct AppState {
     pub repository: Arc<dyn Repository>,
     /// Destination/route topology is deliberately separate from the legacy
     /// job repository while the public target aliases delegate into it. The
-    /// production builder replaces the in-memory default with PostgreSQL.
+    /// production builder replaces the in-memory default with `PostgreSQL`.
     pub destination_topology: Arc<dyn DestinationTopologyRepository>,
     /// Server-secret key used only to tenant-pseudonymise already-normalised
     /// node identity evidence before persistence.
@@ -166,7 +166,7 @@ impl AppState {
     /// evidence. It is intentionally independent of webhook and document keys
     /// so unrelated secret rotation cannot split destination identities.
     #[must_use]
-    pub fn with_destination_identity_key(mut self, key: [u8; 32]) -> Self {
+    pub const fn with_destination_identity_key(mut self, key: [u8; 32]) -> Self {
         self.destination_identity_key = key;
         self
     }
@@ -492,6 +492,10 @@ pub fn router(state: AppState) -> Router {
             "/v1/jobs/{job_id}/delivery-attempts",
             get(destination_topology::list_delivery_attempts),
         )
+        .route(
+            "/v1/jobs/{job_id}/resolve-uncertain",
+            post(destination_topology::resolve_uncertain_delivery),
+        )
         .route("/v1/jobs/{job_id}/cancel", post(api::cancel_job))
         .route("/v1/events/stream", get(api::stream_events))
         .route("/v1/agent/sync", post(api::agent_sync))
@@ -702,7 +706,7 @@ mod tests {
     use piqae_object_store::{ObjectStoreError, StoredObject};
     use piqae_protocol::agent::{
         AgentAcceptJobRequest, AgentCommand, AgentHealth, AgentSyncRequest, AgentSyncResponse,
-        PrinterProfileSnapshot, PrinterSnapshot, QueueSnapshot,
+        PrinterProfileSnapshot, PrinterRouteSnapshot, PrinterSnapshot, QueueSnapshot,
     };
     use rand::rngs::OsRng;
     use sha2::{Digest, Sha256};
@@ -931,7 +935,7 @@ mod tests {
             agent_id: application.agent_id,
             protocol_version: 1,
             agent_version: "test-clock-skew".into(),
-            printer_revision: 0,
+            printer_revision: 1,
             acknowledged_command_cursor: None,
             event_cursor: None,
             queue: QueueSnapshot {
@@ -947,7 +951,7 @@ mod tests {
                 executor_crashes: 3,
                 last_error_code: Some("executor_crashed".into()),
             },
-            printers: None,
+            printers: Some(vec![profiled_printer_snapshot(application.printer_id)]),
             events: Vec::new(),
             diagnostics: Vec::new(),
             document_render: piqae_protocol::agent::DocumentRenderCapabilities::default(),
@@ -1578,7 +1582,7 @@ mod tests {
             agent_id: application.agent_id,
             protocol_version: 1,
             agent_version: "virtual-document-node".into(),
-            printer_revision: 0,
+            printer_revision: 1,
             acknowledged_command_cursor: None,
             event_cursor: None,
             queue: QueueSnapshot {
@@ -1594,7 +1598,7 @@ mod tests {
                 executor_crashes: 0,
                 last_error_code: None,
             },
-            printers: None,
+            printers: Some(vec![profiled_printer_snapshot(application.printer_id)]),
             events: Vec::new(),
             diagnostics: Vec::new(),
             document_render: piqae_protocol::agent::DocumentRenderCapabilities::default(),
@@ -1651,14 +1655,18 @@ mod tests {
             panic!("business-document print must use immutable download content");
         };
         assert_eq!(offered_sha256, &artifact_upload.expected_sha256);
+        let reservation = offer
+            .route_reservation
+            .as_ref()
+            .expect("document offer is destination fenced");
         let accept = AgentAcceptJobRequest {
             lease_id: offer.lease_id,
             lease_token: offer.lease_token.clone(),
             content_sha256: offered_sha256.clone(),
             local_sequence: 1,
-            route_reservation_id: None,
-            route_generation: None,
-            route_fencing_token: None,
+            route_reservation_id: Some(reservation.reservation_id),
+            route_generation: Some(reservation.generation),
+            route_fencing_token: Some(reservation.fencing_token.clone()),
         };
         let accepted = application
             .router
@@ -1948,7 +1956,7 @@ mod tests {
             agent_id: application.agent_id,
             protocol_version: 1,
             agent_version: "test".into(),
-            printer_revision: 0,
+            printer_revision: 1,
             acknowledged_command_cursor,
             event_cursor: None,
             queue: QueueSnapshot {
@@ -1964,7 +1972,7 @@ mod tests {
                 executor_crashes: 0,
                 last_error_code: None,
             },
-            printers: None,
+            printers: Some(vec![profiled_printer_snapshot(application.printer_id)]),
             events: Vec::new(),
             diagnostics: Vec::new(),
             document_render: piqae_protocol::agent::DocumentRenderCapabilities::default(),
@@ -1992,6 +2000,7 @@ mod tests {
         .expect("sync response JSON")
     }
 
+    #[allow(clippy::too_many_lines)]
     fn profiled_printer_snapshot(printer_id: PrinterId) -> PrinterSnapshot {
         let mut native_options = BTreeMap::new();
         native_options.insert(
@@ -2086,7 +2095,20 @@ mod tests {
                 last_test_job_id: None,
                 published: true,
             }],
-            route: None,
+            route: Some(PrinterRouteSnapshot {
+                local_route_key: format!(
+                    "rte_{}",
+                    &format!("{:x}", Sha256::digest(printer_id.to_string().as_bytes()))[..32]
+                ),
+                inventory_revision: 1,
+                topology_revision: 1,
+                observed_at: Utc::now(),
+                identity_evidence: Vec::new(),
+                identity_confidence: piqae_protocol::agent::IdentityConfidence::Unknown,
+                topology_change: None,
+                profile_observed_at: Some(Utc::now()),
+                stock_observed_at: Some(Utc::now()),
+            }),
         }
     }
 
@@ -3544,7 +3566,7 @@ mod tests {
             agent_id: application.agent_id,
             protocol_version: 1,
             agent_version: "test".into(),
-            printer_revision: 0,
+            printer_revision: 1,
             acknowledged_command_cursor: None,
             event_cursor: None,
             queue: QueueSnapshot {
@@ -3560,7 +3582,7 @@ mod tests {
                 executor_crashes: 0,
                 last_error_code: None,
             },
-            printers: None,
+            printers: Some(vec![profiled_printer_snapshot(application.printer_id)]),
             events: Vec::new(),
             diagnostics: Vec::new(),
             document_render: piqae_protocol::agent::DocumentRenderCapabilities::default(),
@@ -3592,6 +3614,10 @@ mod tests {
             serde_json::from_slice(&sync_body).expect("sync response JSON");
         assert_eq!(sync.candidate_jobs.len(), 1);
         let offer = &sync.candidate_jobs[0];
+        let reservation = offer
+            .route_reservation
+            .as_ref()
+            .expect("job offer is destination fenced");
         let accept = AgentAcceptJobRequest {
             lease_id: offer.lease_id,
             lease_token: offer.lease_token.clone(),
@@ -3600,9 +3626,9 @@ mod tests {
                 _ => panic!("expected materialized download content"),
             },
             local_sequence: 1,
-            route_reservation_id: None,
-            route_generation: None,
-            route_fencing_token: None,
+            route_reservation_id: Some(reservation.reservation_id),
+            route_generation: Some(reservation.generation),
+            route_fencing_token: Some(reservation.fencing_token.clone()),
         };
         let path = format!("/v1/agent/jobs/{}/accept", offer.job.id);
         let response = application

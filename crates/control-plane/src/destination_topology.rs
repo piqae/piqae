@@ -4,13 +4,19 @@
 //! projection, and scheduling authority. A node heartbeat is never presented as
 //! proof that a route inventory is current.
 
-#![allow(clippy::missing_errors_doc)]
+#![allow(
+    clippy::missing_errors_doc,
+    clippy::cognitive_complexity,
+    clippy::too_many_lines,
+    reason = "topology projection keeps evidence, route, observation, and acknowledgement ordering explicit"
+)]
 
 use crate::{AppState, api::authenticate_native, error::AppError};
 use axum::{
     Json,
     extract::{Path, Query, State},
-    http::HeaderMap,
+    http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
 };
 use chrono::{DateTime, TimeDelta, Utc};
 use hmac::{Hmac, Mac};
@@ -64,15 +70,16 @@ const fn stored_route_state(value: piqae_domain::PrinterState) -> &'static str {
 fn public_destination_state(value: &str) -> String {
     match value {
         "available" => "active",
-        "attention" => "needs_review",
-        "unavailable" | "paused" | "unknown" => "needs_review",
+        "attention" | "unavailable" | "paused" | "unknown" => "needs_review",
         "retired" => "retired",
         other => other,
     }
     .to_owned()
 }
 
-fn protocol_confidence(value: piqae_protocol::agent::IdentityConfidence) -> IdentityConfidence {
+const fn protocol_confidence(
+    value: piqae_protocol::agent::IdentityConfidence,
+) -> IdentityConfidence {
     match value {
         piqae_protocol::agent::IdentityConfidence::Verified => IdentityConfidence::Verified,
         piqae_protocol::agent::IdentityConfidence::High => IdentityConfidence::High,
@@ -115,26 +122,26 @@ fn tenant_evidence_digest(
     ))
 }
 
-fn scope(tenant: crate::authentication::TenantContext) -> TenantScope {
+const fn scope(tenant: crate::authentication::TenantContext) -> TenantScope {
     TenantScope {
         workspace_id: tenant.workspace_id,
         environment_id: tenant.environment_id,
     }
 }
 
-pub(crate) fn tenant_scope(tenant: crate::authentication::TenantContext) -> TenantScope {
+pub(crate) const fn tenant_scope(tenant: crate::authentication::TenantContext) -> TenantScope {
     scope(tenant)
 }
 
 fn storage_error(error: StorageError) -> AppError {
     match error {
         StorageError::NotFound => AppError::not_found(),
-        StorageError::ConcurrentStateChange | StorageError::InvalidTransition => {
-            AppError::conflict(
-                "destination_state_changed",
-                "The destination or route state changed concurrently.",
-            )
-        }
+        StorageError::IdempotencyConflict
+        | StorageError::ConcurrentStateChange
+        | StorageError::InvalidTransition => AppError::conflict(
+            "destination_state_changed",
+            "The destination or route state changed concurrently.",
+        ),
         StorageError::InvalidData(message) => {
             AppError::invalid("invalid_destination_topology", message)
         }
@@ -252,7 +259,24 @@ pub struct DeliveryAttemptResponse {
     pub completed_at: Option<DateTime<Utc>>,
 }
 
-fn public_attempt_state(state: DeliveryAttemptState) -> &'static str {
+#[derive(Debug, Deserialize)]
+pub struct ResolveUncertainDeliveryRequest {
+    resolution: String,
+    note: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct UncertainDeliveryResolutionResponse {
+    job: piqae_domain::Job,
+    resolution: String,
+    state: &'static str,
+    request_id: String,
+    replacement_job: Option<piqae_domain::Job>,
+    created_at: DateTime<Utc>,
+    resolved_at: Option<DateTime<Utc>>,
+}
+
+const fn public_attempt_state(state: DeliveryAttemptState) -> &'static str {
     match state {
         DeliveryAttemptState::RouteLeased => "route_leased",
         DeliveryAttemptState::AcceptedByNode => "accepted_by_node",
@@ -618,7 +642,7 @@ pub(crate) async fn ranked_ready_routes(
     }
     candidates.sort_by(
         |(left, left_jobs, left_busy), (right, right_jobs, right_busy)| {
-            let role = |value: &str| if value == "primary" { 0_u8 } else { 1_u8 };
+            let role = |value: &str| u8::from(value != "primary");
             (
                 role(&left.role),
                 left.priority,
@@ -638,7 +662,7 @@ pub(crate) async fn ranked_ready_routes(
     Ok(candidates.into_iter().map(|(route, _, _)| route).collect())
 }
 
-fn evidence_kind(kind: piqae_protocol::agent::PhysicalIdentityEvidenceKind) -> &'static str {
+const fn evidence_kind(kind: piqae_protocol::agent::PhysicalIdentityEvidenceKind) -> &'static str {
     use piqae_protocol::agent::PhysicalIdentityEvidenceKind as Kind;
     match kind {
         Kind::IppPrinterUuid => "ipp_uuid",
@@ -653,7 +677,9 @@ fn evidence_kind(kind: piqae_protocol::agent::PhysicalIdentityEvidenceKind) -> &
     }
 }
 
-fn evidence_strength(strength: piqae_protocol::agent::IdentityEvidenceStrength) -> &'static str {
+const fn evidence_strength(
+    strength: piqae_protocol::agent::IdentityEvidenceStrength,
+) -> &'static str {
     use piqae_protocol::agent::IdentityEvidenceStrength as Strength;
     match strength {
         Strength::Strong => "strong",
@@ -859,10 +885,10 @@ pub(crate) async fn project_agent_topology(
                     .map_err(storage_error)?,
                 Err(error) => return Err(storage_error(error)),
             }
-            let server_route_id = existing
-                .as_ref()
-                .map(|route| route.id.clone())
-                .unwrap_or_else(|| format!("rte_{}", ulid::Ulid::new()));
+            let server_route_id = existing.as_ref().map_or_else(
+                || format!("rte_{}", ulid::Ulid::new()),
+                |route| route.id.clone(),
+            );
             let route_role = if let Some(route) = existing.as_ref() {
                 route.role.clone()
             } else if state
@@ -1103,7 +1129,7 @@ pub(crate) async fn reserve_job_route(
                     == job
                         .metadata
                         .get("piqae.route_agent_id")
-                        .map_or_else(|| String::new(), Clone::clone)
+                        .map_or_else(String::new, Clone::clone)
                 && route.printer_id == job.printer_id.to_string()
         });
     // Older jobs do not carry route_agent_id. Fall back to the route's
@@ -1141,22 +1167,9 @@ pub(crate) async fn reserve_job_route(
     if destination.state != "available" {
         return Ok(JobRouteReservation::Busy);
     }
-    // A per-agent claim must not overtake an older job targeting the same
-    // physical destination on another route. Active older claims are fenced by
-    // the repository's destination-wide reservation; unclaimed older work is
-    // checked here before acquiring it.
-    let older_waiting = state
-        .repository
-        .list_reroutable_target_jobs(tenant.workspace_id, tenant.environment_id, 100)
-        .await?
-        .into_iter()
-        .filter(|candidate| {
-            candidate.metadata.get("piqae.destination_id") == Some(&route.destination_id)
-        })
-        .any(|candidate| (candidate.created_at, candidate.id) < (job.created_at, job.id));
-    if older_waiting {
-        return Ok(JobRouteReservation::Busy);
-    }
+    // Stable destination ordering and the single handoff fence are enforced in
+    // the same storage transaction that begins the attempt. API-side bounded
+    // scans cannot safely arbitrate concurrent schedulers.
     let reservation_id = uuid::Uuid::new_v4();
     let started = match state
         .destination_topology
@@ -1189,124 +1202,6 @@ pub(crate) async fn reserve_job_route(
     ))
 }
 
-pub(crate) async fn accept_job_route(
-    state: &AppState,
-    tenant: crate::authentication::TenantContext,
-    job_id: &str,
-    reservation_id: Option<uuid::Uuid>,
-    generation: Option<u64>,
-    fencing_token: Option<&str>,
-) -> Result<(), AppError> {
-    let supplied = usize::from(reservation_id.is_some())
-        + usize::from(generation.is_some())
-        + usize::from(fencing_token.is_some());
-    if supplied == 0 {
-        return Ok(());
-    }
-    if supplied != 3 {
-        return Err(AppError::invalid(
-            "incomplete_route_reservation",
-            "Route reservation ID, generation, and fencing proof must be supplied together.",
-        ));
-    }
-    let reservation_id = reservation_id.map(|id| id.to_string()).unwrap_or_default();
-    let generation = generation.unwrap_or_default();
-    let token = fencing_token.unwrap_or_default();
-    let tenant_scope = scope(tenant);
-    let attempt = state
-        .destination_topology
-        .get_delivery_attempt_by_reservation(tenant_scope, &reservation_id)
-        .await
-        .map_err(storage_error)?;
-    if attempt.job_id != job_id || attempt.generation != generation {
-        return Err(AppError::conflict(
-            "stale_route_fence",
-            "The route reservation no longer authorizes this job.",
-        ));
-    }
-    let attempt = match attempt.state {
-        DeliveryAttemptState::RouteLeased => state
-            .destination_topology
-            .transition_delivery_attempt(
-                tenant_scope,
-                &attempt.id,
-                generation,
-                token,
-                DeliveryAttemptState::AcceptedByNode,
-            )
-            .await
-            .map_err(storage_error)?,
-        DeliveryAttemptState::AcceptedByNode | DeliveryAttemptState::QueuedLocal => attempt,
-        _ => {
-            return Err(AppError::conflict(
-                "stale_route_fence",
-                "The delivery attempt is no longer at the node-acceptance boundary.",
-            ));
-        }
-    };
-    if attempt.state == DeliveryAttemptState::AcceptedByNode {
-        state
-            .destination_topology
-            .transition_delivery_attempt(
-                tenant_scope,
-                &attempt.id,
-                generation,
-                token,
-                DeliveryAttemptState::QueuedLocal,
-            )
-            .await
-            .map_err(storage_error)?;
-    }
-    Ok(())
-}
-
-/// Renews the destination fence alongside a slow job download. Legacy agents
-/// omit all three proof fields; partial proof is always rejected.
-pub(crate) async fn renew_job_route(
-    state: &AppState,
-    tenant: crate::authentication::TenantContext,
-    job_id: &str,
-    lease_until: DateTime<Utc>,
-    reservation_id: Option<uuid::Uuid>,
-    generation: Option<u64>,
-    fencing_token: Option<&str>,
-) -> Result<(), AppError> {
-    let (Some(reservation_id), Some(generation), Some(fencing_token)) =
-        (reservation_id, generation, fencing_token)
-    else {
-        if reservation_id.is_none() && generation.is_none() && fencing_token.is_none() {
-            return Ok(());
-        }
-        return Err(AppError::invalid(
-            "invalid_route_fence",
-            "Route reservation proof must include reservation ID, generation, and token.",
-        ));
-    };
-    let attempt = state
-        .destination_topology
-        .get_delivery_attempt_by_reservation(scope(tenant), &reservation_id.to_string())
-        .await
-        .map_err(storage_error)?;
-    if attempt.job_id != job_id || attempt.generation != generation {
-        return Err(AppError::conflict(
-            "stale_route_fence",
-            "The route reservation no longer authorizes this job.",
-        ));
-    }
-    state
-        .destination_topology
-        .renew_delivery_attempt(
-            scope(tenant),
-            &reservation_id.to_string(),
-            generation,
-            fencing_token,
-            lease_until,
-        )
-        .await
-        .map_err(storage_error)?;
-    Ok(())
-}
-
 pub(crate) async fn ingest_native_handoffs(
     state: &AppState,
     tenant: crate::authentication::TenantContext,
@@ -1327,10 +1222,10 @@ pub(crate) async fn ingest_native_handoffs(
     let mut acknowledged = None;
     for item in evidence {
         let Some(route_id) = item.route_id.as_deref() else {
-            // Legacy local-only fences have no server execution authority.
-            // Their ordinary job event remains the durable status channel.
-            acknowledged = Some(item.sequence);
-            continue;
+            return Err(AppError::conflict(
+                "route_fence_required",
+                "Native handoff evidence must carry its server route reservation.",
+            ));
         };
         let route = state
             .destination_topology
@@ -1426,6 +1321,97 @@ pub(crate) async fn ingest_native_handoffs(
         acknowledged = Some(item.sequence);
     }
     Ok(acknowledged)
+}
+
+/// Reconciles authenticated post-spooler job telemetry with the authoritative
+/// delivery attempt. This is deliberately retried even when the ordinary job
+/// event was already stored: a crash between the two projections must repair
+/// the attempt rather than acknowledge an incomplete status projection.
+pub(crate) async fn reconcile_post_spooler_event(
+    state: &AppState,
+    tenant: crate::authentication::TenantContext,
+    agent_id: piqae_domain::AgentId,
+    event: &piqae_domain::JobEvent,
+) -> Result<Option<DeliveryAttempt>, AppError> {
+    let next = match event.state {
+        piqae_domain::JobState::Spooling
+        | piqae_domain::JobState::Printing
+        | piqae_domain::JobState::Blocked => Some(DeliveryAttemptState::PrintingReported),
+        piqae_domain::JobState::CompletedReported => Some(DeliveryAttemptState::CompletedReported),
+        piqae_domain::JobState::FailedTerminal => Some(DeliveryAttemptState::Failed),
+        // Cancellation after native acceptance cannot prove the spooler did
+        // not print. Preserve duplicate risk instead of claiming a clean stop.
+        piqae_domain::JobState::Cancelled | piqae_domain::JobState::DeliveryUncertain => {
+            Some(DeliveryAttemptState::DeliveryUncertain)
+        }
+        _ => None,
+    };
+    let Some(next) = next else {
+        return Ok(None);
+    };
+    let tenant_scope = scope(tenant);
+    let current = state
+        .destination_topology
+        .get_latest_delivery_attempt(tenant_scope, &event.job_id.to_string())
+        .await
+        .map_err(storage_error)?;
+    let route = state
+        .destination_topology
+        .get_route(tenant_scope, &current.route_id)
+        .await
+        .map_err(storage_error)?;
+    if route.agent_id != agent_id.to_string() {
+        return Err(AppError::conflict(
+            "stale_route_event",
+            "The authenticated node does not own this delivery route.",
+        ));
+    }
+    let attempt = if next == DeliveryAttemptState::DeliveryUncertain {
+        state
+            .destination_topology
+            .mark_post_spooler_attempt_uncertain(tenant_scope, &event.job_id.to_string())
+            .await
+    } else {
+        state
+            .destination_topology
+            .transition_post_spooler_attempt(
+                tenant_scope,
+                &event.job_id.to_string(),
+                &agent_id.to_string(),
+                &current.route_id,
+                next,
+            )
+            .await
+    }
+    .map_err(storage_error)?;
+    state
+        .publish(
+            tenant,
+            "attempt.updated",
+            &serde_json::json!({
+                "attempt_id": attempt.id,
+                "job_id": attempt.job_id,
+                "destination_id": attempt.destination_id,
+                "state": public_attempt_state(attempt.state),
+                "updated_at": attempt.updated_at,
+            }),
+        )
+        .await?;
+    if attempt.state == DeliveryAttemptState::DeliveryUncertain {
+        state
+            .publish(
+                tenant,
+                "destination.updated",
+                &serde_json::json!({
+                    "destination_id": attempt.destination_id,
+                    "state": "needs_review",
+                    "reason": "delivery_uncertain",
+                    "updated_at": attempt.updated_at,
+                }),
+            )
+            .await?;
+    }
+    Ok(Some(attempt))
 }
 
 pub async fn list_destinations(
@@ -1585,11 +1571,9 @@ fn decision_response(
         id: decision.id,
         destination_id: decision.destination_id,
         kind: match decision.kind {
-            IdentityDecisionKind::Merge => "merge",
-            IdentityDecisionKind::Split => "split",
+            IdentityDecisionKind::Merge | IdentityDecisionKind::Confirm => "merge",
+            IdentityDecisionKind::Split | IdentityDecisionKind::RejectMatch => "split",
             IdentityDecisionKind::Reverse => "reversal",
-            IdentityDecisionKind::Confirm => "merge",
-            IdentityDecisionKind::RejectMatch => "split",
         },
         route_ids: decision.route_ids,
         reason: decision.reason,
@@ -1738,8 +1722,10 @@ pub async fn create_identity_decision(
                             .as_deref()
                             .map(str::trim)
                             .filter(|name| !name.is_empty())
-                            .map(ToOwned::to_owned)
-                            .unwrap_or_else(|| format!("{} (split)", destination.name)),
+                            .map_or_else(
+                                || format!("{} (split)", destination.name),
+                                ToOwned::to_owned,
+                            ),
                         identity_confidence: IdentityConfidence::Conflict,
                         state: "available".into(),
                         scheduling_authority_id: destination.scheduling_authority_id.clone(),
@@ -1899,15 +1885,349 @@ pub async fn list_delivery_attempts(
     ))
 }
 
+fn stored_uncertainty_resolution(value: &str) -> Option<&'static str> {
+    match value {
+        "acknowledge_printed" => Some("confirmed_delivered"),
+        "acknowledge_missing" => Some("accept_missing"),
+        "cancelled" => Some("cancelled"),
+        "reprint" => Some("reprint_authorized"),
+        _ => None,
+    }
+}
+
+fn public_uncertainty_resolution(value: &str) -> &'static str {
+    match value {
+        "confirmed_delivered" => "acknowledge_printed",
+        "accept_missing" => "acknowledge_missing",
+        "reprint_authorized" => "reprint",
+        _ => "cancelled",
+    }
+}
+
+async fn validate_reprintable_job(
+    state: &AppState,
+    job: &piqae_domain::Job,
+) -> Result<(), AppError> {
+    if job.expires_at <= Utc::now() {
+        return Err(AppError::conflict(
+            "reprint_content_expired",
+            "The retained content has expired; submit a fresh print job instead.",
+        ));
+    }
+    match &job.content {
+        piqae_domain::ContentSource::Base64 { .. } => Ok(()),
+        piqae_domain::ContentSource::Upload { upload_id } => {
+            let upload = state
+                .repository
+                .get_upload(job.workspace_id, job.environment_id, upload_id)
+                .await?;
+            if upload.state == "complete" {
+                Ok(())
+            } else {
+                Err(AppError::conflict(
+                    "reprint_content_unavailable",
+                    "The original retained content is no longer complete.",
+                ))
+            }
+        }
+        piqae_domain::ContentSource::EncryptedUpload { .. } => Err(AppError::conflict(
+            "encrypted_reprint_requires_new_envelope",
+            "Encrypted content requires a fresh job envelope and cannot be cloned.",
+        )),
+        piqae_domain::ContentSource::Uri { .. } => Err(AppError::conflict(
+            "uri_reprint_requires_new_job",
+            "External content may have changed; submit a fresh print job instead.",
+        )),
+    }
+}
+
+async fn create_authorized_reprint(
+    state: &AppState,
+    tenant: crate::authentication::TenantContext,
+    resolution: &piqae_storage_postgres::destination_topology::DeliveryUncertaintyResolution,
+) -> Result<Option<piqae_domain::Job>, AppError> {
+    if resolution.resolution != "reprint_authorized" {
+        return Ok(None);
+    }
+    let original_id = resolution
+        .job_id
+        .parse()
+        .map_err(|_| AppError::service_unavailable("invalid_uncertain_job_id"))?;
+    let original = state
+        .repository
+        .get_job(tenant.workspace_id, tenant.environment_id, original_id)
+        .await?;
+    validate_reprintable_job(state, &original).await?;
+    let attempt = state
+        .destination_topology
+        .get_latest_delivery_attempt(scope(tenant), &resolution.job_id)
+        .await
+        .map_err(storage_error)?;
+    let route = state
+        .destination_topology
+        .get_route(scope(tenant), &attempt.route_id)
+        .await
+        .map_err(storage_error)?;
+    let agent_id = route
+        .agent_id
+        .parse()
+        .map_err(|_| AppError::service_unavailable("invalid_uncertain_route_agent"))?;
+    let now = Utc::now();
+    let mut metadata = original.metadata.clone();
+    metadata.insert("piqae.reprint_of".into(), resolution.job_id.clone());
+    metadata.insert(
+        "piqae.uncertainty_resolution_id".into(),
+        resolution.id.clone(),
+    );
+    let replacement = piqae_domain::Job {
+        id: piqae_domain::JobId::new(),
+        workspace_id: tenant.workspace_id,
+        environment_id: tenant.environment_id,
+        printer_id: original.printer_id,
+        title: format!("Reprint: {}", original.title)
+            .chars()
+            .take(180)
+            .collect(),
+        source: original.source.clone(),
+        content_kind: original.content_kind,
+        content: original.content.clone(),
+        options: original.options.clone(),
+        metadata,
+        deliveries: original.deliveries,
+        state: piqae_domain::JobState::Registered,
+        created_at: now,
+        expires_at: now + TimeDelta::hours(1),
+        delivery_uncertain_since: None,
+    };
+    let digest = Sha256::digest(resolution.request_id.as_bytes());
+    let idempotency_key = format!("uncertainty-reprint-{}", &hex::encode(digest)[..32]);
+    let request_bytes = serde_json::to_vec(&serde_json::json!({
+        "original_job_id": resolution.job_id,
+        "resolution_request_id": resolution.request_id,
+    }))
+    .map_err(|_| AppError::service_unavailable("reprint_idempotency_failed"))?;
+    let stored = state
+        .repository
+        .create_cloud_job(
+            &replacement,
+            agent_id,
+            Some(&idempotency_key),
+            &request_bytes,
+            state.capabilities.billing.enabled,
+        )
+        .await?;
+    let replacement = match stored {
+        crate::repository::CreateResult::Created(created) => {
+            state
+                .repository
+                .transition_job(
+                    tenant.workspace_id,
+                    tenant.environment_id,
+                    created.id,
+                    piqae_domain::JobState::WaitingForAgent,
+                    None,
+                    Some("Explicit reprint authorized after uncertain delivery".into()),
+                    None,
+                    None,
+                )
+                .await?
+        }
+        crate::repository::CreateResult::Existing(existing) => existing,
+    };
+    state.publish(tenant, "job.updated", &replacement).await?;
+    Ok(Some(replacement))
+}
+
+pub(crate) async fn finalize_acknowledged_uncertainty(
+    state: &AppState,
+    tenant: crate::authentication::TenantContext,
+    agent_id: piqae_domain::AgentId,
+) -> Result<(), AppError> {
+    let resolutions = state
+        .destination_topology
+        .finalize_acknowledged_uncertainty_resolutions(scope(tenant), &agent_id.to_string(), 100)
+        .await
+        .map_err(storage_error)?;
+    for resolution in resolutions {
+        let replacement = create_authorized_reprint(state, tenant, &resolution).await?;
+        for event_type in ["attempt.updated", "destination.updated"] {
+            state
+                .publish(
+                    tenant,
+                    event_type,
+                    &serde_json::json!({
+                        "job_id": resolution.job_id,
+                        "destination_id": resolution.destination_id,
+                        "state": "resolved",
+                        "request_id": resolution.request_id,
+                        "replacement_job_id": replacement.as_ref().map(|job| job.id),
+                        "updated_at": resolution.created_at,
+                    }),
+                )
+                .await?;
+        }
+    }
+    Ok(())
+}
+
+/// Queues an exact node-local ambiguity-fence resolution. The decision remains
+/// pending until the node durably acknowledges the command cursor.
+pub async fn resolve_uncertain_delivery(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(job_id): Path<String>,
+    Json(request): Json<ResolveUncertainDeliveryRequest>,
+) -> Result<Response, AppError> {
+    let tenant = authenticate_native(&state, &headers, Scope::JobsWrite).await?;
+    let request_id = headers
+        .get("idempotency-key")
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| (8..=255).contains(&value.len()))
+        .ok_or_else(|| {
+            AppError::invalid(
+                "invalid_idempotency_key",
+                "Idempotency-Key must be between 8 and 255 bytes.",
+            )
+        })?;
+    if request.note.trim().is_empty() || request.note.len() > 2_000 {
+        return Err(AppError::invalid(
+            "invalid_uncertainty_note",
+            "An operator note between 1 and 2000 bytes is required.",
+        ));
+    }
+    let resolution = stored_uncertainty_resolution(&request.resolution).ok_or_else(|| {
+        AppError::invalid(
+            "invalid_uncertainty_resolution",
+            "Choose acknowledge_printed, acknowledge_missing, cancelled, or reprint.",
+        )
+    })?;
+    let parsed_job_id = job_id
+        .parse()
+        .map_err(|_| AppError::invalid("invalid_job_id", "The job identifier is invalid."))?;
+    let job = state
+        .repository
+        .get_job(tenant.workspace_id, tenant.environment_id, parsed_job_id)
+        .await?;
+    if job.state != piqae_domain::JobState::DeliveryUncertain {
+        return Err(AppError::conflict(
+            "job_not_delivery_uncertain",
+            "Only a delivery-uncertain job can be resolved.",
+        ));
+    }
+    if resolution == "reprint_authorized" {
+        validate_reprintable_job(&state, &job).await?;
+    }
+    let actor_id = tenant.platform_service_account_id.map_or_else(
+        || format!("operator:{}", tenant.workspace_id),
+        |id| format!("platform:{id}"),
+    );
+    let pending = state
+        .destination_topology
+        .enqueue_delivery_uncertainty_resolution(
+            scope(tenant),
+            &job_id,
+            resolution,
+            Some(request.note.trim()),
+            &actor_id,
+            request_id,
+        )
+        .await
+        .map_err(storage_error)?;
+    if let Some(finalized) = state
+        .destination_topology
+        .finalize_delivery_uncertainty_resolution(scope(tenant), request_id)
+        .await
+        .map_err(storage_error)?
+    {
+        let resolved_at = finalized.created_at;
+        let replacement_job = create_authorized_reprint(&state, tenant, &finalized).await?;
+        let job = state
+            .repository
+            .get_job(tenant.workspace_id, tenant.environment_id, parsed_job_id)
+            .await?;
+        let response = UncertainDeliveryResolutionResponse {
+            job,
+            resolution: public_uncertainty_resolution(&finalized.resolution).into(),
+            state: "resolved",
+            request_id: finalized.request_id,
+            replacement_job,
+            created_at: finalized.created_at,
+            resolved_at: Some(resolved_at),
+        };
+        for event_type in ["attempt.updated", "destination.updated"] {
+            state
+                .publish(
+                    tenant,
+                    event_type,
+                    &serde_json::json!({
+                        "job_id": job_id,
+                        "destination_id": finalized.destination_id,
+                        "state": "resolved",
+                        "request_id": response.request_id,
+                        "updated_at": resolved_at,
+                    }),
+                )
+                .await?;
+        }
+        return Ok((StatusCode::OK, Json(response)).into_response());
+    }
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(UncertainDeliveryResolutionResponse {
+            job,
+            resolution: request.resolution,
+            state: "pending_node_ack",
+            request_id: pending.request_id,
+            replacement_job: None,
+            created_at: pending.created_at,
+            resolved_at: None,
+        }),
+    )
+        .into_response())
+}
+
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::expect_used, clippy::too_many_lines)]
     use super::*;
     use crate::{authentication::StaticAuthenticator, repository::MemoryRepository};
+    use axum::{body::Body, http::Request};
+    use base64::{Engine as _, engine::general_purpose::STANDARD_NO_PAD};
+    use ed25519_dalek::{Signer as _, SigningKey};
+    use http_body_util::BodyExt as _;
     use piqae_domain::{EnvironmentId, WorkspaceId};
     use piqae_storage_postgres::destination_topology::{
         DestinationTopologyRepository, MemoryDestinationTopologyRepository,
     };
-    use std::sync::Arc;
+    use std::{collections::BTreeMap, sync::Arc};
+    use tower::ServiceExt as _;
+
+    fn signed_agent_request(
+        agent_id: piqae_domain::AgentId,
+        signing_key: &SigningKey,
+        body: Vec<u8>,
+    ) -> Request<Body> {
+        let path = "/v1/agent/sync";
+        let timestamp = Utc::now().timestamp_millis();
+        let nonce = uuid::Uuid::new_v4();
+        let digest = format!("{:x}", Sha256::digest(&body));
+        let canonical = format!("POST\n{path}\n{timestamp}\n{nonce}\n{digest}");
+        let signature = signing_key.sign(canonical.as_bytes());
+        Request::builder()
+            .method("POST")
+            .uri(path)
+            .header("content-type", "application/json")
+            .header("x-piqae-agent-id", agent_id.to_string())
+            .header("x-piqae-timestamp", timestamp.to_string())
+            .header("x-piqae-nonce", nonce.to_string())
+            .header("x-piqae-body-sha256", digest)
+            .header(
+                "x-piqae-signature",
+                STANDARD_NO_PAD.encode(signature.to_bytes()),
+            )
+            .body(Body::from(body))
+            .expect("signed sync request")
+    }
 
     fn state_with_topology(topology: Arc<MemoryDestinationTopologyRepository>) -> AppState {
         AppState::new_for_tests(
@@ -2088,9 +2408,16 @@ mod tests {
             .expect("connect schema pool");
         let store = PostgresStore::from_pool(pool.clone());
         store.migrate().await.expect("migrate disposable schema");
+        let authenticator = StaticAuthenticator::default();
+        let state =
+            AppState::new_for_tests(Arc::new(store.clone()), Arc::new(authenticator.clone()))
+                .with_destination_topology(Arc::new(store.clone()))
+                .with_destination_identity_key([9; 32]);
+        let application = crate::router(state.clone());
 
         let mut destination_ids = Vec::new();
         let mut stored_digests = Vec::new();
+        let mut tenant_tokens = Vec::new();
         for index in 1_u8..=2 {
             let workspace_id = WorkspaceId::new();
             let environment_id = EnvironmentId::new();
@@ -2101,9 +2428,10 @@ mod tests {
                 .expect("bootstrap tenant");
             let agent_id = piqae_domain::AgentId::new();
             let printer_id = PrinterId::new();
+            let signing_key = SigningKey::from_bytes(&[index; 32]);
             sqlx::query("INSERT INTO agents (id,workspace_id,environment_id,name,installation_id,public_key,os,architecture,version,protocol_version) VALUES ($1,$2,$3,'Node',$4,$5,'linux','x86_64','test',1)")
                 .bind(agent_id.to_string()).bind(workspace_id.to_string()).bind(environment_id.to_string())
-                .bind(format!("installation-{index}")).bind(vec![index; 32]).execute(&pool).await.expect("agent");
+                .bind(format!("installation-{index}")).bind(signing_key.verifying_key().to_bytes().to_vec()).execute(&pool).await.expect("agent");
             sqlx::query("INSERT INTO printers (id,workspace_id,environment_id,agent_id,native_id,name,state,capabilities_revision) VALUES ($1,$2,$3,$4,$5,'Printer','online',1)")
                 .bind(printer_id.to_string()).bind(workspace_id.to_string()).bind(environment_id.to_string())
                 .bind(agent_id.to_string()).bind(format!("native-{index}")).execute(&pool).await.expect("printer");
@@ -2137,8 +2465,8 @@ mod tests {
                     capabilities: PrinterCapabilities::default(),
                     exposed: true,
                     capability_revision: 1,
-                    native_options: Default::default(),
-                    semantic_capabilities: Default::default(),
+                    native_options: BTreeMap::default(),
+                    semantic_capabilities: piqae_domain::SemanticPrinterCapabilities::default(),
                     profiles: Vec::new(),
                     route: Some(PrinterRouteSnapshot {
                         local_route_key: format!("rte_{}", format!("{index:x}").repeat(32)),
@@ -2158,7 +2486,7 @@ mod tests {
                 }]),
                 events: Vec::new(),
                 diagnostics: Vec::new(),
-                document_render: Default::default(),
+                document_render: piqae_protocol::agent::DocumentRenderCapabilities::default(),
                 capabilities: AgentProtocolCapabilities::default(),
                 route_observations: vec![AgentRouteObservation {
                     local_route_key: format!("rte_{}", format!("{index:x}").repeat(32)),
@@ -2175,18 +2503,50 @@ mod tests {
                 topology_changes: Vec::new(),
                 native_handoffs: Vec::new(),
             };
-            let state = AppState::new_for_tests(
-                Arc::new(store.clone()),
-                Arc::new(StaticAuthenticator::default()),
-            )
-            .with_destination_topology(Arc::new(store.clone()))
-            .with_destination_identity_key([9; 32]);
-            project_agent_topology(&state, tenant, &request)
+            let token = format!("piq_destination_test_{index}");
+            authenticator.insert(&token, tenant).await;
+            tenant_tokens.push(token.clone());
+            for label in ["first", "retry"] {
+                let response = application
+                    .clone()
+                    .oneshot(signed_agent_request(
+                        agent_id,
+                        &signing_key,
+                        serde_json::to_vec(&request).expect("sync JSON"),
+                    ))
+                    .await
+                    .expect("agent sync response");
+                assert_eq!(response.status(), StatusCode::OK, "{label} sync");
+                let payload: piqae_protocol::agent::AgentSyncResponse = serde_json::from_slice(
+                    &response
+                        .into_body()
+                        .collect()
+                        .await
+                        .expect("sync body")
+                        .to_bytes(),
+                )
+                .expect("sync response JSON");
+                assert_eq!(
+                    payload
+                        .inventory_projection
+                        .as_ref()
+                        .map(|ack| ack.revision),
+                    Some(1),
+                    "projection is acknowledged only after durable persistence"
+                );
+            }
+            let listed = application
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/v1/physical-destinations")
+                        .header("authorization", format!("Bearer {token}"))
+                        .body(Body::empty())
+                        .expect("destination list request"),
+                )
                 .await
-                .expect("first projection");
-            project_agent_topology(&state, tenant, &request)
-                .await
-                .expect("repeat projection");
+                .expect("destination list response");
+            assert_eq!(listed.status(), StatusCode::OK);
             let tenant_scope = scope(tenant);
             let destinations = store
                 .list_destinations(tenant_scope)
@@ -2205,6 +2565,166 @@ mod tests {
                 .expect("observations");
             assert_eq!(observations.len(), 1, "a sync retry is idempotent");
 
+            if index == 1 {
+                use piqae_domain::{ContentKind, ContentSource, Job, JobId, JobOptions, JobState};
+                use piqae_storage_postgres::destination_topology::{
+                    DeliveryAttemptState, NewDeliveryAttempt,
+                };
+
+                let job_id = JobId::new();
+                let uncertain_job = Job {
+                    id: job_id,
+                    workspace_id,
+                    environment_id,
+                    printer_id,
+                    title: "Uncertain fenced handoff".into(),
+                    source: None,
+                    content_kind: ContentKind::Pdf,
+                    content: ContentSource::Base64 {
+                        data: "JVBERi0=".into(),
+                    },
+                    options: JobOptions::default(),
+                    metadata: BTreeMap::from([
+                        ("piqae.destination_id".into(), destinations[0].id.clone()),
+                        ("piqae.route_id".into(), routes[0].id.clone()),
+                    ]),
+                    deliveries: 1,
+                    state: JobState::WaitingForAgent,
+                    created_at: now,
+                    expires_at: now + TimeDelta::hours(1),
+                    delivery_uncertain_since: None,
+                };
+                store
+                    .create_job(&uncertain_job, agent_id, None, b"uncertain-fence-test")
+                    .await
+                    .expect("uncertain job fixture");
+                let started = store
+                    .begin_delivery_attempt(
+                        tenant_scope,
+                        NewDeliveryAttempt {
+                            attempt_id: "attempt_control_uncertain",
+                            reservation_id: "00000000-0000-0000-0000-000000000001",
+                            job_id: &job_id.to_string(),
+                            destination_id: &destinations[0].id,
+                            route_id: &routes[0].id,
+                            lease_until: now + TimeDelta::minutes(2),
+                        },
+                    )
+                    .await
+                    .expect("begin fenced uncertain attempt");
+                for next in [
+                    DeliveryAttemptState::AcceptedByNode,
+                    DeliveryAttemptState::QueuedLocal,
+                    DeliveryAttemptState::HandingToSpooler,
+                    DeliveryAttemptState::DeliveryUncertain,
+                ] {
+                    store
+                        .transition_delivery_attempt(
+                            tenant_scope,
+                            "attempt_control_uncertain",
+                            started.attempt.generation,
+                            &started.fencing_token,
+                            next,
+                        )
+                        .await
+                        .expect("advance uncertain attempt");
+                }
+                sqlx::query("UPDATE jobs SET state='delivery_uncertain',delivery_uncertain_since=now() WHERE workspace_id=$1 AND environment_id=$2 AND id=$3")
+                    .bind(workspace_id.to_string()).bind(environment_id.to_string()).bind(job_id.to_string()).execute(&pool).await.expect("mark uncertain job");
+                let resolution_path = format!("/v1/jobs/{job_id}/resolve-uncertain");
+                let resolution_body = serde_json::to_vec(&serde_json::json!({
+                    "resolution": "acknowledge_missing",
+                    "note": "Operator checked the output tray and accepts the missing document"
+                }))
+                .expect("resolution JSON");
+                let pending = application
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .method("POST")
+                            .uri(&resolution_path)
+                            .header("authorization", format!("Bearer {token}"))
+                            .header("content-type", "application/json")
+                            .header("idempotency-key", "resolve-control-uncertain-1")
+                            .body(Body::from(resolution_body.clone()))
+                            .expect("resolution request"),
+                    )
+                    .await
+                    .expect("pending resolution response");
+                assert_eq!(pending.status(), StatusCode::ACCEPTED);
+                let stored_command: serde_json::Value = sqlx::query_scalar(
+                    "SELECT command FROM agent_commands WHERE workspace_id=$1 AND environment_id=$2 AND agent_id=$3 ORDER BY cursor DESC LIMIT 1",
+                )
+                .bind(workspace_id.to_string())
+                .bind(environment_id.to_string())
+                .bind(agent_id.to_string())
+                .fetch_one(&pool)
+                .await
+                .expect("stored uncertainty command");
+                serde_json::from_value::<piqae_protocol::agent::AgentCommand>(
+                    stored_command.clone(),
+                )
+                .unwrap_or_else(|error| {
+                    panic!("uncertainty command {stored_command} matches node protocol: {error}")
+                });
+
+                let command_response = application
+                    .clone()
+                    .oneshot(signed_agent_request(
+                        agent_id,
+                        &signing_key,
+                        serde_json::to_vec(&request).expect("command sync JSON"),
+                    ))
+                    .await
+                    .expect("command sync response");
+                let command_status = command_response.status();
+                let command_body = command_response
+                    .into_body()
+                    .collect()
+                    .await
+                    .expect("command sync body")
+                    .to_bytes();
+                assert_eq!(
+                    command_status,
+                    StatusCode::OK,
+                    "command sync failed: {}",
+                    String::from_utf8_lossy(&command_body)
+                );
+                let command_sync: piqae_protocol::agent::AgentSyncResponse =
+                    serde_json::from_slice(&command_body).expect("command sync JSON");
+                assert!(matches!(
+                    command_sync.commands.as_slice(),
+                    [piqae_protocol::agent::AgentCommand::ResolveAmbiguousHandoff { .. }]
+                ));
+                let mut acknowledged = request.clone();
+                acknowledged.acknowledged_command_cursor = command_sync.command_cursor;
+                let acknowledged_response = application
+                    .clone()
+                    .oneshot(signed_agent_request(
+                        agent_id,
+                        &signing_key,
+                        serde_json::to_vec(&acknowledged).expect("acknowledgement sync JSON"),
+                    ))
+                    .await
+                    .expect("acknowledgement sync response");
+                assert_eq!(acknowledged_response.status(), StatusCode::OK);
+                let resolved = application
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .method("POST")
+                            .uri(&resolution_path)
+                            .header("authorization", format!("Bearer {token}"))
+                            .header("content-type", "application/json")
+                            .header("idempotency-key", "resolve-control-uncertain-1")
+                            .body(Body::from(resolution_body))
+                            .expect("resolved replay request"),
+                    )
+                    .await
+                    .expect("resolved replay response");
+                assert_eq!(resolved.status(), StatusCode::OK);
+            }
+
             let mut conflicting_retry = request.clone();
             conflicting_retry.route_observations[0].state = PrinterState::Busy;
             let error = project_agent_topology(&state, tenant, &conflicting_retry)
@@ -2219,6 +2739,17 @@ mod tests {
         }
         assert_ne!(destination_ids[0], destination_ids[1]);
         assert_ne!(stored_digests[0], stored_digests[1]);
+        let cross_tenant = application
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/v1/physical-destinations/{}", destination_ids[1]))
+                    .header("authorization", format!("Bearer {}", tenant_tokens[0]))
+                    .body(Body::empty())
+                    .expect("cross-tenant destination request"),
+            )
+            .await
+            .expect("cross-tenant destination response");
+        assert_eq!(cross_tenant.status(), StatusCode::NOT_FOUND);
 
         pool.close().await;
         sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))

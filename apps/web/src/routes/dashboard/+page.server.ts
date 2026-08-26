@@ -81,7 +81,9 @@ type LoadedLists = {
 type OperationsScope = 'customers' | 'own';
 
 function overviewFor(lists: Pick<LoadedLists, 'jobs' | 'printers' | 'agents'>): DashboardOverview {
-  const uncertain = lists.jobs.filter((job) => job.state === 'delivery_uncertain');
+  const uncertain = lists.jobs.filter(
+    (job) => job.state === 'delivery_uncertain' && !job.deliveryResolution
+  );
   return {
     agents: {
       total: lists.agents.length,
@@ -533,6 +535,52 @@ export const actions: Actions = {
     } catch (error) {
       return fail(502, {
         mutation: 'createEnrolment',
+        error: { message: presentDashboardError(error).message }
+      });
+    }
+  },
+
+  resolveUncertainJob: async (event) => {
+    if (dashboardMode() !== 'live') {
+      return fail(400, {
+        mutation: 'resolveUncertainJob',
+        error: { message: 'Uncertain delivery resolution is disabled while demo data is active.' }
+      });
+    }
+    const data = await event.request.formData();
+    const jobId = String(data.get('job_id') ?? '').trim();
+    const resolution = String(data.get('resolution') ?? '').trim();
+    const note = String(data.get('note') ?? '').trim();
+    const requestId = String(data.get('request_id') ?? '').trim();
+    if (
+      !jobId ||
+      !requestId ||
+      note.length < 1 ||
+      note.length > 2_000 ||
+      !['acknowledge_printed', 'acknowledge_missing', 'cancelled', 'reprint'].includes(resolution)
+    ) {
+      return fail(400, {
+        mutation: 'resolveUncertainJob',
+        error: { message: 'Choose a resolution and include an operator note.' }
+      });
+    }
+    try {
+      const managed = await managedSelection(event, data);
+      const result = await (managed?.api ?? dashboardSource(event).api).resolveUncertainJob(
+        jobId,
+        resolution as 'acknowledge_printed' | 'acknowledge_missing' | 'cancelled' | 'reprint',
+        note,
+        requestId
+      );
+      return {
+        mutation: 'resolveUncertainJob',
+        resolvedJobId: jobId,
+        resolutionState: result.state,
+        replacementJobId: result.replacementJobId
+      };
+    } catch (error) {
+      return fail(409, {
+        mutation: 'resolveUncertainJob',
         error: { message: presentDashboardError(error).message }
       });
     }

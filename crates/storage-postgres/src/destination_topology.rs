@@ -16,7 +16,8 @@ use crate::{PostgresStore, StorageError};
 use async_trait::async_trait;
 use base64::Engine as _;
 use chrono::{DateTime, Utc};
-use piqae_domain::{EnvironmentId, WorkspaceId};
+use piqae_domain::{EnvironmentId, JobId, WorkspaceId};
+use piqae_protocol::agent::{AgentCommand, AmbiguousHandoffResolution};
 use rand::{RngCore, rngs::OsRng};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -1524,14 +1525,21 @@ impl DestinationTopologyRepository for PostgresStore {
             })?;
         let reservation_id: String = attempt.try_get("reservation_id")?;
         let generation: i64 = attempt.try_get("generation")?;
-        let command = serde_json::json!({
-            "type": "resolve_ambiguous_handoff",
-            "job_id": job_id,
-            "local_route_key": local_route_key,
-            "reservation_id": reservation_id,
-            "generation": generation,
-            "resolution": "confirm_accepted"
-        });
+        let command = serde_json::to_value(AgentCommand::ResolveAmbiguousHandoff {
+            job_id: job_id.parse::<JobId>().map_err(|_| {
+                StorageError::InvalidData("uncertain resolution has an invalid job id".into())
+            })?,
+            local_route_key,
+            reservation_id: reservation_id.parse().map_err(|_| {
+                StorageError::InvalidData(
+                    "uncertain resolution has an invalid reservation id".into(),
+                )
+            })?,
+            generation: u64::try_from(generation).map_err(|_| {
+                StorageError::InvalidData("uncertain resolution has a negative generation".into())
+            })?,
+            resolution: AmbiguousHandoffResolution::ConfirmAccepted,
+        })?;
         let cursor: i64 = sqlx::query_scalar("INSERT INTO agent_commands (workspace_id,environment_id,agent_id,command) VALUES ($1,$2,$3,$4) RETURNING cursor")
             .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).bind(&agent_id).bind(&command).fetch_one(&mut *tx).await?;
         let row = sqlx::query("INSERT INTO delivery_uncertainty_resolution_commands (workspace_id,environment_id,request_id,job_id,attempt_id,destination_id,route_id,agent_id,reservation_id,generation,resolution,note,actor_id,agent_command_cursor) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING *, $15::jsonb AS command")

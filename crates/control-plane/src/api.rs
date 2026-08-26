@@ -1,4 +1,9 @@
-#![allow(clippy::missing_errors_doc)]
+#![allow(
+    clippy::missing_errors_doc,
+    clippy::cognitive_complexity,
+    clippy::too_many_lines,
+    reason = "the sync and compatibility handlers keep one auditable transactional workflow"
+)]
 
 use crate::{
     AppState,
@@ -2036,48 +2041,89 @@ async fn resolve_target_destination(
     ))
 }
 
-async fn recover_waiting_target_jobs(
+async fn schedule_waiting_destination_jobs(
     state: &AppState,
     tenant: TenantContext,
 ) -> Result<(), AppError> {
     let jobs = state
         .repository
-        .list_reroutable_target_jobs(tenant.workspace_id, tenant.environment_id, 100)
+        .list_reroutable_destination_jobs(tenant.workspace_id, tenant.environment_id, 1_000)
         .await?;
     for job in jobs {
-        let Some(target_id) = job
+        let Some(destination_id) = job.metadata.get("piqae.destination_id") else {
+            continue;
+        };
+        let routes = crate::destination_topology::ranked_ready_routes(
+            state,
+            crate::destination_topology::tenant_scope(tenant),
+            destination_id,
+        )
+        .await?;
+        if routes.is_empty() {
+            continue;
+        }
+        let target_id = job
             .metadata
             .get("piqae.target_id")
-            .or_else(|| job.metadata.get("spool.target_id"))
-        else {
-            continue;
+            .or_else(|| job.metadata.get("spool.target_id"));
+        let bindings = if let Some(target_id) = target_id {
+            state
+                .repository
+                .list_target_bindings(tenant.workspace_id, tenant.environment_id, target_id)
+                .await?
+        } else {
+            Vec::new()
         };
-        let Ok(destination) = resolve_target_destination(state, tenant, target_id, false).await
-        else {
-            continue;
-        };
-        let Some(binding) = destination.binding.as_ref() else {
-            continue;
-        };
-        match state
-            .repository
-            .reroute_job_before_acceptance(
-                tenant.workspace_id,
-                tenant.environment_id,
-                job.id,
-                target_id,
-                binding,
-                "standby_recovery",
-            )
-            .await
-        {
-            Ok(Some(rerouted)) => {
-                state
-                    .publish(tenant, "job.routing_attempted", &rerouted)
-                    .await?;
+        for route in routes {
+            if job.metadata.get("piqae.route_id") == Some(&route.id) {
+                break;
             }
-            Ok(None) | Err(RepositoryError::ConcurrentStateChange) => {}
-            Err(error) => return Err(error.into()),
+            let binding = target_id.and_then(|_| {
+                bindings.iter().find(|binding| {
+                    binding.enabled
+                        && binding.printer_id.to_string() == route.printer_id
+                        && binding.agent_id.to_string() == route.agent_id
+                })
+            });
+            if target_id.is_some() && binding.is_none() {
+                continue;
+            }
+            let capability_revision = job
+                .metadata
+                .get("piqae.capability_revision")
+                .and_then(|value| value.parse().ok());
+            let route_ticket_key = format!("piqae.resolved_ticket_digest.{}", route.id);
+            let resolved_ticket_digest = job
+                .metadata
+                .get(&route_ticket_key)
+                .or_else(|| job.metadata.get("piqae.resolved_ticket_digest"));
+            let rerouted = state
+                .repository
+                .reroute_job_to_destination_route_before_acceptance(
+                    tenant.workspace_id,
+                    tenant.environment_id,
+                    piqae_storage_postgres::DestinationRouteReassignment {
+                        job_id: job.id,
+                        target_id: target_id.map(String::as_str),
+                        route_id: &route.id,
+                        profile_id: binding.map(|value| value.profile_id.as_str()),
+                        profile_revision: binding.map(|value| value.profile_revision),
+                        expected_capability_revision: capability_revision,
+                        resolved_ticket_digest: resolved_ticket_digest.map(String::as_str),
+                        reason: "standby_recovery",
+                    },
+                )
+                .await;
+            match rerouted {
+                Ok(Some(rerouted)) => {
+                    state
+                        .publish(tenant, "job.routing_attempted", &rerouted)
+                        .await?;
+                    break;
+                }
+                Ok(None) | Err(RepositoryError::ConcurrentStateChange) => {}
+                Err(error) => return Err(error.into()),
+            }
         }
     }
     Ok(())
@@ -2585,7 +2631,7 @@ pub async fn agent_sync(
             Err(error) => return Err(error.into()),
         }
     }
-    recover_waiting_target_jobs(&state, tenant).await?;
+    schedule_waiting_destination_jobs(&state, tenant).await?;
     for event in &request.events {
         match state
             .repository
@@ -2613,6 +2659,13 @@ pub async fn agent_sync(
             Ok(None) | Err(RepositoryError::ConcurrentStateChange) => {}
             Err(error) => return Err(error.into()),
         }
+        crate::destination_topology::reconcile_post_spooler_event(
+            &state,
+            tenant,
+            request.agent_id,
+            event,
+        )
+        .await?;
     }
     let command_batch = state
         .repository
@@ -2624,6 +2677,12 @@ pub async fn agent_sync(
             100,
         )
         .await?;
+    crate::destination_topology::finalize_acknowledged_uncertainty(
+        &state,
+        tenant,
+        request.agent_id,
+    )
+    .await?;
     let leases = if request.queue.accepts_jobs {
         state
             .repository
@@ -2999,9 +3058,20 @@ pub async fn accept_agent_job(
     let path = format!("/v1/agent/jobs/{job_id}/accept");
     let identity = authenticate_agent(&state, &headers, "POST", &path, &body).await?;
     let request: AgentAcceptJobRequest = serde_json::from_slice(&body)?;
+    let (Some(route_reservation_id), Some(route_generation), Some(route_fencing_token)) = (
+        request.route_reservation_id,
+        request.route_generation,
+        request.route_fencing_token.as_deref(),
+    ) else {
+        return Err(AppError::conflict(
+            "route_fence_required",
+            "A complete physical-destination reservation proof is required.",
+        ));
+    };
+    let reservation_id = route_reservation_id.to_string();
     let job = state
         .repository
-        .accept_agent_job(
+        .accept_agent_job_with_delivery_attempt(
             identity.tenant.workspace_id,
             identity.tenant.environment_id,
             identity.agent_id,
@@ -3010,17 +3080,13 @@ pub async fn accept_agent_job(
             &request.lease_token,
             Some(&request.content_sha256),
             request.local_sequence,
+            piqae_storage_postgres::DeliveryAttemptProof {
+                reservation_id: &reservation_id,
+                generation: route_generation,
+                fencing_token: route_fencing_token,
+            },
         )
         .await?;
-    crate::destination_topology::accept_job_route(
-        &state,
-        identity.tenant,
-        &job_id,
-        request.route_reservation_id,
-        request.route_generation,
-        request.route_fencing_token.as_deref(),
-    )
-    .await?;
     state.publish(identity.tenant, "job.updated", &job).await?;
     Ok(Json(AgentAcceptJobResponse {
         accepted_at: Utc::now(),
@@ -3037,27 +3103,33 @@ pub async fn renew_agent_lease(
     let path = format!("/v1/agent/jobs/{job_id}/lease");
     let identity = authenticate_agent(&state, &headers, "POST", &path, &body).await?;
     let request: AgentRenewLeaseRequest = serde_json::from_slice(&body)?;
+    let (Some(route_reservation_id), Some(route_generation), Some(route_fencing_token)) = (
+        request.route_reservation_id,
+        request.route_generation,
+        request.route_fencing_token.as_deref(),
+    ) else {
+        return Err(AppError::conflict(
+            "route_fence_required",
+            "A complete physical-destination reservation proof is required.",
+        ));
+    };
+    let reservation_id = route_reservation_id.to_string();
     let lease_expires_at = state
         .repository
-        .renew_agent_lease(
+        .renew_agent_lease_with_delivery_attempt(
             identity.tenant.workspace_id,
             identity.tenant.environment_id,
             identity.agent_id,
             parse_job_id(&job_id)?,
             request.lease_id,
             &request.lease_token,
+            piqae_storage_postgres::DeliveryAttemptProof {
+                reservation_id: &reservation_id,
+                generation: route_generation,
+                fencing_token: route_fencing_token,
+            },
         )
         .await?;
-    crate::destination_topology::renew_job_route(
-        &state,
-        identity.tenant,
-        &job_id,
-        lease_expires_at,
-        request.route_reservation_id,
-        request.route_generation,
-        request.route_fencing_token.as_deref(),
-    )
-    .await?;
     Ok(Json(AgentRenewLeaseResponse { lease_expires_at }))
 }
 
