@@ -107,8 +107,17 @@ public struct PiqaePrintRequest: Sendable {
 }
 
 public enum PiqaeNativeHandoffState: String, Codable, Sendable {
+    case queuedLocally = "queued_locally"
     case acceptedBySpooler = "accepted_by_spooler"
     case deliveryUncertain = "delivery_uncertain"
+}
+
+public enum PiqaeNativeJobObservation: Equatable, Sendable {
+    case accepted
+    case printing
+    case completedReported
+    case failedTerminal(code: String)
+    case unknown
 }
 
 public struct PiqaeJobReceipt: Codable, Equatable, Sendable {
@@ -147,11 +156,16 @@ public struct PiqaeProfileCaptureRequest: Sendable {
 public protocol PiqaePrinterAdapter: Sendable {
     var adapterID: String { get }
     var descriptor: PiqaePrinterAdapterDescriptor { get }
+    var runtimeFingerprint: PiqaeAdapterFingerprint { get }
     func discoverPrinters() async throws -> [PiqaePrinter]
     func validate(_ request: PiqaePrintRequest, for printer: PiqaePrinter) async throws
-    /// Must honor `request.idempotencyKey`. Durable runtimes persist this
-    /// mapping; adapters must never reinterpret a retry as another copy.
+    /// Called once for a durable, fenced adapter operation. The runtime owns
+    /// idempotency and never invokes this method again after handoff begins.
     func submit(_ request: PiqaePrintRequest, to printer: PiqaePrinter) async throws -> PiqaeJobReceipt
+    func observeNativeJob(
+        nativeJobID: String,
+        printer: PiqaePrinter
+    ) async throws -> PiqaeNativeJobObservation
     func profiles(for printer: PiqaePrinter) async throws -> [PiqaePrintProfile]
     func captureProfile(
         _ request: PiqaeProfileCaptureRequest,
@@ -160,6 +174,13 @@ public protocol PiqaePrinterAdapter: Sendable {
 }
 
 public extension PiqaePrinterAdapter {
+    var runtimeFingerprint: PiqaeAdapterFingerprint {
+        PiqaeAdapterFingerprint(
+            platform: .iosNetwork,
+            adapterID: adapterID,
+            adapterVersion: descriptor.version
+        )
+    }
     var descriptor: PiqaePrinterAdapterDescriptor {
         PiqaePrinterAdapterDescriptor(
             id: adapterID,
@@ -172,6 +193,11 @@ public extension PiqaePrinterAdapter {
     }
 
     func validate(_ request: PiqaePrintRequest, for printer: PiqaePrinter) async throws {}
+
+    func observeNativeJob(
+        nativeJobID: String,
+        printer: PiqaePrinter
+    ) async throws -> PiqaeNativeJobObservation { .unknown }
 
     func profiles(for printer: PiqaePrinter) async throws -> [PiqaePrintProfile] { [] }
 

@@ -3,6 +3,8 @@ import XCTest
 @testable import PiqaeNodeKit
 import PiqaeNodeKitTesting
 
+private enum LinkedRuntimeRequired: Error { case unavailable }
+
 final class PiqaeNodeKitTests: XCTestCase {
     func testLinkedNativeRuntimeArtifactStartsWhenPresent() async throws {
         let applicationID = "com.piqae.tests.linked.\(UUID().uuidString.lowercased())"
@@ -79,6 +81,284 @@ final class PiqaeNodeKitTests: XCTestCase {
         XCTAssertFalse(first.contains("printer.local"))
         try await runtime.report(.suspendImminent)
         try await runtime.stop()
+    }
+
+    func testDurableRuntimeIdempotencyInvokesAdapterOnce() async throws {
+        try requireLinkedRuntime()
+        let fixture = nativeFixture("idempotency")
+        let runtime = PiqaeNativeRuntime(
+            configuration: fixture.configuration,
+            keyStore: PiqaeFixedHostKeyStore()
+        )
+        let adapter = PiqaeFakePrinterAdapter(
+            printers: [PiqaeFakePrinterAdapter.printer()]
+        )
+        let node = PiqaeNode(
+            .localOnly(
+                startupMode: .embedded,
+                identityStore: PiqaeMemoryInstallationIdentityStore(
+                    id: .init(rawValue: fixture.applicationID)
+                ),
+                embeddedRuntime: runtime,
+                printerAdapters: [adapter]
+            )
+        )
+        addTeardownBlock {
+            await node.stop()
+            try? FileManager.default.removeItem(at: fixture.stateDirectory)
+        }
+        try await node.start()
+        let listedPrinters = try await node.printers.list()
+        let printer = try XCTUnwrap(listedPrinters.first)
+        let request = try PiqaePrintRequest(
+            printerID: printer.id,
+            title: "Durable receipt",
+            content: .pdf(Data("%PDF-durable".utf8)),
+            idempotencyKey: "order-42-copy-1"
+        )
+
+        let first = try await node.jobs.submit(request)
+        let second = try await node.jobs.submit(request)
+        let status = try await node.jobs.status(first.jobID)
+
+        XCTAssertEqual(first.jobID, second.jobID)
+        XCTAssertEqual(first.handoffState, .acceptedBySpooler)
+        XCTAssertEqual(second.handoffState, .acceptedBySpooler)
+        XCTAssertEqual(status.state, "completed_reported")
+        let submissionCount = await adapter.submissionCount()
+        XCTAssertEqual(submissionCount, 1)
+    }
+
+    func testHandoffStartedRestartBecomesUncertainWithoutNativeReplay() async throws {
+        try requireLinkedRuntime()
+        let fixture = nativeFixture("restart")
+        let firstRuntime = PiqaeNativeRuntime(
+            configuration: fixture.configuration,
+            keyStore: PiqaeFixedHostKeyStore()
+        )
+        addTeardownBlock {
+            try await firstRuntime.stop()
+            try? FileManager.default.removeItem(at: fixture.stateDirectory)
+        }
+        try await firstRuntime.start()
+        let fingerprint = PiqaeAdapterFingerprint(
+            platform: .iosNetwork,
+            adapterID: "fake.printer",
+            adapterVersion: "1"
+        )
+        let descriptor = PiqaePrinterAdapterDescriptor(
+            id: "fake.printer",
+            displayName: "Restart fake",
+            version: "1",
+            transports: [.vendorSDK],
+            portableOptions: PiqaePortableOption.allCases,
+            supportsProfiles: true
+        )
+        try await firstRuntime.registerAdapter(
+            .init(fingerprint: fingerprint, capabilityContract: .init(descriptor: descriptor))
+        )
+        let printers = try await firstRuntime.observePrinterInventory(
+            adapterID: "fake.printer",
+            printers: [
+                .init(
+                    nativeID: "virtual://prn_restart",
+                    name: "Restart printer",
+                    state: "available"
+                ),
+            ]
+        )
+        let logicalPrinter = PiqaePrinterID(rawValue: try XCTUnwrap(printers.first?.printerID))
+        let accepted = try await firstRuntime.enqueue(
+            .init(
+                adapterID: "fake.printer",
+                idempotencyKey: "restart-boundary",
+                printerID: logicalPrinter,
+                title: "Restart boundary",
+                contentKind: "pdf",
+                content: Data("%PDF-restart".utf8),
+                optionsJSON: #"{"intent":{"copies":1}}"#
+            )
+        )
+        let nextOperation = try await firstRuntime.nextOperation(adapterID: "fake.printer")
+        let claimed = try XCTUnwrap(nextOperation)
+        let started = try await firstRuntime.beginHandoff(claimed)
+        XCTAssertEqual(started.phase, .handoffStarted)
+        try await firstRuntime.stop()
+
+        let secondRuntime = PiqaeNativeRuntime(
+            configuration: fixture.configuration,
+            keyStore: PiqaeFixedHostKeyStore()
+        )
+        let adapter = PiqaeFakePrinterAdapter(
+            printers: [PiqaeFakePrinterAdapter.printer(id: "prn_restart")]
+        )
+        let node = PiqaeNode(
+            .localOnly(
+                startupMode: .embedded,
+                identityStore: PiqaeMemoryInstallationIdentityStore(
+                    id: .init(rawValue: fixture.applicationID)
+                ),
+                embeddedRuntime: secondRuntime,
+                printerAdapters: [adapter]
+            )
+        )
+        addTeardownBlock { await node.stop() }
+        try await node.start()
+
+        let recovered = try await node.jobs.status(.init(rawValue: accepted.jobID))
+        XCTAssertEqual(recovered.state, "delivery_uncertain")
+        let submissionCount = await adapter.submissionCount()
+        XCTAssertEqual(submissionCount, 0)
+    }
+
+    func testAdapterErrorAfterHandoffIsDeliveryUncertain() async throws {
+        try requireLinkedRuntime()
+        let fixture = nativeFixture("ambiguous")
+        let runtime = PiqaeNativeRuntime(
+            configuration: fixture.configuration,
+            keyStore: PiqaeFixedHostKeyStore()
+        )
+        let adapter = PiqaeFakePrinterAdapter(
+            printers: [PiqaeFakePrinterAdapter.printer()],
+            submissionBehavior: .throwAfterHandoff
+        )
+        let node = PiqaeNode(
+            .localOnly(
+                startupMode: .embedded,
+                identityStore: PiqaeMemoryInstallationIdentityStore(
+                    id: .init(rawValue: fixture.applicationID)
+                ),
+                embeddedRuntime: runtime,
+                printerAdapters: [adapter]
+            )
+        )
+        addTeardownBlock {
+            await node.stop()
+            try? FileManager.default.removeItem(at: fixture.stateDirectory)
+        }
+        try await node.start()
+        let listedPrinters = try await node.printers.list()
+        let printer = try XCTUnwrap(listedPrinters.first)
+        let receipt = try await node.jobs.submit(
+            PiqaePrintRequest(
+                printerID: printer.id,
+                title: "Ambiguous receipt",
+                content: .pdf(Data("%PDF-ambiguous".utf8)),
+                idempotencyKey: "ambiguous-boundary"
+            )
+        )
+
+        XCTAssertEqual(receipt.handoffState, .deliveryUncertain)
+        let submissionCount = await adapter.submissionCount()
+        let status = try await node.jobs.status(receipt.jobID)
+        XCTAssertEqual(submissionCount, 1)
+        XCTAssertEqual(status.state, "delivery_uncertain")
+    }
+
+    func testBackgroundWakeExecutesPreviouslyDurableJobWhenBudgetAllows() async throws {
+        try requireLinkedRuntime()
+        let fixture = nativeFixture("background")
+        let runtime = PiqaeNativeRuntime(
+            configuration: fixture.configuration,
+            keyStore: PiqaeFixedHostKeyStore()
+        )
+        let adapter = PiqaeFakePrinterAdapter(
+            printers: [PiqaeFakePrinterAdapter.printer()]
+        )
+        let node = PiqaeNode(
+            .localOnly(
+                startupMode: .embedded,
+                availability: .backgroundOpportunistic,
+                identityStore: PiqaeMemoryInstallationIdentityStore(
+                    id: .init(rawValue: fixture.applicationID)
+                ),
+                embeddedRuntime: runtime,
+                printerAdapters: [adapter]
+            )
+        )
+        addTeardownBlock {
+            await node.stop()
+            try? FileManager.default.removeItem(at: fixture.stateDirectory)
+        }
+        try await node.start()
+        let printers = try await node.printers.list()
+        let printer = try XCTUnwrap(printers.first)
+        await node.updateExecutionContext(
+            .init(phase: .background, source: .backgroundPush, remainingSeconds: 5)
+        )
+        let queued = try await node.jobs.submit(
+            PiqaePrintRequest(
+                printerID: printer.id,
+                title: "Deferred receipt",
+                content: .pdf(Data("%PDF-deferred".utf8)),
+                idempotencyKey: "background-durable"
+            )
+        )
+        XCTAssertEqual(queued.handoffState, .queuedLocally)
+        let countBeforeWake = await adapter.submissionCount()
+        XCTAssertEqual(countBeforeWake, 0)
+
+        let result = await node.handleWakeHint(
+            try PiqaeWakeHint(collapseID: "job-available", source: .backgroundPush),
+            context: .init(phase: .background, source: .backgroundPush, remainingSeconds: 30)
+        )
+        let status = try await node.jobs.status(queued.jobID)
+        let count = await adapter.submissionCount()
+        XCTAssertEqual(result, .reconciledWithoutLeasing)
+        XCTAssertEqual(status.state, "completed_reported")
+        XCTAssertEqual(count, 1)
+    }
+
+    func testProfilesAreCreatedUpdatedAndDeletedByDurableRuntime() async throws {
+        try requireLinkedRuntime()
+        let fixture = nativeFixture("profiles")
+        let runtime = PiqaeNativeRuntime(
+            configuration: fixture.configuration,
+            keyStore: PiqaeFixedHostKeyStore()
+        )
+        let adapter = PiqaeFakePrinterAdapter(
+            printers: [PiqaeFakePrinterAdapter.printer()]
+        )
+        let node = PiqaeNode(
+            .localOnly(
+                startupMode: .embedded,
+                identityStore: PiqaeMemoryInstallationIdentityStore(
+                    id: .init(rawValue: fixture.applicationID)
+                ),
+                embeddedRuntime: runtime,
+                printerAdapters: [adapter]
+            )
+        )
+        addTeardownBlock {
+            await node.stop()
+            try? FileManager.default.removeItem(at: fixture.stateDirectory)
+        }
+        try await node.start()
+        let printers = try await node.printers.list()
+        let printer = try XCTUnwrap(printers.first)
+
+        let created = try await node.profiles.create(
+            .init(printerID: printer.id, name: "Receipt", isDefault: true)
+        )
+        let updated = try await node.profiles.update(
+            .init(
+                printerID: printer.id,
+                profileID: created.id,
+                expectedRevision: created.revision,
+                name: "Receipt 80 mm",
+                isDefault: true
+            )
+        )
+        let profiles = try await node.profiles.list(for: printer.id)
+        XCTAssertEqual(profiles, [updated])
+
+        try await node.profiles.delete(
+            printerID: printer.id,
+            profileID: updated.id,
+            expectedRevision: updated.revision
+        )
+        let remaining = try await node.profiles.list(for: printer.id)
+        XCTAssertEqual(remaining, [])
     }
     func testLifecycleEventsUseSharedRuntimeWireNamesAndReporter() async throws {
         XCTAssertEqual(PiqaeHostLifecycleEvent.suspendImminent.rawValue, "suspend_imminent")
@@ -428,7 +708,10 @@ final class PiqaeNodeKitTests: XCTestCase {
         )
 
         await XCTAssertThrowsErrorAsync(try await node.jobs.submit(request)) { error in
-            XCTAssertEqual(error as? PiqaeNodeError, .backgroundExecutionUnavailable)
+            guard case .unsupportedOperation = error as? PiqaeNodeError else {
+                XCTFail("submission without a durable runtime must fail closed")
+                return
+            }
         }
         let submissionCount = await adapter.submissionCount()
         XCTAssertEqual(submissionCount, 0)
@@ -477,6 +760,37 @@ final class PiqaeNodeKitTests: XCTestCase {
         try await second.start()
         let restartedSnapshot = await second.snapshot()
         XCTAssertEqual(restartedSnapshot.phase, .ready)
+    }
+
+    private func nativeFixture(_ label: String) -> (
+        applicationID: String,
+        configuration: PiqaeNativeRuntimeConfiguration,
+        stateDirectory: URL
+    ) {
+        let applicationID = "com.piqae.tests.\(label).\(UUID().uuidString.lowercased())"
+        let stateDirectory = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/Piqae/embedded", isDirectory: true)
+            .appendingPathComponent(applicationID, isDirectory: true)
+        return (
+            applicationID,
+            PiqaeNativeRuntimeConfiguration(
+                applicationID: applicationID,
+                dataDirectory: "nodekit-tests",
+                availability: .continuousWhileAwake,
+                localOnly: true
+            ),
+            stateDirectory
+        )
+    }
+
+    private func requireLinkedRuntime() throws {
+        guard !PiqaeNativeRuntime.linkedLibraryAvailable else { return }
+        let message = "Build the PiqaeNode XCFramework before running linked-runtime tests."
+        if ProcessInfo.processInfo.environment["PIQAE_REQUIRE_LINKED_RUNTIME_TESTS"] == "1" {
+            XCTFail(message)
+            throw LinkedRuntimeRequired.unavailable
+        }
+        throw XCTSkip(message)
     }
 
     func testFailedEmbeddedRuntimeStartReleasesProcessOwnership() async throws {

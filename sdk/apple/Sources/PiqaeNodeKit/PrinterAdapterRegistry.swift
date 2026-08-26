@@ -49,6 +49,14 @@ public struct PiqaeAdapterFingerprint: Codable, Equatable, Sendable {
         self.deviceFamily = deviceFamily
         self.firmwareVersion = firmwareVersion
     }
+
+    enum CodingKeys: String, CodingKey {
+        case platform
+        case adapterID = "adapter_id"
+        case adapterVersion = "adapter_version"
+        case deviceFamily = "device_family"
+        case firmwareVersion = "firmware_version"
+    }
 }
 
 public enum PiqaeAdapterBackgroundWake: String, Codable, Sendable, CaseIterable {
@@ -73,6 +81,7 @@ public struct PiqaePrinterAdapterDescriptor: Codable, Equatable, Sendable, Ident
     public let portableOptions: [PiqaePortableOption]
     public let supportsProfiles: Bool
     public let backgroundWake: PiqaeAdapterBackgroundWake
+    public let documentKinds: [String]
 
     public init(
         id: String,
@@ -81,7 +90,8 @@ public struct PiqaePrinterAdapterDescriptor: Codable, Equatable, Sendable, Ident
         transports: [PiqaePrinterTransport],
         portableOptions: [PiqaePortableOption],
         supportsProfiles: Bool,
-        backgroundWake: PiqaeAdapterBackgroundWake = .none
+        backgroundWake: PiqaeAdapterBackgroundWake = .none,
+        documentKinds: [String] = ["pdf", "image"]
     ) {
         self.id = id
         self.displayName = displayName
@@ -90,6 +100,7 @@ public struct PiqaePrinterAdapterDescriptor: Codable, Equatable, Sendable, Ident
         self.portableOptions = portableOptions
         self.supportsProfiles = supportsProfiles
         self.backgroundWake = backgroundWake
+        self.documentKinds = documentKinds
     }
 }
 
