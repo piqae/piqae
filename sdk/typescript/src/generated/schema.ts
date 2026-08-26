@@ -3707,6 +3707,19 @@ export interface components {
             telemetry_freshness: "live" | "recent" | "stale" | "never";
             /** @enum {string} */
             projection_health?: "current" | "pending" | "failed" | "unsupported";
+            /** Format: int64 */
+            capability_revision?: number;
+            /** Format: int64 */
+            profile_revision?: number;
+            /** Format: date-time */
+            profile_observed_at?: string | null;
+            /** Format: date-time */
+            stock_observed_at?: string | null;
+            /**
+             * @description Privacy-safe freshness of the loaded-media projection; no driver-private values are exposed.
+             * @enum {string}
+             */
+            stock_state?: "current" | "stale" | "unknown";
             latest_observation?: components["schemas"]["RouteObservation"] | null;
             scheduling_authority_id?: string | null;
             /** Format: date-time */
@@ -3730,6 +3743,8 @@ export interface components {
             kind: "merge" | "split";
             route_ids: string[];
             reason: string;
+            /** @description Optional name for the new destination created by a split decision. */
+            display_name?: string;
         };
         DestinationIdentityDecision: {
             id: string;

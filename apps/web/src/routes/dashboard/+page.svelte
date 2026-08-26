@@ -653,7 +653,7 @@
             <td><Status value={route.health} /></td>
             <td><Status value={route.projectionHealth} /></td>
             <td><Status value={route.telemetryFreshness} /></td>
-            <td><Status value={route.stockState} /></td>
+            <td><Status value={route.stockState ?? 'unknown'} /></td>
             <td class="mono muted">{route.schedulingAuthorityId ?? 'Local connector only'}</td>
           </tr>
         {:else}
@@ -944,10 +944,10 @@
         { term: 'OS queue', value: detail.route.nativeQueueId, mono: true },
         { term: 'Inventory projection', value: detail.route.projectionHealth.replaceAll('_', ' ') },
         { term: 'Telemetry freshness', value: detail.route.telemetryFreshness },
-        { term: 'Capabilities revision', value: detail.route.capabilityRevision },
-        { term: 'Profile revision', value: detail.route.profileRevision },
+        { term: 'Capabilities revision', value: detail.route.capabilityRevision ?? 0 },
+        { term: 'Profile revision', value: detail.route.profileRevision ?? 0 },
         { term: 'Profile observed', value: detail.route.profileObservedAt ?? 'Never' },
-        { term: 'Stock projection', value: detail.route.stockState },
+        { term: 'Stock projection', value: detail.route.stockState ?? 'unknown' },
         { term: 'Stock observed', value: detail.route.stockObservedAt ?? 'Never' },
         { term: 'Scheduling authority', value: detail.route.schedulingAuthorityId ?? 'Local connector only', mono: true },
         { term: 'Route ID', value: detail.route.id, mono: true }

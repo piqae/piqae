@@ -122,6 +122,10 @@ fn scope(tenant: crate::authentication::TenantContext) -> TenantScope {
     }
 }
 
+pub(crate) fn tenant_scope(tenant: crate::authentication::TenantContext) -> TenantScope {
+    scope(tenant)
+}
+
 fn storage_error(error: StorageError) -> AppError {
     match error {
         StorageError::NotFound => AppError::not_found(),
@@ -136,6 +140,10 @@ fn storage_error(error: StorageError) -> AppError {
         }
         _ => AppError::service_unavailable("destination_topology_unavailable"),
     }
+}
+
+pub(crate) fn map_storage_error(error: StorageError) -> AppError {
+    storage_error(error)
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -570,6 +578,66 @@ pub(crate) async fn operational_snapshot(
     Ok((destination_responses, route_responses, observations))
 }
 
+/// Returns only fresh, accepting execution routes in deterministic scheduling
+/// order. The logical destination is unchanged; route choice is a disposable
+/// pre-handoff decision.
+pub(crate) async fn ranked_ready_routes(
+    state: &AppState,
+    tenant_scope: TenantScope,
+    destination_id: &str,
+) -> Result<Vec<StoredPrinterRoute>, AppError> {
+    let now = Utc::now();
+    let mut candidates = Vec::new();
+    for route in state
+        .destination_topology
+        .list_routes(tenant_scope, destination_id)
+        .await
+        .map_err(storage_error)?
+    {
+        if !route.enabled || route.state != "available" {
+            continue;
+        }
+        let Ok(observation) = state
+            .destination_topology
+            .latest_route_observation(tenant_scope, &route.id)
+            .await
+        else {
+            continue;
+        };
+        if observation.fresh_until < now
+            || observation.accepting_jobs != Some(true)
+            || !matches!(observation.printer_state.as_str(), "idle" | "processing")
+        {
+            continue;
+        }
+        candidates.push((
+            route,
+            observation.total_jobs,
+            observation.estimated_busy_seconds.unwrap_or(u32::MAX),
+        ));
+    }
+    candidates.sort_by(
+        |(left, left_jobs, left_busy), (right, right_jobs, right_busy)| {
+            let role = |value: &str| if value == "primary" { 0_u8 } else { 1_u8 };
+            (
+                role(&left.role),
+                left.priority,
+                *left_jobs,
+                *left_busy,
+                &left.id,
+            )
+                .cmp(&(
+                    role(&right.role),
+                    right.priority,
+                    *right_jobs,
+                    *right_busy,
+                    &right.id,
+                ))
+        },
+    );
+    Ok(candidates.into_iter().map(|(route, _, _)| route).collect())
+}
+
 fn evidence_kind(kind: piqae_protocol::agent::PhysicalIdentityEvidenceKind) -> &'static str {
     use piqae_protocol::agent::PhysicalIdentityEvidenceKind as Kind;
     match kind {
@@ -996,12 +1064,18 @@ pub(crate) async fn project_agent_topology(
 /// Acquires the destination-wide native-handoff fence for an already leased
 /// job. The route is resolved by immutable tenant printer/agent identity; a
 /// missing topology row is the bounded compatibility path for older nodes.
+pub(crate) enum JobRouteReservation {
+    Legacy,
+    Busy,
+    Reserved(piqae_protocol::agent::CloudRouteReservation),
+}
+
 pub(crate) async fn reserve_job_route(
     state: &AppState,
     tenant: crate::authentication::TenantContext,
     job: &piqae_domain::Job,
     lease_until: DateTime<Utc>,
-) -> Result<Option<piqae_protocol::agent::CloudRouteReservation>, AppError> {
+) -> Result<JobRouteReservation, AppError> {
     let tenant_scope = scope(tenant);
     let route = state
         .destination_topology
@@ -1034,10 +1108,10 @@ pub(crate) async fn reserve_job_route(
         (matching.len() == 1).then(|| matching[0].clone())
     };
     let Some(route) = route else {
-        return Ok(None);
+        return Ok(JobRouteReservation::Legacy);
     };
     let Some(local_route_key) = route.local_route_key.clone() else {
-        return Ok(None);
+        return Ok(JobRouteReservation::Legacy);
     };
     let destination = state
         .destination_topology
@@ -1045,13 +1119,26 @@ pub(crate) async fn reserve_job_route(
         .await
         .map_err(storage_error)?;
     if destination.state != "available" {
-        return Err(AppError::conflict(
-            "destination_needs_attention",
-            "The physical destination requires operator review before another handoff.",
-        ));
+        return Ok(JobRouteReservation::Busy);
+    }
+    // A per-agent claim must not overtake an older job targeting the same
+    // physical destination on another route. Active older claims are fenced by
+    // the repository's destination-wide reservation; unclaimed older work is
+    // checked here before acquiring it.
+    let older_waiting = state
+        .repository
+        .list_reroutable_target_jobs(tenant.workspace_id, tenant.environment_id, 100)
+        .await?
+        .into_iter()
+        .filter(|candidate| {
+            candidate.metadata.get("piqae.destination_id") == Some(&route.destination_id)
+        })
+        .any(|candidate| (candidate.created_at, candidate.id) < (job.created_at, job.id));
+    if older_waiting {
+        return Ok(JobRouteReservation::Busy);
     }
     let reservation_id = uuid::Uuid::new_v4();
-    let started = state
+    let started = match state
         .destination_topology
         .begin_delivery_attempt(
             tenant_scope,
@@ -1065,15 +1152,21 @@ pub(crate) async fn reserve_job_route(
             },
         )
         .await
-        .map_err(storage_error)?;
-    Ok(Some(piqae_protocol::agent::CloudRouteReservation {
-        route_id: route.id,
-        local_route_key,
-        reservation_id,
-        generation: started.attempt.generation,
-        fencing_token: started.fencing_token,
-        lease_expires_at: started.reservation.lease_until,
-    }))
+    {
+        Ok(value) => value,
+        Err(StorageError::ConcurrentStateChange) => return Ok(JobRouteReservation::Busy),
+        Err(error) => return Err(storage_error(error)),
+    };
+    Ok(JobRouteReservation::Reserved(
+        piqae_protocol::agent::CloudRouteReservation {
+            route_id: route.id,
+            local_route_key,
+            reservation_id,
+            generation: started.attempt.generation,
+            fencing_token: started.fencing_token,
+            lease_expires_at: started.reservation.lease_until,
+        },
+    ))
 }
 
 pub(crate) async fn accept_job_route(
@@ -1297,6 +1390,19 @@ pub(crate) async fn ingest_native_handoffs(
                 .await
                 .map_err(storage_error)?;
         }
+        state
+            .publish(
+                tenant,
+                "attempt.updated",
+                &serde_json::json!({
+                    "attempt_id": attempt.id,
+                    "job_id": attempt.job_id,
+                    "destination_id": attempt.destination_id,
+                    "state": public_attempt_state(attempt.state),
+                    "updated_at": attempt.updated_at,
+                }),
+            )
+            .await?;
         acknowledged = Some(item.sequence);
     }
     Ok(acknowledged)
@@ -1523,7 +1629,7 @@ pub async fn create_identity_decision(
 ) -> Result<(axum::http::StatusCode, Json<IdentityDecisionResponse>), AppError> {
     let tenant = authenticate_native(&state, &headers, Scope::PrintersWrite).await?;
     let tenant_scope = scope(tenant);
-    let mut destination = state
+    let destination = state
         .destination_topology
         .get_destination(tenant_scope, &destination_id)
         .await
@@ -1575,12 +1681,16 @@ pub async fn create_identity_decision(
     related_destination_ids.sort();
     related_destination_ids.dedup();
     let now = Utc::now();
-    let (kind, moved_destination_id) = match request.kind {
+    let (kind, decision_destination_id) = match request.kind {
         DecisionRequestKind::Merge => {
-            if related_destination_ids.len() > 1 {
+            if related_destination_ids.len() != 1
+                || routes
+                    .iter()
+                    .any(|route| route.destination_id == destination_id)
+            {
                 return Err(AppError::conflict(
                     "merge_not_reversible",
-                    "A single decision can merge routes from only one other destination.",
+                    "Select routes from exactly one other destination to merge into this destination.",
                 ));
             }
             (IdentityDecisionKind::Merge, destination_id.clone())
@@ -1596,7 +1706,7 @@ pub async fn create_identity_decision(
                 ));
             }
             let new_id = format!("pdst_{}", ulid::Ulid::new());
-            related_destination_ids = vec![new_id.clone()];
+            related_destination_ids = vec![destination_id.clone()];
             state
                 .destination_topology
                 .upsert_destination(
@@ -1622,32 +1732,14 @@ pub async fn create_identity_decision(
             (IdentityDecisionKind::Split, new_id)
         }
     };
-    for route in &mut routes {
-        route.destination_id.clone_from(&moved_destination_id);
-        route.updated_at = now;
-        state
-            .destination_topology
-            .upsert_route(tenant_scope, route)
-            .await
-            .map_err(storage_error)?;
-    }
-    destination.identity_confidence = IdentityConfidence::Verified;
-    destination.state = "available".into();
-    destination.identity_revision = destination.identity_revision.saturating_add(1);
-    destination.updated_at = now;
-    state
-        .destination_topology
-        .upsert_destination(tenant_scope, &destination)
-        .await
-        .map_err(storage_error)?;
     let decision = IdentityDecision {
         id: format!("idd_{}", ulid::Ulid::new()),
         kind,
-        destination_id,
+        destination_id: decision_destination_id,
         related_destination_ids,
         route_ids: request.route_ids,
         evidence_ids: Vec::new(),
-        actor_kind: "api_principal".into(),
+        actor_kind: "operator".into(),
         actor_id: tenant.platform_service_account_id.map(|id| id.to_string()),
         reason: request.reason.trim().to_owned(),
         reverses_decision_id: None,
@@ -1659,6 +1751,17 @@ pub async fn create_identity_decision(
         .record_identity_decision(tenant_scope, &decision)
         .await
         .map_err(storage_error)?;
+    state
+        .publish(
+            tenant,
+            "destination.updated",
+            &serde_json::json!({
+                "destination_id": decision.destination_id,
+                "decision_id": decision.id,
+                "updated_at": now,
+            }),
+        )
+        .await?;
     Ok((
         axum::http::StatusCode::CREATED,
         Json(decision_response(decision, &HashMap::new())),
@@ -1691,35 +1794,16 @@ pub async fn reverse_identity_decision(
             "This decision was already reversed.",
         ));
     }
-    let restore_destination = match original.kind {
-        IdentityDecisionKind::Split => original.destination_id.clone(),
-        IdentityDecisionKind::Merge => original
-            .related_destination_ids
-            .first()
-            .cloned()
-            .unwrap_or_else(|| original.destination_id.clone()),
+    match original.kind {
+        IdentityDecisionKind::Split | IdentityDecisionKind::Merge => {}
         _ => {
             return Err(AppError::conflict(
                 "identity_decision_not_reversible",
                 "Only merge and split decisions can be reversed.",
             ));
         }
-    };
-    let now = Utc::now();
-    for route_id in &original.route_ids {
-        let mut route = state
-            .destination_topology
-            .get_route(tenant_scope, route_id)
-            .await
-            .map_err(storage_error)?;
-        route.destination_id.clone_from(&restore_destination);
-        route.updated_at = now;
-        state
-            .destination_topology
-            .upsert_route(tenant_scope, &route)
-            .await
-            .map_err(storage_error)?;
     }
+    let now = Utc::now();
     let reversal = IdentityDecision {
         id: format!("idd_{}", ulid::Ulid::new()),
         kind: IdentityDecisionKind::Reverse,
@@ -1727,7 +1811,7 @@ pub async fn reverse_identity_decision(
         related_destination_ids: original.related_destination_ids,
         route_ids: original.route_ids,
         evidence_ids: original.evidence_ids,
-        actor_kind: "api_principal".into(),
+        actor_kind: "operator".into(),
         actor_id: tenant.platform_service_account_id.map(|id| id.to_string()),
         reason: format!("Reversed decision {decision_id}"),
         reverses_decision_id: Some(decision_id),
@@ -1739,6 +1823,17 @@ pub async fn reverse_identity_decision(
         .reverse_identity_decision(tenant_scope, &reversal)
         .await
         .map_err(storage_error)?;
+    state
+        .publish(
+            tenant,
+            "destination.updated",
+            &serde_json::json!({
+                "destination_id": reversal.destination_id,
+                "decision_id": reversal.id,
+                "updated_at": now,
+            }),
+        )
+        .await?;
     Ok(Json(decision_response(reversal, &HashMap::new())))
 }
 

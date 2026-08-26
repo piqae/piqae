@@ -45,7 +45,7 @@ use rand::{RngCore, rngs::OsRng};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
     convert::Infallible,
     str::FromStr,
 };
@@ -1749,10 +1749,27 @@ async fn resolve_job_destination(
                 .repository
                 .resolve_printer_agent(tenant.workspace_id, tenant.environment_id, printer_id)
                 .await?;
+            let topology_route = state
+                .destination_topology
+                .list_all_routes(crate::destination_topology::tenant_scope(tenant))
+                .await
+                .map_err(crate::destination_topology::map_storage_error)?
+                .into_iter()
+                .find(|route| {
+                    route.enabled
+                        && route.printer_id == printer_id.to_string()
+                        && route.agent_id == agent_id.to_string()
+                });
+            let mut metadata =
+                BTreeMap::from([("piqae.route_agent_id".into(), agent_id.to_string())]);
+            if let Some(route) = topology_route {
+                metadata.insert("piqae.destination_id".into(), route.destination_id);
+                metadata.insert("piqae.route_id".into(), route.id);
+            }
             Ok(ResolvedJobDestination {
                 printer_id,
                 agent_id,
-                metadata: BTreeMap::from([("piqae.route_agent_id".into(), agent_id.to_string())]),
+                metadata,
                 binding: None,
             })
         }
@@ -1900,6 +1917,13 @@ async fn resolve_target_destination(
         .repository
         .list_target_bindings(tenant.workspace_id, tenant.environment_id, target_id)
         .await?;
+    let topology_routes = state
+        .destination_topology
+        .list_all_routes(crate::destination_topology::tenant_scope(tenant))
+        .await
+        .map_err(crate::destination_topology::map_storage_error)?;
+    let mut ranked_by_destination = HashMap::<String, Vec<String>>::new();
+    let mut best_ready = None::<(usize, ResolvedJobDestination)>;
     let mut configured_fallback = None;
     for binding in bindings.into_iter().filter(|binding| binding.enabled) {
         let agent_exists = agents.iter().any(|agent| agent.id == binding.agent_id);
@@ -1945,6 +1969,15 @@ async fn resolve_target_destination(
                 profile.revision.to_string(),
             ),
         ]);
+        let topology_route = topology_routes.iter().find(|route| {
+            route.enabled
+                && route.printer_id == printer.id.to_string()
+                && route.agent_id == printer.agent_id.to_string()
+        });
+        if let Some(route) = topology_route {
+            metadata.insert("piqae.destination_id".into(), route.destination_id.clone());
+            metadata.insert("piqae.route_id".into(), route.id.clone());
+        }
         if let Some(stock_id) = target.stock_id.as_ref().or(profile.stock_id.as_ref()) {
             metadata.insert("piqae.stock_id".into(), stock_id.clone());
         }
@@ -1955,11 +1988,40 @@ async fn resolve_target_destination(
             binding: Some(binding),
         };
         if agent_ready && printer.state == PrinterState::Online {
-            return Ok(destination);
+            let rank = if let Some(route) = topology_route {
+                if !ranked_by_destination.contains_key(&route.destination_id) {
+                    let ranked = crate::destination_topology::ranked_ready_routes(
+                        state,
+                        crate::destination_topology::tenant_scope(tenant),
+                        &route.destination_id,
+                    )
+                    .await?
+                    .into_iter()
+                    .map(|candidate| candidate.id)
+                    .collect();
+                    ranked_by_destination.insert(route.destination_id.clone(), ranked);
+                }
+                ranked_by_destination
+                    .get(&route.destination_id)
+                    .and_then(|ranked| ranked.iter().position(|id| id == &route.id))
+            } else {
+                Some(usize::MAX - 1)
+            };
+            if let Some(rank) = rank
+                && best_ready
+                    .as_ref()
+                    .is_none_or(|(current, _)| rank < *current)
+            {
+                best_ready = Some((rank, destination));
+            }
+            continue;
         }
         if allow_offline && configured_fallback.is_none() {
             configured_fallback = Some(destination);
         }
+    }
+    if let Some((_, destination)) = best_ready {
+        return Ok(destination);
     }
     if let Some(destination) = configured_fallback {
         return Ok(destination);
@@ -2485,6 +2547,19 @@ pub async fn agent_sync(
         .await?;
     let inventory_projection =
         crate::destination_topology::project_agent_topology(&state, tenant, &request).await?;
+    if let Some(projection) = inventory_projection.as_ref() {
+        let invalidation = serde_json::json!({
+            "agent_id": request.agent_id,
+            "inventory_revision": projection.revision,
+            "observed_at": request.health.observed_at,
+        });
+        state
+            .publish(tenant, "route.updated", &invalidation)
+            .await?;
+        state
+            .publish(tenant, "destination.updated", &invalidation)
+            .await?;
+    }
     let acknowledged_handoff_sequence = crate::destination_topology::ingest_native_handoffs(
         &state,
         tenant,
@@ -2568,13 +2643,33 @@ pub async fn agent_sync(
     };
     let mut candidate_jobs = Vec::with_capacity(leases.len());
     for lease in leases {
-        let route_reservation = crate::destination_topology::reserve_job_route(
+        let route_reservation = match crate::destination_topology::reserve_job_route(
             &state,
             tenant,
             &lease.job,
             lease.lease_until,
         )
-        .await?;
+        .await?
+        {
+            crate::destination_topology::JobRouteReservation::Legacy => None,
+            crate::destination_topology::JobRouteReservation::Reserved(reservation) => {
+                Some(reservation)
+            }
+            crate::destination_topology::JobRouteReservation::Busy => {
+                state
+                    .repository
+                    .release_agent_lease(
+                        tenant.workspace_id,
+                        tenant.environment_id,
+                        request.agent_id,
+                        lease.job.id,
+                        lease.lease_id,
+                        &lease.lease_token,
+                    )
+                    .await?;
+                continue;
+            }
+        };
         let mut content = match &lease.job.content {
             ContentSource::Upload { upload_id } => {
                 let upload = state
