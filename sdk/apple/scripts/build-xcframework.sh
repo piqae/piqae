@@ -17,7 +17,7 @@ if [ -e "$output" ] || [ -e "$archive" ] || [ -e "$manifest" ]; then
   rm -f -- "$archive" "$manifest"
 fi
 
-for command in cargo rustup lipo xcodebuild ditto swift shasum; do
+for command in cargo rustup lipo python3 xcodebuild swift shasum xattr zip; do
   if ! command -v "$command" >/dev/null 2>&1; then
     echo "required command is unavailable: $command" >&2
     exit 2
@@ -81,7 +81,33 @@ xcodebuild -create-xcframework \
   -library "$simulator_library" -headers "$headers" \
   -output "$output"
 
-ditto -c -k --sequesterRsrc --keepParent "$output" "$archive"
+# Xcode emits AvailableLibraries in a nondeterministic order. Canonicalize that
+# array and the plist keys before normalizing filesystem metadata and zip order.
+python3 - "$output/Info.plist" <<'PY'
+import plistlib
+import sys
+
+path = sys.argv[1]
+with open(path, "rb") as source:
+    info = plistlib.load(source)
+info["AvailableLibraries"] = sorted(
+    info["AvailableLibraries"], key=lambda item: item["LibraryIdentifier"]
+)
+with open(path, "wb") as destination:
+    plistlib.dump(info, destination, fmt=plistlib.FMT_XML, sort_keys=True)
+PY
+
+# Xcode stamps every generated path and adds provenance xattrs. Normalize both,
+# then feed zip a sorted path list so identical source and toolchains produce the
+# same SwiftPM archive checksum instead of a build-time-dependent one.
+xattr -cr "$output"
+find "$output" -exec touch -h -t 198001010000 {} +
+(
+  cd "$artifact_directory"
+  find PiqaeNode.xcframework -print \
+    | LC_ALL=C sort \
+    | COPYFILE_DISABLE=1 zip -X -q "$archive" -@
+)
 swiftpm_checksum=$(swift package compute-checksum "$archive")
 sha256=$(shasum -a 256 "$archive" | awk '{print $1}')
 revision=$(git -C "$repository_root" rev-parse HEAD)

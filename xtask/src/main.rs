@@ -800,6 +800,7 @@ const CHECKS: &[Check] = &[
         steps: &[
             &["swift", "test", "--package-path", "shells/macos"],
             &["release/tools/test_apple_node_sdk.sh"],
+            &["release/tools/test_apple_node_sdk_linked.sh"],
         ],
     },
     Check {

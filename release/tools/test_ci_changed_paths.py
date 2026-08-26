@@ -90,6 +90,7 @@ class CiChangedPathsTests(unittest.TestCase):
         for path in (
             "sdk/apple/Sources/PiqaeNodeKit/PiqaeNode.swift",
             "release/tools/test_apple_node_sdk.sh",
+            "release/tools/test_apple_node_sdk_linked.sh",
         ):
             with self.subTest(path=path):
                 selected = classify([path])
