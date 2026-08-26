@@ -8,6 +8,7 @@
 //! fencing.
 
 pub mod broker;
+pub mod cloud_worker;
 pub mod command;
 pub mod connector_registry;
 mod durable_file;
@@ -22,6 +23,7 @@ pub use broker::{
     ApplicationAuthorization, ApplicationCapabilities, ApplicationIdentity, BrokerConsentHandle,
     BrokerRegistry, BrokerServerState, BrokerToken,
 };
+pub use cloud_worker::*;
 pub use command::*;
 pub use embedded::*;
 pub use installation::{
