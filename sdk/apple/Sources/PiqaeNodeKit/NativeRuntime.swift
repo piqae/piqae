@@ -198,8 +198,14 @@ public actor PiqaeNativeRuntime: PiqaeEmbeddedNodeRuntime, PiqaeOpaqueIdentityPr
         let request: ReconcileCloudRequestData = try Self.unwrap(
             library.command(handle, requestData)
         )
-        guard request.cloudConfigured, let generation = request.generation else {
+        if !request.cloudConfigured {
+            guard request.generation == nil else {
+                throw PiqaeNativeRuntimeError.invalidResponse
+            }
             return .noCloud
+        }
+        guard let generation = request.generation, generation > 0 else {
+            throw PiqaeNativeRuntimeError.invalidResponse
         }
         let deadline = ContinuousClock.now.advanced(by: .milliseconds(Int64(timeout)))
         while ContinuousClock.now < deadline {
@@ -213,7 +219,16 @@ public actor PiqaeNativeRuntime: PiqaeEmbeddedNodeRuntime, PiqaeOpaqueIdentityPr
             let poll: ReconcileCloudPollData = try Self.unwrap(
                 library.command(handle, pollData)
             )
+            guard poll.cloudConfigured,
+                poll.generation == generation,
+                poll.pending == (poll.outcome == nil)
+            else { throw PiqaeNativeRuntimeError.invalidResponse }
             if let outcome = poll.outcome {
+                // Coalescing may complete a later supervisor pass for this
+                // request, but an older generation cannot satisfy it.
+                guard outcome.generation >= generation else {
+                    throw PiqaeNativeRuntimeError.invalidResponse
+                }
                 return PiqaeCloudReconcileOutcome(
                     generation: outcome.generation,
                     cloudConfigured: poll.cloudConfigured,
