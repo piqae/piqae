@@ -435,8 +435,24 @@ async fn postgres_topology_is_tenant_isolated_and_fences_delivery() {
         observer_a.record_route_observation(first, &concurrent_a),
         observer_b.record_route_observation(first, &concurrent_b)
     );
-    recorded_a.expect("first concurrent observation");
-    recorded_b.expect("second concurrent observation");
+    recorded_a.expect("first concurrent retry");
+    recorded_b.expect("second concurrent retry");
+    let mut next_observation = observation.clone();
+    next_observation.id = "observation_4".into();
+    next_observation.sequence = 2;
+    next_observation.observed_at = Utc::now();
+    next_observation.fresh_until = Utc::now() + Duration::seconds(20);
+    store
+        .record_route_observation(first, &next_observation)
+        .await
+        .expect("next durable node sequence");
+    let mut stale_conflict = observation.clone();
+    stale_conflict.id = "observation_stale".into();
+    stale_conflict.printer_state = "idle".into();
+    assert!(matches!(
+        store.record_route_observation(first, &stale_conflict).await,
+        Err(StorageError::IdempotencyConflict)
+    ));
     assert_eq!(
         store
             .list_route_observations(first, "route_first", 10)
@@ -445,7 +461,7 @@ async fn postgres_topology_is_tenant_isolated_and_fences_delivery() {
             .iter()
             .map(|item| item.sequence)
             .collect::<Vec<_>>(),
-        vec![3, 2, 1]
+        vec![2, 1]
     );
     assert_eq!(
         store
@@ -609,8 +625,8 @@ async fn postgres_topology_is_tenant_isolated_and_fences_delivery() {
             .await
             .expect("unresolved uncertainty")
     );
-    let resolution = store
-        .resolve_delivery_uncertainty(
+    let pending_resolution = store
+        .enqueue_delivery_uncertainty_resolution(
             first,
             "job_first",
             "confirmed_delivered",
@@ -619,7 +635,35 @@ async fn postgres_topology_is_tenant_isolated_and_fences_delivery() {
             "resolve_job_first",
         )
         .await
-        .expect("durable uncertainty resolution");
+        .expect("enqueue durable uncertainty resolution command");
+    assert_eq!(
+        pending_resolution.command,
+        serde_json::json!({
+            "type": "resolve_ambiguous_handoff",
+            "job_id": "job_first",
+            "local_route_key": "rte_local_first",
+            "reservation_id": "reservation_1",
+            "generation": 1,
+            "resolution": "confirm_accepted"
+        })
+    );
+    assert!(
+        store
+            .finalize_delivery_uncertainty_resolution(first, "resolve_job_first")
+            .await
+            .expect("pending resolution lookup")
+            .is_none()
+    );
+    sqlx::query("UPDATE agent_commands SET delivered_at=now(),acknowledged_at=now() WHERE workspace_id=$1 AND environment_id=$2 AND cursor=$3")
+        .bind(first.workspace_id.to_string())
+        .bind(first.environment_id.to_string())
+        .bind(i64::try_from(pending_resolution.agent_command_cursor).expect("command cursor"))
+        .execute(store.pool()).await.expect("acknowledge exact agent command");
+    let resolution = store
+        .finalize_delivery_uncertainty_resolution(first, "resolve_job_first")
+        .await
+        .expect("finalize acknowledged uncertainty resolution")
+        .expect("acknowledged resolution");
     assert_eq!(resolution.attempt_id, "attempt_1");
     assert!(
         !store
@@ -628,7 +672,48 @@ async fn postgres_topology_is_tenant_isolated_and_fences_delivery() {
             .expect("uncertainty cleared")
     );
 
-    sqlx::query("INSERT INTO jobs (id,workspace_id,environment_id,printer_id,agent_id,payload,state,per_printer_sequence,expires_at,destination_id,route_id) VALUES ('job_expired',$1,$2,'ptr_backup','agt_first_backup','{}'::jsonb,'registered',2,now()+interval '1 hour','destination_source','route_first_backup')")
+    sqlx::query("INSERT INTO jobs (id,workspace_id,environment_id,printer_id,agent_id,payload,state,per_printer_sequence,expires_at,destination_id,route_id,created_at) VALUES ('job_stale_owner',$1,$2,'ptr_backup','agt_first_backup','{}'::jsonb,'waiting_for_agent',1,now()-interval '1 second','destination_source','route_first_backup',now()-interval '2 minutes'),('job_after_stale',$1,$2,'ptr_backup','agt_first_backup','{}'::jsonb,'waiting_for_agent',2,now()+interval '1 hour','destination_source','route_first_backup',now()-interval '1 minute')")
+        .bind(first.workspace_id.to_string()).bind(first.environment_id.to_string()).execute(store.pool()).await.expect("stale destination handoff jobs");
+    store
+        .begin_delivery_attempt(
+            first,
+            NewDeliveryAttempt {
+                attempt_id: "attempt_stale_owner",
+                reservation_id: "reservation_stale_owner",
+                job_id: "job_stale_owner",
+                destination_id: "destination_source",
+                route_id: "route_first_backup",
+                lease_until: Utc::now() - Duration::seconds(1),
+            },
+        )
+        .await
+        .expect("expired other-job handoff");
+    let after_stale = store
+        .begin_delivery_attempt(
+            first,
+            NewDeliveryAttempt {
+                attempt_id: "attempt_after_stale",
+                reservation_id: "reservation_after_stale",
+                job_id: "job_after_stale",
+                destination_id: "destination_source",
+                route_id: "route_first_backup",
+                lease_until: Utc::now() + Duration::minutes(1),
+            },
+        )
+        .await
+        .expect("expired other-job reservation is retired");
+    store
+        .transition_delivery_attempt(
+            first,
+            "attempt_after_stale",
+            1,
+            &after_stale.fencing_token,
+            DeliveryAttemptState::Failed,
+        )
+        .await
+        .expect("close test-only replacement handoff");
+
+    sqlx::query("INSERT INTO jobs (id,workspace_id,environment_id,printer_id,agent_id,payload,state,per_printer_sequence,expires_at,destination_id,route_id) VALUES ('job_expired',$1,$2,'ptr_backup','agt_first_backup','{}'::jsonb,'registered',3,now()+interval '1 hour','destination_source','route_first_backup')")
         .bind(first.workspace_id.to_string()).bind(first.environment_id.to_string()).execute(store.pool()).await.expect("expired lease job");
     let expired = store
         .begin_delivery_attempt(
@@ -823,15 +908,19 @@ async fn postgres_topology_is_tenant_isolated_and_fences_delivery() {
         ),
         (
             "job_race_b",
-            3_i64,
+            4_i64,
             "ptr_backup",
             "agt_first_backup",
             "route_first_backup",
         ),
     ] {
-        sqlx::query("INSERT INTO jobs (id,workspace_id,environment_id,printer_id,agent_id,payload,state,per_printer_sequence,expires_at,destination_id,route_id) VALUES ($1,$2,$3,$4,$5,'{}'::jsonb,'registered',$6,now()+interval '1 hour','destination_shared',$7)")
-            .bind(job_id).bind(first.workspace_id.to_string()).bind(first.environment_id.to_string()).bind(printer_id).bind(agent_id).bind(sequence).bind(route_id).execute(store.pool()).await.expect("scheduler race job");
+        sqlx::query("INSERT INTO jobs (id,workspace_id,environment_id,printer_id,agent_id,payload,state,per_printer_sequence,expires_at,destination_id,route_id,created_at) VALUES ($1,$2,$3,$4,$5,'{}'::jsonb,'waiting_for_agent',$6,now()+interval '1 hour','destination_shared',$7,now()+($8::bigint * interval '1 second'))")
+            .bind(job_id).bind(first.workspace_id.to_string()).bind(first.environment_id.to_string()).bind(printer_id).bind(agent_id).bind(sequence).bind(route_id).bind(sequence).execute(store.pool()).await.expect("scheduler race job");
     }
+    sqlx::query("UPDATE jobs SET lease_until=now()+interval '1 minute',lease_owner='older-scheduler' WHERE workspace_id=$1 AND environment_id=$2 AND id='job_race_a'")
+        .bind(first.workspace_id.to_string()).bind(first.environment_id.to_string()).execute(store.pool()).await.expect("active older claim");
+    sqlx::query("INSERT INTO jobs (id,workspace_id,environment_id,printer_id,agent_id,payload,state,per_printer_sequence,expires_at,destination_id,route_id,created_at) VALUES ('job_nonready_older',$1,$2,'ptr_shared','agt_first','{}'::jsonb,'registered',4,now()+interval '1 hour','destination_shared','route_first',now()-interval '1 hour')")
+        .bind(first.workspace_id.to_string()).bind(first.environment_id.to_string()).execute(store.pool()).await.expect("non-ready older job");
     let scheduler_a = store.clone();
     let scheduler_b = store.clone();
     let (race_a, race_b) = tokio::join!(
@@ -858,17 +947,9 @@ async fn postgres_topology_is_tenant_isolated_and_fences_delivery() {
             }
         )
     );
-    assert_eq!(usize::from(race_a.is_ok()) + usize::from(race_b.is_ok()), 1);
-    assert!(matches!(
-        race_a.as_ref().err().or_else(|| race_b.as_ref().err()),
-        Some(StorageError::ConcurrentStateChange)
-    ));
-
-    let (winner, loser_job, loser_route) = match (race_a, race_b) {
-        (Ok(winner), Err(_)) => (winner, "job_race_b", "route_first_backup"),
-        (Err(_), Ok(winner)) => (winner, "job_race_a", "route_first"),
-        _ => panic!("exactly one scheduler must reserve the physical destination"),
-    };
+    let winner = race_a.expect("oldest eligible job wins destination order");
+    assert!(matches!(race_b, Err(StorageError::ConcurrentStateChange)));
+    let (loser_job, loser_route) = ("job_race_b", "route_first_backup");
     for next in [
         DeliveryAttemptState::AcceptedByNode,
         DeliveryAttemptState::QueuedLocal,
@@ -920,21 +1001,21 @@ async fn postgres_topology_is_tenant_isolated_and_fences_delivery() {
             .is_none()
     );
     store
-        .transition_delivery_attempt(
+        .transition_post_spooler_attempt(
             first,
-            &winner.attempt.id,
-            winner.attempt.generation,
-            &winner.fencing_token,
+            &winner.attempt.job_id,
+            "agt_first",
+            "route_first",
             DeliveryAttemptState::PrintingReported,
         )
         .await
         .expect("native printing event");
     let definitively_failed = store
-        .transition_delivery_attempt(
+        .transition_post_spooler_attempt(
             first,
-            &winner.attempt.id,
-            winner.attempt.generation,
-            &winner.fencing_token,
+            &winner.attempt.job_id,
+            "agt_first",
+            "route_first",
             DeliveryAttemptState::Failed,
         )
         .await

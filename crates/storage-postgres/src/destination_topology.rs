@@ -6,7 +6,9 @@
 //! cross-tenant lookup or mutation.
 
 #![allow(
+    clippy::cognitive_complexity,
     clippy::significant_drop_tightening,
+    clippy::suspicious_operation_groupings,
     reason = "short in-memory critical sections mirror transactional repository operations"
 )]
 
@@ -20,7 +22,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::Row;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{Arc, RwLock},
 };
 
@@ -329,6 +331,25 @@ pub struct DeliveryUncertaintyResolution {
     pub created_at: DateTime<Utc>,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct PendingDeliveryUncertaintyResolution {
+    pub request_id: String,
+    pub job_id: String,
+    pub attempt_id: String,
+    pub destination_id: String,
+    pub route_id: String,
+    pub agent_id: String,
+    pub reservation_id: String,
+    pub generation: u64,
+    pub resolution: String,
+    pub note: Option<String>,
+    pub actor_id: String,
+    pub agent_command_cursor: u64,
+    pub command: serde_json::Value,
+    pub created_at: DateTime<Utc>,
+    pub finalized_at: Option<DateTime<Utc>>,
+}
+
 #[derive(Clone, Debug)]
 pub struct NewDeliveryAttempt<'a> {
     pub attempt_id: &'a str,
@@ -455,6 +476,24 @@ pub trait DestinationTopologyRepository: Send + Sync {
         fencing_token: &str,
         next: DeliveryAttemptState,
     ) -> Result<DeliveryAttempt, StorageError>;
+    /// Applies a trusted node event after durable spooler acceptance. The
+    /// caller has already authenticated the agent; no scheduler fencing token
+    /// is available on this later event path.
+    async fn transition_post_spooler_attempt(
+        &self,
+        scope: TenantScope,
+        job_id: &str,
+        agent_id: &str,
+        route_id: &str,
+        next: DeliveryAttemptState,
+    ) -> Result<DeliveryAttempt, StorageError>;
+    /// Converts a timed-out post-spooler attempt to uncertain delivery and
+    /// marks its physical destination for operator attention atomically.
+    async fn mark_post_spooler_attempt_uncertain(
+        &self,
+        scope: TenantScope,
+        job_id: &str,
+    ) -> Result<DeliveryAttempt, StorageError>;
     async fn renew_delivery_attempt(
         &self,
         scope: TenantScope,
@@ -463,7 +502,7 @@ pub trait DestinationTopologyRepository: Send + Sync {
         fencing_token: &str,
         lease_until: DateTime<Utc>,
     ) -> Result<StartedDeliveryAttempt, StorageError>;
-    async fn resolve_delivery_uncertainty(
+    async fn enqueue_delivery_uncertainty_resolution(
         &self,
         scope: TenantScope,
         job_id: &str,
@@ -471,7 +510,26 @@ pub trait DestinationTopologyRepository: Send + Sync {
         note: Option<&str>,
         actor_id: &str,
         request_id: &str,
-    ) -> Result<DeliveryUncertaintyResolution, StorageError>;
+    ) -> Result<PendingDeliveryUncertaintyResolution, StorageError>;
+    async fn finalize_delivery_uncertainty_resolution(
+        &self,
+        scope: TenantScope,
+        request_id: &str,
+    ) -> Result<Option<DeliveryUncertaintyResolution>, StorageError>;
+    async fn finalize_acknowledged_uncertainty_resolutions(
+        &self,
+        scope: TenantScope,
+        agent_id: &str,
+        limit: u32,
+    ) -> Result<Vec<DeliveryUncertaintyResolution>, StorageError>;
+    /// Memory adapter hook corresponding to durable agent-command cursor ACK.
+    /// PostgreSQL rejects this direct hook; its existing command-sync path is
+    /// the sole authority for acknowledgement.
+    async fn acknowledge_uncertainty_resolution_command(
+        &self,
+        scope: TenantScope,
+        agent_command_cursor: u64,
+    ) -> Result<(), StorageError>;
     async fn has_unresolved_destination_uncertainty(
         &self,
         scope: TenantScope,
@@ -743,6 +801,30 @@ fn map_uncertainty_resolution(
     })
 }
 
+fn pending_uncertainty_resolution_from_row(
+    row: &sqlx::postgres::PgRow,
+) -> Result<PendingDeliveryUncertaintyResolution, StorageError> {
+    let generation = i64_to_u64(row.try_get("generation")?, "generation")?;
+    let cursor = i64_to_u64(row.try_get("agent_command_cursor")?, "agent command cursor")?;
+    Ok(PendingDeliveryUncertaintyResolution {
+        request_id: row.try_get("request_id")?,
+        job_id: row.try_get("job_id")?,
+        attempt_id: row.try_get("attempt_id")?,
+        destination_id: row.try_get("destination_id")?,
+        route_id: row.try_get("route_id")?,
+        agent_id: row.try_get("agent_id")?,
+        reservation_id: row.try_get("reservation_id")?,
+        generation,
+        resolution: row.try_get("resolution")?,
+        note: row.try_get("note")?,
+        actor_id: row.try_get("actor_id")?,
+        agent_command_cursor: cursor,
+        command: row.try_get("command")?,
+        created_at: row.try_get("created_at")?,
+        finalized_at: row.try_get("finalized_at")?,
+    })
+}
+
 #[async_trait]
 impl DestinationTopologyRepository for PostgresStore {
     async fn upsert_scheduling_authority(
@@ -849,7 +931,12 @@ impl DestinationTopologyRepository for PostgresStore {
         evidence: &IdentityEvidence,
     ) -> Result<(), StorageError> {
         let mut tx = self.pool().begin().await?;
-        sqlx::query("INSERT INTO destination_identity_evidence (workspace_id,environment_id,id,destination_id,route_id,kind,value_digest,strength,conflicts,observed_at,expires_at,metadata) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT (workspace_id,environment_id,route_id,kind,value_digest) DO UPDATE SET strength=EXCLUDED.strength,conflicts=EXCLUDED.conflicts,observed_at=EXCLUDED.observed_at,expires_at=EXCLUDED.expires_at,metadata=EXCLUDED.metadata")
+        let route_matches: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM printer_routes WHERE workspace_id=$1 AND environment_id=$2 AND id=$3 AND destination_id=$4)")
+            .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).bind(&evidence.route_id).bind(&evidence.destination_id).fetch_one(&mut *tx).await?;
+        if !route_matches {
+            return Err(StorageError::NotFound);
+        }
+        sqlx::query("INSERT INTO destination_identity_evidence (workspace_id,environment_id,id,destination_id,route_id,kind,value_digest,strength,conflicts,observed_at,expires_at,metadata) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT (workspace_id,environment_id,route_id,kind,value_digest) DO UPDATE SET destination_id=EXCLUDED.destination_id,strength=EXCLUDED.strength,conflicts=EXCLUDED.conflicts,observed_at=EXCLUDED.observed_at,expires_at=EXCLUDED.expires_at,metadata=EXCLUDED.metadata")
             .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).bind(&evidence.id).bind(&evidence.destination_id).bind(&evidence.route_id).bind(&evidence.kind).bind(&evidence.value_digest).bind(&evidence.strength).bind(evidence.conflicts).bind(evidence.observed_at).bind(evidence.expires_at).bind(&evidence.metadata).execute(&mut *tx).await?;
         if evidence.conflicts {
             sqlx::query("UPDATE physical_destinations SET identity_confidence='conflict',identity_revision=identity_revision+1,updated_at=now() WHERE workspace_id=$1 AND environment_id=$2 AND id=$3")
@@ -914,14 +1001,23 @@ impl DestinationTopologyRepository for PostgresStore {
         let mut tx = self.pool().begin().await?;
         sqlx::query("SELECT id FROM printer_routes WHERE workspace_id=$1 AND environment_id=$2 AND id=$3 FOR UPDATE")
             .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).bind(&observation.route_id).fetch_optional(&mut *tx).await?.ok_or(StorageError::NotFound)?;
-        let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM route_observations WHERE workspace_id=$1 AND environment_id=$2 AND id=$3)")
-            .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).bind(&observation.id).fetch_one(&mut *tx).await?;
-        if exists {
-            tx.commit().await?;
-            return Ok(());
+        let sequence = i64::try_from(observation.sequence)
+            .map_err(|_| StorageError::InvalidData("observation sequence exceeds bigint".into()))?;
+        if let Some(existing) = sqlx::query("SELECT id,route_id,sequence,printer_state,accepting_jobs,state_reasons,total_jobs,connector_jobs,other_piqae_or_external_jobs,unknown_jobs,active_jobs,held_jobs,estimated_busy_seconds,privacy_level,stock_state,observed_at,fresh_until FROM route_observations WHERE workspace_id=$1 AND environment_id=$2 AND route_id=$3 AND sequence=$4")
+            .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).bind(&observation.route_id).bind(sequence).fetch_optional(&mut *tx).await? {
+            let mut stored = map_observation(&existing)?;
+            stored.id.clone_from(&observation.id);
+            if stored == *observation {
+                tx.commit().await?;
+                return Ok(());
+            }
+            return Err(StorageError::IdempotencyConflict);
         }
-        let sequence: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(sequence),0)+1 FROM route_observations WHERE workspace_id=$1 AND environment_id=$2 AND route_id=$3")
+        let latest: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(sequence),0) FROM route_observations WHERE workspace_id=$1 AND environment_id=$2 AND route_id=$3")
             .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).bind(&observation.route_id).fetch_one(&mut *tx).await?;
+        if sequence <= latest {
+            return Err(StorageError::ConcurrentStateChange);
+        }
         sqlx::query("INSERT INTO route_observations (workspace_id,environment_id,id,route_id,sequence,printer_state,accepting_jobs,state_reasons,total_jobs,connector_jobs,other_piqae_or_external_jobs,unknown_jobs,active_jobs,held_jobs,estimated_busy_seconds,privacy_level,stock_state,observed_at,fresh_until) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)")
             .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).bind(&observation.id).bind(&observation.route_id).bind(sequence).bind(&observation.printer_state).bind(observation.accepting_jobs).bind(&observation.state_reasons).bind(i32::try_from(observation.total_jobs).map_err(|_| StorageError::InvalidData("total job count exceeds integer".into()))?).bind(i32::try_from(observation.connector_jobs).map_err(|_| StorageError::InvalidData("connector job count exceeds integer".into()))?).bind(i32::try_from(observation.other_piqae_or_external_jobs).map_err(|_| StorageError::InvalidData("other job count exceeds integer".into()))?).bind(i32::try_from(observation.unknown_jobs).map_err(|_| StorageError::InvalidData("unknown job count exceeds integer".into()))?).bind(i32::try_from(observation.active_jobs).map_err(|_| StorageError::InvalidData("active job count exceeds integer".into()))?).bind(i32::try_from(observation.held_jobs).map_err(|_| StorageError::InvalidData("held job count exceeds integer".into()))?).bind(observation.estimated_busy_seconds.map(i32::try_from).transpose().map_err(|_| StorageError::InvalidData("estimated busy seconds exceeds integer".into()))?).bind(&observation.privacy_level).bind(&observation.stock_state).bind(observation.observed_at).bind(observation.fresh_until).execute(&mut *tx).await?;
         tx.commit().await?;
@@ -988,8 +1084,8 @@ impl DestinationTopologyRepository for PostgresStore {
         request: NewDeliveryAttempt<'_>,
     ) -> Result<StartedDeliveryAttempt, StorageError> {
         let mut tx = self.pool().begin().await?;
-        sqlx::query(
-            "SELECT id FROM jobs WHERE workspace_id=$1 AND environment_id=$2 AND id=$3 FOR UPDATE",
+        let job = sqlx::query(
+            "SELECT id,destination_id FROM jobs WHERE workspace_id=$1 AND environment_id=$2 AND id=$3 FOR UPDATE",
         )
         .bind(scope.workspace_id.to_string())
         .bind(scope.environment_id.to_string())
@@ -997,10 +1093,21 @@ impl DestinationTopologyRepository for PostgresStore {
         .fetch_optional(&mut *tx)
         .await?
         .ok_or(StorageError::NotFound)?;
+        let job_destination: Option<String> = job.try_get("destination_id")?;
+        if job_destination
+            .as_deref()
+            .is_some_and(|id| id != request.destination_id)
+        {
+            return Err(StorageError::ConcurrentStateChange);
+        }
         let route_matches_destination: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM printer_routes WHERE workspace_id=$1 AND environment_id=$2 AND id=$3 AND destination_id=$4 AND enabled AND retired_at IS NULL)")
             .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).bind(request.route_id).bind(request.destination_id).fetch_one(&mut *tx).await?;
         if !route_matches_destination {
             return Err(StorageError::NotFound);
+        }
+        if job_destination.is_none() {
+            sqlx::query("UPDATE jobs SET destination_id=$4,route_id=$5,updated_at=now() WHERE workspace_id=$1 AND environment_id=$2 AND id=$3 AND destination_id IS NULL")
+                .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).bind(request.job_id).bind(request.destination_id).bind(request.route_id).execute(&mut *tx).await?;
         }
         // Serialize schedulers at the physical destination boundary, including
         // schedulers choosing different node routes for the same printer.
@@ -1014,6 +1121,66 @@ impl DestinationTopologyRepository for PostgresStore {
         let unresolved: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM delivery_attempts attempt WHERE attempt.workspace_id=$1 AND attempt.environment_id=$2 AND attempt.destination_id=$3 AND attempt.state='delivery_uncertain' AND NOT EXISTS (SELECT 1 FROM delivery_uncertainty_resolutions resolution WHERE resolution.workspace_id=attempt.workspace_id AND resolution.environment_id=attempt.environment_id AND resolution.attempt_id=attempt.id))")
             .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).bind(request.destination_id).fetch_one(&mut *tx).await?;
         if unresolved {
+            return Err(StorageError::ConcurrentStateChange);
+        }
+        // A scheduler may disappear after reserving but before the node accepts.
+        // Retire only expired route_leased handoffs; every later state is
+        // ambiguity-sensitive and must remain fenced until explicit evidence.
+        let stale_attempt_ids: Vec<String> = sqlx::query_scalar(
+            "UPDATE delivery_attempts
+             SET state='superseded',final_at=now(),updated_at=now()
+             WHERE workspace_id=$1 AND environment_id=$2 AND destination_id=$3
+               AND state='route_leased' AND final_at IS NULL AND lease_until<=now()
+             RETURNING id",
+        )
+        .bind(scope.workspace_id.to_string())
+        .bind(scope.environment_id.to_string())
+        .bind(request.destination_id)
+        .fetch_all(&mut *tx)
+        .await?;
+        if !stale_attempt_ids.is_empty() {
+            sqlx::query(
+                "UPDATE route_reservations
+                 SET state='superseded',released_at=now(),updated_at=now()
+                 WHERE workspace_id=$1 AND environment_id=$2
+                   AND attempt_id=ANY($3) AND state='active'",
+            )
+            .bind(scope.workspace_id.to_string())
+            .bind(scope.environment_id.to_string())
+            .bind(&stale_attempt_ids)
+            .execute(&mut *tx)
+            .await?;
+        }
+        let older_eligible_job: bool = sqlx::query_scalar(
+            "SELECT EXISTS(
+                SELECT 1 FROM jobs older
+                WHERE older.workspace_id=$1 AND older.environment_id=$2
+                  AND older.destination_id=$3 AND older.id<>$4
+                  AND (older.created_at,older.id) < (
+                      SELECT created_at,id FROM jobs
+                      WHERE workspace_id=$1 AND environment_id=$2 AND id=$4
+                  )
+                  AND older.state IN ('waiting_for_agent','failed_retryable')
+                  AND older.expires_at > now()
+                  AND COALESCE((
+                      SELECT attempt.state FROM delivery_attempts attempt
+                      WHERE attempt.workspace_id=older.workspace_id
+                        AND attempt.environment_id=older.environment_id
+                        AND attempt.job_id=older.id
+                      ORDER BY attempt.generation DESC LIMIT 1
+                  ),'route_leased') NOT IN (
+                      'accepted_by_spooler','printing_reported','completed_reported',
+                      'cancelled','failed','delivery_uncertain','superseded'
+                  )
+            )",
+        )
+        .bind(scope.workspace_id.to_string())
+        .bind(scope.environment_id.to_string())
+        .bind(request.destination_id)
+        .bind(request.job_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if older_eligible_job {
             return Err(StorageError::ConcurrentStateChange);
         }
         let active = sqlx::query("SELECT id,state,lease_until FROM delivery_attempts WHERE workspace_id=$1 AND environment_id=$2 AND job_id=$3 AND final_at IS NULL FOR UPDATE")
@@ -1104,6 +1271,165 @@ impl DestinationTopologyRepository for PostgresStore {
         map_attempt(&updated)
     }
 
+    async fn transition_post_spooler_attempt(
+        &self,
+        scope: TenantScope,
+        job_id: &str,
+        agent_id: &str,
+        route_id: &str,
+        next: DeliveryAttemptState,
+    ) -> Result<DeliveryAttempt, StorageError> {
+        if !matches!(
+            next,
+            DeliveryAttemptState::PrintingReported
+                | DeliveryAttemptState::CompletedReported
+                | DeliveryAttemptState::Failed
+                | DeliveryAttemptState::DeliveryUncertain
+        ) {
+            return Err(StorageError::InvalidTransition);
+        }
+        let mut tx = self.pool().begin().await?;
+        let row = sqlx::query(
+            "SELECT attempt.id,attempt.job_id,attempt.destination_id,attempt.route_id,
+                    attempt.generation,attempt.state,attempt.lease_until,attempt.accepted_at,
+                    attempt.handoff_started_at,attempt.spooler_accepted_at,attempt.final_at,
+                    attempt.created_at,attempt.updated_at
+             FROM delivery_attempts attempt
+             JOIN printer_routes route
+               ON route.workspace_id=attempt.workspace_id
+              AND route.environment_id=attempt.environment_id
+              AND route.id=attempt.route_id
+             WHERE attempt.workspace_id=$1 AND attempt.environment_id=$2
+               AND attempt.job_id=$3 AND attempt.route_id=$4 AND route.agent_id=$5
+             ORDER BY attempt.generation DESC LIMIT 1 FOR UPDATE OF attempt",
+        )
+        .bind(scope.workspace_id.to_string())
+        .bind(scope.environment_id.to_string())
+        .bind(job_id)
+        .bind(route_id)
+        .bind(agent_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or(StorageError::NotFound)?;
+        let current = map_attempt(&row)?;
+        if !valid_attempt_transition(current.state, next)
+            || !matches!(
+                current.state,
+                DeliveryAttemptState::AcceptedBySpooler | DeliveryAttemptState::PrintingReported
+            )
+        {
+            return Err(StorageError::ConcurrentStateChange);
+        }
+        let now = Utc::now();
+        let updated = sqlx::query(
+            "UPDATE delivery_attempts
+             SET state=$4,final_at=$5,updated_at=$6
+             WHERE workspace_id=$1 AND environment_id=$2 AND id=$3
+             RETURNING id,job_id,destination_id,route_id,generation,state,lease_until,
+                       accepted_at,handoff_started_at,spooler_accepted_at,final_at,
+                       created_at,updated_at",
+        )
+        .bind(scope.workspace_id.to_string())
+        .bind(scope.environment_id.to_string())
+        .bind(&current.id)
+        .bind(next.as_str())
+        .bind(next.is_final().then_some(now))
+        .bind(now)
+        .fetch_one(&mut *tx)
+        .await?;
+        // Defensive cleanup for data created by an older server that retained
+        // the handoff reservation beyond spooler acceptance.
+        sqlx::query(
+            "UPDATE route_reservations SET state='released',released_at=$4,updated_at=$4
+             WHERE workspace_id=$1 AND environment_id=$2 AND attempt_id=$3 AND state='active'",
+        )
+        .bind(scope.workspace_id.to_string())
+        .bind(scope.environment_id.to_string())
+        .bind(&current.id)
+        .bind(now)
+        .execute(&mut *tx)
+        .await?;
+        if next == DeliveryAttemptState::DeliveryUncertain {
+            sqlx::query(
+                "UPDATE physical_destinations SET state='attention',updated_at=$4
+                 WHERE workspace_id=$1 AND environment_id=$2 AND id=$3",
+            )
+            .bind(scope.workspace_id.to_string())
+            .bind(scope.environment_id.to_string())
+            .bind(&current.destination_id)
+            .bind(now)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        map_attempt(&updated)
+    }
+
+    async fn mark_post_spooler_attempt_uncertain(
+        &self,
+        scope: TenantScope,
+        job_id: &str,
+    ) -> Result<DeliveryAttempt, StorageError> {
+        let mut tx = self.pool().begin().await?;
+        let row = sqlx::query(
+            "SELECT id,job_id,destination_id,route_id,generation,state,lease_until,
+                    accepted_at,handoff_started_at,spooler_accepted_at,final_at,
+                    created_at,updated_at
+             FROM delivery_attempts
+             WHERE workspace_id=$1 AND environment_id=$2 AND job_id=$3
+             ORDER BY generation DESC LIMIT 1 FOR UPDATE",
+        )
+        .bind(scope.workspace_id.to_string())
+        .bind(scope.environment_id.to_string())
+        .bind(job_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or(StorageError::NotFound)?;
+        let current = map_attempt(&row)?;
+        if !matches!(
+            current.state,
+            DeliveryAttemptState::AcceptedBySpooler | DeliveryAttemptState::PrintingReported
+        ) {
+            return Err(StorageError::ConcurrentStateChange);
+        }
+        let now = Utc::now();
+        let updated = sqlx::query(
+            "UPDATE delivery_attempts SET state='delivery_uncertain',final_at=$4,updated_at=$4
+             WHERE workspace_id=$1 AND environment_id=$2 AND id=$3
+             RETURNING id,job_id,destination_id,route_id,generation,state,lease_until,
+                       accepted_at,handoff_started_at,spooler_accepted_at,final_at,
+                       created_at,updated_at",
+        )
+        .bind(scope.workspace_id.to_string())
+        .bind(scope.environment_id.to_string())
+        .bind(&current.id)
+        .bind(now)
+        .fetch_one(&mut *tx)
+        .await?;
+        sqlx::query(
+            "UPDATE route_reservations SET state='released',released_at=$4,updated_at=$4
+             WHERE workspace_id=$1 AND environment_id=$2 AND attempt_id=$3 AND state='active'",
+        )
+        .bind(scope.workspace_id.to_string())
+        .bind(scope.environment_id.to_string())
+        .bind(&current.id)
+        .bind(now)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "UPDATE physical_destinations SET state='attention',updated_at=$4
+             WHERE workspace_id=$1 AND environment_id=$2 AND id=$3",
+        )
+        .bind(scope.workspace_id.to_string())
+        .bind(scope.environment_id.to_string())
+        .bind(&current.destination_id)
+        .bind(now)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        map_attempt(&updated)
+    }
+
     async fn renew_delivery_attempt(
         &self,
         scope: TenantScope,
@@ -1166,7 +1492,7 @@ impl DestinationTopologyRepository for PostgresStore {
         })
     }
 
-    async fn resolve_delivery_uncertainty(
+    async fn enqueue_delivery_uncertainty_resolution(
         &self,
         scope: TenantScope,
         job_id: &str,
@@ -1174,32 +1500,118 @@ impl DestinationTopologyRepository for PostgresStore {
         note: Option<&str>,
         actor_id: &str,
         request_id: &str,
-    ) -> Result<DeliveryUncertaintyResolution, StorageError> {
+    ) -> Result<PendingDeliveryUncertaintyResolution, StorageError> {
         let mut tx = self.pool().begin().await?;
-        if let Some(existing) = sqlx::query("SELECT id,job_id,attempt_id,destination_id,resolution,note,actor_id,request_id,created_at FROM delivery_uncertainty_resolutions WHERE workspace_id=$1 AND environment_id=$2 AND request_id=$3")
+        if let Some(existing) = sqlx::query("SELECT pending.*,command.command FROM delivery_uncertainty_resolution_commands pending JOIN agent_commands command ON command.cursor=pending.agent_command_cursor WHERE pending.workspace_id=$1 AND pending.environment_id=$2 AND pending.request_id=$3")
             .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).bind(request_id).fetch_optional(&mut *tx).await? {
-            let existing = map_uncertainty_resolution(&existing)?;
+            let existing = pending_uncertainty_resolution_from_row(&existing)?;
             if existing.job_id == job_id && existing.resolution == resolution && existing.note.as_deref() == note && existing.actor_id == actor_id {
                 tx.commit().await?;
                 return Ok(existing);
             }
             return Err(StorageError::IdempotencyConflict);
         }
-        let attempt = sqlx::query("SELECT id,destination_id FROM delivery_attempts WHERE workspace_id=$1 AND environment_id=$2 AND job_id=$3 AND state='delivery_uncertain' ORDER BY generation DESC LIMIT 1 FOR UPDATE")
+        let attempt = sqlx::query("SELECT attempt.id,attempt.destination_id,attempt.route_id,attempt.generation,route.agent_id,route.local_route_key,reservation.id AS reservation_id FROM delivery_attempts attempt JOIN printer_routes route ON route.workspace_id=attempt.workspace_id AND route.environment_id=attempt.environment_id AND route.id=attempt.route_id JOIN route_reservations reservation ON reservation.workspace_id=attempt.workspace_id AND reservation.environment_id=attempt.environment_id AND reservation.attempt_id=attempt.id WHERE attempt.workspace_id=$1 AND attempt.environment_id=$2 AND attempt.job_id=$3 AND attempt.state='delivery_uncertain' ORDER BY attempt.generation DESC LIMIT 1 FOR UPDATE OF attempt")
             .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).bind(job_id).fetch_optional(&mut *tx).await?.ok_or(StorageError::NotFound)?;
         let attempt_id: String = attempt.try_get("id")?;
         let destination_id: String = attempt.try_get("destination_id")?;
+        let route_id: String = attempt.try_get("route_id")?;
+        let agent_id: String = attempt.try_get("agent_id")?;
+        let local_route_key: String = attempt
+            .try_get::<Option<String>, _>("local_route_key")?
+            .ok_or_else(|| {
+                StorageError::InvalidData("uncertain route has no node-local route key".into())
+            })?;
+        let reservation_id: String = attempt.try_get("reservation_id")?;
+        let generation: i64 = attempt.try_get("generation")?;
+        let command = serde_json::json!({
+            "type": "resolve_ambiguous_handoff",
+            "job_id": job_id,
+            "local_route_key": local_route_key,
+            "reservation_id": reservation_id,
+            "generation": generation,
+            "resolution": "confirm_accepted"
+        });
+        let cursor: i64 = sqlx::query_scalar("INSERT INTO agent_commands (workspace_id,environment_id,agent_id,command) VALUES ($1,$2,$3,$4) RETURNING cursor")
+            .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).bind(&agent_id).bind(&command).fetch_one(&mut *tx).await?;
+        let row = sqlx::query("INSERT INTO delivery_uncertainty_resolution_commands (workspace_id,environment_id,request_id,job_id,attempt_id,destination_id,route_id,agent_id,reservation_id,generation,resolution,note,actor_id,agent_command_cursor) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING *, $15::jsonb AS command")
+            .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).bind(request_id).bind(job_id).bind(&attempt_id).bind(&destination_id).bind(&route_id).bind(&agent_id).bind(&reservation_id).bind(generation).bind(resolution).bind(note).bind(actor_id).bind(cursor).bind(&command).fetch_one(&mut *tx).await.map_err(reservation_write_error)?;
+        tx.commit().await?;
+        pending_uncertainty_resolution_from_row(&row)
+    }
+
+    async fn finalize_delivery_uncertainty_resolution(
+        &self,
+        scope: TenantScope,
+        request_id: &str,
+    ) -> Result<Option<DeliveryUncertaintyResolution>, StorageError> {
+        let mut tx = self.pool().begin().await?;
+        let pending = sqlx::query("SELECT pending.*,command.acknowledged_at FROM delivery_uncertainty_resolution_commands pending JOIN agent_commands command ON command.workspace_id=pending.workspace_id AND command.environment_id=pending.environment_id AND command.agent_id=pending.agent_id AND command.cursor=pending.agent_command_cursor WHERE pending.workspace_id=$1 AND pending.environment_id=$2 AND pending.request_id=$3 FOR UPDATE OF pending")
+            .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).bind(request_id).fetch_optional(&mut *tx).await?.ok_or(StorageError::NotFound)?;
+        if pending
+            .try_get::<Option<DateTime<Utc>>, _>("acknowledged_at")?
+            .is_none()
+        {
+            tx.commit().await?;
+            return Ok(None);
+        }
+        if pending
+            .try_get::<Option<DateTime<Utc>>, _>("finalized_at")?
+            .is_some()
+        {
+            let row = sqlx::query("SELECT id,job_id,attempt_id,destination_id,resolution,note,actor_id,request_id,created_at FROM delivery_uncertainty_resolutions WHERE workspace_id=$1 AND environment_id=$2 AND request_id=$3")
+                .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).bind(request_id).fetch_one(&mut *tx).await?;
+            tx.commit().await?;
+            return map_uncertainty_resolution(&row).map(Some);
+        }
         let id = format!("dur_{}", ulid::Ulid::new());
-        let row = sqlx::query("INSERT INTO delivery_uncertainty_resolutions (workspace_id,environment_id,id,job_id,attempt_id,destination_id,resolution,note,actor_id,request_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT (workspace_id,environment_id,request_id) DO UPDATE SET request_id=EXCLUDED.request_id WHERE delivery_uncertainty_resolutions.job_id=EXCLUDED.job_id RETURNING id,job_id,attempt_id,destination_id,resolution,note,actor_id,request_id,created_at")
-            .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).bind(id).bind(job_id).bind(&attempt_id).bind(&destination_id).bind(resolution).bind(note).bind(actor_id).bind(request_id).fetch_optional(&mut *tx).await.map_err(reservation_write_error)?.ok_or(StorageError::IdempotencyConflict)?;
+        let row = sqlx::query("INSERT INTO delivery_uncertainty_resolutions (workspace_id,environment_id,id,job_id,attempt_id,destination_id,resolution,note,actor_id,request_id) SELECT workspace_id,environment_id,$4,job_id,attempt_id,destination_id,resolution,note,actor_id,request_id FROM delivery_uncertainty_resolution_commands WHERE workspace_id=$1 AND environment_id=$2 AND request_id=$3 RETURNING id,job_id,attempt_id,destination_id,resolution,note,actor_id,request_id,created_at")
+            .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).bind(request_id).bind(id).fetch_one(&mut *tx).await.map_err(reservation_write_error)?;
+        let destination_id: String = row.try_get("destination_id")?;
+        sqlx::query("UPDATE delivery_uncertainty_resolution_commands SET finalized_at=now() WHERE workspace_id=$1 AND environment_id=$2 AND request_id=$3")
+            .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).bind(request_id).execute(&mut *tx).await?;
         let unresolved: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM delivery_attempts uncertain WHERE uncertain.workspace_id=$1 AND uncertain.environment_id=$2 AND uncertain.destination_id=$3 AND uncertain.state='delivery_uncertain' AND NOT EXISTS (SELECT 1 FROM delivery_uncertainty_resolutions resolved WHERE resolved.workspace_id=uncertain.workspace_id AND resolved.environment_id=uncertain.environment_id AND resolved.attempt_id=uncertain.id))")
             .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).bind(&destination_id).fetch_one(&mut *tx).await?;
         if !unresolved {
             sqlx::query("UPDATE physical_destinations SET state='available',updated_at=now() WHERE workspace_id=$1 AND environment_id=$2 AND id=$3 AND state='attention'")
                 .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).bind(&destination_id).execute(&mut *tx).await?;
         }
+        let resolution_name: String = row.try_get("resolution")?;
+        let resolved_at = Utc::now();
+        sqlx::query("UPDATE jobs SET payload=jsonb_set(jsonb_set(jsonb_set(payload,'{metadata,piqae.delivery_resolution}',to_jsonb($4::text),true),'{metadata,piqae.delivery_resolution_request_id}',to_jsonb($5::text),true),'{metadata,piqae.delivery_resolved_at}',to_jsonb($6::text),true),updated_at=now() WHERE workspace_id=$1 AND environment_id=$2 AND id=$3")
+            .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).bind(row.try_get::<String,_>("job_id")?).bind(&resolution_name).bind(request_id).bind(resolved_at.to_rfc3339()).execute(&mut *tx).await?;
         tx.commit().await?;
-        map_uncertainty_resolution(&row)
+        map_uncertainty_resolution(&row).map(Some)
+    }
+
+    async fn finalize_acknowledged_uncertainty_resolutions(
+        &self,
+        scope: TenantScope,
+        agent_id: &str,
+        limit: u32,
+    ) -> Result<Vec<DeliveryUncertaintyResolution>, StorageError> {
+        let request_ids: Vec<String> = sqlx::query_scalar("SELECT pending.request_id FROM delivery_uncertainty_resolution_commands pending JOIN agent_commands command ON command.workspace_id=pending.workspace_id AND command.environment_id=pending.environment_id AND command.agent_id=pending.agent_id AND command.cursor=pending.agent_command_cursor WHERE pending.workspace_id=$1 AND pending.environment_id=$2 AND pending.agent_id=$3 AND pending.finalized_at IS NULL AND command.acknowledged_at IS NOT NULL ORDER BY pending.created_at,pending.request_id LIMIT $4")
+            .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).bind(agent_id).bind(i64::from(limit.clamp(1,100))).fetch_all(self.pool()).await?;
+        let mut resolutions = Vec::with_capacity(request_ids.len());
+        for request_id in request_ids {
+            if let Some(resolution) = self
+                .finalize_delivery_uncertainty_resolution(scope, &request_id)
+                .await?
+            {
+                resolutions.push(resolution);
+            }
+        }
+        Ok(resolutions)
+    }
+
+    async fn acknowledge_uncertainty_resolution_command(
+        &self,
+        _scope: TenantScope,
+        _agent_command_cursor: u64,
+    ) -> Result<(), StorageError> {
+        Err(StorageError::InvalidData(
+            "PostgreSQL uncertainty commands are acknowledged only by agent command sync".into(),
+        ))
     }
 
     async fn has_unresolved_destination_uncertainty(
@@ -1303,6 +1715,13 @@ async fn apply_identity_decision(
         "destinations": destination_snapshot,
         "routes": route_snapshot,
     });
+    if !decision.evidence_ids.is_empty() {
+        let evidence_count: i64 = sqlx::query_scalar("SELECT count(*) FROM destination_identity_evidence WHERE workspace_id=$1 AND environment_id=$2 AND id=ANY($3)")
+            .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).bind(&decision.evidence_ids).fetch_one(&mut *transaction).await?;
+        if usize::try_from(evidence_count).ok() != Some(decision.evidence_ids.len()) {
+            return Err(StorageError::NotFound);
+        }
+    }
 
     match decision.kind {
         IdentityDecisionKind::Merge | IdentityDecisionKind::Split => {
@@ -1333,6 +1752,8 @@ async fn apply_identity_decision(
             sqlx::query("UPDATE printer_routes SET role='standby',updated_at=now() WHERE workspace_id=$1 AND environment_id=$2 AND id=ANY($3)")
                 .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).bind(&decision.route_ids).execute(&mut *transaction).await?;
             sqlx::query("UPDATE printer_routes SET destination_id=$3,updated_at=now() WHERE workspace_id=$1 AND environment_id=$2 AND id=ANY($4)")
+                .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).bind(&decision.destination_id).bind(&decision.route_ids).execute(&mut *transaction).await?;
+            sqlx::query("UPDATE destination_identity_evidence SET destination_id=$3 WHERE workspace_id=$1 AND environment_id=$2 AND route_id=ANY($4)")
                 .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).bind(&decision.destination_id).bind(&decision.route_ids).execute(&mut *transaction).await?;
             let has_primary: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM printer_routes WHERE workspace_id=$1 AND environment_id=$2 AND destination_id=$3 AND role='primary' AND enabled AND retired_at IS NULL)")
                 .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).bind(&decision.destination_id).fetch_one(&mut *transaction).await?;
@@ -1413,6 +1834,8 @@ async fn reverse_applied_identity_decision(
         sqlx::query("UPDATE printer_routes SET destination_id=$4,role=$5,updated_at=now() WHERE workspace_id=$1 AND environment_id=$2 AND id=$3")
             .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).bind(route["id"].as_str()).bind(route["destination_id"].as_str()).bind(route["role"].as_str()).execute(&mut *transaction).await.map_err(reservation_write_error)?;
     }
+    sqlx::query("UPDATE destination_identity_evidence evidence SET destination_id=route.destination_id FROM printer_routes route WHERE evidence.workspace_id=$1 AND evidence.environment_id=$2 AND route.workspace_id=evidence.workspace_id AND route.environment_id=evidence.environment_id AND route.id=evidence.route_id AND route.id=ANY($3)")
+        .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).bind(&route_ids).execute(&mut *transaction).await?;
     sqlx::query("UPDATE target_bindings binding SET destination_id=route.destination_id,updated_at=now() FROM printer_routes route WHERE binding.workspace_id=$1 AND binding.environment_id=$2 AND route.workspace_id=binding.workspace_id AND route.environment_id=binding.environment_id AND route.id=binding.route_id AND route.id=ANY($3)")
         .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).bind(&route_ids).execute(&mut *transaction).await?;
     sqlx::query("UPDATE jobs job SET destination_id=route.destination_id,updated_at=now() FROM printer_routes route WHERE job.workspace_id=$1 AND job.environment_id=$2 AND route.workspace_id=job.workspace_id AND route.environment_id=job.environment_id AND route.id=job.route_id AND route.id=ANY($3)")
@@ -1464,6 +1887,10 @@ struct MemoryState {
     attempts: HashMap<(TenantScope, String), (DeliveryAttempt, String)>,
     reservations: HashMap<(TenantScope, String), RouteReservation>,
     uncertainty_resolutions: HashMap<(TenantScope, String), DeliveryUncertaintyResolution>,
+    pending_uncertainty_resolutions:
+        HashMap<(TenantScope, String), PendingDeliveryUncertaintyResolution>,
+    acknowledged_uncertainty_commands: HashSet<(TenantScope, u64)>,
+    next_uncertainty_command_cursor: u64,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1633,6 +2060,14 @@ impl DestinationTopologyRepository for MemoryDestinationTopologyRepository {
         {
             return Err(StorageError::NotFound);
         }
+        if state
+            .routes
+            .get(&(scope, evidence.route_id.clone()))
+            .map(|route| route.destination_id.as_str())
+            != Some(evidence.destination_id.as_str())
+        {
+            return Err(StorageError::NotFound);
+        }
         state
             .evidence
             .insert((scope, evidence.id.clone()), evidence.clone());
@@ -1674,6 +2109,13 @@ impl DestinationTopologyRepository for MemoryDestinationTopologyRepository {
             .route_ids
             .iter()
             .any(|route_id| !state.routes.contains_key(&(scope, route_id.clone())))
+        {
+            return Err(StorageError::NotFound);
+        }
+        if decision
+            .evidence_ids
+            .iter()
+            .any(|evidence_id| !state.evidence.contains_key(&(scope, evidence_id.clone())))
         {
             return Err(StorageError::NotFound);
         }
@@ -1728,6 +2170,13 @@ impl DestinationTopologyRepository for MemoryDestinationTopologyRepository {
                         route.role = "standby".into();
                         route.updated_at = Utc::now();
                     }
+                }
+                for evidence in state
+                    .evidence
+                    .values_mut()
+                    .filter(|evidence| decision.route_ids.contains(&evidence.route_id))
+                {
+                    evidence.destination_id.clone_from(&decision.destination_id);
                 }
                 let has_primary = state.routes.iter().any(|((tenant, _), route)| {
                     *tenant == scope
@@ -1817,8 +2266,10 @@ impl DestinationTopologyRepository for MemoryDestinationTopologyRepository {
             .cloned()
             .ok_or(StorageError::NotFound)?;
         if snapshot.routes.iter().any(|route| {
-            state.reservations.values().any(|reservation| {
-                reservation.route_id == route.id && reservation.state == "active"
+            state.reservations.iter().any(|((tenant, _), reservation)| {
+                *tenant == scope
+                    && reservation.route_id == route.id
+                    && reservation.state == "active"
             }) || state.attempts.iter().any(|((tenant, _), (attempt, _))| {
                 *tenant == scope && attempt.route_id.eq(&route.id) && !attempt.state.is_final()
             })
@@ -1832,6 +2283,20 @@ impl DestinationTopologyRepository for MemoryDestinationTopologyRepository {
         }
         for route in snapshot.routes {
             state.routes.insert((scope, route.id.clone()), route);
+        }
+        let restored_destinations: HashMap<_, _> = state
+            .routes
+            .iter()
+            .filter(|((tenant, _), _)| *tenant == scope)
+            .map(|((_, route_id), route)| (route_id.clone(), route.destination_id.clone()))
+            .collect();
+        for ((tenant, _), evidence) in &mut state.evidence {
+            if *tenant != scope {
+                continue;
+            }
+            if let Some(destination_id) = restored_destinations.get(&evidence.route_id) {
+                evidence.destination_id.clone_from(destination_id);
+            }
         }
         state
             .decisions
@@ -1864,26 +2329,33 @@ impl DestinationTopologyRepository for MemoryDestinationTopologyRepository {
         {
             return Err(StorageError::NotFound);
         }
-        if state
+        let existing_items = state
             .observations
-            .values()
-            .flatten()
-            .any(|item| item.id == observation.id)
-        {
-            return Ok(());
+            .get(&(scope, observation.route_id.clone()));
+        if let Some(existing) = existing_items.and_then(|items| {
+            items
+                .iter()
+                .find(|item| item.sequence == observation.sequence)
+        }) {
+            let mut existing = existing.clone();
+            existing.id.clone_from(&observation.id);
+            return if existing == *observation {
+                Ok(())
+            } else {
+                Err(StorageError::IdempotencyConflict)
+            };
         }
-        let mut observation = observation.clone();
-        observation.sequence = state
-            .observations
-            .get(&(scope, observation.route_id.clone()))
+        if existing_items
             .and_then(|items| items.iter().map(|item| item.sequence).max())
-            .unwrap_or(0)
-            .saturating_add(1);
+            .is_some_and(|latest| observation.sequence <= latest)
+        {
+            return Err(StorageError::ConcurrentStateChange);
+        }
         state
             .observations
             .entry((scope, observation.route_id.clone()))
             .or_default()
-            .push(observation);
+            .push(observation.clone());
         Ok(())
     }
     async fn latest_route_observation(
@@ -1972,6 +2444,35 @@ impl DestinationTopologyRepository for MemoryDestinationTopologyRepository {
         {
             return Err(StorageError::NotFound);
         }
+        let stale_attempt_keys: Vec<_> = state
+            .attempts
+            .iter()
+            .filter_map(|(key @ (tenant, _), (attempt, _))| {
+                (*tenant == scope
+                    && attempt.destination_id == request.destination_id
+                    && attempt.state == DeliveryAttemptState::RouteLeased
+                    && attempt.lease_until <= now)
+                    .then_some(key.clone())
+            })
+            .collect();
+        let mut stale_attempt_ids = Vec::with_capacity(stale_attempt_keys.len());
+        for key in stale_attempt_keys {
+            if let Some((attempt, _)) = state.attempts.get_mut(&key) {
+                attempt.state = DeliveryAttemptState::Superseded;
+                attempt.final_at = Some(now);
+                attempt.updated_at = now;
+                stale_attempt_ids.push(attempt.id.clone());
+            }
+        }
+        for ((tenant, _), reservation) in &mut state.reservations {
+            if *tenant == scope
+                && reservation.state == "active"
+                && stale_attempt_ids.contains(&reservation.attempt_id)
+            {
+                reservation.state = "superseded".into();
+                reservation.released_at = Some(now);
+            }
+        }
         let active_key = state
             .attempts
             .iter()
@@ -1993,9 +2494,17 @@ impl DestinationTopologyRepository for MemoryDestinationTopologyRepository {
                 active.updated_at = now;
                 active.id.clone()
             };
-            if let Some(reservation) = state.reservations.values_mut().find(|reservation| {
-                reservation.attempt_id == active_id && reservation.state == "active"
-            }) {
+            if let Some(reservation) =
+                state
+                    .reservations
+                    .iter_mut()
+                    .find_map(|((tenant, _), reservation)| {
+                        (*tenant == scope
+                            && reservation.attempt_id == active_id
+                            && reservation.state == "active")
+                            .then_some(reservation)
+                    })
+            {
                 reservation.state = "superseded".into();
                 reservation.released_at = Some(now);
             }
@@ -2109,9 +2618,17 @@ impl DestinationTopologyRepository for MemoryDestinationTopologyRepository {
             if !next.is_final() {
                 attempt.final_at = None;
             }
-            if let Some(reservation) = state.reservations.values_mut().find(|reservation| {
-                reservation.attempt_id == attempt_id && reservation.state == "active"
-            }) {
+            if let Some(reservation) =
+                state
+                    .reservations
+                    .iter_mut()
+                    .find_map(|((tenant, _), reservation)| {
+                        (*tenant == scope
+                            && reservation.attempt_id == attempt_id
+                            && reservation.state == "active")
+                            .then_some(reservation)
+                    })
+            {
                 reservation.state = if next == DeliveryAttemptState::Superseded {
                     "superseded"
                 } else if next == DeliveryAttemptState::Cancelled {
@@ -2139,6 +2656,130 @@ impl DestinationTopologyRepository for MemoryDestinationTopologyRepository {
         } else {
             result
         })
+    }
+    async fn transition_post_spooler_attempt(
+        &self,
+        scope: TenantScope,
+        job_id: &str,
+        agent_id: &str,
+        route_id: &str,
+        next: DeliveryAttemptState,
+    ) -> Result<DeliveryAttempt, StorageError> {
+        if !matches!(
+            next,
+            DeliveryAttemptState::PrintingReported
+                | DeliveryAttemptState::CompletedReported
+                | DeliveryAttemptState::Failed
+                | DeliveryAttemptState::DeliveryUncertain
+        ) {
+            return Err(StorageError::InvalidTransition);
+        }
+        let mut state = write_state(self)?;
+        if state
+            .routes
+            .get(&(scope, route_id.to_owned()))
+            .is_none_or(|route| route.agent_id != agent_id)
+        {
+            return Err(StorageError::NotFound);
+        }
+        let key = state
+            .attempts
+            .iter()
+            .filter_map(|(key @ (tenant, _), (attempt, _))| {
+                (*tenant == scope && attempt.job_id == job_id && attempt.route_id == route_id)
+                    .then_some((key.clone(), attempt.generation))
+            })
+            .max_by_key(|(_, generation)| *generation)
+            .map(|(key, _)| key)
+            .ok_or(StorageError::NotFound)?;
+        let now = Utc::now();
+        let (attempt, _) = state.attempts.get_mut(&key).ok_or(StorageError::NotFound)?;
+        if !matches!(
+            attempt.state,
+            DeliveryAttemptState::AcceptedBySpooler | DeliveryAttemptState::PrintingReported
+        ) || !valid_attempt_transition(attempt.state, next)
+        {
+            return Err(StorageError::ConcurrentStateChange);
+        }
+        attempt.state = next;
+        attempt.updated_at = now;
+        attempt.final_at = next.is_final().then_some(now);
+        let result = attempt.clone();
+        if let Some(reservation) =
+            state
+                .reservations
+                .iter_mut()
+                .find_map(|((tenant, _), reservation)| {
+                    (*tenant == scope
+                        && reservation.attempt_id == result.id
+                        && reservation.state == "active")
+                        .then_some(reservation)
+                })
+        {
+            reservation.state = "released".into();
+            reservation.released_at = Some(now);
+        }
+        if next == DeliveryAttemptState::DeliveryUncertain {
+            if let Some(destination) = state
+                .destinations
+                .get_mut(&(scope, result.destination_id.clone()))
+            {
+                destination.state = "attention".into();
+                destination.updated_at = now;
+            }
+        }
+        Ok(result)
+    }
+    async fn mark_post_spooler_attempt_uncertain(
+        &self,
+        scope: TenantScope,
+        job_id: &str,
+    ) -> Result<DeliveryAttempt, StorageError> {
+        let mut state = write_state(self)?;
+        let key = state
+            .attempts
+            .iter()
+            .filter_map(|(key @ (tenant, _), (attempt, _))| {
+                (*tenant == scope && attempt.job_id == job_id)
+                    .then_some((key.clone(), attempt.generation))
+            })
+            .max_by_key(|(_, generation)| *generation)
+            .map(|(key, _)| key)
+            .ok_or(StorageError::NotFound)?;
+        let now = Utc::now();
+        let (attempt, _) = state.attempts.get_mut(&key).ok_or(StorageError::NotFound)?;
+        if !matches!(
+            attempt.state,
+            DeliveryAttemptState::AcceptedBySpooler | DeliveryAttemptState::PrintingReported
+        ) {
+            return Err(StorageError::ConcurrentStateChange);
+        }
+        attempt.state = DeliveryAttemptState::DeliveryUncertain;
+        attempt.updated_at = now;
+        attempt.final_at = Some(now);
+        let result = attempt.clone();
+        if let Some(reservation) =
+            state
+                .reservations
+                .iter_mut()
+                .find_map(|((tenant, _), reservation)| {
+                    (*tenant == scope
+                        && reservation.attempt_id == result.id
+                        && reservation.state == "active")
+                        .then_some(reservation)
+                })
+        {
+            reservation.state = "released".into();
+            reservation.released_at = Some(now);
+        }
+        if let Some(destination) = state
+            .destinations
+            .get_mut(&(scope, result.destination_id.clone()))
+        {
+            destination.state = "attention".into();
+            destination.updated_at = now;
+        }
+        Ok(result)
     }
     async fn renew_delivery_attempt(
         &self,
@@ -2194,7 +2835,7 @@ impl DestinationTopologyRepository for MemoryDestinationTopologyRepository {
             fencing_token: fencing_token.to_owned(),
         })
     }
-    async fn resolve_delivery_uncertainty(
+    async fn enqueue_delivery_uncertainty_resolution(
         &self,
         scope: TenantScope,
         job_id: &str,
@@ -2202,22 +2843,27 @@ impl DestinationTopologyRepository for MemoryDestinationTopologyRepository {
         note: Option<&str>,
         actor_id: &str,
         request_id: &str,
-    ) -> Result<DeliveryUncertaintyResolution, StorageError> {
+    ) -> Result<PendingDeliveryUncertaintyResolution, StorageError> {
         let mut state = write_state(self)?;
         if let Some(existing) = state
-            .uncertainty_resolutions
+            .pending_uncertainty_resolutions
             .get(&(scope, request_id.to_owned()))
         {
-            if existing.job_id == job_id {
+            if existing.job_id == job_id
+                && existing.resolution == resolution
+                && existing.note.as_deref() == note
+                && existing.actor_id == actor_id
+            {
                 return Ok(existing.clone());
             }
             return Err(StorageError::IdempotencyConflict);
         }
         let attempt = state
             .attempts
-            .values()
-            .filter_map(|(attempt, _)| {
-                (attempt.job_id == job_id
+            .iter()
+            .filter_map(|((tenant, _), (attempt, _))| {
+                (*tenant == scope
+                    && attempt.job_id == job_id
                     && attempt.state == DeliveryAttemptState::DeliveryUncertain)
                     .then_some(attempt)
             })
@@ -2225,43 +2871,187 @@ impl DestinationTopologyRepository for MemoryDestinationTopologyRepository {
             .cloned()
             .ok_or(StorageError::NotFound)?;
         if state
-            .uncertainty_resolutions
-            .values()
-            .any(|item| item.attempt_id == attempt.id)
+            .pending_uncertainty_resolutions
+            .iter()
+            .any(|((tenant, _), item)| *tenant == scope && item.attempt_id == attempt.id)
         {
             return Err(StorageError::ConcurrentStateChange);
         }
-        let result = DeliveryUncertaintyResolution {
-            id: format!("dur_{}", ulid::Ulid::new()),
+        let route = state
+            .routes
+            .get(&(scope, attempt.route_id.clone()))
+            .cloned()
+            .ok_or(StorageError::NotFound)?;
+        let local_route_key = route.local_route_key.ok_or_else(|| {
+            StorageError::InvalidData("uncertain route has no node-local route key".into())
+        })?;
+        let reservation = state
+            .reservations
+            .iter()
+            .find_map(|((tenant, _), reservation)| {
+                (*tenant == scope && reservation.attempt_id == attempt.id).then_some(reservation)
+            })
+            .cloned()
+            .ok_or(StorageError::NotFound)?;
+        state.next_uncertainty_command_cursor = state
+            .next_uncertainty_command_cursor
+            .checked_add(1)
+            .ok_or_else(|| StorageError::InvalidData("agent command cursor overflow".into()))?;
+        let cursor = state.next_uncertainty_command_cursor;
+        let command = serde_json::json!({
+            "type": "resolve_ambiguous_handoff",
+            "job_id": job_id,
+            "local_route_key": local_route_key,
+            "reservation_id": reservation.id,
+            "generation": attempt.generation,
+            "resolution": "confirm_accepted"
+        });
+        let result = PendingDeliveryUncertaintyResolution {
+            request_id: request_id.into(),
             job_id: job_id.into(),
             attempt_id: attempt.id.clone(),
             destination_id: attempt.destination_id.clone(),
+            route_id: attempt.route_id.clone(),
+            agent_id: route.agent_id,
+            reservation_id: reservation.id,
+            generation: attempt.generation,
             resolution: resolution.into(),
             note: note.map(str::to_owned),
             actor_id: actor_id.into(),
-            request_id: request_id.into(),
+            agent_command_cursor: cursor,
+            command,
+            created_at: Utc::now(),
+            finalized_at: None,
+        };
+        state
+            .pending_uncertainty_resolutions
+            .insert((scope, request_id.into()), result.clone());
+        Ok(result)
+    }
+    async fn finalize_delivery_uncertainty_resolution(
+        &self,
+        scope: TenantScope,
+        request_id: &str,
+    ) -> Result<Option<DeliveryUncertaintyResolution>, StorageError> {
+        let mut state = write_state(self)?;
+        if let Some(existing) = state
+            .uncertainty_resolutions
+            .get(&(scope, request_id.to_owned()))
+        {
+            return Ok(Some(existing.clone()));
+        }
+        let pending = state
+            .pending_uncertainty_resolutions
+            .get(&(scope, request_id.to_owned()))
+            .cloned()
+            .ok_or(StorageError::NotFound)?;
+        if !state
+            .acknowledged_uncertainty_commands
+            .contains(&(scope, pending.agent_command_cursor))
+        {
+            return Ok(None);
+        }
+        let result = DeliveryUncertaintyResolution {
+            id: format!("dur_{}", ulid::Ulid::new()),
+            job_id: pending.job_id,
+            attempt_id: pending.attempt_id,
+            destination_id: pending.destination_id.clone(),
+            resolution: pending.resolution,
+            note: pending.note,
+            actor_id: pending.actor_id,
+            request_id: pending.request_id,
             created_at: Utc::now(),
         };
         state
             .uncertainty_resolutions
             .insert((scope, request_id.into()), result.clone());
-        let still_unresolved = state.attempts.values().any(|(candidate, _)| {
-            candidate.destination_id == attempt.destination_id
+        let still_unresolved = state.attempts.iter().any(|((tenant, _), (candidate, _))| {
+            *tenant == scope
+                && candidate.destination_id == result.destination_id
                 && candidate.state == DeliveryAttemptState::DeliveryUncertain
                 && !state
                     .uncertainty_resolutions
-                    .values()
-                    .any(|item| item.attempt_id == candidate.id)
+                    .iter()
+                    .any(|((resolution_tenant, _), item)| {
+                        *resolution_tenant == scope && item.attempt_id == candidate.id
+                    })
         });
         if !still_unresolved {
-            if let Some(destination) = state.destinations.get_mut(&(scope, attempt.destination_id))
+            if let Some(destination) = state
+                .destinations
+                .get_mut(&(scope, result.destination_id.clone()))
             {
                 if destination.state == "attention" {
                     destination.state = "available".into();
                 }
             }
         }
-        Ok(result)
+        if let Some(pending) = state
+            .pending_uncertainty_resolutions
+            .get_mut(&(scope, request_id.to_owned()))
+        {
+            pending.finalized_at = Some(Utc::now());
+        }
+        Ok(Some(result))
+    }
+    async fn finalize_acknowledged_uncertainty_resolutions(
+        &self,
+        scope: TenantScope,
+        agent_id: &str,
+        limit: u32,
+    ) -> Result<Vec<DeliveryUncertaintyResolution>, StorageError> {
+        let request_ids: Vec<_> = {
+            let state = read_state(self)?;
+            let mut items: Vec<_> = state
+                .pending_uncertainty_resolutions
+                .iter()
+                .filter_map(|((tenant, request_id), pending)| {
+                    (*tenant == scope
+                        && pending.agent_id == agent_id
+                        && pending.finalized_at.is_none()
+                        && state
+                            .acknowledged_uncertainty_commands
+                            .contains(&(scope, pending.agent_command_cursor)))
+                    .then_some((pending.created_at, request_id.clone()))
+                })
+                .collect();
+            items.sort();
+            items
+                .into_iter()
+                .take(usize::try_from(limit.clamp(1, 100)).unwrap_or(100))
+                .map(|(_, request_id)| request_id)
+                .collect()
+        };
+        let mut resolutions = Vec::with_capacity(request_ids.len());
+        for request_id in request_ids {
+            if let Some(resolution) = self
+                .finalize_delivery_uncertainty_resolution(scope, &request_id)
+                .await?
+            {
+                resolutions.push(resolution);
+            }
+        }
+        Ok(resolutions)
+    }
+    async fn acknowledge_uncertainty_resolution_command(
+        &self,
+        scope: TenantScope,
+        agent_command_cursor: u64,
+    ) -> Result<(), StorageError> {
+        let mut state = write_state(self)?;
+        if !state
+            .pending_uncertainty_resolutions
+            .iter()
+            .any(|((tenant, _), pending)| {
+                *tenant == scope && pending.agent_command_cursor == agent_command_cursor
+            })
+        {
+            return Err(StorageError::NotFound);
+        }
+        state
+            .acknowledged_uncertainty_commands
+            .insert((scope, agent_command_cursor));
+        Ok(())
     }
     async fn has_unresolved_destination_uncertainty(
         &self,
@@ -2476,6 +3266,93 @@ mod tests {
                 .await,
             Err(StorageError::NotFound)
         ));
+        repository
+            .transition_delivery_attempt(
+                first,
+                "attempt_1",
+                started.attempt.generation,
+                &started.fencing_token,
+                DeliveryAttemptState::QueuedLocal,
+            )
+            .await
+            .unwrap();
+        repository
+            .transition_delivery_attempt(
+                first,
+                "attempt_1",
+                started.attempt.generation,
+                &started.fencing_token,
+                DeliveryAttemptState::HandingToSpooler,
+            )
+            .await
+            .unwrap();
+        repository
+            .transition_delivery_attempt(
+                first,
+                "attempt_1",
+                started.attempt.generation,
+                &started.fencing_token,
+                DeliveryAttemptState::DeliveryUncertain,
+            )
+            .await
+            .unwrap();
+        let pending = repository
+            .enqueue_delivery_uncertainty_resolution(
+                first,
+                "job_1",
+                "confirmed_delivered",
+                None,
+                "operator",
+                "request_1",
+            )
+            .await
+            .unwrap();
+        assert!(
+            repository
+                .finalize_delivery_uncertainty_resolution(first, "request_1")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        repository
+            .acknowledge_uncertainty_resolution_command(first, pending.agent_command_cursor)
+            .await
+            .unwrap();
+        assert!(
+            repository
+                .finalize_delivery_uncertainty_resolution(first, "request_1")
+                .await
+                .unwrap()
+                .is_some()
+        );
+        repository
+            .begin_delivery_attempt(
+                first,
+                NewDeliveryAttempt {
+                    attempt_id: "attempt_stale",
+                    reservation_id: "reservation_stale",
+                    job_id: "job_stale",
+                    destination_id: "dst_shared",
+                    route_id: "route_a",
+                    lease_until: Utc::now() - chrono::Duration::seconds(1),
+                },
+            )
+            .await
+            .unwrap();
+        repository
+            .begin_delivery_attempt(
+                first,
+                NewDeliveryAttempt {
+                    attempt_id: "attempt_after_stale",
+                    reservation_id: "reservation_after_stale",
+                    job_id: "job_after_stale",
+                    destination_id: "dst_shared",
+                    route_id: "route_a",
+                    lease_until: Utc::now() + chrono::Duration::minutes(1),
+                },
+            )
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

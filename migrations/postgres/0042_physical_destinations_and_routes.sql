@@ -86,6 +86,7 @@ CREATE TABLE printer_routes (
     UNIQUE (workspace_id, environment_id, printer_id, agent_id),
     UNIQUE (workspace_id, environment_id, agent_id, local_route_key),
     UNIQUE (workspace_id, environment_id, destination_id, id),
+    UNIQUE (workspace_id, environment_id, agent_id, id),
     FOREIGN KEY (workspace_id, environment_id, destination_id)
         REFERENCES physical_destinations(workspace_id, environment_id, id) ON DELETE CASCADE,
     FOREIGN KEY (workspace_id, environment_id, printer_id)
@@ -129,6 +130,9 @@ CREATE TABLE destination_identity_evidence (
         REFERENCES physical_destinations(workspace_id, environment_id, id) ON DELETE CASCADE,
     FOREIGN KEY (workspace_id, environment_id, route_id)
         REFERENCES printer_routes(workspace_id, environment_id, id) ON DELETE CASCADE,
+    FOREIGN KEY (workspace_id, environment_id, destination_id, route_id)
+        REFERENCES printer_routes(workspace_id, environment_id, destination_id, id)
+        DEFERRABLE INITIALLY DEFERRED,
     CHECK ((metadata - 'source' - 'schema_version' - 'normalization' - 'key_version') = '{}'::jsonb),
     CHECK (NOT (metadata ? 'source') OR metadata->>'source' IN ('node', 'operator', 'migration')),
     CHECK (NOT (metadata ? 'normalization') OR char_length(metadata->>'normalization') BETWEEN 1 AND 64),
@@ -239,6 +243,8 @@ CREATE TABLE projection_acknowledgements (
         REFERENCES agents(workspace_id, environment_id, id) ON DELETE CASCADE,
     FOREIGN KEY (workspace_id, environment_id, route_id)
         REFERENCES printer_routes(workspace_id, environment_id, id) ON DELETE CASCADE,
+    FOREIGN KEY (workspace_id, environment_id, agent_id, route_id)
+        REFERENCES printer_routes(workspace_id, environment_id, agent_id, id) ON DELETE CASCADE,
     CHECK ((status = 'acknowledged') = (acknowledged_at IS NOT NULL)),
     CHECK (error_code IS NULL OR char_length(error_code) BETWEEN 1 AND 128)
 );
@@ -355,6 +361,50 @@ CREATE TABLE delivery_uncertainty_resolutions (
 CREATE INDEX delivery_uncertainty_resolutions_destination_idx
     ON delivery_uncertainty_resolutions
        (workspace_id, environment_id, destination_id, created_at DESC, id);
+
+-- Resolution is a two-phase operation. The operator intent first becomes an
+-- exact node command; only the node's durable command-cursor acknowledgement
+-- permits the append-only resolution row above to be written.
+ALTER TABLE agent_commands
+    ADD CONSTRAINT agent_commands_tenant_cursor_unique
+        UNIQUE (workspace_id, environment_id, agent_id, cursor);
+
+CREATE TABLE delivery_uncertainty_resolution_commands (
+    workspace_id text NOT NULL,
+    environment_id text NOT NULL,
+    request_id text NOT NULL CHECK (char_length(request_id) BETWEEN 1 AND 256),
+    job_id text NOT NULL,
+    attempt_id text NOT NULL,
+    destination_id text NOT NULL,
+    route_id text NOT NULL,
+    agent_id text NOT NULL,
+    reservation_id text NOT NULL,
+    generation bigint NOT NULL CHECK (generation > 0),
+    resolution text NOT NULL CHECK (resolution IN (
+        'confirmed_delivered', 'reprint_authorized', 'accept_missing', 'cancelled'
+    )),
+    note text CHECK (note IS NULL OR char_length(note) BETWEEN 1 AND 2048),
+    actor_id text NOT NULL CHECK (char_length(actor_id) BETWEEN 1 AND 256),
+    agent_command_cursor bigint NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    finalized_at timestamptz,
+    PRIMARY KEY (workspace_id, environment_id, request_id),
+    UNIQUE (workspace_id, environment_id, attempt_id),
+    FOREIGN KEY (workspace_id, environment_id, job_id)
+        REFERENCES jobs(workspace_id, environment_id, id) ON DELETE CASCADE,
+    FOREIGN KEY (workspace_id, environment_id, attempt_id)
+        REFERENCES delivery_attempts(workspace_id, environment_id, id) ON DELETE CASCADE,
+    FOREIGN KEY (workspace_id, environment_id, destination_id)
+        REFERENCES physical_destinations(workspace_id, environment_id, id),
+    FOREIGN KEY (workspace_id, environment_id, route_id)
+        REFERENCES printer_routes(workspace_id, environment_id, id),
+    FOREIGN KEY (workspace_id, environment_id, agent_id)
+        REFERENCES agents(workspace_id, environment_id, id),
+    FOREIGN KEY (workspace_id, environment_id, reservation_id)
+        REFERENCES route_reservations(workspace_id, environment_id, id),
+    FOREIGN KEY (workspace_id, environment_id, agent_id, agent_command_cursor)
+        REFERENCES agent_commands(workspace_id, environment_id, agent_id, cursor)
+);
 
 CREATE TABLE site_coordinator_memberships (
     workspace_id text NOT NULL,
@@ -494,3 +544,22 @@ ALTER TABLE jobs
 
 CREATE INDEX jobs_destination_route_idx
     ON jobs (workspace_id, environment_id, destination_id, route_id, created_at DESC);
+
+-- Route-aware recovery no longer requires a logical target binding for every
+-- redundant node route. Preserve the legacy audit columns while recording the
+-- authoritative destination and route transition explicitly.
+ALTER TABLE job_routing_attempts
+    ALTER COLUMN target_id DROP NOT NULL,
+    ALTER COLUMN to_binding_id DROP NOT NULL,
+    ADD COLUMN destination_id text,
+    ADD COLUMN from_route_id text,
+    ADD COLUMN to_route_id text,
+    ADD CONSTRAINT job_routing_attempts_destination_tenant_fkey
+        FOREIGN KEY (workspace_id, environment_id, destination_id)
+        REFERENCES physical_destinations(workspace_id, environment_id, id),
+    ADD CONSTRAINT job_routing_attempts_from_route_tenant_fkey
+        FOREIGN KEY (workspace_id, environment_id, from_route_id)
+        REFERENCES printer_routes(workspace_id, environment_id, id),
+    ADD CONSTRAINT job_routing_attempts_to_route_tenant_fkey
+        FOREIGN KEY (workspace_id, environment_id, to_route_id)
+        REFERENCES printer_routes(workspace_id, environment_id, id);
