@@ -5,6 +5,10 @@ use crate::{
     LifecycleSnapshot, RuntimeConfiguration,
 };
 use anyhow::{Context as _, Result};
+use chrono::{DateTime, TimeDelta, Utc};
+use piqae_protocol::agent::{
+    NodeAvailability, NodeAvailabilityClass, NodeHostMode, NodeRuntimeObservation, WakeMechanism,
+};
 use std::sync::{Arc, Mutex};
 
 /// Owns exclusive installation access and the host lifecycle state. Queue,
@@ -64,6 +68,64 @@ impl NodeRuntime {
         }
     }
 
+    /// Builds one bounded control-plane observation from the current host
+    /// lifecycle. The caller supplies a sequence reserved durably before this
+    /// value is emitted; runtime lifecycle generations are never used as wire
+    /// idempotency keys.
+    #[must_use]
+    pub fn observation(
+        &self,
+        sequence: u64,
+        observed_at: DateTime<Utc>,
+        freshness: std::time::Duration,
+    ) -> NodeRuntimeObservation {
+        let snapshot = self.snapshot();
+        let configuration = self.configuration();
+        let freshness_seconds = i64::try_from(freshness.as_secs())
+            .unwrap_or(600)
+            .clamp(1, 600);
+        let network_unavailable =
+            matches!(snapshot.network, crate::NetworkAvailability::Unavailable);
+        let lifecycle_state = if snapshot.shutdown_requested || network_unavailable {
+            NodeAvailability::Unavailable
+        } else {
+            match snapshot.power {
+                crate::PowerAvailability::Suspending => NodeAvailability::Suspending,
+                crate::PowerAvailability::Sleeping => NodeAvailability::Suspended,
+                crate::PowerAvailability::Unknown => NodeAvailability::Unavailable,
+                crate::PowerAvailability::Awake if snapshot.foreground => {
+                    if matches!(
+                        configuration.host.availability,
+                        crate::AvailabilityClass::ForegroundOnly
+                            | crate::AvailabilityClass::BackgroundOpportunistic
+                    ) {
+                        NodeAvailability::Foreground
+                    } else {
+                        NodeAvailability::Available
+                    }
+                }
+                crate::PowerAvailability::Awake => NodeAvailability::Background,
+            }
+        };
+        let attached = configuration.host.host_kind == crate::HostKind::AttachedClient;
+        NodeRuntimeObservation {
+            sequence,
+            host_mode: map_host_kind(configuration.host.host_kind),
+            availability_class: map_availability(configuration.host.availability),
+            lifecycle_state,
+            accepts_cloud_jobs: snapshot.accepting_cloud_leases && !attached,
+            observed_at,
+            fresh_until: observed_at + TimeDelta::seconds(freshness_seconds),
+            execution_budget_ms: None,
+            wake_mechanisms: configuration
+                .host
+                .local_ipc_broker
+                .then_some(WakeMechanism::LocalBroker)
+                .into_iter()
+                .collect(),
+        }
+    }
+
     /// Derives non-reversible physical-destination evidence without exporting
     /// the installation key or canonical printer endpoint.
     ///
@@ -94,6 +156,29 @@ impl NodeRuntime {
         message.extend_from_slice(canonical_identity);
         let digest = provider.hmac_sha256("physical-destination-v1", &message)?;
         Ok(format!("pid_{}", hex::encode(digest)))
+    }
+}
+
+const fn map_host_kind(value: crate::HostKind) -> NodeHostMode {
+    match value {
+        crate::HostKind::MachineService => NodeHostMode::MachineService,
+        crate::HostKind::UserAgent => NodeHostMode::UserAgent,
+        crate::HostKind::EmbeddedApplication => NodeHostMode::EmbeddedApplication,
+        crate::HostKind::AttachedClient => NodeHostMode::AttachedClient,
+    }
+}
+
+const fn map_availability(value: crate::AvailabilityClass) -> NodeAvailabilityClass {
+    match value {
+        crate::AvailabilityClass::ContinuousWhileAwake => {
+            NodeAvailabilityClass::ContinuousWhileAwake
+        }
+        crate::AvailabilityClass::ForegroundOnly => NodeAvailabilityClass::ForegroundOnly,
+        crate::AvailabilityClass::BackgroundOpportunistic => {
+            NodeAvailabilityClass::BackgroundOpportunistic
+        }
+        crate::AvailabilityClass::ManagedKiosk => NodeAvailabilityClass::ManagedKiosk,
+        crate::AvailabilityClass::WakeRelayCapable => NodeAvailabilityClass::WakeRelayCapable,
     }
 }
 
@@ -195,5 +280,41 @@ mod tests {
             runtime.opaque_evidence(&unavailable, "airprint", b"canonical"),
             Err(HostKeyError::Unavailable)
         ));
+    }
+
+    #[test]
+    fn runtime_observation_uses_caller_sequence_and_suspend_resume_freshness() {
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = NodeRuntime::start(RuntimeConfiguration {
+            data_directory: directory.path().to_path_buf(),
+            mode: NodeRuntimeMode::CloudCapable,
+            host: HostCapabilities {
+                host_kind: HostKind::UserAgent,
+                availability: AvailabilityClass::ContinuousWhileAwake,
+                secure_storage: true,
+                local_ipc_broker: true,
+                can_prevent_idle_sleep_during_handoff: false,
+                can_receive_remote_wake_hint: false,
+                printer_transports: std::collections::BTreeSet::default(),
+            },
+        })
+        .unwrap();
+        let _ = runtime.apply_lifecycle(LifecycleEvent::Started);
+        let now = Utc::now();
+        let awake = runtime.observation(42, now, std::time::Duration::from_secs(90));
+        assert_eq!(awake.sequence, 42);
+        assert_eq!(awake.lifecycle_state, NodeAvailability::Available);
+        assert!(awake.accepts_cloud_jobs);
+        assert_eq!(awake.fresh_until, now + TimeDelta::seconds(90));
+
+        let _ = runtime.apply_lifecycle(LifecycleEvent::SuspendImminent);
+        let suspended = runtime.observation(43, now, std::time::Duration::from_secs(90));
+        assert_eq!(suspended.lifecycle_state, NodeAvailability::Suspending);
+        assert!(!suspended.accepts_cloud_jobs);
+        let _ = runtime.apply_lifecycle(LifecycleEvent::Woke);
+        let resumed = runtime.observation(44, now, std::time::Duration::from_secs(9999));
+        assert_eq!(resumed.lifecycle_state, NodeAvailability::Available);
+        assert!(resumed.accepts_cloud_jobs);
+        assert_eq!(resumed.fresh_until, now + TimeDelta::minutes(10));
     }
 }
