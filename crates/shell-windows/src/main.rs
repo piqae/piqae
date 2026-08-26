@@ -711,14 +711,8 @@ mod windows_shell {
         };
         std::thread::spawn(move || {
             let refreshed = client.status().and_then(|status| {
-                client.printers().and_then(|printers| {
-                    client
-                        .pending_broker_authorizations()
-                        .map(|pending_authorizations| ShellSnapshot {
-                            status,
-                            printers,
-                            pending_authorizations,
-                        })
+                client.printers().map(|printers| {
+                    assemble_snapshot(status, printers, client.pending_broker_authorizations())
                 })
             });
             let Some(state_lock) = SHELL_STATE.get() else {
@@ -738,6 +732,44 @@ mod windows_shell {
                 }
             }
         });
+    }
+
+    fn assemble_snapshot<E>(
+        status: piqae_local_ipc::LocalStatus,
+        printers: Vec<piqae_local_ipc::LocalPrinter>,
+        pending_authorizations: Result<Vec<piqae_local_ipc::PendingBrokerAuthorization>, E>,
+    ) -> ShellSnapshot {
+        ShellSnapshot {
+            status,
+            printers,
+            pending_authorizations: pending_authorizations.unwrap_or_default(),
+        }
+    }
+
+    #[cfg(test)]
+    mod refresh_tests {
+        use super::assemble_snapshot;
+        use piqae_local_ipc::{ConnectionState, LocalStatus, PendingBrokerAuthorization};
+
+        #[test]
+        fn supplementary_failure_does_not_discard_primary_refresh_data() {
+            let status = LocalStatus {
+                agent_id: Some("agent-test".into()),
+                workspace_name: Some("Workspace".into()),
+                version: "test".into(),
+                connection: ConnectionState::Connected,
+                queued_jobs: 2,
+                active_jobs: 1,
+                printer_warnings: 0,
+                paused: false,
+            };
+            let pending: Result<Vec<PendingBrokerAuthorization>, &str> =
+                Err("supplementary endpoint unavailable");
+            let snapshot = assemble_snapshot(status.clone(), Vec::new(), pending);
+            assert_eq!(snapshot.status, status);
+            assert!(snapshot.printers.is_empty());
+            assert!(snapshot.pending_authorizations.is_empty());
+        }
     }
 
     fn open_dashboard(window: HWND) {

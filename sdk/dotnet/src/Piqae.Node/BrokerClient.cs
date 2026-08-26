@@ -159,9 +159,16 @@ internal static class WindowsCredentialStore
 
     internal static void Write(string target, string secret)
     {
-        if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException();
         var bytes = Encoding.UTF8.GetBytes(secret);
-        if (bytes.Length > 5120) throw new ArgumentOutOfRangeException(nameof(secret));
+        try { WriteBytes(target, bytes); }
+        finally { CryptographicOperations.ZeroMemory(bytes); }
+    }
+
+    internal static void WriteBytes(string target, ReadOnlySpan<byte> secret)
+    {
+        if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException();
+        if (secret.Length > 5120) throw new ArgumentOutOfRangeException(nameof(secret));
+        var bytes = secret.ToArray();
         var blob = Marshal.AllocHGlobal(bytes.Length);
         try
         {
@@ -177,20 +184,42 @@ internal static class WindowsCredentialStore
             };
             if (!CredWrite(ref credential, 0)) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
         }
-        finally { CryptographicOperations.ZeroMemory(bytes); Marshal.FreeHGlobal(blob); }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(bytes);
+            if (blob != IntPtr.Zero && secret.Length > 0)
+            {
+                var zeros = new byte[secret.Length];
+                Marshal.Copy(zeros, 0, blob, zeros.Length);
+            }
+            Marshal.FreeHGlobal(blob);
+        }
     }
 
     internal static string? Read(string target)
     {
+        var bytes = ReadBytes(target);
+        if (bytes is null) return null;
+        try { return Encoding.UTF8.GetString(bytes); }
+        finally { CryptographicOperations.ZeroMemory(bytes); }
+    }
+
+    internal static byte[]? ReadBytes(string target)
+    {
         if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException();
-        if (!CredRead(target, CredTypeGeneric, 0, out var pointer)) return null;
+        if (!CredRead(target, CredTypeGeneric, 0, out var pointer))
+        {
+            const int errorNotFound = 1168;
+            var error = Marshal.GetLastWin32Error();
+            if (error == errorNotFound) return null;
+            throw new System.ComponentModel.Win32Exception(error);
+        }
         try
         {
             var credential = Marshal.PtrToStructure<NativeCredential>(pointer);
             var bytes = new byte[checked((int)credential.CredentialBlobSize)];
             Marshal.Copy(credential.CredentialBlob, bytes, 0, bytes.Length);
-            try { return Encoding.UTF8.GetString(bytes); }
-            finally { CryptographicOperations.ZeroMemory(bytes); }
+            return bytes;
         }
         finally { CredFree(pointer); }
     }
@@ -198,6 +227,15 @@ internal static class WindowsCredentialStore
     internal static void Delete(string target)
     {
         if (OperatingSystem.IsWindows()) _ = CredDelete(target, CredTypeGeneric, 0);
+    }
+
+    internal static void DeleteRequired(string target)
+    {
+        if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException();
+        if (CredDelete(target, CredTypeGeneric, 0)) return;
+        const int errorNotFound = 1168;
+        var error = Marshal.GetLastWin32Error();
+        if (error != errorNotFound) throw new System.ComponentModel.Win32Exception(error);
     }
 
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
@@ -272,4 +310,7 @@ public sealed class WindowsCredentialHostKeyProvider(string installationScope) :
         }
         finally { if (ownsMutex) mutex.ReleaseMutex(); }
     }
+
+    internal void DeleteForTests(string keyScope) =>
+        WindowsCredentialStore.DeleteRequired($"{_targetPrefix}/{keyScope}");
 }

@@ -57,13 +57,16 @@ public sealed class PiqaeNode : IDisposable
     private bool _disposed;
     private GCHandle? _hostKeyHandle;
     private HmacCallback? _hostKeyCallback;
+    private GCHandle? _connectorKeyHandle;
+    private GenerateConnectorKeyCallback? _generateConnectorKeyCallback;
+    private SignConnectorCallback? _signConnectorCallback;
+    private DeleteConnectorKeyCallback? _deleteConnectorKeyCallback;
 
-    public PiqaeNode(PiqaeNodeOptions options)
+    public PiqaeNode(PiqaeNodeOptions options, IPiqaeConnectorKeyProvider? connectorKeyProvider = null)
     {
         ArgumentNullException.ThrowIfNull(options);
         var descriptor = NativeMethods.piqae_node_abi_descriptor();
-        if (descriptor.AbiVersion != 1 || descriptor.ContractMin > 1 || descriptor.ContractMax < 1)
-            throw new PiqaeNodeException("unsupported_native_abi", "The native Piqae runtime ABI is not compatible with this SDK.");
+        EnsureCompatibleAbi(descriptor);
         var payload = JsonSerializer.SerializeToUtf8Bytes(new
         {
             contract = 1,
@@ -75,6 +78,17 @@ public sealed class PiqaeNode : IDisposable
         }, JsonOptions);
         using var response = NativeResponse.Call(payload, NativeMethods.piqae_node_create);
         _handle = response.Data.GetProperty("handle").GetUInt64();
+        if (connectorKeyProvider is not null)
+        {
+            try { ConfigureConnectorKeyProvider(connectorKeyProvider); }
+            catch
+            {
+                using var ignored = NativeResponse.Call(_handle, NativeMethods.piqae_node_destroy, throwOnError: false);
+                _handle = 0;
+                _disposed = true;
+                throw;
+            }
+        }
     }
 
     public JsonElement Start() => CallHandle(NativeMethods.piqae_node_start);
@@ -222,6 +236,40 @@ public sealed class PiqaeNode : IDisposable
         connector_id = connectorId
     });
 
+    public void ConfigureConnectorKeyProvider(IPiqaeConnectorKeyProvider provider)
+    {
+        ArgumentNullException.ThrowIfNull(provider);
+        lock (_gate)
+        {
+            ThrowIfDisposed();
+            if (_connectorKeyHandle.HasValue)
+                throw new InvalidOperationException("A connector key provider is already configured.");
+            var handle = GCHandle.Alloc(provider);
+            GenerateConnectorKeyCallback generate = GenerateConnectorKey;
+            SignConnectorCallback sign = SignConnector;
+            DeleteConnectorKeyCallback delete = DeleteConnectorKey;
+            var native = new NativeConnectorKeyProvider
+            {
+                Context = GCHandle.ToIntPtr(handle),
+                Generate = Marshal.GetFunctionPointerForDelegate(generate),
+                Sign = Marshal.GetFunctionPointerForDelegate(sign),
+                Delete = Marshal.GetFunctionPointerForDelegate(delete)
+            };
+            try
+            {
+                using var ignored = NativeResponse.Call(
+                    _handle,
+                    native,
+                    NativeMethods.piqae_node_set_connector_key_provider);
+                _connectorKeyHandle = handle;
+                _generateConnectorKeyCallback = generate;
+                _signConnectorCallback = sign;
+                _deleteConnectorKeyCallback = delete;
+            }
+            catch { handle.Free(); throw; }
+        }
+    }
+
     public void ConfigureHostKeyProvider(IPiqaeHostKeyProvider provider)
     {
         ArgumentNullException.ThrowIfNull(provider);
@@ -292,6 +340,14 @@ public sealed class PiqaeNode : IDisposable
                 _hostKeyHandle = null;
                 _hostKeyCallback = null;
             }
+            if (_connectorKeyHandle is { } connectorKeyHandle)
+            {
+                connectorKeyHandle.Free();
+                _connectorKeyHandle = null;
+                _generateConnectorKeyCallback = null;
+                _signConnectorCallback = null;
+                _deleteConnectorKeyCallback = null;
+            }
         }
     }
 
@@ -317,6 +373,14 @@ public sealed class PiqaeNode : IDisposable
     }
 
     private void ThrowIfDisposed() => ObjectDisposedException.ThrowIf(_disposed, this);
+
+    internal static void EnsureCompatibleAbi(NativeAbiDescriptor descriptor)
+    {
+        if (descriptor.AbiVersion != 1 || descriptor.ContractMin > 1 || descriptor.ContractMax < 1)
+            throw new PiqaeNodeException(
+                "unsupported_native_abi",
+                "The native Piqae runtime ABI is not compatible with this SDK.");
+    }
 
     private static int HostHmacCallback(
         IntPtr context,
@@ -345,6 +409,106 @@ public sealed class PiqaeNode : IDisposable
         }
         catch { return 1; }
     }
+
+    private static int GenerateConnectorKey(
+        IntPtr context,
+        IntPtr scope,
+        nuint scopeLength,
+        IntPtr handleOutput,
+        nuint handleCapacity,
+        IntPtr handleLengthOutput,
+        IntPtr publicKeyOutput,
+        nuint publicKeyLength)
+    {
+        if (context == IntPtr.Zero || scope == IntPtr.Zero || handleOutput == IntPtr.Zero
+            || handleLengthOutput == IntPtr.Zero || publicKeyOutput == IntPtr.Zero
+            || scopeLength is 0 or > 256 || handleCapacity is 0 or > 256 || publicKeyLength != 32)
+            return 1;
+        try
+        {
+            var provider = (IPiqaeConnectorKeyProvider?)GCHandle.FromIntPtr(context).Target;
+            if (provider is null) return 1;
+            var scopeBytes = new byte[(int)scopeLength];
+            Marshal.Copy(scope, scopeBytes, 0, scopeBytes.Length);
+            PiqaeGeneratedConnectorKey generated;
+            try { generated = provider.Generate(new UTF8Encoding(false, true).GetString(scopeBytes)); }
+            finally { CryptographicOperations.ZeroMemory(scopeBytes); }
+            var handleBytes = Encoding.UTF8.GetBytes(generated.Handle);
+            try
+            {
+                if (handleBytes.Length == 0 || (nuint)handleBytes.Length > handleCapacity
+                    || generated.PublicKey.Length != 32) return 1;
+                Marshal.Copy(handleBytes, 0, handleOutput, handleBytes.Length);
+                Marshal.WriteIntPtr(handleLengthOutput, (IntPtr)handleBytes.Length);
+                Marshal.Copy(generated.PublicKey, 0, publicKeyOutput, generated.PublicKey.Length);
+                return 0;
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(handleBytes);
+                CryptographicOperations.ZeroMemory(generated.PublicKey);
+            }
+        }
+        catch { return 1; }
+    }
+
+    private static int SignConnector(
+        IntPtr context,
+        IntPtr handle,
+        nuint handleLength,
+        IntPtr message,
+        nuint messageLength,
+        IntPtr signatureOutput,
+        nuint signatureLength)
+    {
+        if (context == IntPtr.Zero || handle == IntPtr.Zero || signatureOutput == IntPtr.Zero
+            || handleLength is 0 or > 256 || messageLength > 1024 * 1024 || signatureLength != 64
+            || (messageLength != 0 && message == IntPtr.Zero)) return 1;
+        try
+        {
+            var provider = (IPiqaeConnectorKeyProvider?)GCHandle.FromIntPtr(context).Target;
+            if (provider is null) return 1;
+            var handleBytes = new byte[(int)handleLength];
+            var messageBytes = new byte[(int)messageLength];
+            Marshal.Copy(handle, handleBytes, 0, handleBytes.Length);
+            if (messageBytes.Length > 0) Marshal.Copy(message, messageBytes, 0, messageBytes.Length);
+            try
+            {
+                var signature = provider.Sign(
+                    new UTF8Encoding(false, true).GetString(handleBytes),
+                    messageBytes);
+                try
+                {
+                    if (signature.Length != 64) return 1;
+                    Marshal.Copy(signature, 0, signatureOutput, signature.Length);
+                    return 0;
+                }
+                finally { CryptographicOperations.ZeroMemory(signature); }
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(handleBytes);
+                CryptographicOperations.ZeroMemory(messageBytes);
+            }
+        }
+        catch { return 1; }
+    }
+
+    private static int DeleteConnectorKey(IntPtr context, IntPtr handle, nuint handleLength)
+    {
+        if (context == IntPtr.Zero || handle == IntPtr.Zero || handleLength is 0 or > 256) return 1;
+        try
+        {
+            var provider = (IPiqaeConnectorKeyProvider?)GCHandle.FromIntPtr(context).Target;
+            if (provider is null) return 1;
+            var handleBytes = new byte[(int)handleLength];
+            Marshal.Copy(handle, handleBytes, 0, handleBytes.Length);
+            try { provider.Delete(new UTF8Encoding(false, true).GetString(handleBytes)); }
+            finally { CryptographicOperations.ZeroMemory(handleBytes); }
+            return 0;
+        }
+        catch { return 1; }
+    }
 }
 
 public interface IPiqaeHostKeyProvider
@@ -362,6 +526,28 @@ internal struct NativeHostKeyProvider
 {
     internal IntPtr Context;
     internal IntPtr HmacSha256;
+}
+
+[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+internal delegate int GenerateConnectorKeyCallback(
+    IntPtr context, IntPtr scope, nuint scopeLength, IntPtr handleOutput, nuint handleCapacity,
+    IntPtr handleLengthOutput, IntPtr publicKeyOutput, nuint publicKeyLength);
+
+[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+internal delegate int SignConnectorCallback(
+    IntPtr context, IntPtr handle, nuint handleLength, IntPtr message, nuint messageLength,
+    IntPtr signatureOutput, nuint signatureLength);
+
+[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+internal delegate int DeleteConnectorKeyCallback(IntPtr context, IntPtr handle, nuint handleLength);
+
+[StructLayout(LayoutKind.Sequential)]
+internal struct NativeConnectorKeyProvider
+{
+    internal IntPtr Context;
+    internal IntPtr Generate;
+    internal IntPtr Sign;
+    internal IntPtr Delete;
 }
 
 public sealed class PiqaeNodeException(string code, string message) : Exception(message)
@@ -382,6 +568,13 @@ internal readonly struct NativeAbiDescriptor
     public readonly ushort AbiVersion;
     public readonly ushort ContractMin;
     public readonly ushort ContractMax;
+
+    internal NativeAbiDescriptor(ushort abiVersion, ushort contractMin, ushort contractMax)
+    {
+        AbiVersion = abiVersion;
+        ContractMin = contractMin;
+        ContractMax = contractMax;
+    }
 }
 
 internal static class NativeMethods
@@ -392,6 +585,7 @@ internal static class NativeMethods
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)] internal static extern NativeBuffer piqae_node_create(byte[] data, nuint length);
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)] internal static extern NativeBuffer piqae_node_start(ulong handle);
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)] internal static extern NativeBuffer piqae_node_set_host_key_provider(ulong handle, NativeHostKeyProvider provider);
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)] internal static extern NativeBuffer piqae_node_set_connector_key_provider(ulong handle, NativeConnectorKeyProvider provider);
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)] internal static extern NativeBuffer piqae_node_stop(ulong handle);
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)] internal static extern NativeBuffer piqae_node_snapshot(ulong handle);
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)] internal static extern NativeBuffer piqae_node_command(ulong handle, byte[] data, nuint length);
@@ -439,6 +633,8 @@ internal sealed class NativeResponse : IDisposable
     internal static NativeResponse Call(ulong handle, Func<ulong, NativeBuffer> operation, bool throwOnError = true) =>
         new(operation(handle), throwOnError);
     internal static NativeResponse Call(ulong handle, NativeHostKeyProvider provider, Func<ulong, NativeHostKeyProvider, NativeBuffer> operation) =>
+        new(operation(handle, provider), true);
+    internal static NativeResponse Call(ulong handle, NativeConnectorKeyProvider provider, Func<ulong, NativeConnectorKeyProvider, NativeBuffer> operation) =>
         new(operation(handle, provider), true);
     internal static NativeResponse Call(ulong handle, byte[] payload, Func<ulong, byte[], nuint, NativeBuffer> operation) =>
         new(operation(handle, payload, (nuint)payload.Length), true);
