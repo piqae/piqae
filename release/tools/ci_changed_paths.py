@@ -84,7 +84,9 @@ def classify(paths: Iterable[str], *, run_all: bool = False) -> dict[str, bool]:
                 "sdk/native/",
             )
         )
-        selected["macos_shell"] |= path.startswith(("shells/macos/", "sdk/apple/"))
+        selected["macos_shell"] |= path.startswith(
+            ("shells/macos/", "sdk/apple/")
+        ) or path == "release/tools/test_apple_node_sdk.sh"
         selected["macos_packaging"] |= path.startswith("packaging/macos/")
         selected["windows_shell"] |= path.startswith("crates/shell-windows/")
         selected["windows_installer"] |= path.startswith("packaging/windows/")
