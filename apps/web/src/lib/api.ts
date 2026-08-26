@@ -20,6 +20,7 @@ import type {
   DashboardWebhook
 } from './view-types';
 import * as demo from './demo-data';
+import { printerNeedsAttention } from './operations-health';
 
 export interface DashboardApi {
   meta(): Promise<DashboardMeta>;
@@ -55,6 +56,10 @@ export interface DashboardApi {
   nodeRuntimeObservations(): Promise<DashboardPage<DashboardNodeRuntimeObservation>>;
   nodeWakeHints(nodeId: string): Promise<DashboardNodeWakeHint[]>;
   requestNodeRefresh(nodeId: string, requestId: string): Promise<DashboardNodeWakeHint>;
+  updateNodeDetails(
+    nodeId: string,
+    details: { name?: string; site?: string | null; location?: string | null; labels?: string[] }
+  ): Promise<DashboardAgent>;
   removeNode(nodeId: string): Promise<{ alreadyRemoved: boolean }>;
 }
 
@@ -103,7 +108,7 @@ export const mockApi: DashboardApi = {
       printers: {
         total: demo.printers.length,
         online: demo.printers.filter((printer) => printer.state === 'online').length,
-        attention: demo.printers.filter((printer) => printer.state !== 'online').length
+        attention: demo.printers.filter((printer) => printerNeedsAttention(printer.state)).length
       },
       jobs: {
         recent: demo.jobs.length,
@@ -205,6 +210,17 @@ export const mockApi: DashboardApi = {
     expiresAt: new Date(Date.now() + 300_000).toISOString(),
     observedAt: null
   }),
+  updateNodeDetails: async (nodeId, details) => {
+    const node = demo.agents.find((candidate) => candidate.id === nodeId);
+    if (!node) throw new Error('Node not found.');
+    return delay({
+      ...node,
+      ...details,
+      site: 'site' in details ? details.site : node.site,
+      location: 'location' in details ? details.location : node.location,
+      labels: details.labels ?? node.labels
+    });
+  },
   removeNode: () => delay({ alreadyRemoved: false })
 };
 
@@ -237,6 +253,8 @@ export function createLiveApi(
   const toAgent = (agent: Awaited<ReturnType<typeof client.agents.list>>[number]): DashboardAgent => ({
     id: agent.id,
     name: agent.name,
+    site: agent.site ?? null,
+    location: agent.location ?? null,
     state:
       agent.state === 'connected'
         ? 'online'
@@ -256,7 +274,7 @@ export function createLiveApi(
     lastSeenAt: agent.last_seen_at,
     queueDepth: 0,
     printerCount: 0,
-    labels: []
+    labels: agent.labels ?? []
   });
 
   const toRuntimeObservation = (
@@ -354,6 +372,9 @@ export function createLiveApi(
     sequence: observation.sequence,
     printerState: observation.printer_state,
     acceptingJobs: observation.accepting_jobs,
+    // A staggered deployment may briefly serve an older API response without
+    // this evidence flag. Fail closed: absent evidence is not an empty queue.
+    queueReported: observation.queue_reported ?? false,
     totalJobs: observation.total_jobs,
     activeJobs: observation.active_jobs,
     heldJobs: observation.held_jobs,
@@ -497,7 +518,7 @@ export function createLiveApi(
         printers: {
           total: printerPage.data.length,
           online: printerPage.data.filter((printer) => printer.state === 'online').length,
-          attention: printerPage.data.filter((printer) => printer.state !== 'online').length
+          attention: printerPage.data.filter((printer) => printerNeedsAttention(printer.state)).length
         },
         jobs: {
           recent: jobPage.data.length,
@@ -544,6 +565,8 @@ export function createLiveApi(
         { reason: 'operator_request', expires_in_seconds: 300 },
         requestId
       )),
+    updateNodeDetails: async (nodeId, details) =>
+      toAgent(await client.nodes.updateDetails(nodeId, details)),
     removeNode: async (nodeId) => {
       try {
         await client.nodes.revoke(nodeId);

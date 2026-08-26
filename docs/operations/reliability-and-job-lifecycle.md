@@ -150,6 +150,12 @@ capabilities alone never establishes that two routes reach the same printer.
 Only unambiguous same-kind strong/verified identity evidence can group a new
 route automatically; conflicts require a reversible operator decision.
 
+Missing optional evidence is not itself an incident. An unverified single route
+is shown as provisional, and loaded media remains `not_reported` until a native
+adapter can observe it truthfully. Neither label makes the route schedulable:
+fresh authenticated route telemetry and explicit `accepting_jobs` evidence
+remain mandatory.
+
 For a resilient destination, a **target** should bind:
 
 - one primary node/printer/profile revision;
@@ -276,6 +282,24 @@ The beta must not promise automatic zero-RPO regional database failover when
 the chosen data service cannot provide it.
 
 ## SLOs and alerts
+
+### macOS/CUPS route observations
+
+Node v0.1.22 reads each CUPS destination's current IPP `printer-state` during
+the signed route-observation cycle. CUPS idle (`3`) and processing (`4`) queues
+may advertise `accepting_jobs=true`; stopped (`5`) and unrecognized values
+remain ineligible. A queue removed from CUPS is reconciled as an absent route.
+This generic path does not infer vendor-specific offline, error, or paper-out
+reasons. The control plane still applies its freshness fence, so this display
+signal cannot by itself authorize a lease.
+
+CUPS queue discovery supplies profile observation and privacy-safe job counts.
+Generic CUPS does not prove which physical stock is loaded, so loaded media is
+reported as **Not reported** until a driver/device adapter or an explicit
+operator workflow provides evidence. Existing nodes must install v0.1.22 and
+complete a signed inventory/observation cycle before these corrected states can
+appear; physical driver and stock claims still require the hardware acceptance
+matrix.
 
 Measure at least:
 

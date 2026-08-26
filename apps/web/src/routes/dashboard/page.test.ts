@@ -140,7 +140,7 @@ describe('uncertain delivery on the operations dashboard', () => {
     });
 
     const tile = reviewTile();
-    expect(tile).toHaveTextContent('No uncertain handoffs');
+    expect(tile).toHaveTextContent('No actionable issues');
     expect(tile).not.toHaveClass('attention');
     expect(tile).toHaveAttribute('href', '/dashboard?view=needs_review');
     expect(tile.textContent).not.toContain('oldest');
@@ -439,6 +439,7 @@ describe('managed customer operations', () => {
         sequence: 3,
         printerState: 'busy',
         acceptingJobs: true,
+        queueReported: true,
         totalJobs: 7,
         activeJobs: 1,
         heldJobs: 0,

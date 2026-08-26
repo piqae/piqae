@@ -9,6 +9,7 @@ import {
 } from '$lib/server/dashboard-data';
 import { isOperationalView, resolveStateFilter } from '$lib/dashboard-navigation';
 import type { DashboardApi } from '$lib/api';
+import { printerNeedsAttention } from '$lib/operations-health';
 import type {
   DashboardAccount,
   DashboardAgent,
@@ -108,7 +109,7 @@ function overviewFor(lists: Pick<LoadedLists, 'jobs' | 'printers' | 'agents'>): 
     printers: {
       total: lists.printers.length,
       online: lists.printers.filter((printer) => printer.state === 'online').length,
-      attention: lists.printers.filter((printer) => printer.state !== 'online').length
+      attention: lists.printers.filter((printer) => printerNeedsAttention(printer.state)).length
     },
     jobs: {
       recent: lists.jobs.length,
@@ -406,6 +407,51 @@ async function nodeWakeHints(api: DashboardApi, nodeId: string) {
 }
 
 export const actions: Actions = {
+  updateNodeDetails: async (event) => {
+    if (dashboardMode() !== 'live') {
+      return fail(400, {
+        mutation: 'updateNodeDetails',
+        error: { message: 'Node details cannot be changed while demo data is active.' }
+      });
+    }
+    const data = await event.request.formData();
+    const nodeId = String(data.get('node_id') ?? '').trim();
+    const name = String(data.get('name') ?? '').trim();
+    const site = String(data.get('site') ?? '').trim();
+    const location = String(data.get('location') ?? '').trim();
+    const labels = String(data.get('labels') ?? '')
+      .split(',')
+      .map((label) => label.trim())
+      .filter(Boolean);
+    if (!nodeId || !name || name.length > 120 || site.length > 120 || location.length > 120) {
+      return fail(400, {
+        mutation: 'updateNodeDetails',
+        error: { message: 'Use a node name and keep node, site, and location labels within 120 characters.' }
+      });
+    }
+    if (labels.length > 16 || labels.some((label) => label.length > 64) || new Set(labels).size !== labels.length) {
+      return fail(400, {
+        mutation: 'updateNodeDetails',
+        error: { message: 'Use at most 16 unique labels, each no longer than 64 characters.' }
+      });
+    }
+    try {
+      const managed = await managedSelection(event, data);
+      const node = await (managed?.api ?? dashboardSource(event).api).updateNodeDetails(nodeId, {
+        name,
+        site: site || null,
+        location: location || null,
+        labels
+      });
+      return { mutation: 'updateNodeDetails', node };
+    } catch (error) {
+      return fail(502, {
+        mutation: 'updateNodeDetails',
+        error: { message: presentDashboardError(error).message }
+      });
+    }
+  },
+
   removeNode: async (event) => {
     if (dashboardMode() !== 'live') {
       return fail(400, {

@@ -310,6 +310,9 @@ export interface CreatedApiKey extends ApiKey {
 export interface Agent {
   id: PiqaeId;
   name: string;
+  site?: string | null;
+  location?: string | null;
+  labels?: string[];
   platform: string;
   state: 'connected' | 'disconnected' | 'paused' | 'degraded';
   version: string;
@@ -319,6 +322,13 @@ export interface Agent {
   sqlite_integrity_ok?: boolean | null;
   executor_crashes?: number;
   last_error_code?: string | null;
+}
+
+export interface UpdateNodeDetails {
+  name?: string;
+  site?: string | null;
+  location?: string | null;
+  labels?: string[];
 }
 
 export interface DiagnosticReport {

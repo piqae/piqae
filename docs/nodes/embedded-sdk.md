@@ -210,6 +210,20 @@ Removing the app does not prove that an iPad, desktop spooler, or printer
 discarded accepted work. Operators resolve any retained uncertain deliveries
 before resetting the installation.
 
+### Node names and operator labels
+
+Standalone nodes default their display name to the privacy-safe operating-system
+computer/device name. Piqae never derives a node name, site, location, or label
+from the logged-in username, contact record, or postal address. Operators can
+rename a node and set optional `site`, `location`, and `labels` through
+`PATCH /v1/nodes/{node_id}`.
+
+Embedded hosts use the same model. Their SDK configuration can provide the
+display name and optional operator labels during connection setup; host-managed
+integrations may do this without exposing connection maintenance to the end
+user. Labels are tenant-scoped display metadata and are not physical-printer
+identity evidence, routing keys, or scheduler admission evidence.
+
 ## Package and compatibility policy
 
 The public application SDKs are the supported integration boundary. Internal

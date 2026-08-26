@@ -265,10 +265,11 @@ export class PiqaeClient {
     list: () => this.request<Agent[]>('GET', '/v1/nodes'),
     retrieve: (id: string) =>
       this.request<Agent>('GET', `/v1/nodes/${encodeURIComponent(id)}`),
-    rename: (id: string, name: string) =>
+    updateDetails: (id: string, details: import('./types.js').UpdateNodeDetails) =>
       this.request<Agent>('PATCH', `/v1/nodes/${encodeURIComponent(id)}`, {
-        body: { name }
+        body: details
       }),
+    rename: (id: string, name: string) => this.nodes.updateDetails(id, { name }),
     revoke: (id: string) =>
       this.request<void>('DELETE', `/v1/nodes/${encodeURIComponent(id)}`),
     pause: (id: string) =>

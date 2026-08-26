@@ -436,6 +436,9 @@ pub struct StoredApiKey {
 pub struct StoredAgent {
     pub id: AgentId,
     pub name: String,
+    pub site: Option<String>,
+    pub location: Option<String>,
+    pub labels: Vec<String>,
     pub platform: String,
     pub state: String,
     pub version: String,
@@ -3662,7 +3665,7 @@ impl PostgresStore {
         environment_id: EnvironmentId,
     ) -> Result<Vec<StoredAgent>, StorageError> {
         let rows = sqlx::query(
-            "SELECT id, name, os, state, version, COALESCE(last_seen_at, created_at) AS last_seen_at,
+            "SELECT id, name, metadata, os, state, version, COALESCE(last_seen_at, created_at) AS last_seen_at,
                     health_started_at, health_observed_at, sqlite_integrity_ok,
                     executor_crashes, last_error_code
              FROM agents
@@ -3683,7 +3686,7 @@ impl PostgresStore {
         agent_id: AgentId,
     ) -> Result<StoredAgent, StorageError> {
         let row = sqlx::query(
-            "SELECT id, name, os, state, version, COALESCE(last_seen_at, created_at) AS last_seen_at,
+            "SELECT id, name, metadata, os, state, version, COALESCE(last_seen_at, created_at) AS last_seen_at,
                     health_started_at, health_observed_at, sqlite_integrity_ok,
                     executor_crashes, last_error_code
              FROM agents
@@ -3699,15 +3702,39 @@ impl PostgresStore {
         agent_from_row(&row)
     }
 
-    pub async fn rename_agent(
+    pub async fn update_agent_details(
         &self,
         workspace_id: WorkspaceId,
         environment_id: EnvironmentId,
         agent_id: AgentId,
-        name: &str,
+        name: Option<&str>,
+        site: Option<Option<&str>>,
+        location: Option<Option<&str>>,
+        labels: Option<&[String]>,
     ) -> Result<StoredAgent, StorageError> {
+        let mut metadata_patch = serde_json::Map::new();
+        let mut metadata_keys_to_remove = Vec::new();
+        if let Some(site) = site {
+            if let Some(site) = site {
+                metadata_patch.insert("site".into(), serde_json::json!(site));
+            } else {
+                metadata_keys_to_remove.push("site");
+            }
+        }
+        if let Some(location) = location {
+            if let Some(location) = location {
+                metadata_patch.insert("location".into(), serde_json::json!(location));
+            } else {
+                metadata_keys_to_remove.push("location");
+            }
+        }
+        if let Some(labels) = labels {
+            metadata_patch.insert("labels".into(), serde_json::json!(labels));
+        }
         sqlx::query(
-            "UPDATE agents SET name = $4
+            "UPDATE agents
+             SET name = COALESCE($4, name),
+                 metadata = (metadata - $6::text[]) || $5::jsonb
              WHERE id = $1 AND workspace_id = $2 AND environment_id = $3
                AND revoked_at IS NULL",
         )
@@ -3715,6 +3742,8 @@ impl PostgresStore {
         .bind(workspace_id.to_string())
         .bind(environment_id.to_string())
         .bind(name)
+        .bind(serde_json::Value::Object(metadata_patch))
+        .bind(metadata_keys_to_remove)
         .execute(&self.pool)
         .await?
         .rows_affected()
@@ -11280,11 +11309,31 @@ async fn upsert_node_connector(
 
 fn agent_from_row(row: &PgRow) -> Result<StoredAgent, StorageError> {
     let id: String = row.try_get("id")?;
+    let metadata: serde_json::Value = row.try_get("metadata")?;
     Ok(StoredAgent {
         id: id
             .parse()
             .map_err(|error| StorageError::InvalidData(format!("agent id `{id}`: {error}")))?,
         name: row.try_get("name")?,
+        site: metadata
+            .get("site")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+        location: metadata
+            .get("location")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+        labels: metadata
+            .get("labels")
+            .and_then(serde_json::Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default(),
         platform: row.try_get("os")?,
         state: normalize_agent_state(&row.try_get::<String, _>("state")?),
         version: row.try_get("version")?,

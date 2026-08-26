@@ -35,6 +35,8 @@ export interface DashboardAgent {
   customer?: DashboardResourceOwner | null;
   id: string;
   name: string;
+  site?: string | null;
+  location?: string | null;
   state: ResourceState;
   os: 'windows' | 'macos' | 'linux' | 'ipados';
   architecture: string;
@@ -156,6 +158,7 @@ export interface DashboardRouteObservation {
   sequence: number;
   printerState: 'online' | 'busy' | 'paused' | 'paper_out' | 'error' | 'offline' | 'unknown';
   acceptingJobs: boolean;
+  queueReported: boolean;
   totalJobs: number;
   activeJobs: number;
   heldJobs: number;
@@ -182,7 +185,7 @@ export interface DashboardPrinterRoute {
   profileRevision: number;
   profileObservedAt: string | null;
   stockObservedAt: string | null;
-  stockState: 'current' | 'stale' | 'unknown';
+  stockState: 'current' | 'stale' | 'not_reported' | 'unknown';
   schedulingAuthorityId: string | null;
   latestObservation: DashboardRouteObservation | null;
   updatedAt: string;
