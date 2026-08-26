@@ -50,6 +50,38 @@ pub async fn authenticate_agent(
     path: &str,
     body: &[u8],
 ) -> Result<AgentIdentity, AppError> {
+    authenticate_agent_inner(state, headers, method, path, body, false).await
+}
+
+/// Verifies the connector's final signed revocation request.
+///
+/// This path intentionally permits an exact already-revoked credential so a
+/// lost response or failed local commit can retry only the idempotent
+/// revocation operation.
+///
+/// # Errors
+///
+/// Returns an authentication error for missing, stale, replayed,
+/// digest-mismatched, or cryptographically invalid requests, and a service
+/// error if persistence fails.
+pub async fn authenticate_agent_for_revocation(
+    state: &AppState,
+    headers: &axum::http::HeaderMap,
+    method: &str,
+    path: &str,
+    body: &[u8],
+) -> Result<AgentIdentity, AppError> {
+    authenticate_agent_inner(state, headers, method, path, body, true).await
+}
+
+async fn authenticate_agent_inner(
+    state: &AppState,
+    headers: &axum::http::HeaderMap,
+    method: &str,
+    path: &str,
+    body: &[u8],
+    allow_revoked_connector: bool,
+) -> Result<AgentIdentity, AppError> {
     let agent_id_text = required_product_header(headers, "x-piqae-agent-id", "x-spool-agent-id")?;
     let agent_id = AgentId::from_str(agent_id_text)
         .map_err(|_| AppError::device_unauthorized("invalid_agent_id"))?;
@@ -84,11 +116,15 @@ pub async fn authenticate_agent(
     {
         return Err(AppError::device_unauthorized("agent_digest_mismatch"));
     }
-    let record = state
-        .repository
-        .agent_for_authentication(agent_id)
-        .await
-        .map_err(|_| AppError::device_unauthorized("unknown_agent"))?;
+    let record = if allow_revoked_connector {
+        state
+            .repository
+            .agent_for_revocation_authentication(agent_id)
+            .await
+    } else {
+        state.repository.agent_for_authentication(agent_id).await
+    }
+    .map_err(|_| AppError::device_unauthorized("unknown_agent"))?;
     let public_key: [u8; 32] = record
         .public_key
         .try_into()

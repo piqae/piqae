@@ -13,8 +13,20 @@
 use anyhow::{Context as _, Result, bail};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::Utc;
-use piqae_agent_storage::{AcceptedJob, AgentStore, LocalJob, StoredNamedProfile};
-use piqae_domain::{EventId, NativePrinterOption};
+use piqae_agent_storage::{
+    AcceptedJob, AgentStore, CloudAcceptIntent, LocalJob, StoredNamedProfile,
+};
+use piqae_domain::{
+    AgentId, EventId, JobFailureReason, JobId, JobState, NativePrinterOption, PrinterCapabilities,
+    PrinterId, PrinterState,
+};
+use piqae_protocol::{
+    CURRENT_PROTOCOL_VERSION,
+    agent::{
+        AgentCommand, AgentFeature, AgentHealth, AgentProtocolCapabilities, AgentSyncRequest,
+        DocumentRenderCapabilities, JobOffer, PrinterSnapshot, QueueSnapshot, TelemetryPrivacy,
+    },
+};
 use piqae_support_packs::{AdapterFingerprint, Platform, SupportPackRegistry};
 use rand::RngCore as _;
 use serde::{Deserialize, Serialize};
@@ -119,6 +131,9 @@ pub enum AdapterOperationPhase {
 pub struct AdapterOperation {
     pub operation_id: String,
     pub adapter_id: String,
+    /// `local` or the durable connector id whose isolated queue owns the job.
+    #[serde(default = "local_queue_scope")]
+    pub queue_scope: String,
     pub job_id: String,
     pub idempotency_key: String,
     pub fence: String,
@@ -177,6 +192,8 @@ struct DurableAdapter {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CompletedAck {
     adapter_id: String,
+    #[serde(default = "local_queue_scope")]
+    queue_scope: String,
     fence_sha256: String,
     outcome_sha256: String,
     ack: AdapterOperationAck,
@@ -188,6 +205,8 @@ struct CompletedAck {
 struct EmbeddedDocument {
     version: u16,
     adapters: BTreeMap<String, DurableAdapter>,
+    #[serde(default)]
+    connector_scopes: BTreeSet<String>,
     operations: BTreeMap<String, AdapterOperation>,
     completed: BTreeMap<String, CompletedAck>,
 }
@@ -195,6 +214,7 @@ struct EmbeddedDocument {
 pub struct EmbeddedQueue {
     root: PathBuf,
     store: AgentStore,
+    connector_stores: BTreeMap<String, AgentStore>,
     support_packs: SupportPackRegistry,
     document: EmbeddedDocument,
 }
@@ -222,6 +242,7 @@ impl EmbeddedQueue {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => EmbeddedDocument {
                 version: DOCUMENT_VERSION,
                 adapters: BTreeMap::new(),
+                connector_scopes: BTreeSet::new(),
                 operations: BTreeMap::new(),
                 completed: BTreeMap::new(),
             },
@@ -232,9 +253,11 @@ impl EmbeddedQueue {
         let mut queue = Self {
             root,
             store,
+            connector_stores: BTreeMap::new(),
             support_packs,
             document,
         };
+        queue.open_persisted_connector_scopes()?;
         queue.repair_after_restart()?;
         Ok(queue)
     }
@@ -368,6 +391,226 @@ impl EmbeddedQueue {
         Ok(snapshots)
     }
 
+    /// Opens the durable queue projection for one authenticated connector.
+    /// Each connector owns its cursors, outbox, leases and job rows while the
+    /// adapter operation journal remains installation-wide.
+    pub fn ensure_connector_queue(&mut self, connector_id: &str) -> Result<()> {
+        validate_queue_scope(connector_id)?;
+        if self.connector_stores.contains_key(connector_id) {
+            return Ok(());
+        }
+        if self.document.connector_scopes.len() >= 128 {
+            bail!("embedded connector queue limit reached");
+        }
+        let root = self.root.join("connectors").join(connector_id);
+        std::fs::create_dir_all(&root)?;
+        let store = AgentStore::open(root.join("agent.sqlite3"))?;
+        self.document
+            .connector_scopes
+            .insert(connector_id.to_owned());
+        if let Err(error) = self.persist() {
+            self.document.connector_scopes.remove(connector_id);
+            return Err(error);
+        }
+        self.connector_stores.insert(connector_id.to_owned(), store);
+        Ok(())
+    }
+
+    pub fn connector_sync_snapshot(
+        &mut self,
+        connector_id: &str,
+        agent_id: AgentId,
+        started_at: chrono::DateTime<Utc>,
+        refresh_inventory: bool,
+        allowed_printer_ids: Option<&BTreeSet<String>>,
+        runtime: &crate::NodeRuntime,
+    ) -> Result<AgentSyncRequest> {
+        self.ensure_connector_queue(connector_id)?;
+        let printers = if refresh_inventory {
+            let snapshots = self
+                .printer_snapshots()?
+                .into_iter()
+                .filter(|printer| {
+                    allowed_printer_ids.is_none_or(|allowed| allowed.contains(&printer.printer_id))
+                })
+                .map(embedded_protocol_printer)
+                .collect::<Result<Vec<_>>>()?;
+            Some(snapshots)
+        } else {
+            None
+        };
+        let store = self.store_for_scope_mut(connector_id)?;
+        let revision = store
+            .setting("printer_inventory_revision")?
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(0);
+        let printer_revision = if refresh_inventory {
+            let next = revision.saturating_add(1);
+            store.set_setting("printer_inventory_revision", &next.to_string())?;
+            next
+        } else {
+            revision
+        };
+        let counts = store.queue_counts()?;
+        let events = store
+            .pending_cloud_events(0, 100)?
+            .into_iter()
+            .map(|event| embedded_protocol_event(agent_id, event))
+            .collect::<Result<Vec<_>>>()?;
+        let event_cursor = events.last().map(|event| event.id);
+        let (executor_crashes, last_error_code) = store.failure_health()?;
+        Ok(AgentSyncRequest {
+            agent_id,
+            protocol_version: CURRENT_PROTOCOL_VERSION,
+            agent_version: env!("CARGO_PKG_VERSION").into(),
+            printer_revision,
+            acknowledged_command_cursor: store.setting("command_cursor")?,
+            event_cursor,
+            queue: QueueSnapshot {
+                queued_jobs: counts.queued,
+                active_jobs: counts.active,
+                content_bytes: 0,
+                accepts_jobs: runtime.snapshot().accepting_cloud_leases,
+            },
+            health: AgentHealth {
+                started_at,
+                observed_at: Utc::now(),
+                sqlite_integrity_ok: store.integrity_check()?,
+                executor_crashes,
+                last_error_code,
+            },
+            printers,
+            events,
+            diagnostics: Vec::new(),
+            document_render: DocumentRenderCapabilities::default(),
+            capabilities: AgentProtocolCapabilities {
+                features: vec![
+                    AgentFeature::EmbeddedHostV1,
+                    AgentFeature::RuntimeAvailabilityV1,
+                ],
+                telemetry_privacy: TelemetryPrivacy::CountsOnly,
+            },
+            route_observations: Vec::new(),
+            topology_changes: Vec::new(),
+            native_handoffs: Vec::new(),
+            runtime: Some(runtime.observation(1, Utc::now(), std::time::Duration::from_secs(90))),
+        })
+    }
+
+    pub fn acknowledge_connector_response(
+        &mut self,
+        connector_id: &str,
+        event_cursor: Option<EventId>,
+        command_cursor: Option<&str>,
+    ) -> Result<()> {
+        let store = self.store_for_scope_mut(connector_id)?;
+        if let Some(cursor) = event_cursor {
+            store.acknowledge_cloud_event(&cursor.to_string(), Utc::now().timestamp_millis())?;
+        }
+        if let Some(cursor) = command_cursor {
+            store.set_setting("command_cursor", cursor)?;
+        }
+        Ok(())
+    }
+
+    pub fn apply_connector_commands(
+        &mut self,
+        connector_id: &str,
+        commands: &[AgentCommand],
+    ) -> Result<()> {
+        let store = self.store_for_scope_mut(connector_id)?;
+        for command in commands {
+            match command {
+                AgentCommand::CancelJob { job_id } => {
+                    store.request_cancel(&job_id.to_string(), Utc::now().timestamp_millis())?;
+                }
+                AgentCommand::Pause => store.set_setting("paused", "true")?,
+                AgentCommand::Resume => store.set_setting("paused", "false")?,
+                AgentCommand::RefreshPrinters | AgentCommand::UpdateAvailable { .. } => {}
+                AgentCommand::CollectDiagnostics { .. }
+                | AgentCommand::ResolveAmbiguousHandoff { .. } => {
+                    bail!("embedded connector command requires an unsupported host capability")
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn pending_connector_accepts(&self, connector_id: &str) -> Result<Vec<CloudAcceptIntent>> {
+        self.store_for_scope(connector_id)?
+            .pending_cloud_accepts()
+            .map_err(Into::into)
+    }
+
+    pub fn prepare_connector_offer(
+        &mut self,
+        connector_id: &str,
+        offer: &JobOffer,
+        content: &[u8],
+        allowed_printer_ids: Option<&BTreeSet<String>>,
+    ) -> Result<CloudAcceptIntent> {
+        self.ensure_connector_queue(connector_id)?;
+        let printer_id = offer.job.printer_id.to_string();
+        if !allowed_printer_ids.is_none_or(|allowed| allowed.contains(&printer_id)) {
+            bail!("offered printer is outside the connector grant");
+        }
+        let snapshot = self
+            .printer_snapshots()?
+            .into_iter()
+            .find(|printer| printer.printer_id == printer_id)
+            .context("offered embedded printer is not present")?;
+        let digest = hex::encode(Sha256::digest(content));
+        let expected = offer_content_digest(offer);
+        if expected.is_some_and(|expected| expected != digest) {
+            bail!("offered embedded content digest does not match");
+        }
+        let path = self.persist_content_for_scope(connector_id, &digest, content)?;
+        let store = self.store_for_scope_mut(connector_id)?;
+        let local = store.prepare_cloud_job(
+            &AcceptedJob {
+                job_id: offer.job.id.to_string(),
+                submission_id: format!("sub_{}", offer.job.id),
+                printer_id,
+                printer_native_id: scoped_native_id(&snapshot.adapter_id, &snapshot.native_id),
+                title: offer.job.title.clone(),
+                content_sha256: digest.clone(),
+                content_path: path.to_string_lossy().into_owned(),
+                content_kind: match offer.job.content_kind {
+                    piqae_domain::ContentKind::Pdf => "pdf",
+                    piqae_domain::ContentKind::Raw => "raw",
+                }
+                .into(),
+                options_json: serde_json::to_string(&offer.job.options)?,
+                expires_unix_ms: Some(offer.job.expires_at.timestamp_millis()),
+                accepted_unix_ms: Utc::now().timestamp_millis(),
+                cloud_managed: true,
+            },
+            &offer.lease_id.to_string(),
+            &offer.lease_token,
+            offer.lease_expires_at.timestamp_millis(),
+        )?;
+        Ok(CloudAcceptIntent {
+            job_id: offer.job.id.to_string(),
+            lease_id: offer.lease_id.to_string(),
+            lease_token: offer.lease_token.clone(),
+            lease_expires_unix_ms: offer.lease_expires_at.timestamp_millis(),
+            content_sha256: digest,
+            local_sequence: u64::try_from(local.printer_sequence).unwrap_or(u64::MAX),
+        })
+    }
+
+    pub fn activate_connector_offer(&mut self, connector_id: &str, job_id: JobId) -> Result<()> {
+        self.store_for_scope_mut(connector_id)?
+            .activate_cloud_job(&job_id.to_string(), Utc::now().timestamp_millis())?;
+        Ok(())
+    }
+
+    pub fn abandon_connector_offer(&mut self, connector_id: &str, job_id: JobId) -> Result<()> {
+        self.store_for_scope_mut(connector_id)?
+            .abandon_cloud_accept(&job_id.to_string(), Utc::now().timestamp_millis())?;
+        Ok(())
+    }
+
     pub fn enqueue(&mut self, request: EmbeddedJobRequest) -> Result<EmbeddedJobAccepted> {
         validate_job_request(&request)?;
         let adapter = self
@@ -422,16 +665,17 @@ impl EmbeddedQueue {
         }
         let now = Utc::now().timestamp_millis();
         let Some(job) = self
-            .store
-            .runnable_heads(now)?
+            .runnable_jobs_across_scopes(now)?
             .into_iter()
-            .find(|job| self.adapter_owns_job(adapter_id, job))
+            .find(|(_, job)| self.adapter_owns_job(adapter_id, job))
         else {
             return Ok(None);
         };
+        let (queue_scope, job) = job;
         let operation = AdapterOperation {
             operation_id: random_operation_id(),
             adapter_id: adapter_id.to_owned(),
+            queue_scope,
             job_id: job.job_id.clone(),
             idempotency_key: job.submission_id.clone(),
             fence: random_fence(),
@@ -452,7 +696,12 @@ impl EmbeddedQueue {
         self.persist()?;
         // The persisted operation is the spool intent. A crash before this
         // event simply replays the exact operation and fence.
-        self.store.append_next_event(
+        let store = self.store_for_scope_mut(&operation.queue_scope)?;
+        store.set_setting(
+            &adapter_operation_setting(&operation.job_id),
+            &operation.operation_id,
+        )?;
+        store.append_next_event(
             &EventId::new().to_string(),
             &job.job_id,
             "spool_intent",
@@ -600,6 +849,7 @@ impl EmbeddedQueue {
         };
         let completed = CompletedAck {
             adapter_id: adapter_id.to_owned(),
+            queue_scope: operation.queue_scope,
             fence_sha256: token_digest(fence),
             outcome_sha256,
             ack: ack.clone(),
@@ -630,7 +880,15 @@ impl EmbeddedQueue {
     }
 
     pub fn job(&self, job_id: &str) -> Result<Option<LocalJob>> {
-        self.store.get_job(job_id).map_err(Into::into)
+        if let Some(job) = self.store.get_job(job_id)? {
+            return Ok(Some(job));
+        }
+        for store in self.connector_stores.values() {
+            if let Some(job) = store.get_job(job_id)? {
+                return Ok(Some(job));
+            }
+        }
+        Ok(None)
     }
 
     pub fn profiles(&self, printer_id: &str) -> Result<Vec<StoredNamedProfile>> {
@@ -700,11 +958,72 @@ impl EmbeddedQueue {
             .is_some_and(|adapter| adapter.printers.values().any(|id| id == &job.printer_id))
     }
 
+    fn runnable_jobs_across_scopes(&self, now: i64) -> Result<Vec<(String, LocalJob)>> {
+        let mut jobs = self
+            .store
+            .runnable_heads(now)?
+            .into_iter()
+            .map(|job| (local_queue_scope(), job))
+            .collect::<Vec<_>>();
+        for (connector_id, store) in &self.connector_stores {
+            jobs.extend(
+                store
+                    .runnable_heads(now)?
+                    .into_iter()
+                    .map(|job| (connector_id.clone(), job)),
+            );
+        }
+        jobs.sort_by(|left, right| {
+            left.1
+                .printer_sequence
+                .cmp(&right.1.printer_sequence)
+                .then_with(|| left.0.cmp(&right.0))
+        });
+        Ok(jobs)
+    }
+
+    fn store_for_scope_mut(&mut self, scope: &str) -> Result<&mut AgentStore> {
+        if scope == "local" {
+            return Ok(&mut self.store);
+        }
+        self.connector_stores
+            .get_mut(scope)
+            .context("connector queue scope is not active")
+    }
+
+    fn store_for_scope(&self, scope: &str) -> Result<&AgentStore> {
+        if scope == "local" {
+            return Ok(&self.store);
+        }
+        self.connector_stores
+            .get(scope)
+            .context("connector queue scope is not active")
+    }
+
     fn persist_content(&mut self, digest: &str, content: &[u8]) -> Result<PathBuf> {
-        let path = self.root.join("content").join(format!("{digest}.bin"));
+        self.persist_content_for_scope("local", digest, content)
+    }
+
+    fn persist_content_for_scope(
+        &mut self,
+        queue_scope: &str,
+        digest: &str,
+        content: &[u8],
+    ) -> Result<PathBuf> {
+        let content_root = if queue_scope == "local" {
+            self.root.join("content")
+        } else {
+            validate_queue_scope(queue_scope)?;
+            self.root
+                .join("connectors")
+                .join(queue_scope)
+                .join("content")
+        };
+        std::fs::create_dir_all(&content_root)?;
+        let path = content_root.join(format!("{digest}.bin"));
         let additional = u64::try_from(content.len()).unwrap_or(u64::MAX);
         if !path.exists() {
-            self.reclaim_content_until_available(additional)?;
+            self.reclaim_content_until_available(queue_scope, &content_root, additional)?;
         }
         match OpenOptions::new().write(true).create_new(true).open(&path) {
             Ok(mut file) => {
@@ -724,26 +1043,33 @@ impl EmbeddedQueue {
         Ok(path)
     }
 
-    fn reclaim_content_until_available(&mut self, additional: u64) -> Result<()> {
-        let content_root = self.root.join("content");
-        let mut used = directory_bytes(&content_root)?;
+    fn reclaim_content_until_available(
+        &mut self,
+        queue_scope: &str,
+        content_root: &Path,
+        additional: u64,
+    ) -> Result<()> {
+        let mut used = directory_bytes(content_root)?;
         if used.saturating_add(additional) <= MAX_CONTENT_STORE_BYTES {
             return Ok(());
         }
-        for candidate in self.store.claim_reclaimable_terminal_content(256)? {
+        let candidates = self
+            .store_for_scope_mut(queue_scope)?
+            .claim_reclaimable_terminal_content(256)?;
+        for candidate in candidates {
             match std::fs::remove_file(&candidate.path) {
                 Ok(()) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => {
-                    self.store
+                    self.store_for_scope_mut(queue_scope)?
                         .cancel_terminal_content_reclaim(&candidate.sha256, &candidate.path)?;
                     return Err(error.into());
                 }
             }
             let _ = self
-                .store
+                .store_for_scope_mut(queue_scope)?
                 .mark_terminal_content_reclaimed(&candidate.sha256, &candidate.path)?;
-            used = directory_bytes(&content_root)?;
+            used = directory_bytes(content_root)?;
             if used.saturating_add(additional) <= MAX_CONTENT_STORE_BYTES {
                 return Ok(());
             }
@@ -772,6 +1098,42 @@ impl EmbeddedQueue {
         Ok(())
     }
 
+    fn open_persisted_connector_scopes(&mut self) -> Result<()> {
+        let mut scopes = self.document.connector_scopes.clone();
+        scopes.extend(
+            self.document
+                .operations
+                .values()
+                .map(|operation| operation.queue_scope.clone())
+                .chain(
+                    self.document
+                        .completed
+                        .values()
+                        .map(|completed| completed.queue_scope.clone()),
+                )
+                .filter(|scope| scope != "local"),
+        );
+        let migrated = scopes != self.document.connector_scopes;
+        self.document.connector_scopes = scopes.clone();
+        if migrated {
+            self.persist()?;
+        }
+        for scope in &scopes {
+            self.open_connector_store(scope)?;
+        }
+        Ok(())
+    }
+
+    fn open_connector_store(&mut self, connector_id: &str) -> Result<()> {
+        let root = self.root.join("connectors").join(connector_id);
+        std::fs::create_dir_all(&root)?;
+        self.connector_stores.insert(
+            connector_id.to_owned(),
+            AgentStore::open(root.join("agent.sqlite3"))?,
+        );
+        Ok(())
+    }
+
     fn repair_active_operation(&mut self, operation_id: &str) -> Result<()> {
         let operation = self
             .document
@@ -780,21 +1142,27 @@ impl EmbeddedQueue {
             .cloned()
             .context("adapter operation disappeared")?;
         let job = self
-            .store
+            .store_for_scope(&operation.queue_scope)?
             .get_job(&operation.job_id)?
             .context("adapter operation references a missing job")?;
+        self.store_for_scope_mut(&operation.queue_scope)?
+            .set_setting(
+                &adapter_operation_setting(&operation.job_id),
+                &operation.operation_id,
+            )?;
         match operation.phase {
             AdapterOperationPhase::Claimed if job.state != "spool_intent" => {
                 if matches!(job.state.as_str(), "queued_local" | "failed_retryable") {
-                    self.store.append_next_event(
-                        &EventId::new().to_string(),
-                        &job.job_id,
-                        "spool_intent",
-                        None,
-                        Some("Recovered persisted embedded adapter operation"),
-                        "{}",
-                        Utc::now().timestamp_millis(),
-                    )?;
+                    self.store_for_scope_mut(&operation.queue_scope)?
+                        .append_next_event(
+                            &EventId::new().to_string(),
+                            &job.job_id,
+                            "spool_intent",
+                            None,
+                            Some("Recovered persisted embedded adapter operation"),
+                            "{}",
+                            Utc::now().timestamp_millis(),
+                        )?;
                 }
             }
             AdapterOperationPhase::Accepted if job.state == "spool_intent" => {
@@ -803,15 +1171,16 @@ impl EmbeddedQueue {
                     .as_deref()
                     .context("accepted operation has no native job id")?;
                 let now = Utc::now().timestamp_millis();
-                self.store.record_native_acceptance(
-                    &EventId::new().to_string(),
-                    &job.job_id,
-                    native_job_id,
-                    "{}",
-                    now,
-                    now.saturating_add(1_000),
-                    now.saturating_add(5 * 60_000),
-                )?;
+                self.store_for_scope_mut(&operation.queue_scope)?
+                    .record_native_acceptance(
+                        &EventId::new().to_string(),
+                        &job.job_id,
+                        native_job_id,
+                        "{}",
+                        now,
+                        now.saturating_add(1_000),
+                        now.saturating_add(5 * 60_000),
+                    )?;
             }
             AdapterOperationPhase::Claimed
             | AdapterOperationPhase::HandoffStarted
@@ -821,17 +1190,34 @@ impl EmbeddedQueue {
     }
 
     fn apply_completed_to_store(&mut self, completed: &CompletedAck) -> Result<()> {
-        let Some(job) = self.store.get_job(&completed.ack.job_id)? else {
+        let Some(job) = self
+            .store_for_scope(&completed.queue_scope)?
+            .get_job(&completed.ack.job_id)?
+        else {
             bail!("completed adapter operation references a missing job");
         };
         if job.state == completed.ack.state {
             return Ok(());
         }
+        let current_operation = self
+            .store_for_scope(&completed.queue_scope)?
+            .setting(&adapter_operation_setting(&completed.ack.job_id))?;
+        if current_operation
+            .as_deref()
+            .is_some_and(|operation_id| operation_id != completed.ack.operation_id)
+        {
+            // A newer durable adapter generation superseded this retained
+            // acknowledgement. Historical acknowledgements remain available
+            // for idempotent duplicate responses but must never regress the
+            // current job projection during restart repair.
+            return Ok(());
+        }
         let now = completed.completed_unix_ms;
+        let store = self.store_for_scope_mut(&completed.queue_scope)?;
         match &completed.outcome {
             AdapterOperationOutcome::CompletedReported { native_job_id } => {
                 if job.state == "spool_intent" {
-                    self.store.record_native_acceptance(
+                    store.record_native_acceptance(
                         &EventId::new().to_string(),
                         &job.job_id,
                         native_job_id,
@@ -841,7 +1227,7 @@ impl EmbeddedQueue {
                         now.saturating_add(5 * 60_000),
                     )?;
                 }
-                self.store.append_next_event(
+                store.append_next_event(
                     &EventId::new().to_string(),
                     &job.job_id,
                     "completed_reported",
@@ -850,14 +1236,14 @@ impl EmbeddedQueue {
                     "{}",
                     now,
                 )?;
-                self.store.finish_reconciliation(&job.job_id)?;
+                store.finish_reconciliation(&job.job_id)?;
             }
             AdapterOperationOutcome::FailedTerminal {
                 native_job_id,
                 code,
             } => {
                 if job.state == "spool_intent" {
-                    self.store.record_native_acceptance(
+                    store.record_native_acceptance(
                         &EventId::new().to_string(),
                         &job.job_id,
                         native_job_id,
@@ -867,7 +1253,7 @@ impl EmbeddedQueue {
                         now.saturating_add(5 * 60_000),
                     )?;
                 }
-                self.store.append_next_event(
+                store.append_next_event(
                     &EventId::new().to_string(),
                     &job.job_id,
                     "failed_terminal",
@@ -876,10 +1262,10 @@ impl EmbeddedQueue {
                     "{}",
                     now,
                 )?;
-                self.store.finish_reconciliation(&job.job_id)?;
+                store.finish_reconciliation(&job.job_id)?;
             }
             AdapterOperationOutcome::Ambiguous { code } => {
-                self.store.append_next_event(
+                store.append_next_event(
                     &EventId::new().to_string(),
                     &job.job_id,
                     "delivery_uncertain",
@@ -888,10 +1274,10 @@ impl EmbeddedQueue {
                     "{}",
                     now,
                 )?;
-                self.store.finish_reconciliation(&job.job_id)?;
+                store.finish_reconciliation(&job.job_id)?;
             }
             AdapterOperationOutcome::RejectedBeforeHandoff { code, retryable } => {
-                self.store.append_next_event(
+                store.append_next_event(
                     &EventId::new().to_string(),
                     &job.job_id,
                     if *retryable {
@@ -913,13 +1299,21 @@ impl EmbeddedQueue {
     }
 }
 
+fn adapter_operation_setting(job_id: &str) -> String {
+    format!("embedded_adapter_operation:{job_id}")
+}
+
 fn validate_document(document: &EmbeddedDocument) -> Result<()> {
     if document.version != DOCUMENT_VERSION
         || document.adapters.len() > MAX_ADAPTERS
+        || document.connector_scopes.len() > 128
         || document.operations.len() > MAX_ACTIVE_OPERATIONS
         || document.completed.len() > MAX_COMPLETED_ACKS
     {
         bail!("unsupported or unbounded embedded runtime journal");
+    }
+    for scope in &document.connector_scopes {
+        validate_queue_scope(scope)?;
     }
     for adapter in document.adapters.values() {
         validate_adapter(&adapter.registration)?;
@@ -1077,6 +1471,80 @@ fn scoped_native_id(adapter_id: &str, native_id: &str) -> String {
     format!("{adapter_id}\0{native_id}")
 }
 
+fn local_queue_scope() -> String {
+    "local".into()
+}
+
+fn validate_queue_scope(scope: &str) -> Result<()> {
+    if scope.is_empty()
+        || scope == "local"
+        || scope.len() > 160
+        || !scope
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    {
+        bail!("connector queue scope is invalid");
+    }
+    Ok(())
+}
+
+fn embedded_protocol_printer(snapshot: EmbeddedPrinterSnapshot) -> Result<PrinterSnapshot> {
+    let id: PrinterId = snapshot.printer_id.parse()?;
+    let state: PrinterState = serde_json::from_value(serde_json::Value::String(snapshot.state))?;
+    let semantic = serde_json::from_value(snapshot.semantic_capabilities).unwrap_or_default();
+    Ok(PrinterSnapshot {
+        id,
+        native_id: scoped_native_id(&snapshot.adapter_id, &snapshot.native_id),
+        name: snapshot.name,
+        state,
+        is_default: snapshot.is_default,
+        capabilities: PrinterCapabilities::default(),
+        exposed: true,
+        capability_revision: u64::try_from(snapshot.observed_unix_ms).unwrap_or_default(),
+        native_options: BTreeMap::new(),
+        semantic_capabilities: semantic,
+        profiles: Vec::new(),
+        route: None,
+    })
+}
+
+fn embedded_protocol_event(
+    agent_id: AgentId,
+    event: piqae_agent_storage::PendingEvent,
+) -> Result<piqae_domain::JobEvent> {
+    let state: JobState = serde_json::from_value(serde_json::Value::String(event.state))?;
+    let reason = event
+        .reason
+        .map(|reason| serde_json::from_value::<JobFailureReason>(serde_json::Value::String(reason)))
+        .transpose()
+        .ok()
+        .flatten();
+    Ok(piqae_domain::JobEvent {
+        id: event.event_id.parse()?,
+        job_id: event.job_id.parse()?,
+        sequence: u64::try_from(event.job_sequence).unwrap_or_default(),
+        state,
+        reason,
+        message: event.message,
+        agent_id: Some(agent_id),
+        native_job_id: None,
+        occurred_at: chrono::DateTime::from_timestamp_millis(event.observed_unix_ms)
+            .context("embedded event timestamp is invalid")?,
+    })
+}
+
+fn offer_content_digest(offer: &JobOffer) -> Option<String> {
+    match &offer.content {
+        piqae_protocol::agent::ContentDescriptor::InlineBase64 { sha256, .. }
+        | piqae_protocol::agent::ContentDescriptor::Uri { sha256, .. } => sha256.clone(),
+        piqae_protocol::agent::ContentDescriptor::Download { sha256, .. }
+        | piqae_protocol::agent::ContentDescriptor::EncryptedDownload { sha256, .. } => {
+            Some(sha256.clone())
+        }
+        piqae_protocol::agent::ContentDescriptor::BusinessDocument { .. } => None,
+    }
+}
+
 fn unscoped_native_id(adapter_id: &str, value: &str) -> Result<String> {
     value
         .strip_prefix(&format!("{adapter_id}\0"))
@@ -1132,6 +1600,145 @@ mod tests {
             options_json: "{}".into(),
             expires_unix_ms: None,
         }
+    }
+
+    fn cloud_offer(printer: &EmbeddedPrinterSnapshot, job_id: JobId, content: &[u8]) -> JobOffer {
+        let encoded = base64::engine::general_purpose::STANDARD.encode(content);
+        JobOffer {
+            job: piqae_domain::Job {
+                id: job_id,
+                workspace_id: piqae_domain::WorkspaceId::new(),
+                environment_id: piqae_domain::EnvironmentId::new(),
+                printer_id: printer.printer_id.parse().unwrap(),
+                title: "privacy-safe fixture".into(),
+                source: None,
+                content_kind: piqae_domain::ContentKind::Pdf,
+                content: piqae_domain::ContentSource::Base64 {
+                    data: encoded.clone(),
+                },
+                options: piqae_domain::JobOptions::default(),
+                metadata: BTreeMap::new(),
+                deliveries: 1,
+                state: JobState::WaitingForAgent,
+                created_at: Utc::now(),
+                expires_at: Utc::now() + chrono::TimeDelta::minutes(5),
+                delivery_uncertain_since: None,
+            },
+            expected_capability_revision: None,
+            resolved_ticket_digest: None,
+            lease_id: uuid::Uuid::new_v4(),
+            lease_token: "redacted-test-lease".into(),
+            lease_expires_at: Utc::now() + chrono::TimeDelta::minutes(1),
+            content: piqae_protocol::agent::ContentDescriptor::InlineBase64 {
+                data: encoded,
+                sha256: Some(hex::encode(Sha256::digest(content))),
+                bytes: Some(u64::try_from(content.len()).unwrap()),
+            },
+            route_reservation: None,
+        }
+    }
+
+    #[test]
+    fn connector_queues_are_isolated_but_share_one_serial_native_handoff() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut queue, printer) = prepare(root.path());
+        let first_id = JobId::new();
+        let second_id = JobId::new();
+        let first = cloud_offer(&printer, first_id, b"first connector fixture");
+        let second = cloud_offer(&printer, second_id, b"second connector fixture");
+        queue
+            .prepare_connector_offer("ncon_first", &first, b"first connector fixture", None)
+            .unwrap();
+        queue
+            .activate_connector_offer("ncon_first", first_id)
+            .unwrap();
+        queue
+            .prepare_connector_offer("ncon_second", &second, b"second connector fixture", None)
+            .unwrap();
+        queue
+            .activate_connector_offer("ncon_second", second_id)
+            .unwrap();
+
+        assert!(
+            queue.connector_stores["ncon_first"]
+                .get_job(&second_id.to_string())
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            queue.connector_stores["ncon_second"]
+                .get_job(&first_id.to_string())
+                .unwrap()
+                .is_none()
+        );
+        let first_path = queue.connector_stores["ncon_first"]
+            .get_job(&first_id.to_string())
+            .unwrap()
+            .unwrap()
+            .content_path;
+        let second_path = queue.connector_stores["ncon_second"]
+            .get_job(&second_id.to_string())
+            .unwrap()
+            .unwrap()
+            .content_path;
+        assert_ne!(
+            Path::new(&first_path).parent(),
+            Path::new(&second_path).parent()
+        );
+        let operation = queue
+            .next_operation("com.example.pos.airprint")
+            .unwrap()
+            .unwrap();
+        let duplicate_poll = queue
+            .next_operation("com.example.pos.airprint")
+            .unwrap()
+            .unwrap();
+        assert_eq!(duplicate_poll.operation_id, operation.operation_id);
+        let expected_next = if operation.job_id == first_id.to_string() {
+            second_id
+        } else {
+            first_id
+        };
+        queue
+            .begin_handoff(
+                &operation.adapter_id,
+                &operation.operation_id,
+                &operation.fence,
+            )
+            .unwrap();
+        queue
+            .complete_operation(
+                &operation.adapter_id,
+                &operation.operation_id,
+                &operation.fence,
+                &AdapterOperationOutcome::Accepted {
+                    native_job_id: "native-shared-1".into(),
+                },
+            )
+            .unwrap();
+        queue
+            .complete_operation(
+                &operation.adapter_id,
+                &operation.operation_id,
+                &operation.fence,
+                &AdapterOperationOutcome::CompletedReported {
+                    native_job_id: "native-shared-1".into(),
+                },
+            )
+            .unwrap();
+        drop(queue);
+
+        let mut restarted =
+            EmbeddedQueue::open(root.path(), SupportPackRegistry::default()).unwrap();
+        assert_eq!(restarted.connector_stores.len(), 2);
+        assert_eq!(
+            restarted
+                .next_operation("com.example.pos.airprint")
+                .unwrap()
+                .unwrap()
+                .job_id,
+            expected_next.to_string()
+        );
     }
 
     #[test]
@@ -1389,6 +1996,7 @@ mod tests {
         };
         let completed = CompletedAck {
             adapter_id: operation.adapter_id.clone(),
+            queue_scope: operation.queue_scope.clone(),
             fence_sha256: token_digest(&operation.fence),
             outcome_sha256: json_digest(&outcome).unwrap(),
             ack,
@@ -1419,7 +2027,7 @@ mod tests {
     fn retry_uses_a_new_operation_and_expired_claim_cannot_begin_handoff() {
         let root = tempfile::tempdir().unwrap();
         let (mut queue, printer) = prepare(root.path());
-        let _ = queue.enqueue(request(&printer)).unwrap();
+        let job = queue.enqueue(request(&printer)).unwrap();
         let first = queue
             .next_operation("com.example.pos.airprint")
             .unwrap()
@@ -1493,5 +2101,15 @@ mod tests {
                 },
             )
             .unwrap();
+        drop(queue);
+        for _ in 0..2 {
+            let restarted =
+                EmbeddedQueue::open(root.path(), SupportPackRegistry::default()).unwrap();
+            assert_eq!(
+                restarted.job(&job.job_id).unwrap().unwrap().state,
+                "completed_reported"
+            );
+            drop(restarted);
+        }
     }
 }

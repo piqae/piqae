@@ -54,11 +54,25 @@ typedef int32_t (*PiqaeSignConnectorCallback)(void *, const uint8_t *, size_t, c
 typedef int32_t (*PiqaeDeleteConnectorKeyCallback)(void *, const uint8_t *, size_t);
 typedef struct PiqaeConnectorKeyProvider { void *context; PiqaeGenerateConnectorKeyCallback generate; PiqaeSignConnectorCallback sign; PiqaeDeleteConnectorKeyCallback delete_key; } PiqaeConnectorKeyProvider;
 
+/*
+ * Coalesced signal that the host should drain adapter operations. The callback
+ * carries no job, connector, document, or credential data and can run on the
+ * embedded cloud worker thread. Context and callback must remain valid and
+ * thread-safe until piqae_node_destroy returns. Repeated work is coalesced until
+ * the host drains piqae_node NextAdapterOperation to an empty result.
+ */
+typedef void (*PiqaeWorkAvailableCallback)(void *context);
+typedef struct PiqaeWorkAvailableProvider {
+  void *context;
+  PiqaeWorkAvailableCallback notify;
+} PiqaeWorkAvailableProvider;
+
 PIQAE_NODE_API PiqaeNodeAbiDescriptor piqae_node_abi_descriptor(void);
 PIQAE_NODE_API PiqaeBuffer piqae_node_create(const uint8_t *data, size_t length);
 PIQAE_NODE_API PiqaeBuffer piqae_node_start(uint64_t handle);
 PIQAE_NODE_API PiqaeBuffer piqae_node_set_host_key_provider(uint64_t handle, PiqaeHostKeyProvider provider);
 PIQAE_NODE_API PiqaeBuffer piqae_node_set_connector_key_provider(uint64_t handle, PiqaeConnectorKeyProvider provider);
+PIQAE_NODE_API PiqaeBuffer piqae_node_set_work_available_provider(uint64_t handle, PiqaeWorkAvailableProvider provider);
 PIQAE_NODE_API PiqaeBuffer piqae_node_stop(uint64_t handle);
 PIQAE_NODE_API PiqaeBuffer piqae_node_snapshot(uint64_t handle);
 PIQAE_NODE_API PiqaeBuffer piqae_node_broker_execute(const uint8_t *endpoint_data, size_t endpoint_length, const uint8_t *credential_json, size_t credential_length, const uint8_t *capability_json, size_t capability_length, const uint8_t *operation_json, size_t operation_length);

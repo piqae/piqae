@@ -359,6 +359,10 @@ pub trait Repository: Send + Sync + 'static {
         &self,
         agent_id: AgentId,
     ) -> Result<AgentAuthenticationRecord, RepositoryError>;
+    async fn agent_for_revocation_authentication(
+        &self,
+        agent_id: AgentId,
+    ) -> Result<AgentAuthenticationRecord, RepositoryError>;
     async fn reserve_agent_nonce(
         &self,
         agent_id: AgentId,
@@ -1864,6 +1868,15 @@ impl Repository for PostgresStore {
         agent_id: AgentId,
     ) -> Result<AgentAuthenticationRecord, RepositoryError> {
         Self::agent_for_authentication(self, agent_id)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn agent_for_revocation_authentication(
+        &self,
+        agent_id: AgentId,
+    ) -> Result<AgentAuthenticationRecord, RepositoryError> {
+        Self::agent_for_revocation_authentication(self, agent_id)
             .await
             .map_err(Into::into)
     }
@@ -4200,6 +4213,38 @@ impl Repository for MemoryRepository {
         agent_id: AgentId,
     ) -> Result<AgentAuthenticationRecord, RepositoryError> {
         let state = self.state.read().await;
+        let connector_records = state
+            .node_connectors
+            .values()
+            .filter(|connector| connector.node_id == agent_id)
+            .collect::<Vec<_>>();
+        if !connector_records.is_empty()
+            && !connector_records
+                .iter()
+                .any(|connector| connector.revoked_at.is_none())
+        {
+            return Err(RepositoryError::NotFound);
+        }
+        state
+            .agents
+            .get(&agent_id)
+            .map(|(workspace, environment, _)| AgentAuthenticationRecord {
+                workspace_id: *workspace,
+                environment_id: *environment,
+                public_key: state
+                    .agent_public_keys
+                    .get(&agent_id)
+                    .cloned()
+                    .unwrap_or_default(),
+            })
+            .ok_or(RepositoryError::NotFound)
+    }
+
+    async fn agent_for_revocation_authentication(
+        &self,
+        agent_id: AgentId,
+    ) -> Result<AgentAuthenticationRecord, RepositoryError> {
+        let state = self.state.read().await;
         state
             .agents
             .get(&agent_id)
@@ -4797,7 +4842,7 @@ impl Repository for MemoryRepository {
             created_at,
         });
         if connector.revoked_at.is_some() {
-            return Err(RepositoryError::NotFound);
+            return Ok(());
         }
         connector.revoked_at = Some(Utc::now());
         Ok(())
@@ -7718,12 +7763,20 @@ mod routing_repository_tests {
             .expect("revoked connector remains visible");
         assert_eq!(connectors.len(), 1);
         assert!(connectors[0].revoked_at.is_some());
+        repository
+            .revoke_node_connector(workspace, environment, node, &format!("ncon_{node}"))
+            .await
+            .expect("self-revoke retry is idempotent");
         assert!(matches!(
-            repository
-                .revoke_node_connector(workspace, environment, node, &format!("ncon_{node}"))
-                .await,
+            repository.agent_for_authentication(node).await,
             Err(RepositoryError::NotFound)
         ));
+        assert!(
+            repository
+                .agent_for_revocation_authentication(node)
+                .await
+                .is_ok()
+        );
     }
 
     #[tokio::test]

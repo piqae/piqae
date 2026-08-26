@@ -2722,6 +2722,50 @@ paths:
           $ref: "#/components/responses/Error"
         "401":
           $ref: "#/components/responses/Error"
+  /v1/agent/connectors/{connector_id}/revoke:
+    parameters:
+      - name: connector_id
+        in: path
+        required: true
+        schema:
+          type: string
+          pattern: ^ncon_[A-Za-z0-9_]+$
+          maxLength: 128
+    post:
+      summary: Revoke the calling connector's authority grant
+      description: >-
+        Performs the connector's final signed authority request. Exact retries
+        remain authenticated only for this revocation operation so a node can
+        recover if the local durable confirmation failed after server commit.
+      tags: [Agents]
+      operationId: revokeAgentConnector
+      security:
+        - agentId: []
+          agentTimestamp: []
+          agentNonce: []
+          agentBodyDigest: []
+          agentSignature: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              maxProperties: 0
+      responses:
+        "200":
+          description: Connector authority grant is revoked.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [revoked]
+                properties:
+                  revoked: { type: boolean, const: true }
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
   /v1/agent/content-encryption-key:
     put:
       summary: Register or rotate the node's dedicated content-encryption key
