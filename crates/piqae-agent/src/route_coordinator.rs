@@ -38,6 +38,8 @@ struct CoordinatorDocument {
     installation_namespace: Uuid,
     topology_revision: u64,
     handoff_sequence: u64,
+    #[serde(default)]
+    observation_sequence: u64,
     routes: BTreeMap<String, DurableRoute>,
     reservations: BTreeMap<String, DurableReservation>,
     handoffs: Vec<DurableHandoff>,
@@ -110,6 +112,7 @@ impl RouteCoordinator {
                 installation_namespace: Uuid::new_v4(),
                 topology_revision: 0,
                 handoff_sequence: 0,
+                observation_sequence: 0,
                 routes: BTreeMap::new(),
                 reservations: BTreeMap::new(),
                 handoffs: Vec::new(),
@@ -221,6 +224,19 @@ impl RouteCoordinator {
         self.document.topology_changes.clone()
     }
 
+    pub fn allocate_observation_sequences(&mut self, count: usize) -> Result<Vec<u64>> {
+        let bounded = count.min(MAX_ROUTES);
+        let start = self.document.observation_sequence;
+        self.document.observation_sequence = self
+            .document
+            .observation_sequence
+            .saturating_add(u64::try_from(bounded).unwrap_or(u64::MAX));
+        self.persist()?;
+        Ok((1..=bounded)
+            .map(|offset| start.saturating_add(u64::try_from(offset).unwrap_or(u64::MAX)))
+            .collect())
+    }
+
     pub fn reserve(
         &mut self,
         connector_id: &str,
@@ -312,6 +328,26 @@ impl RouteCoordinator {
         {
             bail!("cloud route reservation is invalid for this installation route");
         }
+        if self.document.handoffs.iter().any(|handoff| {
+            handoff.job_id == job_id
+                && matches!(
+                    handoff.outcome,
+                    NativeHandoffOutcome::Accepted | NativeHandoffOutcome::Ambiguous
+                )
+        }) {
+            bail!("job already crossed or may have crossed native handoff");
+        }
+        if self
+            .document
+            .handoffs
+            .iter()
+            .filter(|handoff| handoff.job_id == job_id)
+            .map(|handoff| handoff.fencing_generation)
+            .max()
+            .is_some_and(|generation| reservation.generation <= generation)
+        {
+            bail!("cloud route reservation generation is stale for this job");
+        }
         let coordination_key = self
             .document
             .routes
@@ -331,16 +367,6 @@ impl RouteCoordinator {
             }
             bail!("printer route already has an unresolved reservation");
         }
-        let route = self
-            .document
-            .routes
-            .values_mut()
-            .find(|route| route.route_id == expected_route)
-            .context("cloud reservation references an unknown local route")?;
-        if reservation.generation <= route.generation {
-            bail!("cloud route reservation generation is stale");
-        }
-        route.generation = reservation.generation;
         self.document.reservations.insert(
             coordination_key,
             DurableReservation {
@@ -469,6 +495,54 @@ impl RouteCoordinator {
             })
     }
 
+    pub fn resolve_ambiguous_handoff(
+        &mut self,
+        connector_id: &str,
+        job_id: &str,
+        local_route_key: &str,
+        reservation_id: Uuid,
+        generation: u64,
+        resolution: piqae_protocol::agent::AmbiguousHandoffResolution,
+    ) -> Result<()> {
+        let coordination_key = self
+            .document
+            .reservations
+            .iter()
+            .find_map(|(coordination_key, reservation)| {
+                (reservation.connector_id == connector_id
+                    && reservation.job_id == job_id
+                    && reservation.local_route_key == local_route_key
+                    && reservation.reservation_id == reservation_id
+                    && reservation.generation == generation)
+                    .then(|| coordination_key.clone())
+            })
+            .context("ambiguous route reservation does not match active fence")?;
+        let handoff = self
+            .document
+            .handoffs
+            .iter_mut()
+            .rev()
+            .find(|handoff| {
+                handoff.connector_id == connector_id
+                    && handoff.job_id == job_id
+                    && handoff.local_route_key == local_route_key
+                    && handoff.reservation_id == reservation_id
+                    && handoff.fencing_generation == generation
+                    && handoff.outcome == NativeHandoffOutcome::Ambiguous
+            })
+            .context("matching native handoff is not ambiguous")?;
+        handoff.outcome = match resolution {
+            piqae_protocol::agent::AmbiguousHandoffResolution::ReleaseForRetry => {
+                NativeHandoffOutcome::RejectedBeforeHandoff
+            }
+            piqae_protocol::agent::AmbiguousHandoffResolution::ConfirmAccepted => {
+                NativeHandoffOutcome::Accepted
+            }
+        };
+        self.document.reservations.remove(&coordination_key);
+        self.persist()
+    }
+
     fn record_topology_change(
         &mut self,
         route_id: &str,
@@ -545,17 +619,27 @@ fn canonical_evidence(printer: &DiscoveredPrinter) -> Vec<PhysicalIdentityEviden
 }
 
 fn identity_confidence(evidence: &[PhysicalIdentityEvidence]) -> IdentityConfidence {
-    let strong = evidence
+    let has_strong = evidence
         .iter()
-        .filter(|item| item.strength == IdentityEvidenceStrength::Strong)
-        .count();
-    let supporting = evidence
+        .any(|item| item.strength == IdentityEvidenceStrength::Strong);
+    let has_endpoint = evidence.iter().any(|item| {
+        item.strength == IdentityEvidenceStrength::Medium
+            && item.kind == PhysicalIdentityEvidenceKind::NetworkEndpoint
+    });
+    let has_device_description = evidence.iter().any(|item| {
+        item.strength == IdentityEvidenceStrength::Medium
+            && matches!(
+                item.kind,
+                PhysicalIdentityEvidenceKind::ManufacturerModel
+                    | PhysicalIdentityEvidenceKind::CapabilityFingerprint
+            )
+    });
+    let has_medium = evidence
         .iter()
-        .filter(|item| item.strength == IdentityEvidenceStrength::Medium)
-        .count();
-    if strong > 0 || supporting >= 2 {
+        .any(|item| item.strength == IdentityEvidenceStrength::Medium);
+    if has_strong || (has_endpoint && has_device_description) {
         IdentityConfidence::High
-    } else if supporting == 1 {
+    } else if has_medium {
         IdentityConfidence::Possible
     } else {
         IdentityConfidence::Unknown
@@ -587,10 +671,39 @@ fn physical_coordination_key(
         digest.update(b"piqae-physical-coordination-v1\0");
         digest.update([identity.0]);
         digest.update(identity.1.as_bytes());
-        format!("pgrp_{}", &hex::encode(digest.finalize())[..32])
-    } else {
-        local_route_key.to_owned()
+        return format!("pgrp_{}", &hex::encode(digest.finalize())[..32]);
     }
+    let endpoints = evidence
+        .iter()
+        .filter(|item| {
+            item.strength == IdentityEvidenceStrength::Medium
+                && item.kind == PhysicalIdentityEvidenceKind::NetworkEndpoint
+        })
+        .collect::<Vec<_>>();
+    let device_descriptions = evidence
+        .iter()
+        .filter(|item| {
+            item.strength == IdentityEvidenceStrength::Medium
+                && matches!(
+                    item.kind,
+                    PhysicalIdentityEvidenceKind::ManufacturerModel
+                        | PhysicalIdentityEvidenceKind::CapabilityFingerprint
+                )
+        })
+        .collect::<Vec<_>>();
+    if let [endpoint] = endpoints.as_slice()
+        && !device_descriptions.is_empty()
+    {
+        let mut digest = Sha256::new();
+        digest.update(b"piqae-physical-coordination-v1\0medium\0");
+        digest.update(endpoint.value_sha256.as_bytes());
+        for description in device_descriptions {
+            digest.update([description.kind as u8]);
+            digest.update(description.value_sha256.as_bytes());
+        }
+        return format!("pgrp_{}", &hex::encode(digest.finalize())[..32]);
+    }
+    local_route_key.to_owned()
 }
 
 #[cfg(test)]
@@ -622,6 +735,19 @@ mod tests {
         let restarted = RouteCoordinator::open(root.path()).unwrap();
         assert_eq!(route, restarted.route_id("native-a"));
         assert_ne!(route, restarted.route_id("native-b"));
+    }
+
+    #[test]
+    fn live_observation_sequence_is_monotonic_across_restart() {
+        let root = TempDir::new().unwrap();
+        let mut first = RouteCoordinator::open(root.path()).unwrap();
+        assert_eq!(first.allocate_observation_sequences(2).unwrap(), vec![1, 2]);
+        drop(first);
+        let mut restarted = RouteCoordinator::open(root.path()).unwrap();
+        assert_eq!(
+            restarted.allocate_observation_sequences(2).unwrap(),
+            vec![3, 4]
+        );
     }
 
     #[test]
@@ -745,6 +871,42 @@ mod tests {
     }
 
     #[test]
+    fn correlated_model_and_capability_are_not_high_confidence_or_auto_grouped() {
+        let model = PhysicalIdentityEvidence {
+            kind: PhysicalIdentityEvidenceKind::ManufacturerModel,
+            value_sha256: "c".repeat(64),
+            strength: IdentityEvidenceStrength::Medium,
+        };
+        let capabilities = PhysicalIdentityEvidence {
+            kind: PhysicalIdentityEvidenceKind::CapabilityFingerprint,
+            value_sha256: "d".repeat(64),
+            strength: IdentityEvidenceStrength::Medium,
+        };
+        let endpoint_a = PhysicalIdentityEvidence {
+            kind: PhysicalIdentityEvidenceKind::NetworkEndpoint,
+            value_sha256: "e".repeat(64),
+            strength: IdentityEvidenceStrength::Medium,
+        };
+        let endpoint_b = PhysicalIdentityEvidence {
+            kind: PhysicalIdentityEvidenceKind::NetworkEndpoint,
+            value_sha256: "f".repeat(64),
+            strength: IdentityEvidenceStrength::Medium,
+        };
+        assert_eq!(
+            identity_confidence(&[model.clone(), capabilities.clone()]),
+            IdentityConfidence::Possible
+        );
+        assert_ne!(
+            physical_coordination_key(
+                "route-a",
+                &[model.clone(), capabilities.clone(), endpoint_a]
+            ),
+            physical_coordination_key("route-b", &[model, capabilities, endpoint_b]),
+            "identical-model printers at different endpoints must not merge"
+        );
+    }
+
+    #[test]
     fn accepted_handoff_prevents_restart_replay() {
         let root = TempDir::new().unwrap();
         let mut coordinator = RouteCoordinator::open(root.path()).unwrap();
@@ -825,6 +987,35 @@ mod tests {
                 .reserve("self_hosted", "native-a", "job_b", 99)
                 .is_err()
         );
+        assert!(
+            restarted
+                .resolve_ambiguous_handoff(
+                    "hosted",
+                    "job_a",
+                    &reservation.local_route_key,
+                    Uuid::new_v4(),
+                    reservation.generation,
+                    piqae_protocol::agent::AmbiguousHandoffResolution::ReleaseForRetry,
+                )
+                .is_err(),
+            "a stale or incorrect resolution must not unlock the route"
+        );
+        restarted
+            .resolve_ambiguous_handoff(
+                "hosted",
+                "job_a",
+                &reservation.local_route_key,
+                reservation.reservation_id,
+                reservation.generation,
+                piqae_protocol::agent::AmbiguousHandoffResolution::ReleaseForRetry,
+            )
+            .unwrap();
+        assert!(
+            restarted
+                .reserve("hosted", "native-a", "job_a", 100)
+                .is_ok(),
+            "explicit durable release-for-retry permits the original job again"
+        );
     }
 
     #[test]
@@ -881,6 +1072,55 @@ mod tests {
             Some(cloud.route_id.as_str())
         );
         assert_eq!(evidence[0].local_route_key, local_route_key);
+    }
+
+    #[test]
+    fn cloud_generation_is_per_job_and_stale_same_job_attempts_are_rejected() {
+        let root = TempDir::new().unwrap();
+        let mut coordinator = RouteCoordinator::open(root.path()).unwrap();
+        coordinator
+            .reconcile(&[printer("native-a", Vec::new())], 1, Utc::now())
+            .unwrap();
+        let local_route_key = coordinator.route_id("native-a");
+        for job in ["job_a", "job_b"] {
+            let cloud = piqae_protocol::agent::CloudRouteReservation {
+                route_id: "rte_01ARZ3NDEKTSV4RRFFQ69G5FAV".into(),
+                local_route_key: local_route_key.clone(),
+                reservation_id: Uuid::new_v4(),
+                generation: 1,
+                fencing_token: format!("fence-{job}"),
+                lease_expires_at: Utc::now() + chrono::Duration::minutes(1),
+            };
+            coordinator
+                .register_authoritative("hosted", "native-a", job, &cloud, Utc::now())
+                .unwrap();
+            let reserved = coordinator
+                .reserve("hosted", "native-a", job, Utc::now().timestamp_millis())
+                .unwrap();
+            coordinator
+                .finish(
+                    "hosted",
+                    job,
+                    &reserved,
+                    NativeHandoffOutcome::RejectedBeforeHandoff,
+                    None,
+                    Utc::now(),
+                )
+                .unwrap();
+        }
+        let stale = piqae_protocol::agent::CloudRouteReservation {
+            route_id: "rte_01ARZ3NDEKTSV4RRFFQ69G5FAV".into(),
+            local_route_key,
+            reservation_id: Uuid::new_v4(),
+            generation: 1,
+            fencing_token: "stale-fence".into(),
+            lease_expires_at: Utc::now() + chrono::Duration::minutes(1),
+        };
+        assert!(
+            coordinator
+                .register_authoritative("hosted", "native-a", "job_a", &stale, Utc::now())
+                .is_err()
+        );
     }
 
     #[test]

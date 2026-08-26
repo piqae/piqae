@@ -4045,7 +4045,15 @@ async fn sync_succeeded(response: AgentSyncResponse, context: SyncContext<'_>) -
     {
         warn!(%error, "native handoff acknowledgement could not be persisted");
     }
-    apply_commands(context.store, context.paused, commands, command_cursor);
+    apply_commands(
+        context.store,
+        context.paused,
+        context.route_coordinator,
+        &context.cloud.connector_id,
+        commands,
+        command_cursor,
+    )
+    .await;
     for offer in candidate_jobs {
         if let Err(error) = accept_offer(
             context.cloud,
@@ -4076,14 +4084,33 @@ fn apply_event_acknowledgement(store: &mut AgentStore, cursor: Option<EventId>) 
     }
 }
 
-fn apply_commands(
+async fn apply_commands(
     store: &mut AgentStore,
     paused: &AtomicBool,
+    route_coordinator: &Arc<Mutex<route_coordinator::RouteCoordinator>>,
+    connector_id: &str,
     commands: Vec<AgentCommand>,
     command_cursor: Option<String>,
 ) {
     for command in commands {
-        if let Err(error) = apply_command(store, paused, command) {
+        let result = match command {
+            AgentCommand::ResolveAmbiguousHandoff {
+                job_id,
+                local_route_key,
+                reservation_id,
+                generation,
+                resolution,
+            } => route_coordinator.lock().await.resolve_ambiguous_handoff(
+                connector_id,
+                &job_id.to_string(),
+                &local_route_key,
+                reservation_id,
+                generation,
+                resolution,
+            ),
+            command => apply_command(store, paused, command).map_err(anyhow::Error::from),
+        };
+        if let Err(error) = result {
             warn!(%error, "cloud command could not be applied durably");
             return;
         }
@@ -4122,6 +4149,11 @@ fn apply_command(
         AgentCommand::CollectDiagnostics { request_id } => {
             collect_diagnostics(store, &request_id)?;
             info!(%request_id, "bounded redacted diagnostics collected");
+        }
+        AgentCommand::ResolveAmbiguousHandoff { .. } => {
+            return Err(StorageError::InvalidLocalEvent(
+                "route resolution command reached the queue-only handler".into(),
+            ));
         }
     }
     Ok(())
@@ -4233,6 +4265,7 @@ async fn accept_offer(
     let lease_id = offer.lease_id;
     let lease_token = offer.lease_token.clone();
     let job_id = offer.job.id;
+    let route_reservation = offer.route_reservation.clone();
     let result = tokio::select! {
       result = maintain_lease(
         offer.lease_expires_at,
@@ -4255,6 +4288,15 @@ async fn accept_offer(
                     &AgentRenewLeaseRequest {
                         lease_id,
                         lease_token: lease_token.clone(),
+                        route_reservation_id: route_reservation
+                            .as_ref()
+                            .map(|reservation| reservation.reservation_id),
+                        route_generation: route_reservation
+                            .as_ref()
+                            .map(|reservation| reservation.generation),
+                        route_fencing_token: route_reservation
+                            .as_ref()
+                            .map(|reservation| reservation.fencing_token.clone()),
                     },
                 ),
             )
@@ -5223,6 +5265,9 @@ fn sync_request(
                 piqae_protocol::agent::AgentFeature::NativeHandoffEvidenceV1,
                 piqae_protocol::agent::AgentFeature::TopologyChangesV1,
                 piqae_protocol::agent::AgentFeature::ProfileStockFreshnessV1,
+                piqae_protocol::agent::AgentFeature::RouteObservationSequenceV1,
+                piqae_protocol::agent::AgentFeature::RouteLeaseRenewalV1,
+                piqae_protocol::agent::AgentFeature::AmbiguousHandoffResolutionV1,
             ],
             telemetry_privacy: piqae_protocol::agent::TelemetryPrivacy::CountsOnly,
         },
@@ -5364,7 +5409,18 @@ async fn collect_route_observations(
     use piqae_protocol::agent::RouteObservation;
 
     let mut observations = Vec::new();
-    for (native_id, connector_native_ids) in printers {
+    let sequence_allocation = route_coordinator
+        .lock()
+        .await
+        .allocate_observation_sequences(printers.len());
+    let sequences = match sequence_allocation {
+        Ok(sequences) => sequences,
+        Err(error) => {
+            warn!(%error, "route observation sequence could not be persisted");
+            return observations;
+        }
+    };
+    for ((native_id, connector_native_ids), sequence) in printers.into_iter().zip(sequences) {
         let route_id = route_coordinator.lock().await.route_id(&native_id);
         let native_id_for_collection = native_id.clone();
         let cached = observation_cache
@@ -5406,6 +5462,7 @@ async fn collect_route_observations(
         };
         observations.push(RouteObservation {
             local_route_key: route_id,
+            sequence,
             observed_at,
             inventory_revision,
             state,

@@ -354,6 +354,9 @@ pub enum AgentFeature {
     NativeHandoffEvidenceV1,
     TopologyChangesV1,
     ProfileStockFreshnessV1,
+    RouteObservationSequenceV1,
+    RouteLeaseRenewalV1,
+    AmbiguousHandoffResolutionV1,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -579,10 +582,29 @@ pub struct AgentAcceptJobResponse {
     pub state: piqae_domain::JobState,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 pub struct AgentRenewLeaseRequest {
     pub lease_id: Uuid,
     pub lease_token: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_reservation_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_generation: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_fencing_token: Option<String>,
+}
+
+impl std::fmt::Debug for AgentRenewLeaseRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AgentRenewLeaseRequest")
+            .field("lease_id", &self.lease_id)
+            .field("lease_token", &"[REDACTED]")
+            .field("route_reservation_id", &self.route_reservation_id)
+            .field("route_generation", &self.route_generation)
+            .field("route_fencing_token", &"[REDACTED]")
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -604,6 +626,13 @@ pub enum AgentCommand {
     CancelJob {
         job_id: piqae_domain::JobId,
     },
+    ResolveAmbiguousHandoff {
+        job_id: piqae_domain::JobId,
+        local_route_key: String,
+        reservation_id: Uuid,
+        generation: u64,
+        resolution: AmbiguousHandoffResolution,
+    },
     Pause,
     Resume,
     UpdateAvailable {
@@ -614,6 +643,17 @@ pub enum AgentCommand {
     CollectDiagnostics {
         request_id: String,
     },
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AmbiguousHandoffResolution {
+    /// An operator or authoritative spooler reconciliation proved that native
+    /// handoff did not occur, so the job may be offered again.
+    ReleaseForRetry,
+    /// The uncertain attempt is accepted as delivered/handled and must never
+    /// be replayed automatically.
+    ConfirmAccepted,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -684,6 +724,8 @@ pub enum PhysicalIdentityEvidenceKind {
     CertificateKey,
     NetworkMac,
     NetworkEndpoint,
+    ManufacturerModel,
+    CapabilityFingerprint,
     DriverFingerprint,
 }
 
@@ -735,6 +777,7 @@ pub struct RouteTopologyChange {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RouteObservation {
     pub local_route_key: String,
+    pub sequence: u64,
     pub observed_at: DateTime<Utc>,
     pub inventory_revision: u64,
     pub state: PrinterState,
@@ -834,4 +877,34 @@ pub struct PrinterProfileSnapshot {
     pub last_test_job_id: Option<String>,
     #[serde(default)]
     pub published: bool,
+}
+
+#[cfg(test)]
+mod route_protocol_tests {
+    use super::*;
+
+    #[test]
+    fn lease_renewal_route_proof_is_additive_and_debug_redacted() {
+        let Ok(legacy): Result<AgentRenewLeaseRequest, _> =
+            serde_json::from_value(serde_json::json!({
+                    "lease_id": Uuid::nil(),
+                    "lease_token": "legacy-secret"
+            }))
+        else {
+            panic!("legacy renewal must deserialize");
+        };
+        assert!(legacy.route_reservation_id.is_none());
+
+        let request = AgentRenewLeaseRequest {
+            lease_id: Uuid::nil(),
+            lease_token: "lease-secret".into(),
+            route_reservation_id: Some(Uuid::nil()),
+            route_generation: Some(7),
+            route_fencing_token: Some("fence-secret".into()),
+        };
+        let debug = format!("{request:?}");
+        assert!(!debug.contains("lease-secret"));
+        assert!(!debug.contains("fence-secret"));
+        assert!(debug.contains("[REDACTED]"));
+    }
 }
