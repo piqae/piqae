@@ -5363,6 +5363,14 @@ components:
         projection_health:
           type: string
           enum: [current, pending, failed, unsupported]
+        capability_revision: { type: integer, format: int64, minimum: 0 }
+        profile_revision: { type: integer, format: int64, minimum: 0 }
+        profile_observed_at: { type: [string, "null"], format: date-time }
+        stock_observed_at: { type: [string, "null"], format: date-time }
+        stock_state:
+          type: string
+          enum: [current, stale, unknown]
+          description: Privacy-safe freshness of the loaded-media projection; no driver-private values are exposed.
         latest_observation:
           oneOf:
             - { $ref: "#/components/schemas/RouteObservation" }

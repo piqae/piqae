@@ -431,7 +431,7 @@ pub async fn operations(
         let (physical_destinations, routes, route_observations) =
             crate::destination_topology::operational_snapshot(
                 &state,
-                piqae_storage_postgres::TenantScope {
+                piqae_storage_postgres::destination_topology::TenantScope {
                     workspace_id,
                     environment_id,
                 },

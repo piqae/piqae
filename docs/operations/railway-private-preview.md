@@ -124,12 +124,18 @@ domains, or logs:
 PIQAE_S3_ACCESS_KEY_ID
 PIQAE_S3_SECRET_ACCESS_KEY
 PIQAE_WEBHOOK_MASTER_KEY
+PIQAE_DESTINATION_IDENTITY_KEY
 PIQAE_LOCAL_OWNER_BOOTSTRAP_TOKEN  # one-time only; remove after bootstrap
 ```
 
 `PIQAE_WEBHOOK_MASTER_KEY` must be a base64-encoded 32-byte key. Use the
 database service reference for `PIQAE_DATABASE_URL` instead of copying its
 resolved credential into another configuration surface.
+
+`PIQAE_DESTINATION_IDENTITY_KEY` must be a distinct, stable base64-encoded
+32-byte key. Keep it across webhook or hostname rotations: changing it stops
+new printer evidence from matching the existing tenant-scoped destination
+projection. Rotate it only through a versioned evidence-key migration.
 
 ### Railway bucket addressing
 

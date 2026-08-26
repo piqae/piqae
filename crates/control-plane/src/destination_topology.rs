@@ -16,10 +16,13 @@ use chrono::{DateTime, TimeDelta, Utc};
 use hmac::{Hmac, Mac};
 use piqae_auth::Scope;
 use piqae_storage_postgres::{
-    DeliveryAttempt, IdentityConfidence, IdentityDecision, IdentityDecisionKind, NewDeliveryAttempt,
-    IdentityEvidence, ProjectionAcknowledgement, RouteObservation, RouteReservation,
-    SchedulingAuthority, SiteCoordinatorMembership, StorageError, StoredPhysicalDestination,
-    StoredPrinterRoute, TenantScope,
+    StorageError,
+    destination_topology::{
+        DeliveryAttempt, DeliveryAttemptState, IdentityConfidence, IdentityDecision,
+        IdentityDecisionKind, IdentityEvidence, NewDeliveryAttempt, ProjectionAcknowledgement,
+        RouteObservation, RouteReservation, SchedulingAuthority, SiteCoordinatorMembership,
+        StoredPhysicalDestination, StoredPrinterRoute, TenantScope,
+    },
 };
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
@@ -32,9 +35,28 @@ fn enum_name<T: Serialize>(value: &T) -> String {
         .unwrap_or_else(|| "unknown".into())
 }
 
-fn protocol_confidence(
-    value: piqae_protocol::agent::IdentityConfidence,
-) -> IdentityConfidence {
+const fn stored_route_state(value: piqae_domain::PrinterState) -> &'static str {
+    match value {
+        piqae_domain::PrinterState::Online | piqae_domain::PrinterState::Busy => "available",
+        piqae_domain::PrinterState::Offline => "unavailable",
+        piqae_domain::PrinterState::Paused => "paused",
+        piqae_domain::PrinterState::PaperOut | piqae_domain::PrinterState::Error => "rejecting",
+        piqae_domain::PrinterState::Unknown => "unknown",
+    }
+}
+
+fn public_destination_state(value: &str) -> String {
+    match value {
+        "available" => "active",
+        "attention" => "needs_review",
+        "unavailable" | "paused" | "unknown" => "needs_review",
+        "retired" => "retired",
+        other => other,
+    }
+    .to_owned()
+}
+
+fn protocol_confidence(value: piqae_protocol::agent::IdentityConfidence) -> IdentityConfidence {
     match value {
         piqae_protocol::agent::IdentityConfidence::Verified => IdentityConfidence::Verified,
         piqae_protocol::agent::IdentityConfidence::High => IdentityConfidence::High,
@@ -55,7 +77,9 @@ fn tenant_evidence_digest(
 ) -> Result<String, AppError> {
     if normalized_node_digest.len() != 64
         || normalized_node_digest != normalized_node_digest.to_ascii_lowercase()
-        || !normalized_node_digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+        || !normalized_node_digest
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
     {
         return Err(AppError::invalid(
             "invalid_identity_evidence",
@@ -69,7 +93,10 @@ fn tenant_evidence_digest(
     mac.update(tenant_scope.environment_id.to_string().as_bytes());
     mac.update(b"\0");
     mac.update(normalized_node_digest.as_bytes());
-    Ok(format!("hmac-sha256:{}", hex::encode(mac.finalize().into_bytes())))
+    Ok(format!(
+        "hmac-sha256:{}",
+        hex::encode(mac.finalize().into_bytes())
+    ))
 }
 
 fn scope(tenant: crate::authentication::TenantContext) -> TenantScope {
@@ -83,9 +110,14 @@ fn storage_error(error: StorageError) -> AppError {
     match error {
         StorageError::NotFound => AppError::not_found(),
         StorageError::ConcurrentStateChange | StorageError::InvalidTransition => {
-            AppError::conflict("destination_state_changed", "The destination or route state changed concurrently.")
+            AppError::conflict(
+                "destination_state_changed",
+                "The destination or route state changed concurrently.",
+            )
         }
-        StorageError::InvalidData(message) => AppError::invalid("invalid_destination_topology", message),
+        StorageError::InvalidData(message) => {
+            AppError::invalid("invalid_destination_topology", message)
+        }
         _ => AppError::service_unavailable("destination_topology_unavailable"),
     }
 }
@@ -134,6 +166,11 @@ pub struct PrinterRouteResponse {
     pub health: &'static str,
     pub telemetry_freshness: &'static str,
     pub projection_health: &'static str,
+    pub capability_revision: u64,
+    pub profile_revision: u64,
+    pub profile_observed_at: Option<DateTime<Utc>>,
+    pub stock_observed_at: Option<DateTime<Utc>>,
+    pub stock_state: &'static str,
     pub latest_observation: Option<RouteObservationResponse>,
     pub scheduling_authority_id: Option<String>,
     pub created_at: DateTime<Utc>,
@@ -161,6 +198,88 @@ pub struct IdentityDecisionResponse {
     pub reverses_decision_id: Option<String>,
     pub reversed_by_decision_id: Option<String>,
     pub created_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct RouteReservationResponse {
+    pub id: String,
+    pub route_id: String,
+    pub job_id: String,
+    pub attempt_id: String,
+    pub generation: u64,
+    pub state: String,
+    pub acquired_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    pub released_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct DeliveryAttemptResponse {
+    pub id: String,
+    pub job_id: String,
+    pub target_id: Option<String>,
+    pub route_id: String,
+    pub generation: u64,
+    pub state: &'static str,
+    pub native_spool_id: Option<String>,
+    pub failure_reason: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub completed_at: Option<DateTime<Utc>>,
+}
+
+fn public_attempt_state(state: DeliveryAttemptState) -> &'static str {
+    match state {
+        DeliveryAttemptState::RouteLeased => "route_leased",
+        DeliveryAttemptState::AcceptedByNode => "accepted_by_node",
+        DeliveryAttemptState::QueuedLocal => "queued_local",
+        DeliveryAttemptState::HandingToSpooler => "handing_to_spooler",
+        DeliveryAttemptState::AcceptedBySpooler => "accepted_by_spooler",
+        DeliveryAttemptState::PrintingReported => "printing_reported",
+        DeliveryAttemptState::CompletedReported => "completed_reported",
+        DeliveryAttemptState::Cancelled => "cancelled_before_handoff",
+        DeliveryAttemptState::Failed => "failed",
+        DeliveryAttemptState::DeliveryUncertain => "delivery_uncertain",
+        DeliveryAttemptState::Superseded => "rejected_before_handoff",
+    }
+}
+
+fn attempt_response(value: DeliveryAttempt) -> DeliveryAttemptResponse {
+    DeliveryAttemptResponse {
+        id: value.id,
+        job_id: value.job_id,
+        // Target IDs are control-plane presentation metadata and are not inferred
+        // from a physical destination identifier.
+        target_id: None,
+        route_id: value.route_id,
+        generation: value.generation,
+        state: public_attempt_state(value.state),
+        native_spool_id: None,
+        failure_reason: None,
+        created_at: value.created_at,
+        updated_at: value.updated_at,
+        completed_at: value.final_at,
+    }
+}
+
+fn reservation_response(value: RouteReservation) -> RouteReservationResponse {
+    RouteReservationResponse {
+        id: value.id,
+        route_id: value.route_id,
+        job_id: value.job_id,
+        attempt_id: value.attempt_id,
+        generation: value.generation,
+        state: match value.state.as_str() {
+            "active" => "active",
+            "released" => "released",
+            "expired" => "expired",
+            _ => "fenced",
+        }
+        .to_owned(),
+        acquired_at: value.acquired_at,
+        expires_at: value.lease_until,
+        released_at: value.released_at,
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -265,24 +384,53 @@ async fn route_response(
             "stale"
         }
     });
-    let health = if !route.enabled || route.state == "offline" {
+    let health = if !route.enabled || route.state == "unavailable" {
         "offline"
     } else if telemetry_freshness == "stale" || telemetry_freshness == "never" {
         "stale"
     } else {
-        match observation.as_ref().map(|value| value.printer_state.as_str()) {
-            Some("online") if observation.as_ref().is_some_and(|value| value.accepting_jobs == Some(true)) => "ready",
+        match observation
+            .as_ref()
+            .map(|value| value.printer_state.as_str())
+        {
+            Some("online")
+                if observation
+                    .as_ref()
+                    .is_some_and(|value| value.accepting_jobs == Some(true)) =>
+            {
+                "ready"
+            }
             Some("busy") | Some("printing") => "busy",
             Some("paused" | "paper_out" | "error") => "needs_operator",
             Some("offline") => "offline",
             _ => "unknown",
         }
     };
-    let projection_health = projection.as_ref().map_or("unsupported", |value| {
-        match value.status.as_str() {
-            "current" | "projected" => "current",
-            "failed" => "failed",
-            _ => "pending",
+    let projection_health =
+        projection
+            .as_ref()
+            .map_or("unsupported", |value| match value.status.as_str() {
+                "acknowledged" => "current",
+                "rejected" => "failed",
+                _ => "pending",
+            });
+    let profile_observed_at = observation
+        .as_ref()
+        .and_then(|value| value.stock_state.get("profile_observed_at"))
+        .and_then(serde_json::Value::as_str)
+        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+        .map(|value| value.with_timezone(&Utc));
+    let stock_observed_at = observation
+        .as_ref()
+        .and_then(|value| value.stock_state.get("stock_observed_at"))
+        .and_then(serde_json::Value::as_str)
+        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+        .map(|value| value.with_timezone(&Utc));
+    let stock_state = stock_observed_at.map_or("unknown", |observed_at| {
+        if observed_at + TimeDelta::minutes(5) >= now {
+            "current"
+        } else {
+            "stale"
         }
     });
     let authority = state
@@ -302,6 +450,11 @@ async fn route_response(
         health,
         telemetry_freshness,
         projection_health,
+        capability_revision: route.capability_revision,
+        profile_revision: route.profile_revision,
+        profile_observed_at,
+        stock_observed_at,
+        stock_state,
         latest_observation: observation.map(observation_response),
         scheduling_authority_id: authority,
         created_at: route.updated_at,
@@ -326,7 +479,7 @@ async fn destination_response(
         manufacturer: None,
         model: None,
         identity_confidence: identity_confidence(destination.identity_confidence),
-        status: destination.state,
+        status: public_destination_state(&destination.state),
         route_count,
         created_at: destination.updated_at,
         updated_at: destination.updated_at,
@@ -389,9 +542,7 @@ fn evidence_kind(kind: piqae_protocol::agent::PhysicalIdentityEvidenceKind) -> &
     }
 }
 
-fn evidence_strength(
-    strength: piqae_protocol::agent::IdentityEvidenceStrength,
-) -> &'static str {
+fn evidence_strength(strength: piqae_protocol::agent::IdentityEvidenceStrength) -> &'static str {
     use piqae_protocol::agent::IdentityEvidenceStrength as Strength;
     match strength {
         Strength::Strong => "strong",
@@ -457,7 +608,11 @@ pub(crate) async fn project_agent_topology(
             tenant_scope,
             &SchedulingAuthority {
                 id: authority_id.clone(),
-                kind: state.capabilities.deployment.clone(),
+                kind: if state.capabilities.deployment == "cloud" {
+                    "hosted_control_plane".into()
+                } else {
+                    "self_hosted_control_plane".into()
+                },
                 authority_key: format!(
                     "{}:{}:{}",
                     state.capabilities.deployment, tenant.workspace_id, tenant.environment_id
@@ -494,7 +649,10 @@ pub(crate) async fn project_agent_topology(
             let Some(snapshot) = printer.route.as_ref() else {
                 continue;
             };
-            if matches!(snapshot.topology_change, Some(piqae_protocol::agent::TopologyChange::Removed)) {
+            if matches!(
+                snapshot.topology_change,
+                Some(piqae_protocol::agent::TopologyChange::Removed)
+            ) {
                 continue;
             }
             let evidence = snapshot
@@ -546,7 +704,7 @@ pub(crate) async fn project_agent_topology(
             {
                 Ok(mut destination) => {
                     if conflicts {
-                        destination.state = "needs_review".into();
+                        destination.state = "attention".into();
                         destination.identity_confidence = IdentityConfidence::Conflict;
                     }
                     destination.updated_at = snapshot.observed_at;
@@ -564,7 +722,7 @@ pub(crate) async fn project_agent_topology(
                             id: destination_id.clone(),
                             name: printer.name.clone(),
                             identity_confidence: confidence,
-                            state: if conflicts { "needs_review" } else { "active" }.into(),
+                            state: if conflicts { "attention" } else { "available" }.into(),
                             scheduling_authority_id: Some(authority_id.clone()),
                             identity_revision: snapshot.topology_revision.max(1),
                             updated_at: snapshot.observed_at,
@@ -589,8 +747,11 @@ pub(crate) async fn project_agent_topology(
                         printer_id: printer.id.to_string(),
                         agent_id: request.agent_id.to_string(),
                         native_queue_id: printer.native_id.clone(),
-                        state: enum_name(&printer.state),
-                        role: existing.as_ref().map_or("standby", |route| route.role.as_str()).into(),
+                        state: stored_route_state(printer.state).into(),
+                        role: existing
+                            .as_ref()
+                            .map_or("standby", |route| route.role.as_str())
+                            .into(),
                         priority: existing.as_ref().map_or(100, |route| route.priority),
                         enabled: true,
                         capability_revision: printer.capability_revision,
@@ -622,9 +783,10 @@ pub(crate) async fn project_agent_topology(
                             observed_at: snapshot.observed_at,
                             expires_at: None,
                             metadata: serde_json::json!({
-                                "source": "agent_sync",
+                                "source": "node",
                                 "schema_version": 1,
-                                "normalization": "node_sha256_then_tenant_hmac"
+                                "normalization": "node_sha256_then_tenant_hmac",
+                                "key_version": "v1"
                             }),
                         },
                     )
@@ -640,7 +802,7 @@ pub(crate) async fn project_agent_topology(
                         route_id: server_route_id.clone(),
                         inventory_revision: snapshot.inventory_revision,
                         capability_revision: printer.capability_revision,
-                        status: "current".into(),
+                        status: "acknowledged".into(),
                         error_code: None,
                         observed_at: snapshot.observed_at,
                         acknowledged_at: Some(now),
@@ -658,7 +820,10 @@ pub(crate) async fn project_agent_topology(
     }
 
     for change in &request.topology_changes {
-        if !matches!(change.change, piqae_protocol::agent::TopologyChange::Removed) {
+        if !matches!(
+            change.change,
+            piqae_protocol::agent::TopologyChange::Removed
+        ) {
             continue;
         }
         match state
@@ -672,7 +837,7 @@ pub(crate) async fn project_agent_topology(
         {
             Ok(mut route) => {
                 route.enabled = false;
-                route.state = "offline".into();
+                route.state = "unavailable".into();
                 route.last_seen_at = Some(change.observed_at);
                 route.updated_at = change.observed_at;
                 state
@@ -776,10 +941,11 @@ pub(crate) async fn reserve_job_route(
         .into_iter()
         .find(|route| {
             route.enabled
-                && route.agent_id == job.metadata.get("piqae.route_agent_id").map_or_else(
-                    || String::new(),
-                    Clone::clone,
-                )
+                && route.agent_id
+                    == job
+                        .metadata
+                        .get("piqae.route_agent_id")
+                        .map_or_else(|| String::new(), Clone::clone)
                 && route.printer_id == job.printer_id.to_string()
         });
     // Older jobs do not carry route_agent_id. Fall back to the route's
@@ -808,7 +974,7 @@ pub(crate) async fn reserve_job_route(
         .get_destination(tenant_scope, &route.destination_id)
         .await
         .map_err(storage_error)?;
-    if destination.state != "active" {
+    if destination.state != "available" {
         return Err(AppError::conflict(
             "destination_needs_attention",
             "The physical destination requires operator review before another handoff.",
@@ -876,19 +1042,18 @@ pub(crate) async fn accept_job_route(
         ));
     }
     let attempt = match attempt.state {
-        piqae_storage_postgres::DeliveryAttemptState::RouteLeased => state
+        DeliveryAttemptState::RouteLeased => state
             .destination_topology
             .transition_delivery_attempt(
                 tenant_scope,
                 &attempt.id,
                 generation,
                 token,
-                piqae_storage_postgres::DeliveryAttemptState::AcceptedByNode,
+                DeliveryAttemptState::AcceptedByNode,
             )
             .await
             .map_err(storage_error)?,
-        piqae_storage_postgres::DeliveryAttemptState::AcceptedByNode
-        | piqae_storage_postgres::DeliveryAttemptState::QueuedLocal => attempt,
+        DeliveryAttemptState::AcceptedByNode | DeliveryAttemptState::QueuedLocal => attempt,
         _ => {
             return Err(AppError::conflict(
                 "stale_route_fence",
@@ -896,7 +1061,7 @@ pub(crate) async fn accept_job_route(
             ));
         }
     };
-    if attempt.state == piqae_storage_postgres::DeliveryAttemptState::AcceptedByNode {
+    if attempt.state == DeliveryAttemptState::AcceptedByNode {
         state
             .destination_topology
             .transition_delivery_attempt(
@@ -904,7 +1069,7 @@ pub(crate) async fn accept_job_route(
                 &attempt.id,
                 generation,
                 token,
-                piqae_storage_postgres::DeliveryAttemptState::QueuedLocal,
+                DeliveryAttemptState::QueuedLocal,
             )
             .await
             .map_err(storage_error)?;
@@ -952,10 +1117,7 @@ pub(crate) async fn ingest_native_handoffs(
         }
         let mut attempt = state
             .destination_topology
-            .get_delivery_attempt_by_reservation(
-                tenant_scope,
-                &item.reservation_id.to_string(),
-            )
+            .get_delivery_attempt_by_reservation(tenant_scope, &item.reservation_id.to_string())
             .await
             .map_err(storage_error)?;
         if attempt.job_id != item.job_id.to_string()
@@ -967,7 +1129,7 @@ pub(crate) async fn ingest_native_handoffs(
                 "Native handoff evidence was fenced by a newer delivery attempt.",
             ));
         }
-        if attempt.state == piqae_storage_postgres::DeliveryAttemptState::QueuedLocal {
+        if attempt.state == DeliveryAttemptState::QueuedLocal {
             attempt = state
                 .destination_topology
                 .transition_delivery_attempt(
@@ -975,23 +1137,23 @@ pub(crate) async fn ingest_native_handoffs(
                     &attempt.id,
                     item.fencing_generation,
                     &item.fencing_token,
-                    piqae_storage_postgres::DeliveryAttemptState::HandingToSpooler,
+                    DeliveryAttemptState::HandingToSpooler,
                 )
                 .await
                 .map_err(storage_error)?;
         }
         let next = match item.outcome {
             piqae_protocol::agent::NativeHandoffOutcome::Accepted => {
-                piqae_storage_postgres::DeliveryAttemptState::AcceptedBySpooler
+                DeliveryAttemptState::AcceptedBySpooler
             }
             piqae_protocol::agent::NativeHandoffOutcome::RejectedBeforeHandoff => {
-                piqae_storage_postgres::DeliveryAttemptState::Failed
+                DeliveryAttemptState::Failed
             }
             piqae_protocol::agent::NativeHandoffOutcome::Ambiguous => {
-                piqae_storage_postgres::DeliveryAttemptState::DeliveryUncertain
+                DeliveryAttemptState::DeliveryUncertain
             }
         };
-        if attempt.state == piqae_storage_postgres::DeliveryAttemptState::HandingToSpooler {
+        if attempt.state == DeliveryAttemptState::HandingToSpooler {
             attempt = state
                 .destination_topology
                 .transition_delivery_attempt(
@@ -1004,15 +1166,13 @@ pub(crate) async fn ingest_native_handoffs(
                 .await
                 .map_err(storage_error)?;
         }
-        if next == piqae_storage_postgres::DeliveryAttemptState::DeliveryUncertain
-            && attempt.state == next
-        {
+        if next == DeliveryAttemptState::DeliveryUncertain && attempt.state == next {
             let mut destination = state
                 .destination_topology
                 .get_destination(tenant_scope, &attempt.destination_id)
                 .await
                 .map_err(storage_error)?;
-            destination.state = "needs_review".into();
+            destination.state = "attention".into();
             destination.updated_at = Utc::now();
             state
                 .destination_topology
@@ -1055,7 +1215,9 @@ pub async fn get_destination(
         .get_destination(tenant_scope, &destination_id)
         .await
         .map_err(storage_error)?;
-    Ok(Json(destination_response(&state, tenant_scope, destination).await?))
+    Ok(Json(
+        destination_response(&state, tenant_scope, destination).await?,
+    ))
 }
 
 pub async fn list_destination_routes(
@@ -1160,11 +1322,11 @@ pub async fn list_identity_evidence(
             .map_err(storage_error)?
             .into_iter()
             .map(|value| IdentityEvidenceResponse {
+                confidence: evidence_confidence(&value),
                 id: value.id,
                 destination_id: value.destination_id,
                 route_id: value.route_id,
                 kind: value.kind,
-                confidence: evidence_confidence(&value),
                 observed_at: value.observed_at,
             })
             .collect(),
@@ -1231,7 +1393,9 @@ pub async fn list_identity_decisions(
         .get_destination(tenant_scope, &destination_id)
         .await
         .map_err(storage_error)?;
-    Ok(Json(stored_decisions(&state, tenant_scope, &destination_id).await?))
+    Ok(Json(
+        stored_decisions(&state, tenant_scope, &destination_id).await?,
+    ))
 }
 
 pub async fn create_identity_decision(
@@ -1248,14 +1412,22 @@ pub async fn create_identity_decision(
         .await
         .map_err(storage_error)?;
     if request.route_ids.is_empty() || request.route_ids.len() > 100 {
-        return Err(AppError::invalid("invalid_route_selection", "Select between one and 100 routes."));
+        return Err(AppError::invalid(
+            "invalid_route_selection",
+            "Select between one and 100 routes.",
+        ));
     }
     if request.reason.trim().is_empty() || request.reason.chars().count() > 2_000 {
-        return Err(AppError::invalid("invalid_identity_reason", "A reason of at most 2,000 characters is required."));
+        return Err(AppError::invalid(
+            "invalid_identity_reason",
+            "A reason of at most 2,000 characters is required.",
+        ));
     }
-    if request.display_name.as_ref().is_some_and(|name| {
-        name.trim().is_empty() || name.chars().count() > 255
-    }) {
+    if request
+        .display_name
+        .as_ref()
+        .is_some_and(|name| name.trim().is_empty() || name.chars().count() > 255)
+    {
         return Err(AppError::invalid(
             "invalid_destination_name",
             "A destination name must contain at most 255 characters.",
@@ -1263,7 +1435,10 @@ pub async fn create_identity_decision(
     }
     let unique = request.route_ids.iter().collect::<HashSet<_>>();
     if unique.len() != request.route_ids.len() {
-        return Err(AppError::invalid("invalid_route_selection", "Route IDs must be unique."));
+        return Err(AppError::invalid(
+            "invalid_route_selection",
+            "Route IDs must be unique.",
+        ));
     }
     let mut routes = Vec::with_capacity(request.route_ids.len());
     for route_id in &request.route_ids {
@@ -1294,7 +1469,10 @@ pub async fn create_identity_decision(
             (IdentityDecisionKind::Merge, destination_id.clone())
         }
         DecisionRequestKind::Split => {
-            if routes.iter().any(|route| route.destination_id != destination_id) {
+            if routes
+                .iter()
+                .any(|route| route.destination_id != destination_id)
+            {
                 return Err(AppError::conflict(
                     "split_route_mismatch",
                     "Every split route must currently belong to this destination.",
@@ -1316,7 +1494,7 @@ pub async fn create_identity_decision(
                             .map(ToOwned::to_owned)
                             .unwrap_or_else(|| format!("{} (split)", destination.name)),
                         identity_confidence: IdentityConfidence::Conflict,
-                        state: "active".into(),
+                        state: "available".into(),
                         scheduling_authority_id: destination.scheduling_authority_id.clone(),
                         identity_revision: destination.identity_revision.saturating_add(1),
                         updated_at: now,
@@ -1337,7 +1515,7 @@ pub async fn create_identity_decision(
             .map_err(storage_error)?;
     }
     destination.identity_confidence = IdentityConfidence::Verified;
-    destination.state = "active".into();
+    destination.state = "available".into();
     destination.identity_revision = destination.identity_revision.saturating_add(1);
     destination.updated_at = now;
     state
@@ -1391,7 +1569,10 @@ pub async fn reverse_identity_decision(
         .iter()
         .any(|decision| decision.reverses_decision_id.as_deref() == Some(&decision_id))
     {
-        return Err(AppError::conflict("identity_decision_reversed", "This decision was already reversed."));
+        return Err(AppError::conflict(
+            "identity_decision_reversed",
+            "This decision was already reversed.",
+        ));
     }
     let restore_destination = match original.kind {
         IdentityDecisionKind::Split => original.destination_id.clone(),
@@ -1400,7 +1581,12 @@ pub async fn reverse_identity_decision(
             .first()
             .cloned()
             .unwrap_or_else(|| original.destination_id.clone()),
-        _ => return Err(AppError::conflict("identity_decision_not_reversible", "Only merge and split decisions can be reversed.")),
+        _ => {
+            return Err(AppError::conflict(
+                "identity_decision_not_reversible",
+                "Only merge and split decisions can be reversed.",
+            ));
+        }
     };
     let now = Utc::now();
     for route_id in &original.route_ids {
@@ -1442,14 +1628,17 @@ pub async fn reverse_identity_decision(
 pub async fn list_route_reservations(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Result<Json<Vec<RouteReservation>>, AppError> {
+) -> Result<Json<Vec<RouteReservationResponse>>, AppError> {
     let tenant = authenticate_native(&state, &headers, Scope::JobsRead).await?;
     Ok(Json(
         state
             .destination_topology
             .list_route_reservations(scope(tenant), 100)
             .await
-            .map_err(storage_error)?,
+            .map_err(storage_error)?
+            .into_iter()
+            .map(reservation_response)
+            .collect(),
     ))
 }
 
@@ -1457,7 +1646,7 @@ pub async fn list_delivery_attempts(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(job_id): Path<String>,
-) -> Result<Json<Vec<DeliveryAttempt>>, AppError> {
+) -> Result<Json<Vec<DeliveryAttemptResponse>>, AppError> {
     let tenant = authenticate_native(&state, &headers, Scope::JobsRead).await?;
     let job_id_parsed = job_id
         .parse()
@@ -1471,6 +1660,9 @@ pub async fn list_delivery_attempts(
             .destination_topology
             .list_delivery_attempts(scope(tenant), &job_id)
             .await
-            .map_err(storage_error)?,
+            .map_err(storage_error)?
+            .into_iter()
+            .map(attempt_response)
+            .collect(),
     ))
 }

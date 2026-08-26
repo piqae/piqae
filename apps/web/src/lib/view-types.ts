@@ -120,6 +120,11 @@ export interface DashboardPrinterRoute {
   health: 'ready' | 'busy' | 'needs_operator' | 'offline' | 'stale' | 'unknown';
   telemetryFreshness: 'live' | 'recent' | 'stale' | 'never';
   projectionHealth: 'current' | 'pending' | 'failed' | 'unsupported';
+  capabilityRevision: number;
+  profileRevision: number;
+  profileObservedAt: string | null;
+  stockObservedAt: string | null;
+  stockState: 'current' | 'stale' | 'unknown';
   schedulingAuthorityId: string | null;
   latestObservation: DashboardRouteObservation | null;
   updatedAt: string;

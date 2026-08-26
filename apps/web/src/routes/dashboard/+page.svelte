@@ -636,6 +636,7 @@
           <th>Route health</th>
           <th>Inventory projection</th>
           <th>Telemetry</th>
+          <th>Profiles / stock</th>
           <th>Scheduling authority</th>
         </tr>
       </thead>
@@ -652,10 +653,11 @@
             <td><Status value={route.health} /></td>
             <td><Status value={route.projectionHealth} /></td>
             <td><Status value={route.telemetryFreshness} /></td>
+            <td><Status value={route.stockState} /></td>
             <td class="mono muted">{route.schedulingAuthorityId ?? 'Local connector only'}</td>
           </tr>
         {:else}
-          <tr><td colspan={aggregateCustomers ? 6 : 5}><EmptyState message="No printer routes match this view." compact /></td></tr>
+          <tr><td colspan={aggregateCustomers ? 7 : 6}><EmptyState message="No printer routes match this view." compact /></td></tr>
         {/each}
       </tbody>
     </table>
@@ -942,6 +944,11 @@
         { term: 'OS queue', value: detail.route.nativeQueueId, mono: true },
         { term: 'Inventory projection', value: detail.route.projectionHealth.replaceAll('_', ' ') },
         { term: 'Telemetry freshness', value: detail.route.telemetryFreshness },
+        { term: 'Capabilities revision', value: detail.route.capabilityRevision },
+        { term: 'Profile revision', value: detail.route.profileRevision },
+        { term: 'Profile observed', value: detail.route.profileObservedAt ?? 'Never' },
+        { term: 'Stock projection', value: detail.route.stockState },
+        { term: 'Stock observed', value: detail.route.stockObservedAt ?? 'Never' },
         { term: 'Scheduling authority', value: detail.route.schedulingAuthorityId ?? 'Local connector only', mono: true },
         { term: 'Route ID', value: detail.route.id, mono: true }
       ]}

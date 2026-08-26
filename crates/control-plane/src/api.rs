@@ -275,15 +275,6 @@ pub async fn delete_node(
             &serde_json::json!({"node_id": node_id}),
         )
         .await?;
-    let inventory_projection =
-        crate::destination_topology::project_agent_topology(&state, tenant, &request).await?;
-    let acknowledged_handoff_sequence = crate::destination_topology::ingest_native_handoffs(
-        &state,
-        tenant,
-        request.agent_id,
-        &request.native_handoffs,
-    )
-    .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1761,10 +1752,7 @@ async fn resolve_job_destination(
             Ok(ResolvedJobDestination {
                 printer_id,
                 agent_id,
-                metadata: BTreeMap::from([(
-                    "piqae.route_agent_id".into(),
-                    agent_id.to_string(),
-                )]),
+                metadata: BTreeMap::from([("piqae.route_agent_id".into(), agent_id.to_string())]),
                 binding: None,
             })
         }
@@ -2495,6 +2483,15 @@ pub async fn agent_sync(
             printers.as_deref(),
         )
         .await?;
+    let inventory_projection =
+        crate::destination_topology::project_agent_topology(&state, tenant, &request).await?;
+    let acknowledged_handoff_sequence = crate::destination_topology::ingest_native_handoffs(
+        &state,
+        tenant,
+        request.agent_id,
+        &request.native_handoffs,
+    )
+    .await?;
     let mut acknowledged_diagnostics = Vec::with_capacity(request.diagnostics.len());
     for report in &request.diagnostics {
         match state

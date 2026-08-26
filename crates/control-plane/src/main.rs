@@ -125,6 +125,10 @@ async fn run() -> Result<()> {
     let webhook_key = parse_webhook_key(
         &product_env("PIQAE_WEBHOOK_MASTER_KEY").context("PIQAE_WEBHOOK_MASTER_KEY is required")?,
     )?;
+    let destination_identity_key = parse_destination_identity_key(
+        &product_env("PIQAE_DESTINATION_IDENTITY_KEY")
+            .context("PIQAE_DESTINATION_IDENTITY_KEY is required")?,
+    )?;
     let document_keyring = parse_document_keyring(
         &product_env("PIQAE_DOCUMENT_MASTER_KEY")
             .context("PIQAE_DOCUMENT_MASTER_KEY is required")?,
@@ -237,6 +241,7 @@ async fn run() -> Result<()> {
         object_store,
     )
     .with_destination_topology(Arc::new(store.clone()))
+    .with_destination_identity_key(destination_identity_key)
     .with_document_artifact_download_concurrency(artifact_download_concurrency)
     .with_capabilities(capabilities.clone())
     .with_public_control_plane_url(public_control_plane_url);
@@ -626,6 +631,16 @@ fn parse_webhook_key(value: &str) -> Result<[u8; 32]> {
     decoded
         .try_into()
         .map_err(|_| anyhow::anyhow!("PIQAE_WEBHOOK_MASTER_KEY must decode to exactly 32 bytes"))
+}
+
+fn parse_destination_identity_key(value: &str) -> Result<[u8; 32]> {
+    use base64::Engine as _;
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(value)
+        .context("PIQAE_DESTINATION_IDENTITY_KEY must be base64")?;
+    decoded.try_into().map_err(|_| {
+        anyhow::anyhow!("PIQAE_DESTINATION_IDENTITY_KEY must decode to exactly 32 bytes")
+    })
 }
 
 fn parse_document_key(value: &str) -> Result<[u8; 32]> {

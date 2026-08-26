@@ -290,6 +290,11 @@ export function createLiveApi(
     health: route.health,
     telemetryFreshness: route.telemetry_freshness,
     projectionHealth: route.projection_health ?? 'unsupported',
+    capabilityRevision: route.capability_revision ?? 0,
+    profileRevision: route.profile_revision ?? 0,
+    profileObservedAt: route.profile_observed_at ?? null,
+    stockObservedAt: route.stock_observed_at ?? null,
+    stockState: route.stock_state ?? 'unknown',
     schedulingAuthorityId: route.scheduling_authority_id ?? null,
     latestObservation: route.latest_observation ? toRouteObservation(route.latest_observation) : null,
     updatedAt: route.updated_at

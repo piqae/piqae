@@ -7,8 +7,8 @@ pub mod authentication;
 pub mod billing;
 pub mod billing_usage_worker;
 pub mod compatibility;
-pub mod device_auth;
 pub mod destination_topology;
+pub mod device_auth;
 pub mod document_crypto;
 pub mod document_render_worker;
 pub mod documents;
@@ -33,11 +33,12 @@ use axum::{
     routing::{get, post},
 };
 use piqae_object_store::{MemoryObjectStore, ObjectStore};
-use piqae_storage_postgres::{DestinationTopologyRepository, MemoryDestinationTopologyRepository};
+use piqae_storage_postgres::destination_topology::{
+    DestinationTopologyRepository, MemoryDestinationTopologyRepository,
+};
 use piqae_webhooks::WebhookSecretBox;
 use repository::Repository;
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 use std::{fmt, sync::Arc};
 use tokio::sync::{Semaphore, broadcast};
 use tower_http::compression::CompressionLayer;
@@ -126,15 +127,12 @@ impl AppState {
         object_store: Arc<dyn ObjectStore>,
     ) -> Self {
         let (events, _) = broadcast::channel(1_024);
-        let destination_identity_key: [u8; 32] = Sha256::new()
-            .chain_update(b"piqae.destination-identity.v1\0")
-            .chain_update(webhook_key)
-            .finalize()
-            .into();
         Self {
             repository,
             destination_topology: Arc::new(MemoryDestinationTopologyRepository::default()),
-            destination_identity_key,
+            // Tests deliberately use an explicit non-production fixture key.
+            // Production replaces it from PIQAE_DESTINATION_IDENTITY_KEY.
+            destination_identity_key: [0; 32],
             authenticator,
             events,
             webhook_secrets: Arc::new(WebhookSecretBox::new(webhook_key)),
@@ -161,6 +159,15 @@ impl AppState {
         repository: Arc<dyn DestinationTopologyRepository>,
     ) -> Self {
         self.destination_topology = repository;
+        self
+    }
+
+    /// Configures the stable key used to tenant-pseudonymise physical-device
+    /// evidence. It is intentionally independent of webhook and document keys
+    /// so unrelated secret rotation cannot split destination identities.
+    #[must_use]
+    pub fn with_destination_identity_key(mut self, key: [u8; 32]) -> Self {
+        self.destination_identity_key = key;
         self
     }
 
@@ -363,10 +370,7 @@ pub fn router(state: AppState) -> Router {
             "/v1/physical-destinations/{destination_id}/identity-decisions/{decision_id}/reverse",
             post(destination_topology::reverse_identity_decision),
         )
-        .route(
-            "/v1/printer-routes",
-            get(destination_topology::list_routes),
-        )
+        .route("/v1/printer-routes", get(destination_topology::list_routes))
         .route(
             "/v1/printer-routes/{route_id}",
             get(destination_topology::get_route),
