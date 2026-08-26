@@ -57,7 +57,10 @@ Then:
    environment.
 4. Let the single **Piqae release** workflow publish the signed macOS and
    Windows packages, Linux bundles, container images, stable appcasts, release
-   manifest, and GitHub prerelease. Never start the platform workflows
+   manifest, provenance-bearing Apple/Windows embedded SDK candidates, and
+   GitHub prerelease. Embedded SDK candidates remain unsigned Preview assets
+   until their package-signing gates are configured; the workflow does not
+   publish them to a package registry. Never start the platform workflows
    separately for the same version.
 5. Confirm the public-feed smoke checks, then canary the release before widening
    availability.
