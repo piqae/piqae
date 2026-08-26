@@ -8,8 +8,46 @@ use piqae_local_ipc::{
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConnectorInvitationRequest {
+    pub control_plane_url: String,
+    #[serde(skip_serializing)]
+    pub invitation_token: String,
+    pub printer_grant: piqae_protocol::agent::PrinterGrant,
+    pub allowed_printer_ids: Vec<String>,
+    pub node_name: String,
+    pub hostname: String,
+}
+
+impl std::fmt::Debug for ConnectorInvitationRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ConnectorInvitationRequest")
+            .field("control_plane_url", &self.control_plane_url)
+            .field("invitation_token", &"[REDACTED]")
+            .field("printer_grant", &self.printer_grant)
+            .field("allowed_printer_ids", &self.allowed_printer_ids.len())
+            .field("node_name", &self.node_name)
+            .field("hostname", &self.hostname)
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConnectorInvitationResult {
+    pub connector_id: String,
+    pub agent_id: String,
+    pub display_name: Option<String>,
+    pub workspace_name: Option<String>,
+    pub manage_url: Option<String>,
+}
+
 #[derive(Debug)]
 pub enum RuntimeCommand {
+    ConnectInvitation {
+        request: Box<ConnectorInvitationRequest>,
+        respond_to: oneshot::Sender<Result<ConnectorInvitationResult, CommandFailure>>,
+    },
     ApplyHostLifecycle {
         event: crate::LifecycleEvent,
         respond_to: oneshot::Sender<crate::LifecycleSnapshot>,

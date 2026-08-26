@@ -902,12 +902,13 @@ const fn required_capability(operation: &LocalOperation) -> Option<BrokerCapabil
         | LocalOperation::ConfirmLoadedMedia(_) => Some(BrokerCapability::ManageProfiles),
         LocalOperation::Pause | LocalOperation::Resume => Some(BrokerCapability::ManageConnectors),
         LocalOperation::Sdk { operation } => Some(match operation {
+            SdkBrokerOperation::ConnectInvitation { .. }
+            | SdkBrokerOperation::RevokeConnector { .. } => BrokerCapability::ManageConnectors,
             SdkBrokerOperation::SubmitLocalJob { .. } => BrokerCapability::SubmitLocalJobs,
             SdkBrokerOperation::Profiles { .. } => BrokerCapability::ObservePrinters,
             SdkBrokerOperation::JobHistory { .. } | SdkBrokerOperation::ConnectorSnapshots => {
                 BrokerCapability::ObserveStatus
             }
-            SdkBrokerOperation::RevokeConnector { .. } => BrokerCapability::ManageConnectors,
         }),
         LocalOperation::RestartAgent
         | LocalOperation::ExportSupportBundle { .. }
@@ -1065,6 +1066,37 @@ async fn dispatch_sdk_operation(
     operation: SdkBrokerOperation,
 ) -> Result<LocalResult, LocalFailure> {
     let data = match operation {
+        SdkBrokerOperation::ConnectInvitation {
+            control_plane_url,
+            invitation_token,
+            printer_grant,
+            allowed_printer_ids,
+            node_name,
+            hostname,
+        } => {
+            let (send, receive) = oneshot::channel();
+            send_command(
+                commands,
+                RuntimeCommand::ConnectInvitation {
+                    request: Box::new(crate::command::ConnectorInvitationRequest {
+                        control_plane_url,
+                        invitation_token: invitation_token.expose_for_exchange(),
+                        printer_grant,
+                        allowed_printer_ids,
+                        node_name,
+                        hostname,
+                    }),
+                    respond_to: send,
+                },
+            )
+            .await?;
+            serde_json::to_value(
+                receive
+                    .await
+                    .map_err(|_| unavailable())?
+                    .map_err(command_failure)?,
+            )
+        }
         SdkBrokerOperation::SubmitLocalJob {
             printer_id,
             title,
