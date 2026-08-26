@@ -14,12 +14,15 @@ public actor PiqaeMemoryInstallationIdentityStore: PiqaeInstallationIdentityStor
 public actor PiqaeFakeEmbeddedRuntime: PiqaeEmbeddedNodeRuntime {
     public enum StartFailure: Error { case requested }
     public enum ConnectFailure: Error { case requested }
+    public enum ReconcileFailure: Error { case requested }
 
     private let failsToStart: Bool
     private let failsToConnect: Bool
     private let connector: PiqaeRuntimeConnectorSnapshot?
     private var nextOperationDelayNanoseconds: UInt64
     private var nativeObservationDelayNanoseconds: UInt64 = 0
+    private var reconcileFailuresRemaining = 0
+    private var reconcileCallCountValue = 0
     private var workAvailableHandler: (@Sendable () -> Void)?
     private var operationsByAdapter: [String: [PiqaeRuntimeAdapterOperation]] = [:]
     private var observationsByAdapter: [String: [PiqaeRuntimeAdapterOperation]] = [:]
@@ -49,6 +52,22 @@ public actor PiqaeFakeEmbeddedRuntime: PiqaeEmbeddedNodeRuntime {
     ) async throws {
         workAvailableHandler = handler
     }
+
+    public func reconcileCloud(timeoutMilliseconds: UInt64) async throws -> Bool {
+        reconcileCallCountValue += 1
+        guard timeoutMilliseconds > 0 else { return false }
+        if reconcileFailuresRemaining > 0 {
+            reconcileFailuresRemaining -= 1
+            throw ReconcileFailure.requested
+        }
+        return true
+    }
+
+    public func failNextCloudReconciliations(_ count: Int) {
+        reconcileFailuresRemaining = max(0, count)
+    }
+
+    public func reconcileCallCount() -> Int { reconcileCallCountValue }
 
     public func start() async throws {
         startCount += 1

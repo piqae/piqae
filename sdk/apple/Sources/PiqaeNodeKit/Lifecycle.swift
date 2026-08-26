@@ -146,6 +146,52 @@ public enum PiqaeWakeHintResult: Equatable, Sendable {
     case deferred(reason: String)
 }
 
+/// Bounded retry policy for advisory wake reconciliation. It never retries a
+/// native handoff directly: the Rust runtime's durable intent and fencing
+/// state remain the only authority for whether adapter work is runnable.
+public struct PiqaeWakeRetryPolicy: Equatable, Sendable {
+    public let maximumAttempts: Int
+    public let initialDelaySeconds: TimeInterval
+    public let maximumDelaySeconds: TimeInterval
+    public let executionSafetyMarginSeconds: TimeInterval
+    public let cloudCycleTimeoutSeconds: TimeInterval
+
+    public init(
+        maximumAttempts: Int = 4,
+        initialDelaySeconds: TimeInterval = 0.25,
+        maximumDelaySeconds: TimeInterval = 2,
+        executionSafetyMarginSeconds: TimeInterval = 1,
+        cloudCycleTimeoutSeconds: TimeInterval = 5
+    ) {
+        self.maximumAttempts = min(max(1, maximumAttempts), 8)
+        self.initialDelaySeconds = min(max(0, initialDelaySeconds), 5)
+        self.maximumDelaySeconds = min(
+            max(self.initialDelaySeconds, maximumDelaySeconds),
+            10
+        )
+        self.executionSafetyMarginSeconds = min(
+            max(0.25, executionSafetyMarginSeconds),
+            5
+        )
+        self.cloudCycleTimeoutSeconds = min(max(0.25, cloudCycleTimeoutSeconds), 10)
+    }
+
+    public static let `default` = PiqaeWakeRetryPolicy()
+
+    func delay(after attempt: Int, remainingSeconds: TimeInterval?) -> TimeInterval? {
+        guard attempt < maximumAttempts else { return nil }
+        let exponent = min(max(0, attempt - 1), 7)
+        let proposed = min(
+            initialDelaySeconds * pow(2, Double(exponent)),
+            maximumDelaySeconds
+        )
+        guard let remainingSeconds else { return proposed }
+        let available = remainingSeconds - executionSafetyMarginSeconds
+        guard available > 0 else { return nil }
+        return min(proposed, available)
+    }
+}
+
 public enum PiqaeRemoteNotificationAvailability: String, Codable, Sendable {
     /// The OS may launch or briefly resume the app. Delivery and runtime are
     /// never guaranteed.

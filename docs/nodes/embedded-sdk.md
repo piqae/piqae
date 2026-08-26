@@ -112,6 +112,9 @@ queue estimates; their titles, owners, and documents are never projected.
 
 ## Sleep and background execution
 
+See [Remote wake and delivery reliability](../architecture/remote-wake-and-delivery-reliability.md)
+for the per-job fallback order, platform constraints, and release evidence.
+
 A wake hint is not a lease and contains no job or document metadata. The server
 waits for a fresh authenticated runtime observation before it offers work.
 For a queued job the server emits a content-free `node.wake_hint.requested`

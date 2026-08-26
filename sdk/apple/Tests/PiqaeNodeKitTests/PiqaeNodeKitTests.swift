@@ -37,6 +37,8 @@ final class PiqaeNodeKitTests: XCTestCase {
             canonicalIdentity: Data("printer-fixture".utf8)
         )
         XCTAssertTrue(opaque.hasPrefix("pid_"))
+        let reconciled = try await runtime.reconcileCloud(timeoutMilliseconds: 1_000)
+        XCTAssertTrue(reconciled)
         try await runtime.stop()
         XCTAssertEqual(workSignals.value, 0)
     }
@@ -836,6 +838,83 @@ final class PiqaeNodeKitTests: XCTestCase {
         XCTAssertEqual(result, .reconciled)
         let submissionCount = await adapter.submissionCount()
         XCTAssertEqual(submissionCount, 0)
+    }
+
+    func testWakeHintRetriesCloudReconciliationWithinBound() async throws {
+        let runtime = PiqaeFakeEmbeddedRuntime()
+        await runtime.failNextCloudReconciliations(2)
+        let node = PiqaeNode(
+            .localOnly(
+                startupMode: .embedded,
+                availability: .backgroundOpportunistic,
+                identityStore: PiqaeMemoryInstallationIdentityStore(
+                    id: .init(rawValue: "ins_wake_retry_test")
+                ),
+                embeddedRuntime: runtime,
+                wakeRetryPolicy: .init(
+                    maximumAttempts: 4,
+                    initialDelaySeconds: 0.001,
+                    maximumDelaySeconds: 0.001,
+                    executionSafetyMarginSeconds: 0.25,
+                    cloudCycleTimeoutSeconds: 0.25
+                )
+            )
+        )
+        try await node.start()
+        defer { Task { await node.stop() } }
+
+        let result = await node.handleWakeHint(
+            try PiqaeWakeHint(collapseID: "retryable-hint", source: .backgroundPush),
+            context: .init(
+                phase: .background,
+                source: .backgroundPush,
+                remainingSeconds: 10
+            )
+        )
+
+        XCTAssertEqual(result, .reconciled)
+        let reconcileCalls = await runtime.reconcileCallCount()
+        XCTAssertEqual(reconcileCalls, 3)
+    }
+
+    func testWakeHintDoesNotRetryPastBackgroundBudget() async throws {
+        let runtime = PiqaeFakeEmbeddedRuntime()
+        await runtime.failNextCloudReconciliations(8)
+        let node = PiqaeNode(
+            .localOnly(
+                startupMode: .embedded,
+                availability: .backgroundOpportunistic,
+                identityStore: PiqaeMemoryInstallationIdentityStore(
+                    id: .init(rawValue: "ins_wake_budget_test")
+                ),
+                embeddedRuntime: runtime,
+                wakeRetryPolicy: .init(
+                    maximumAttempts: 8,
+                    initialDelaySeconds: 0.1,
+                    maximumDelaySeconds: 0.1,
+                    executionSafetyMarginSeconds: 1,
+                    cloudCycleTimeoutSeconds: 1
+                )
+            )
+        )
+        try await node.start()
+        defer { Task { await node.stop() } }
+
+        let result = await node.handleWakeHint(
+            try PiqaeWakeHint(collapseID: "expired-budget", source: .backgroundPush),
+            context: .init(
+                phase: .background,
+                source: .backgroundPush,
+                remainingSeconds: 0.5
+            )
+        )
+
+        guard case .deferred = result else {
+            XCTFail("A budget below the safety margin must defer")
+            return
+        }
+        let reconcileCalls = await runtime.reconcileCallCount()
+        XCTAssertEqual(reconcileCalls, 0)
     }
 
     func testRemoteQueueActivationDrainsWithoutManualRefresh() async throws {

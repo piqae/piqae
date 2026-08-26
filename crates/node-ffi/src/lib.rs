@@ -323,6 +323,9 @@ pub struct NativeRuntimeConfiguration {
 )]
 pub enum NativeCommand {
     Snapshot,
+    ReconcileCloud {
+        timeout_ms: u64,
+    },
     ApplyLifecycle {
         event: LifecycleEvent,
     },
@@ -916,6 +919,32 @@ pub extern "C" fn piqae_node_command(handle: u64, data: *const u8, length: usize
         let bytes = input_bytes(data, length)?;
         let command =
             serde_json::from_slice::<NativeCommand>(bytes).map_err(|_| FfiError::InvalidCommand)?;
+        if let NativeCommand::ReconcileCloud { timeout_ms } = &command {
+            if *timeout_ms == 0 || *timeout_ms > 10_000 {
+                return Err(FfiError::InvalidCommand);
+            }
+            let request = {
+                let instances = lock_instances()?;
+                let instance = instances.get(&handle).ok_or(FfiError::InvalidHandle)?;
+                if instance.runtime.is_none() {
+                    return Err(FfiError::NotStarted);
+                }
+                let request = instance
+                    .cloud_supervisor
+                    .as_ref()
+                    .map(EmbeddedCloudSupervisor::request_reconcile);
+                drop(instances);
+                request
+            };
+            let cloud_configured = request.is_some();
+            let completed = request
+                .is_none_or(|request| request.wait(std::time::Duration::from_millis(*timeout_ms)));
+            return Ok(json!({
+                "handle": handle,
+                "cloud_configured": cloud_configured,
+                "completed": completed
+            }));
+        }
         let (
             runtime,
             provider,
@@ -953,6 +982,10 @@ pub extern "C" fn piqae_node_command(handle: u64, data: *const u8, length: usize
         };
         match command {
             NativeCommand::Snapshot => {}
+            // The reconcile arm returns before the instance borrow above. If
+            // that routing is ever changed, fail closed instead of panicking
+            // across the FFI boundary.
+            NativeCommand::ReconcileCloud { .. } => return Err(FfiError::InvalidCommand),
             NativeCommand::ApplyLifecycle { event } => {
                 let _ = runtime.apply_lifecycle(event);
             }
@@ -1575,12 +1608,19 @@ mod tests {
         let handle = created["data"]["handle"].as_u64().unwrap();
         let started = read_and_free(piqae_node_start(handle));
         assert_eq!(started["data"]["started"], true);
-        let command = br#"{"type":"apply_lifecycle","event":"suspend_imminent"}"#;
-        let snapshot = read_and_free(piqae_node_command(handle, command.as_ptr(), command.len()));
+        let lifecycle_command = br#"{"type":"apply_lifecycle","event":"suspend_imminent"}"#;
+        let snapshot = read_and_free(piqae_node_command(
+            handle,
+            lifecycle_command.as_ptr(),
+            lifecycle_command.len(),
+        ));
         assert_eq!(
             snapshot["data"]["lifecycle"]["accepting_cloud_leases"],
             false
         );
+        let reconcile = command(handle, json!({"type":"reconcile_cloud","timeout_ms":1_000}));
+        assert_eq!(reconcile["data"]["cloud_configured"], false);
+        assert_eq!(reconcile["data"]["completed"], true);
         let stopped = read_and_free(piqae_node_stop(handle));
         assert_eq!(stopped["data"]["started"], false);
         let _ = read_and_free(piqae_node_destroy(handle));

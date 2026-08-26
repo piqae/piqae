@@ -113,6 +113,9 @@ public protocol PiqaeEmbeddedNodeRuntime: PiqaeHostLifecycleReporter, Sendable {
     /// available. Implementations invoke it from any thread and retain it only
     /// for the lifetime of the started runtime.
     func setWorkAvailableHandler(_ handler: @escaping @Sendable () -> Void) async throws
+    /// Requests one immediate cloud sync and waits only for the bounded native
+    /// supervisor pass. This is a nudge, not a lease or remote-wake proof.
+    func reconcileCloud(timeoutMilliseconds: UInt64) async throws -> Bool
     func start() async throws
     func stop() async throws
     func registerAdapter(_ registration: PiqaeRuntimeAdapterRegistration) async throws
@@ -152,6 +155,10 @@ public protocol PiqaeEmbeddedNodeRuntime: PiqaeHostLifecycleReporter, Sendable {
 
 public extension PiqaeEmbeddedNodeRuntime {
     func setWorkAvailableHandler(_ handler: @escaping @Sendable () -> Void) async throws {}
+    /// Source-compatible default for custom runtimes built before immediate
+    /// reconciliation existed. Unsupported runtimes must defer, not claim that
+    /// a cloud pass completed.
+    func reconcileCloud(timeoutMilliseconds: UInt64) async throws -> Bool { false }
     func registerAdapter(_ registration: PiqaeRuntimeAdapterRegistration) async throws {
         throw PiqaeNodeError.unsupportedOperation("The embedded runtime does not expose adapters.")
     }
@@ -274,6 +281,7 @@ public struct PiqaeNodeConfiguration: Sendable {
     public let printerAdapters: [any PiqaePrinterAdapter]
     public let hostLifecycleReporter: (any PiqaeHostLifecycleReporter)?
     public let remoteNotificationProvider: (any PiqaeRemoteNotificationRegistrationProvider)?
+    public let wakeRetryPolicy: PiqaeWakeRetryPolicy
     /// Desktop automatic mode may create a separate app-scoped node only when
     /// the host explicitly opts into that topology.
     public let allowsEmbeddedFallback: Bool
@@ -288,6 +296,7 @@ public struct PiqaeNodeConfiguration: Sendable {
         printerAdapters: [any PiqaePrinterAdapter] = [],
         hostLifecycleReporter: (any PiqaeHostLifecycleReporter)? = nil,
         remoteNotificationProvider: (any PiqaeRemoteNotificationRegistrationProvider)? = nil,
+        wakeRetryPolicy: PiqaeWakeRetryPolicy = .default,
         allowsEmbeddedFallback: Bool = false
     ) {
         self.startupMode = startupMode
@@ -299,6 +308,7 @@ public struct PiqaeNodeConfiguration: Sendable {
         self.printerAdapters = printerAdapters
         self.hostLifecycleReporter = hostLifecycleReporter
         self.remoteNotificationProvider = remoteNotificationProvider
+        self.wakeRetryPolicy = wakeRetryPolicy
         self.allowsEmbeddedFallback = allowsEmbeddedFallback
     }
 
@@ -310,6 +320,7 @@ public struct PiqaeNodeConfiguration: Sendable {
         embeddedRuntime: (any PiqaeEmbeddedNodeRuntime)? = nil,
         printerAdapters: [any PiqaePrinterAdapter] = [],
         hostLifecycleReporter: (any PiqaeHostLifecycleReporter)? = nil,
+        wakeRetryPolicy: PiqaeWakeRetryPolicy = .default,
         allowsEmbeddedFallback: Bool = false
     ) -> PiqaeNodeConfiguration {
         PiqaeNodeConfiguration(
@@ -321,6 +332,7 @@ public struct PiqaeNodeConfiguration: Sendable {
             embeddedRuntime: embeddedRuntime,
             printerAdapters: printerAdapters,
             hostLifecycleReporter: hostLifecycleReporter,
+            wakeRetryPolicy: wakeRetryPolicy,
             allowsEmbeddedFallback: allowsEmbeddedFallback
         )
     }

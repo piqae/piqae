@@ -34,6 +34,13 @@ var keys = new WindowsCredentialConnectorKeyProvider(options.ApplicationId);
 using var node = new PiqaeNode(options, keys);
 node.Start();
 
+// The embedding host forwards real Windows resume/network facts. This asks
+// every configured connector for one immediate bounded sync; it does not wake
+// Windows and grants no print authority.
+node.ApplyLifecycle(LifecycleEvent.Woke);
+node.ApplyLifecycle(LifecycleEvent.NetworkAvailable);
+_ = node.ReconcileCloud(TimeSpan.FromSeconds(5));
+
 var prepared = node.PrepareConnectorInvitation();
 // Send prepared.PublicKeyBase64 to the trusted UI that issued the invitation,
 // then redeem only the authority-issued token and the prepared opaque handle.
@@ -77,7 +84,10 @@ never sent through the named pipe. Rust owns canonicalization, request and
 response proofs, replay rejection, and downgrade rejection, and returns data
 only after authentication succeeds.
 The SDK does not claim background execution or physical-print support merely
-because the native library loads.
+because the native library loads. Modern Standby, wake timers, and Wake-on-LAN
+remain hardware, driver, power-policy, network, and service-topology dependent.
+Embedding applications must forward suspend/resume and network changes from the
+actual Windows host; the tray is not a durable lifecycle authority.
 
 The product release candidate is `Piqae.Node.<version>.nupkg`. Its only native
 RID is currently `win-x64`, and the package pins

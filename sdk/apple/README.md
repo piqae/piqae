@@ -265,8 +265,11 @@ route is foreground-only, or the remaining budget is too short.
 
 The coordinator can register an APNs device token through the injected provider
 and can forward an opaque collapse ID from the app delegate. It begins a bounded
-background task for reconciliation, reports expiration as `suspend_imminent`,
-and cancels the worker. A repeated hint is safe because Rust idempotency and
+background task for reconciliation, requests an immediate generation-fenced
+cloud supervisor pass instead of waiting for the normal poll interval, retries
+transient failures with bounded exponential backoff inside the measured
+execution deadline, reports expiration as `suspend_imminent`, and cancels the
+worker. A repeated hint is safe because Rust idempotency and
 handoff fences prevent native replay; a lost hint leaves durable work queued and
 never fabricates eligibility. The API cannot run
 after user force-quit and reports only opportunistic availability while the app
