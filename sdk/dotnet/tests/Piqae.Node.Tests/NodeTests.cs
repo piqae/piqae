@@ -1,12 +1,57 @@
 using Piqae.Node;
 using Org.BouncyCastle.Math.EC.Rfc8032;
 using System.Security.Cryptography;
+using System.Text.Json;
 using Xunit;
 
 namespace Piqae.Node.Tests;
 
 public sealed class NodeTests
 {
+    [Fact]
+    public void HostConfigurationMatchesPortableContractAndAllowsManyConnections()
+    {
+        var configuration = new HostConfiguration(
+            NodeHostProduct.Embedded,
+            "com.example.pos",
+            new NodeIdentityConfiguration(
+                "Dispatch PC",
+                site: "Warehouse",
+                location: "Desk 4",
+                labels: ["shipping", "backup"]),
+            InstalledHostPolicy.PreferInstalled,
+            new ConnectionPolicy(
+                ConnectionManagement.HostManaged,
+                allowsMultiple: true,
+                allowedAuthorityOrigins: [new Uri("https://api.piqae.com")]));
+
+        var json = JsonSerializer.Serialize(configuration);
+        var restored = JsonSerializer.Deserialize<HostConfiguration>(json);
+
+        Assert.NotNull(restored);
+        Assert.Equal((byte)1, restored.Contract);
+        Assert.Equal(NodeHostProduct.Embedded, restored.Product);
+        Assert.True(restored.ConnectionPolicy.AllowsMultiple);
+        Assert.Contains("\"installed_host_policy\":\"prefer_installed\"", json);
+        Assert.Contains("\"management\":\"host_managed\"", json);
+        restored.ConnectionPolicy.ValidateAuthority(new Uri("https://api.piqae.com"));
+        Assert.Throws<ArgumentException>(() =>
+            restored.ConnectionPolicy.ValidateAuthority(new Uri("https://other.example")));
+    }
+
+    [Fact]
+    public void HostIdentityIsBoundedAndNeverReadsUserIdentity()
+    {
+        var suggestion = LocalNodeNameSuggestion.Make();
+        Assert.NotEmpty(suggestion);
+        Assert.True(System.Text.Encoding.UTF8.GetByteCount(suggestion) <= 120);
+        Assert.Throws<ArgumentException>(() => new NodeIdentityConfiguration(
+            "Node", labels: Enumerable.Repeat("duplicate", 2).ToArray()));
+        Assert.Throws<ArgumentException>(() => new ConnectionPolicy(
+            ConnectionManagement.HostManaged,
+            allowedAuthorityOrigins: []));
+    }
+
     [Fact]
     public void EndpointIsDeterministicAndLocal()
     {

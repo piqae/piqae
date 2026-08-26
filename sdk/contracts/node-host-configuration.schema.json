@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://piqae.com/schemas/node-host-configuration.v1.json",
+  "title": "Piqae node host configuration",
+  "description": "Portable SDK configuration. It does not contain connector credentials or printer data.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract",
+    "product",
+    "application_id",
+    "identity",
+    "installed_host_policy",
+    "connection_policy"
+  ],
+  "properties": {
+    "contract": { "const": 1 },
+    "product": { "enum": ["standalone", "embedded"] },
+    "application_id": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 255,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9.-]*$"
+    },
+    "identity": { "$ref": "#/$defs/identity" },
+    "installed_host_policy": {
+      "enum": ["prefer_installed", "require_installed", "isolated_application"]
+    },
+    "connection_policy": { "$ref": "#/$defs/connection_policy" }
+  },
+  "$defs": {
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["display_name", "labels"],
+      "properties": {
+        "display_name": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "site": { "type": ["string", "null"], "minLength": 1, "maxLength": 120 },
+        "location": { "type": ["string", "null"], "minLength": 1, "maxLength": 120 },
+        "labels": {
+          "type": "array",
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1, "maxLength": 64 }
+        }
+      }
+    },
+    "connection_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["management", "allows_multiple", "allowed_authority_origins"],
+      "properties": {
+        "management": { "enum": ["user_managed", "host_managed"] },
+        "allows_multiple": { "type": "boolean" },
+        "allowed_authority_origins": {
+          "description": "Exact HTTPS origins. Empty means the user may explicitly choose an HTTPS authority.",
+          "type": "array",
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": { "type": "string", "format": "uri", "maxLength": 2048 }
+        }
+      }
+    }
+  }
+}
