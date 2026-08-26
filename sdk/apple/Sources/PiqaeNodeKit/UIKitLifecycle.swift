@@ -30,6 +30,7 @@ public final class PiqaeUIKitLifecycleCoordinator {
                 Task { @MainActor [weak self] in
                     guard let self else { return }
                     let remaining = UIApplication.shared.backgroundTimeRemaining
+                    try? await self.node.reportHostLifecycle(.enteredBackground)
                     await self.node.updateExecutionContext(
                         PiqaeExecutionContext(
                             phase: .background,
@@ -48,6 +49,8 @@ public final class PiqaeUIKitLifecycleCoordinator {
             ) { [weak self] _ in
                 Task { @MainActor [weak self] in
                     guard let self else { return }
+                    try? await self.node.reportHostLifecycle(.woke)
+                    try? await self.node.reportHostLifecycle(.enteredForeground)
                     await self.node.updateExecutionContext(.foreground)
                 }
             }
@@ -67,14 +70,31 @@ public final class PiqaeUIKitLifecycleCoordinator {
             return .deferred(reason: "The wake hint was invalid.")
         }
         let remaining = UIApplication.shared.backgroundTimeRemaining
-        return await node.handleWakeHint(
-            hint,
-            context: PiqaeExecutionContext(
-                phase: .background,
-                source: .backgroundPush,
-                remainingSeconds: remaining.isFinite ? remaining : nil
+        guard remaining.isFinite, remaining >= 5 else {
+            return .deferred(reason: "iPadOS did not grant a safe reconciliation budget.")
+        }
+        try? await node.reportHostLifecycle(.enteredBackground)
+        let worker = Task { [node] in
+            await node.handleWakeHint(
+                hint,
+                context: PiqaeExecutionContext(
+                    phase: .background,
+                    source: .backgroundPush,
+                    remainingSeconds: remaining
+                )
             )
-        )
+        }
+        let lifecycleNode = node
+        let identifier = UIApplication.shared.beginBackgroundTask(withName: "Piqae reconcile") {
+            worker.cancel()
+            Task { try? await lifecycleNode.reportHostLifecycle(.suspendImminent) }
+        }
+        guard identifier != .invalid else {
+            worker.cancel()
+            return .deferred(reason: "iPadOS did not grant background execution.")
+        }
+        defer { UIApplication.shared.endBackgroundTask(identifier) }
+        return await worker.value
     }
 
     /// Requests bounded continuation time only for work that already started in

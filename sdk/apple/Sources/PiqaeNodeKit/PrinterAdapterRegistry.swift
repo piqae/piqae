@@ -10,6 +10,15 @@ public enum PiqaePrinterTransport: String, Codable, Sendable, CaseIterable {
     case vendorSDK = "vendor_sdk"
 }
 
+/// Produces non-reversible, installation-scoped evidence through the shared
+/// runtime. Implementations must fail closed when the host key is unavailable.
+public protocol PiqaeOpaqueIdentityProvider: Sendable {
+    func deriveOpaqueID(
+        namespace: String,
+        canonicalIdentity: Data
+    ) async throws -> String
+}
+
 /// Matches the display-safe selector used by Piqae support packs. Serial
 /// numbers, Bluetooth addresses, credentials, and native option payloads do
 /// not belong in this fingerprint.

@@ -1,5 +1,25 @@
 import Foundation
 
+/// Wire names match `node-host-api::LifecycleEvent`. Apple lifecycle adapters
+/// report facts through this contract; they do not independently decide lease
+/// admission.
+public enum PiqaeHostLifecycleEvent: String, Codable, Sendable, CaseIterable {
+    case started
+    case enteredForeground = "entered_foreground"
+    case enteredBackground = "entered_background"
+    case suspendImminent = "suspend_imminent"
+    case sleeping
+    case woke
+    case networkAvailable = "network_available"
+    case networkConstrained = "network_constrained"
+    case networkUnavailable = "network_unavailable"
+    case shutdownRequested = "shutdown_requested"
+}
+
+public protocol PiqaeHostLifecycleReporter: Sendable {
+    func report(_ event: PiqaeHostLifecycleEvent) async throws
+}
+
 public enum PiqaeExecutionPhase: String, Codable, Sendable {
     case foreground
     case background
@@ -124,4 +144,71 @@ public enum PiqaeWakeHintResult: Equatable, Sendable {
     /// or accepts a job by itself.
     case reconciledWithoutLeasing
     case deferred(reason: String)
+}
+
+public enum PiqaeRemoteNotificationAvailability: String, Codable, Sendable {
+    /// The OS may launch or briefly resume the app. Delivery and runtime are
+    /// never guaranteed.
+    case opportunisticWhileInstalled = "opportunistic_while_installed"
+    /// iPadOS does not launch an app that the user force-quit, and an off or
+    /// unreachable device cannot receive the hint.
+    case unavailableWhenTerminated = "unavailable_when_terminated"
+}
+
+public enum PiqaeAPNsEnvironment: String, Codable, Sendable {
+    case development
+    case production
+}
+
+public struct PiqaeSensitiveDeviceToken: Sendable, CustomStringConvertible,
+    CustomDebugStringConvertible
+{
+    private let data: Data
+
+    public init(_ data: Data) throws {
+        guard !data.isEmpty, data.count <= 256 else {
+            throw PiqaeNodeError.invalidConfiguration(
+                "The APNs device token must contain 1 to 256 bytes."
+            )
+        }
+        self.data = data
+    }
+
+    public var description: String { "<redacted>" }
+    public var debugDescription: String { "<redacted>" }
+
+    public func withBytes<T>(_ body: (Data) throws -> T) rethrows -> T {
+        try body(data)
+    }
+}
+
+public struct PiqaeRemoteNotificationRegistration: Sendable {
+    public let installationID: PiqaeInstallationID
+    public let token: PiqaeSensitiveDeviceToken
+    public let environment: PiqaeAPNsEnvironment
+    public let bundleIdentifier: String
+
+    public init(
+        installationID: PiqaeInstallationID,
+        token: PiqaeSensitiveDeviceToken,
+        environment: PiqaeAPNsEnvironment,
+        bundleIdentifier: String
+    ) throws {
+        let bundleIdentifier = bundleIdentifier.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard bundleIdentifier.contains("."), bundleIdentifier.utf8.count <= 255 else {
+            throw PiqaeNodeError.invalidConfiguration(
+                "The notification bundle identifier must be a bounded reverse-DNS name."
+            )
+        }
+        self.installationID = installationID
+        self.token = token
+        self.environment = environment
+        self.bundleIdentifier = bundleIdentifier
+    }
+}
+
+/// Implemented by the host app's backend client. APNs signing keys and
+/// platform service credentials must remain on that backend.
+public protocol PiqaeRemoteNotificationRegistrationProvider: Sendable {
+    func register(_ request: PiqaeRemoteNotificationRegistration) async throws
 }

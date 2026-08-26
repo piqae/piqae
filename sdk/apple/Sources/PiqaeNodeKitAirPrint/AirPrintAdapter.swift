@@ -2,7 +2,6 @@ import Foundation
 import PiqaeNodeKit
 
 #if os(iOS)
-import CryptoKit
 import UIKit
 
 public actor PiqaeAirPrintAdapter: PiqaePrinterAdapter {
@@ -16,32 +15,35 @@ public actor PiqaeAirPrintAdapter: PiqaePrinterAdapter {
         supportsProfiles: false
     )
     private var knownPrinterURLs: Set<URL>
-    private var receiptsByIdempotencyKey: [String: PiqaeJobReceipt] = [:]
+    private let identityProvider: any PiqaeOpaqueIdentityProvider
 
     /// AirPrint doesn't expose silent network enumeration. Supply printers the
     /// user selected with `PiqaeAirPrintPicker`, then retain their URLs in the
     /// host app and register them again at next launch.
-    public init(knownPrinterURLs: [URL] = []) {
-        self.knownPrinterURLs = Set(knownPrinterURLs)
+    public init(
+        identityProvider: any PiqaeOpaqueIdentityProvider,
+        knownPrinterURLs: [URL] = []
+    ) throws {
+        self.identityProvider = identityProvider
+        self.knownPrinterURLs = try Set(
+            knownPrinterURLs.map { try PiqaeAirPrintEndpoint.canonicalize($0).route }
+        )
     }
 
     public func register(printerURL: URL) throws {
-        guard ["ipp", "ipps"].contains(printerURL.scheme?.lowercased()) else {
-            throw PiqaeNodeError.invalidConfiguration(
-                "AirPrint printers must use an ipp or ipps URL."
-            )
-        }
-        knownPrinterURLs.insert(printerURL)
+        knownPrinterURLs.insert(try PiqaeAirPrintEndpoint.canonicalize(printerURL).route)
     }
 
     public func forget(printerURL: URL) {
-        knownPrinterURLs.remove(printerURL)
+        guard let route = try? PiqaeAirPrintEndpoint.canonicalize(printerURL).route else { return }
+        knownPrinterURLs.remove(route)
     }
 
     public func discoverPrinters() async throws -> [PiqaePrinter] {
         var printers: [PiqaePrinter] = []
         for url in knownPrinterURLs.sorted(by: { $0.absoluteString < $1.absoluteString }) {
-            printers.append(await Self.contact(url))
+            let id = try await id(for: url)
+            printers.append(await Self.contact(url, id: id))
         }
         return printers
     }
@@ -86,22 +88,25 @@ public actor PiqaeAirPrintAdapter: PiqaePrinterAdapter {
         _ request: PiqaePrintRequest,
         to printer: PiqaePrinter
     ) async throws -> PiqaeJobReceipt {
-        if let prior = receiptsByIdempotencyKey[request.idempotencyKey] { return prior }
         try await validate(request, for: printer)
-        guard let url = knownPrinterURLs.first(where: { Self.id(for: $0) == printer.id }) else {
+        var matchingURL: URL?
+        for url in knownPrinterURLs where try await id(for: url) == printer.id {
+            matchingURL = url
+            break
+        }
+        guard let url = matchingURL else {
             throw PiqaeNodeError.printerNotFound(printer.id)
         }
-        let receipt = try await Self.submitOnMainActor(request, printerURL: url)
-        receiptsByIdempotencyKey[request.idempotencyKey] = receipt
-        return receipt
+        // Idempotency belongs to the durable shared node runtime. The adapter
+        // performs one native handoff for the durable attempt it receives.
+        return try await Self.submitOnMainActor(request, printerURL: url)
     }
 
     @MainActor
-    private static func contact(_ url: URL) async -> PiqaePrinter {
+    private static func contact(_ url: URL, id printerID: PiqaePrinterID) async -> PiqaePrinter {
         let printer = UIPrinter(url: url)
         let available = await printer.contactPrinter()
         let now = Date()
-        let printerID = id(for: url)
         return PiqaePrinter(
             id: printerID,
             adapterID: "apple.airprint",
@@ -135,6 +140,8 @@ public actor PiqaeAirPrintAdapter: PiqaePrinterAdapter {
         _ request: PiqaePrintRequest,
         printerURL: URL
     ) async throws -> PiqaeJobReceipt {
+        await PiqaeUIKitPrintGate.shared.acquire()
+        defer { PiqaeUIKitPrintGate.shared.release() }
         let controller = UIPrintInteractionController.shared
         let info = UIPrintInfo(dictionary: nil)
         info.jobName = request.title
@@ -154,12 +161,15 @@ public actor PiqaeAirPrintAdapter: PiqaePrinterAdapter {
 
         let accepted = try await withCheckedThrowingContinuation {
             (continuation: CheckedContinuation<Bool, Error>) in
+            let oneShot = PiqaeUIKitOneShot(continuation)
             let began = controller.print(to: UIPrinter(url: printerURL)) { _, completed, error in
-                if let error { continuation.resume(throwing: error) }
-                else { continuation.resume(returning: completed) }
+                Task { @MainActor in
+                    if let error { oneShot.resume(throwing: error) }
+                    else { oneShot.resume(returning: completed) }
+                }
             }
             if !began {
-                continuation.resume(
+                oneShot.resume(
                     throwing: PiqaeNodeError.submissionRejected(
                         "The AirPrint subsystem did not begin the handoff."
                     )
@@ -179,28 +189,47 @@ public actor PiqaeAirPrintAdapter: PiqaePrinterAdapter {
         )
     }
 
-    private nonisolated static func id(for url: URL) -> PiqaePrinterID {
-        let digest = SHA256.hash(data: Data(url.absoluteString.utf8))
-        let encoded = Data(digest).base64EncodedString()
-            .replacingOccurrences(of: "+", with: "-")
-            .replacingOccurrences(of: "/", with: "_")
-            .replacingOccurrences(of: "=", with: "")
-        return PiqaePrinterID(rawValue: "apr_\(encoded)")
+    private func id(for url: URL) async throws -> PiqaePrinterID {
+        let endpoint = try PiqaeAirPrintEndpoint.canonicalize(url)
+        let evidence = try await identityProvider.deriveOpaqueID(
+            namespace: "apple.airprint.physical-destination.v1",
+            canonicalIdentity: endpoint.identityInput
+        )
+        guard
+            evidence.hasPrefix("pid_"), evidence.utf8.count >= 20,
+            evidence.utf8.count <= 128,
+            evidence.unicodeScalars.allSatisfy({
+                CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "_-")).contains($0)
+            })
+        else {
+            throw PiqaeNodeError.invalidConfiguration(
+                "The shared runtime returned invalid printer identity evidence."
+            )
+        }
+        return PiqaePrinterID(rawValue: "apr_\(evidence)")
     }
 }
 
 @MainActor
 public enum PiqaeAirPrintPicker {
     public static func selectPrinter() async throws -> URL? {
+        await PiqaeUIKitPrintGate.shared.acquire()
+        defer { PiqaeUIKitPrintGate.shared.release() }
         let picker = UIPrinterPickerController(initiallySelectedPrinter: nil)
         return try await withCheckedThrowingContinuation {
             (continuation: CheckedContinuation<URL?, Error>) in
+            let oneShot = PiqaeUIKitOneShot(continuation)
             let presented = picker.present(animated: true) { controller, selected, error in
-                if let error { continuation.resume(throwing: error) }
-                else { continuation.resume(returning: selected ? controller.selectedPrinter?.url : nil) }
+                Task { @MainActor in
+                    if let error { oneShot.resume(throwing: error) }
+                    else {
+                        let selectedURL = selected ? controller.selectedPrinter?.url : nil
+                        oneShot.resume(returning: selectedURL)
+                    }
+                }
             }
             if !presented {
-                continuation.resume(
+                oneShot.resume(
                     throwing: PiqaeNodeError.unsupportedOperation(
                         "The AirPrint picker is already presented."
                     )

@@ -2,6 +2,7 @@ import AppKit
 import ApplicationServices
 import Foundation
 import PDFKit
+import PiqaeMenuCore
 import PiqaeProfileHost
 
 @MainActor
@@ -87,7 +88,13 @@ public enum PrintCoreReplayer {
 
         // From this point a false return can follow an OS handoff, so it must
         // be reported as ambiguous and must not be retried automatically.
-        guard operation.run() else {
+        let handedOff = try PiqaeMacActiveWorkPowerGuard.withAssertion(
+            phase: .nativeHandoff,
+            maximumDuration: 120
+        ) {
+            operation.run()
+        }
+        guard handedOff else {
             throw PrintCoreReplayError.failure(
                 code: "print_handoff_ambiguous",
                 message: "macOS did not confirm the print handoff",

@@ -4,6 +4,85 @@ import XCTest
 import PiqaeNodeKitTesting
 
 final class PiqaeNodeKitTests: XCTestCase {
+    func testLifecycleEventsUseSharedRuntimeWireNamesAndReporter() async throws {
+        XCTAssertEqual(PiqaeHostLifecycleEvent.suspendImminent.rawValue, "suspend_imminent")
+        XCTAssertEqual(PiqaeHostLifecycleEvent.networkConstrained.rawValue, "network_constrained")
+
+        let reporter = PiqaeFakeLifecycleReporter()
+        let node = PiqaeNode(
+            .localOnly(
+                startupMode: .embedded,
+                identityStore: PiqaeMemoryInstallationIdentityStore(
+                    id: .init(rawValue: "ins_apple_lifecycle")
+                ),
+                hostLifecycleReporter: reporter
+            )
+        )
+        try await node.start()
+        try await node.reportHostLifecycle(.enteredBackground)
+        try await node.reportHostLifecycle(.suspendImminent)
+
+        let events = await reporter.events
+        let snapshot = await node.snapshot()
+        XCTAssertEqual(events, [.enteredBackground, .suspendImminent])
+        XCTAssertEqual(snapshot.phase, .suspended)
+        await node.stop()
+    }
+
+    func testRemoteNotificationRegistrationIsExplicitAndRedacted() async throws {
+        let provider = PiqaeFakeRemoteNotificationProvider()
+        let identity = PiqaeMemoryInstallationIdentityStore(
+            id: .init(rawValue: "ins_apple_push")
+        )
+        let node = PiqaeNode(
+            PiqaeNodeConfiguration(
+                startupMode: .embedded,
+                identityStore: identity,
+                remoteNotificationProvider: provider
+            )
+        )
+        try await node.start()
+        let bytes = Data([0xde, 0xad, 0xbe, 0xef])
+        try await node.remoteNotifications.register(
+            deviceToken: bytes,
+            environment: .development,
+            bundleIdentifier: "com.example.print"
+        )
+
+        let registrations = await provider.registrations
+        XCTAssertEqual(registrations.count, 1)
+        XCTAssertEqual(registrations[0].installationID.rawValue, "ins_apple_push")
+        XCTAssertEqual(registrations[0].token.description, "<redacted>")
+        XCTAssertEqual(
+            registrations[0].token.withBytes { $0 },
+            bytes
+        )
+        await node.stop()
+    }
+
+    func testRemoteNotificationRegistrationIsOptIn() async throws {
+        let node = PiqaeNode(
+            .localOnly(
+                startupMode: .embedded,
+                identityStore: PiqaeMemoryInstallationIdentityStore(
+                    id: .init(rawValue: "ins_apple_no_push")
+                )
+            )
+        )
+        try await node.start()
+        await XCTAssertThrowsErrorAsync(
+            try await node.remoteNotifications.register(
+                deviceToken: Data([1]),
+                environment: .production,
+                bundleIdentifier: "com.example.print"
+            )
+        )
+        XCTAssertEqual(
+            node.remoteNotifications.availability,
+            .opportunisticWhileInstalled
+        )
+        await node.stop()
+    }
     func testLocalOnlyEmbeddedNodeDiscoversFakePrinter() async throws {
         let printer = PiqaeFakePrinterAdapter.printer()
         let adapter = PiqaeFakePrinterAdapter(printers: [printer])

@@ -7,6 +7,7 @@ public final class PiqaeNode: @unchecked Sendable {
     public let printers: PiqaePrintersService
     public let jobs: PiqaeJobsService
     public let profiles: PiqaeProfilesService
+    public let remoteNotifications: PiqaeRemoteNotificationsService
 
     public init(_ configuration: PiqaeNodeConfiguration) {
         let engine = PiqaeNodeEngine(configuration: configuration)
@@ -15,6 +16,7 @@ public final class PiqaeNode: @unchecked Sendable {
         printers = PiqaePrintersService(engine: engine)
         jobs = PiqaeJobsService(engine: engine)
         profiles = PiqaeProfilesService(engine: engine)
+        remoteNotifications = PiqaeRemoteNotificationsService(engine: engine)
     }
 
     public func start() async throws {
@@ -37,11 +39,35 @@ public final class PiqaeNode: @unchecked Sendable {
         await engine.updateExecutionContext(context)
     }
 
+    public func reportHostLifecycle(_ event: PiqaeHostLifecycleEvent) async throws {
+        try await engine.reportHostLifecycle(event)
+    }
+
     public func handleWakeHint(
         _ hint: PiqaeWakeHint,
         context: PiqaeExecutionContext
     ) async -> PiqaeWakeHintResult {
         await engine.handleWakeHint(hint, context: context)
+    }
+}
+
+public final class PiqaeRemoteNotificationsService: @unchecked Sendable {
+    private let engine: PiqaeNodeEngine
+    fileprivate init(engine: PiqaeNodeEngine) { self.engine = engine }
+
+    public let availability: PiqaeRemoteNotificationAvailability =
+        .opportunisticWhileInstalled
+
+    public func register(
+        deviceToken: Data,
+        environment: PiqaeAPNsEnvironment,
+        bundleIdentifier: String
+    ) async throws {
+        try await engine.registerRemoteNotifications(
+            deviceToken: deviceToken,
+            environment: environment,
+            bundleIdentifier: bundleIdentifier
+        )
     }
 }
 
@@ -388,17 +414,65 @@ actor PiqaeNodeEngine {
         emit()
     }
 
+    func reportHostLifecycle(_ event: PiqaeHostLifecycleEvent) async throws {
+        try await configuration.hostLifecycleReporter?.report(event)
+        switch event {
+        case .enteredForeground:
+            updateExecutionContext(.foreground)
+        case .enteredBackground:
+            updateExecutionContext(
+                PiqaeExecutionContext(phase: .background, source: .foreground)
+            )
+        case .suspendImminent, .sleeping, .shutdownRequested:
+            updateExecutionContext(
+                PiqaeExecutionContext(phase: .suspended, source: .foreground)
+            )
+        case .started, .woke, .networkAvailable, .networkConstrained, .networkUnavailable:
+            break
+        }
+    }
+
+    func registerRemoteNotifications(
+        deviceToken: Data,
+        environment: PiqaeAPNsEnvironment,
+        bundleIdentifier: String
+    ) async throws {
+        try requireStarted()
+        guard let provider = configuration.remoteNotificationProvider else {
+            throw PiqaeNodeError.unsupportedOperation(
+                "The host did not configure remote-notification registration."
+            )
+        }
+        guard let installationID = snapshotValue.installationID else {
+            throw PiqaeNodeError.notStarted
+        }
+        try await provider.register(
+            PiqaeRemoteNotificationRegistration(
+                installationID: installationID,
+                token: try PiqaeSensitiveDeviceToken(deviceToken),
+                environment: environment,
+                bundleIdentifier: bundleIdentifier
+            )
+        )
+    }
+
     func handleWakeHint(
         _ hint: PiqaeWakeHint,
         context: PiqaeExecutionContext
     ) async -> PiqaeWakeHintResult {
         guard started else { return .deferred(reason: "The node has not started.") }
+        guard !Task.isCancelled else {
+            return .deferred(reason: "The host execution budget expired.")
+        }
         guard context.phase != .suspended else {
             return .deferred(reason: "The host application is suspended.")
         }
         executionContext = context
         do {
             try await refresh()
+            guard !Task.isCancelled else {
+                return .deferred(reason: "The host execution budget expired.")
+            }
             return .reconciledWithoutLeasing
         } catch {
             return .deferred(reason: "Reconciliation is temporarily unavailable.")

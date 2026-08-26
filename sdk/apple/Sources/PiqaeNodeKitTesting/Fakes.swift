@@ -124,6 +124,32 @@ public actor PiqaeFakeEnrollmentProvider: PiqaeCloudEnrollmentProvider {
     public func requestCount() -> Int { requestCountValue }
 }
 
+public actor PiqaeFakeLifecycleReporter: PiqaeHostLifecycleReporter {
+    public private(set) var events: [PiqaeHostLifecycleEvent] = []
+    public var error: (any Error & Sendable)?
+
+    public init() {}
+
+    public func report(_ event: PiqaeHostLifecycleEvent) async throws {
+        if let error { throw error }
+        events.append(event)
+    }
+}
+
+public actor PiqaeFakeRemoteNotificationProvider:
+    PiqaeRemoteNotificationRegistrationProvider
+{
+    public private(set) var registrations: [PiqaeRemoteNotificationRegistration] = []
+    public var error: (any Error & Sendable)?
+
+    public init() {}
+
+    public func register(_ request: PiqaeRemoteNotificationRegistration) async throws {
+        if let error { throw error }
+        registrations.append(request)
+    }
+}
+
 public actor PiqaeFakeInstalledNodeIPC: PiqaeInstalledNodeIPC {
     private let protocolVersion: UInt32?
     private var snapshotValue: PiqaeNodeSnapshot
