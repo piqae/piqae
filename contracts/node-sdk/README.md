@@ -9,3 +9,13 @@ Broker protocol 1 covers non-sensitive presence and existing authorized
 operations. Protocol 2 adds the bounded request/status/exchange consent flow;
 the claimed application and signing fields are display evidence only and never
 grant access without an explicit node-side decision.
+
+Protocol 3 adds the durable embedded-adapter SDK operations. A host must pull a
+persisted operation, acknowledge `begin_adapter_handoff` before invoking the
+native print API, and then report either authoritative acceptance followed by a
+terminal result, a proven pre-handoff rejection, or an ambiguous handoff. The
+same unresolved operation and fence are replayed after restart; an operation in
+`handoff_started` or `accepted` must never be submitted to the native API again.
+
+The `v1/adapter-*.json` fixtures are allocator-neutral `piqae_node_command`
+payloads. Paths, identifiers, and document bytes are synthetic.

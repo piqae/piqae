@@ -10,17 +10,20 @@
     reason = "isolated C ABI pointer validation and paired buffer deallocation"
 )]
 
+use piqae_node_runtime::connector_registry::{ConnectorRecord, ConnectorRegistry};
 use piqae_node_runtime::{
-    AvailabilityClass, HostCapabilities, HostKeyError, HostKeyProvider, HostKind, LifecycleEvent,
-    NodeRuntime, NodeRuntimeMode, PrinterTransport, RuntimeConfiguration,
+    AdapterOperationOutcome, AvailabilityClass, EmbeddedAdapterRegistration, EmbeddedJobRequest,
+    EmbeddedPrinterObservation, EmbeddedQueue, HostCapabilities, HostKeyError, HostKeyProvider,
+    HostKind, LifecycleEvent, NodeRuntime, NodeRuntimeMode, PrinterTransport, RuntimeConfiguration,
 };
+use piqae_support_packs::SupportPackRegistry;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Component, Path},
     sync::{
-        Mutex, OnceLock,
+        Condvar, Mutex, OnceLock,
         atomic::{AtomicU64, Ordering},
     },
 };
@@ -28,7 +31,7 @@ use thiserror::Error;
 
 pub const NODE_ABI_VERSION: u16 = 1;
 pub const NODE_CONTRACT_VERSION: u16 = 1;
-const MAX_ABI_INPUT_BYTES: usize = 1024 * 1024;
+const MAX_ABI_INPUT_BYTES: usize = 24 * 1024 * 1024;
 const MAX_APPLICATION_ID_BYTES: usize = 255;
 const MAX_DATA_DIRECTORY_BYTES: usize = 512;
 
@@ -125,6 +128,10 @@ pub struct NativeRuntimeConfiguration {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "bounded JSON ABI commands intentionally retain a direct generated schema"
+)]
 pub enum NativeCommand {
     Snapshot,
     ApplyLifecycle {
@@ -134,6 +141,81 @@ pub enum NativeCommand {
         namespace: String,
         canonical_identity: String,
     },
+    RegisterAdapter {
+        registration: EmbeddedAdapterRegistration,
+    },
+    ObservePrinterInventory {
+        adapter_id: String,
+        printers: Vec<EmbeddedPrinterObservation>,
+    },
+    PrinterInventory,
+    EnqueueLocalJob {
+        adapter_id: String,
+        idempotency_key: String,
+        printer_id: String,
+        title: String,
+        content_kind: String,
+        content_base64: String,
+        #[serde(default = "empty_json_object")]
+        options_json: String,
+        expires_unix_ms: Option<i64>,
+    },
+    NextAdapterOperation {
+        adapter_id: String,
+    },
+    BeginAdapterHandoff {
+        adapter_id: String,
+        operation_id: String,
+        fence: String,
+    },
+    CompleteAdapterOperation {
+        adapter_id: String,
+        operation_id: String,
+        fence: String,
+        result: AdapterOperationOutcome,
+    },
+    JobSnapshot {
+        job_id: String,
+    },
+    ProfileSnapshots {
+        printer_id: String,
+    },
+    CreateProfile {
+        printer_id: String,
+        name: String,
+        is_default: bool,
+        options_json: String,
+    },
+    UpdateProfile {
+        printer_id: String,
+        profile_id: String,
+        expected_revision: u64,
+        name: String,
+        is_default: bool,
+        options_json: String,
+    },
+    DeleteProfile {
+        printer_id: String,
+        profile_id: String,
+        expected_revision: u64,
+    },
+    CaptureNativeProfile {
+        adapter_id: String,
+        printer_id: String,
+    },
+    CompleteConnectorInvitationExchange {
+        invitation_nonce: String,
+        expires_unix_ms: i64,
+        connector: ConnectorRecord,
+    },
+    ConnectorSnapshots,
+    RevokeConnector {
+        connector_id: String,
+    },
+}
+
+fn empty_json_object() -> String {
+    "{}".into()
 }
 
 #[derive(Debug, Error)]
@@ -196,6 +278,46 @@ struct Instance {
     configuration: NativeRuntimeConfiguration,
     runtime: Option<std::sync::Arc<NodeRuntime>>,
     host_key_provider: Option<PiqaeHostKeyProvider>,
+    embedded_queue: Option<std::sync::Arc<Mutex<EmbeddedQueue>>>,
+    connector_registry: Option<std::sync::Arc<Mutex<ConnectorRegistry>>>,
+    in_flight: std::sync::Arc<InFlight>,
+}
+
+#[derive(Debug, Default)]
+struct InFlight {
+    count: Mutex<usize>,
+    idle: Condvar,
+}
+
+impl InFlight {
+    fn begin(self: &std::sync::Arc<Self>) -> Result<InFlightGuard, FfiError> {
+        let mut count = self.count.lock().map_err(|_| FfiError::Internal)?;
+        *count = count.checked_add(1).ok_or(FfiError::Internal)?;
+        drop(count);
+        Ok(InFlightGuard(std::sync::Arc::clone(self)))
+    }
+
+    fn wait_until_idle(&self) -> Result<(), FfiError> {
+        let mut count = self.count.lock().map_err(|_| FfiError::Internal)?;
+        while *count != 0 {
+            count = self.idle.wait(count).map_err(|_| FfiError::Internal)?;
+        }
+        drop(count);
+        Ok(())
+    }
+}
+
+struct InFlightGuard(std::sync::Arc<InFlight>);
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        if let Ok(mut count) = self.0.count.lock() {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                self.0.idle.notify_all();
+            }
+        }
+    }
 }
 
 fn instances() -> &'static Mutex<BTreeMap<u64, Instance>> {
@@ -226,6 +348,9 @@ pub extern "C" fn piqae_node_create(data: *const u8, length: usize) -> PiqaeBuff
                 configuration,
                 runtime: None,
                 host_key_provider: None,
+                embedded_queue: None,
+                connector_registry: None,
+                in_flight: std::sync::Arc::new(InFlight::default()),
             },
         );
         Ok(json!({ "handle": handle }))
@@ -243,6 +368,9 @@ pub extern "C" fn piqae_node_set_host_key_provider(
         }
         let mut instances = lock_instances()?;
         let instance = instances.get_mut(&handle).ok_or(FfiError::InvalidHandle)?;
+        if instance.runtime.is_some() || instance.host_key_provider.is_some() {
+            return Err(FfiError::ProviderLocked);
+        }
         instance.host_key_provider = Some(provider);
         drop(instances);
         Ok(json!({ "handle": handle, "host_key_provider": "configured" }))
@@ -257,7 +385,7 @@ pub extern "C" fn piqae_node_start(handle: u64) -> PiqaeBuffer {
         if instance.runtime.is_none() {
             let root = app_scoped_root(&instance.configuration)?;
             let runtime = NodeRuntime::start(RuntimeConfiguration {
-                data_directory: root,
+                data_directory: root.clone(),
                 mode: if instance.configuration.local_only {
                     NodeRuntimeMode::LocalOnly
                 } else {
@@ -275,6 +403,12 @@ pub extern "C" fn piqae_node_start(handle: u64) -> PiqaeBuffer {
             })
             .map_err(|_| FfiError::StartFailed)?;
             instance.runtime = Some(std::sync::Arc::new(runtime));
+            let queue = EmbeddedQueue::open(root.join("embedded"), SupportPackRegistry::default())
+                .map_err(|_| FfiError::StartFailed)?;
+            instance.embedded_queue = Some(std::sync::Arc::new(Mutex::new(queue)));
+            let connectors = ConnectorRegistry::load(root.join("embedded"))
+                .map_err(|_| FfiError::StartFailed)?;
+            instance.connector_registry = Some(std::sync::Arc::new(Mutex::new(connectors)));
         }
         let snapshot = instance_snapshot(handle, instance);
         drop(instances);
@@ -329,6 +463,8 @@ pub extern "C" fn piqae_node_stop(handle: u64) -> PiqaeBuffer {
         let mut instances = lock_instances()?;
         let instance = instances.get_mut(&handle).ok_or(FfiError::InvalidHandle)?;
         instance.runtime = None;
+        instance.embedded_queue = None;
+        instance.connector_registry = None;
         let snapshot = instance_snapshot(handle, instance);
         drop(instances);
         Ok(snapshot)
@@ -347,18 +483,38 @@ pub extern "C" fn piqae_node_snapshot(handle: u64) -> PiqaeBuffer {
 }
 
 #[unsafe(no_mangle)]
+#[allow(
+    clippy::cognitive_complexity,
+    clippy::too_many_lines,
+    reason = "the exhaustive versioned ABI dispatch stays in one panic-containment boundary"
+)]
 pub extern "C" fn piqae_node_command(handle: u64, data: *const u8, length: usize) -> PiqaeBuffer {
     ffi_entry(|| {
         let bytes = input_bytes(data, length)?;
         let command =
             serde_json::from_slice::<NativeCommand>(bytes).map_err(|_| FfiError::InvalidCommand)?;
-        let (runtime, provider) = {
+        let (runtime, provider, embedded_queue, connector_registry, _in_flight) = {
             let instances = lock_instances()?;
             let instance = instances.get(&handle).ok_or(FfiError::InvalidHandle)?;
             let runtime = instance.runtime.clone().ok_or(FfiError::NotStarted)?;
             let provider = instance.host_key_provider;
+            let embedded_queue = instance
+                .embedded_queue
+                .clone()
+                .ok_or(FfiError::NotStarted)?;
+            let connector_registry = instance
+                .connector_registry
+                .clone()
+                .ok_or(FfiError::NotStarted)?;
+            let in_flight = instance.in_flight.begin()?;
             drop(instances);
-            (runtime, provider)
+            (
+                runtime,
+                provider,
+                embedded_queue,
+                connector_registry,
+                in_flight,
+            )
         };
         match command {
             NativeCommand::Snapshot => {}
@@ -375,6 +531,158 @@ pub extern "C" fn piqae_node_command(handle: u64, data: *const u8, length: usize
                     .map_err(|_| FfiError::HostKeyUnavailable)?;
                 return Ok(json!({ "handle": handle, "opaque_evidence": evidence }));
             }
+            NativeCommand::RegisterAdapter { registration } => {
+                lock_embedded(&embedded_queue)?
+                    .register_adapter(registration)
+                    .map_err(|_| FfiError::AdapterOperation)?;
+                return Ok(json!({ "handle": handle, "registered": true }));
+            }
+            NativeCommand::ObservePrinterInventory {
+                adapter_id,
+                printers,
+            } => {
+                let printers = lock_embedded(&embedded_queue)?
+                    .observe_inventory(&adapter_id, &printers)
+                    .map_err(|_| FfiError::AdapterOperation)?;
+                return Ok(json!({ "handle": handle, "printers": printers }));
+            }
+            NativeCommand::PrinterInventory => {
+                let printers = lock_embedded(&embedded_queue)?
+                    .printer_snapshots()
+                    .map_err(|_| FfiError::AdapterOperation)?;
+                return Ok(json!({ "handle": handle, "printers": printers }));
+            }
+            NativeCommand::EnqueueLocalJob {
+                adapter_id,
+                idempotency_key,
+                printer_id,
+                title,
+                content_kind,
+                content_base64,
+                options_json,
+                expires_unix_ms,
+            } => {
+                use base64::Engine as _;
+                let content = base64::engine::general_purpose::STANDARD
+                    .decode(content_base64)
+                    .map_err(|_| FfiError::InvalidCommand)?;
+                let accepted = lock_embedded(&embedded_queue)?
+                    .enqueue(EmbeddedJobRequest {
+                        adapter_id,
+                        idempotency_key,
+                        printer_id,
+                        title,
+                        content_kind,
+                        content,
+                        options_json,
+                        expires_unix_ms,
+                    })
+                    .map_err(|_| FfiError::AdapterOperation)?;
+                return Ok(json!({ "handle": handle, "job": accepted }));
+            }
+            NativeCommand::NextAdapterOperation { adapter_id } => {
+                let operation = lock_embedded(&embedded_queue)?
+                    .next_operation(&adapter_id)
+                    .map_err(|_| FfiError::AdapterOperation)?;
+                return Ok(json!({ "handle": handle, "operation": operation }));
+            }
+            NativeCommand::BeginAdapterHandoff {
+                adapter_id,
+                operation_id,
+                fence,
+            } => {
+                let operation = lock_embedded(&embedded_queue)?
+                    .begin_handoff(&adapter_id, &operation_id, &fence)
+                    .map_err(|_| FfiError::AdapterOperation)?;
+                return Ok(json!({ "handle": handle, "operation": operation }));
+            }
+            NativeCommand::CompleteAdapterOperation {
+                adapter_id,
+                operation_id,
+                fence,
+                result,
+            } => {
+                let acknowledgement = lock_embedded(&embedded_queue)?
+                    .complete_operation(&adapter_id, &operation_id, &fence, &result)
+                    .map_err(|_| FfiError::AdapterOperation)?;
+                return Ok(json!({ "handle": handle, "acknowledgement": acknowledgement }));
+            }
+            NativeCommand::JobSnapshot { job_id } => {
+                let job = lock_embedded(&embedded_queue)?
+                    .job(&job_id)
+                    .map_err(|_| FfiError::AdapterOperation)?;
+                return Ok(json!({ "handle": handle, "job": job }));
+            }
+            NativeCommand::ProfileSnapshots { printer_id } => {
+                let profiles = lock_embedded(&embedded_queue)?
+                    .profiles(&printer_id)
+                    .map_err(|_| FfiError::AdapterOperation)?;
+                return Ok(json!({ "handle": handle, "profiles": profiles }));
+            }
+            NativeCommand::CreateProfile {
+                printer_id,
+                name,
+                is_default,
+                options_json,
+            } => {
+                let profile = lock_embedded(&embedded_queue)?
+                    .create_profile(&printer_id, &name, is_default, &options_json)
+                    .map_err(|_| FfiError::AdapterOperation)?;
+                return Ok(json!({ "handle": handle, "profile": profile }));
+            }
+            NativeCommand::UpdateProfile {
+                printer_id,
+                profile_id,
+                expected_revision,
+                name,
+                is_default,
+                options_json,
+            } => {
+                let profile = lock_embedded(&embedded_queue)?
+                    .update_profile(
+                        &printer_id,
+                        &profile_id,
+                        expected_revision,
+                        &name,
+                        is_default,
+                        &options_json,
+                    )
+                    .map_err(|_| FfiError::AdapterOperation)?;
+                return Ok(json!({ "handle": handle, "profile": profile }));
+            }
+            NativeCommand::DeleteProfile {
+                printer_id,
+                profile_id,
+                expected_revision,
+            } => {
+                lock_embedded(&embedded_queue)?
+                    .delete_profile(&printer_id, &profile_id, expected_revision)
+                    .map_err(|_| FfiError::AdapterOperation)?;
+                return Ok(json!({ "handle": handle, "deleted": true }));
+            }
+            NativeCommand::CaptureNativeProfile { .. } => {
+                return Err(FfiError::UnsupportedAdapterCapture);
+            }
+            NativeCommand::CompleteConnectorInvitationExchange {
+                invitation_nonce: _,
+                expires_unix_ms: _,
+                connector: _,
+            } => {
+                return Err(FfiError::SecureConnectorProviderRequired);
+            }
+            NativeCommand::ConnectorSnapshots => {
+                let connectors = lock_connectors(&connector_registry)?
+                    .records()
+                    .cloned()
+                    .collect::<Vec<_>>();
+                return Ok(json!({ "handle": handle, "connectors": connectors }));
+            }
+            NativeCommand::RevokeConnector { connector_id } => {
+                let revoked = lock_connectors(&connector_registry)?
+                    .revoke(&connector_id)
+                    .map_err(|_| FfiError::ConnectorOperation)?;
+                return Ok(json!({ "handle": handle, "revoked": revoked }));
+            }
         }
         let instances = lock_instances()?;
         let instance = instances.get(&handle).ok_or(FfiError::InvalidHandle)?;
@@ -387,10 +695,10 @@ pub extern "C" fn piqae_node_command(handle: u64, data: *const u8, length: usize
 #[unsafe(no_mangle)]
 pub extern "C" fn piqae_node_destroy(handle: u64) -> PiqaeBuffer {
     ffi_entry(|| {
-        let removed = lock_instances()?.remove(&handle).is_some();
-        if !removed {
-            return Err(FfiError::InvalidHandle);
-        }
+        let removed = lock_instances()?
+            .remove(&handle)
+            .ok_or(FfiError::InvalidHandle)?;
+        removed.in_flight.wait_until_idle()?;
         Ok(json!({ "handle": handle, "destroyed": true }))
     })
 }
@@ -432,6 +740,11 @@ enum FfiError {
     NotStarted,
     StartFailed,
     HostKeyUnavailable,
+    ProviderLocked,
+    AdapterOperation,
+    UnsupportedAdapterCapture,
+    ConnectorOperation,
+    SecureConnectorProviderRequired,
     Contract(String),
     Internal,
 }
@@ -456,6 +769,11 @@ impl FfiError {
             Self::NotStarted => "runtime_not_started",
             Self::StartFailed => "runtime_start_failed",
             Self::HostKeyUnavailable => "host_key_unavailable",
+            Self::ProviderLocked => "host_key_provider_locked",
+            Self::AdapterOperation => "adapter_operation_failed",
+            Self::UnsupportedAdapterCapture => "adapter_capture_unsupported",
+            Self::ConnectorOperation => "connector_operation_failed",
+            Self::SecureConnectorProviderRequired => "secure_connector_provider_required",
             Self::Contract(_) => "invalid_configuration",
             Self::Internal => "internal_error",
         }
@@ -472,9 +790,32 @@ impl FfiError {
             Self::HostKeyUnavailable => {
                 "the host secure key provider is unavailable or rejected the request"
             }
+            Self::ProviderLocked => {
+                "the host key provider cannot be replaced after configuration or start"
+            }
+            Self::AdapterOperation => "the durable adapter operation could not be completed",
+            Self::UnsupportedAdapterCapture => {
+                "this adapter does not expose a runtime-controlled native profile capture operation"
+            }
+            Self::ConnectorOperation => "the connector operation could not be completed",
+            Self::SecureConnectorProviderRequired => {
+                "cloud connector enrollment requires a non-exporting platform signing-key provider"
+            }
             Self::Internal => "the runtime operation failed",
         }
     }
+}
+
+fn lock_embedded(
+    queue: &std::sync::Arc<Mutex<EmbeddedQueue>>,
+) -> Result<std::sync::MutexGuard<'_, EmbeddedQueue>, FfiError> {
+    queue.lock().map_err(|_| FfiError::Internal)
+}
+
+fn lock_connectors(
+    registry: &std::sync::Arc<Mutex<ConnectorRegistry>>,
+) -> Result<std::sync::MutexGuard<'_, ConnectorRegistry>, FfiError> {
+    registry.lock().map_err(|_| FfiError::Internal)
 }
 
 fn lock_instances() -> Result<std::sync::MutexGuard<'static, BTreeMap<u64, Instance>>, FfiError> {
@@ -515,6 +856,7 @@ fn ffi_entry(operation: impl FnOnce() -> Result<Value, FfiError>) -> PiqaeBuffer
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use base64::Engine as _;
 
     fn unique_fixture() -> Vec<u8> {
         let mut fixture: Value = serde_json::from_slice(include_bytes!(
@@ -530,6 +872,15 @@ mod tests {
         let value = serde_json::from_slice(bytes).unwrap();
         piqae_node_free(buffer);
         value
+    }
+
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "test call sites construct one-shot JSON command values"
+    )]
+    fn command(handle: u64, value: Value) -> Value {
+        let bytes = serde_json::to_vec(&value).unwrap();
+        read_and_free(piqae_node_command(handle, bytes.as_ptr(), bytes.len()))
     }
 
     #[test]
@@ -625,5 +976,259 @@ mod tests {
         );
         assert!(!evidence.to_string().contains("printer.local"));
         let _ = read_and_free(piqae_node_destroy(handle));
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one end-to-end ABI regression proves the required handoff ordering"
+    )]
+    fn ffi_embedded_print_is_durable_and_requires_handoff_start() {
+        let fixture = unique_fixture();
+        let created = read_and_free(piqae_node_create(fixture.as_ptr(), fixture.len()));
+        let handle = created["data"]["handle"].as_u64().unwrap();
+        assert_eq!(read_and_free(piqae_node_start(handle))["ok"], true);
+        assert_eq!(
+            command(
+                handle,
+                json!({
+                    "type": "register_adapter",
+                    "registration": {
+                        "fingerprint": {
+                            "platform": "ios_air_print",
+                            "adapter_id": "com.example.pos.airprint",
+                            "adapter_version": "1.0.0",
+                            "device_family": "ipad",
+                            "firmware_version": null
+                        },
+                        "capability_contract": {"document_kinds": ["pdf"]}
+                    }
+                }),
+            )["ok"],
+            true
+        );
+        let inventory = command(
+            handle,
+            json!({
+                "type": "observe_printer_inventory",
+                "adapter_id": "com.example.pos.airprint",
+                "printers": [{
+                    "native_id": "ipps://printer/ipp/print",
+                    "name": "Kitchen",
+                    "state": "available",
+                    "is_default": true,
+                    "native_options": {}
+                }]
+            }),
+        );
+        let printer_id = inventory["data"]["printers"][0]["printer_id"]
+            .as_str()
+            .unwrap();
+        let accepted = command(
+            handle,
+            json!({
+                "type": "enqueue_local_job",
+                "adapter_id": "com.example.pos.airprint",
+                "idempotency_key": "order-42",
+                "printer_id": printer_id,
+                "title": "Order 42",
+                "content_kind": "pdf",
+                "content_base64": base64::engine::general_purpose::STANDARD.encode(b"%PDF fake"),
+                "options_json": "{}",
+                "expires_unix_ms": null
+            }),
+        );
+        let job_id = accepted["data"]["job"]["job_id"].as_str().unwrap();
+        let next = command(
+            handle,
+            json!({"type":"next_adapter_operation","adapter_id":"com.example.pos.airprint"}),
+        );
+        let operation = &next["data"]["operation"];
+        let operation_id = operation["operation_id"].as_str().unwrap();
+        let fence = operation["fence"].as_str().unwrap();
+        let premature = command(
+            handle,
+            json!({
+                "type":"complete_adapter_operation",
+                "adapter_id":"com.example.pos.airprint",
+                "operation_id":operation_id,
+                "fence":fence,
+                "result":{"outcome":"accepted","native_job_id":"native-42"}
+            }),
+        );
+        assert_eq!(premature["error"]["code"], "adapter_operation_failed");
+        assert_eq!(
+            command(
+                handle,
+                json!({
+                    "type":"begin_adapter_handoff",
+                    "adapter_id":"com.example.pos.airprint",
+                    "operation_id":operation_id,
+                    "fence":fence
+                }),
+            )["data"]["operation"]["phase"],
+            "handoff_started"
+        );
+        for result in [
+            json!({"outcome":"accepted","native_job_id":"native-42"}),
+            json!({"outcome":"completed_reported","native_job_id":"native-42"}),
+        ] {
+            assert_eq!(
+                command(
+                    handle,
+                    json!({
+                        "type":"complete_adapter_operation",
+                        "adapter_id":"com.example.pos.airprint",
+                        "operation_id":operation_id,
+                        "fence":fence,
+                        "result":result
+                    }),
+                )["ok"],
+                true
+            );
+        }
+        let _ = read_and_free(piqae_node_stop(handle));
+        let _ = read_and_free(piqae_node_start(handle));
+        assert_eq!(
+            command(handle, json!({"type":"job_snapshot","job_id":job_id}))["data"]["job"]["state"],
+            "completed_reported"
+        );
+        let _ = read_and_free(piqae_node_destroy(handle));
+    }
+
+    #[derive(Debug)]
+    struct BlockingHmacContext {
+        entered: std::sync::mpsc::Sender<()>,
+        release: Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+
+    unsafe extern "C" fn blocking_hmac(
+        context: *mut core::ffi::c_void,
+        _scope: *const u8,
+        _scope_length: usize,
+        _message: *const u8,
+        _message_length: usize,
+        output: *mut u8,
+        output_length: usize,
+    ) -> i32 {
+        if context.is_null() || output.is_null() || output_length != 32 {
+            return 1;
+        }
+        // SAFETY: the test retains this boxed context until destroy returns,
+        // which is the lifetime rule under test.
+        let context = unsafe { &*(context.cast::<BlockingHmacContext>()) };
+        let _ = context.entered.send(());
+        if context
+            .release
+            .lock()
+            .ok()
+            .and_then(|release| release.recv().ok())
+            .is_none()
+        {
+            return 1;
+        }
+        // SAFETY: the ABI supplied a live exact-size output buffer.
+        unsafe { std::slice::from_raw_parts_mut(output, output_length).fill(9) };
+        0
+    }
+
+    #[test]
+    fn destroy_waits_for_host_callback_and_provider_cannot_be_replaced() {
+        let fixture = unique_fixture();
+        let created = read_and_free(piqae_node_create(fixture.as_ptr(), fixture.len()));
+        let handle = created["data"]["handle"].as_u64().unwrap();
+        let (entered_send, entered_receive) = std::sync::mpsc::channel();
+        let (release_send, release_receive) = std::sync::mpsc::channel();
+        let context = Box::into_raw(Box::new(BlockingHmacContext {
+            entered: entered_send,
+            release: Mutex::new(release_receive),
+        }));
+        let provider = PiqaeHostKeyProvider {
+            context: context.cast(),
+            hmac_sha256: Some(blocking_hmac),
+        };
+        assert_eq!(
+            read_and_free(piqae_node_set_host_key_provider(handle, provider))["ok"],
+            true
+        );
+        assert_eq!(
+            read_and_free(piqae_node_set_host_key_provider(handle, provider))["error"]["code"],
+            "host_key_provider_locked"
+        );
+        let _ = read_and_free(piqae_node_start(handle));
+        let command_thread = std::thread::spawn(move || {
+            command(
+                handle,
+                json!({
+                    "type":"derive_opaque_evidence",
+                    "namespace":"airprint",
+                    "canonical_identity":"ipps://printer/ipp/print"
+                }),
+            )
+        });
+        entered_receive
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        let (destroyed_send, destroyed_receive) = std::sync::mpsc::channel();
+        let destroy_thread = std::thread::spawn(move || {
+            let result = read_and_free(piqae_node_destroy(handle));
+            let _ = destroyed_send.send(result);
+        });
+        assert!(
+            destroyed_receive
+                .recv_timeout(std::time::Duration::from_millis(50))
+                .is_err(),
+            "destroy returned while a host callback still held its context"
+        );
+        release_send.send(()).unwrap();
+        assert_eq!(command_thread.join().unwrap()["ok"], true);
+        assert_eq!(
+            destroyed_receive
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .unwrap()["ok"],
+            true
+        );
+        destroy_thread.join().unwrap();
+        // SAFETY: destroy has waited for every in-flight callback.
+        unsafe { drop(Box::from_raw(context)) };
+    }
+
+    #[test]
+    fn apple_adapter_platform_names_are_stable_in_abi_json() {
+        for platform in [
+            "ios_air_print",
+            "ios_network",
+            "ios_bluetooth_le",
+            "ios_external_accessory",
+        ] {
+            let command: NativeCommand = serde_json::from_value(json!({
+                "type":"register_adapter",
+                "registration": {
+                    "fingerprint": {
+                        "platform": platform,
+                        "adapter_id":"com.example.adapter",
+                        "adapter_version":"1.0.0",
+                        "device_family":null,
+                        "firmware_version":null
+                    },
+                    "capability_contract": {}
+                }
+            }))
+            .unwrap();
+            assert!(matches!(command, NativeCommand::RegisterAdapter { .. }));
+        }
+    }
+
+    #[test]
+    fn durable_adapter_command_fixtures_pin_the_v1_schema() {
+        for fixture in [
+            include_bytes!("../../../contracts/node-sdk/v1/adapter-register.json").as_slice(),
+            include_bytes!("../../../contracts/node-sdk/v1/adapter-enqueue.json").as_slice(),
+            include_bytes!("../../../contracts/node-sdk/v1/adapter-next.json").as_slice(),
+            include_bytes!("../../../contracts/node-sdk/v1/adapter-begin-handoff.json").as_slice(),
+            include_bytes!("../../../contracts/node-sdk/v1/adapter-complete.json").as_slice(),
+        ] {
+            serde_json::from_slice::<NativeCommand>(fixture).unwrap();
+        }
     }
 }

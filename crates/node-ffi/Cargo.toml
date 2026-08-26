@@ -11,7 +11,9 @@ publish = false
 crate-type = ["rlib", "staticlib", "cdylib"]
 
 [dependencies]
+base64.workspace = true
 piqae-node-runtime = { path = "../node-runtime" }
+piqae-support-packs = { path = "../support-packs" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

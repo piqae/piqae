@@ -17,6 +17,31 @@ public sealed record PiqaeNodeOptions(
     string ApplicationId,
     string DataDirectory);
 
+public sealed record AdapterFingerprint(
+    string Platform,
+    string AdapterId,
+    string AdapterVersion,
+    string? DeviceFamily = null,
+    string? FirmwareVersion = null);
+
+public sealed record AdapterRegistration(AdapterFingerprint Fingerprint, JsonElement CapabilityContract);
+
+public sealed record PrinterObservation(
+    string NativeId,
+    string Name,
+    string State,
+    bool IsDefault,
+    JsonElement NativeOptions);
+
+public enum AdapterOperationOutcomeKind
+{
+    RejectedBeforeHandoff,
+    Accepted,
+    CompletedReported,
+    FailedTerminal,
+    Ambiguous
+}
+
 public sealed class PiqaeNode : IDisposable
 {
     private static readonly JsonSerializerOptions JsonOptions = new()
@@ -61,6 +86,103 @@ public sealed class PiqaeNode : IDisposable
         using var response = NativeResponse.Call(_handle, payload, NativeMethods.piqae_node_command);
         return response.Data.Clone();
     }
+
+    public JsonElement RegisterAdapter(AdapterRegistration registration) => Command(new
+    {
+        type = "register_adapter",
+        registration
+    });
+
+    public JsonElement ObservePrinterInventory(string adapterId, IReadOnlyList<PrinterObservation> printers) => Command(new
+    {
+        type = "observe_printer_inventory",
+        adapter_id = adapterId,
+        printers
+    });
+
+    public JsonElement PrinterInventory() => Command(new { type = "printer_inventory" });
+
+    public JsonElement EnqueueLocalJob(
+        string adapterId,
+        string idempotencyKey,
+        string printerId,
+        string title,
+        string contentKind,
+        ReadOnlySpan<byte> content,
+        string optionsJson = "{}",
+        long? expiresUnixMs = null) => Command(new
+    {
+        type = "enqueue_local_job",
+        adapter_id = adapterId,
+        idempotency_key = idempotencyKey,
+        printer_id = printerId,
+        title,
+        content_kind = contentKind,
+        content_base64 = Convert.ToBase64String(content),
+        options_json = optionsJson,
+        expires_unix_ms = expiresUnixMs
+    });
+
+    public JsonElement NextAdapterOperation(string adapterId) => Command(new
+    {
+        type = "next_adapter_operation",
+        adapter_id = adapterId
+    });
+
+    public JsonElement BeginAdapterHandoff(string adapterId, string operationId, string fence) => Command(new
+    {
+        type = "begin_adapter_handoff",
+        adapter_id = adapterId,
+        operation_id = operationId,
+        fence
+    });
+
+    public JsonElement CompleteAdapterOperation(
+        string adapterId,
+        string operationId,
+        string fence,
+        AdapterOperationOutcomeKind outcome,
+        string? nativeJobId = null,
+        string? code = null,
+        bool retryable = false)
+    {
+        var result = outcome switch
+        {
+            AdapterOperationOutcomeKind.RejectedBeforeHandoff => new Dictionary<string, object?>
+            { ["outcome"] = "rejected_before_handoff", ["code"] = code, ["retryable"] = retryable },
+            AdapterOperationOutcomeKind.Accepted => new Dictionary<string, object?>
+            { ["outcome"] = "accepted", ["native_job_id"] = nativeJobId },
+            AdapterOperationOutcomeKind.CompletedReported => new Dictionary<string, object?>
+            { ["outcome"] = "completed_reported", ["native_job_id"] = nativeJobId },
+            AdapterOperationOutcomeKind.FailedTerminal => new Dictionary<string, object?>
+            { ["outcome"] = "failed_terminal", ["native_job_id"] = nativeJobId, ["code"] = code },
+            AdapterOperationOutcomeKind.Ambiguous => new Dictionary<string, object?>
+            { ["outcome"] = "ambiguous", ["code"] = code },
+            _ => throw new ArgumentOutOfRangeException(nameof(outcome))
+        };
+        return Command(new
+        {
+            type = "complete_adapter_operation",
+            adapter_id = adapterId,
+            operation_id = operationId,
+            fence,
+            result
+        });
+    }
+
+    public JsonElement ProfileSnapshots(string printerId) => Command(new
+    {
+        type = "profile_snapshots",
+        printer_id = printerId
+    });
+
+    public JsonElement ConnectorSnapshots() => Command(new { type = "connector_snapshots" });
+
+    public JsonElement RevokeConnector(string connectorId) => Command(new
+    {
+        type = "revoke_connector",
+        connector_id = connectorId
+    });
 
     public void ConfigureHostKeyProvider(IPiqaeHostKeyProvider provider)
     {
@@ -119,6 +241,14 @@ public sealed class PiqaeNode : IDisposable
     {
         ThrowIfDisposed();
         using var response = NativeResponse.Call(_handle, operation);
+        return response.Data.Clone();
+    }
+
+    private JsonElement Command(object command)
+    {
+        ThrowIfDisposed();
+        var payload = JsonSerializer.SerializeToUtf8Bytes(command, JsonOptions);
+        using var response = NativeResponse.Call(_handle, payload, NativeMethods.piqae_node_command);
         return response.Data.Clone();
     }
 

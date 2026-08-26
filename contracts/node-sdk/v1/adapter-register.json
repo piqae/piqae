@@ -1,0 +1,15 @@
+{
+  "type": "register_adapter",
+  "registration": {
+    "fingerprint": {
+      "platform": "ios_air_print",
+      "adapter_id": "com.example.pos.airprint",
+      "adapter_version": "1.0.0",
+      "device_family": "ipad",
+      "firmware_version": null
+    },
+    "capability_contract": {
+      "document_kinds": ["pdf"]
+    }
+  }
+}

@@ -8,8 +8,6 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs::OpenOptions,
-    io::Write as _,
     path::PathBuf,
 };
 use tokio::sync::{Mutex, mpsc, oneshot};
@@ -20,7 +18,7 @@ use piqae_local_ipc::{
     BrokerAuthorizationDecision, BrokerAuthorizationHandle, BrokerAuthorizationState,
     BrokerCapability, BrokerCredential, BrokerOperation, BrokerPresence, BrokerRequest,
     BrokerResponse, BrokerResult, LocalFailure, LocalOperation, LocalResult,
-    PendingBrokerAuthorization, read_message, write_message,
+    PendingBrokerAuthorization, SdkBrokerOperation, read_message, write_message,
 };
 
 const DOCUMENT_VERSION: u16 = 1;
@@ -165,7 +163,8 @@ impl BrokerRegistry {
             bail!("broker application limit reached");
         }
         let token = generate_token();
-        self.applications.insert(
+        let mut applications = self.applications.clone();
+        applications.insert(
             identity.application_id.clone(),
             DurableApplicationAuthorization {
                 identity: identity.clone(),
@@ -174,7 +173,8 @@ impl BrokerRegistry {
                 revoked: false,
             },
         );
-        self.persist()?;
+        self.persist_applications(&applications)?;
+        self.applications = applications;
         Ok(ApplicationAuthorization {
             identity,
             capabilities,
@@ -205,40 +205,33 @@ impl BrokerRegistry {
     ///
     /// Returns an error when durable registry replacement fails.
     pub fn revoke(&mut self, application_id: &str) -> Result<bool> {
-        let Some(entry) = self.applications.get_mut(application_id) else {
+        let Some(entry) = self.applications.get(application_id) else {
             return Ok(false);
         };
         if entry.revoked {
             return Ok(false);
         }
-        entry.revoked = true;
-        self.persist()?;
+        let mut applications = self.applications.clone();
+        applications
+            .get_mut(application_id)
+            .context("broker authorization disappeared")?
+            .revoked = true;
+        self.persist_applications(&applications)?;
+        self.applications = applications;
         Ok(true)
     }
 
-    fn persist(&self) -> Result<()> {
-        std::fs::create_dir_all(&self.root)?;
+    fn persist_applications(
+        &self,
+        applications: &BTreeMap<String, DurableApplicationAuthorization>,
+    ) -> Result<()> {
         let path = self.root.join("broker-applications.json");
-        let staged = self.root.join("broker-applications.json.replacing");
-        let _ = std::fs::remove_file(&staged);
         let document = BrokerDocument {
             version: DOCUMENT_VERSION,
-            applications: self.applications.values().cloned().collect(),
+            applications: applications.values().cloned().collect(),
         };
         let bytes = serde_json::to_vec_pretty(&document)?;
-        let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt as _;
-            options.mode(0o600);
-        }
-        let mut file = options.open(&staged)?;
-        file.write_all(&bytes)?;
-        file.sync_all()?;
-        drop(file);
-        std::fs::rename(&staged, &path)?;
-        Ok(())
+        crate::durable_file::replace_json(&path, &bytes)
     }
 }
 
@@ -630,6 +623,17 @@ impl BrokerServerState {
                     capability,
                     operation,
                 } => {
+                    if request.protocol < 3 && matches!(operation, LocalOperation::Sdk { .. }) {
+                        return BrokerResponse {
+                            protocol: BROKER_PROTOCOL_VERSION,
+                            request_id: request.request_id,
+                            result: Err(local_failure(
+                                "unsupported_broker_protocol",
+                                "SDK broker operations require protocol version 3",
+                                false,
+                            )),
+                        };
+                    }
                     let required = required_capability(&operation);
                     if required != Some(capability) {
                         Err(local_failure(
@@ -747,6 +751,14 @@ const fn required_capability(operation: &LocalOperation) -> Option<BrokerCapabil
         | LocalOperation::ValidateProfile(_)
         | LocalOperation::ConfirmLoadedMedia(_) => Some(BrokerCapability::ManageProfiles),
         LocalOperation::Pause | LocalOperation::Resume => Some(BrokerCapability::ManageConnectors),
+        LocalOperation::Sdk { operation } => Some(match operation {
+            SdkBrokerOperation::SubmitLocalJob { .. } => BrokerCapability::SubmitLocalJobs,
+            SdkBrokerOperation::Profiles { .. } => BrokerCapability::ObservePrinters,
+            SdkBrokerOperation::JobHistory { .. } | SdkBrokerOperation::ConnectorSnapshots => {
+                BrokerCapability::ObserveStatus
+            }
+            SdkBrokerOperation::RevokeConnector { .. } => BrokerCapability::ManageConnectors,
+        }),
         LocalOperation::RestartAgent
         | LocalOperation::ExportSupportBundle { .. }
         | LocalOperation::Reenrol { .. } => None,
@@ -778,6 +790,7 @@ async fn dispatch_operation(
                 .map(|printers| LocalResult::Printers { printers })
                 .map_err(|_| unavailable())
         }
+        LocalOperation::Sdk { operation } => dispatch_sdk_operation(commands, operation).await,
         LocalOperation::Pause | LocalOperation::Resume => {
             let (send, receive) = oneshot::channel();
             let command = if matches!(operation, LocalOperation::Pause) {
@@ -891,6 +904,125 @@ async fn dispatch_operation(
             false,
         )),
     }
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "one exhaustive SDK wire-to-command mapping keeps capability auditability"
+)]
+async fn dispatch_sdk_operation(
+    commands: &mpsc::Sender<RuntimeCommand>,
+    operation: SdkBrokerOperation,
+) -> Result<LocalResult, LocalFailure> {
+    let data = match operation {
+        SdkBrokerOperation::SubmitLocalJob {
+            printer_id,
+            title,
+            content_kind,
+            content_base64,
+            options,
+            expires_unix_ms,
+        } => {
+            let (send, receive) = oneshot::channel();
+            send_command(
+                commands,
+                RuntimeCommand::SubmitJob {
+                    request: Box::new(crate::command::LocalCreateJob {
+                        printer_id,
+                        printer_native_id: None,
+                        title,
+                        content_kind,
+                        content: crate::command::LocalContent::Base64 {
+                            data: content_base64,
+                        },
+                        options,
+                        expires_unix_ms,
+                    }),
+                    respond_to: send,
+                },
+            )
+            .await?;
+            serde_json::to_value(
+                receive
+                    .await
+                    .map_err(|_| unavailable())?
+                    .map_err(command_failure)?,
+            )
+        }
+        SdkBrokerOperation::Profiles { printer_id } => {
+            let (send, receive) = oneshot::channel();
+            send_command(
+                commands,
+                RuntimeCommand::Profiles {
+                    printer_id,
+                    respond_to: send,
+                },
+            )
+            .await?;
+            serde_json::to_value(
+                receive
+                    .await
+                    .map_err(|_| unavailable())?
+                    .map_err(command_failure)?,
+            )
+        }
+        SdkBrokerOperation::JobHistory { offset, limit } => {
+            let (send, receive) = oneshot::channel();
+            send_command(
+                commands,
+                RuntimeCommand::JobHistory {
+                    offset,
+                    limit,
+                    respond_to: send,
+                },
+            )
+            .await?;
+            serde_json::to_value(
+                receive
+                    .await
+                    .map_err(|_| unavailable())?
+                    .map_err(command_failure)?,
+            )
+        }
+        SdkBrokerOperation::ConnectorSnapshots => {
+            let (send, receive) = oneshot::channel();
+            send_command(
+                commands,
+                RuntimeCommand::ConnectorDetails { respond_to: send },
+            )
+            .await?;
+            serde_json::to_value(
+                receive
+                    .await
+                    .map_err(|_| unavailable())?
+                    .map_err(command_failure)?,
+            )
+        }
+        SdkBrokerOperation::RevokeConnector { connector_id } => {
+            let (send, receive) = oneshot::channel();
+            send_command(
+                commands,
+                RuntimeCommand::RevokeConnector {
+                    connector_id,
+                    respond_to: send,
+                },
+            )
+            .await?;
+            receive
+                .await
+                .map_err(|_| unavailable())?
+                .map_err(command_failure)?;
+            Ok(serde_json::json!({ "revoked": true }))
+        }
+    }
+    .map_err(|_| {
+        local_failure(
+            "sdk_result_serialization_failed",
+            "the local SDK result could not be serialized",
+            false,
+        )
+    })?;
+    Ok(LocalResult::Sdk { data })
 }
 
 async fn send_command(
@@ -1035,6 +1167,37 @@ mod tests {
         assert!(registry.authenticate(
             "com.example.pos",
             current.token.expose_for_client(),
+            ApplicationCapabilities::OBSERVE_ONLY
+        ));
+    }
+
+    #[test]
+    fn repeated_authorize_rotate_revoke_is_durable_across_restart() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut registry = BrokerRegistry::load(directory.path()).unwrap();
+        let first = registry
+            .authorize(identity(), ApplicationCapabilities::OBSERVE_ONLY)
+            .unwrap();
+        let second = registry
+            .authorize(identity(), ApplicationCapabilities::OBSERVE_ONLY)
+            .unwrap();
+        assert!(!registry.authenticate(
+            "com.example.pos",
+            first.token.expose_for_client(),
+            ApplicationCapabilities::OBSERVE_ONLY
+        ));
+        assert!(registry.revoke("com.example.pos").unwrap());
+        drop(registry);
+
+        let registry = BrokerRegistry::load(directory.path()).unwrap();
+        assert!(!registry.authenticate(
+            "com.example.pos",
+            first.token.expose_for_client(),
+            ApplicationCapabilities::OBSERVE_ONLY
+        ));
+        assert!(!registry.authenticate(
+            "com.example.pos",
+            second.token.expose_for_client(),
             ApplicationCapabilities::OBSERVE_ONLY
         ));
     }

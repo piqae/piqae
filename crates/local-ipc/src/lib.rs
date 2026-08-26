@@ -47,7 +47,7 @@ pub fn broker_endpoint_for_data_directory(data_directory: &std::path::Path) -> S
 
 pub const LOCAL_PROTOCOL_VERSION: u16 = 2;
 pub const BROKER_PROTOCOL_MIN_VERSION: u16 = 1;
-pub const BROKER_PROTOCOL_VERSION: u16 = 2;
+pub const BROKER_PROTOCOL_VERSION: u16 = 3;
 pub const MAX_MESSAGE_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_NATIVE_CAPTURE_BYTES: usize = 1024 * 1024;
 
@@ -147,6 +147,10 @@ pub struct BrokerRequest {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "wire-compatible operation variants are bounded by MAX_MESSAGE_BYTES and boxing would complicate generated SDK schemas"
+)]
 pub enum BrokerOperation {
     Presence,
     RequestAuthorization {
@@ -224,6 +228,36 @@ pub enum LocalOperation {
     CancelProfileCapture(CancelProfileCapture),
     ValidateProfile(ValidateProfile),
     ConfirmLoadedMedia(ConfirmLoadedMedia),
+    Sdk { operation: SdkBrokerOperation },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "bounded SDK wire operation keeps the generated schema direct"
+)]
+pub enum SdkBrokerOperation {
+    SubmitLocalJob {
+        printer_id: String,
+        title: String,
+        content_kind: piqae_domain::ContentKind,
+        content_base64: String,
+        #[serde(default)]
+        options: JobOptions,
+        expires_unix_ms: Option<i64>,
+    },
+    Profiles {
+        printer_id: String,
+    },
+    JobHistory {
+        offset: usize,
+        limit: usize,
+    },
+    ConnectorSnapshots,
+    RevokeConnector {
+        connector_id: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -237,12 +271,23 @@ pub struct LocalResponse {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum LocalResult {
     Status(LocalStatus),
-    Printers { printers: Vec<LocalPrinter> },
+    Printers {
+        printers: Vec<LocalPrinter>,
+    },
     Accepted,
-    SupportBundle { path: PathBuf },
+    SupportBundle {
+        path: PathBuf,
+    },
     ProfileCaptureAuthorized(Box<ProfileCaptureAuthorized>),
-    ProfileCaptured { profile: Box<LocalPrinterProfile> },
+    ProfileCaptured {
+        profile: Box<LocalPrinterProfile>,
+    },
     ProfileValidation(ProfileValidationResult),
+    /// Additive SDK result whose inner schema is selected by the matching
+    /// `SdkBrokerOperation`. Secrets remain forbidden from this projection.
+    Sdk {
+        data: serde_json::Value,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
