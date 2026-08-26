@@ -33,7 +33,10 @@ let package = Package(
             name: "CPiqaeNodeABI",
             dependencies: abiDependencies,
             publicHeadersPath: "include",
-            cSettings: abiSettings
+            cSettings: abiSettings,
+            linkerSettings: [
+                .linkedLibrary("bsm", .when(platforms: [.macOS]))
+            ]
         ),
         .target(name: "PiqaeNodeKit", dependencies: ["CPiqaeNodeABI"]),
         .target(
