@@ -4444,8 +4444,18 @@ impl PostgresStore {
         let row = sqlx::query(
             "INSERT INTO target_bindings (
                 id, workspace_id, environment_id, target_id, printer_id, agent_id,
-                profile_id, profile_revision, role, enabled
-             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+                profile_id, profile_revision, role, enabled, destination_id, route_id
+             ) VALUES (
+                $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,
+                (SELECT route.destination_id FROM printer_routes AS route
+                 WHERE route.workspace_id=$2 AND route.environment_id=$3
+                   AND route.printer_id=$5 AND route.agent_id=$6
+                   AND route.retired_at IS NULL LIMIT 1),
+                (SELECT route.id FROM printer_routes AS route
+                 WHERE route.workspace_id=$2 AND route.environment_id=$3
+                   AND route.printer_id=$5 AND route.agent_id=$6
+                   AND route.retired_at IS NULL LIMIT 1)
+             )
              RETURNING id, target_id, printer_id, agent_id, profile_id, profile_revision,
                        role, enabled, created_at, updated_at",
         )
@@ -5801,23 +5811,55 @@ impl PostgresStore {
         }
 
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-            .bind(job.printer_id.to_string())
+            .bind(format!(
+                "{}:{}:{}",
+                job.workspace_id, job.environment_id, job.printer_id
+            ))
             .execute(&mut *transaction)
             .await?;
         let per_printer_sequence: i64 = sqlx::query_scalar(
             "SELECT COALESCE(MAX(per_printer_sequence), 0) + 1
-             FROM jobs WHERE printer_id = $1",
+             FROM jobs WHERE workspace_id=$1 AND environment_id=$2 AND printer_id=$3",
         )
+        .bind(job.workspace_id.to_string())
+        .bind(job.environment_id.to_string())
         .bind(job.printer_id.to_string())
         .fetch_one(&mut *transaction)
         .await?;
 
         let payload = serde_json::to_value(job)?;
+        let destination_id = job.metadata.get("piqae.destination_id");
+        let route_id = job.metadata.get("piqae.route_id");
+        if destination_id.is_some() != route_id.is_some() {
+            return Err(StorageError::InvalidData(
+                "destination and route metadata must be provided together".into(),
+            ));
+        }
+        if let (Some(destination_id), Some(route_id)) = (destination_id, route_id) {
+            let valid: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM printer_routes
+                 WHERE workspace_id=$1 AND environment_id=$2 AND id=$3
+                   AND destination_id=$4 AND printer_id=$5 AND agent_id=$6
+                   AND enabled AND retired_at IS NULL)",
+            )
+            .bind(job.workspace_id.to_string())
+            .bind(job.environment_id.to_string())
+            .bind(route_id)
+            .bind(destination_id)
+            .bind(job.printer_id.to_string())
+            .bind(agent_id.to_string())
+            .fetch_one(&mut *transaction)
+            .await?;
+            if !valid {
+                return Err(StorageError::NotFound);
+            }
+        }
         sqlx::query(
             "INSERT INTO jobs (
                 id, workspace_id, environment_id, printer_id, agent_id, payload, state,
-                state_sequence, per_printer_sequence, expires_at, created_at, updated_at
-             ) VALUES ($1,$2,$3,$4,$5,$6,$7,1,$8,$9,$10,$10)",
+                state_sequence, per_printer_sequence, expires_at, created_at, updated_at,
+                destination_id, route_id
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7,1,$8,$9,$10,$10,$11,$12)",
         )
         .bind(job.id.to_string())
         .bind(job.workspace_id.to_string())
@@ -5829,6 +5871,8 @@ impl PostgresStore {
         .bind(per_printer_sequence)
         .bind(job.expires_at)
         .bind(job.created_at)
+        .bind(destination_id)
+        .bind(route_id)
         .execute(&mut *transaction)
         .await?;
 
@@ -5931,7 +5975,7 @@ impl PostgresStore {
         }
         let mut transaction = self.pool.begin().await?;
         let row = sqlx::query(
-            "SELECT payload, state, agent_id, printer_id, lease_until
+            "SELECT payload, state, agent_id, printer_id, lease_until, destination_id, route_id
              FROM jobs
              WHERE id = $1 AND workspace_id = $2 AND environment_id = $3
              FOR UPDATE",
@@ -5989,7 +6033,8 @@ impl PostgresStore {
         }
 
         let destination = sqlx::query(
-            "SELECT target.stock_id, printer.profiles
+            "SELECT target.stock_id, printer.profiles,
+                    binding.destination_id, binding.route_id
              FROM targets AS target
              JOIN target_bindings AS binding
                ON binding.target_id = target.id
@@ -6026,6 +6071,14 @@ impl PostgresStore {
         .await?
         .ok_or(StorageError::ConcurrentStateChange)?;
         let stock_id: Option<String> = destination.try_get("stock_id")?;
+        let binding_destination_id: Option<String> = destination.try_get("destination_id")?;
+        let binding_route_id: Option<String> = destination.try_get("route_id")?;
+        let current_destination_id: Option<String> = row.try_get("destination_id")?;
+        if current_destination_id.is_some()
+            && binding_destination_id.as_ref() != current_destination_id.as_ref()
+        {
+            return Err(StorageError::ConcurrentStateChange);
+        }
         let intended_stock = job
             .metadata
             .get("piqae.stock_id")
@@ -6050,13 +6103,18 @@ impl PostgresStore {
         }
 
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-            .bind(binding.printer_id.to_string())
+            .bind(format!(
+                "{}:{}:{}",
+                workspace_id, environment_id, binding.printer_id
+            ))
             .execute(&mut *transaction)
             .await?;
         let per_printer_sequence: i64 = sqlx::query_scalar(
             "SELECT COALESCE(MAX(per_printer_sequence), 0) + 1
-             FROM jobs WHERE printer_id = $1",
+             FROM jobs WHERE workspace_id=$1 AND environment_id=$2 AND printer_id=$3",
         )
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
         .bind(binding.printer_id.to_string())
         .fetch_one(&mut *transaction)
         .await?;
@@ -6092,7 +6150,7 @@ impl PostgresStore {
         let updated = sqlx::query(
             "UPDATE jobs
              SET printer_id = $4, agent_id = $5, payload = $6,
-                 per_printer_sequence = $7,
+                 per_printer_sequence = $7, route_id = COALESCE($8, route_id),
                  lease_owner = NULL, lease_id = NULL,
                  lease_token_hash = NULL, lease_until = NULL, updated_at = now()
              WHERE id = $1 AND workspace_id = $2 AND environment_id = $3
@@ -6112,6 +6170,7 @@ impl PostgresStore {
         .bind(binding.agent_id.to_string())
         .bind(serde_json::to_value(&job)?)
         .bind(per_printer_sequence)
+        .bind(binding_route_id)
         .execute(&mut *transaction)
         .await?;
         if updated.rows_affected() != 1 {
