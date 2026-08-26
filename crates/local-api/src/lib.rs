@@ -10,10 +10,12 @@ use axum::{
     response::{Html, IntoResponse, Redirect, Response},
     routing::{get, post, put},
 };
-use piqae_local_ipc::{
-    ConfirmLoadedMedia, LocalPrinter, LocalPrinterProfile, LocalPrinterQueue, LocalStatus,
-    NativeProfileCapturePayload, ProfileCaptureAuthorized, ProfileValidationResult,
-    SessionAuthenticator,
+use piqae_local_ipc::{ConfirmLoadedMedia, NativeProfileCapturePayload, SessionAuthenticator};
+pub use piqae_node_runtime::command::{
+    CommandFailure as ControlFailure, ConfirmLoadedMediaRequest, DeleteProfileQuery,
+    ExposureUpdate, LocalConnectorDetail, LocalContent, LocalCreateJob, LocalHistoryJob,
+    LocalJobAccepted, LocalJobHistory, ProfileCaptureBeginRequest, ProfileCreate, ProfileUpdate,
+    RuntimeCommand as ControlRequest, TestPageRequest, ValidateProfileRequest,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -26,191 +28,6 @@ use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 use tower_http::limit::RequestBodyLimitLayer;
 
-#[derive(Debug)]
-pub enum ControlRequest {
-    Status {
-        respond_to: oneshot::Sender<LocalStatus>,
-    },
-    Printers {
-        respond_to: oneshot::Sender<Vec<LocalPrinter>>,
-    },
-    SetPrinterExposure {
-        printer_id: String,
-        exposed: bool,
-        respond_to: oneshot::Sender<Result<LocalPrinter, ControlFailure>>,
-    },
-    Profiles {
-        printer_id: String,
-        respond_to: oneshot::Sender<Result<Vec<LocalPrinterProfile>, ControlFailure>>,
-    },
-    CreateProfile {
-        printer_id: String,
-        request: ProfileCreate,
-        respond_to: oneshot::Sender<Result<LocalPrinterProfile, ControlFailure>>,
-    },
-    UpdateProfile {
-        printer_id: String,
-        profile_id: String,
-        request: ProfileUpdate,
-        respond_to: oneshot::Sender<Result<LocalPrinterProfile, ControlFailure>>,
-    },
-    DeleteProfile {
-        printer_id: String,
-        profile_id: String,
-        expected_revision: u64,
-        respond_to: oneshot::Sender<Result<(), ControlFailure>>,
-    },
-    BeginProfileCapture {
-        printer_id: String,
-        request: ProfileCaptureBeginRequest,
-        respond_to: oneshot::Sender<Result<ProfileCaptureAuthorized, ControlFailure>>,
-    },
-    CommitProfileCapture {
-        session_id: String,
-        capture_token: String,
-        capture: Box<NativeProfileCapturePayload>,
-        respond_to: oneshot::Sender<Result<LocalPrinterProfile, ControlFailure>>,
-    },
-    CancelProfileCapture {
-        session_id: String,
-        capture_token: String,
-        respond_to: oneshot::Sender<Result<(), ControlFailure>>,
-    },
-    ValidateProfile {
-        profile_id: String,
-        revision: u64,
-        respond_to: oneshot::Sender<Result<ProfileValidationResult, ControlFailure>>,
-    },
-    ConfirmLoadedMedia {
-        request: ConfirmLoadedMedia,
-        respond_to: oneshot::Sender<Result<(), ControlFailure>>,
-    },
-    PrinterQueue {
-        printer_id: String,
-        respond_to: oneshot::Sender<Result<LocalPrinterQueue, ControlFailure>>,
-    },
-    JobHistory {
-        offset: usize,
-        limit: usize,
-        respond_to: oneshot::Sender<Result<LocalJobHistory, ControlFailure>>,
-    },
-    ReprintJob {
-        job_id: String,
-        idempotency_key: String,
-        confirmed: bool,
-        respond_to: oneshot::Sender<Result<LocalJobAccepted, ControlFailure>>,
-    },
-    ConnectorDetails {
-        respond_to: oneshot::Sender<Result<Vec<LocalConnectorDetail>, ControlFailure>>,
-    },
-    TestPage {
-        printer_id: String,
-        profile_id: String,
-        confirmed: bool,
-        respond_to: oneshot::Sender<Result<LocalJobAccepted, ControlFailure>>,
-    },
-    Pause {
-        respond_to: oneshot::Sender<Result<(), ControlFailure>>,
-    },
-    Resume {
-        respond_to: oneshot::Sender<Result<(), ControlFailure>>,
-    },
-    ReloadConnectors {
-        respond_to: oneshot::Sender<Result<(), ControlFailure>>,
-    },
-    RevokeConnector {
-        connector_id: String,
-        respond_to: oneshot::Sender<Result<(), ControlFailure>>,
-    },
-    SubmitJob {
-        request: Box<LocalCreateJob>,
-        respond_to: oneshot::Sender<Result<LocalJobAccepted, ControlFailure>>,
-    },
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct ControlFailure {
-    pub code: String,
-    pub message: String,
-}
-
-#[derive(Debug, Clone, serde::Deserialize)]
-pub struct LocalCreateJob {
-    pub printer_id: String,
-    #[serde(default)]
-    pub printer_native_id: Option<String>,
-    pub title: String,
-    pub content_kind: piqae_domain::ContentKind,
-    pub content: LocalContent,
-    #[serde(default)]
-    pub options: piqae_domain::JobOptions,
-    pub expires_unix_ms: Option<i64>,
-}
-
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum LocalContent {
-    Base64 { data: String },
-    Uri { uri: String },
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct LocalJobAccepted {
-    pub job_id: String,
-    pub state: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct LocalJobHistory {
-    pub jobs: Vec<LocalHistoryJob>,
-    pub next_offset: Option<usize>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct LocalHistoryJob {
-    pub job_id: String,
-    pub printer_id: String,
-    pub title: String,
-    pub state: String,
-    pub native_job_id: Option<String>,
-    pub can_reprint: bool,
-    pub created_unix_ms: Option<i64>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct LocalConnectorDetail {
-    pub connector_id: String,
-    pub display_name: String,
-    pub workspace_name: Option<String>,
-    pub authorization_type: Option<String>,
-    pub workspace_id: Option<String>,
-    pub environment_id: Option<String>,
-    pub requesting_service_account_id: Option<String>,
-    pub endpoint: String,
-    pub connection: String,
-    pub permission: String,
-    pub allowed_printer_ids: Vec<String>,
-    pub selected_printer_count: usize,
-    /// Redacted connector health only. This may contain a stable protocol
-    /// error code, but never response bodies, credentials, or request data.
-    pub last_sync_error_code: Option<String>,
-    /// Number of queues currently present in the node-owned inventory.
-    pub local_printer_count: usize,
-    /// Number of present queues permitted by this connector's grant.
-    pub eligible_printer_count: usize,
-    /// Latest inventory revision prepared by this connector for cloud sync.
-    pub inventory_revision: u64,
-    /// True when a local inventory change still needs a sync attempt.
-    pub inventory_refresh_pending: bool,
-    /// True only when this connector can reach a locally coordinated physical
-    /// destination also granted to a different control-plane origin. No
-    /// origin, route key, job identity, or reservation proof is exposed.
-    pub cross_authority_route_warning: bool,
-    /// Present only when connector enrolment records an authenticated,
-    /// operator-safe management destination. Never guess provider paths.
-    pub manage_url: Option<String>,
-}
-
 #[derive(Debug, Deserialize)]
 struct ReprintRequest {
     idempotency_key: String,
@@ -222,68 +39,6 @@ struct ReprintRequest {
 struct DashboardSessionCreated {
     url: String,
     expires_in_seconds: u64,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct ExposureUpdate {
-    pub exposed: bool,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ProfileCreate {
-    pub name: String,
-    #[serde(default)]
-    pub is_default: bool,
-    #[serde(default)]
-    pub options: piqae_domain::JobOptions,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ProfileUpdate {
-    pub expected_revision: u64,
-    pub name: String,
-    #[serde(default)]
-    pub is_default: bool,
-    #[serde(default)]
-    pub options: piqae_domain::JobOptions,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct DeleteProfileQuery {
-    pub expected_revision: u64,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct TestPageRequest {
-    pub profile_id: String,
-    /// A local driver test may address an installed printer before it is
-    /// exposed to cloud/API jobs, but only after an explicit user action.
-    #[serde(default)]
-    pub confirmed: bool,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ProfileCaptureBeginRequest {
-    pub operation: piqae_domain::ProfileCaptureOperation,
-    pub profile_id: Option<String>,
-    pub expected_revision: Option<u64>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ValidateProfileRequest {
-    pub revision: u64,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ConfirmLoadedMediaRequest {
-    pub stock_id: Option<String>,
-    pub confidence: piqae_domain::LoadedMediaConfidence,
-    pub confirmed_by: Option<String>,
 }
 
 #[derive(Debug, Error)]
@@ -1124,6 +879,7 @@ mod tests {
         body::{Body, to_bytes},
         http::Request,
     };
+    use piqae_local_ipc::{LocalPrinterProfile, LocalStatus};
     use tower::ServiceExt;
 
     fn test_state() -> (LocalApiState, mpsc::Receiver<ControlRequest>) {

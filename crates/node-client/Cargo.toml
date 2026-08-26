@@ -1,5 +1,5 @@
 [package]
-name = "piqae-local-api"
+name = "piqae-node-client"
 version.workspace = true
 edition.workspace = true
 license = "Apache-2.0"
@@ -8,19 +8,16 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
-axum.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-piqae-domain.workspace = true
+async-trait.workspace = true
 piqae-local-ipc = { path = "../local-ipc", version = "0.1.2" }
 piqae-node-runtime = { path = "../node-runtime", version = "0.1.21" }
+serde.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
-tower-http.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
-tower.workspace = true
+tempfile = "3.20.0"
 
 [lints]
 workspace = true

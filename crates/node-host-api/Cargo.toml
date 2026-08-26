@@ -1,0 +1,15 @@
+[package]
+name = "piqae-node-host-api"
+version.workspace = true
+edition.workspace = true
+license = "Apache-2.0"
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+async-trait.workspace = true
+serde.workspace = true
+
+[lints]
+workspace = true

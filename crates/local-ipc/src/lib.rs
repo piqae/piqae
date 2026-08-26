@@ -18,8 +18,75 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use uuid::Uuid;
 
 pub const LOCAL_PROTOCOL_VERSION: u16 = 2;
+pub const BROKER_PROTOCOL_VERSION: u16 = 1;
 pub const MAX_MESSAGE_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_NATIVE_CAPTURE_BYTES: usize = 1024 * 1024;
+
+/// Non-sensitive broker discovery result. Presence never reveals an installed
+/// node's tenants, connectors, printers or installation identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrokerPresence {
+    pub protocol_min: u16,
+    pub protocol_max: u16,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrokerCredential {
+    pub application_id: String,
+    pub token: String,
+}
+
+impl std::fmt::Debug for BrokerCredential {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("BrokerCredential")
+            .field("application_id", &self.application_id)
+            .field("token", &"[REDACTED]")
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BrokerCapability {
+    ObserveStatus,
+    ObservePrinters,
+    ManageProfiles,
+    SubmitLocalJobs,
+    ManageConnectors,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BrokerRequest {
+    pub protocol: u16,
+    pub request_id: Uuid,
+    pub operation: BrokerOperation,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum BrokerOperation {
+    Presence,
+    Execute {
+        credential: BrokerCredential,
+        capability: BrokerCapability,
+        operation: LocalOperation,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BrokerResponse {
+    pub protocol: u16,
+    pub request_id: Uuid,
+    pub result: Result<BrokerResult, LocalFailure>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum BrokerResult {
+    Presence(BrokerPresence),
+    Local(LocalResult),
+}
 
 /// Generates a one-time 256-bit bearer token and the digest that may be
 /// persisted by the agent. The plaintext token is returned only to the
@@ -556,6 +623,37 @@ mod tests {
             challenge,
             operation: LocalOperation::Status,
         }
+    }
+
+    #[test]
+    fn broker_credentials_are_redacted_from_debug_output() {
+        let credential = BrokerCredential {
+            application_id: "com.example.pos".into(),
+            token: "sensitive-token".into(),
+        };
+        let output = format!("{credential:?}");
+        assert!(output.contains("com.example.pos"));
+        assert!(!output.contains("sensitive-token"));
+    }
+
+    #[test]
+    fn checked_in_broker_presence_fixtures_remain_compatible() {
+        let request: BrokerRequest = serde_json::from_slice(include_bytes!(
+            "../../../contracts/node-sdk/v1/broker-presence-request.json"
+        ))
+        .unwrap();
+        assert!(matches!(request.operation, BrokerOperation::Presence));
+        let response: BrokerResponse = serde_json::from_slice(include_bytes!(
+            "../../../contracts/node-sdk/v1/broker-presence-response.json"
+        ))
+        .unwrap();
+        assert!(matches!(
+            response.result,
+            Ok(BrokerResult::Presence(BrokerPresence {
+                protocol_min: 1,
+                protocol_max: 1
+            }))
+        ));
     }
 
     #[tokio::test]
