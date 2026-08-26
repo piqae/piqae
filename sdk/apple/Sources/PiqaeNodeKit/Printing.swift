@@ -87,11 +87,11 @@ public struct PiqaePrintRequest: Sendable {
         idempotencyKey: String
     ) throws {
         let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
-        let trimmedKey = idempotencyKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedIdempotencyValue = idempotencyKey.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedTitle.isEmpty, trimmedTitle.utf8.count <= 256 else {
             throw PiqaeNodeError.invalidConfiguration("Job titles must contain 1 to 256 UTF-8 bytes.")
         }
-        guard !trimmedKey.isEmpty, trimmedKey.utf8.count <= 200 else {
+        guard !normalizedIdempotencyValue.isEmpty, normalizedIdempotencyValue.utf8.count <= 200 else {
             throw PiqaeNodeError.invalidConfiguration("Idempotency keys must contain 1 to 200 UTF-8 bytes.")
         }
         guard content.byteCount > 0, content.byteCount <= 100 * 1024 * 1024 else {
@@ -102,7 +102,7 @@ public struct PiqaePrintRequest: Sendable {
         self.content = content
         self.intent = intent
         self.profileID = profileID
-        self.idempotencyKey = trimmedKey
+        self.idempotencyKey = normalizedIdempotencyValue
     }
 }
 
