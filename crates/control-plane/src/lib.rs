@@ -951,6 +951,10 @@ mod tests {
             events: Vec::new(),
             diagnostics: Vec::new(),
             document_render: piqae_protocol::agent::DocumentRenderCapabilities::default(),
+            capabilities: piqae_protocol::agent::AgentProtocolCapabilities::default(),
+            route_observations: Vec::new(),
+            topology_changes: Vec::new(),
+            native_handoffs: Vec::new(),
         })
         .expect("sync body");
 
@@ -1594,6 +1598,10 @@ mod tests {
             events: Vec::new(),
             diagnostics: Vec::new(),
             document_render: piqae_protocol::agent::DocumentRenderCapabilities::default(),
+            capabilities: piqae_protocol::agent::AgentProtocolCapabilities::default(),
+            route_observations: Vec::new(),
+            topology_changes: Vec::new(),
+            native_handoffs: Vec::new(),
         };
         let sync_response = application
             .router
@@ -1960,6 +1968,10 @@ mod tests {
             events: Vec::new(),
             diagnostics: Vec::new(),
             document_render: piqae_protocol::agent::DocumentRenderCapabilities::default(),
+            capabilities: piqae_protocol::agent::AgentProtocolCapabilities::default(),
+            route_observations: Vec::new(),
+            topology_changes: Vec::new(),
+            native_handoffs: Vec::new(),
         };
         let body = serde_json::to_vec(&request).expect("sync JSON");
         let response = application
@@ -2074,6 +2086,7 @@ mod tests {
                 last_test_job_id: None,
                 published: true,
             }],
+            route: None,
         }
     }
 
@@ -2146,6 +2159,10 @@ mod tests {
             events: Vec::new(),
             diagnostics: Vec::new(),
             document_render: piqae_protocol::agent::DocumentRenderCapabilities::default(),
+            capabilities: piqae_protocol::agent::AgentProtocolCapabilities::default(),
+            route_observations: Vec::new(),
+            topology_changes: Vec::new(),
+            native_handoffs: Vec::new(),
         };
         let body = serde_json::to_vec(&request).expect("sync JSON");
         let sync = application
@@ -2316,6 +2333,10 @@ mod tests {
             events: Vec::new(),
             diagnostics: Vec::new(),
             document_render: piqae_protocol::agent::DocumentRenderCapabilities::default(),
+            capabilities: piqae_protocol::agent::AgentProtocolCapabilities::default(),
+            route_observations: Vec::new(),
+            topology_changes: Vec::new(),
+            native_handoffs: Vec::new(),
         };
         let body = serde_json::to_vec(&sync_request).expect("sync JSON");
         let response = application
@@ -2492,6 +2513,10 @@ mod tests {
             events: Vec::new(),
             diagnostics: Vec::new(),
             document_render: piqae_protocol::agent::DocumentRenderCapabilities::default(),
+            capabilities: piqae_protocol::agent::AgentProtocolCapabilities::default(),
+            route_observations: Vec::new(),
+            topology_changes: Vec::new(),
+            native_handoffs: Vec::new(),
         };
         let reconnect_body = serde_json::to_vec(&reconnect).expect("reconnect JSON");
         let reconnect_response = application
@@ -3539,6 +3564,10 @@ mod tests {
             events: Vec::new(),
             diagnostics: Vec::new(),
             document_render: piqae_protocol::agent::DocumentRenderCapabilities::default(),
+            capabilities: piqae_protocol::agent::AgentProtocolCapabilities::default(),
+            route_observations: Vec::new(),
+            topology_changes: Vec::new(),
+            native_handoffs: Vec::new(),
         };
         let sync_body = serde_json::to_vec(&sync).expect("sync JSON");
         let sync_response = application

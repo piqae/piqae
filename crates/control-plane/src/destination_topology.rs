@@ -1878,3 +1878,304 @@ pub async fn list_delivery_attempts(
             .collect(),
     ))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{authentication::StaticAuthenticator, repository::MemoryRepository};
+    use piqae_domain::{EnvironmentId, WorkspaceId};
+    use piqae_storage_postgres::destination_topology::{
+        DestinationTopologyRepository, MemoryDestinationTopologyRepository,
+    };
+    use std::sync::Arc;
+
+    fn state_with_topology(topology: Arc<MemoryDestinationTopologyRepository>) -> AppState {
+        AppState::new_for_tests(
+            Arc::new(MemoryRepository::default()),
+            Arc::new(StaticAuthenticator::default()),
+        )
+        .with_destination_topology(topology)
+        .with_destination_identity_key([7; 32])
+    }
+
+    #[test]
+    fn evidence_digest_is_tenant_scoped_and_versioned() {
+        let state = state_with_topology(Arc::new(MemoryDestinationTopologyRepository::default()));
+        let first = TenantScope {
+            workspace_id: WorkspaceId::new(),
+            environment_id: EnvironmentId::new(),
+        };
+        let second = TenantScope {
+            workspace_id: WorkspaceId::new(),
+            environment_id: EnvironmentId::new(),
+        };
+        let raw = "0".repeat(64);
+        let first_digest = tenant_evidence_digest(&state, first, &raw).expect("first digest");
+        let second_digest = tenant_evidence_digest(&state, second, &raw).expect("second digest");
+        assert!(first_digest.starts_with("hmac-sha256:"));
+        assert_ne!(first_digest, second_digest);
+    }
+
+    #[test]
+    fn public_evidence_uses_conflict_not_a_decision_value() {
+        let evidence = IdentityEvidence {
+            id: "ide_test".into(),
+            destination_id: "pdst_test".into(),
+            route_id: "rte_test".into(),
+            kind: "device_serial".into(),
+            value_digest: format!("hmac-sha256:{}", "0".repeat(64)),
+            strength: "strong".into(),
+            conflicts: true,
+            observed_at: Utc::now(),
+            expires_at: None,
+            metadata: serde_json::json!({}),
+        };
+        assert_eq!(evidence_confidence(&evidence), "conflict");
+    }
+
+    #[tokio::test]
+    async fn matching_requires_same_kind_and_rejects_conflicting_strong_evidence() {
+        let topology = Arc::new(MemoryDestinationTopologyRepository::default());
+        let state = state_with_topology(topology.clone());
+        let tenant_scope = TenantScope {
+            workspace_id: WorkspaceId::new(),
+            environment_id: EnvironmentId::new(),
+        };
+        let destination_id = "pdst_01J00000000000000000000000";
+        topology
+            .upsert_destination(
+                tenant_scope,
+                &StoredPhysicalDestination {
+                    id: destination_id.into(),
+                    name: "Printer".into(),
+                    identity_confidence: IdentityConfidence::High,
+                    state: "available".into(),
+                    scheduling_authority_id: None,
+                    identity_revision: 1,
+                    updated_at: Utc::now(),
+                },
+            )
+            .await
+            .expect("destination");
+        topology
+            .upsert_route(
+                tenant_scope,
+                &StoredPrinterRoute {
+                    id: "rte_01J00000000000000000000000".into(),
+                    destination_id: destination_id.into(),
+                    printer_id: "ptr_test".into(),
+                    agent_id: "agt_test".into(),
+                    native_queue_id: "native-test".into(),
+                    local_route_key: Some("rte_local_test".into()),
+                    state: "available".into(),
+                    role: "primary".into(),
+                    priority: 0,
+                    enabled: true,
+                    capability_revision: 1,
+                    profile_revision: 1,
+                    last_seen_at: Some(Utc::now()),
+                    updated_at: Utc::now(),
+                },
+            )
+            .await
+            .expect("route");
+        for (id, kind, digest) in [
+            ("ide_uuid", "ipp_uuid", "a".repeat(64)),
+            ("ide_serial", "device_serial", "b".repeat(64)),
+        ] {
+            topology
+                .record_identity_evidence(
+                    tenant_scope,
+                    &IdentityEvidence {
+                        id: id.into(),
+                        destination_id: destination_id.into(),
+                        route_id: "rte_01J00000000000000000000000".into(),
+                        kind: kind.into(),
+                        value_digest: digest,
+                        strength: "strong".into(),
+                        conflicts: false,
+                        observed_at: Utc::now(),
+                        expires_at: None,
+                        metadata: serde_json::json!({}),
+                    },
+                )
+                .await
+                .expect("evidence");
+        }
+        let cross_kind = destination_for_new_route(
+            &state,
+            tenant_scope,
+            &[("device_serial".into(), "strong".into(), "a".repeat(64))],
+        )
+        .await
+        .expect("cross-kind result");
+        assert_ne!(cross_kind.0, destination_id);
+        assert!(!cross_kind.1);
+
+        let conflicting = destination_for_new_route(
+            &state,
+            tenant_scope,
+            &[
+                ("ipp_uuid".into(), "strong".into(), "a".repeat(64)),
+                ("device_serial".into(), "strong".into(), "c".repeat(64)),
+            ],
+        )
+        .await
+        .expect("conflict result");
+        assert_ne!(conflicting.0, destination_id);
+        assert!(conflicting.1);
+    }
+
+    #[tokio::test]
+    async fn postgres_agent_projection_is_idempotent_and_tenant_isolated() {
+        use crate::authentication::TenantContext;
+        use piqae_domain::{PrinterCapabilities, PrinterId, PrinterState};
+        use piqae_protocol::agent::{
+            AgentHealth, AgentProtocolCapabilities, AgentSyncRequest, IdentityEvidenceStrength,
+            PhysicalIdentityEvidence, PhysicalIdentityEvidenceKind, PrinterRouteSnapshot,
+            PrinterSnapshot, QueueSnapshot,
+        };
+        use piqae_storage_postgres::PostgresStore;
+        use sqlx::postgres::PgPoolOptions;
+
+        let Ok(database_url) = std::env::var("PIQAE_TEST_DATABASE_URL") else {
+            eprintln!("skipped: set PIQAE_TEST_DATABASE_URL for control-plane topology evidence");
+            return;
+        };
+        let schema = format!("piqae_control_topology_{}", ulid::Ulid::new()).to_ascii_lowercase();
+        let admin = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&database_url)
+            .await
+            .expect("connect test postgres");
+        sqlx::query(&format!("CREATE SCHEMA {schema}"))
+            .execute(&admin)
+            .await
+            .expect("create disposable schema");
+        let schema_for_connection = schema.clone();
+        let pool = PgPoolOptions::new()
+            .max_connections(4)
+            .after_connect(move |connection, _| {
+                let statement = format!("SET search_path TO {schema_for_connection}");
+                Box::pin(async move {
+                    sqlx::query(&statement).execute(connection).await?;
+                    Ok(())
+                })
+            })
+            .connect(&database_url)
+            .await
+            .expect("connect schema pool");
+        let store = PostgresStore::from_pool(pool.clone());
+        store.migrate().await.expect("migrate disposable schema");
+
+        let mut destination_ids = Vec::new();
+        let mut stored_digests = Vec::new();
+        for index in 1_u8..=2 {
+            let workspace_id = WorkspaceId::new();
+            let environment_id = EnvironmentId::new();
+            let tenant = TenantContext::unrestricted(workspace_id, environment_id);
+            store
+                .ensure_bootstrap_tenant(workspace_id, environment_id)
+                .await
+                .expect("bootstrap tenant");
+            let agent_id = piqae_domain::AgentId::new();
+            let printer_id = PrinterId::new();
+            sqlx::query("INSERT INTO agents (id,workspace_id,environment_id,name,installation_id,public_key,os,architecture,version,protocol_version) VALUES ($1,$2,$3,'Node',$4,$5,'linux','x86_64','test',1)")
+                .bind(agent_id.to_string()).bind(workspace_id.to_string()).bind(environment_id.to_string())
+                .bind(format!("installation-{index}")).bind(vec![index; 32]).execute(&pool).await.expect("agent");
+            sqlx::query("INSERT INTO printers (id,workspace_id,environment_id,agent_id,native_id,name,state,capabilities_revision) VALUES ($1,$2,$3,$4,$5,'Printer','online',1)")
+                .bind(printer_id.to_string()).bind(workspace_id.to_string()).bind(environment_id.to_string())
+                .bind(agent_id.to_string()).bind(format!("native-{index}")).execute(&pool).await.expect("printer");
+            let now = Utc::now();
+            let request = AgentSyncRequest {
+                agent_id,
+                protocol_version: 1,
+                agent_version: "test".into(),
+                printer_revision: 1,
+                acknowledged_command_cursor: None,
+                event_cursor: None,
+                queue: QueueSnapshot {
+                    queued_jobs: 0,
+                    active_jobs: 0,
+                    content_bytes: 0,
+                    accepts_jobs: true,
+                },
+                health: AgentHealth {
+                    started_at: now,
+                    observed_at: now,
+                    sqlite_integrity_ok: true,
+                    executor_crashes: 0,
+                    last_error_code: None,
+                },
+                printers: Some(vec![PrinterSnapshot {
+                    id: printer_id,
+                    native_id: format!("native-{index}"),
+                    name: "Printer".into(),
+                    state: PrinterState::Online,
+                    is_default: true,
+                    capabilities: PrinterCapabilities::default(),
+                    exposed: true,
+                    capability_revision: 1,
+                    native_options: Default::default(),
+                    semantic_capabilities: Default::default(),
+                    profiles: Vec::new(),
+                    route: Some(PrinterRouteSnapshot {
+                        local_route_key: format!("rte_{}", format!("{index:x}").repeat(32)),
+                        inventory_revision: 1,
+                        topology_revision: 1,
+                        observed_at: now,
+                        identity_evidence: vec![PhysicalIdentityEvidence {
+                            kind: PhysicalIdentityEvidenceKind::DeviceSerial,
+                            value_sha256: "a".repeat(64),
+                            strength: IdentityEvidenceStrength::Strong,
+                        }],
+                        identity_confidence: piqae_protocol::agent::IdentityConfidence::High,
+                        topology_change: None,
+                        profile_observed_at: Some(now),
+                        stock_observed_at: Some(now),
+                    }),
+                }]),
+                events: Vec::new(),
+                diagnostics: Vec::new(),
+                document_render: Default::default(),
+                capabilities: AgentProtocolCapabilities::default(),
+                route_observations: Vec::new(),
+                topology_changes: Vec::new(),
+                native_handoffs: Vec::new(),
+            };
+            let state = AppState::new_for_tests(
+                Arc::new(store.clone()),
+                Arc::new(StaticAuthenticator::default()),
+            )
+            .with_destination_topology(Arc::new(store.clone()))
+            .with_destination_identity_key([9; 32]);
+            project_agent_topology(&state, tenant, &request)
+                .await
+                .expect("first projection");
+            project_agent_topology(&state, tenant, &request)
+                .await
+                .expect("repeat projection");
+            let tenant_scope = scope(tenant);
+            let destinations = store
+                .list_destinations(tenant_scope)
+                .await
+                .expect("destinations");
+            assert_eq!(destinations.len(), 1);
+            let evidence = store
+                .list_identity_evidence(tenant_scope, &destinations[0].id)
+                .await
+                .expect("evidence");
+            assert_eq!(evidence.len(), 1);
+            destination_ids.push(destinations[0].id.clone());
+            stored_digests.push(evidence[0].value_digest.clone());
+        }
+        assert_ne!(destination_ids[0], destination_ids[1]);
+        assert_ne!(stored_digests[0], stored_digests[1]);
+
+        pool.close().await;
+        sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+            .execute(&admin)
+            .await
+            .expect("drop disposable schema");
+    }
+}
