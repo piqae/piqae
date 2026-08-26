@@ -523,7 +523,7 @@ button:disabled {
   color: var(--text-tertiary);
 }
 
-@media (max-width: 720px) {
+@media (max-width: 900px) {
   .ui-toolbar {
     flex-wrap: wrap;
     padding: 10px 0;
