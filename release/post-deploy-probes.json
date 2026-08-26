@@ -11,6 +11,8 @@
         { "path": "/v1/workspaces/current/members", "expect": "authenticated" },
         { "path": "/v1/identity/me", "expect": "authenticated" },
         { "path": "/v1/printers", "expect": "authenticated" },
+        { "path": "/v1/physical-destinations", "expect": "authenticated" },
+        { "path": "/v1/printer-routes", "expect": "authenticated" },
         { "path": "/v1/jobs", "expect": "authenticated" },
         { "path": "/v1/api-keys", "expect": "authenticated" },
         { "path": "/v1/webhooks", "expect": "authenticated" },

@@ -13,6 +13,8 @@ class PostgresReleaseEvidenceTest(unittest.TestCase):
         self.assertEqual(
             [gate.identifier for gate in evidence.GATES],
             [
+                "destination_topology_fencing_fifo",
+                "destination_topology_n_minus_one_upgrade",
                 "routing_recovery",
                 "platform_service_accounts",
                 "platform_service_account_http",
@@ -22,6 +24,30 @@ class PostgresReleaseEvidenceTest(unittest.TestCase):
                 "billing",
             ],
         )
+
+    def test_destination_topology_runs_both_named_release_boundaries(self) -> None:
+        topology = evidence.GATES[:2]
+        self.assertEqual(
+            [gate.expected_test for gate in topology],
+            [
+                "postgres_topology_is_tenant_isolated_and_fences_delivery",
+                "migration_42_upgrades_41_and_backfills_without_inferring_route_merges",
+            ],
+        )
+        for gate in topology:
+            self.assertEqual(
+                gate.command[:6],
+                (
+                    "cargo",
+                    "test",
+                    "-p",
+                    "piqae-storage-postgres",
+                    "--test",
+                    "destination_topology",
+                ),
+            )
+            self.assertIn(gate.expected_test, gate.command)
+            self.assertEqual(gate.command[-3:], ("--locked", "--", "--nocapture"))
 
     def test_missing_database_url_fails_closed(self) -> None:
         with self.assertRaisesRegex(

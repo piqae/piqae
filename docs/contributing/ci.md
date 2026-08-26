@@ -28,6 +28,10 @@ It refuses to imply coverage it did not give:
   attributed to the CI job that does cover it.
 - Jobs that only exist to produce release artifacts are listed as `ci-only`
   rather than silently dropped.
+- The changed-history Gitleaks scan is also listed as `ci-only`: reproducing it
+  faithfully depends on GitHub's event base/head boundary. Local preflight
+  still runs the release policy and dependency checks; GitHub remains the
+  authority for the bounded secret-history result.
 
 ### PostgreSQL
 
