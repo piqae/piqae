@@ -4114,6 +4114,22 @@ fn upsert_cloud_accept_intent(
     route: &CloudRouteProof,
     prepared_unix_ms: i64,
 ) -> Result<(), StorageError> {
+    let existing = connection
+        .query_row(
+            "SELECT job_id, lease_id, lease_token, lease_expires_unix_ms,
+                    content_sha256, local_sequence, route_reservation_id,
+                    route_generation, route_fencing_token, acceptance_state
+             FROM cloud_accept_intents WHERE job_id = ?1",
+            [&job.job_id],
+            row_to_cloud_accept_intent,
+        )
+        .optional()?;
+    if existing.as_ref().is_some_and(|intent| {
+        intent.remote_accept_confirmed
+            && !cloud_accept_evidence_matches(intent, job, lease_id, lease_token, route)
+    }) {
+        return Err(StorageError::JobConflict(job.job_id.clone()));
+    }
     connection.execute(
         "INSERT INTO cloud_accept_intents (
             job_id, lease_id, lease_token, lease_expires_unix_ms,
@@ -4151,6 +4167,28 @@ fn upsert_cloud_accept_intent(
         ],
     )?;
     Ok(())
+}
+
+fn cloud_accept_evidence_matches(
+    intent: &CloudAcceptIntent,
+    job: &LocalJob,
+    lease_id: &str,
+    lease_token: &str,
+    route: &CloudRouteProof,
+) -> bool {
+    constant_time_str_eq(&intent.lease_id, lease_id)
+        && constant_time_str_eq(&intent.lease_token, lease_token)
+        && constant_time_str_eq(&intent.content_sha256, &job.content_sha256)
+        && u64::try_from(job.printer_sequence).ok() == Some(intent.local_sequence)
+        && intent
+            .route_reservation_id
+            .as_deref()
+            .is_some_and(|value| constant_time_str_eq(value, &route.reservation_id))
+        && intent.route_generation == Some(route.generation)
+        && intent
+            .route_fencing_token
+            .as_deref()
+            .is_some_and(|value| constant_time_str_eq(value, &route.fencing_token))
 }
 
 fn row_to_cloud_accept_intent(
@@ -4510,6 +4548,79 @@ mod tests {
         assert_eq!(restarted.runnable_heads(30).unwrap().len(), 1);
         assert_eq!(restarted.pending_events(0, 10).unwrap().len(), 1);
         assert!(restarted.pending_cloud_accepts().unwrap().is_empty());
+    }
+
+    #[test]
+    fn confirmed_cloud_accept_rejects_conflicting_reoffer_and_retains_exact_proof() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("confirmed-reoffer.sqlite");
+        let mut cloud = job("cloud-reoffer", "p1", 10);
+        cloud.cloud_managed = true;
+        let original_route = cloud_route_proof();
+        let original_lease_id = "lease-original";
+        let original_lease_token = "token-original";
+        {
+            let mut store = AgentStore::open(&database).unwrap();
+            store
+                .prepare_cloud_job(
+                    &cloud,
+                    original_lease_id,
+                    original_lease_token,
+                    30_000,
+                    &original_route,
+                )
+                .unwrap();
+            store.confirm_cloud_accept(&cloud.job_id, 11).unwrap();
+
+            // An identical replay may refresh non-authority scheduling data
+            // without losing the durable remote confirmation.
+            store
+                .prepare_cloud_job(
+                    &cloud,
+                    original_lease_id,
+                    original_lease_token,
+                    60_000,
+                    &original_route,
+                )
+                .unwrap();
+
+            let conflicting_route = CloudRouteProof {
+                reservation_id: "reservation-conflicting".into(),
+                generation: original_route.generation + 1,
+                fencing_token: "fence-conflicting".into(),
+            };
+            assert!(matches!(
+                store.prepare_cloud_job(
+                    &cloud,
+                    "lease-conflicting",
+                    "token-conflicting",
+                    90_000,
+                    &conflicting_route,
+                ),
+                Err(StorageError::JobConflict(_))
+            ));
+        }
+
+        let restarted = AgentStore::open(&database).unwrap();
+        let intents = restarted.pending_cloud_accepts().unwrap();
+        assert_eq!(intents.len(), 1);
+        assert!(intents[0].remote_accept_confirmed);
+        assert_eq!(intents[0].lease_id, original_lease_id);
+        assert_eq!(intents[0].lease_token, original_lease_token);
+        assert_eq!(
+            intents[0].route_reservation_id.as_deref(),
+            Some(original_route.reservation_id.as_str())
+        );
+        assert_eq!(intents[0].route_generation, Some(original_route.generation));
+        assert_eq!(
+            intents[0].route_fencing_token.as_deref(),
+            Some(original_route.fencing_token.as_str())
+        );
+        assert_eq!(
+            restarted.get_job(&cloud.job_id).unwrap().unwrap().state,
+            "cloud_accept_pending"
+        );
+        assert!(restarted.runnable_heads(20).unwrap().is_empty());
     }
 
     #[test]
