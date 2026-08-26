@@ -1195,45 +1195,43 @@ mod tests {
 
     #[test]
     fn preflight_models_supply_chain_and_observability_commands() {
-        let dependency_policy = CHECKS
-            .iter()
-            .find(|check| check.job == "Supply-chain policy / Rust dependency policy")
-            .expect("dependency policy check");
-        assert_eq!(dependency_policy.scopes, &["dependency_policy"]);
-        assert_eq!(
-            dependency_policy.steps,
-            &[
-                &["cargo", "deny", "check", "--hide-inclusion-graph"][..],
-                &["cargo", "audit"][..],
-            ]
-        );
-
-        let release_policy = CHECKS
-            .iter()
-            .find(|check| check.job == "Supply-chain policy / Release policy and tooling")
-            .expect("release policy check");
         assert!(
-            release_policy
-                .steps
-                .iter()
-                .any(|step| { *step == ["ruby", "release/tools/check_release_policy.rb"] })
+            CHECKS.iter().any(|check| {
+                check.job == "Supply-chain policy / Rust dependency policy"
+                    && check.scopes == ["dependency_policy"]
+                    && check.steps
+                        == [
+                            &["cargo", "deny", "check", "--hide-inclusion-graph"][..],
+                            &["cargo", "audit"][..],
+                        ]
+            }),
+            "dependency policy check must reproduce CI"
         );
         assert!(
-            release_policy
-                .steps
-                .iter()
-                .any(|step| { *step == ["ruby", "release/tools/test_release_policy.rb"] })
+            CHECKS.iter().any(|check| {
+                check.job == "Supply-chain policy / Release policy and tooling"
+                    && check
+                        .steps
+                        .iter()
+                        .any(|step| *step == ["ruby", "release/tools/check_release_policy.rb"])
+                    && check
+                        .steps
+                        .iter()
+                        .any(|step| *step == ["ruby", "release/tools/test_release_policy.rb"])
+            }),
+            "release policy check must reproduce CI"
         );
-
-        let observability = CHECKS
-            .iter()
-            .find(|check| check.job == "CI / Rust (ubuntu-latest, otlp)")
-            .expect("observability feature matrix");
-        assert_eq!(observability.steps.len(), 5);
-        assert!(observability.steps.iter().any(|step| {
-            step.windows(2)
-                .any(|arguments| arguments == ["--features", "otlp,sentry"])
-        }));
+        assert!(
+            CHECKS.iter().any(|check| {
+                check.job == "CI / Rust (ubuntu-latest, otlp)"
+                    && check.steps.len() == 5
+                    && check.steps.iter().any(|step| {
+                        step.windows(2)
+                            .any(|arguments| arguments == ["--features", "otlp,sentry"])
+                    })
+            }),
+            "observability feature matrix must reproduce CI"
+        );
     }
 
     #[test]
