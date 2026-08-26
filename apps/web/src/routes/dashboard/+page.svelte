@@ -12,6 +12,14 @@
   import { operationalViews, stateFilters } from '$lib/dashboard-navigation';
   import { nativeNodeConnectUrlFromHandoff } from '$lib/node-connect-fragment';
   import {
+    destinationNeedsReview,
+    identitySummary,
+    profilesSummary,
+    routeHealthSummary,
+    routeNeedsReview,
+    stockSummary
+  } from '$lib/operations-health';
+  import {
     summariseUncertainDelivery,
     summariseUncertainDeliveryOverview,
     UNCERTAIN_DELIVERY_STATE
@@ -55,13 +63,6 @@
       overview.jobs.uncertain,
       overview.jobs.oldestUncertainSince
     )
-  );
-  const uncertainTitle = $derived(
-    uncertain.count === 0
-      ? 'No job is waiting on proof that it printed.'
-      : `Piqae cannot prove these jobs printed. Longest unresolved: ${
-          uncertain.oldestLabel ?? 'unknown'
-        }.`
   );
 
   // The checklist is scaffolding, not chrome: once a first job exists it stops
@@ -141,15 +142,23 @@
     (customerFilter === 'all' || job.customer?.externalId === customerFilter)
   ));
   const reviewDestinations = $derived(data.destinations.filter((destination) =>
-    (destination.status === 'needs_review' || destination.identityConfidence === 'possible' || destination.identityConfidence === 'conflict' || destination.identityConfidence === 'unknown') &&
+    destinationNeedsReview(destination) &&
     matches(destination.displayName, destination.id, destination.customer?.name) &&
     (customerFilter === 'all' || destination.customer?.externalId === customerFilter)
   ));
   const reviewRoutes = $derived(data.routes.filter((route) =>
-    (route.health === 'needs_operator' || route.health === 'stale' || route.projectionHealth === 'failed' || route.telemetryFreshness === 'stale') &&
+    routeNeedsReview(route) &&
     matches(route.nativeQueueId, route.id, route.customer?.name) &&
     (customerFilter === 'all' || route.customer?.externalId === customerFilter)
   ));
+  const reviewCount = $derived(reviewJobs.length + reviewDestinations.length + reviewRoutes.length);
+  const reviewTitle = $derived(
+    reviewCount === 0
+      ? 'No actionable delivery, route, projection, or identity issues.'
+      : uncertain.count > 0
+        ? `Piqae cannot prove ${uncertain.count === 1 ? 'this job' : 'these jobs'} printed. Longest unresolved: ${uncertain.oldestLabel ?? 'unknown'}.`
+        : `${reviewCount} actionable issue${reviewCount === 1 ? '' : 's'} across delivery and printer routing.`
+  );
 
   const resultCount = $derived(
     data.view === 'jobs'
@@ -165,7 +174,7 @@
               : data.view === 'queue'
                 ? visibleQueueRoutes.length
                 : data.view === 'needs_review'
-                  ? reviewJobs.length + reviewDestinations.length + reviewRoutes.length
+                  ? reviewCount
                   : visibleAccounts.length
   );
 
@@ -233,8 +242,9 @@
           route.agentId.replace(/^agt_/, '') === node.id.replace(/^agt_/, '') &&
           (!node.customer || route.customer?.externalId === node.customer.externalId)
       )
-      .map((route) => route.latestObservation)
-      .filter((observation) => observation !== null);
+      .flatMap((route) =>
+        route.latestObservation?.queueReported ? [route.latestObservation] : []
+      );
     if (observations.length === 0) return null;
     const owned = observations.reduce((sum, observation) => sum + observation.connectorJobs, 0);
     const unknown = observations.reduce((sum, observation) => sum + observation.unknownJobs, 0);
@@ -278,6 +288,9 @@
   const destinationName = (destinationId: string, customerExternalId?: string | null) =>
     data.destinations.find((destination) => destination.id === destinationId && destination.customer?.externalId === customerExternalId)?.displayName ??
     data.destinations.find((destination) => destination.id === destinationId)?.displayName ?? 'Unknown destination';
+  const routePrinter = (route: (typeof data.routes)[number]) =>
+    data.printers.find((printer) => printer.id === route.printerId && printer.customer?.externalId === route.customer?.externalId)
+      ?? data.printers.find((printer) => printer.id === route.printerId);
 
   // Enrolment dialog.
   let enrolmentOpen = $state(false);
@@ -328,6 +341,7 @@
   let printPending = $state(false);
   let diagnosticsPending = $state(false);
   let refreshPending = $state(false);
+  let nodeDetailsPending = $state(false);
   let removeNodeOpen = $state(false);
   let removeNodePending = $state(false);
   let removeNodeConfirmation = $state('');
@@ -477,12 +491,14 @@
 {/if}
 
 {#snippet uncertainDetail()}
-  {#if uncertain.count === 0}
-    No uncertain handoffs
-  {:else}
+  {#if reviewCount === 0}
+    No actionable issues
+  {:else if uncertain.count > 0}
     {uncertain.count} uncertain {uncertain.count === 1 ? 'handoff' : 'handoffs'}{#if uncertain.oldestLabel}
       · <strong>oldest {uncertain.oldestLabel}</strong>
-    {/if}
+    {/if}{#if reviewCount > uncertain.count} · {reviewCount - uncertain.count} other{/if}
+  {:else}
+    {reviewCount} actionable {reviewCount === 1 ? 'issue' : 'issues'}
   {/if}
 {/snippet}
 
@@ -509,10 +525,10 @@
   />
   <Metric
     label="Needs review"
-    value={overview.jobs.failed + overview.jobs.uncertain}
+    value={reviewCount}
     detail={uncertainDetail}
-    tone={uncertain.count > 0 ? 'attention' : 'neutral'}
-    title={uncertainTitle}
+    tone={reviewCount > 0 ? 'attention' : 'neutral'}
+    title={reviewTitle}
     href={operationalHref({ view: 'needs_review', state: null })}
   />
 </section>
@@ -578,7 +594,7 @@
           <tr>
             <td><a class="cell-stack" href={detailHref('destination', destination.id, destination.customer?.externalId)}><strong>{destination.displayName}</strong><small>Physical destination</small></a></td>
             {#if aggregateCustomers}<td>{destination.customer?.name ?? 'Unknown'}</td>{/if}
-            <td><Status value={destination.identityConfidence} /></td>
+            <td><Status value={identitySummary(destination)} /></td>
             <td class="right muted"><RelativeTime value={destination.updatedAt} /></td>
           </tr>
         {/each}
@@ -586,11 +602,11 @@
           <tr>
             <td><a class="cell-stack" href={detailHref('route', route.id, route.customer?.externalId)}><strong>{destinationName(route.physicalDestinationId, route.customer?.externalId)}</strong><small class="mono">{route.nativeQueueId}</small></a></td>
             {#if aggregateCustomers}<td>{route.customer?.name ?? 'Unknown'}</td>{/if}
-            <td>{#if route.projectionHealth === 'failed'}<Status value="projection_failed" />{:else}<Status value={route.health === 'ready' ? route.telemetryFreshness : route.health} />{/if}</td>
+            <td>{#if route.projectionHealth === 'failed'}<Status value="projection_failed" />{:else}<Status value={routeHealthSummary(route)} />{/if}</td>
             <td class="right muted"><RelativeTime value={route.latestObservation?.observedAt ?? route.updatedAt} /></td>
           </tr>
         {/each}
-        {#if reviewJobs.length + reviewDestinations.length + reviewRoutes.length === 0}
+        {#if reviewCount === 0}
           <tr><td colspan={aggregateCustomers ? 4 : 3}><EmptyState message="Nothing needs review." compact /></td></tr>
         {/if}
       </tbody>
@@ -657,8 +673,8 @@
               </td>
               {#if aggregateCustomers}<td><a class="customer-link" href={operationalHref({ managed_customer: route.customer?.externalId ?? null, scope: null })}>{route.customer?.name ?? 'Unknown'}</a></td>{/if}
               <td><Status value={observation.printerState} /></td>
-              <td class="numeric">{observation.totalJobs} total · {observation.activeJobs} active · {observation.heldJobs} held</td>
-              <td>{observation.connectorJobs} this connection · {observation.otherPiqaeOrExternalJobs} other · {observation.unknownJobs} unknown</td>
+              <td class="numeric">{observation.queueReported ? `${observation.totalJobs} total · ${observation.activeJobs} active · ${observation.heldJobs} held` : 'Not reported'}</td>
+              <td>{observation.queueReported ? `${observation.connectorJobs} this connection · ${observation.otherPiqaeOrExternalJobs} other · ${observation.unknownJobs} unknown` : 'Native queue unavailable'}</td>
               <td class="right"><span class:stale={route.telemetryFreshness === 'stale' || route.telemetryFreshness === 'never'}>{route.telemetryFreshness}</span> · <RelativeTime value={observation.observedAt} /></td>
             </tr>
           {/if}
@@ -689,7 +705,7 @@
               </a>
             </td>
             {#if aggregateCustomers}<td><a class="customer-link" href={operationalHref({ managed_customer: destination.customer?.externalId ?? null, scope: null })}>{destination.customer?.name ?? 'Unknown'}</a></td>{/if}
-            <td><Status value={destination.identityConfidence} /></td>
+            <td><Status value={identitySummary(destination)} /></td>
             <td><Status value={destination.status} /></td>
             <td class="numeric">{destination.routeCount}</td>
             <td class="right muted numeric"><RelativeTime value={destination.updatedAt} /></td>
@@ -708,7 +724,8 @@
           <th>Route health</th>
           <th>Inventory projection</th>
           <th>Telemetry</th>
-          <th>Profiles / stock</th>
+          <th>Profiles</th>
+          <th>Media / stock</th>
           <th>Scheduling authority</th>
         </tr>
       </thead>
@@ -722,14 +739,15 @@
               </a>
             </td>
             {#if aggregateCustomers}<td><a class="customer-link" href={operationalHref({ managed_customer: route.customer?.externalId ?? null, scope: null })}>{route.customer?.name ?? 'Unknown'}</a></td>{/if}
-            <td><Status value={route.health} /></td>
+            <td><Status value={routeHealthSummary(route)} /></td>
             <td><Status value={route.projectionHealth} /></td>
             <td><Status value={route.telemetryFreshness} /></td>
-            <td><Status value={route.stockState ?? 'unknown'} /></td>
+            <td><Status value={profilesSummary(route, routePrinter(route))} /></td>
+            <td><Status value={stockSummary(route)} /></td>
             <td class="mono muted">{route.schedulingAuthorityId ?? 'Local connector only'}</td>
           </tr>
         {:else}
-          <tr><td colspan={aggregateCustomers ? 7 : 6}><EmptyState message="No printer routes match this view." compact /></td></tr>
+          <tr><td colspan={aggregateCustomers ? 8 : 7}><EmptyState message="No printer routes match this view." compact /></td></tr>
         {/each}
       </tbody>
     </table>
@@ -1084,7 +1102,7 @@
         { term: 'Route ID', value: detail.route.id, mono: true }
       ]}
     />
-    {#if detail.route.latestObservation}
+    {#if detail.route.latestObservation?.queueReported}
       <div class="drawer-section">
         <h3>Privacy-safe queue<span><RelativeTime value={detail.route.latestObservation.observedAt} /></span></h3>
         <DefinitionList items={[
@@ -1113,10 +1131,56 @@
         { term: 'Node version', value: `v${detail.node.version}`, mono: true },
         { term: 'Protocol', value: detail.node.protocolVersion, mono: true },
         { term: 'Reported queue', value: runtimeQueue ? `${runtimeQueue.total} jobs · ${runtimeQueue.active} active` : 'Not reported' },
+        { term: 'Site', value: detail.node.site ?? null },
+        { term: 'Location', value: detail.node.location ?? null },
         { term: 'Labels', value: detail.node.labels.join(', ') || null },
         { term: 'Node ID', value: detail.node.id, mono: true }
       ]}
     />
+
+    {#if managedAccount || data.scope === 'own'}
+      <div class="drawer-section">
+        <h3>Operator details<span>private to this workspace</span></h3>
+        <form
+          class="node-details-form"
+          method="POST"
+          action="?/updateNodeDetails"
+          use:enhance={() => {
+            nodeDetailsPending = true;
+            return async ({ update }) => {
+              await update({ reset: false, invalidateAll: true });
+              nodeDetailsPending = false;
+            };
+          }}
+        >
+          {#if managedAccount}<input type="hidden" name="managed_customer" value={managedAccount.externalId} />{/if}
+          <input type="hidden" name="node_id" value={detail.node.id} />
+          <Field label="Node name">
+            <input class="input" name="name" value={detail.node.name} maxlength="120" required />
+          </Field>
+          <Field label="Site (optional)">
+            <input class="input" name="site" value={detail.node.site ?? ''} maxlength="120" placeholder="Main warehouse" />
+          </Field>
+          <Field label="Location (optional)">
+            <input class="input" name="location" value={detail.node.location ?? ''} maxlength="120" placeholder="Dispatch desk" />
+          </Field>
+          <Field label="Labels (optional, comma separated)">
+            <input class="input" name="labels" value={detail.node.labels.join(', ')} maxlength="1054" placeholder="shipping, labels" />
+          </Field>
+          <p class="muted empty-line">
+            Piqae uses the computer name by default. Site, location, and labels are only uploaded
+            when an operator or host application supplies them; usernames and addresses are never inferred.
+          </p>
+          <button class="button small" type="submit" disabled={nodeDetailsPending || data.dashboardMode !== 'live'}>
+            {nodeDetailsPending ? 'Saving…' : 'Save node details'}
+          </button>
+          {#if form?.mutation === 'updateNodeDetails'}
+            {#if form?.error}<p class="ui-note error" role="alert">{form.error.message}</p>
+            {:else}<p class="ui-note neutral" role="status">Node details saved.</p>{/if}
+          {/if}
+        </form>
+      </div>
+    {/if}
 
     <div class="drawer-section runtime-detail">
       <h3>Host availability<span>{detail.runtime?.freshness ?? 'never reported'}</span></h3>

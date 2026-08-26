@@ -461,12 +461,15 @@ pub trait Repository: Send + Sync + 'static {
         environment_id: EnvironmentId,
         agent_id: AgentId,
     ) -> Result<StoredAgent, RepositoryError>;
-    async fn rename_agent(
+    async fn update_agent_details(
         &self,
         workspace_id: WorkspaceId,
         environment_id: EnvironmentId,
         agent_id: AgentId,
-        name: &str,
+        name: Option<&str>,
+        site: Option<Option<&str>>,
+        location: Option<Option<&str>>,
+        labels: Option<&[String]>,
     ) -> Result<StoredAgent, RepositoryError>;
     async fn revoke_agent(
         &self,
@@ -2055,16 +2058,28 @@ impl Repository for PostgresStore {
             .map_err(Into::into)
     }
 
-    async fn rename_agent(
+    async fn update_agent_details(
         &self,
         workspace_id: WorkspaceId,
         environment_id: EnvironmentId,
         agent_id: AgentId,
-        name: &str,
+        name: Option<&str>,
+        site: Option<Option<&str>>,
+        location: Option<Option<&str>>,
+        labels: Option<&[String]>,
     ) -> Result<StoredAgent, RepositoryError> {
-        Self::rename_agent(self, workspace_id, environment_id, agent_id, name)
-            .await
-            .map_err(Into::into)
+        Self::update_agent_details(
+            self,
+            workspace_id,
+            environment_id,
+            agent_id,
+            name,
+            site,
+            location,
+            labels,
+        )
+        .await
+        .map_err(Into::into)
     }
 
     async fn revoke_agent(
@@ -3451,6 +3466,9 @@ impl MemoryRepository {
                 StoredAgent {
                     id: agent_id,
                     name: "Test agent".into(),
+                    site: None,
+                    location: None,
+                    labels: Vec::new(),
                     platform: "test".into(),
                     state: "connected".into(),
                     version: env!("CARGO_PKG_VERSION").into(),
@@ -4682,12 +4700,15 @@ impl Repository for MemoryRepository {
             .ok_or(RepositoryError::NotFound)
     }
 
-    async fn rename_agent(
+    async fn update_agent_details(
         &self,
         workspace_id: WorkspaceId,
         environment_id: EnvironmentId,
         agent_id: AgentId,
-        name: &str,
+        name: Option<&str>,
+        site: Option<Option<&str>>,
+        location: Option<Option<&str>>,
+        labels: Option<&[String]>,
     ) -> Result<StoredAgent, RepositoryError> {
         let mut state = self.state.write().await;
         let (_, _, agent) = state
@@ -4697,7 +4718,18 @@ impl Repository for MemoryRepository {
                 *workspace == workspace_id && *environment == environment_id
             })
             .ok_or(RepositoryError::NotFound)?;
-        name.clone_into(&mut agent.name);
+        if let Some(name) = name {
+            name.clone_into(&mut agent.name);
+        }
+        if let Some(site) = site {
+            agent.site = site.map(str::to_owned);
+        }
+        if let Some(location) = location {
+            agent.location = location.map(str::to_owned);
+        }
+        if let Some(labels) = labels {
+            labels.clone_into(&mut agent.labels);
+        }
         Ok(agent.clone())
     }
 
@@ -5535,6 +5567,9 @@ impl Repository for MemoryRepository {
         let agent = StoredAgent {
             id: agent_id,
             name: proposed_name,
+            site: None,
+            location: None,
+            labels: Vec::new(),
             platform,
             state: "disconnected".into(),
             version,
@@ -5615,6 +5650,9 @@ impl Repository for MemoryRepository {
                 StoredAgent {
                     id: agent_id,
                     name: name.into(),
+                    site: None,
+                    location: None,
+                    labels: Vec::new(),
                     platform: platform.into(),
                     state: "connected".into(),
                     version: version.into(),
@@ -7191,6 +7229,84 @@ mod routing_repository_tests {
     use std::collections::BTreeMap;
 
     #[tokio::test]
+    async fn node_operator_details_are_tenant_scoped_and_clearable() {
+        let repository = MemoryRepository::default();
+        let workspace = WorkspaceId::new();
+        let other_workspace = WorkspaceId::new();
+        let environment = EnvironmentId::new();
+        let node = AgentId::new();
+        repository.state.write().await.agents.insert(
+            node,
+            (
+                workspace,
+                environment,
+                StoredAgent {
+                    id: node,
+                    name: "Piqae node".into(),
+                    site: None,
+                    location: None,
+                    labels: Vec::new(),
+                    platform: "macos".into(),
+                    state: "connected".into(),
+                    version: env!("CARGO_PKG_VERSION").into(),
+                    last_seen_at: Utc::now(),
+                    health_started_at: None,
+                    health_observed_at: None,
+                    sqlite_integrity_ok: None,
+                    executor_crashes: 0,
+                    last_error_code: None,
+                },
+            ),
+        );
+
+        let labels = vec!["shipping".to_owned(), "labels".to_owned()];
+        let updated = repository
+            .update_agent_details(
+                workspace,
+                environment,
+                node,
+                Some("Warehouse Mac mini"),
+                Some(Some("Main warehouse")),
+                Some(Some("Dispatch desk")),
+                Some(&labels),
+            )
+            .await
+            .expect("update own node");
+        assert_eq!(updated.site.as_deref(), Some("Main warehouse"));
+        assert_eq!(updated.location.as_deref(), Some("Dispatch desk"));
+        assert_eq!(updated.labels, labels);
+        assert!(matches!(
+            repository
+                .update_agent_details(
+                    other_workspace,
+                    environment,
+                    node,
+                    Some("Other"),
+                    None,
+                    None,
+                    None
+                )
+                .await,
+            Err(RepositoryError::NotFound)
+        ));
+        let cleared = repository
+            .update_agent_details(
+                workspace,
+                environment,
+                node,
+                None,
+                Some(None),
+                Some(None),
+                None,
+            )
+            .await
+            .expect("clear optional labels");
+        assert!(cleared.site.is_none());
+        assert!(cleared.location.is_none());
+        assert_eq!(cleared.labels, labels);
+    }
+
+    #[tokio::test]
     async fn destination_reroute_listing_filters_before_applying_its_limit() {
         let repository = MemoryRepository::default();
         let workspace = WorkspaceId::new();
@@ -7714,6 +7830,9 @@ mod routing_repository_tests {
                 StoredAgent {
                     id: node,
                     name: "Shared PC".into(),
+                    site: None,
+                    location: None,
+                    labels: Vec::new(),
                     platform: "test".into(),
                     state: "connected".into(),
                     version: "1".into(),
@@ -7806,6 +7925,9 @@ mod routing_repository_tests {
                     StoredAgent {
                         id: node,
                         name: "Revoked memory node".into(),
+                        site: None,
+                        location: None,
+                        labels: Vec::new(),
                         platform: "test".into(),
                         state: "connected".into(),
                         version: "1".into(),
@@ -7991,6 +8113,9 @@ mod routing_repository_tests {
                 StoredAgent {
                     id: node,
                     name: "Encryption node".into(),
+                    site: None,
+                    location: None,
+                    labels: Vec::new(),
                     platform: "test".into(),
                     state: "connected".into(),
                     version: "1".into(),

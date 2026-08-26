@@ -178,6 +178,7 @@ pub struct RouteObservationResponse {
     pub printer_state: String,
     pub state_reasons: Vec<String>,
     pub accepting_jobs: bool,
+    pub queue_reported: bool,
     pub total_jobs: u32,
     pub active_jobs: u32,
     pub held_jobs: u32,
@@ -459,6 +460,7 @@ fn observation_response(value: RouteObservation) -> RouteObservationResponse {
         printer_state: public_observation_state(&value.printer_state),
         state_reasons: value.state_reasons,
         accepting_jobs: value.accepting_jobs.unwrap_or(false),
+        queue_reported: value.privacy_level == "counts_only",
         total_jobs: value.total_jobs,
         active_jobs: value.active_jobs,
         held_jobs: value.held_jobs,
@@ -539,7 +541,7 @@ fn route_response_from_parts(
         .and_then(serde_json::Value::as_str)
         .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
         .map(|value| value.with_timezone(&Utc));
-    let stock_state = stock_observed_at.map_or("unknown", |observed_at| {
+    let stock_state = stock_observed_at.map_or("not_reported", |observed_at| {
         if observed_at + TimeDelta::minutes(5) >= now {
             "current"
         } else {
@@ -676,30 +678,16 @@ async fn route_responses(
 fn destination_response_from_parts(
     destination: StoredPhysicalDestination,
     routes: &[StoredPrinterRoute],
-    observations: &HashMap<&str, &RouteObservation>,
+    _observations: &HashMap<&str, &RouteObservation>,
 ) -> PhysicalDestinationResponse {
-    let routes = routes
+    let route_count = routes
         .iter()
         .filter(|route| route.destination_id == destination.id)
-        .collect::<Vec<_>>();
-    let route_count = routes.len();
-    let now = Utc::now();
-    let has_ready_route = routes.iter().any(|route| {
-        route.enabled
-            && route.state == "available"
-            && observations
-                .get(route.id.as_str())
-                .is_some_and(|observation| {
-                    observation.fresh_until >= now
-                        && observation.accepting_jobs == Some(true)
-                        && matches!(observation.printer_state.as_str(), "idle" | "processing")
-                })
-    });
-    let public_status = if destination.state == "available" && !has_ready_route {
-        "needs_review".into()
-    } else {
-        public_destination_state(&destination.state)
-    };
+        .count();
+    // Destination status describes topology/identity review, not whether one
+    // route can accept a job at this instant. Scheduling still independently
+    // requires a fresh accepting route in `ranked_ready_routes`.
+    let public_status = public_destination_state(&destination.state);
     PhysicalDestinationResponse {
         id: destination.id,
         display_name: destination.name,
@@ -1296,6 +1284,7 @@ pub(crate) async fn project_agent_topology(
                 "Route observation reasons exceed protocol bounds.",
             ));
         }
+        let queue_reported = observation.queue.is_some();
         let queue = observation.queue.clone().unwrap_or_default();
         let classified_total = queue
             .connector_jobs
@@ -1340,7 +1329,11 @@ pub(crate) async fn project_agent_topology(
                     active_jobs: queue.active_jobs,
                     held_jobs: queue.held_jobs,
                     estimated_busy_seconds: None,
-                    privacy_level: "counts_only".into(),
+                    privacy_level: if queue_reported {
+                        "counts_only".into()
+                    } else {
+                        "not_reported".into()
+                    },
                     stock_state: serde_json::json!({
                         "profile_observed_at": observation.profile_observed_at,
                         "stock_observed_at": observation.stock_observed_at
@@ -2996,6 +2989,32 @@ mod tests {
     }
 
     #[test]
+    fn missing_native_queue_evidence_is_not_presented_as_an_empty_queue() {
+        let now = Utc::now();
+        let response = observation_response(RouteObservation {
+            id: "rob_test".into(),
+            route_id: "rte_test".into(),
+            sequence: 1,
+            printer_state: "idle".into(),
+            accepting_jobs: Some(true),
+            state_reasons: Vec::new(),
+            total_jobs: 0,
+            connector_jobs: 0,
+            other_piqae_or_external_jobs: 0,
+            unknown_jobs: 0,
+            active_jobs: 0,
+            held_jobs: 0,
+            estimated_busy_seconds: None,
+            privacy_level: "not_reported".into(),
+            stock_state: serde_json::json!({}),
+            observed_at: now,
+            fresh_until: now + TimeDelta::seconds(90),
+        });
+        assert!(!response.queue_reported);
+        assert!(response.accepting_jobs);
+    }
+
+    #[test]
     fn authorized_reprint_metadata_drops_prior_delivery_outcomes() {
         let resolution =
             piqae_storage_postgres::destination_topology::DeliveryUncertaintyResolution {
@@ -3095,8 +3114,10 @@ mod tests {
             .expect("route response");
         assert_eq!(destination_response.created_at, created_at);
         assert_eq!(destination_response.updated_at, updated_at);
+        assert_eq!(destination_response.status, "active");
         assert_eq!(route_response.created_at, created_at);
         assert_eq!(route_response.updated_at, updated_at);
+        assert_eq!(route_response.stock_state, "not_reported");
     }
 
     #[tokio::test]

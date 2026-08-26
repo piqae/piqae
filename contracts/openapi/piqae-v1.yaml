@@ -2113,7 +2113,7 @@ paths:
               schema: { $ref: "#/components/schemas/Agent" }
         "404": { $ref: "#/components/responses/Error" }
     patch:
-      summary: Rename a node
+      summary: Update operator-visible node details
       tags: [Nodes]
       operationId: patchNode
       requestBody:
@@ -2123,9 +2123,24 @@ paths:
             schema:
               type: object
               additionalProperties: false
-              required: [name]
+              minProperties: 1
               properties:
                 name: { type: string, minLength: 1, maxLength: 120 }
+                site:
+                  type: [string, "null"]
+                  minLength: 1
+                  maxLength: 120
+                  description: Optional operator-supplied site label. Piqae never infers this from a user or address.
+                location:
+                  type: [string, "null"]
+                  minLength: 1
+                  maxLength: 120
+                  description: Optional operator-supplied placement such as Dispatch desk or Kitchen.
+                labels:
+                  type: array
+                  maxItems: 16
+                  uniqueItems: true
+                  items: { type: string, minLength: 1, maxLength: 64 }
       responses:
         "200":
           description: Updated node.
@@ -5640,7 +5655,7 @@ components:
         stock_observed_at: { type: [string, "null"], format: date-time }
         stock_state:
           type: string
-          enum: [current, stale, unknown]
+          enum: [current, stale, not_reported, unknown]
           description: Privacy-safe freshness of the loaded-media projection; no driver-private values are exposed.
         latest_observation:
           oneOf:
@@ -5703,7 +5718,7 @@ components:
       type: object
       additionalProperties: false
       required:
-        [id, route_id, sequence, printer_state, accepting_jobs, total_jobs, active_jobs, held_jobs, connector_jobs, other_piqae_or_external_jobs, unknown_jobs, observed_at, expires_at]
+        [id, route_id, sequence, printer_state, accepting_jobs, queue_reported, total_jobs, active_jobs, held_jobs, connector_jobs, other_piqae_or_external_jobs, unknown_jobs, observed_at, expires_at]
       properties:
         id: { type: string }
         route_id: { type: string }
@@ -5714,6 +5729,9 @@ components:
           maxItems: 64
           items: { type: string, maxLength: 255 }
         accepting_jobs: { type: boolean }
+        queue_reported:
+          type: boolean
+          description: False when printer state was observed but native spooler counts could not be collected; zero counts must not be interpreted as an empty queue in that case.
         total_jobs: { type: integer, minimum: 0 }
         active_jobs: { type: integer, minimum: 0 }
         held_jobs: { type: integer, minimum: 0 }
@@ -6199,6 +6217,19 @@ components:
           type: string
         name:
           type: string
+        site:
+          type: [string, "null"]
+          maxLength: 120
+          description: Operator-supplied site label; never inferred from personal data.
+        location:
+          type: [string, "null"]
+          maxLength: 120
+          description: Operator-supplied physical placement label.
+        labels:
+          type: array
+          maxItems: 16
+          uniqueItems: true
+          items: { type: string, minLength: 1, maxLength: 64 }
         platform:
           type: string
         state:

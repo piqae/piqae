@@ -1747,7 +1747,7 @@ export interface paths {
         delete: operations["deleteNode"];
         options?: never;
         head?: never;
-        /** Rename a node */
+        /** Update operator-visible node details */
         patch: operations["patchNode"];
         trace?: never;
     };
@@ -3919,7 +3919,7 @@ export interface components {
              * @description Privacy-safe freshness of the loaded-media projection; no driver-private values are exposed.
              * @enum {string}
              */
-            stock_state?: "current" | "stale" | "unknown";
+            stock_state?: "current" | "stale" | "not_reported" | "unknown";
             latest_observation?: components["schemas"]["RouteObservation"] | null;
             scheduling_authority_id?: string | null;
             /** Format: date-time */
@@ -3968,6 +3968,8 @@ export interface components {
             printer_state: "online" | "busy" | "paused" | "paper_out" | "error" | "offline" | "unknown";
             state_reasons?: string[];
             accepting_jobs: boolean;
+            /** @description False when printer state was observed but native spooler counts could not be collected; zero counts must not be interpreted as an empty queue in that case. */
+            queue_reported: boolean;
             total_jobs: number;
             active_jobs: number;
             held_jobs: number;
@@ -4242,6 +4244,11 @@ export interface components {
         Agent: {
             id: string;
             name: string;
+            /** @description Operator-supplied site label; never inferred from personal data. */
+            site?: string | null;
+            /** @description Operator-supplied physical placement label. */
+            location?: string | null;
+            labels?: string[];
             platform: string;
             /** @enum {unknown} */
             state: "connected" | "disconnected" | "paused" | "degraded";
@@ -7462,7 +7469,12 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": {
-                    name: string;
+                    name?: string;
+                    /** @description Optional operator-supplied site label. Piqae never infers this from a user or address. */
+                    site?: string | null;
+                    /** @description Optional operator-supplied placement such as Dispatch desk or Kitchen. */
+                    location?: string | null;
+                    labels?: string[];
                 };
             };
         };

@@ -1259,12 +1259,13 @@ async fn add_connector(arguments: &Arguments, consent: ConnectorConsentInput) ->
         &allowed_printer_ids,
     );
     let installation_proof = installation_identity.sign_base64(&proof_message);
+    let hostname = installation_hostname();
     let enrolled = AgentClient::new(base_url.clone())?
         .enrol(&EnrolRequest {
             token,
             public_key: connector_public_key,
-            name: installation_hostname(),
-            hostname: installation_hostname(),
+            name: hostname.clone(),
+            hostname,
             platform: std::env::consts::OS.to_owned(),
             architecture: std::env::consts::ARCH.to_owned(),
             installation_mode: InstallationMode::User,
@@ -1927,11 +1928,28 @@ fn open_verification_url(url: &Url) {
 }
 
 fn installation_hostname() -> String {
+    #[cfg(target_os = "macos")]
+    if let Ok(output) = std::process::Command::new("/usr/sbin/scutil")
+        .args(["--get", "ComputerName"])
+        .output()
+        && output.status.success()
+        && let Some(name) = privacy_safe_computer_name(&output.stdout)
+    {
+        return name;
+    }
     ["COMPUTERNAME", "HOSTNAME"]
         .into_iter()
         .find_map(|name| std::env::var(name).ok())
-        .filter(|value| !value.trim().is_empty())
+        .and_then(|value| privacy_safe_computer_name(value.as_bytes()))
         .unwrap_or_else(|| "Piqae node".into())
+}
+
+fn privacy_safe_computer_name(raw: &[u8]) -> Option<String> {
+    let value = std::str::from_utf8(raw).ok()?.trim();
+    if value.is_empty() || value.chars().any(char::is_control) {
+        return None;
+    }
+    Some(value.chars().take(120).collect())
 }
 
 fn write_new_device_key(path: &Path, secret: &[u8; 32]) -> Result<()> {
@@ -6237,6 +6255,21 @@ fn load_or_create_private_token(path: &Path) -> Result<String> {
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
+
+    #[test]
+    fn computer_name_is_bounded_and_rejects_control_data() {
+        assert_eq!(
+            privacy_safe_computer_name(b"Warehouse Mac mini\n").as_deref(),
+            Some("Warehouse Mac mini")
+        );
+        assert!(privacy_safe_computer_name(b"operator\naddress").is_none());
+        assert_eq!(
+            privacy_safe_computer_name(&[b'a'; 140])
+                .expect("name")
+                .len(),
+            120
+        );
+    }
 
     #[test]
     fn approved_connectors_enable_cloud_runtime_in_every_launch_mode() {

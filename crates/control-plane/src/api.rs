@@ -237,6 +237,82 @@ pub async fn get_node(
 #[derive(Debug, Deserialize)]
 pub struct PatchNodeRequest {
     name: Option<String>,
+    #[serde(default)]
+    site: PatchOptionalString,
+    #[serde(default)]
+    location: PatchOptionalString,
+    labels: Option<Vec<String>>,
+}
+
+#[derive(Debug, Default)]
+enum PatchOptionalString {
+    #[default]
+    Missing,
+    Clear,
+    Value(String),
+}
+
+impl<'de> Deserialize<'de> for PatchOptionalString {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Ok(Option::<String>::deserialize(deserializer)?.map_or(Self::Clear, Self::Value))
+    }
+}
+
+enum NodeOptionalLabel {
+    Clear,
+    Set(String),
+}
+
+impl NodeOptionalLabel {
+    fn value(&self) -> Option<&str> {
+        match self {
+            Self::Clear => None,
+            Self::Set(value) => Some(value),
+        }
+    }
+}
+
+fn optional_node_label(
+    field: &PatchOptionalString,
+    field_name: &str,
+) -> Result<Option<NodeOptionalLabel>, AppError> {
+    let value = match field {
+        PatchOptionalString::Missing => return Ok(None),
+        PatchOptionalString::Clear => return Ok(Some(NodeOptionalLabel::Clear)),
+        PatchOptionalString::Value(value) => value.trim(),
+    };
+    if value.is_empty() || value.chars().count() > 120 {
+        return Err(AppError::invalid(
+            "invalid_node",
+            format!("The node {field_name} is outside the supported limits."),
+        ));
+    }
+    Ok(Some(NodeOptionalLabel::Set(value.to_owned())))
+}
+
+#[cfg(test)]
+mod patch_node_tests {
+    use super::*;
+
+    #[test]
+    fn optional_operator_details_distinguish_missing_clear_and_value()
+    -> Result<(), serde_json::Error> {
+        let missing: PatchNodeRequest =
+            serde_json::from_value(serde_json::json!({"name": "Node"}))?;
+        let clear: PatchNodeRequest = serde_json::from_value(serde_json::json!({"site": null}))?;
+        let value: PatchNodeRequest =
+            serde_json::from_value(serde_json::json!({"site": " Warehouse "}))?;
+
+        assert!(matches!(missing.site, PatchOptionalString::Missing));
+        assert!(matches!(clear.site, PatchOptionalString::Clear));
+        assert!(
+            matches!(value.site, PatchOptionalString::Value(ref site) if site == " Warehouse ")
+        );
+        Ok(())
+    }
 }
 
 pub async fn patch_node(
@@ -246,18 +322,54 @@ pub async fn patch_node(
     Json(request): Json<PatchNodeRequest>,
 ) -> Result<Json<StoredAgent>, AppError> {
     let tenant = authenticate_native(&state, &headers, Scope::AgentsWrite).await?;
-    let name = request.name.as_deref().map(str::trim).ok_or_else(|| {
-        AppError::invalid("invalid_node", "A node name is required for this update.")
-    })?;
-    if name.is_empty() || name.chars().count() > 120 {
+    let name = request.name.as_deref().map(str::trim);
+    let site = optional_node_label(&request.site, "site")?;
+    let location = optional_node_label(&request.location, "location")?;
+    let labels = request.labels.map(|labels| {
+        labels
+            .into_iter()
+            .map(|label| label.trim().to_owned())
+            .collect::<Vec<_>>()
+    });
+    if name.is_none() && site.is_none() && location.is_none() && labels.is_none() {
+        return Err(AppError::invalid(
+            "invalid_node",
+            "At least one node detail is required for this update.",
+        ));
+    }
+    if name.is_some_and(|name| name.is_empty() || name.chars().count() > 120) {
         return Err(AppError::invalid(
             "invalid_node",
             "The node name is outside the supported limits.",
         ));
     }
+    if labels.as_ref().is_some_and(|labels| {
+        labels.len() > 16
+            || labels
+                .iter()
+                .any(|label| label.is_empty() || label.chars().count() > 64)
+            || labels
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                != labels.len()
+    }) {
+        return Err(AppError::invalid(
+            "invalid_node",
+            "Node labels must be unique and contain at most 16 values of 1 to 64 characters.",
+        ));
+    }
     let node = state
         .repository
-        .rename_agent(tenant.workspace_id, tenant.environment_id, node_id, name)
+        .update_agent_details(
+            tenant.workspace_id,
+            tenant.environment_id,
+            node_id,
+            name,
+            site.as_ref().map(NodeOptionalLabel::value),
+            location.as_ref().map(NodeOptionalLabel::value),
+            labels.as_deref(),
+        )
         .await?;
     state.publish(tenant, "node.updated", &node).await?;
     Ok(Json(node))

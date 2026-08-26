@@ -534,6 +534,9 @@ describe("PiqaeClient", () => {
         new Response(JSON.stringify({ id: "node_1", name: "Packing" })),
       )
       .mockResolvedValueOnce(
+        new Response(JSON.stringify({ id: "node_1", name: "Packing", site: "Warehouse" })),
+      )
+      .mockResolvedValueOnce(
         new Response(
           JSON.stringify({
             id: "dva_1",
@@ -549,15 +552,25 @@ describe("PiqaeClient", () => {
     });
 
     await client.nodes.rename("node_1", "Packing");
+    await client.nodes.updateDetails("node_1", {
+      site: "Warehouse",
+      location: "Dispatch desk",
+      labels: ["shipping"],
+    });
     await client.pairing.approve("dva_1", "ABCD-EFGH");
 
     expect(String(fetcher.mock.calls[0]?.[0])).toBe(
       "https://print.example.test/v1/nodes/node_1",
     );
     expect(JSON.parse(String(fetcher.mock.calls[1]?.[1]?.body))).toEqual({
+      site: "Warehouse",
+      location: "Dispatch desk",
+      labels: ["shipping"],
+    });
+    expect(JSON.parse(String(fetcher.mock.calls[2]?.[1]?.body))).toEqual({
       user_code: "ABCD-EFGH",
     });
-    expect(String(fetcher.mock.calls[1]?.[0])).not.toContain("ABCD-EFGH");
+    expect(String(fetcher.mock.calls[2]?.[0])).not.toContain("ABCD-EFGH");
   });
 
   it("lists and revokes only explicitly addressed node connectors", async () => {

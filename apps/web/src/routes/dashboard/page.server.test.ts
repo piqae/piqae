@@ -1,11 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { createJob, dashboardSource, listPrinters, resolveUncertain, requestNodeRefresh, removeNode } = vi.hoisted(() => ({
+const { createJob, dashboardSource, listPrinters, resolveUncertain, requestNodeRefresh, updateNodeDetails, removeNode } = vi.hoisted(() => ({
   createJob: vi.fn(),
   dashboardSource: vi.fn(),
   listPrinters: vi.fn(),
   resolveUncertain: vi.fn(),
   requestNodeRefresh: vi.fn(),
+  updateNodeDetails: vi.fn(),
   removeNode: vi.fn()
 }));
 
@@ -27,6 +28,7 @@ import { actions, load } from './+page.server';
 const createPrintJob = actions.createPrintJob!;
 const resolveUncertainJob = actions.resolveUncertainJob!;
 const requestNodeRefreshAction = actions.requestNodeRefresh!;
+const updateNodeDetailsAction = actions.updateNodeDetails!;
 const removeNodeAction = actions.removeNode!;
 
 function event(form: FormData) {
@@ -217,6 +219,35 @@ describe('scoped node operations', () => {
       removedNodeId: 'agt_01'
     });
     expect(removeNode).toHaveBeenCalledWith('agt_01');
+  });
+
+  it('updates privacy-safe managed node labels in the selected workspace', async () => {
+    updateNodeDetails.mockResolvedValue({ id: 'agt_01', name: 'Kitchen iPad' });
+    const managedApi = { updateNodeDetails };
+    dashboardSource.mockReturnValue({
+      api: {
+        account: vi.fn(async () => account),
+        managedWorkspace: vi.fn(() => managedApi)
+      }
+    });
+    const form = new FormData();
+    form.set('managed_customer', account.externalId);
+    form.set('node_id', 'agt_01');
+    form.set('name', 'Kitchen iPad');
+    form.set('site', 'Central cafe');
+    form.set('location', 'Pass');
+    form.set('labels', 'receipts, kitchen');
+
+    await expect(updateNodeDetailsAction(event(form))).resolves.toMatchObject({
+      mutation: 'updateNodeDetails',
+      node: { id: 'agt_01' }
+    });
+    expect(updateNodeDetails).toHaveBeenCalledWith('agt_01', {
+      name: 'Kitchen iPad',
+      site: 'Central cafe',
+      location: 'Pass',
+      labels: ['receipts', 'kitchen']
+    });
   });
 
   it('does not remove a node absent from the server-resolved managed workspace', async () => {

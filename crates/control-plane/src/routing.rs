@@ -833,6 +833,9 @@ mod tests {
         let mut agent = StoredAgent {
             id: piqae_domain::AgentId::new(),
             name: "Node".into(),
+            site: None,
+            location: None,
+            labels: Vec::new(),
             platform: "macos".into(),
             state: "connected".into(),
             version: "0.1.0".into(),
