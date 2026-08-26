@@ -1,14 +1,27 @@
 //! UI-independent command bus shared by brokers, compatibility HTTP and SDKs.
 
 use piqae_local_ipc::{
-    ConfirmLoadedMedia, LocalPrinter, LocalPrinterProfile, LocalPrinterQueue, LocalStatus,
-    NativeProfileCapturePayload, ProfileCaptureAuthorized, ProfileValidationResult,
+    BrokerAuthorizationDecision, ConfirmLoadedMedia, LocalPrinter, LocalPrinterProfile,
+    LocalPrinterQueue, LocalStatus, NativeProfileCapturePayload, PendingBrokerAuthorization,
+    ProfileCaptureAuthorized, ProfileValidationResult,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 
 #[derive(Debug)]
 pub enum RuntimeCommand {
+    ApplyHostLifecycle {
+        event: crate::LifecycleEvent,
+        respond_to: oneshot::Sender<crate::LifecycleSnapshot>,
+    },
+    PendingBrokerAuthorizations {
+        respond_to: oneshot::Sender<Vec<PendingBrokerAuthorization>>,
+    },
+    DecideBrokerAuthorization {
+        authorization_id: uuid::Uuid,
+        decision: BrokerAuthorizationDecision,
+        respond_to: oneshot::Sender<Result<(), CommandFailure>>,
+    },
     Status {
         respond_to: oneshot::Sender<LocalStatus>,
     },
@@ -107,6 +120,12 @@ pub enum RuntimeCommand {
         request: Box<LocalCreateJob>,
         respond_to: oneshot::Sender<Result<LocalJobAccepted, CommandFailure>>,
     },
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostLifecycleRequest {
+    pub event: crate::LifecycleEvent,
 }
 
 /// Compatibility name for the one-release loopback HTTP adapter. New code

@@ -2791,6 +2791,7 @@ name = "piqae-local-ipc"
 version = "0.1.21"
 dependencies = [
  "base64 0.22.1",
+ "hex",
  "piqae-domain",
  "rand 0.8.7",
  "serde",
@@ -2800,6 +2801,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "uuid",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2832,6 +2834,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+ "uuid",
 ]
 
 [[package]]
@@ -2840,6 +2843,7 @@ version = "0.1.21"
 dependencies = [
  "async-trait",
  "serde",
+ "thiserror",
 ]
 
 [[package]]
@@ -2866,6 +2870,7 @@ dependencies = [
  "tokio",
  "url",
  "uuid",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

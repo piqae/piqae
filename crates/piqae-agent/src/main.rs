@@ -2,6 +2,8 @@ mod content_key_store;
 mod uri_fetch;
 #[cfg(windows)]
 mod windows_acl;
+#[cfg(windows)]
+mod windows_power;
 
 use aes_gcm::{
     Aes256Gcm, KeyInit as _,
@@ -49,8 +51,8 @@ use piqae_local_ipc::{
     capture_token_digest, generate_capture_token,
 };
 use piqae_node_runtime::{
-    AvailabilityClass, BrokerRegistry, BrokerServerState, HostCapabilities, HostKind,
-    LifecycleEvent, NodeRuntime, NodeRuntimeMode, PrinterTransport, RuntimeConfiguration,
+    AvailabilityClass, BrokerConsentHandle, BrokerRegistry, BrokerServerState, HostCapabilities,
+    HostKind, LifecycleEvent, NodeRuntime, NodeRuntimeMode, PrinterTransport, RuntimeConfiguration,
     connector_registry as connector_runtime, route_coordinator,
 };
 use piqae_protocol::{
@@ -782,7 +784,7 @@ async fn main() -> Result<()> {
             std::iter::once(PrinterTransport::OperatingSystemDriver).collect()
         }
     };
-    let node_runtime = NodeRuntime::start(RuntimeConfiguration {
+    let node_runtime = Arc::new(NodeRuntime::start(RuntimeConfiguration {
         data_directory: arguments.data_dir.clone(),
         mode: if arguments.mode == AgentMode::Local {
             NodeRuntimeMode::LocalOnly
@@ -793,12 +795,12 @@ async fn main() -> Result<()> {
             host_kind: HostKind::UserAgent,
             availability: AvailabilityClass::ContinuousWhileAwake,
             secure_storage: true,
-            local_ipc_broker: cfg!(unix),
+            local_ipc_broker: cfg!(any(unix, windows)),
             can_prevent_idle_sleep_during_handoff: false,
             can_receive_remote_wake_hint: false,
             printer_transports,
         },
-    })?;
+    })?);
     let _ = node_runtime.apply_lifecycle(LifecycleEvent::Started);
     // Loading is intentionally fail-closed: a corrupt or unsupported
     // multi-connector registry must not silently fall back to another tenant's
@@ -870,9 +872,18 @@ async fn main() -> Result<()> {
     }));
     let paused = Arc::new(AtomicBool::new(initially_paused));
     let cloud_sync_wakeup = Arc::new(Notify::new());
+    #[cfg(windows)]
+    let _power_lifecycle = windows_power::PowerLifecycleRegistration::register(
+        Arc::clone(&node_runtime),
+        Arc::clone(&cloud_sync_wakeup),
+    )?;
     let printer_inventory_dirty = Arc::new(AtomicBool::new(true));
     let (control_tx, control_rx) = mpsc::channel(32);
     let (connector_supervisor_tx, connector_supervisor_rx) = mpsc::channel(32);
+    let broker_registry = BrokerRegistry::load(&arguments.data_dir)
+        .context("open local application broker registry")?;
+    let broker_state = BrokerServerState::new(broker_registry, control_tx.clone());
+    let broker_consent = broker_state.consent_handle();
     let mut control_task = tokio::spawn(control_loop(
         control_rx,
         engine,
@@ -885,6 +896,8 @@ async fn main() -> Result<()> {
         Arc::clone(&cloud_sync_wakeup),
         Arc::clone(&printer_inventory_dirty),
         connector_supervisor_tx,
+        broker_consent,
+        Arc::clone(&node_runtime),
     ));
 
     // A populated registry supersedes the legacy cloud identity. Running both
@@ -909,6 +922,7 @@ async fn main() -> Result<()> {
             Arc::clone(&printer_inventory_dirty),
             Arc::new(RwLock::new(None)),
             stop.clone(),
+            Arc::clone(&node_runtime),
         ));
         Some(LegacyCloudWorker { stop, task })
     } else {
@@ -929,6 +943,7 @@ async fn main() -> Result<()> {
         support_packs,
         legacy_cloud_worker,
         connector_connections,
+        Arc::clone(&node_runtime),
     ));
 
     info!(
@@ -938,11 +953,8 @@ async fn main() -> Result<()> {
         bind = %arguments.local_bind,
         "Piqae node started"
     );
-    let broker_registry = BrokerRegistry::load(&arguments.data_dir)
-        .context("open local application broker registry")?;
-    let broker_state = BrokerServerState::new(broker_registry, control_tx.clone());
     let mut broker_task = tokio::spawn(run_local_broker(
-        arguments.data_dir.join("runtime").join("node.sock"),
+        piqae_local_ipc::broker_endpoint_for_data_directory(&arguments.data_dir),
         broker_state,
     ));
     let local_api = piqae_local_api::serve(
@@ -970,15 +982,14 @@ async fn main() -> Result<()> {
     outcome
 }
 
-async fn run_local_broker(path: PathBuf, state: BrokerServerState) {
+async fn run_local_broker(endpoint: String, state: BrokerServerState) {
     #[cfg(unix)]
-    if let Err(error) = piqae_node_runtime::broker::serve_unix_broker(path, state).await {
+    if let Err(error) = piqae_node_runtime::broker::serve_unix_broker(endpoint, state).await {
         error!(error = %error, "local node broker stopped");
     }
-    #[cfg(not(unix))]
-    {
-        let _ = (path, state);
-        std::future::pending::<()>().await;
+    #[cfg(windows)]
+    if let Err(error) = piqae_node_runtime::broker::serve_windows_broker(&endpoint, state).await {
+        error!(error = %error, "local node broker stopped");
     }
 }
 
@@ -1778,6 +1789,8 @@ async fn control_loop(
     cloud_sync_wakeup: Arc<Notify>,
     printer_inventory_dirty: Arc<AtomicBool>,
     connector_supervisor: mpsc::Sender<ConnectorSupervisorCommand>,
+    broker_consent: BrokerConsentHandle,
+    node_runtime: Arc<NodeRuntime>,
 ) {
     let mut scheduler = tokio::time::interval(Duration::from_millis(250));
     scheduler.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -1797,7 +1810,12 @@ async fn control_loop(
                         | ControlRequest::ConfirmLoadedMedia { .. }
                 );
                 let sync_relevant = inventory_changed
-                    || matches!(&request, ControlRequest::Pause { .. } | ControlRequest::Resume { .. });
+                    || matches!(
+                        &request,
+                        ControlRequest::Pause { .. }
+                            | ControlRequest::Resume { .. }
+                            | ControlRequest::ApplyHostLifecycle { .. }
+                    );
                 if inventory_changed {
                     printer_inventory_dirty.store(true, Ordering::Release);
                 }
@@ -1811,6 +1829,8 @@ async fn control_loop(
                     &connection,
                     &paused,
                     &connector_supervisor,
+                    &broker_consent,
+                    &node_runtime,
                 ).await;
                 if sync_relevant {
                     cloud_sync_wakeup.notify_one();
@@ -1881,6 +1901,7 @@ async fn connector_supervisor_loop(
     support_packs: Arc<SupportPackRegistry>,
     mut legacy_cloud_worker: Option<LegacyCloudWorker>,
     connections: ConnectorConnectionTracker,
+    node_runtime: Arc<NodeRuntime>,
 ) {
     let mut workers = std::collections::BTreeMap::<String, ConnectorWorker>::new();
     if let Err(error) =
@@ -1896,6 +1917,7 @@ async fn connector_supervisor_loop(
         &printer_discovery,
         &support_packs,
         &connections,
+        &node_runtime,
     )
     .await
     {
@@ -1925,6 +1947,7 @@ async fn connector_supervisor_loop(
                         &printer_discovery,
                         &support_packs,
                         &connections,
+                        &node_runtime,
                     ).await
                 {
                     warn!(%error, "connector worker liveness recovery deferred");
@@ -1944,6 +1967,7 @@ async fn connector_supervisor_loop(
                     &printer_discovery,
                     &support_packs,
                     &connections,
+                    &node_runtime,
                 ).await {
                     warn!(%error, "periodic connector recovery deferred");
                 }
@@ -1968,6 +1992,7 @@ async fn connector_supervisor_loop(
                                 &printer_discovery,
                                 &support_packs,
                                 &connections,
+                                &node_runtime,
                             )
                             .await
                         }
@@ -2155,6 +2180,7 @@ async fn stop_legacy_cloud_worker(worker: LegacyCloudWorker) {
 #[allow(
     clippy::cognitive_complexity,
     clippy::needless_collect,
+    clippy::too_many_arguments,
     reason = "reload independently reconciles removals, grant changes, paths, and starts while aggregating per-connector failures"
 )]
 async fn reload_connector_workers(
@@ -2165,6 +2191,7 @@ async fn reload_connector_workers(
     printer_discovery: &PrinterDiscovery,
     support_packs: &Arc<SupportPackRegistry>,
     connections: &ConnectorConnectionTracker,
+    node_runtime: &Arc<NodeRuntime>,
 ) -> Result<()> {
     let registry = connector_runtime::ConnectorRegistry::load(data_dir)?;
     let observations = workers
@@ -2214,6 +2241,7 @@ async fn reload_connector_workers(
             printer_discovery.clone(),
             Arc::clone(support_packs),
             connections.clone(),
+            Arc::clone(node_runtime),
         )
         .await
         {
@@ -2252,6 +2280,7 @@ async fn start_connector_worker(
     printer_discovery: PrinterDiscovery,
     support_packs: Arc<SupportPackRegistry>,
     connections: ConnectorConnectionTracker,
+    node_runtime: Arc<NodeRuntime>,
 ) -> Result<ConnectorWorker> {
     let parent = paths
         .database
@@ -2304,6 +2333,7 @@ async fn start_connector_worker(
         Arc::clone(&printer_inventory_dirty),
         Arc::clone(&last_sync_error_code),
         sync_stop.clone(),
+        node_runtime,
     ));
     let connection_stop = StopSignal::default();
     let connection_watch = tokio::spawn(watch_connector_connection(
@@ -2416,8 +2446,23 @@ async fn handle_control_request(
     connection: &RwLock<ConnectionState>,
     paused: &AtomicBool,
     connector_supervisor: &mpsc::Sender<ConnectorSupervisorCommand>,
+    broker_consent: &BrokerConsentHandle,
+    node_runtime: &NodeRuntime,
 ) {
     match request {
+        ControlRequest::ApplyHostLifecycle { event, respond_to } => {
+            let _ = respond_to.send(node_runtime.apply_lifecycle(event));
+        }
+        ControlRequest::PendingBrokerAuthorizations { respond_to } => {
+            let _ = respond_to.send(broker_consent.pending().await);
+        }
+        ControlRequest::DecideBrokerAuthorization {
+            authorization_id,
+            decision,
+            respond_to,
+        } => {
+            let _ = respond_to.send(broker_consent.decide(authorization_id, decision).await);
+        }
         ControlRequest::Status { respond_to } => {
             let current_connection = *connection.read().await;
             let _ = respond_to.send(local_status(
@@ -3780,6 +3825,7 @@ async fn cloud_sync_loop(
     printer_inventory_dirty: Arc<AtomicBool>,
     last_sync_error_code: Arc<RwLock<Option<String>>>,
     stop: StopSignal,
+    node_runtime: Arc<NodeRuntime>,
 ) {
     let store = match AgentStore::open(&database_path) {
         Ok(store) => store,
@@ -3819,6 +3865,7 @@ async fn cloud_sync_loop(
         printer_inventory_dirty,
         last_sync_error_code,
         stop,
+        node_runtime,
     ))
     .await;
 }
@@ -3845,6 +3892,7 @@ async fn run_cloud_sync_loop(
     printer_inventory_dirty: Arc<AtomicBool>,
     last_sync_error_code: Arc<RwLock<Option<String>>>,
     stop: StopSignal,
+    node_runtime: Arc<NodeRuntime>,
 ) {
     let Some((active_content_key_id, active_content_key)) = cloud.content_encryption_keys.active()
     else {
@@ -3951,6 +3999,7 @@ async fn run_cloud_sync_loop(
                         connection: &connection,
                         stop: &stop,
                         route_coordinator: &route_coordinator,
+                        node_runtime: &node_runtime,
                     },
                 )
                 .await
@@ -4088,8 +4137,13 @@ struct SyncContext<'a> {
     connection: &'a RwLock<ConnectionState>,
     stop: &'a StopSignal,
     route_coordinator: &'a Arc<Mutex<route_coordinator::RouteCoordinator>>,
+    node_runtime: &'a NodeRuntime,
 }
 
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "one sync success applies the ordered durable acknowledgements before commands and offers"
+)]
 async fn sync_succeeded(response: AgentSyncResponse, context: SyncContext<'_>) -> Duration {
     let AgentSyncResponse {
         acknowledged_event_cursor,
@@ -4105,12 +4159,21 @@ async fn sync_succeeded(response: AgentSyncResponse, context: SyncContext<'_>) -
     *context.connection.write().await = ConnectionState::Connected;
     apply_event_acknowledgement(context.store, acknowledged_event_cursor);
     acknowledge_diagnostics(context.store, &acknowledged_diagnostics);
-    if let Some(sequence) = acknowledged_handoff_sequence
-        && let Err(error) = context
+    if let Some(sequence) = acknowledged_handoff_sequence {
+        if let Err(error) = context
             .store
             .set_setting("acknowledged_handoff_sequence", &sequence.to_string())
-    {
-        warn!(%error, "native handoff acknowledgement could not be persisted");
+        {
+            warn!(%error, "native handoff acknowledgement could not be persisted");
+        } else {
+            let acknowledgement = {
+                let mut coordinator = context.route_coordinator.lock().await;
+                coordinator.acknowledge_handoffs(&context.cloud.connector_id, sequence)
+            };
+            if let Err(error) = acknowledgement {
+                warn!(%error, "native handoff replay barriers could not be compacted");
+            }
+        }
     }
     apply_commands(
         context.store,
@@ -4131,6 +4194,7 @@ async fn sync_succeeded(response: AgentSyncResponse, context: SyncContext<'_>) -
             context.route_coordinator,
             offer,
             context.stop,
+            context.node_runtime,
         )
         .await
         {
@@ -4298,6 +4362,7 @@ fn acknowledge_diagnostics(store: &mut AgentStore, acknowledged: &[String]) {
 )]
 #[allow(
     clippy::too_many_arguments,
+    clippy::too_many_lines,
     reason = "offer acceptance crosses explicit queue, content, route, and shutdown boundaries"
 )]
 async fn accept_offer(
@@ -4309,7 +4374,24 @@ async fn accept_offer(
     route_coordinator: &Arc<Mutex<route_coordinator::RouteCoordinator>>,
     offer: JobOffer,
     stop: &StopSignal,
+    node_runtime: &NodeRuntime,
 ) -> Result<()> {
+    if !node_runtime.snapshot().accepting_cloud_leases {
+        cloud
+            .client
+            .release_lease(
+                &cloud.identity,
+                offer.job.id,
+                &AgentReleaseLeaseRequest {
+                    lease_id: offer.lease_id,
+                    lease_token: offer.lease_token.clone(),
+                    reason: "host_lifecycle_unavailable".into(),
+                },
+            )
+            .await
+            .context("release lease while host lifecycle denies admission")?;
+        anyhow::bail!("host lifecycle denies new cloud lease admission");
+    }
     if !printer_is_allowed(
         cloud.allowed_printer_ids.as_ref(),
         &offer.job.printer_id.to_string(),
@@ -6038,6 +6120,22 @@ mod tests {
             observation_cache: Arc::new(Mutex::new(RouteObservationCache::default())),
             connector_id: "test".into(),
         };
+        let node_runtime = Arc::new(
+            NodeRuntime::start(RuntimeConfiguration {
+                data_directory: directory.path().join("test-runtime"),
+                mode: NodeRuntimeMode::LocalOnly,
+                host: HostCapabilities {
+                    host_kind: HostKind::UserAgent,
+                    availability: AvailabilityClass::ContinuousWhileAwake,
+                    secure_storage: true,
+                    local_ipc_broker: false,
+                    can_prevent_idle_sleep_during_handoff: false,
+                    can_receive_remote_wake_hint: false,
+                    printer_transports: std::collections::BTreeSet::new(),
+                },
+            })
+            .expect("test runtime"),
+        );
         let error = reload_connector_workers(
             directory.path(),
             &mut workers,
@@ -6046,6 +6144,7 @@ mod tests {
             &PrinterDiscovery::Disabled,
             &Arc::new(SupportPackRegistry::default()),
             &connections,
+            &node_runtime,
         )
         .await
         .expect_err("missing bad connector key must fail the aggregate");

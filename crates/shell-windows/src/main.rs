@@ -27,11 +27,12 @@ mod windows_shell {
             WindowsAndMessaging::{
                 AppendMenuW, CW_USEDEFAULT, CreatePopupMenu, CreateWindowExW, DefWindowProcW,
                 DestroyMenu, DestroyWindow, DispatchMessageW, GetCursorPos, GetMessageW,
-                IDI_APPLICATION, LoadIconW, MB_ICONERROR, MB_ICONINFORMATION, MB_OK, MF_DISABLED,
-                MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING, MSG, MessageBoxW, PostMessageW,
-                PostQuitMessage, RegisterClassW, SW_SHOWNORMAL, SetForegroundWindow, TPM_NONOTIFY,
-                TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WM_APP, WM_CLOSE,
-                WM_CONTEXTMENU, WM_DESTROY, WM_LBUTTONUP, WM_RBUTTONUP, WNDCLASSW, WS_OVERLAPPED,
+                IDI_APPLICATION, IDYES, LoadIconW, MB_ICONERROR, MB_ICONINFORMATION, MB_OK,
+                MB_YESNO, MF_DISABLED, MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING, MSG,
+                MessageBoxW, PostMessageW, PostQuitMessage, RegisterClassW, SW_SHOWNORMAL,
+                SetForegroundWindow, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu,
+                TranslateMessage, WM_APP, WM_CLOSE, WM_CONTEXTMENU, WM_DESTROY, WM_LBUTTONUP,
+                WM_RBUTTONUP, WNDCLASSW, WS_OVERLAPPED,
             },
         },
     };
@@ -56,6 +57,12 @@ mod windows_shell {
             revision: Option<u64>,
             operation: ProfileCaptureOperation,
             is_default: bool,
+        },
+        DecideAuthorization {
+            authorization_id: uuid::Uuid,
+            display_name: String,
+            capabilities: Vec<piqae_local_ipc::BrokerCapability>,
+            approve: bool,
         },
         OpenDashboard,
         CheckForUpdates,
@@ -86,6 +93,7 @@ mod windows_shell {
     struct ShellSnapshot {
         status: piqae_local_ipc::LocalStatus,
         printers: Vec<piqae_local_ipc::LocalPrinter>,
+        pending_authorizations: Vec<piqae_local_ipc::PendingBrokerAuthorization>,
     }
 
     pub fn run() -> Result<(), String> {
@@ -287,7 +295,11 @@ mod windows_shell {
             return actions;
         };
         match state.snapshot.as_ref() {
-            Some(ShellSnapshot { status, printers }) => {
+            Some(ShellSnapshot {
+                status,
+                printers,
+                pending_authorizations,
+            }) => {
                 let workspace = status.workspace_name.as_deref().unwrap_or("Local node");
                 append_disabled(
                     menu,
@@ -359,6 +371,54 @@ mod windows_shell {
                     }
                     append_submenu(menu, submenu, &printer.name);
                 }
+                if !pending_authorizations.is_empty() {
+                    append_separator(menu);
+                    append_disabled(menu, "Application access requests");
+                    for pending in pending_authorizations {
+                        let submenu = unsafe { CreatePopupMenu() };
+                        if submenu.is_null() {
+                            continue;
+                        }
+                        append_disabled(
+                            submenu,
+                            &format!(
+                                "Requests: {}",
+                                capability_labels(&pending.requested_capabilities)
+                            ),
+                        );
+                        append_disabled(
+                            submenu,
+                            pending.application.signing_identity_sha256.as_ref().map_or(
+                                "Signing identity not supplied",
+                                |_| "Signing identity is evidence only",
+                            ),
+                        );
+                        append_separator(submenu);
+                        append_action(
+                            submenu,
+                            "Approve requested access…",
+                            MenuAction::DecideAuthorization {
+                                authorization_id: pending.authorization_id,
+                                display_name: pending.application.display_name.clone(),
+                                capabilities: pending.requested_capabilities.clone(),
+                                approve: true,
+                            },
+                            &mut actions,
+                        );
+                        append_action(
+                            submenu,
+                            "Deny",
+                            MenuAction::DecideAuthorization {
+                                authorization_id: pending.authorization_id,
+                                display_name: pending.application.display_name.clone(),
+                                capabilities: Vec::new(),
+                                approve: false,
+                            },
+                            &mut actions,
+                        );
+                        append_submenu(menu, submenu, &pending.application.display_name);
+                    }
+                }
             }
             None => {
                 append_disabled(menu, "Piqae — Connecting…");
@@ -415,6 +475,18 @@ mod windows_shell {
                 is_default,
             ),
             Some(MenuAction::OpenDashboard) => open_dashboard(window),
+            Some(MenuAction::DecideAuthorization {
+                authorization_id,
+                display_name,
+                capabilities,
+                approve,
+            }) => decide_authorization(
+                window,
+                authorization_id,
+                &display_name,
+                capabilities,
+                approve,
+            ),
             Some(MenuAction::CheckForUpdates) => {
                 UPDATER.with(|updater| {
                     if let Some(updater) = updater.borrow().as_ref() {
@@ -428,6 +500,55 @@ mod windows_shell {
             },
             None => {}
         }
+    }
+
+    fn decide_authorization(
+        window: HWND,
+        authorization_id: uuid::Uuid,
+        display_name: &str,
+        capabilities: Vec<piqae_local_ipc::BrokerCapability>,
+        approve: bool,
+    ) {
+        if approve {
+            let title = wide("Approve application access?");
+            let body = wide(&format!(
+                "{display_name} requests access to {}. The application ID and signing digest are not proof of identity. Approve only if you started this request.",
+                capability_labels(&capabilities)
+            ));
+            // SAFETY: strings are live and NUL-terminated; the tray window is live.
+            if unsafe {
+                MessageBoxW(
+                    window,
+                    body.as_ptr(),
+                    title.as_ptr(),
+                    MB_YESNO | MB_ICONINFORMATION,
+                )
+            } != IDYES
+            {
+                return;
+            }
+        }
+        let result = SHELL_STATE
+            .get()
+            .and_then(|state| state.lock().ok())
+            .map(|state| Arc::clone(&state.client))
+            .ok_or_else(|| ShellError::Configuration("shell state is unavailable".into()))
+            .and_then(|client| {
+                client.decide_broker_authorization(
+                    authorization_id,
+                    approve,
+                    if approve { capabilities } else { Vec::new() },
+                )
+            });
+        if let Err(error) = result {
+            message(
+                window,
+                "Piqae could not update application access",
+                &compact_error(&error),
+                MB_ICONERROR,
+            );
+        }
+        schedule_refresh();
     }
 
     fn capture_profile(
@@ -590,9 +711,15 @@ mod windows_shell {
         };
         std::thread::spawn(move || {
             let refreshed = client.status().and_then(|status| {
-                client
-                    .printers()
-                    .map(|printers| ShellSnapshot { status, printers })
+                client.printers().and_then(|printers| {
+                    client
+                        .pending_broker_authorizations()
+                        .map(|pending_authorizations| ShellSnapshot {
+                            status,
+                            printers,
+                            pending_authorizations,
+                        })
+                })
             });
             let Some(state_lock) = SHELL_STATE.get() else {
                 return;
@@ -703,6 +830,20 @@ mod windows_shell {
             Degraded => "Degraded",
             Unauthorized => "Revoked — pair this node again",
         }
+    }
+
+    fn capability_labels(capabilities: &[piqae_local_ipc::BrokerCapability]) -> String {
+        capabilities
+            .iter()
+            .map(|capability| match capability {
+                piqae_local_ipc::BrokerCapability::ObserveStatus => "node status",
+                piqae_local_ipc::BrokerCapability::ObservePrinters => "printer list",
+                piqae_local_ipc::BrokerCapability::ManageProfiles => "printer profiles",
+                piqae_local_ipc::BrokerCapability::SubmitLocalJobs => "local printing",
+                piqae_local_ipc::BrokerCapability::ManageConnectors => "connections",
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 
     fn wide(value: &str) -> Vec<u16> {
