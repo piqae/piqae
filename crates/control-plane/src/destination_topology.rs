@@ -597,12 +597,12 @@ fn evidence_strength(strength: piqae_protocol::agent::IdentityEvidenceStrength) 
 async fn destination_for_new_route(
     state: &AppState,
     tenant_scope: TenantScope,
-    evidence: &[(String, String)],
+    evidence: &[(String, String, String)],
 ) -> Result<(String, bool), AppError> {
     let strong = evidence
         .iter()
-        .filter(|(strength, _)| evidence_is_strong(strength))
-        .map(|(_, digest)| digest.as_str())
+        .filter(|(_, strength, _)| evidence_is_strong(strength))
+        .map(|(kind, _, digest)| (kind.as_str(), digest.as_str()))
         .collect::<HashSet<_>>();
     if strong.is_empty() {
         return Ok((format!("pdst_{}", ulid::Ulid::new()), false));
@@ -613,20 +613,35 @@ async fn destination_for_new_route(
         .await
         .map_err(storage_error)?;
     let mut matches = Vec::new();
+    let mut conflicting_match = false;
     for destination in destinations {
         let stored = state
             .destination_topology
             .list_identity_evidence(tenant_scope, &destination.id)
             .await
             .map_err(storage_error)?;
-        if stored.iter().any(|item| {
-            evidence_is_strong(&item.strength) && strong.contains(item.value_digest.as_str())
-        }) {
+        let stored_strong = stored
+            .iter()
+            .filter(|item| evidence_is_strong(&item.strength))
+            .map(|item| (item.kind.as_str(), item.value_digest.as_str()))
+            .collect::<HashSet<_>>();
+        let has_match = strong.iter().any(|item| stored_strong.contains(item));
+        let has_conflict = strong.iter().any(|(kind, digest)| {
+            stored_strong
+                .iter()
+                .any(|(stored_kind, stored_digest)| stored_kind == kind && stored_digest != digest)
+        });
+        if has_match && has_conflict {
+            conflicting_match = true;
+        } else if has_match {
             matches.push(destination.id);
         }
     }
     matches.sort();
     matches.dedup();
+    if conflicting_match {
+        return Ok((format!("pdst_{}", ulid::Ulid::new()), true));
+    }
     match matches.as_slice() {
         [destination_id] => Ok((destination_id.clone(), false)),
         [] => Ok((format!("pdst_{}", ulid::Ulid::new()), false)),
@@ -703,6 +718,7 @@ pub(crate) async fn project_agent_topology(
                 .iter()
                 .map(|item| {
                     Ok((
+                        evidence_kind(item.kind).to_owned(),
                         evidence_strength(item.strength).to_owned(),
                         tenant_evidence_digest(state, tenant_scope, &item.value_sha256)?,
                     ))
@@ -831,8 +847,8 @@ pub(crate) async fn project_agent_topology(
                             destination_id: destination_id.clone(),
                             route_id: server_route_id.clone(),
                             kind: evidence_kind(item.kind).into(),
-                            value_digest: evidence[index].1.clone(),
-                            strength: evidence[index].0.clone(),
+                            value_digest: evidence[index].2.clone(),
+                            strength: evidence[index].1.clone(),
                             conflicts,
                             observed_at: snapshot.observed_at,
                             expires_at: None,
@@ -852,7 +868,7 @@ pub(crate) async fn project_agent_topology(
                 .acknowledge_projection(
                     tenant_scope,
                     &ProjectionAcknowledgement {
-                        connector_id: request.agent_id.to_string(),
+                        agent_id: request.agent_id.to_string(),
                         route_id: server_route_id.clone(),
                         inventory_revision: snapshot.inventory_revision,
                         capability_revision: printer.capability_revision,
