@@ -2171,11 +2171,10 @@ impl DestinationTopologyRepository for MemoryDestinationTopologyRepository {
                         route.updated_at = Utc::now();
                     }
                 }
-                for evidence in state
-                    .evidence
-                    .values_mut()
-                    .filter(|evidence| decision.route_ids.contains(&evidence.route_id))
-                {
+                for ((tenant, _), evidence) in &mut state.evidence {
+                    if *tenant != scope || !decision.route_ids.contains(&evidence.route_id) {
+                        continue;
+                    }
                     evidence.destination_id.clone_from(&decision.destination_id);
                 }
                 let has_primary = state.routes.iter().any(|((tenant, _), route)| {
@@ -3392,6 +3391,100 @@ mod tests {
                 .unwrap()
                 .identity_confidence,
             IdentityConfidence::Conflict
+        );
+    }
+
+    #[tokio::test]
+    async fn reversing_identity_topology_never_mutates_colliding_tenant_evidence() {
+        let repository = MemoryDestinationTopologyRepository::default();
+        let first = scope();
+        let second = scope();
+        for (tenant, destination_id) in [
+            (first, "dst_source"),
+            (first, "dst_target"),
+            (second, "dst_second"),
+        ] {
+            repository
+                .upsert_destination(tenant, &destination(destination_id))
+                .await
+                .unwrap();
+        }
+        repository
+            .upsert_route(first, &route("route_collision", "dst_source"))
+            .await
+            .unwrap();
+        repository
+            .upsert_route(second, &route("route_collision", "dst_second"))
+            .await
+            .unwrap();
+        for (tenant, evidence_id, destination_id, digest) in [
+            (first, "evidence_first", "dst_source", "a"),
+            (second, "evidence_second", "dst_second", "b"),
+        ] {
+            repository
+                .record_identity_evidence(
+                    tenant,
+                    &IdentityEvidence {
+                        id: evidence_id.into(),
+                        destination_id: destination_id.into(),
+                        route_id: "route_collision".into(),
+                        kind: "device_serial".into(),
+                        value_digest: format!("hmac-sha256:{}", digest.repeat(64)),
+                        strength: "strong".into(),
+                        conflicts: false,
+                        observed_at: Utc::now(),
+                        expires_at: None,
+                        metadata: serde_json::json!({}),
+                    },
+                )
+                .await
+                .unwrap();
+        }
+        let merge = IdentityDecision {
+            id: "decision_merge".into(),
+            kind: IdentityDecisionKind::Merge,
+            destination_id: "dst_target".into(),
+            related_destination_ids: vec!["dst_source".into()],
+            route_ids: vec!["route_collision".into()],
+            evidence_ids: vec!["evidence_first".into()],
+            actor_kind: "operator".into(),
+            actor_id: Some("operator".into()),
+            reason: "verified merge".into(),
+            reverses_decision_id: None,
+            request_id: Some("merge_request".into()),
+            created_at: Utc::now(),
+        };
+        repository
+            .record_identity_decision(first, &merge)
+            .await
+            .unwrap();
+        repository
+            .reverse_identity_decision(
+                first,
+                &IdentityDecision {
+                    id: "decision_reverse".into(),
+                    kind: IdentityDecisionKind::Reverse,
+                    destination_id: "dst_target".into(),
+                    related_destination_ids: vec!["dst_source".into()],
+                    route_ids: vec!["route_collision".into()],
+                    evidence_ids: vec!["evidence_first".into()],
+                    actor_kind: "operator".into(),
+                    actor_id: Some("operator".into()),
+                    reason: "undo verified merge".into(),
+                    reverses_decision_id: Some("decision_merge".into()),
+                    request_id: Some("reverse_request".into()),
+                    created_at: Utc::now(),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            repository
+                .list_identity_evidence(second, "dst_second")
+                .await
+                .unwrap()
+                .len(),
+            1
         );
     }
 }
