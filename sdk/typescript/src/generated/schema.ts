@@ -1736,7 +1736,14 @@ export interface paths {
         get: operations["getNode"];
         put?: never;
         post?: never;
-        /** Revoke a node and its device key */
+        /**
+         * Revoke a node and its device key
+         * @description Revokes this tenant's node identity and connectors, retires its printer
+         *     routes, cancels pending wake hints, and releases only delivery attempts
+         *     that have not crossed node acceptance. Other nodes that reach the same
+         *     physical destination remain eligible. Accepted or uncertain delivery
+         *     evidence and the node's local state are not erased or silently retried.
+         */
         delete: operations["deleteNode"];
         options?: never;
         head?: never;
