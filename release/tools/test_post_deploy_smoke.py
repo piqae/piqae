@@ -3,13 +3,16 @@ from __future__ import annotations
 import json
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from post_deploy_smoke import (
     DEFAULT_MANIFEST,
+    PROBE_USER_AGENT,
     SmokeError,
     await_revision,
     check_health,
     evaluate,
+    fetch,
     load_manifest,
     normalized_origin,
     run_probes,
@@ -126,6 +129,31 @@ class OriginTests(unittest.TestCase):
         self.assertEqual(
             normalized_origin("https://api.example.com/"), "https://api.example.com"
         )
+
+
+class FetchTests(unittest.TestCase):
+    def test_the_probe_uses_an_explicit_product_user_agent(self) -> None:
+        class Response:
+            status = 200
+
+            def __enter__(self) -> "Response":
+                return self
+
+            def __exit__(self, *_args: object) -> None:
+                return None
+
+            def read(self, _limit: int) -> bytes:
+                return b"ok"
+
+        def open_request(request: object, *, timeout: float) -> Response:
+            self.assertEqual(timeout, 1.0)
+            self.assertEqual(request.get_header("User-agent"), PROBE_USER_AGENT)
+            return Response()
+
+        with patch(
+            "post_deploy_smoke.urllib.request.urlopen", side_effect=open_request
+        ):
+            self.assertEqual(fetch("https://api.example.com/health", 1.0), (200, b"ok"))
 
 
 class PollingTests(unittest.TestCase):

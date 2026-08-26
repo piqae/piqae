@@ -36,6 +36,7 @@ from typing import Callable
 
 DEFAULT_MANIFEST = Path(__file__).resolve().parents[1] / "post-deploy-probes.json"
 REVISION_RE = re.compile(r"^[0-9a-f]{40}$")
+PROBE_USER_AGENT = "piqae-post-deploy-smoke/1"
 # Status families a probe may legitimately answer with.
 PUBLIC_OK = (200,)
 AUTHENTICATED_OK = (401, 403)
@@ -105,7 +106,11 @@ def evaluate(path: str, expect: str, status: int) -> str | None:
 
 
 def fetch(url: str, timeout: float) -> tuple[int, bytes]:
-    request = urllib.request.Request(url, method="GET", headers={"accept": "*/*"})
+    request = urllib.request.Request(
+        url,
+        method="GET",
+        headers={"accept": "*/*", "user-agent": PROBE_USER_AGENT},
+    )
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return response.status, response.read(1_000_000)
