@@ -342,6 +342,7 @@ impl Executor for SupervisedExecutor {
         &mut self,
         submission: LocalSubmission,
     ) -> Result<NativeAcceptance, ExecutorFailure> {
+        let expected_fence = submission.route_fence.clone();
         let job_id = submission
             .job_id
             .parse::<JobId>()
@@ -370,6 +371,7 @@ impl Executor for SupervisedExecutor {
                 content_path: submission.content_path.to_string_lossy().into_owned(),
                 options: submission.options,
                 native_profile: submission.native_profile,
+                route_fence: submission.route_fence,
             },
         };
         match self.supervisor.execute(&request).await {
@@ -377,18 +379,30 @@ impl Executor for SupervisedExecutor {
                 result:
                     Ok(ExecutorResult::Submitted {
                         native_job_id: Some(native_job_id),
+                        route_fence,
                     }),
                 ..
-            }) => Ok(NativeAcceptance { native_job_id }),
+            }) if route_fence == expected_fence => Ok(NativeAcceptance { native_job_id }),
             Ok(ExecutorResponse {
                 result:
                     Ok(ExecutorResult::Submitted {
                         native_job_id: None,
+                        route_fence,
                     }),
                 ..
-            }) => Err(ExecutorFailure {
+            }) if route_fence == expected_fence => Err(ExecutorFailure {
                 code: "native_job_id_missing".into(),
                 message: "spooler accepted the job without an observable ID".into(),
+                retryable: false,
+                handoff_may_have_succeeded: true,
+                native_code: None,
+            }),
+            Ok(ExecutorResponse {
+                result: Ok(ExecutorResult::Submitted { .. }),
+                ..
+            }) => Err(ExecutorFailure {
+                code: "stale_route_fence".into(),
+                message: "native executor did not echo the active route fence".into(),
                 retryable: false,
                 handoff_may_have_succeeded: true,
                 native_code: None,

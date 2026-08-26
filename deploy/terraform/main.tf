@@ -81,6 +81,19 @@ resource "google_secret_manager_secret_version" "webhook_master_key" {
   secret_data = var.webhook_master_key_secret
 }
 
+resource "google_secret_manager_secret" "destination_identity_key" {
+  secret_id  = "${local.name}-destination-identity-key"
+  depends_on = [google_project_service.secret_manager]
+  replication {
+    auto {}
+  }
+}
+
+resource "google_secret_manager_secret_version" "destination_identity_key" {
+  secret      = google_secret_manager_secret.destination_identity_key.id
+  secret_data = var.destination_identity_key_secret
+}
+
 resource "google_secret_manager_secret" "document_master_key" {
   secret_id  = "${local.name}-document-master-key"
   depends_on = [google_project_service.secret_manager]
@@ -139,6 +152,7 @@ resource "google_secret_manager_secret_iam_member" "runtime_secrets" {
     google_secret_manager_secret.object_access_key.id,
     google_secret_manager_secret.object_secret_key.id,
     google_secret_manager_secret.webhook_master_key.id,
+    google_secret_manager_secret.destination_identity_key.id,
     google_secret_manager_secret.document_master_key.id,
     google_secret_manager_secret.document_decryption_keys.id,
     google_secret_manager_secret.stripe_secret_key.id,
@@ -333,6 +347,15 @@ resource "google_cloud_run_v2_service" "server" {
           secret_key_ref {
             secret  = google_secret_manager_secret.webhook_master_key.secret_id
             version = "latest"
+          }
+        }
+      }
+      env {
+        name = "PIQAE_DESTINATION_IDENTITY_KEY"
+        value_source {
+          secret_key_ref {
+            secret  = google_secret_manager_secret.destination_identity_key.secret_id
+            version = google_secret_manager_secret_version.destination_identity_key.version
           }
         }
       }

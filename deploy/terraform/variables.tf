@@ -75,8 +75,26 @@ variable "webhook_master_key_secret" {
   sensitive   = true
   description = "Base64-encoded 32-byte key used to encrypt webhook signing secrets."
   validation {
-    condition     = can(regex("^[A-Za-z0-9+/]{43}=$", var.webhook_master_key_secret))
-    error_message = "webhook_master_key_secret must be base64 that decodes to exactly 32 bytes"
+    condition     = can(regex("^[A-Za-z0-9+/]{42}[AEIMQUYcgkosw048]=$", var.webhook_master_key_secret))
+    error_message = "webhook_master_key_secret must be canonical standard Base64 for exactly 32 bytes"
+  }
+}
+
+variable "destination_identity_key_secret" {
+  type        = string
+  sensitive   = true
+  description = "Distinct stable base64-encoded 32-byte key used to pseudonymise tenant-scoped physical-destination identity evidence."
+  validation {
+    condition     = can(regex("^[A-Za-z0-9+/]{42}[AEIMQUYcgkosw048]=$", var.destination_identity_key_secret))
+    error_message = "destination_identity_key_secret must be canonical standard Base64 for exactly 32 bytes"
+  }
+  validation {
+    condition = (
+      var.destination_identity_key_secret != var.webhook_master_key_secret &&
+      var.destination_identity_key_secret != var.document_master_key_secret &&
+      var.webhook_master_key_secret != var.document_master_key_secret
+    )
+    error_message = "webhook_master_key_secret, destination_identity_key_secret, and document_master_key_secret must be pairwise distinct"
   }
 }
 
@@ -85,7 +103,7 @@ variable "document_master_key_secret" {
   sensitive   = true
   description = "Distinct base64-encoded 32-byte key used to encrypt document templates, inputs, and artifact references."
   validation {
-    condition     = can(regex("^[A-Za-z0-9+/]{43}=$", var.document_master_key_secret))
+    condition     = can(regex("^[A-Za-z0-9+/]{42}[AEIMQUYcgkosw048]=$", var.document_master_key_secret))
     error_message = "document_master_key_secret must be canonical standard Base64 for exactly 32 bytes"
   }
 }

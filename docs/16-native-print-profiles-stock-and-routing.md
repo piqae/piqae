@@ -1,9 +1,19 @@
 # Native print profiles, stock, and routing
 
+**Status:** architecture and partial Preview implementation. Driver capture and
+virtual/spooler tests are not physical-print certification. The checked-in
+support matrix remains authoritative.
+
+This document originally used **destination** for an installed OS queue. The
+current topology calls that a **route** and reserves **physical destination**
+for the inferred real printer. Existing `printer` API fields remain the
+compatibility projection of a route; profile-native configuration remains
+route-bound.
+
 ## Decision
 
-Piqae presents each installed operating-system printer destination once and
-allows any number of named, immutable print profiles beneath it. Creating or
+Piqae presents each installed operating-system printer route once and allows
+any number of named, immutable print profiles beneath it. Creating or
 editing a profile opens the operating system's real printer-driver interface.
 The web application deliberately does not recreate vendor settings.
 
@@ -34,20 +44,15 @@ capabilities.
 ## User-visible model
 
 ```text
-Node: Oliver's Mac
-└─ Destination: HP OfficeJet Pro
-   ├─ Profile: A4 colour, Tray 1
-   ├─ Profile: A4 mono draft, Tray 1
+Physical destination: HP OfficeJet Pro
+├─ Route: Oliver's Mac / OfficeJet queue
+│  ├─ Profile: A4 colour, Tray 1
+│  └─ Profile: A4 mono draft, Tray 1
+└─ Route: Dispatch PC / OfficeJet standby
    └─ Profile: A4 photo, rear feed
-
-Node: Labels Windows
-└─ Destination: OKI Pro1050 PS
-   ├─ Profile: 80 mm matte, black mark
-   ├─ Profile: 100 mm gloss, gap
-   └─ Profile: 125 mm continuous, heavy
 ```
 
-The same destination is not added repeatedly merely to hold different
+The same route is not added repeatedly merely to hold different
 settings. Duplicate operating-system queues remain supported because some
 legacy drivers only behave reliably that way, but they are a compatibility
 fallback rather than the primary model.
@@ -57,14 +62,15 @@ fallback rather than the primary model.
 | Product term | Meaning | Existing implementation mapping |
 | --- | --- | --- |
 | Node | One enrolled Piqae installation on a computer | `Agent` |
-| Physical device | Actual printer hardware, optionally shared by destinations | New resource |
-| Destination | An installed OS queue on one node | Existing `Printer` |
-| Profile | A versioned native driver configuration for one destination | Expand existing named profile |
+| Physical destination | Inferred actual printer hardware, tenant-scoped | `physical_destinations` |
+| Route | An installed OS queue on one node | `printer_routes` |
+| Printer | Compatibility API projection of one route | Existing `Printer` resource |
+| Profile | A versioned native driver configuration for one route | Existing named profile |
 | Stock | Paper, roll, labels, cards, or other loaded substrate | New resource |
 | Target | Stable API address resolving to one or more profile bindings | New resource |
-| Binding | A target's node/destination/profile candidate | New resource |
+| Binding | A target's route/profile candidate | New resource |
 
-The compatibility API continues to call destinations or flattened targets
+The compatibility API continues to call installed routes or flattened targets
 `printers`. The native API uses the more precise terms.
 
 ## Required V1 experience
@@ -118,9 +124,10 @@ appear without local user confirmation.
 Every layer has a separate identifier:
 
 ```text
-device_id       physical hardware, when known
+destination_id  tenant-scoped inferred physical hardware
 node_id         enrolled installation
-destination_id  installed OS queue on one node
+route_id        installed OS queue on one node
+printer_id      compatibility projection of that route
 profile_id      stable named Piqae profile
 profile_revision immutable captured version
 stock_id        operational media definition
@@ -135,8 +142,8 @@ Editing a profile appends a revision. It never changes a configuration already
 referenced by an accepted job. A job records both `profile_id` and
 `profile_revision`.
 
-Destination identity uses the node ID plus the strongest available native
-queue identity. Physical-device grouping uses, in descending confidence:
+Route identity uses the node ID plus an installation-stable local route key.
+Physical-destination grouping considers, in descending confidence:
 
 1. manufacturer serial number or IPP printer UUID;
 2. stable device UUID reported by PrintCore/Winspool;
@@ -144,7 +151,12 @@ queue identity. Physical-device grouping uses, in descending confidence:
 4. USB topology plus make/model;
 5. explicit operator confirmation.
 
-Piqae must not merge devices automatically using only a friendly queue name.
+Raw serials, MAC addresses, endpoints, and certificate material do not leave
+the node. The node reports normalized SHA-256 evidence and the control plane
+stores a tenant-keyed HMAC; public identity-evidence APIs omit the digest. Piqae
+may attach a new route automatically only on an unambiguous same-kind
+strong/verified match with no conflicting strong evidence. It never merges on
+a friendly queue name, model, driver, or capability fingerprint alone.
 
 ## Native profile contract
 
@@ -155,7 +167,7 @@ platform-owned configuration:
 {
   "id": "prf_01K...",
   "revision": 7,
-  "destinationId": "dst_01K...",
+  "routeId": "rte_01K...",
   "name": "80 mm matte, black mark",
   "status": "ready",
   "driverFingerprint": {
@@ -587,14 +599,23 @@ Compatibility IDs never change when a target binding moves between nodes.
 
 ### Agent SQLite
 
-Retain the existing `printers` table as the installed destination and expand
+Retain the existing `printers` table as the compatibility projection of an
+installed route and expand
 the current immutable `printer_profiles` model.
 
 Add:
 
 ```text
-physical_devices
-printer_device_bindings
+physical_destinations
+destination_identity_evidence
+destination_identity_decisions
+destination_identity_decision_routes
+printer_routes
+route_observations
+projection_acknowledgements
+route_reservations
+delivery_attempts
+delivery_uncertainty_resolutions
 profile_native_blobs
 profile_dependencies
 stocks

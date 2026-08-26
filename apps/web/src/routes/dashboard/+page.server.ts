@@ -13,11 +13,14 @@ import type {
   DashboardAccount,
   DashboardAgent,
   DashboardCustomerOperations,
+  DashboardDestination,
   DashboardJob,
   DashboardJobEvent,
   DashboardNodeDiagnostic,
   DashboardOverview,
-  DashboardPrinter
+  DashboardPrinter,
+  DashboardPrinterRoute,
+  DashboardRouteObservation
 } from '$lib/view-types';
 
 const MAX_DASHBOARD_PDF_BYTES = 50 * 1024 * 1024;
@@ -45,6 +48,8 @@ export type OperationalDetail =
       printer: DashboardPrinter | null;
       agent: DashboardAgent | null;
     }
+  | { kind: 'destination'; destination: DashboardDestination; routes: DashboardPrinterRoute[] }
+  | { kind: 'route'; route: DashboardPrinterRoute; destination: DashboardDestination | null }
   | {
       kind: 'printer';
       printer: DashboardPrinter;
@@ -68,6 +73,9 @@ type LoadedLists = {
   printers: DashboardPrinter[];
   agents: DashboardAgent[];
   accounts: DashboardAccount[];
+  destinations: DashboardDestination[];
+  routes: DashboardPrinterRoute[];
+  routeObservations: DashboardRouteObservation[];
 };
 
 type OperationsScope = 'customers' | 'own';
@@ -80,7 +88,9 @@ function sameResourceId(left: string | null | undefined, right: string | null | 
 }
 
 function overviewFor(lists: Pick<LoadedLists, 'jobs' | 'printers' | 'agents'>): DashboardOverview {
-  const uncertain = lists.jobs.filter((job) => job.state === 'delivery_uncertain');
+  const uncertain = lists.jobs.filter(
+    (job) => job.state === 'delivery_uncertain' && !job.deliveryResolution
+  );
   return {
     agents: {
       total: lists.agents.length,
@@ -130,7 +140,10 @@ async function loadCustomerOperations(api: DashboardApi) {
   return {
     jobs: loaded.flatMap((entry) => entry.jobs),
     printers: loaded.flatMap((entry) => entry.printers),
-    agents: loaded.flatMap((entry) => entry.agents)
+    agents: loaded.flatMap((entry) => entry.agents),
+    destinations: loaded.flatMap((entry) => entry.destinations),
+    routes: loaded.flatMap((entry) => entry.routes),
+    routeObservations: loaded.flatMap((entry) => entry.routeObservations)
   };
 }
 
@@ -175,11 +188,13 @@ export const load: PageServerLoad = async (event) => {
       !managedAccount && effectiveMeta.platform.accounts && requestedScope !== 'own'
         ? 'customers'
         : 'own';
-    const [ownOverview, ownJobs, ownPrinters, ownAgents] = await Promise.all([
+    const [ownOverview, ownJobs, ownPrinters, ownAgents, ownDestinations, ownRoutes] = await Promise.all([
       operationalApi.overview(),
       operationalApi.jobs(),
       operationalApi.printers(),
-      operationalApi.agents()
+      operationalApi.agents(),
+      operationalApi.destinations(),
+      operationalApi.routes()
     ]);
     const ownHasResources = ownAgents.data.length > 0 || ownPrinters.data.length > 0 || ownJobs.data.length > 0;
     const customerOperations =
@@ -189,12 +204,19 @@ export const load: PageServerLoad = async (event) => {
     const jobs = customerOperations ? { data: customerOperations.jobs, nextCursor: null } : ownJobs;
     const printers = customerOperations ? { data: customerOperations.printers, nextCursor: null } : ownPrinters;
     const agents = customerOperations ? { data: customerOperations.agents, nextCursor: null } : ownAgents;
+    const destinations = customerOperations ? { data: customerOperations.destinations, nextCursor: null } : ownDestinations;
+    const routes = customerOperations ? { data: customerOperations.routes, nextCursor: null } : ownRoutes;
 
     const lists: LoadedLists = {
       jobs: jobs.data,
       printers: printers.data,
       agents: agents.data,
-      accounts: accounts.data
+      accounts: accounts.data,
+      destinations: destinations.data,
+      routes: routes.data,
+      routeObservations: customerOperations
+        ? customerOperations.routeObservations
+        : routes.data.flatMap((route) => route.latestObservation ? [route.latestObservation] : [])
     };
 
     const overview = customerOperations ? overviewFor(lists) : ownOverview;
@@ -224,6 +246,9 @@ export const load: PageServerLoad = async (event) => {
       printers: [],
       agents: [],
       accounts: [],
+      destinations: [],
+      routes: [],
+      routeObservations: [],
       detail: null,
       dataError: presentDashboardError(error)
     };
@@ -283,6 +308,28 @@ async function loadDetail(
       printer,
       agent: loaded.agents.find((agent) => sameResourceId(agent.id, printer.agentId)) ?? null,
       jobs: loaded.jobs.filter((job) => sameResourceId(job.printerId, printer.id))
+    };
+  }
+
+  const destinationId = params.get('destination');
+  if (destinationId) {
+    const destination = loaded.destinations.find((candidate) => candidate.id === destinationId);
+    if (!destination) return { kind: 'missing', label: 'destination' };
+    return {
+      kind: 'destination',
+      destination,
+      routes: loaded.routes.filter((route) => route.physicalDestinationId === destination.id)
+    };
+  }
+
+  const routeId = params.get('route');
+  if (routeId) {
+    const route = loaded.routes.find((candidate) => candidate.id === routeId);
+    if (!route) return { kind: 'missing', label: 'route' };
+    return {
+      kind: 'route',
+      route,
+      destination: loaded.destinations.find((candidate) => candidate.id === route.physicalDestinationId) ?? null
     };
   }
 
@@ -495,6 +542,52 @@ export const actions: Actions = {
     } catch (error) {
       return fail(502, {
         mutation: 'createEnrolment',
+        error: { message: presentDashboardError(error).message }
+      });
+    }
+  },
+
+  resolveUncertainJob: async (event) => {
+    if (dashboardMode() !== 'live') {
+      return fail(400, {
+        mutation: 'resolveUncertainJob',
+        error: { message: 'Uncertain delivery resolution is disabled while demo data is active.' }
+      });
+    }
+    const data = await event.request.formData();
+    const jobId = String(data.get('job_id') ?? '').trim();
+    const resolution = String(data.get('resolution') ?? '').trim();
+    const note = String(data.get('note') ?? '').trim();
+    const requestId = String(data.get('request_id') ?? '').trim();
+    if (
+      !jobId ||
+      !requestId ||
+      note.length < 1 ||
+      note.length > 2_000 ||
+      !['acknowledge_printed', 'acknowledge_missing', 'cancelled', 'reprint'].includes(resolution)
+    ) {
+      return fail(400, {
+        mutation: 'resolveUncertainJob',
+        error: { message: 'Choose a resolution and include an operator note.' }
+      });
+    }
+    try {
+      const managed = await managedSelection(event, data);
+      const result = await (managed?.api ?? dashboardSource(event).api).resolveUncertainJob(
+        jobId,
+        resolution as 'acknowledge_printed' | 'acknowledge_missing' | 'cancelled' | 'reprint',
+        note,
+        requestId
+      );
+      return {
+        mutation: 'resolveUncertainJob',
+        resolvedJobId: jobId,
+        resolutionState: result.state,
+        replacementJobId: result.replacementJobId
+      };
+    } catch (error) {
+      return fail(409, {
+        mutation: 'resolveUncertainJob',
         error: { message: presentDashboardError(error).message }
       });
     }

@@ -578,6 +578,14 @@ impl Need {
             Self::Tool(tool @ ("node" | "pnpm")) => {
                 format!("`mise install` provides {tool} at the version CI pins")
             }
+            Self::Tool("cargo-deny") => {
+                "install the CI-pinned tool with `cargo install cargo-deny --version 0.20.2 --locked`"
+                    .into()
+            }
+            Self::Tool("cargo-audit") => {
+                "install the CI-pinned tool with `cargo install cargo-audit --version 0.22.2 --locked`"
+                    .into()
+            }
             Self::Tool("swift") => "install Xcode command line tools".into(),
             Self::Tool("terraform") => "install Terraform 1.9.8, the version CI pins".into(),
             Self::Tool(tool) => format!("install {tool}"),
@@ -614,7 +622,7 @@ const CHECKS: &[Check] = &[
     Check {
         scopes: &[],
         job: "Supply-chain policy / Release policy and tooling",
-        needs: &[Need::Tool("python3")],
+        needs: &[Need::Tool("python3"), Need::Tool("ruby")],
         steps: &[
             &[
                 "python3",
@@ -626,6 +634,8 @@ const CHECKS: &[Check] = &[
                 "-p",
                 "test_*.py",
             ],
+            &["ruby", "release/tools/check_release_policy.rb"],
+            &["ruby", "release/tools/test_release_policy.rb"],
             &["python3", "release/tools/check_security_exceptions.py"],
             &["python3", "release/tools/check_competitor_mentions.py"],
         ],
@@ -645,6 +655,19 @@ const CHECKS: &[Check] = &[
                 "release/tools/check_workflow_runners.py",
                 "@workflows",
             ],
+        ],
+    },
+    Check {
+        scopes: &["dependency_policy"],
+        job: "Supply-chain policy / Rust dependency policy",
+        needs: &[
+            Need::Tool("cargo"),
+            Need::Tool("cargo-deny"),
+            Need::Tool("cargo-audit"),
+        ],
+        steps: &[
+            &["cargo", "deny", "check", "--hide-inclusion-graph"],
+            &["cargo", "audit"],
         ],
     },
     Check {
@@ -692,6 +715,41 @@ const CHECKS: &[Check] = &[
                 "--features",
                 "otlp",
                 "--locked",
+            ],
+            &[
+                "cargo",
+                "clippy",
+                "-p",
+                "piqae-control-plane",
+                "--all-targets",
+                "--features",
+                "sentry",
+                "--locked",
+                "--",
+                "-D",
+                "warnings",
+            ],
+            &[
+                "cargo",
+                "test",
+                "-p",
+                "piqae-control-plane",
+                "--features",
+                "sentry",
+                "--locked",
+            ],
+            &[
+                "cargo",
+                "clippy",
+                "-p",
+                "piqae-control-plane",
+                "--all-targets",
+                "--features",
+                "otlp,sentry",
+                "--locked",
+                "--",
+                "-D",
+                "warnings",
             ],
         ],
     },
@@ -832,14 +890,28 @@ const CHECKS: &[Check] = &[
     Check {
         scopes: &["shopify"],
         job: "CI / Shopify",
-        needs: &[Need::Tool("pnpm"), Need::Postgres],
+        needs: &[
+            Need::Tool("pnpm"),
+            Need::Tool("bash"),
+            Need::Tool("grep"),
+            Need::Postgres,
+        ],
         steps: &[
             &["pnpm", "install", "--frozen-lockfile", "--prefer-offline"],
             &["pnpm", "--filter", "@piqae/sdk", "build"],
             &["pnpm", "--filter", "@piqae/shopify-app", "check"],
             &["pnpm", "--filter", "@piqae/shopify-app", "test"],
-            &["pnpm", "--filter", "@piqae/shopify-app", "test:postgres"],
+            &[
+                "bash",
+                "-c",
+                "PIQAE_REQUIRE_POSTGRES_TESTS=1 pnpm --filter @piqae/shopify-app test:postgres",
+            ],
             &["pnpm", "--filter", "@piqae/shopify-app", "format:check"],
+            &[
+                "bash",
+                "-c",
+                "set -euo pipefail; cd apps/shopify; SHOPIFY_CLIENT_ID=ci-client-id SHOPIFY_APP_URL=https://shopify-ci.example.com pnpm release:config; ! grep -Eq 'example\\.invalid|development-client-id' shopify.app.release.toml; grep -F 'https://shopify-ci.example.com/auth/callback' shopify.app.release.toml",
+            ],
             &["pnpm", "--filter", "@piqae/shopify-app", "build"],
         ],
     },
@@ -902,6 +974,11 @@ const CI_ONLY_JOBS: &[(&str, &str)] = &[
     ),
 ];
 
+/// Always-on CI work whose checked-history context is owned by GitHub Actions.
+const ALWAYS_CI_ONLY_JOBS: &[&str] = &[
+    "Supply-chain policy / Repository secret history scans the changed Git history with Gitleaks",
+];
+
 /// Reproduces the CI jobs that the current change selects.
 fn preflight(root: &Path, arguments: &[String]) -> TaskResult {
     let mut everything = false;
@@ -955,6 +1032,9 @@ fn preflight(root: &Path, arguments: &[String]) -> TaskResult {
         if scopes.contains(*scope) {
             println!("  ci-only  {reason}");
         }
+    }
+    for reason in ALWAYS_CI_ONLY_JOBS {
+        println!("  ci-only  {reason}");
     }
     if runnable.is_empty() && blocked.is_empty() {
         println!("\nNothing selected; CI would run no gated job for this change.");
@@ -1111,5 +1191,55 @@ mod tests {
     fn project_manifests_are_apache_licensed() {
         let result = repository_root().and_then(|root| check_licenses(&root));
         assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[test]
+    fn preflight_models_supply_chain_and_observability_commands() {
+        assert!(
+            CHECKS.iter().any(|check| {
+                check.job == "Supply-chain policy / Rust dependency policy"
+                    && check.scopes == ["dependency_policy"]
+                    && check.steps
+                        == [
+                            &["cargo", "deny", "check", "--hide-inclusion-graph"][..],
+                            &["cargo", "audit"][..],
+                        ]
+            }),
+            "dependency policy check must reproduce CI"
+        );
+        assert!(
+            CHECKS.iter().any(|check| {
+                check.job == "Supply-chain policy / Release policy and tooling"
+                    && check
+                        .steps
+                        .iter()
+                        .any(|step| *step == ["ruby", "release/tools/check_release_policy.rb"])
+                    && check
+                        .steps
+                        .iter()
+                        .any(|step| *step == ["ruby", "release/tools/test_release_policy.rb"])
+            }),
+            "release policy check must reproduce CI"
+        );
+        assert!(
+            CHECKS.iter().any(|check| {
+                check.job == "CI / Rust (ubuntu-latest, otlp)"
+                    && check.steps.len() == 5
+                    && check.steps.iter().any(|step| {
+                        step.windows(2)
+                            .any(|arguments| arguments == ["--features", "otlp,sentry"])
+                    })
+            }),
+            "observability feature matrix must reproduce CI"
+        );
+    }
+
+    #[test]
+    fn preflight_exposes_github_owned_history_scan() {
+        assert!(
+            ALWAYS_CI_ONLY_JOBS
+                .iter()
+                .any(|job| job.contains("Gitleaks"))
+        );
     }
 }

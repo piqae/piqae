@@ -12,6 +12,16 @@ export type LoadedMediaObservation = components['schemas']['LoadedMediaObservati
 export type UpsertLoadedMediaObservation = components['schemas']['UpsertLoadedMediaObservation'];
 export type PrintWorkflow = components['schemas']['PrintWorkflow'];
 export type CreatePrintWorkflow = components['schemas']['CreatePrintWorkflow'];
+export type PhysicalDestination = components['schemas']['PhysicalDestination'];
+export type PrinterRoute = components['schemas']['PrinterRoute'];
+export type DestinationIdentityEvidence = components['schemas']['DestinationIdentityEvidence'];
+export type DestinationIdentityDecision = components['schemas']['DestinationIdentityDecision'];
+export type CreateDestinationIdentityDecision = components['schemas']['CreateDestinationIdentityDecision'];
+export type RouteObservation = components['schemas']['RouteObservation'];
+export type RouteReservation = components['schemas']['RouteReservation'];
+export type DeliveryAttempt = components['schemas']['DeliveryAttempt'];
+export type ResolveUncertainDelivery = components['schemas']['ResolveUncertainDelivery'];
+export type UncertainDeliveryResolution = components['schemas']['UncertainDeliveryResolution'];
 
 export type BusinessDocumentV1 = components['schemas']['BusinessDocumentV1'];
 export type BusinessDocumentNode = components['schemas']['BusinessDocumentNode'];

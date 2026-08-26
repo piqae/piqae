@@ -46,11 +46,13 @@
 
 <style>
   dialog {
-    width: min(560px, 100vw);
-    max-width: 100vw;
+    position: fixed;
+    inset: 0 0 0 auto;
+    width: min(560px, 100dvw);
+    max-width: 100dvw;
     height: 100dvh;
     max-height: 100dvh;
-    margin: 0 0 0 auto;
+    margin: 0;
     padding: 0;
     overflow: hidden;
     color: var(--text-primary);
@@ -76,7 +78,8 @@
   }
 
   header {
-    display: flex;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto auto;
     align-items: center;
     gap: 10px;
     padding: 12px 14px 12px 18px;

@@ -33,6 +33,7 @@ secrets:
   keys:
     databaseUrl: PIQAE_DATABASE_URL
     webhookMasterKey: PIQAE_WEBHOOK_MASTER_KEY
+    destinationIdentityKey: PIQAE_DESTINATION_IDENTITY_KEY
     documentMasterKey: PIQAE_DOCUMENT_MASTER_KEY
     documentDecryptionKeys: PIQAE_DOCUMENT_DECRYPTION_KEYS
     s3AccessKeyId: PIQAE_S3_ACCESS_KEY_ID

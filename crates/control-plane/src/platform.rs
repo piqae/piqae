@@ -1,4 +1,4 @@
-#![allow(clippy::missing_errors_doc)]
+#![allow(clippy::missing_errors_doc, clippy::too_many_lines)]
 
 use crate::{AppState, authentication::PlatformManagerContext, error::AppError};
 use axum::{
@@ -48,6 +48,12 @@ pub struct PlatformOperationsRow {
     agents: Vec<serde_json::Value>,
     printers: Vec<serde_json::Value>,
     jobs: Vec<serde_json::Value>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    physical_destinations: Vec<crate::destination_topology::PhysicalDestinationResponse>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    routes: Vec<crate::destination_topology::PrinterRouteResponse>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    route_observations: Vec<crate::destination_topology::RouteObservationResponse>,
 }
 
 #[derive(Debug, Serialize)]
@@ -422,6 +428,16 @@ pub async fn operations(
                 )
             })
             .collect::<Result<Vec<_>, _>>()?;
+        let (physical_destinations, routes, route_observations) =
+            crate::destination_topology::operational_snapshot(
+                &state,
+                piqae_storage_postgres::destination_topology::TenantScope {
+                    workspace_id,
+                    environment_id,
+                },
+                MAX_RESOURCES_PER_CUSTOMER,
+            )
+            .await?;
         data.push(PlatformOperationsRow {
             customer: PlatformOperationsCustomer {
                 id: workspace_id.to_string(),
@@ -435,6 +451,9 @@ pub async fn operations(
             agents,
             printers,
             jobs,
+            physical_destinations,
+            routes,
+            route_observations,
         });
     }
     let next_cursor = has_more

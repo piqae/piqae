@@ -13,11 +13,11 @@ use piqae_domain::{
 use piqae_protocol::agent::AgentCommand;
 use piqae_storage_postgres::{
     AgentAuthenticationRecord, CreateDocumentResult, CreateJobResult as PgCreateJobResult,
-    DocumentRenderWork, EnrolledAgent, ExpiredDocumentArtifactWork, JobLease,
-    NewDeviceAuthorization, NodeUpdatePolicy, NodeUpdateState, PostgresStore, StorageError,
-    StoredAgent, StoredAgentCommandBatch, StoredApiKey, StoredBillingSummary,
-    StoredConnectSessionPreview, StoredContentEncryptionKey, StoredDeviceAuthorization,
-    StoredDocumentPreview, StoredDocumentRender, StoredDocumentTemplate,
+    DeliveryAttemptProof, DestinationRouteReassignment, DocumentRenderWork, EnrolledAgent,
+    ExpiredDocumentArtifactWork, JobLease, NewDeviceAuthorization, NodeUpdatePolicy,
+    NodeUpdateState, PostgresStore, StorageError, StoredAgent, StoredAgentCommandBatch,
+    StoredApiKey, StoredBillingSummary, StoredConnectSessionPreview, StoredContentEncryptionKey,
+    StoredDeviceAuthorization, StoredDocumentPreview, StoredDocumentRender, StoredDocumentTemplate,
     StoredDocumentTemplateRevision, StoredLoadedMedia, StoredNodeConnector, StoredNodeDiagnostic,
     StoredNodeUpdate, StoredPlatformAccount, StoredPlatformCredential, StoredPrintWorkflow,
     StoredPrinter, StoredResolvedPrintTicket, StoredStock, StoredTarget, StoredTargetBinding,
@@ -947,7 +947,24 @@ pub trait Repository: Send + Sync + 'static {
         binding: &StoredTargetBinding,
         reason: &str,
     ) -> Result<Option<Job>, RepositoryError>;
+    async fn reroute_job_to_destination_route_before_acceptance(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        request: DestinationRouteReassignment<'_>,
+    ) -> Result<Option<Job>, RepositoryError> {
+        let _ = (workspace_id, environment_id, request);
+        Err(RepositoryError::Persistence(
+            "destination route reassignment is unavailable".into(),
+        ))
+    }
     async fn list_reroutable_target_jobs(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        limit: i64,
+    ) -> Result<Vec<Job>, RepositoryError>;
+    async fn list_reroutable_destination_jobs(
         &self,
         workspace_id: WorkspaceId,
         environment_id: EnvironmentId,
@@ -1011,6 +1028,27 @@ pub trait Repository: Send + Sync + 'static {
         lease_id: Uuid,
         lease_token: &str,
     ) -> Result<DateTime<Utc>, RepositoryError>;
+    async fn renew_agent_lease_with_delivery_attempt(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        job_id: JobId,
+        lease_id: Uuid,
+        lease_token: &str,
+        proof: DeliveryAttemptProof<'_>,
+    ) -> Result<DateTime<Utc>, RepositoryError> {
+        let _ = proof;
+        self.renew_agent_lease(
+            workspace_id,
+            environment_id,
+            agent_id,
+            job_id,
+            lease_id,
+            lease_token,
+        )
+        .await
+    }
     async fn release_agent_lease(
         &self,
         workspace_id: WorkspaceId,
@@ -1047,6 +1085,32 @@ pub trait Repository: Send + Sync + 'static {
         content_sha256: Option<&str>,
         local_sequence: u64,
     ) -> Result<Job, RepositoryError>;
+    #[allow(clippy::too_many_arguments)]
+    async fn accept_agent_job_with_delivery_attempt(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        job_id: JobId,
+        lease_id: Uuid,
+        lease_token: &str,
+        content_sha256: Option<&str>,
+        local_sequence: u64,
+        proof: DeliveryAttemptProof<'_>,
+    ) -> Result<Job, RepositoryError> {
+        let _ = proof;
+        self.accept_agent_job(
+            workspace_id,
+            environment_id,
+            agent_id,
+            job_id,
+            lease_id,
+            lease_token,
+            content_sha256,
+            local_sequence,
+        )
+        .await
+    }
     async fn compatibility_id(
         &self,
         workspace_id: WorkspaceId,
@@ -1164,6 +1228,74 @@ impl Repository for PostgresStore {
             name,
             ciphertext,
             sha256,
+        )
+        .await
+        .map_err(Into::into)
+    }
+
+    async fn reroute_job_to_destination_route_before_acceptance(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        request: DestinationRouteReassignment<'_>,
+    ) -> Result<Option<Job>, RepositoryError> {
+        PostgresStore::reroute_job_to_destination_route_before_acceptance(
+            self,
+            workspace_id,
+            environment_id,
+            request,
+        )
+        .await
+        .map_err(Into::into)
+    }
+
+    async fn renew_agent_lease_with_delivery_attempt(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        job_id: JobId,
+        lease_id: Uuid,
+        lease_token: &str,
+        proof: DeliveryAttemptProof<'_>,
+    ) -> Result<DateTime<Utc>, RepositoryError> {
+        PostgresStore::renew_agent_lease_with_delivery_attempt(
+            self,
+            workspace_id,
+            environment_id,
+            agent_id,
+            job_id,
+            lease_id,
+            lease_token,
+            proof,
+        )
+        .await
+        .map_err(Into::into)
+    }
+
+    async fn accept_agent_job_with_delivery_attempt(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        job_id: JobId,
+        lease_id: Uuid,
+        lease_token: &str,
+        content_sha256: Option<&str>,
+        local_sequence: u64,
+        proof: DeliveryAttemptProof<'_>,
+    ) -> Result<Job, RepositoryError> {
+        PostgresStore::accept_agent_job_with_delivery_attempt(
+            self,
+            workspace_id,
+            environment_id,
+            agent_id,
+            job_id,
+            lease_id,
+            lease_token,
+            content_sha256,
+            local_sequence,
+            proof,
         )
         .await
         .map_err(Into::into)
@@ -2707,6 +2839,17 @@ impl Repository for PostgresStore {
         limit: i64,
     ) -> Result<Vec<Job>, RepositoryError> {
         PostgresStore::list_reroutable_target_jobs(self, workspace_id, environment_id, limit)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn list_reroutable_destination_jobs(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        limit: i64,
+    ) -> Result<Vec<Job>, RepositoryError> {
+        PostgresStore::list_reroutable_destination_jobs(self, workspace_id, environment_id, limit)
             .await
             .map_err(Into::into)
     }
@@ -6040,6 +6183,38 @@ impl Repository for MemoryRepository {
         Ok(jobs)
     }
 
+    async fn list_reroutable_destination_jobs(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        limit: i64,
+    ) -> Result<Vec<Job>, RepositoryError> {
+        let state = self.state.read().await;
+        let mut jobs = state
+            .jobs
+            .values()
+            .filter(|record| {
+                record.job.workspace_id == workspace_id
+                    && record.job.environment_id == environment_id
+                    && matches!(
+                        record.job.state,
+                        JobState::WaitingForAgent | JobState::FailedRetryable
+                    )
+                    && record.job.expires_at > Utc::now()
+                    && record.job.metadata.contains_key("piqae.destination_id")
+                    && !state.job_acceptances.contains_key(&record.job.id)
+                    && state
+                        .leases
+                        .get(&record.job.id)
+                        .is_none_or(|(_, _, _, expiry)| *expiry <= Utc::now())
+            })
+            .map(|record| record.job.clone())
+            .collect::<Vec<_>>();
+        jobs.sort_by_key(|job| (job.created_at, job.id));
+        jobs.truncate(usize::try_from(limit.clamp(1, 1_000)).unwrap_or(1_000));
+        Ok(jobs)
+    }
+
     async fn get_job(
         &self,
         workspace_id: WorkspaceId,
@@ -6545,6 +6720,63 @@ mod routing_repository_tests {
     use super::*;
     use piqae_domain::JobOptions;
     use piqae_storage_postgres::PrinterProfileSnapshot;
+    use std::collections::BTreeMap;
+
+    #[tokio::test]
+    async fn destination_reroute_listing_filters_before_applying_its_limit() {
+        let repository = MemoryRepository::default();
+        let workspace = WorkspaceId::new();
+        let environment = EnvironmentId::new();
+        let printer = PrinterId::new();
+        let agent = AgentId::new();
+        let now = Utc::now();
+        let job = |state, metadata, created_at| Job {
+            id: JobId::new(),
+            workspace_id: workspace,
+            environment_id: environment,
+            printer_id: printer,
+            title: "Reroute listing".into(),
+            source: None,
+            content_kind: piqae_domain::ContentKind::Pdf,
+            content: piqae_domain::ContentSource::Base64 {
+                data: "JVBERi0=".into(),
+            },
+            options: JobOptions::default(),
+            metadata,
+            deliveries: 1,
+            state,
+            created_at,
+            expires_at: now + chrono::Duration::hours(1),
+            delivery_uncertain_since: None,
+        };
+        let eligible = job(
+            JobState::WaitingForAgent,
+            BTreeMap::from([("piqae.destination_id".into(), "pdst_test".into())]),
+            now - chrono::Duration::minutes(1),
+        );
+        let ineligible = job(JobState::Registered, BTreeMap::new(), now);
+        let eligible_id = eligible.id;
+        let mut state = repository.state.write().await;
+        for job in [eligible, ineligible] {
+            state.jobs.insert(
+                job.id,
+                MemoryJob {
+                    job,
+                    agent_id: agent,
+                    sequence: 1,
+                    events: Vec::new(),
+                },
+            );
+        }
+        drop(state);
+
+        let listed = repository
+            .list_reroutable_destination_jobs(workspace, environment, 1)
+            .await
+            .expect("list complete eligible first page");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, eligible_id);
+    }
 
     #[tokio::test]
     async fn memory_document_previews_reject_duplicate_ids_and_finish_admitted_approvals() {

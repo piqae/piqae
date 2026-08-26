@@ -61,11 +61,26 @@ Logical installed service. Important fields:
 - application queue policy;
 - created, last seen, and removed timestamps.
 
-This resource represents an installed operating-system destination. The
-expanded native-profile design adds optional physical-device grouping,
-immutable profiles, stock, and stable routing targets without changing the
-legacy-compatible meaning of a printer. See
+This compatibility resource represents one installed operating-system queue,
+now projected natively as a printer route. It is not by itself a globally
+unique physical printer. The native design adds physical-destination grouping,
+immutable profiles, stock, and stable routing without changing the
+legacy-compatible meaning of `/v1/printers`. See
 [native print profiles, stock, and routing](16-native-print-profiles-stock-and-routing.md).
+
+### Physical destination and printer route
+
+A physical destination is the tenant-scoped scheduling and review boundary for
+one real-world output device. A printer route is one node/OS-queue path to that
+destination. Routes group automatically only on unambiguous same-kind strong
+or verified identity evidence with no conflicting strong evidence; names,
+drivers, and queue labels are never identity.
+
+Each route carries projection health, compatibility, fencing generation, and a
+latest privacy-safe observation with `observed_at` and `fresh_until`. Those
+fields describe control-plane evidence, not proof of paper output. A
+destination reservation selects one route for one delivery attempt; the
+scheduler may change routes only before durable native acceptance.
 
 ### Print profile
 
@@ -87,9 +102,9 @@ or unknown.
 
 ### Target and binding
 
-A target is a stable API destination. Each binding selects a node,
-destination, profile revision, and routing priority. One delivery lease selects
-one binding; no fan-out occurs.
+A target is a stable API destination. Each binding selects a physical
+destination, compatible route/profile requirements, and routing priority. One
+destination reservation selects one route; no fan-out occurs.
 
 ### Job
 
@@ -165,6 +180,17 @@ Immutable ordered fact:
 - `POST /v1/printers/{id}/test-jobs`
 - `POST /v1/printers/{id}/pause`
 - `POST /v1/printers/{id}/resume`
+
+### Physical destinations and routes
+
+- `GET /v1/physical-destinations`
+- `GET/PATCH /v1/physical-destinations/{id}`
+- `GET /v1/physical-destinations/{id}/routes`
+- `GET /v1/printer-routes`
+- `GET /v1/printer-routes/{id}`
+- `GET /v1/printer-routes/{id}/observations`
+- identity-review decision operations;
+- destination reservation and delivery-attempt inspection.
 
 ### Profiles, stocks, and targets
 
@@ -307,8 +333,16 @@ Suggested PostgreSQL tables:
 - `printer_native_identities`
 - `printer_capability_revisions`
 - `printer_state_events`
-- `physical_devices`
-- `printer_device_bindings`
+- `physical_destinations`
+- `destination_identity_evidence`
+- `destination_identity_decisions`
+- `destination_identity_decision_routes`
+- `printer_routes`
+- `route_observations`
+- `projection_acknowledgements`
+- `route_reservations`
+- `delivery_attempts`
+- `delivery_uncertainty_resolutions`
 - `printer_profiles`
 - `profile_native_metadata`
 - `profile_dependencies`
@@ -338,9 +372,18 @@ Suggested PostgreSQL tables:
 - `compatibility_ids`
 - `usage_ledger`
 
+These are the canonical PostgreSQL table names used by migration 42. Public API
+resources retain the friendlier “physical destination”, “identity evidence”,
+and “printer route” names; they are not alternate storage tables.
+
 Important constraints:
 
-- tenant/workspace included in unique and foreign-key paths;
+- every physical-destination, route, observation, acknowledgement,
+  reservation, delivery-attempt, and identity record uses
+  `(workspace_id, environment_id, id)` (or its full tenant-scoped natural key)
+  in primary keys, foreign keys, unique constraints, lookups, and active
+  reservation fences; workspace-only keys are forbidden because Test and Live
+  are isolated tenants;
 - unique `(workspace_id, api_key_id, idempotency_key_hash)` or documented
   alternative scope;
 - unique `(agent_id, boot_id, sequence)` for agent events;

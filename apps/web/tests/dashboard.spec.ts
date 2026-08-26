@@ -12,7 +12,7 @@ test('operations surface exposes state with semantic navigation', async ({ page 
   await expect(accountMenu.getByText('Demo workspace', { exact: true })).toBeVisible();
   await expect(accountMenu.getByRole('link', { name: 'Settings' })).toBeVisible();
   await expect(accountMenu.getByRole('link', { name: 'Sign out' })).toBeVisible();
-  await expect(page.getByText('1 uncertain handoff')).toBeVisible();
+  await expect(page.getByText('2 uncertain handoffs')).toBeVisible();
   await expect(page.getByRole('table')).toBeVisible();
 
   // Views are query-string state on the one page, not separate routes.
@@ -103,15 +103,19 @@ test('documentation and hosted authentication boundaries are reachable', async (
 test('credential and cancellation dialogs are accessible and non-mutating in demo mode', async ({
   page
 }) => {
-  await page.goto('/dashboard');
+  // Integrator accounts default to the safe, aggregate customer view. Node
+  // enrolment is an own-workspace action and is intentionally available only
+  // after selecting that isolated scope.
+  await page.goto('/dashboard?scope=own');
   await page.getByRole('button', { name: 'Add node' }).click();
   const enrolment = page.getByRole('dialog', { name: 'Add a node' });
   await expect(enrolment).toBeVisible();
   await expect(
     enrolment.getByText('Demo mode: preview only. No enrolment will be created.')
   ).toBeVisible();
-  await expect(enrolment.getByText('Browser pairing is recommended')).toBeVisible();
-  await expect(enrolment.getByRole('button', { name: 'Create manual token' })).toBeDisabled();
+  await expect(enrolment.getByText('Open the app')).toBeVisible();
+  await expect(enrolment.getByText('Advanced options')).toBeVisible();
+  await expect(enrolment.getByRole('button', { name: 'Continue in Piqae' })).toBeDisabled();
 
   // Each settings dialog is opened from a fresh load: the mobile project uses
   // touch emulation, where dismissing one modal before opening the next is

@@ -72,7 +72,7 @@ export async function loadAdminPrintOptions(input: {
       documents,
       destinations: [],
       manageDocumentsUrl: "/app/templates",
-      setupDestinationUrl: "/app/settings",
+      setupDestinationUrl: "/app/printers",
       renderExecutionPolicy: settings.renderExecutionPolicy,
     };
   }
@@ -128,7 +128,7 @@ export async function loadAdminPrintOptions(input: {
     documents: documents.length > 0 ? documents : accountDefault,
     destinations,
     manageDocumentsUrl: "/app/templates",
-    setupDestinationUrl: "/app/settings",
+    setupDestinationUrl: "/app/printers",
     destinationError,
     renderExecutionPolicy: settings.renderExecutionPolicy,
   };

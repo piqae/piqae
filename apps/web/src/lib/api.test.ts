@@ -41,7 +41,7 @@ describe('live dashboard overview', () => {
       data: [{
         customer: { id: 'wsp_child', externalId: 'c4beta', name: 'C4 Beta' },
         environment: { id: 'env_live', kind: 'live' },
-        agents: [], printers: [], jobs: []
+        agents: [], printers: [], jobs: [], destinations: [], routes: [], routeObservations: []
       }],
       nextCursor: 'next-shop',
       hasMore: true

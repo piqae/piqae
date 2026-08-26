@@ -523,10 +523,21 @@ button:disabled {
   color: var(--text-tertiary);
 }
 
-@media (max-width: 720px) {
+@media (max-width: 900px) {
   .ui-toolbar {
     flex-wrap: wrap;
     padding: 10px 0;
+  }
+
+  .ui-segmented {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+    overflow-x: auto;
+  }
+
+  .ui-segmented button {
+    flex: 0 0 auto;
   }
 
   .ui-search {

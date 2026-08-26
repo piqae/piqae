@@ -176,7 +176,7 @@ await piqae.accounts.archive(customer.externalId);`,
       },
       {
         heading: 'Point of sale',
-        body: 'Use a target that can route to an available node and printer. Keep the receipt request short-lived, show current node/printer health before checkout, and provide an explicit reprint action when delivery becomes uncertain.'
+        body: 'Use a physical destination with one or more compatible printer routes. The scheduler fences each attempt to one fresh route and may choose another route only before native acceptance. Keep the receipt request short-lived, show observation freshness before checkout, and require explicit operator reconciliation when delivery becomes uncertain.'
       },
       {
         heading: 'Batch documents',
@@ -188,7 +188,7 @@ await piqae.accounts.archive(customer.externalId);`,
       },
       {
         heading: 'Multiple nodes',
-        body: 'A physical printer exposed by two computers is two node-specific printer resources. Send to a printer for exact placement, or to a target for an explicit routing policy. Piqae does not silently reroute a pinned printer job.'
+        body: 'A physical printer exposed by two computers is one destination with two node-specific routes only when strong identity evidence matches unambiguously or an operator confirms it. A fenced reservation selects exactly one fresh compatible route. Piqae may choose another route before native acceptance, but never after an ambiguous handoff.'
       }
     ]
   },

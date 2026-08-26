@@ -80,6 +80,39 @@ class PreflightError(RuntimeError):
     pass
 
 
+def hcl_block(source: str, declaration: str) -> str:
+    """Return one balanced HCL block while ignoring braces inside strings."""
+    start = source.find(declaration)
+    if start < 0:
+        return ""
+    opening = source.find("{", start + len(declaration))
+    if opening < 0:
+        return ""
+    depth = 0
+    quoted = False
+    escaped = False
+    for offset in range(opening, len(source)):
+        character = source[offset]
+        if escaped:
+            escaped = False
+            continue
+        if quoted and character == "\\":
+            escaped = True
+            continue
+        if character == '"':
+            quoted = not quoted
+            continue
+        if quoted:
+            continue
+        if character == "{":
+            depth += 1
+        elif character == "}":
+            depth -= 1
+            if depth == 0:
+                return source[start : offset + 1]
+    return ""
+
+
 def parse_env(path: Path) -> dict[str, str]:
     values: dict[str, str] = {}
     for line_number, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
@@ -211,22 +244,73 @@ def structural_errors() -> list[str]:
             'value = "workos"',
             'resource "google_cloud_run_v2_job" "migration"',
             'name = "STRIPE_WEBHOOK_SECRET"',
+            'name = "PIQAE_DESTINATION_IDENTITY_KEY"',
+            'google_secret_manager_secret.destination_identity_key.id',
             'for_each            = toset(["api", "sync", "worker"])',
         ],
         errors,
     )
     if 'resource "google_cloud_run_v2_service_iam_member" "primary_invoker"' in terraform_main:
         errors.append("duplicate primary Cloud Run public IAM resource remains")
-    require_text(
+    terraform_variables = require_text(
         ROOT / "deploy/terraform/variables.tf",
         [
             '@sha256:[0-9a-f]{64}$',
             'object_store_endpoint must use HTTPS',
-            'webhook_master_key_secret must be base64 that decodes to exactly 32 bytes',
+            'webhook_master_key_secret must be canonical standard Base64 for exactly 32 bytes',
+            'destination_identity_key_secret must be canonical standard Base64 for exactly 32 bytes',
+            'webhook_master_key_secret, destination_identity_key_secret, and document_master_key_secret must be pairwise distinct',
         ],
         errors,
     )
-    require_text(
+    destination_variable = hcl_block(
+        terraform_variables, 'variable "destination_identity_key_secret"'
+    )
+    if not destination_variable:
+        errors.append("Terraform destination identity variable block is missing")
+    else:
+        for relationship in (
+            'regex("^[A-Za-z0-9+/]{42}[AEIMQUYcgkosw048]=$", var.destination_identity_key_secret)',
+            "var.destination_identity_key_secret != var.webhook_master_key_secret",
+            "var.destination_identity_key_secret != var.document_master_key_secret",
+            "var.webhook_master_key_secret != var.document_master_key_secret",
+        ):
+            if relationship not in destination_variable:
+                errors.append(
+                    "Terraform destination identity validation is incomplete: "
+                    f"missing {relationship}"
+                )
+
+    destination_version = hcl_block(
+        terraform_main,
+        'resource "google_secret_manager_secret_version" "destination_identity_key"',
+    )
+    if not destination_version or not all(
+        relationship in destination_version
+        for relationship in (
+            "google_secret_manager_secret.destination_identity_key.id",
+            "var.destination_identity_key_secret",
+        )
+    ):
+        errors.append(
+            "Terraform destination identity Secret Manager version is not wired to its input"
+        )
+    runtime_iam = hcl_block(
+        terraform_main, 'resource "google_secret_manager_secret_iam_member" "runtime_secrets"'
+    )
+    if "google_secret_manager_secret.destination_identity_key.id" not in runtime_iam:
+        errors.append("Terraform runtime service account cannot access the destination identity secret")
+    primary_services = hcl_block(
+        terraform_main, 'resource "google_cloud_run_v2_service" "server"'
+    )
+    if not re.search(
+        r'name\s*=\s*"PIQAE_DESTINATION_IDENTITY_KEY".*?secret\s*=\s*google_secret_manager_secret\.destination_identity_key\.secret_id.*?version\s*=\s*google_secret_manager_secret_version\.destination_identity_key\.version',
+        primary_services,
+        flags=re.DOTALL,
+    ):
+        errors.append("Terraform primary Cloud Run services do not consume the destination identity secret")
+
+    terraform_ha = require_text(
         ROOT / "deploy/terraform/ha.tf",
         [
             'path = "/v1/ready"',
@@ -237,9 +321,20 @@ def structural_errors() -> list[str]:
             "versioning { enabled = true }",
             'global_sync',
             '"/v1/agent/jobs/*"',
+            'name = "PIQAE_DESTINATION_IDENTITY_KEY"',
+            'version = google_secret_manager_secret_version.destination_identity_key.version',
         ],
         errors,
     )
+    secondary_services = hcl_block(
+        terraform_ha, 'resource "google_cloud_run_v2_service" "server_secondary"'
+    )
+    if not re.search(
+        r'name\s*=\s*"PIQAE_DESTINATION_IDENTITY_KEY".*?secret\s*=\s*google_secret_manager_secret\.destination_identity_key\.secret_id.*?version\s*=\s*google_secret_manager_secret_version\.destination_identity_key\.version',
+        secondary_services,
+        flags=re.DOTALL,
+    ):
+        errors.append("Terraform secondary Cloud Run services do not consume the destination identity secret")
     require_text(
         ROOT / "deploy/self-host/docker-compose.yml",
         ['http://127.0.0.1:8080/v1/ready'],

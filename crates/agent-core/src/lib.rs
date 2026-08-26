@@ -55,6 +55,7 @@ pub struct LocalSubmission {
     pub options: JobOptions,
     pub native_profile: Option<NativeProfilePayload>,
     pub deadline_unix_ms: i64,
+    pub route_fence: Option<piqae_protocol::executor::LocalRouteFence>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -448,6 +449,7 @@ impl<E: Executor, C: Clock> AgentEngine<E, C> {
             options,
             native_profile,
             deadline_unix_ms: self.clock.unix_ms() + self.execution_deadline_ms,
+            route_fence: None,
         };
 
         match self.executor.submit(submission).await {

@@ -18,7 +18,7 @@ describe("node connection completion", () => {
     });
   });
 
-  it("authenticates and returns to the fixed embedded settings route", async () => {
+  it("authenticates and returns to the fixed embedded printers route", async () => {
     const request = new Request(
       "https://shopify.piqae.com/connect/complete?shop=c4beta.myshopify.com",
     );
@@ -32,7 +32,7 @@ describe("node connection completion", () => {
     expect(authenticateAdmin).toHaveBeenCalledWith(request);
     expect(response.status).toBe(302);
     expect(response.headers.get("location")).toBe(
-      "/app/settings?shop=c4beta.myshopify.com",
+      "/app/printers?shop=c4beta.myshopify.com",
     );
   });
 
@@ -62,7 +62,7 @@ describe("node connection completion", () => {
     });
 
     expect(response.headers.get("location")).toBe(
-      "/app/settings?shop=c4beta.myshopify.com",
+      "/app/printers?shop=c4beta.myshopify.com",
     );
   });
 });

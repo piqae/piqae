@@ -55,6 +55,8 @@ spec:
               valueFrom: { secretKeyRef: { name: {{ include "piqae.secretName" $root }}, key: {{ $root.Values.secrets.keys.databaseUrl }} } }
             - name: PIQAE_WEBHOOK_MASTER_KEY
               valueFrom: { secretKeyRef: { name: {{ include "piqae.secretName" $root }}, key: {{ $root.Values.secrets.keys.webhookMasterKey }} } }
+            - name: PIQAE_DESTINATION_IDENTITY_KEY
+              valueFrom: { secretKeyRef: { name: {{ include "piqae.secretName" $root }}, key: {{ $root.Values.secrets.keys.destinationIdentityKey }} } }
             - name: PIQAE_DOCUMENT_MASTER_KEY
               valueFrom: { secretKeyRef: { name: {{ include "piqae.secretName" $root }}, key: {{ $root.Values.secrets.keys.documentMasterKey }} } }
             - name: PIQAE_DOCUMENT_ACTIVE_KEY_ID

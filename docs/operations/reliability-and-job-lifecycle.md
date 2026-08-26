@@ -3,9 +3,10 @@
 **Status:** the durable control-plane queue, leased node pickup, target-based
 primary/standby selection, pre-acceptance reassignment, durable local queue,
 native handoff intent, and spooler reconciliation are implemented.
-Pre-acceptance routing concurrency and acceptance/lease fences have disposable
-PostgreSQL evidence. Production regional failover and the release soak gates in
-this document are not yet proven.
+Destination-wide ordering, route reservation/acceptance fences, and the
+installation coordinator have disposable PostgreSQL and non-physical evidence.
+Physical-printer redundancy, production regional failover, rolling-fleet and
+the release soak gates in this document are not yet proven.
 
 Piqae has two different reliability responsibilities:
 
@@ -39,6 +40,7 @@ receiver can prove that replay is idempotent.
 | Client to API | Job ID, request hash, idempotency key, PostgreSQL row | Return the original job for the same key and body |
 | Document storage | Expected digest/length and completed upload row | Retry upload before registering the job |
 | Server to node | Expiring lease ID and secret bound to job/node | Re-offer after lease expiry only if no durable node acceptance exists |
+| Destination route choice | Attempt generation plus destination-wide reservation whose fencing token is stored only as a digest | Release or reroute only before native handoff; a superseded generation cannot resume |
 | Node acceptance | SQLite job, inbox receipt, content digest, pending acceptance intent | Replay the same acceptance until the server confirms it |
 | Node to spooler | SQLite `spool_intent` written before the native call | Never blindly resubmit after an ambiguous native call |
 | Spooler observation | Native job ID and append-only observations | Reconcile to queued/printing/completed/failed/cancelled or uncertain |
@@ -60,6 +62,8 @@ WebSockets, tray state, and logs are never authoritative queues.
 - Lease loss before local persistence aborts the acceptance attempt.
 - An offline target remains visible as `waiting_for_agent`; it is not reported
   as printed or failed merely because a live connection disappeared.
+- A route without an acknowledged installation-stable route key is held as
+  `node_upgrade_required`; it receives no unfenced compatibility offer.
 - Expiry is explicit and produces an event.
 
 Rerouting to another node is safe only in this phase and only when the selected
@@ -89,8 +93,11 @@ If either process crashes between those operations, the pending intent is
 replayed. The server binds acceptance to the job, node, lease, digest, and
 local sequence. A later node must not receive the same accepted job.
 
-Per-printer sequence ordering means each local printer has one deterministic
-queue head. Separate printers can progress concurrently.
+The server orders eligible work for one physical destination by stable
+`(created_at, job_id)` order across its routes. The node retains a route-local
+acceptance sequence and an installation-wide coordinator serializes final
+handoffs from every connector using the same locally identified physical group.
+Separate physical destinations can progress concurrently.
 
 ### Before native handoff
 
@@ -134,10 +141,14 @@ Cancellation before spooler handoff can be definitive. Cancellation after
 handoff is a request that must be reconciled; failure to prove the result is
 uncertain, not cancelled.
 
-## Multiple nodes
+## Multiple nodes and control planes
 
-Every node belongs to one workspace and one Test or Live environment. Printers
-with the same model or name on different nodes remain distinct resources.
+One installation can project a route into several isolated hosted, managed
+child, or self-hosted connectors. A tenant-scoped physical destination can also
+contain routes on several nodes. Matching model, display name, driver, or
+capabilities alone never establishes that two routes reach the same printer.
+Only unambiguous same-kind strong/verified identity evidence can group a new
+route automatically; conflicts require a reversible operator decision.
 
 For a resilient destination, a **target** should bind:
 
@@ -148,6 +159,10 @@ For a resilient destination, a **target** should bind:
 
 A binding is ready only when the node is connected, the printer is usable, the
 profile revision is present and published, and its stock/dependencies match.
+The scheduler also requires an authenticated route observation that has not
+passed `fresh_until`. The current control plane emits a 90-second freshness
+window; expired observations are displayable as `recent` for at most five
+minutes and are never eligible for new work.
 
 Cross-node failover must obey this rule:
 
@@ -167,6 +182,14 @@ V1 should prefer deterministic primary/standby routing, with an explicit
 weighted or least-queue policy added only after queue-depth staleness and stock
 semantics are proven.
 
+Several connectors on the same installation share a local final-handoff
+coordinator even though their credentials, content, queues, and cursors remain
+isolated. Independent hosted and self-hosted control planes do not share a
+reservation ledger. Piqae therefore serializes their local handoffs but does
+not claim global FIFO, automatic cross-server failover, or exactly-once
+delivery between those authorities. Direct OS-spooler jobs are reported only
+as aggregate occupancy and remain outside Piqae ordering and idempotency.
+
 ## If a job does not reach a node
 
 The dashboard and alerting distinguish:
@@ -174,7 +197,8 @@ The dashboard and alerting distinguish:
 | Condition | Interpretation | Action |
 | --- | --- | --- |
 | No eligible online node at registration | Valid configured target is temporarily unavailable | Register durably against its configured binding and retain as waiting |
-| Node offline after registration | Job is durable but not picked up | Alert on pickup age; reconnect or safely reroute before acceptance |
+| Node offline after registration | Job is durable but not picked up | Alert on pickup age; reroute only to a fresh compatible route before acceptance |
+| Route projection missing | The node can report presence but cannot prove the new fence alias | Upgrade the node and wait for `projection_health=current`; do not bypass the hold |
 | Repeated lease expiry | Node cannot finish download/validation | Surface reason and retry count; quarantine unhealthy node |
 | Local acceptance not confirmed | Node has durable intent; server is uncertain | Let the same node replay acceptance; do not offer elsewhere |
 | Node offline after local acceptance | Job survives in node SQLite | Wait for that node; operator-controlled recovery if hardware is lost |
@@ -197,10 +221,12 @@ Required timers are workspace-configurable within safe limits:
 
 1. Build one immutable image and SBOM from a signed tag.
 2. Run migrations as a separate forward-compatible job.
-3. Verify N and N-1 server/node protocol combinations.
+3. Verify the release's declared server/node compatibility matrix. For the
+   physical-destination cutover, an N-1 node may remain visible but is held from
+   new work until it upgrades and acknowledges its route projection.
 4. Deploy a canary revision with no exclusive schema dependency.
-5. Exercise virtual registration, lease, acceptance, event, and webhook
-   synthetics.
+5. Exercise virtual registration, route projection, destination ordering,
+   lease/reservation fencing, acceptance, event, and webhook synthetics.
 6. Shift a small traffic cohort, watching error rate, queue age, pickup latency,
    lease churn, and event lag.
 7. Shift the primary region, then verify secondary-region readiness.

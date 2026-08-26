@@ -107,12 +107,15 @@ function pageData(jobs: DashboardJob[], stateFilter = 'all') {
     printers: [printer],
     agents: [agent],
     accounts: [],
+    destinations: [],
+    routes: [],
+    routeObservations: [],
     detail: null,
     dataError: null
   };
 }
 
-const reviewTile = () => screen.getByText('Needs review').closest('a') as HTMLAnchorElement;
+const reviewTile = () => screen.getByRole('link', { name: /Needs review/ }) as HTMLAnchorElement;
 
 describe('uncertain delivery on the operations dashboard', () => {
   beforeAll(() => {
@@ -137,7 +140,7 @@ describe('uncertain delivery on the operations dashboard', () => {
     const tile = reviewTile();
     expect(tile).toHaveTextContent('No uncertain handoffs');
     expect(tile).not.toHaveClass('attention');
-    expect(tile).toHaveAttribute('href', '/dashboard?view=jobs');
+    expect(tile).toHaveAttribute('href', '/dashboard?view=needs_review');
     expect(tile.textContent).not.toContain('oldest');
     expect(screen.queryByText('Delivery Uncertain')).not.toBeInTheDocument();
   });
@@ -166,7 +169,7 @@ describe('uncertain delivery on the operations dashboard', () => {
 
     const tile = reviewTile();
     expect(tile).toHaveClass('attention');
-    expect(tile).toHaveAttribute('href', '/dashboard?view=jobs&state=delivery_uncertain');
+    expect(tile).toHaveAttribute('href', '/dashboard?view=needs_review');
     expect(tile.textContent).toContain('1 uncertain handoff');
     expect(tile.textContent).toContain('oldest 3h');
     expect(tile.getAttribute('title')).toContain('3h');
@@ -183,7 +186,7 @@ describe('uncertain delivery on the operations dashboard', () => {
     expect(reviewTile().textContent).toContain('oldest under a minute');
   });
 
-  it('states the same age in the job drawer as on the tile', () => {
+  it('states the same age in the job drawer and opens the acknowledged resolution flow', async () => {
     const unproven = job({
       id: 'job_02',
       title: 'Unproven label',
@@ -205,6 +208,28 @@ describe('uncertain delivery on the operations dashboard', () => {
     expect(screen.getByText(/Automatic retry is disabled because it could produce a duplicate/)).toBeInTheDocument();
     expect(screen.queryByText(/node restarted between/i)).not.toBeInTheDocument();
     expect(reviewTile().textContent).toContain('oldest 2h');
+    await fireEvent.click(screen.getByRole('button', { name: 'Resolve' }));
+    expect(screen.getByRole('dialog', { name: 'Resolve uncertain delivery' })).toBeInTheDocument();
+    expect(screen.getByText(/waits for this node to acknowledge the exact local fence/i)).toBeInTheDocument();
+  });
+
+  it('keeps a resolved uncertain handoff in audit history without offering another resolution', () => {
+    const resolved = job({
+      id: 'job_resolved',
+      state: 'delivery_uncertain',
+      deliveryResolution: 'accept_missing',
+      deliveryUncertainSince: minutesAgo(40)
+    });
+    render(Page, {
+      data: {
+        ...pageData([resolved]),
+        detail: { kind: 'job', job: resolved, events: [], printer, agent }
+      } as never,
+      form: null as never
+    });
+
+    expect(screen.getByText(/resolved by an operator/i)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Resolve' })).not.toBeInTheDocument();
   });
 
   it('shows only uncertain jobs when the address selects that state', () => {
@@ -324,5 +349,55 @@ describe('managed customer operations', () => {
       'href',
       expect.stringContaining('managed_customer=')
     );
+  });
+
+  it('separates node, route, projection, and telemetry health while keeping queue sources private', () => {
+    page.url = new URL('https://piqae.test/dashboard?view=routes') as never;
+    const owner = { id: account.id, externalId: account.externalId, name: account.name };
+    render(Page, {
+      data: {
+        ...pageData([]),
+        meta: { ...pageData([]).meta, platform: { accounts: true } },
+        platformEnabled: true,
+        scope: 'customers',
+        ownHasResources: false,
+        view: 'routes',
+        accounts: [account],
+        destinations: [{
+          customer: owner,
+          id: 'pdst_01',
+          displayName: 'Warehouse Zebra',
+          manufacturer: 'Zebra',
+          model: 'ZT411',
+          identityConfidence: 'verified',
+          status: 'active',
+          routeCount: 1,
+          updatedAt: minutesAgo(1)
+        }],
+        routes: [{
+          customer: owner,
+          id: 'rte_01',
+          physicalDestinationId: 'pdst_01',
+          printerId: 'prt_01',
+          agentId: 'agt_01',
+          nativeQueueId: 'Zebra-Shipping',
+          enabled: true,
+          health: 'ready',
+          telemetryFreshness: 'stale',
+          projectionHealth: 'failed',
+          schedulingAuthorityId: 'auth_cloud',
+          latestObservation: null,
+          updatedAt: minutesAgo(1)
+        }]
+      } as never,
+      form: null as never
+    });
+
+    const routeRow = screen.getByText('Warehouse Zebra').closest('tr');
+    expect(routeRow).not.toBeNull();
+    expect(routeRow).toHaveTextContent('Stale');
+    expect(screen.getByText('Failed')).toBeInTheDocument();
+    expect(screen.getByText('auth_cloud')).toBeInTheDocument();
+    expect(screen.queryByText(/filename|username/i)).not.toBeInTheDocument();
   });
 });

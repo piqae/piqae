@@ -44,7 +44,7 @@ describe("admin print options", () => {
       expect.objectContaining({ id: "published-invoice", name: "Invoice" }),
     ]);
     expect(result.destinations).toEqual([]);
-    expect(result.setupDestinationUrl).toBe("/app/settings");
+    expect(result.setupDestinationUrl).toBe("/app/printers");
     expect(result.renderExecutionPolicy).toBe("automatic");
   });
 

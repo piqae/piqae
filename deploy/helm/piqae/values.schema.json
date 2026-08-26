@@ -47,10 +47,11 @@
         "keys": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["databaseUrl", "webhookMasterKey", "documentMasterKey", "documentDecryptionKeys", "s3AccessKeyId", "s3SecretAccessKey"],
+          "required": ["databaseUrl", "webhookMasterKey", "destinationIdentityKey", "documentMasterKey", "documentDecryptionKeys", "s3AccessKeyId", "s3SecretAccessKey"],
           "properties": {
             "databaseUrl": { "type": "string", "minLength": 1 },
             "webhookMasterKey": { "type": "string", "minLength": 1 },
+            "destinationIdentityKey": { "type": "string", "minLength": 1 },
             "documentMasterKey": { "type": "string", "minLength": 1 },
             "documentDecryptionKeys": { "type": "string", "minLength": 1 },
             "s3AccessKeyId": { "type": "string", "minLength": 1 },

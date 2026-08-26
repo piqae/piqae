@@ -327,9 +327,19 @@ For `delivery_uncertain`:
 2. show the original job, printer, timestamps, and native reason to an
    authorized operator;
 3. inspect the physical printer, queue, stock, and downstream business state;
-4. record the decision and actor in the host application's audit trail; and
-5. if another output is required, create a new linked attempt and idempotency
-   key.
+4. call `POST /v1/jobs/{id}/resolve-uncertain` with a stable
+   `Idempotency-Key`, a required operator note, and one of
+   `acknowledge_printed`, `acknowledge_missing`, `cancelled`, or `reprint`;
+5. treat HTTP 202 as pending until the exact node command cursor is
+   acknowledged; and
+6. if `reprint` is selected, use the separately linked cloud job created after
+   acknowledgement. Retained Base64/upload content can be cloned; URI or
+   encrypted content requires a fresh authorized submission.
+
+The original uncertain attempt remains immutable and terminal. Its resolution,
+actor, note, node acknowledgement, and optional replacement-job link are audit
+records; they do not rewrite the physical evidence. No choice automatically
+releases the old attempt for retry or proves that paper was produced.
 
 ## Known limits and non-claims
 

@@ -63,6 +63,15 @@ class ProbeManifestTests(unittest.TestCase):
         self.assertIn("/v1/workspaces/current", paths)
         self.assertIn("/v1/identity/me", paths)
 
+    def test_destination_topology_is_probed_without_tenant_credentials(self) -> None:
+        manifest = load_manifest(DEFAULT_MANIFEST)
+        probes = {
+            probe["path"]: probe["expect"]
+            for probe in manifest["services"]["piqae-control-plane"]["probes"]
+        }
+        self.assertEqual(probes["/v1/physical-destinations"], "authenticated")
+        self.assertEqual(probes["/v1/printer-routes"], "authenticated")
+
     def test_an_unknown_service_is_rejected(self) -> None:
         with self.assertRaises(SmokeError):
             service_manifest(load_manifest(DEFAULT_MANIFEST), "piqae-nonexistent")

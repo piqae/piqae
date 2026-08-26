@@ -30,6 +30,7 @@ externalSecret:
   remoteKeys:
     databaseUrl: replace/piqae/database-url
     webhookMasterKey: replace/piqae/webhook-master-key
+    destinationIdentityKey: replace/piqae/destination-identity-key
     s3AccessKeyId: replace/piqae/object-access-key
     s3SecretAccessKey: replace/piqae/object-secret-key
 

@@ -1,9 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { createJob, dashboardSource, listPrinters } = vi.hoisted(() => ({
+const { createJob, dashboardSource, listPrinters, resolveUncertain } = vi.hoisted(() => ({
   createJob: vi.fn(),
   dashboardSource: vi.fn(),
-  listPrinters: vi.fn()
+  listPrinters: vi.fn(),
+  resolveUncertain: vi.fn()
 }));
 
 vi.mock('$lib/server/dashboard-data', () => ({
@@ -22,6 +23,7 @@ vi.mock('$lib/server/dashboard-data', () => ({
 import { actions, load } from './+page.server';
 
 const createPrintJob = actions.createPrintJob!;
+const resolveUncertainJob = actions.resolveUncertainJob!;
 
 function event(form: FormData) {
   return {
@@ -109,6 +111,33 @@ describe('dashboard PDF printing', () => {
   });
 });
 
+describe('uncertain delivery resolution', () => {
+  it('passes the exact idempotency request through and reports pending node acknowledgement', async () => {
+    resolveUncertain.mockResolvedValue({ state: 'pending_node_ack', replacementJobId: null });
+    dashboardSource.mockReturnValue({
+      api: { resolveUncertainJob: resolveUncertain }
+    });
+    const form = new FormData();
+    form.set('job_id', 'job_01J00000000000000000000000');
+    form.set('resolution', 'acknowledge_missing');
+    form.set('note', 'Checked the output tray and accepted the missing document.');
+    form.set('request_id', 'resolve-browser-request-1');
+
+    const result = await resolveUncertainJob(event(form));
+
+    expect(result).toMatchObject({
+      mutation: 'resolveUncertainJob',
+      resolutionState: 'pending_node_ack'
+    });
+    expect(resolveUncertain).toHaveBeenCalledWith(
+      'job_01J00000000000000000000000',
+      'acknowledge_missing',
+      'Checked the output tray and accepted the missing document.',
+      'resolve-browser-request-1'
+    );
+  });
+});
+
 const emptyPage = { data: [], nextCursor: null };
 
 function loadEvent(search: string) {
@@ -123,6 +152,8 @@ function loadEvent(search: string) {
       jobs: async () => emptyPage,
       printers: async () => emptyPage,
       agents: async () => emptyPage,
+      destinations: async () => emptyPage,
+      routes: async () => emptyPage,
       accounts: async () => emptyPage
     }
   });
@@ -163,7 +194,7 @@ describe('managed customer selection', () => {
         customer: { id: 'wsp_child', externalId: 'c4beta', name: 'C4 Beta' },
         environment: { id: 'env_live', kind: 'live' },
         agents: [{ ...({ id: 'agt_child', name: 'Shop Mac', state: 'online' }), customer: { id: 'wsp_child', externalId: 'c4beta', name: 'C4 Beta' } }],
-        printers: [], jobs: []
+        printers: [], jobs: [], destinations: [], routes: [], routeObservations: []
       }],
       nextCursor: null,
       hasMore: false
@@ -180,7 +211,9 @@ describe('managed customer selection', () => {
         }),
         jobs: async () => emptyPage,
         printers: async () => emptyPage,
-        agents: async () => emptyPage
+        agents: async () => emptyPage,
+        destinations: async () => emptyPage,
+        routes: async () => emptyPage
       }
     });
 
@@ -221,7 +254,9 @@ describe('managed customer selection', () => {
       }),
       jobs: async () => emptyPage,
       printers: async () => emptyPage,
-      agents: childAgents
+      agents: childAgents,
+      destinations: async () => emptyPage,
+      routes: async () => emptyPage
     };
     const managedWorkspace = vi.fn(() => childApi);
     dashboardSource.mockReturnValue({
@@ -270,6 +305,8 @@ describe('managed customer selection', () => {
       jobs: async () => emptyPage,
       printers: async () => emptyPage,
       agents: async () => ({ data: [{ id: rawId, name: 'Piqae node' }], nextCursor: null }),
+      destinations: async () => emptyPage,
+      routes: async () => emptyPage,
       nodeDiagnostics: async () => []
     };
     dashboardSource.mockReturnValue({

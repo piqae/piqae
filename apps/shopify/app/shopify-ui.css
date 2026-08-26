@@ -110,6 +110,45 @@
   grid-column: 1 / -1;
   color: #616161;
 }
+.piqae-computer-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 18rem), 1fr));
+  gap: 0.75rem;
+}
+.piqae-computer-card {
+  min-width: 0;
+  padding: 1rem;
+  border: 1px solid color-mix(in srgb, currentColor 16%, transparent);
+  border-radius: 0.75rem;
+  background: Canvas;
+}
+.piqae-computer-card > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+.piqae-computer-card strong,
+.piqae-resource-id {
+  overflow-wrap: anywhere;
+}
+.piqae-computer-card small {
+  display: block;
+  color: color-mix(in srgb, currentColor 68%, transparent);
+  line-height: 1.45;
+}
+.piqae-printer-empty {
+  display: grid;
+  justify-items: start;
+  gap: 0.75rem;
+  padding: 2rem;
+  text-align: left;
+}
+.piqae-advanced-disclosure {
+  padding: 1rem;
+  border: 1px solid color-mix(in srgb, currentColor 14%, transparent);
+  border-radius: 0.75rem;
+}
 .piqae-connect-complete {
   max-width: 34rem;
   margin: 12vh auto;

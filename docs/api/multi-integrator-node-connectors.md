@@ -82,24 +82,30 @@ connector workers, with periodic reconciliation as a recovery bound.
 | One node, several hosted direct or child connectors | Each tenant receives an isolated projection of every granted local printer. |
 | One node, hosted and self-hosted connectors | Each immutable server origin has independent credentials, queues, cursors and content roots. |
 | Several nodes with disjoint printers | Each OS queue remains a separate printer route. |
-| Several nodes exposing the same physical device | They remain separate routes until an operator binds them to one logical target; matching names or drivers never merges them automatically. |
+| Several nodes exposing the same physical device | They are separate routes. The control plane may attach a new route to an existing physical destination only when same-kind strong or verified identity evidence matches unambiguously and no conflicting strong evidence exists. Names, drivers and queue labels never merge routes. Ambiguous evidence requires review. |
 | Different connector subsets on different nodes | Only the explicit grant on each connector controls visibility and job admission. |
 | Printer added, removed or reconfigured | Every connector is invalidated immediately and later reconciled; selected-printer grants never widen automatically. |
 
 ## Shared destinations and queue privacy
 
-Multi-connector projection does not create a global physical-printer queue.
-Within one node, every connector has a tenant-private durable Piqae queue and
-all accepted work ultimately reaches the same OS queue. A tenant may receive a
-privacy-safe busy/occupancy signal, but must never receive another tenant's job
-title, document, metadata or identifiers. Jobs submitted directly to the OS
-spooler are outside Piqae's ordering and idempotency boundary.
+Within one installation, the local coordinator serializes Piqae handoffs for
+routes grouped as one physical destination while preserving a tenant-private
+durable queue for every connector. A tenant may receive privacy-safe aggregate
+occupancy and work-ahead counts, but never another tenant's job title,
+document, metadata or identifiers. Jobs submitted directly to the operating
+system spooler are outside Piqae's ordering, reservation, and idempotency
+boundary and may only appear as bounded native-queue observations.
 
-When several computers can drive the same physical printer, use an explicit
-logical target with primary/standby bindings. The control plane leases one job
-to one route. It may reroute before durable native acceptance; after spooler
-handoff or an ambiguous crash it must enter `delivery_uncertain` rather than
-automatically print through another node and risk a duplicate. Pool scheduling,
-cross-tenant queue positions and automatic physical-device discovery remain
-future work and must not be implied by connector health or matching queue
-names.
+Within one control plane, multiple compatible routes can serve a physical
+destination. A destination reservation fences one job to one route and keeps a
+stable destination order. The scheduler may choose another fresh compatible
+route only before durable native acceptance. After spooler handoff or an
+ambiguous crash, the attempt becomes `delivery_uncertain`; it must not print
+automatically through a second node.
+
+Hosted and self-hosted connectors on the same installation remain independent
+authorities. They do not share a reservation ledger, global FIFO, job contents,
+or an exactly-once physical-delivery guarantee. The local coordinator can
+serialize the Piqae handoffs it sees, but one server cannot automatically fail
+over a job registered on another server. Connector health and matching queue
+names must never imply cross-authority ownership or redundancy.

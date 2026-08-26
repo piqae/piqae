@@ -10,7 +10,7 @@ use anyhow::{Context, Result, bail};
 use piqae_protocol::agent::PrinterGrant;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, BTreeSet},
     fs::OpenOptions,
     io::Write as _,
     path::{Path, PathBuf},
@@ -19,6 +19,50 @@ use url::Url;
 
 const REGISTRY_VERSION: u16 = 1;
 const MAX_CONNECTORS: usize = 128;
+
+/// Identifies connectors whose allowed local queues share a physical
+/// serialization group across independent control-plane origins. This is a
+/// diagnostic only: the node serializes their native handoffs locally, but it
+/// cannot promise global exactly-once scheduling or fail over work between
+/// authorities which do not share a reservation ledger.
+pub fn cross_authority_connectors(
+    records: &[ConnectorRecord],
+    printer_groups: &[(String, String)],
+) -> BTreeSet<String> {
+    let mut groups = BTreeMap::<String, BTreeMap<String, BTreeSet<String>>>::new();
+    for record in records.iter().filter(|record| record.enabled) {
+        let origin = record.control_plane_url.origin().ascii_serialization();
+        let allowed = match record.printer_grant {
+            PrinterGrant::AllLocalPrinters => None,
+            PrinterGrant::SelectedPrinters => Some(
+                record
+                    .allowed_printer_ids
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<BTreeSet<_>>(),
+            ),
+        };
+        for (printer_id, coordination_key) in printer_groups {
+            if allowed
+                .as_ref()
+                .is_some_and(|selected| !selected.contains(printer_id.as_str()))
+            {
+                continue;
+            }
+            groups
+                .entry(coordination_key.clone())
+                .or_default()
+                .entry(origin.clone())
+                .or_default()
+                .insert(record.connector_id.clone());
+        }
+    }
+    groups
+        .into_values()
+        .filter(|origins| origins.len() > 1)
+        .flat_map(|origins| origins.into_values().flatten())
+        .collect()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -296,46 +340,6 @@ fn validate_record(record: &ConnectorRecord) -> Result<()> {
     Ok(())
 }
 
-/// Round-robin admission queue for a bounded shared native executor.
-/// Duplicate readiness signals are coalesced, preventing a busy tenant from
-/// occupying the queue and starving quiet connectors.
-#[derive(Debug)]
-#[allow(dead_code, reason = "consumed by the staged connector supervisor")]
-pub struct FairConnectorQueue {
-    ready: VecDeque<String>,
-    queued: std::collections::BTreeSet<String>,
-    capacity: usize,
-}
-
-impl FairConnectorQueue {
-    #[allow(dead_code, reason = "consumed by the staged connector supervisor")]
-    pub(crate) fn new(capacity: usize) -> Result<Self> {
-        if capacity == 0 || capacity > MAX_CONNECTORS {
-            bail!("invalid scheduler capacity");
-        }
-        Ok(Self {
-            ready: VecDeque::new(),
-            queued: std::collections::BTreeSet::default(),
-            capacity,
-        })
-    }
-    #[allow(dead_code, reason = "consumed by the staged connector supervisor")]
-    pub(crate) fn notify_ready(&mut self, connector_id: &str) -> bool {
-        if self.queued.contains(connector_id) || self.ready.len() >= self.capacity {
-            return false;
-        }
-        self.queued.insert(connector_id.to_owned());
-        self.ready.push_back(connector_id.to_owned());
-        true
-    }
-    #[allow(dead_code, reason = "consumed by the staged connector supervisor")]
-    pub(crate) fn next(&mut self) -> Option<String> {
-        let id = self.ready.pop_front()?;
-        self.queued.remove(&id);
-        Some(id)
-    }
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -401,6 +405,37 @@ mod tests {
     }
 
     #[test]
+    fn cross_authority_warning_requires_a_shared_allowed_physical_group() {
+        let mut hosted = record("ncon_hosted");
+        hosted.allowed_printer_ids = vec!["ptr_shared".into()];
+        let mut same_origin = record("ncon_same_origin");
+        same_origin.allowed_printer_ids = vec!["ptr_shared".into()];
+        let mut self_hosted = record("ncon_self_hosted");
+        self_hosted.control_plane_url = Url::parse("https://print.internal.example/").unwrap();
+        self_hosted.allowed_printer_ids = vec!["ptr_shared".into()];
+        let mut unrelated = record("ncon_unrelated");
+        unrelated.control_plane_url = Url::parse("https://other.example/").unwrap();
+        unrelated.allowed_printer_ids = vec!["ptr_other".into()];
+
+        let warnings = cross_authority_connectors(
+            &[hosted, same_origin, self_hosted, unrelated],
+            &[
+                ("ptr_shared".into(), "physical-a".into()),
+                ("ptr_other".into(), "physical-b".into()),
+            ],
+        );
+        assert_eq!(
+            warnings,
+            BTreeSet::from([
+                "ncon_hosted".to_owned(),
+                "ncon_same_origin".to_owned(),
+                "ncon_self_hosted".to_owned(),
+            ])
+        );
+        assert!(!warnings.contains("ncon_unrelated"));
+    }
+
+    #[test]
     fn management_destinations_fail_closed() {
         let mut connector = record("ncon_unsafe");
         connector.manage_url = Some(Url::parse("http://owner.example/manage").unwrap());
@@ -446,19 +481,6 @@ mod tests {
         assert!(registry.add(insecure).is_err());
         registry.add(record("ncon_a")).unwrap();
         assert!(registry.add(record("ncon_a")).is_err());
-    }
-
-    #[test]
-    fn scheduler_is_bounded_coalesced_and_round_robin() {
-        let mut queue = FairConnectorQueue::new(2).unwrap();
-        assert!(queue.notify_ready("ncon_a"));
-        assert!(!queue.notify_ready("ncon_a"));
-        assert!(queue.notify_ready("ncon_b"));
-        assert!(!queue.notify_ready("ncon_c"));
-        assert_eq!(queue.next().as_deref(), Some("ncon_a"));
-        assert!(queue.notify_ready("ncon_a"));
-        assert_eq!(queue.next().as_deref(), Some("ncon_b"));
-        assert_eq!(queue.next().as_deref(), Some("ncon_a"));
     }
 
     #[test]
