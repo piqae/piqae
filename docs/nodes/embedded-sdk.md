@@ -120,6 +120,53 @@ network privacy prompts, and physical-printer certification remain the host
 application's release responsibilities. No generic adapter is advertised as a
 vendor-certified driver.
 
+## Removing access without losing recovery evidence
+
+Cleanup is deliberately split by ownership instead of being one ambiguous
+"delete node" operation:
+
+- **Revoke one connection** when a hosted workspace, managed child account, or
+  self-hosted authority should stop using the installation. Other connectors,
+  the installation identity, local profiles, and the local queue remain.
+- **Revoke an application capability** when an attached desktop app should no
+  longer use the installed node. The app loses broker access without rotating
+  cloud connector or device keys.
+- **Remove a node from a workspace** from the scoped dashboard only after
+  confirming the node name. The server revokes that tenant's node identity and
+  returns work that has not crossed native acceptance to scheduling. It does
+  not erase the computer's local database, and uncertain/native-accepted work
+  is never silently retried.
+- **Reset an embedded installation** is a host-application uninstall/reset
+  operation, not a cloud API call. Stop the runtime, prove there is no active or
+  uncertain handoff, revoke its connectors, then let the app remove its exact
+  sandbox-owned state and Keychain/Credential Manager entries. Never point a
+  generic recursive delete at a shared state root.
+
+Removing the app does not prove that an iPad, desktop spooler, or printer
+discarded accepted work. Operators resolve any retained uncertain deliveries
+before resetting the installation.
+
+## Package and compatibility policy
+
+The public application SDKs are the supported integration boundary. Internal
+Rust crates stay `publish = false`; applications must not assemble a node from
+private crates whose queue/storage contracts can change together inside the
+monorepo.
+
+- Apple applications consume `PiqaeNodeKit` through Swift Package Manager. A
+  tagged binary release must reference the reviewed, signed XCFramework
+  checksum produced from the same Piqae tag; a source checkout is for Preview
+  development only.
+- Windows applications consume the safe `Piqae.Node` .NET facade. A tagged
+  NuGet package contains the matching native runtime for supported RIDs and is
+  validated in a clean consumer before publication.
+- Both packages expose their native ABI and local broker protocol ranges. A
+  desktop client attaches only when those ranges overlap; it never guesses or
+  opens the installed node's database as a fallback.
+- Embedded native code updates with the host app. An attached machine service
+  continues to use Piqae's signed updater, preserving the documented N/N-1
+  broker window.
+
 ## Testing and support claims
 
 Use fake printers for lifecycle, restart, connector, idempotency, and routing
