@@ -399,29 +399,12 @@ fn observation_response(value: RouteObservation) -> RouteObservationResponse {
     }
 }
 
-async fn route_response(
-    state: &AppState,
-    tenant_scope: TenantScope,
+fn route_response_from_parts(
     route: StoredPrinterRoute,
-) -> Result<PrinterRouteResponse, AppError> {
-    let observation = match state
-        .destination_topology
-        .latest_route_observation(tenant_scope, &route.id)
-        .await
-    {
-        Ok(value) => Some(value),
-        Err(StorageError::NotFound) => None,
-        Err(error) => return Err(storage_error(error)),
-    };
-    let projection = match state
-        .destination_topology
-        .get_projection_acknowledgement(tenant_scope, &route.agent_id, &route.id)
-        .await
-    {
-        Ok(value) => Some(value),
-        Err(StorageError::NotFound) => None,
-        Err(error) => return Err(storage_error(error)),
-    };
+    observation: Option<RouteObservation>,
+    projection: Option<&ProjectionAcknowledgement>,
+    authority: Option<String>,
+) -> PrinterRouteResponse {
     let now = Utc::now();
     let telemetry_freshness = observation.as_ref().map_or("never", |value| {
         if value.fresh_until >= now {
@@ -481,13 +464,7 @@ async fn route_response(
             "stale"
         }
     });
-    let authority = state
-        .destination_topology
-        .get_destination(tenant_scope, &route.destination_id)
-        .await
-        .map_err(storage_error)?
-        .scheduling_authority_id;
-    Ok(PrinterRouteResponse {
+    PrinterRouteResponse {
         id: route.id,
         physical_destination_id: route.destination_id,
         printer_id: route.printer_id,
@@ -505,9 +482,153 @@ async fn route_response(
         stock_state,
         latest_observation: observation.map(observation_response),
         scheduling_authority_id: authority,
-        created_at: route.updated_at,
+        created_at: route.created_at,
         updated_at: route.updated_at,
-    })
+    }
+}
+
+async fn route_response(
+    state: &AppState,
+    tenant_scope: TenantScope,
+    route: StoredPrinterRoute,
+) -> Result<PrinterRouteResponse, AppError> {
+    let observation = match state
+        .destination_topology
+        .latest_route_observation(tenant_scope, &route.id)
+        .await
+    {
+        Ok(value) => Some(value),
+        Err(StorageError::NotFound) => None,
+        Err(error) => return Err(storage_error(error)),
+    };
+    let projection = match state
+        .destination_topology
+        .get_projection_acknowledgement(tenant_scope, &route.agent_id, &route.id)
+        .await
+    {
+        Ok(value) => Some(value),
+        Err(StorageError::NotFound) => None,
+        Err(error) => return Err(storage_error(error)),
+    };
+    let authority = state
+        .destination_topology
+        .get_destination(tenant_scope, &route.destination_id)
+        .await
+        .map_err(storage_error)?
+        .scheduling_authority_id;
+    Ok(route_response_from_parts(
+        route,
+        observation,
+        projection.as_ref(),
+        authority,
+    ))
+}
+
+fn route_responses_from_parts(
+    routes: Vec<StoredPrinterRoute>,
+    observations: &[RouteObservation],
+    projections: &[ProjectionAcknowledgement],
+    destinations: &[StoredPhysicalDestination],
+) -> Result<Vec<PrinterRouteResponse>, AppError> {
+    let observations = observations
+        .iter()
+        .map(|value| (value.route_id.as_str(), value))
+        .collect::<HashMap<_, _>>();
+    let projections = projections
+        .iter()
+        .map(|value| ((value.agent_id.as_str(), value.route_id.as_str()), value))
+        .collect::<HashMap<_, _>>();
+    let destinations = destinations
+        .iter()
+        .map(|value| (value.id.as_str(), value))
+        .collect::<HashMap<_, _>>();
+    routes
+        .into_iter()
+        .map(|route| {
+            let destination = destinations
+                .get(route.destination_id.as_str())
+                .ok_or_else(|| storage_error(StorageError::NotFound))?;
+            let observation = observations
+                .get(route.id.as_str())
+                .map(|value| (*value).clone());
+            let projection = projections
+                .get(&(route.agent_id.as_str(), route.id.as_str()))
+                .copied();
+            Ok(route_response_from_parts(
+                route,
+                observation,
+                projection,
+                destination.scheduling_authority_id.clone(),
+            ))
+        })
+        .collect()
+}
+
+async fn route_responses(
+    state: &AppState,
+    tenant_scope: TenantScope,
+    routes: Vec<StoredPrinterRoute>,
+) -> Result<Vec<PrinterRouteResponse>, AppError> {
+    let route_ids = routes
+        .iter()
+        .map(|route| route.id.clone())
+        .collect::<Vec<_>>();
+    let observations = state
+        .destination_topology
+        .latest_route_observations(tenant_scope, &route_ids)
+        .await
+        .map_err(storage_error)?;
+    let projections = state
+        .destination_topology
+        .projection_acknowledgements_for_routes(tenant_scope, &route_ids)
+        .await
+        .map_err(storage_error)?;
+    let destinations = state
+        .destination_topology
+        .list_destinations(tenant_scope)
+        .await
+        .map_err(storage_error)?;
+    route_responses_from_parts(routes, &observations, &projections, &destinations)
+}
+
+fn destination_response_from_parts(
+    destination: StoredPhysicalDestination,
+    routes: &[StoredPrinterRoute],
+    observations: &HashMap<&str, &RouteObservation>,
+) -> PhysicalDestinationResponse {
+    let routes = routes
+        .iter()
+        .filter(|route| route.destination_id == destination.id)
+        .collect::<Vec<_>>();
+    let route_count = routes.len();
+    let now = Utc::now();
+    let has_ready_route = routes.iter().any(|route| {
+        route.enabled
+            && route.state == "available"
+            && observations
+                .get(route.id.as_str())
+                .is_some_and(|observation| {
+                    observation.fresh_until >= now
+                        && observation.accepting_jobs == Some(true)
+                        && matches!(observation.printer_state.as_str(), "idle" | "processing")
+                })
+    });
+    let public_status = if destination.state == "available" && !has_ready_route {
+        "needs_review".into()
+    } else {
+        public_destination_state(&destination.state)
+    };
+    PhysicalDestinationResponse {
+        id: destination.id,
+        display_name: destination.name,
+        manufacturer: None,
+        model: None,
+        identity_confidence: identity_confidence(destination.identity_confidence),
+        status: public_status,
+        route_count,
+        created_at: destination.created_at,
+        updated_at: destination.updated_at,
+    }
 }
 
 async fn destination_response(
@@ -520,43 +641,53 @@ async fn destination_response(
         .list_routes(tenant_scope, &destination.id)
         .await
         .map_err(storage_error)?;
-    let route_count = routes.len();
-    let mut has_ready_route = false;
-    let now = Utc::now();
-    for route in &routes {
-        if !route.enabled || route.state != "available" {
-            continue;
-        }
-        if let Ok(observation) = state
-            .destination_topology
-            .latest_route_observation(tenant_scope, &route.id)
-            .await
-        {
-            if observation.fresh_until >= now
-                && observation.accepting_jobs == Some(true)
-                && matches!(observation.printer_state.as_str(), "idle" | "processing")
-            {
-                has_ready_route = true;
-                break;
-            }
-        }
-    }
-    let public_status = if destination.state == "available" && !has_ready_route {
-        "needs_review".into()
-    } else {
-        public_destination_state(&destination.state)
-    };
-    Ok(PhysicalDestinationResponse {
-        id: destination.id,
-        display_name: destination.name,
-        manufacturer: None,
-        model: None,
-        identity_confidence: identity_confidence(destination.identity_confidence),
-        status: public_status,
-        route_count,
-        created_at: destination.updated_at,
-        updated_at: destination.updated_at,
-    })
+    let route_ids = routes
+        .iter()
+        .map(|route| route.id.clone())
+        .collect::<Vec<_>>();
+    let observations = state
+        .destination_topology
+        .latest_route_observations(tenant_scope, &route_ids)
+        .await
+        .map_err(storage_error)?;
+    let observations = observations
+        .iter()
+        .map(|value| (value.route_id.as_str(), value))
+        .collect::<HashMap<_, _>>();
+    Ok(destination_response_from_parts(
+        destination,
+        &routes,
+        &observations,
+    ))
+}
+
+async fn destination_responses(
+    state: &AppState,
+    tenant_scope: TenantScope,
+    destinations: Vec<StoredPhysicalDestination>,
+) -> Result<Vec<PhysicalDestinationResponse>, AppError> {
+    let routes = state
+        .destination_topology
+        .list_all_routes(tenant_scope)
+        .await
+        .map_err(storage_error)?;
+    let route_ids = routes
+        .iter()
+        .map(|route| route.id.clone())
+        .collect::<Vec<_>>();
+    let observations = state
+        .destination_topology
+        .latest_route_observations(tenant_scope, &route_ids)
+        .await
+        .map_err(storage_error)?;
+    let observations = observations
+        .iter()
+        .map(|value| (value.route_id.as_str(), value))
+        .collect::<HashMap<_, _>>();
+    Ok(destinations
+        .into_iter()
+        .map(|destination| destination_response_from_parts(destination, &routes, &observations))
+        .collect())
 }
 
 /// Builds a bounded customer-attributed topology snapshot for the platform
@@ -574,31 +705,55 @@ pub(crate) async fn operational_snapshot(
     ),
     AppError,
 > {
-    let mut destinations = state
+    let all_destinations = state
         .destination_topology
         .list_destinations(tenant_scope)
         .await
         .map_err(storage_error)?;
+    let mut destinations = all_destinations.clone();
     destinations.truncate(limit);
-    let mut destination_responses = Vec::with_capacity(destinations.len());
-    for destination in destinations {
-        destination_responses.push(destination_response(state, tenant_scope, destination).await?);
-    }
-    let mut routes = state
+    let all_routes = state
         .destination_topology
         .list_all_routes(tenant_scope)
         .await
         .map_err(storage_error)?;
+    let all_route_ids = all_routes
+        .iter()
+        .map(|route| route.id.clone())
+        .collect::<Vec<_>>();
+    let route_observations = state
+        .destination_topology
+        .latest_route_observations(tenant_scope, &all_route_ids)
+        .await
+        .map_err(storage_error)?;
+    let observation_map = route_observations
+        .iter()
+        .map(|value| (value.route_id.as_str(), value))
+        .collect::<HashMap<_, _>>();
+    let destination_responses = destinations
+        .iter()
+        .cloned()
+        .map(|destination| {
+            destination_response_from_parts(destination, &all_routes, &observation_map)
+        })
+        .collect::<Vec<_>>();
+    let mut routes = all_routes;
     routes.truncate(limit);
-    let mut route_responses = Vec::with_capacity(routes.len());
-    let mut observations = Vec::new();
-    for route in routes {
-        let response = route_response(state, tenant_scope, route).await?;
-        if let Some(observation) = response.latest_observation.clone() {
-            observations.push(observation);
-        }
-        route_responses.push(response);
-    }
+    let route_ids = routes
+        .iter()
+        .map(|route| route.id.clone())
+        .collect::<Vec<_>>();
+    let projections = state
+        .destination_topology
+        .projection_acknowledgements_for_routes(tenant_scope, &route_ids)
+        .await
+        .map_err(storage_error)?;
+    let route_responses =
+        route_responses_from_parts(routes, &route_observations, &projections, &all_destinations)?;
+    let observations = route_responses
+        .iter()
+        .filter_map(|response| response.latest_observation.clone())
+        .collect();
     Ok((destination_responses, route_responses, observations))
 }
 
@@ -612,20 +767,28 @@ pub(crate) async fn ranked_ready_routes(
 ) -> Result<Vec<StoredPrinterRoute>, AppError> {
     let now = Utc::now();
     let mut candidates = Vec::new();
-    for route in state
+    let routes = state
         .destination_topology
         .list_routes(tenant_scope, destination_id)
         .await
+        .map_err(storage_error)?;
+    let route_ids = routes
+        .iter()
+        .map(|route| route.id.clone())
+        .collect::<Vec<_>>();
+    let observations = state
+        .destination_topology
+        .latest_route_observations(tenant_scope, &route_ids)
+        .await
         .map_err(storage_error)?
-    {
+        .into_iter()
+        .map(|observation| (observation.route_id.clone(), observation))
+        .collect::<HashMap<_, _>>();
+    for route in routes {
         if !route.enabled || route.state != "available" {
             continue;
         }
-        let Ok(observation) = state
-            .destination_topology
-            .latest_route_observation(tenant_scope, &route.id)
-            .await
-        else {
+        let Some(observation) = observations.get(&route.id) else {
             continue;
         };
         if observation.fresh_until < now
@@ -878,6 +1041,7 @@ pub(crate) async fn project_agent_topology(
                             state: if conflicts { "attention" } else { "available" }.into(),
                             scheduling_authority_id: Some(authority_id.clone()),
                             identity_revision: snapshot.topology_revision.max(1),
+                            created_at: snapshot.observed_at,
                             updated_at: snapshot.observed_at,
                         },
                     )
@@ -926,6 +1090,9 @@ pub(crate) async fn project_agent_topology(
                             .max()
                             .unwrap_or(0),
                         last_seen_at: Some(snapshot.observed_at),
+                        created_at: existing
+                            .as_ref()
+                            .map_or(snapshot.observed_at, |route| route.created_at),
                         updated_at: snapshot.observed_at,
                     },
                 )
@@ -1455,11 +1622,9 @@ pub async fn list_destinations(
         .list_destinations(tenant_scope)
         .await
         .map_err(storage_error)?;
-    let mut data = Vec::with_capacity(stored.len());
-    for destination in stored {
-        data.push(destination_response(&state, tenant_scope, destination).await?);
-    }
-    Ok(Json(data))
+    Ok(Json(
+        destination_responses(&state, tenant_scope, stored).await?,
+    ))
 }
 
 pub async fn get_destination(
@@ -1496,11 +1661,7 @@ pub async fn list_destination_routes(
         .list_routes(tenant_scope, &destination_id)
         .await
         .map_err(storage_error)?;
-    let mut data = Vec::with_capacity(stored.len());
-    for route in stored {
-        data.push(route_response(&state, tenant_scope, route).await?);
-    }
-    Ok(Json(data))
+    Ok(Json(route_responses(&state, tenant_scope, stored).await?))
 }
 
 pub async fn list_routes(
@@ -1514,11 +1675,7 @@ pub async fn list_routes(
         .list_all_routes(tenant_scope)
         .await
         .map_err(storage_error)?;
-    let mut data = Vec::with_capacity(stored.len());
-    for route in stored {
-        data.push(route_response(&state, tenant_scope, route).await?);
-    }
-    Ok(Json(data))
+    Ok(Json(route_responses(&state, tenant_scope, stored).await?))
 }
 
 pub async fn get_route(
@@ -1760,6 +1917,7 @@ pub async fn create_identity_decision(
                         state: "available".into(),
                         scheduling_authority_id: destination.scheduling_authority_id.clone(),
                         identity_revision: destination.identity_revision.saturating_add(1),
+                        created_at: now,
                         updated_at: now,
                     },
                 )
@@ -2371,6 +2529,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn topology_responses_preserve_resource_creation_times() {
+        let topology = Arc::new(MemoryDestinationTopologyRepository::default());
+        let state = state_with_topology(topology.clone());
+        let tenant_scope = TenantScope {
+            workspace_id: WorkspaceId::new(),
+            environment_id: EnvironmentId::new(),
+        };
+        let created_at = Utc::now() - TimeDelta::hours(1);
+        let updated_at = Utc::now();
+        let destination = StoredPhysicalDestination {
+            id: "pdst_01J00000000000000000000000".into(),
+            name: "Printer".into(),
+            identity_confidence: IdentityConfidence::High,
+            state: "available".into(),
+            scheduling_authority_id: None,
+            identity_revision: 1,
+            created_at,
+            updated_at,
+        };
+        topology
+            .upsert_destination(tenant_scope, &destination)
+            .await
+            .expect("destination");
+        let route = StoredPrinterRoute {
+            id: "rte_01J00000000000000000000000".into(),
+            destination_id: destination.id.clone(),
+            printer_id: "ptr_test".into(),
+            agent_id: "agt_test".into(),
+            native_queue_id: "native-test".into(),
+            local_route_key: Some("rte_local_test".into()),
+            state: "available".into(),
+            role: "primary".into(),
+            priority: 0,
+            enabled: true,
+            capability_revision: 1,
+            profile_revision: 1,
+            last_seen_at: Some(updated_at),
+            created_at,
+            updated_at,
+        };
+        topology
+            .upsert_route(tenant_scope, &route)
+            .await
+            .expect("route");
+
+        let destination_response = destination_response(&state, tenant_scope, destination)
+            .await
+            .expect("destination response");
+        let route_response = route_response(&state, tenant_scope, route)
+            .await
+            .expect("route response");
+        assert_eq!(destination_response.created_at, created_at);
+        assert_eq!(destination_response.updated_at, updated_at);
+        assert_eq!(route_response.created_at, created_at);
+        assert_eq!(route_response.updated_at, updated_at);
+    }
+
+    #[tokio::test]
     async fn matching_requires_same_kind_and_rejects_conflicting_strong_evidence() {
         let topology = Arc::new(MemoryDestinationTopologyRepository::default());
         let state = state_with_topology(topology.clone());
@@ -2389,6 +2605,7 @@ mod tests {
                     state: "available".into(),
                     scheduling_authority_id: None,
                     identity_revision: 1,
+                    created_at: Utc::now(),
                     updated_at: Utc::now(),
                 },
             )
@@ -2411,6 +2628,7 @@ mod tests {
                     capability_revision: 1,
                     profile_revision: 1,
                     last_seen_at: Some(Utc::now()),
+                    created_at: Utc::now(),
                     updated_at: Utc::now(),
                 },
             )

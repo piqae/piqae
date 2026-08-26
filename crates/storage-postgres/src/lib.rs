@@ -6093,6 +6093,17 @@ impl PostgresStore {
         let binding_destination_id: Option<String> = destination.try_get("destination_id")?;
         let binding_route_id: Option<String> = destination.try_get("route_id")?;
         let current_destination_id: Option<String> = row.try_get("destination_id")?;
+        let current_route_id: Option<String> = row.try_get("route_id")?;
+        if binding_destination_id.is_some() != binding_route_id.is_some() {
+            return Err(StorageError::InvalidData(
+                "target binding has an incomplete destination/route assignment".into(),
+            ));
+        }
+        if current_destination_id.is_some() != current_route_id.is_some() {
+            return Err(StorageError::InvalidData(
+                "job has an incomplete destination/route assignment".into(),
+            ));
+        }
         if current_destination_id.is_some()
             && binding_destination_id.as_ref() != current_destination_id.as_ref()
         {
@@ -6169,7 +6180,9 @@ impl PostgresStore {
         let updated = sqlx::query(
             "UPDATE jobs
              SET printer_id = $4, agent_id = $5, payload = $6,
-                 per_printer_sequence = $7, route_id = COALESCE($8, route_id),
+                 per_printer_sequence = $7,
+                 destination_id = COALESCE($8, destination_id),
+                 route_id = COALESCE($9, route_id),
                  lease_owner = NULL, lease_id = NULL,
                  lease_token_hash = NULL, lease_until = NULL, updated_at = now()
              WHERE id = $1 AND workspace_id = $2 AND environment_id = $3
@@ -6189,6 +6202,7 @@ impl PostgresStore {
         .bind(binding.agent_id.to_string())
         .bind(serde_json::to_value(&job)?)
         .bind(per_printer_sequence)
+        .bind(binding_destination_id)
         .bind(binding_route_id)
         .execute(&mut *transaction)
         .await?;

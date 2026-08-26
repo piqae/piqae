@@ -2941,6 +2941,7 @@ pub async fn agent_sync(
         candidate_jobs,
         next_poll_after_ms,
         acknowledged_diagnostics,
+        inventory_projection_acknowledgement_supported: true,
         inventory_projection,
         acknowledged_handoff_sequence,
     }))

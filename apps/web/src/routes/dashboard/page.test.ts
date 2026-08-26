@@ -393,9 +393,10 @@ describe('managed customer operations', () => {
       form: null as never
     });
 
-    expect(screen.getByText('Warehouse Zebra')).toBeInTheDocument();
+    const routeRow = screen.getByText('Warehouse Zebra').closest('tr');
+    expect(routeRow).not.toBeNull();
+    expect(routeRow).toHaveTextContent('Stale');
     expect(screen.getByText('Failed')).toBeInTheDocument();
-    expect(screen.getByText('Stale')).toBeInTheDocument();
     expect(screen.getByText('auth_cloud')).toBeInTheDocument();
     expect(screen.queryByText(/filename|username/i)).not.toBeInTheDocument();
   });

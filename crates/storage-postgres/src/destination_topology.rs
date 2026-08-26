@@ -76,6 +76,7 @@ pub struct StoredPhysicalDestination {
     pub state: String,
     pub scheduling_authority_id: Option<String>,
     pub identity_revision: u64,
+    pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
 
@@ -94,6 +95,7 @@ pub struct StoredPrinterRoute {
     pub capability_revision: u64,
     pub profile_revision: u64,
     pub last_seen_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
 
@@ -442,6 +444,11 @@ pub trait DestinationTopologyRepository: Send + Sync {
         scope: TenantScope,
         route_id: &str,
     ) -> Result<RouteObservation, StorageError>;
+    async fn latest_route_observations(
+        &self,
+        scope: TenantScope,
+        route_ids: &[String],
+    ) -> Result<Vec<RouteObservation>, StorageError>;
     async fn list_route_observations(
         &self,
         scope: TenantScope,
@@ -459,6 +466,11 @@ pub trait DestinationTopologyRepository: Send + Sync {
         agent_id: &str,
         route_id: &str,
     ) -> Result<ProjectionAcknowledgement, StorageError>;
+    async fn projection_acknowledgements_for_routes(
+        &self,
+        scope: TenantScope,
+        route_ids: &[String],
+    ) -> Result<Vec<ProjectionAcknowledgement>, StorageError>;
     async fn upsert_site_membership(
         &self,
         scope: TenantScope,
@@ -649,6 +661,7 @@ fn map_destination(row: &sqlx::postgres::PgRow) -> Result<StoredPhysicalDestinat
         state: row.try_get("state")?,
         scheduling_authority_id: row.try_get("scheduling_authority_id")?,
         identity_revision: i64_to_u64(row.try_get("identity_revision")?, "identity_revision")?,
+        created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
     })
 }
@@ -671,6 +684,7 @@ fn map_route(row: &sqlx::postgres::PgRow) -> Result<StoredPrinterRoute, StorageE
         )?,
         profile_revision: i64_to_u64(row.try_get("profile_revision")?, "profile_revision")?,
         last_seen_at: row.try_get("last_seen_at")?,
+        created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
     })
 }
@@ -843,7 +857,7 @@ impl DestinationTopologyRepository for PostgresStore {
         scope: TenantScope,
         route_id: &str,
     ) -> Result<StoredPrinterRoute, StorageError> {
-        let row = sqlx::query("SELECT id,destination_id,printer_id,agent_id,native_queue_id,local_route_key,state,role,priority,enabled,capability_revision,profile_revision,last_seen_at,updated_at FROM printer_routes WHERE workspace_id=$1 AND environment_id=$2 AND id=$3 AND retired_at IS NULL")
+        let row = sqlx::query("SELECT id,destination_id,printer_id,agent_id,native_queue_id,local_route_key,state,role,priority,enabled,capability_revision,profile_revision,last_seen_at,created_at,updated_at FROM printer_routes WHERE workspace_id=$1 AND environment_id=$2 AND id=$3 AND retired_at IS NULL")
             .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).bind(route_id).fetch_optional(self.pool()).await?.ok_or(StorageError::NotFound)?;
         map_route(&row)
     }
@@ -854,7 +868,7 @@ impl DestinationTopologyRepository for PostgresStore {
         agent_id: &str,
         local_route_key: &str,
     ) -> Result<StoredPrinterRoute, StorageError> {
-        let row = sqlx::query("SELECT id,destination_id,printer_id,agent_id,native_queue_id,local_route_key,state,role,priority,enabled,capability_revision,profile_revision,last_seen_at,updated_at FROM printer_routes WHERE workspace_id=$1 AND environment_id=$2 AND agent_id=$3 AND local_route_key=$4 AND retired_at IS NULL")
+        let row = sqlx::query("SELECT id,destination_id,printer_id,agent_id,native_queue_id,local_route_key,state,role,priority,enabled,capability_revision,profile_revision,last_seen_at,created_at,updated_at FROM printer_routes WHERE workspace_id=$1 AND environment_id=$2 AND agent_id=$3 AND local_route_key=$4 AND retired_at IS NULL")
             .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).bind(agent_id).bind(local_route_key).fetch_optional(self.pool()).await?.ok_or(StorageError::NotFound)?;
         map_route(&row)
     }
@@ -863,7 +877,7 @@ impl DestinationTopologyRepository for PostgresStore {
         &self,
         scope: TenantScope,
     ) -> Result<Vec<StoredPrinterRoute>, StorageError> {
-        let rows = sqlx::query("SELECT id,destination_id,printer_id,agent_id,native_queue_id,local_route_key,state,role,priority,enabled,capability_revision,profile_revision,last_seen_at,updated_at FROM printer_routes WHERE workspace_id=$1 AND environment_id=$2 AND retired_at IS NULL ORDER BY destination_id,priority,id")
+        let rows = sqlx::query("SELECT id,destination_id,printer_id,agent_id,native_queue_id,local_route_key,state,role,priority,enabled,capability_revision,profile_revision,last_seen_at,created_at,updated_at FROM printer_routes WHERE workspace_id=$1 AND environment_id=$2 AND retired_at IS NULL ORDER BY destination_id,priority,id")
             .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).fetch_all(self.pool()).await?;
         rows.iter().map(map_route).collect()
     }
@@ -886,7 +900,7 @@ impl DestinationTopologyRepository for PostgresStore {
         scope: TenantScope,
         id: &str,
     ) -> Result<StoredPhysicalDestination, StorageError> {
-        let row = sqlx::query("SELECT id,name,identity_confidence,state,scheduling_authority_id,identity_revision,updated_at FROM physical_destinations WHERE workspace_id=$1 AND environment_id=$2 AND id=$3")
+        let row = sqlx::query("SELECT id,name,identity_confidence,state,scheduling_authority_id,identity_revision,created_at,updated_at FROM physical_destinations WHERE workspace_id=$1 AND environment_id=$2 AND id=$3")
             .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).bind(id).fetch_optional(self.pool()).await?.ok_or(StorageError::NotFound)?;
         map_destination(&row)
     }
@@ -895,7 +909,7 @@ impl DestinationTopologyRepository for PostgresStore {
         &self,
         scope: TenantScope,
     ) -> Result<Vec<StoredPhysicalDestination>, StorageError> {
-        let rows = sqlx::query("SELECT id,name,identity_confidence,state,scheduling_authority_id,identity_revision,updated_at FROM physical_destinations WHERE workspace_id=$1 AND environment_id=$2 AND retired_at IS NULL ORDER BY updated_at DESC,id")
+        let rows = sqlx::query("SELECT id,name,identity_confidence,state,scheduling_authority_id,identity_revision,created_at,updated_at FROM physical_destinations WHERE workspace_id=$1 AND environment_id=$2 AND retired_at IS NULL ORDER BY updated_at DESC,id")
             .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).fetch_all(self.pool()).await?;
         rows.iter().map(map_destination).collect()
     }
@@ -921,7 +935,7 @@ impl DestinationTopologyRepository for PostgresStore {
         scope: TenantScope,
         destination_id: &str,
     ) -> Result<Vec<StoredPrinterRoute>, StorageError> {
-        let rows = sqlx::query("SELECT id,destination_id,printer_id,agent_id,native_queue_id,local_route_key,state,role,priority,enabled,capability_revision,profile_revision,last_seen_at,updated_at FROM printer_routes WHERE workspace_id=$1 AND environment_id=$2 AND destination_id=$3 AND retired_at IS NULL ORDER BY priority,id")
+        let rows = sqlx::query("SELECT id,destination_id,printer_id,agent_id,native_queue_id,local_route_key,state,role,priority,enabled,capability_revision,profile_revision,last_seen_at,created_at,updated_at FROM printer_routes WHERE workspace_id=$1 AND environment_id=$2 AND destination_id=$3 AND retired_at IS NULL ORDER BY priority,id")
             .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).bind(destination_id).fetch_all(self.pool()).await?;
         rows.iter().map(map_route).collect()
     }
@@ -1035,6 +1049,19 @@ impl DestinationTopologyRepository for PostgresStore {
         map_observation(&row)
     }
 
+    async fn latest_route_observations(
+        &self,
+        scope: TenantScope,
+        route_ids: &[String],
+    ) -> Result<Vec<RouteObservation>, StorageError> {
+        if route_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let rows = sqlx::query("SELECT DISTINCT ON (route_id) id,route_id,sequence,printer_state,accepting_jobs,state_reasons,total_jobs,connector_jobs,other_piqae_or_external_jobs,unknown_jobs,active_jobs,held_jobs,estimated_busy_seconds,privacy_level,stock_state,observed_at,fresh_until FROM route_observations WHERE workspace_id=$1 AND environment_id=$2 AND route_id=ANY($3) ORDER BY route_id,sequence DESC")
+            .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).bind(route_ids).fetch_all(self.pool()).await?;
+        rows.iter().map(map_observation).collect()
+    }
+
     async fn list_route_observations(
         &self,
         scope: TenantScope,
@@ -1066,6 +1093,19 @@ impl DestinationTopologyRepository for PostgresStore {
         let row = sqlx::query("SELECT agent_id,route_id,inventory_revision,capability_revision,status,error_code,observed_at,acknowledged_at FROM projection_acknowledgements WHERE workspace_id=$1 AND environment_id=$2 AND agent_id=$3 AND route_id=$4")
             .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).bind(agent_id).bind(route_id).fetch_optional(self.pool()).await?.ok_or(StorageError::NotFound)?;
         map_projection_acknowledgement(&row)
+    }
+
+    async fn projection_acknowledgements_for_routes(
+        &self,
+        scope: TenantScope,
+        route_ids: &[String],
+    ) -> Result<Vec<ProjectionAcknowledgement>, StorageError> {
+        if route_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let rows = sqlx::query("SELECT agent_id,route_id,inventory_revision,capability_revision,status,error_code,observed_at,acknowledged_at FROM projection_acknowledgements WHERE workspace_id=$1 AND environment_id=$2 AND route_id=ANY($3) ORDER BY route_id,agent_id")
+            .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).bind(route_ids).fetch_all(self.pool()).await?;
+        rows.iter().map(map_projection_acknowledgement).collect()
     }
 
     async fn upsert_site_membership(
@@ -1683,7 +1723,7 @@ impl DestinationTopologyRepository for PostgresStore {
         let mut tx = self.pool().begin().await?;
         let unresolved: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM delivery_attempts attempt WHERE attempt.workspace_id=$1 AND attempt.environment_id=$2 AND attempt.destination_id=$3 AND attempt.state='delivery_uncertain' AND NOT EXISTS (SELECT 1 FROM delivery_uncertainty_resolutions resolution WHERE resolution.workspace_id=attempt.workspace_id AND resolution.environment_id=attempt.environment_id AND resolution.attempt_id=attempt.id))")
             .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).bind(destination_id).fetch_one(&mut *tx).await?;
-        let row = sqlx::query("UPDATE physical_destinations SET state=CASE WHEN $4 THEN 'attention' WHEN state='attention' THEN 'available' ELSE state END,updated_at=now() WHERE workspace_id=$1 AND environment_id=$2 AND id=$3 RETURNING id,name,identity_confidence,state,scheduling_authority_id,identity_revision,updated_at")
+        let row = sqlx::query("UPDATE physical_destinations SET state=CASE WHEN $4 THEN 'attention' WHEN state='attention' THEN 'available' ELSE state END,updated_at=now() WHERE workspace_id=$1 AND environment_id=$2 AND id=$3 RETURNING id,name,identity_confidence,state,scheduling_authority_id,identity_revision,created_at,updated_at")
             .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).bind(destination_id).bind(unresolved).fetch_optional(&mut *tx).await?.ok_or(StorageError::NotFound)?;
         tx.commit().await?;
         map_destination(&row)
@@ -1986,9 +2026,14 @@ impl DestinationTopologyRepository for MemoryDestinationTopologyRepository {
         scope: TenantScope,
         destination: &StoredPhysicalDestination,
     ) -> Result<(), StorageError> {
-        write_state(self)?
+        let mut state = write_state(self)?;
+        let mut stored = destination.clone();
+        if let Some(existing) = state.destinations.get(&(scope, destination.id.clone())) {
+            stored.created_at = existing.created_at;
+        }
+        state
             .destinations
-            .insert((scope, destination.id.clone()), destination.clone());
+            .insert((scope, destination.id.clone()), stored);
         Ok(())
     }
     async fn get_destination(
@@ -2033,11 +2078,18 @@ impl DestinationTopologyRepository for MemoryDestinationTopologyRepository {
                     && stored.printer_id == route.printer_id
                     && stored.agent_id == route.agent_id
             })
-            .map(|((_, id), stored)| (id.clone(), stored.local_route_key.clone()));
+            .map(|((_, id), stored)| {
+                (
+                    id.clone(),
+                    stored.local_route_key.clone(),
+                    stored.created_at,
+                )
+            });
         drop(state);
         let mut stored = route.clone();
-        if let Some((id, local_route_key)) = existing {
+        if let Some((id, local_route_key, created_at)) = existing {
             stored.id = id;
+            stored.created_at = created_at;
             if stored.local_route_key.is_none() {
                 stored.local_route_key = local_route_key;
             }
@@ -2421,6 +2473,24 @@ impl DestinationTopologyRepository for MemoryDestinationTopologyRepository {
             .cloned()
             .ok_or(StorageError::NotFound)
     }
+    async fn latest_route_observations(
+        &self,
+        scope: TenantScope,
+        route_ids: &[String],
+    ) -> Result<Vec<RouteObservation>, StorageError> {
+        let route_ids: HashSet<_> = route_ids.iter().map(String::as_str).collect();
+        Ok(read_state(self)?
+            .observations
+            .iter()
+            .filter_map(|((tenant, route_id), items)| {
+                if *tenant == scope && route_ids.contains(route_id.as_str()) {
+                    items.iter().max_by_key(|item| item.sequence).cloned()
+                } else {
+                    None
+                }
+            })
+            .collect())
+    }
     async fn list_route_observations(
         &self,
         scope: TenantScope,
@@ -2465,6 +2535,21 @@ impl DestinationTopologyRepository for MemoryDestinationTopologyRepository {
             .get(&(scope, agent_id.to_owned(), route_id.to_owned()))
             .cloned()
             .ok_or(StorageError::NotFound)
+    }
+    async fn projection_acknowledgements_for_routes(
+        &self,
+        scope: TenantScope,
+        route_ids: &[String],
+    ) -> Result<Vec<ProjectionAcknowledgement>, StorageError> {
+        let route_ids: HashSet<_> = route_ids.iter().map(String::as_str).collect();
+        Ok(read_state(self)?
+            .acknowledgements
+            .iter()
+            .filter(|((tenant, _, route_id), _)| {
+                *tenant == scope && route_ids.contains(route_id.as_str())
+            })
+            .map(|(_, value)| value.clone())
+            .collect())
     }
     async fn upsert_site_membership(
         &self,
@@ -2580,8 +2665,10 @@ impl DestinationTopologyRepository for MemoryDestinationTopologyRepository {
                 && attempt.state == DeliveryAttemptState::DeliveryUncertain
                 && !state
                     .uncertainty_resolutions
-                    .values()
-                    .any(|resolution| resolution.attempt_id == attempt.id)
+                    .iter()
+                    .any(|((tenant, _), resolution)| {
+                        *tenant == scope && resolution.attempt_id == attempt.id
+                    })
         }) {
             return Err(StorageError::ConcurrentStateChange);
         }
@@ -3144,8 +3231,8 @@ impl DestinationTopologyRepository for MemoryDestinationTopologyRepository {
                 && attempt.state == DeliveryAttemptState::DeliveryUncertain
                 && !state
                     .uncertainty_resolutions
-                    .values()
-                    .any(|item| item.attempt_id == attempt.id)
+                    .iter()
+                    .any(|((tenant, _), item)| *tenant == scope && item.attempt_id == attempt.id)
         }))
     }
     async fn recompute_destination_attention(
@@ -3160,8 +3247,10 @@ impl DestinationTopologyRepository for MemoryDestinationTopologyRepository {
                 && attempt.state == DeliveryAttemptState::DeliveryUncertain
                 && !state
                     .uncertainty_resolutions
-                    .values()
-                    .any(|resolution| resolution.attempt_id == attempt.id)
+                    .iter()
+                    .any(|((tenant, _), resolution)| {
+                        *tenant == scope && resolution.attempt_id == attempt.id
+                    })
         });
         let destination = state
             .destinations
@@ -3258,6 +3347,7 @@ mod tests {
             state: "available".into(),
             scheduling_authority_id: None,
             identity_revision: 0,
+            created_at: Utc::now(),
             updated_at: Utc::now(),
         }
     }
@@ -3276,6 +3366,7 @@ mod tests {
             capability_revision: 1,
             profile_revision: 1,
             last_seen_at: Some(Utc::now()),
+            created_at: Utc::now(),
             updated_at: Utc::now(),
         }
     }
@@ -3435,6 +3526,108 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn uncertainty_resolutions_are_scoped_when_attempt_ids_collide() {
+        let repository = MemoryDestinationTopologyRepository::default();
+        let first = scope();
+        let second = scope();
+        for tenant in [first, second] {
+            repository
+                .upsert_destination(tenant, &destination("dst_shared"))
+                .await
+                .unwrap();
+            repository
+                .upsert_route(tenant, &route("route_shared", "dst_shared"))
+                .await
+                .unwrap();
+            let attempt = repository
+                .begin_delivery_attempt(
+                    tenant,
+                    NewDeliveryAttempt {
+                        attempt_id: "attempt_shared",
+                        reservation_id: "reservation_shared",
+                        job_id: "job_shared",
+                        destination_id: "dst_shared",
+                        route_id: "route_shared",
+                        lease_until: Utc::now() + chrono::Duration::minutes(1),
+                    },
+                )
+                .await
+                .unwrap();
+            for state in [
+                DeliveryAttemptState::AcceptedByNode,
+                DeliveryAttemptState::QueuedLocal,
+                DeliveryAttemptState::HandingToSpooler,
+                DeliveryAttemptState::DeliveryUncertain,
+            ] {
+                repository
+                    .transition_delivery_attempt(
+                        tenant,
+                        "attempt_shared",
+                        attempt.attempt.generation,
+                        &attempt.fencing_token,
+                        state,
+                    )
+                    .await
+                    .unwrap();
+            }
+        }
+
+        let pending = repository
+            .enqueue_delivery_uncertainty_resolution(
+                second,
+                "job_shared",
+                "confirmed_delivered",
+                None,
+                "operator",
+                "request_second",
+            )
+            .await
+            .unwrap();
+        repository
+            .acknowledge_uncertainty_resolution_command(second, pending.agent_command_cursor)
+            .await
+            .unwrap();
+        assert!(
+            repository
+                .finalize_delivery_uncertainty_resolution(second, "request_second")
+                .await
+                .unwrap()
+                .is_some()
+        );
+
+        assert!(
+            repository
+                .has_unresolved_destination_uncertainty(first, "dst_shared")
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            repository
+                .recompute_destination_attention(first, "dst_shared")
+                .await
+                .unwrap()
+                .state,
+            "attention"
+        );
+        assert!(matches!(
+            repository
+                .begin_delivery_attempt(
+                    first,
+                    NewDeliveryAttempt {
+                        attempt_id: "attempt_next",
+                        reservation_id: "reservation_next",
+                        job_id: "job_next",
+                        destination_id: "dst_shared",
+                        route_id: "route_shared",
+                        lease_until: Utc::now() + chrono::Duration::minutes(1),
+                    }
+                )
+                .await,
+            Err(StorageError::ConcurrentStateChange)
+        ));
+    }
+
+    #[tokio::test]
     async fn conflicting_evidence_marks_only_its_destination() {
         let repository = MemoryDestinationTopologyRepository::default();
         let tenant = scope();
@@ -3566,5 +3759,86 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn batch_topology_reads_return_latest_tenant_scoped_projection() {
+        let repository = MemoryDestinationTopologyRepository::default();
+        let first = scope();
+        let second = scope();
+        for tenant in [first, second] {
+            repository
+                .upsert_destination(tenant, &destination("dst_shared"))
+                .await
+                .unwrap();
+            repository
+                .upsert_route(tenant, &route("route_shared", "dst_shared"))
+                .await
+                .unwrap();
+        }
+        let observation = |id: &str, sequence: u64, total_jobs: u32| RouteObservation {
+            id: id.into(),
+            route_id: "route_shared".into(),
+            sequence,
+            printer_state: "idle".into(),
+            accepting_jobs: Some(true),
+            state_reasons: Vec::new(),
+            total_jobs,
+            connector_jobs: total_jobs,
+            other_piqae_or_external_jobs: 0,
+            unknown_jobs: 0,
+            active_jobs: 0,
+            held_jobs: 0,
+            estimated_busy_seconds: None,
+            privacy_level: "counts_only".into(),
+            stock_state: serde_json::json!({}),
+            observed_at: Utc::now(),
+            fresh_until: Utc::now() + chrono::Duration::minutes(1),
+        };
+        repository
+            .record_route_observation(first, &observation("obs_first_1", 1, 1))
+            .await
+            .unwrap();
+        repository
+            .record_route_observation(first, &observation("obs_first_2", 2, 2))
+            .await
+            .unwrap();
+        repository
+            .record_route_observation(second, &observation("obs_second", 9, 9))
+            .await
+            .unwrap();
+        for (tenant, revision) in [(first, 2), (second, 9)] {
+            repository
+                .acknowledge_projection(
+                    tenant,
+                    &ProjectionAcknowledgement {
+                        agent_id: "agt_test".into(),
+                        route_id: "route_shared".into(),
+                        inventory_revision: revision,
+                        capability_revision: revision,
+                        status: "acknowledged".into(),
+                        error_code: None,
+                        observed_at: Utc::now(),
+                        acknowledged_at: Some(Utc::now()),
+                    },
+                )
+                .await
+                .unwrap();
+        }
+
+        let route_ids = vec!["route_shared".into(), "route_missing".into()];
+        let observations = repository
+            .latest_route_observations(first, &route_ids)
+            .await
+            .unwrap();
+        assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0].sequence, 2);
+        assert_eq!(observations[0].total_jobs, 2);
+        let acknowledgements = repository
+            .projection_acknowledgements_for_routes(first, &route_ids)
+            .await
+            .unwrap();
+        assert_eq!(acknowledgements.len(), 1);
+        assert_eq!(acknowledgements[0].inventory_revision, 2);
     }
 }

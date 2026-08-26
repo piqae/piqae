@@ -43,6 +43,12 @@ describe('operational state filters', () => {
     expect(isStateFilter('online', 'nodes')).toBe(true);
   });
 
+  it('filters routes by route health rather than node or printer state', () => {
+    expect(isStateFilter('needs_operator', 'routes')).toBe(true);
+    expect(isStateFilter('online', 'routes')).toBe(false);
+    expect(stateFilters('routes')[0]).toEqual({ value: 'all', label: 'All route health' });
+  });
+
   it('offers no state filter for customers', () => {
     expect(stateFilters('customers')).toEqual([]);
     expect(isStateFilter('online', 'customers')).toBe(false);

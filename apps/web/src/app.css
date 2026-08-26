@@ -529,6 +529,17 @@ button:disabled {
     padding: 10px 0;
   }
 
+  .ui-segmented {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+    overflow-x: auto;
+  }
+
+  .ui-segmented button {
+    flex: 0 0 auto;
+  }
+
   .ui-search {
     width: 100%;
   }

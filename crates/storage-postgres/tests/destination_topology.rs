@@ -99,6 +99,7 @@ fn destination(id: &str, authority_id: &str) -> StoredPhysicalDestination {
         state: "available".into(),
         scheduling_authority_id: Some(authority_id.to_owned()),
         identity_revision: 1,
+        created_at: Utc::now(),
         updated_at: Utc::now(),
     }
 }
@@ -124,6 +125,7 @@ fn route(
         capability_revision: 1,
         profile_revision: 1,
         last_seen_at: Some(Utc::now()),
+        created_at: Utc::now(),
         updated_at: Utc::now(),
     }
 }
@@ -225,6 +227,19 @@ async fn postgres_topology_is_tenant_isolated_and_fences_delivery() {
             .expect("first destination")
             .name,
         "Warehouse printer"
+    );
+    let initial_created_at = store
+        .get_destination(first, "destination_shared")
+        .await
+        .expect("destination timestamps")
+        .created_at;
+    assert_eq!(
+        store
+            .recompute_destination_attention(first, "destination_shared")
+            .await
+            .expect("recomputed destination includes its creation time")
+            .created_at,
+        initial_created_at
     );
     assert_eq!(
         store
@@ -517,6 +532,34 @@ async fn postgres_topology_is_tenant_isolated_and_fences_delivery() {
             .await,
         Err(StorageError::NotFound)
     ));
+    let batched_route_ids = vec!["route_first".into(), "route_first_backup".into()];
+    let batched_observations = store
+        .latest_route_observations(first, &batched_route_ids)
+        .await
+        .expect("latest observations load in one tenant-scoped batch");
+    assert_eq!(batched_observations.len(), 1);
+    assert_eq!(batched_observations[0].route_id, "route_first");
+    assert_eq!(batched_observations[0].sequence, 2);
+    let batched_acknowledgements = store
+        .projection_acknowledgements_for_routes(first, &batched_route_ids)
+        .await
+        .expect("projection acknowledgements load in one tenant-scoped batch");
+    assert_eq!(batched_acknowledgements.len(), 1);
+    assert_eq!(batched_acknowledgements[0].inventory_revision, 10);
+    assert!(
+        store
+            .latest_route_observations(second, &batched_route_ids)
+            .await
+            .expect("other tenant batch remains isolated")
+            .is_empty()
+    );
+    assert!(
+        store
+            .projection_acknowledgements_for_routes(second, &batched_route_ids)
+            .await
+            .expect("other tenant projection batch remains isolated")
+            .is_empty()
+    );
     store
         .upsert_site_membership(
             first,

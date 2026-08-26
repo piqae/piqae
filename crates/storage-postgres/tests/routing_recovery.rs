@@ -312,6 +312,7 @@ async fn postgres_reroute_is_atomic_and_fenced_by_lease_and_acceptance() {
                 state: "available".into(),
                 scheduling_authority_id: None,
                 identity_revision: 1,
+                created_at: Utc::now(),
                 updated_at: Utc::now(),
             },
         )
@@ -352,6 +353,7 @@ async fn postgres_reroute_is_atomic_and_fenced_by_lease_and_acceptance() {
                     capability_revision: 1,
                     profile_revision: 4,
                     last_seen_at: Some(Utc::now()),
+                    created_at: Utc::now(),
                     updated_at: Utc::now(),
                 },
             )
@@ -709,6 +711,88 @@ async fn postgres_reroute_is_atomic_and_fenced_by_lease_and_acceptance() {
     .await
     .expect("fenced routing evidence");
     assert_eq!(fenced_attempts, 0);
+
+    let legacy_pair_job = create_waiting_job(
+        &first,
+        workspace_id,
+        environment_id,
+        primary_printer,
+        primary_agent,
+        "legacy-topology-pair",
+    )
+    .await;
+    sqlx::query(
+        "UPDATE target_bindings SET destination_id=NULL,route_id='route_standby'
+         WHERE workspace_id=$1 AND environment_id=$2 AND id='tgb_standby'",
+    )
+    .bind(workspace_id.to_string())
+    .bind(environment_id.to_string())
+    .execute(&first_pool)
+    .await
+    .expect("one-sided binding fixture");
+    assert!(matches!(
+        first
+            .reroute_job_before_acceptance(
+                workspace_id,
+                environment_id,
+                legacy_pair_job,
+                "tgt_recovery",
+                &standby_binding,
+                "standby_recovery",
+            )
+            .await,
+        Err(StorageError::InvalidData(_))
+    ));
+    let unchanged_topology: (Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT destination_id,route_id FROM jobs
+         WHERE workspace_id=$1 AND environment_id=$2 AND id=$3",
+    )
+    .bind(workspace_id.to_string())
+    .bind(environment_id.to_string())
+    .bind(legacy_pair_job.to_string())
+    .fetch_one(&first_pool)
+    .await
+    .expect("one-sided binding did not partially update job");
+    assert_eq!(unchanged_topology, (None, None));
+
+    sqlx::query(
+        "UPDATE target_bindings SET destination_id='destination_recovery',route_id='route_standby'
+         WHERE workspace_id=$1 AND environment_id=$2 AND id='tgb_standby'",
+    )
+    .bind(workspace_id.to_string())
+    .bind(environment_id.to_string())
+    .execute(&first_pool)
+    .await
+    .expect("restore complete binding topology");
+    first
+        .reroute_job_before_acceptance(
+            workspace_id,
+            environment_id,
+            legacy_pair_job,
+            "tgt_recovery",
+            &standby_binding,
+            "standby_recovery",
+        )
+        .await
+        .expect("complete binding topology")
+        .expect("legacy job rerouted");
+    let updated_topology: (Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT destination_id,route_id FROM jobs
+         WHERE workspace_id=$1 AND environment_id=$2 AND id=$3",
+    )
+    .bind(workspace_id.to_string())
+    .bind(environment_id.to_string())
+    .bind(legacy_pair_job.to_string())
+    .fetch_one(&first_pool)
+    .await
+    .expect("complete destination/route update");
+    assert_eq!(
+        updated_topology,
+        (
+            Some("destination_recovery".into()),
+            Some("route_standby".into())
+        )
+    );
 
     first_pool.close().await;
     second_pool.close().await;

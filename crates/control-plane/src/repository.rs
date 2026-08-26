@@ -969,20 +969,7 @@ pub trait Repository: Send + Sync + 'static {
         workspace_id: WorkspaceId,
         environment_id: EnvironmentId,
         limit: i64,
-    ) -> Result<Vec<Job>, RepositoryError> {
-        let mut jobs = self
-            .list_jobs(workspace_id, environment_id, None, limit)
-            .await?;
-        jobs.retain(|job| {
-            matches!(
-                job.state,
-                JobState::WaitingForAgent | JobState::FailedRetryable
-            ) && job.expires_at > Utc::now()
-                && job.metadata.contains_key("piqae.destination_id")
-        });
-        jobs.sort_by_key(|job| (job.created_at, job.id));
-        Ok(jobs)
-    }
+    ) -> Result<Vec<Job>, RepositoryError>;
     async fn get_job(
         &self,
         workspace_id: WorkspaceId,
@@ -6196,6 +6183,38 @@ impl Repository for MemoryRepository {
         Ok(jobs)
     }
 
+    async fn list_reroutable_destination_jobs(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        limit: i64,
+    ) -> Result<Vec<Job>, RepositoryError> {
+        let state = self.state.read().await;
+        let mut jobs = state
+            .jobs
+            .values()
+            .filter(|record| {
+                record.job.workspace_id == workspace_id
+                    && record.job.environment_id == environment_id
+                    && matches!(
+                        record.job.state,
+                        JobState::WaitingForAgent | JobState::FailedRetryable
+                    )
+                    && record.job.expires_at > Utc::now()
+                    && record.job.metadata.contains_key("piqae.destination_id")
+                    && !state.job_acceptances.contains_key(&record.job.id)
+                    && state
+                        .leases
+                        .get(&record.job.id)
+                        .is_none_or(|(_, _, _, expiry)| *expiry <= Utc::now())
+            })
+            .map(|record| record.job.clone())
+            .collect::<Vec<_>>();
+        jobs.sort_by_key(|job| (job.created_at, job.id));
+        jobs.truncate(usize::try_from(limit.clamp(1, 1_000)).unwrap_or(1_000));
+        Ok(jobs)
+    }
+
     async fn get_job(
         &self,
         workspace_id: WorkspaceId,
@@ -6701,6 +6720,63 @@ mod routing_repository_tests {
     use super::*;
     use piqae_domain::JobOptions;
     use piqae_storage_postgres::PrinterProfileSnapshot;
+    use std::collections::BTreeMap;
+
+    #[tokio::test]
+    async fn destination_reroute_listing_filters_before_applying_its_limit() {
+        let repository = MemoryRepository::default();
+        let workspace = WorkspaceId::new();
+        let environment = EnvironmentId::new();
+        let printer = PrinterId::new();
+        let agent = AgentId::new();
+        let now = Utc::now();
+        let job = |state, metadata, created_at| Job {
+            id: JobId::new(),
+            workspace_id: workspace,
+            environment_id: environment,
+            printer_id: printer,
+            title: "Reroute listing".into(),
+            source: None,
+            content_kind: piqae_domain::ContentKind::Pdf,
+            content: piqae_domain::ContentSource::Base64 {
+                data: "JVBERi0=".into(),
+            },
+            options: JobOptions::default(),
+            metadata,
+            deliveries: 1,
+            state,
+            created_at,
+            expires_at: now + chrono::Duration::hours(1),
+            delivery_uncertain_since: None,
+        };
+        let eligible = job(
+            JobState::WaitingForAgent,
+            BTreeMap::from([("piqae.destination_id".into(), "pdst_test".into())]),
+            now - chrono::Duration::minutes(1),
+        );
+        let ineligible = job(JobState::Registered, BTreeMap::new(), now);
+        let eligible_id = eligible.id;
+        let mut state = repository.state.write().await;
+        for job in [eligible, ineligible] {
+            state.jobs.insert(
+                job.id,
+                MemoryJob {
+                    job,
+                    agent_id: agent,
+                    sequence: 1,
+                    events: Vec::new(),
+                },
+            );
+        }
+        drop(state);
+
+        let listed = repository
+            .list_reroutable_destination_jobs(workspace, environment, 1)
+            .await
+            .expect("list complete eligible first page");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, eligible_id);
+    }
 
     #[tokio::test]
     async fn memory_document_previews_reject_duplicate_ids_and_finish_admitted_approvals() {

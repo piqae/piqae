@@ -334,13 +334,15 @@ Suggested PostgreSQL tables:
 - `printer_capability_revisions`
 - `printer_state_events`
 - `physical_destinations`
-- `physical_destination_identity_evidence`
-- `physical_destination_identity_decisions`
+- `destination_identity_evidence`
+- `destination_identity_decisions`
+- `destination_identity_decision_routes`
 - `printer_routes`
-- `printer_route_observations`
-- `route_projection_health`
-- `destination_route_reservations`
+- `route_observations`
+- `projection_acknowledgements`
+- `route_reservations`
 - `delivery_attempts`
+- `delivery_uncertainty_resolutions`
 - `printer_profiles`
 - `profile_native_metadata`
 - `profile_dependencies`
@@ -370,9 +372,18 @@ Suggested PostgreSQL tables:
 - `compatibility_ids`
 - `usage_ledger`
 
+These are the canonical PostgreSQL table names used by migration 42. Public API
+resources retain the friendlier “physical destination”, “identity evidence”,
+and “printer route” names; they are not alternate storage tables.
+
 Important constraints:
 
-- tenant/workspace included in unique and foreign-key paths;
+- every physical-destination, route, observation, acknowledgement,
+  reservation, delivery-attempt, and identity record uses
+  `(workspace_id, environment_id, id)` (or its full tenant-scoped natural key)
+  in primary keys, foreign keys, unique constraints, lookups, and active
+  reservation fences; workspace-only keys are forbidden because Test and Live
+  are isolated tenants;
 - unique `(workspace_id, api_key_id, idempotency_key_hash)` or documented
   alternative scope;
 - unique `(agent_id, boot_id, sequence)` for agent events;

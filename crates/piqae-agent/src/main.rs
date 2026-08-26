@@ -3713,6 +3713,16 @@ fn connector_allowed_printers(
     }
 }
 
+fn inventory_projection_confirmed(
+    acknowledgement_supported: bool,
+    acknowledgement: Option<&piqae_protocol::agent::InventoryProjectionAcknowledgement>,
+    submitted_revision: u64,
+) -> bool {
+    acknowledgement.map_or(!acknowledgement_supported, |acknowledgement| {
+        acknowledgement.revision == submitted_revision
+    })
+}
+
 #[allow(
     clippy::too_many_arguments,
     reason = "cloud synchronization dependencies are explicit process-boundary capabilities"
@@ -3877,10 +3887,11 @@ async fn run_cloud_sync_loop(
         }
         let delay = match cloud.client.sync(&cloud.identity, &request).await {
             Ok(response) => {
-                let projection_acknowledged = response
-                    .inventory_projection
-                    .as_ref()
-                    .is_some_and(|ack| ack.revision == submitted_printer_revision);
+                let projection_acknowledged = inventory_projection_confirmed(
+                    response.inventory_projection_acknowledgement_supported,
+                    response.inventory_projection.as_ref(),
+                    submitted_printer_revision,
+                );
                 if submitted_printer_inventory && projection_acknowledged {
                     last_printer_refresh = Some(tokio::time::Instant::now());
                 } else if submitted_printer_inventory {
@@ -5778,6 +5789,28 @@ mod tests {
         let serialized = serde_json::to_string(&connector_a).expect("privacy-safe JSON");
         assert!(!serialized.contains("must remain local"));
         assert!(!serialized.contains("must-remain-local"));
+    }
+
+    #[test]
+    fn projection_acknowledgement_negotiates_without_legacy_retry_churn() {
+        let matching = piqae_protocol::agent::InventoryProjectionAcknowledgement {
+            revision: 7,
+            projected_at: Utc::now(),
+        };
+        let stale = piqae_protocol::agent::InventoryProjectionAcknowledgement {
+            revision: 6,
+            projected_at: Utc::now(),
+        };
+
+        assert!(inventory_projection_confirmed(false, None, 7));
+        assert!(inventory_projection_confirmed(false, Some(&matching), 7));
+        assert!(!inventory_projection_confirmed(false, Some(&stale), 7));
+        assert!(inventory_projection_confirmed(true, Some(&matching), 7));
+        assert!(!inventory_projection_confirmed(true, Some(&stale), 7));
+        assert!(
+            !inventory_projection_confirmed(true, None, 7),
+            "a server that advertises projection ACKs must confirm the exact revision"
+        );
     }
 
     #[tokio::test]

@@ -155,7 +155,7 @@ export default function Printers() {
     window.addEventListener("message", connected);
     return () => window.removeEventListener("message", connected);
   }, [revalidator]);
-  const installer = connection?.downloads.find(
+  const installer = connection?.downloads?.find(
     (download) => download.platform === detectedPlatform,
   );
 

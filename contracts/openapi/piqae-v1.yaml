@@ -3302,14 +3302,14 @@ components:
       required: true
       schema:
         type: string
-        pattern: ^pdst_[0-9A-HJKMNP-TV-Z]{26}$
+        pattern: '^pdst_(?:[0-9A-HJKMNP-TV-Z]{26}|[0-9a-f]{32})$'
     RouteId:
       name: route_id
       in: path
       required: true
       schema:
         type: string
-        pattern: ^rte_[0-9A-HJKMNP-TV-Z]{26}$
+        pattern: '^rte_(?:[0-9A-HJKMNP-TV-Z]{26}|[0-9a-f]{32})$'
     IdentityDecisionId:
       name: decision_id
       in: path
@@ -4370,6 +4370,26 @@ components:
           maxItems: 8
           default: []
           items: { type: string, pattern: '^diag_' }
+        inventory_projection_acknowledgement_supported:
+          type: boolean
+          default: false
+          description: When true, a submitted printer inventory remains pending until inventory_projection confirms the exact revision. Missing or false preserves the legacy successful-sync acknowledgement contract.
+        inventory_projection:
+          type: [object, "null"]
+          additionalProperties: false
+          required: [revision, projected_at]
+          properties:
+            revision:
+              type: integer
+              format: int64
+              minimum: 0
+            projected_at:
+              type: string
+              format: date-time
+        acknowledged_handoff_sequence:
+          type: [integer, "null"]
+          format: int64
+          minimum: 0
     DiagnosticReport:
       type: object
       additionalProperties: false

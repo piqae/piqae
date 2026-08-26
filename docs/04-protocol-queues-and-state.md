@@ -108,7 +108,7 @@ The internal model is richer than the legacy service's stable states.
 | `offered_to_agent` | control plane | Availability notification was sent; not yet a durability boundary. |
 | `agent_downloading` | agent | Content transfer is in progress. |
 | `agent_accepted` | agent | Metadata and content are durable locally. The control plane may apply its content-retention policy. |
-| `queued_local` | agent | Waiting in per-printer order. |
+| `queued_local` | agent | Waiting in tenant-scoped physical-destination order across eligible routes; the installation coordinator also serializes local handoffs that share one physical printer. |
 | `preparing` | agent | Validating options, pages, and content. |
 | `rendering` | renderer | PDF is being transformed for native submission. |
 | `submitting_to_spooler` | agent | Native handoff has begun; crash recovery may be ambiguous. |

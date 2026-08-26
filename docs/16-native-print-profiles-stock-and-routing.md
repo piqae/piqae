@@ -167,7 +167,7 @@ platform-owned configuration:
 {
   "id": "prf_01K...",
   "revision": 7,
-  "destinationId": "dst_01K...",
+  "routeId": "rte_01K...",
   "name": "80 mm matte, black mark",
   "status": "ready",
   "driverFingerprint": {
@@ -607,12 +607,15 @@ Add:
 
 ```text
 physical_destinations
-physical_destination_identity_evidence
-physical_destination_identity_decisions
+destination_identity_evidence
+destination_identity_decisions
+destination_identity_decision_routes
 printer_routes
-printer_route_observations
-destination_route_reservations
+route_observations
+projection_acknowledgements
+route_reservations
 delivery_attempts
+delivery_uncertainty_resolutions
 profile_native_blobs
 profile_dependencies
 stocks

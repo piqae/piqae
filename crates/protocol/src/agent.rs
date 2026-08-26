@@ -424,6 +424,11 @@ pub struct AgentSyncResponse {
     pub next_poll_after_ms: u64,
     #[serde(default)]
     pub acknowledged_diagnostics: Vec<String>,
+    /// Explicit rolling-upgrade negotiation for inventory projection ACKs.
+    /// Missing/false is the legacy V1 contract where a successful sync was
+    /// the only acknowledgement available.
+    #[serde(default)]
+    pub inventory_projection_acknowledgement_supported: bool,
     /// Confirms that the exact connector-scoped inventory revision was
     /// durably projected. Nodes retry inventory until this acknowledgement is
     /// observed; a successful heartbeat alone is not sufficient.
@@ -914,6 +919,24 @@ pub struct PrinterProfileSnapshot {
 #[cfg(test)]
 mod route_protocol_tests {
     use super::*;
+
+    #[test]
+    fn legacy_sync_response_does_not_claim_projection_acknowledgements() {
+        let Ok(response): Result<AgentSyncResponse, _> =
+            serde_json::from_value(serde_json::json!({
+            "server_time": "2026-08-26T00:00:00Z",
+            "acknowledged_event_cursor": null,
+            "command_cursor": null,
+            "commands": [],
+            "candidate_jobs": [],
+            "next_poll_after_ms": 1000
+            }))
+        else {
+            panic!("legacy sync response must deserialize");
+        };
+        assert!(!response.inventory_projection_acknowledgement_supported);
+        assert!(response.inventory_projection.is_none());
+    }
 
     #[test]
     fn lease_renewal_route_proof_is_additive_and_debug_redacted() {

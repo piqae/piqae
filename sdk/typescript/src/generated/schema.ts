@@ -3098,6 +3098,19 @@ export interface components {
             next_poll_after_ms: number;
             /** @default [] */
             acknowledged_diagnostics?: string[];
+            /**
+             * @description When true, a submitted printer inventory remains pending until inventory_projection confirms the exact revision. Missing or false preserves the legacy successful-sync acknowledgement contract.
+             * @default false
+             */
+            inventory_projection_acknowledgement_supported?: boolean;
+            inventory_projection?: {
+                /** Format: int64 */
+                revision: number;
+                /** Format: date-time */
+                projected_at: string;
+            } | null;
+            /** Format: int64 */
+            acknowledged_handoff_sequence?: number | null;
         };
         DiagnosticReport: {
             request_id: string;

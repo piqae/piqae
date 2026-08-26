@@ -30,6 +30,7 @@ const DOCUMENT_VERSION: u16 = 1;
 const MAX_ROUTES: usize = 512;
 const MAX_HANDOFFS: usize = 512;
 const MAX_TOPOLOGY_CHANGES: usize = 512;
+const OBSERVATION_SEQUENCE_RESERVATION: u64 = 512;
 const RESERVATION_LIFETIME_MS: i64 = 2 * 60 * 1_000;
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -102,6 +103,8 @@ pub struct RouteReservation {
 pub struct RouteCoordinator {
     root: PathBuf,
     document: CoordinatorDocument,
+    next_observation_sequence: u64,
+    reserved_observation_sequence: u64,
 }
 
 impl std::fmt::Debug for RouteReservation {
@@ -153,18 +156,33 @@ impl RouteCoordinator {
         if document.version != DOCUMENT_VERSION {
             bail!("unsupported route coordinator version {}", document.version);
         }
-        if document.routes.len() > MAX_ROUTES
-            || document.handoffs.len() > MAX_HANDOFFS
+        if document.handoffs.len() > MAX_HANDOFFS
             || document.topology_changes.len() > MAX_TOPOLOGY_CHANGES
         {
             bail!("route coordinator state exceeds supported bounds");
         }
-        let mut coordinator = Self { root, document };
+        let next_observation_sequence = document
+            .observation_sequence
+            .checked_add(1)
+            .context("route observation sequence space is exhausted")?;
+        let reserved_observation_sequence = document.observation_sequence;
+        let mut coordinator = Self {
+            root,
+            document,
+            next_observation_sequence,
+            reserved_observation_sequence,
+        };
         // Repair an intermediate journal written by an older coordinator
         // which re-keyed route evidence without moving the unresolved fence.
         // This also restores the persisted exclusion domain before any worker
         // can reserve after process restart.
         coordinator.reconcile_coordination_keys();
+        // Repair must precede pruning because an older journal can still
+        // protect an absent route through its previous coordination key.
+        coordinator.prune_absent_routes();
+        if coordinator.document.routes.len() > MAX_ROUTES {
+            bail!("route coordinator state exceeds supported bounds");
+        }
         coordinator.persist()?;
         Ok(coordinator)
     }
@@ -175,10 +193,29 @@ impl RouteCoordinator {
         inventory_revision: u64,
         observed_at: DateTime<Utc>,
     ) -> Result<BTreeMap<String, PrinterRouteSnapshot>> {
+        self.prune_absent_routes();
+        let protected_native_ids = self
+            .document
+            .routes
+            .iter()
+            .filter(|(_, route)| self.route_requires_retention(route))
+            .map(|(native_id, _)| native_id.clone())
+            .collect::<BTreeSet<_>>();
+        let available_unprotected_routes = MAX_ROUTES.saturating_sub(protected_native_ids.len());
+        let mut accepted_unprotected_routes = 0usize;
         let mut present = BTreeSet::new();
         let mut snapshots = BTreeMap::new();
-        for printer in printers.iter().take(MAX_ROUTES) {
-            present.insert(printer.native_id.clone());
+        for printer in printers {
+            if !present.insert(printer.native_id.clone()) {
+                continue;
+            }
+            if !protected_native_ids.contains(&printer.native_id) {
+                if accepted_unprotected_routes >= available_unprotected_routes {
+                    present.remove(&printer.native_id);
+                    continue;
+                }
+                accepted_unprotected_routes = accepted_unprotected_routes.saturating_add(1);
+            }
             let route_id = self.route_id(&printer.native_id);
             let evidence = canonical_evidence(printer);
             let confidence = identity_confidence(&evidence);
@@ -250,6 +287,7 @@ impl RouteCoordinator {
             }
             self.record_topology_change(&route_id, TopologyChange::Removed, observed_at);
         }
+        self.prune_absent_routes();
         self.reconcile_coordination_keys();
         self.persist()?;
         Ok(snapshots)
@@ -280,15 +318,32 @@ impl RouteCoordinator {
 
     pub fn allocate_observation_sequences(&mut self, count: usize) -> Result<Vec<u64>> {
         let bounded = count.min(MAX_ROUTES);
-        let start = self.document.observation_sequence;
-        self.document.observation_sequence = self
-            .document
-            .observation_sequence
-            .saturating_add(u64::try_from(bounded).unwrap_or(u64::MAX));
-        self.persist()?;
-        Ok((1..=bounded)
-            .map(|offset| start.saturating_add(u64::try_from(offset).unwrap_or(u64::MAX)))
-            .collect())
+        if bounded == 0 {
+            return Ok(Vec::new());
+        }
+        let bounded = u64::try_from(bounded).context("route observation batch is too large")?;
+        let allocated_through = self
+            .next_observation_sequence
+            .checked_add(bounded - 1)
+            .context("route observation sequence space is exhausted")?;
+        if allocated_through > self.reserved_observation_sequence {
+            let reservation = OBSERVATION_SEQUENCE_RESERVATION.max(bounded);
+            let reserved_through = self
+                .document
+                .observation_sequence
+                .checked_add(reservation)
+                .context("route observation sequence space is exhausted")?;
+            self.document.observation_sequence = reserved_through;
+            // Persist the high-water mark before returning any number from the
+            // range. A crash can skip unused values but can never reuse one.
+            self.persist()?;
+            self.reserved_observation_sequence = reserved_through;
+        }
+        let start = self.next_observation_sequence;
+        self.next_observation_sequence = allocated_through
+            .checked_add(1)
+            .context("route observation sequence space is exhausted")?;
+        Ok((start..=allocated_through).collect())
     }
 
     pub fn reserve(
@@ -633,6 +688,30 @@ impl RouteCoordinator {
         trim_front(&mut self.document.topology_changes, MAX_TOPOLOGY_CHANGES);
     }
 
+    fn route_requires_retention(&self, route: &DurableRoute) -> bool {
+        self.document
+            .reservations
+            .values()
+            .any(|reservation| reservation.local_route_key == route.route_id)
+            || self.document.handoffs.iter().any(|handoff| {
+                handoff.local_route_key == route.route_id
+                    && handoff.outcome == NativeHandoffOutcome::Ambiguous
+            })
+    }
+
+    fn prune_absent_routes(&mut self) {
+        let retained_route_ids = self
+            .document
+            .routes
+            .values()
+            .filter(|route| !route.present && self.route_requires_retention(route))
+            .map(|route| route.route_id.clone())
+            .collect::<BTreeSet<_>>();
+        self.document
+            .routes
+            .retain(|_, route| route.present || retained_route_ids.contains(&route.route_id));
+    }
+
     /// Reconciles newly observed physical identity with the exclusion domains
     /// already occupied by unresolved reservations. An occupied domain wins
     /// over a newly derived physical key. If a proposed physical group would
@@ -954,11 +1033,66 @@ mod tests {
         let root = TempDir::new().unwrap();
         let mut first = RouteCoordinator::open(root.path()).unwrap();
         assert_eq!(first.allocate_observation_sequences(2).unwrap(), vec![1, 2]);
+        let reserved_through = first.document.observation_sequence;
+        assert_eq!(first.allocate_observation_sequences(2).unwrap(), vec![3, 4]);
+        assert_eq!(
+            first.document.observation_sequence, reserved_through,
+            "hot-path allocations must use the crash-safe reserved range"
+        );
         drop(first);
         let mut restarted = RouteCoordinator::open(root.path()).unwrap();
-        assert_eq!(
-            restarted.allocate_observation_sequences(2).unwrap(),
-            vec![3, 4]
+        let after_restart = restarted.allocate_observation_sequences(2).unwrap();
+        assert!(
+            after_restart[0] > reserved_through,
+            "a restart must skip the unused durable reservation rather than reuse it"
+        );
+    }
+
+    #[test]
+    fn stale_absent_routes_are_pruned_without_releasing_unresolved_handoffs() {
+        let root = TempDir::new().unwrap();
+        let mut coordinator = RouteCoordinator::open(root.path()).unwrap();
+        coordinator
+            .reconcile(&[printer("protected", Vec::new())], 1, Utc::now())
+            .unwrap();
+        let protected = coordinator
+            .reserve("hosted", "protected", "job_protected", 1)
+            .unwrap();
+        coordinator
+            .finish(
+                "hosted",
+                "job_protected",
+                &protected,
+                NativeHandoffOutcome::Ambiguous,
+                None,
+                Utc::now(),
+            )
+            .unwrap();
+        coordinator.reconcile(&[], 2, Utc::now()).unwrap();
+
+        for revision in 3..=(u64::try_from(MAX_ROUTES).unwrap() + 12) {
+            let native_id = format!("transient-{revision}");
+            coordinator
+                .reconcile(&[printer(&native_id, Vec::new())], revision, Utc::now())
+                .unwrap();
+        }
+        assert!(coordinator.document.routes.len() <= MAX_ROUTES);
+        assert!(coordinator.document.routes.contains_key("protected"));
+        assert!(
+            coordinator
+                .reserve("self_hosted", "protected", "job_other", 999)
+                .is_err(),
+            "pruning must not release an unresolved physical handoff fence"
+        );
+
+        drop(coordinator);
+        let mut restarted = RouteCoordinator::open(root.path()).unwrap();
+        assert!(restarted.document.routes.len() <= MAX_ROUTES);
+        assert!(
+            restarted
+                .reserve("self_hosted", "protected", "job_other", 1_000)
+                .is_err(),
+            "restart repair must preserve the unresolved exclusion domain"
         );
     }
 

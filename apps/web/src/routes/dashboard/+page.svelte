@@ -1280,7 +1280,7 @@
         <input type="hidden" name="job_id" value={detail.job.id} />
         <input type="hidden" name="request_id" value={resolutionRequestId} />
         <Field label="Decision">
-          <select class="select" name="resolution" required>
+          <select class="ui-select" name="resolution" required>
             <option value="acknowledge_printed">Printed — close the warning</option>
             <option value="acknowledge_missing">Missing — accept without reprint</option>
             <option value="cancelled">Close without claiming an outcome</option>

@@ -61,6 +61,16 @@ const RESOURCE_STATE_FILTERS = [
   { value: 'paused', label: 'Paused' }
 ] as const;
 
+const ROUTE_HEALTH_FILTERS = [
+  { value: 'all', label: 'All route health' },
+  { value: 'ready', label: 'Ready' },
+  { value: 'busy', label: 'Busy' },
+  { value: 'needs_operator', label: 'Needs operator' },
+  { value: 'offline', label: 'Offline' },
+  { value: 'stale', label: 'Stale' },
+  { value: 'unknown', label: 'Unknown' }
+] as const;
+
 export interface StateFilterOption {
   value: string;
   label: string;
@@ -75,6 +85,7 @@ export interface StateFilterOption {
  */
 export function stateFilters(view: OperationalView): StateFilterOption[] {
   if (view === 'customers' || view === 'queue' || view === 'destinations' || view === 'needs_review') return [];
+  if (view === 'routes') return [...ROUTE_HEALTH_FILTERS];
   return [...(view === 'jobs' ? JOB_STATE_FILTERS : RESOURCE_STATE_FILTERS)];
 }
 
