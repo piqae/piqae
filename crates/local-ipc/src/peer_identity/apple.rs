@@ -314,9 +314,10 @@ unsafe fn extract_signing_information(
             "the broker peer's designated requirement is unreadable",
         ));
     }
-    let designated_requirement = unsafe { cf_string(requirement_text) }?;
+    let designated_requirement = unsafe { cf_string(requirement_text) };
     // SAFETY: create-rule string from SecRequirementCopyString.
     unsafe { CFRelease(requirement_text) };
+    let designated_requirement = designated_requirement?;
 
     let unique = unsafe { CFDictionaryGetValue(information, kSecCodeInfoUnique.cast::<c_void>()) };
     if unique.is_null() || unsafe { CFGetTypeID(unique) } != unsafe { CFDataGetTypeID() } {
