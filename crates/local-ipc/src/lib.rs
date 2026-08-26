@@ -47,7 +47,8 @@ pub fn broker_endpoint_for_data_directory(data_directory: &std::path::Path) -> S
 
 pub const LOCAL_PROTOCOL_VERSION: u16 = 2;
 pub const BROKER_PROTOCOL_MIN_VERSION: u16 = 1;
-pub const BROKER_PROTOCOL_VERSION: u16 = 3;
+pub const BROKER_PROTOCOL_VERSION: u16 = 4;
+pub const BROKER_PROOF_MAX_SKEW_MS: i64 = 30_000;
 pub const MAX_MESSAGE_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_NATIVE_CAPTURE_BYTES: usize = 1024 * 1024;
 
@@ -168,6 +169,17 @@ pub enum BrokerOperation {
         capability: BrokerCapability,
         operation: LocalOperation,
     },
+    /// Protocol-v4 execution. The bearer token never crosses IPC: both peers
+    /// derive a proof key as SHA-256(token), while the broker stores only that
+    /// same digest. The nonce is one-time and durably replay protected.
+    ExecuteAuthenticated {
+        application_id: String,
+        capability: BrokerCapability,
+        operation: LocalOperation,
+        nonce: String,
+        issued_unix_ms: i64,
+        proof: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -175,6 +187,98 @@ pub struct BrokerResponse {
     pub protocol: u16,
     pub request_id: Uuid,
     pub result: Result<BrokerResult, LocalFailure>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proof: Option<String>,
+}
+
+fn broker_hmac(key: &[u8; 32], fields: &[&[u8]]) -> String {
+    let mut inner_key = [0x36_u8; 64];
+    let mut outer_key = [0x5c_u8; 64];
+    for (index, byte) in key.iter().enumerate() {
+        inner_key[index] ^= byte;
+        outer_key[index] ^= byte;
+    }
+    let mut inner = Sha256::new();
+    inner.update(inner_key);
+    for field in fields {
+        inner.update(u64::try_from(field.len()).unwrap_or(u64::MAX).to_be_bytes());
+        inner.update(field);
+    }
+    let mut outer = Sha256::new();
+    outer.update(outer_key);
+    outer.update(inner.finalize());
+    URL_SAFE_NO_PAD.encode(outer.finalize())
+}
+
+/// Derives the broker proof key held by a protocol-v4 client.
+#[must_use]
+pub fn broker_proof_key(token: &str) -> [u8; 32] {
+    Sha256::digest(token.as_bytes()).into()
+}
+
+/// Canonical request authentication proof for protocol-v4 execution.
+///
+/// # Errors
+///
+/// Fails when the bounded operation cannot be represented as JSON.
+pub fn broker_request_proof(
+    key: &[u8; 32],
+    request_id: Uuid,
+    application_id: &str,
+    capability: BrokerCapability,
+    operation: &LocalOperation,
+    nonce: &str,
+    issued_unix_ms: i64,
+) -> Result<String, serde_json::Error> {
+    let operation = serde_json::to_vec(operation)?;
+    let capability = serde_json::to_string(&capability)?;
+    Ok(broker_hmac(
+        key,
+        &[
+            b"piqae-broker-request-v4",
+            request_id.as_bytes(),
+            application_id.as_bytes(),
+            capability.as_bytes(),
+            &operation,
+            nonce.as_bytes(),
+            &issued_unix_ms.to_be_bytes(),
+        ],
+    ))
+}
+
+/// Authenticates the complete protocol-v4 response, including failures.
+///
+/// # Errors
+///
+/// Fails when the bounded result cannot be represented as JSON.
+pub fn broker_response_proof(
+    key: &[u8; 32],
+    request_id: Uuid,
+    nonce: &str,
+    result: &Result<BrokerResult, LocalFailure>,
+) -> Result<String, serde_json::Error> {
+    let result = serde_json::to_vec(result)?;
+    Ok(broker_hmac(
+        key,
+        &[
+            b"piqae-broker-response-v4",
+            request_id.as_bytes(),
+            nonce.as_bytes(),
+            &result,
+        ],
+    ))
+}
+
+#[must_use]
+pub fn constant_time_proof_eq(left: &str, right: &str) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    left.as_bytes()
+        .iter()
+        .zip(right.as_bytes())
+        .fold(0_u8, |difference, (a, b)| difference | (a ^ b))
+        == 0
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -184,7 +288,7 @@ pub enum BrokerResult {
     AuthorizationRequested(BrokerAuthorizationHandle),
     AuthorizationStatus { state: BrokerAuthorizationState },
     AuthorizationExchanged(BrokerCredential),
-    Local(LocalResult),
+    Local { result: LocalResult },
 }
 
 /// Generates a one-time 256-bit bearer token and the digest that may be
@@ -831,6 +935,36 @@ mod tests {
             let request: BrokerRequest = serde_json::from_slice(fixture).unwrap();
             assert_eq!(request.protocol, 2);
         }
+    }
+
+    #[test]
+    fn checked_in_broker_v4_fixtures_pin_authenticated_execution_without_a_token() {
+        let presence: BrokerRequest = serde_json::from_slice(include_bytes!(
+            "../../../contracts/node-sdk/v1/broker-v4-presence-request.json"
+        ))
+        .unwrap();
+        assert_eq!(presence.protocol, BROKER_PROTOCOL_VERSION);
+        let execute_bytes = include_bytes!(
+            "../../../contracts/node-sdk/v1/broker-v4-authenticated-execute-request.json"
+        );
+        let execute: BrokerRequest = serde_json::from_slice(execute_bytes).unwrap();
+        assert_eq!(execute.protocol, BROKER_PROTOCOL_VERSION);
+        assert!(!String::from_utf8_lossy(execute_bytes).contains("credential"));
+        assert!(matches!(
+            execute.operation,
+            BrokerOperation::ExecuteAuthenticated {
+                ref application_id,
+                capability: BrokerCapability::ObserveStatus,
+                operation: LocalOperation::Status,
+                ..
+            } if application_id == "com.example.pos"
+        ));
+        let response: BrokerResponse = serde_json::from_slice(include_bytes!(
+            "../../../contracts/node-sdk/v1/broker-v4-authenticated-execute-response.json"
+        ))
+        .unwrap();
+        assert_eq!(response.protocol, BROKER_PROTOCOL_VERSION);
+        assert!(response.proof.is_some());
     }
 
     #[tokio::test]

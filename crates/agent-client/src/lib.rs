@@ -320,6 +320,10 @@ impl AgentClient {
         let client = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(40))
+            // Enrollment and signed node requests are origin-pinned. Following
+            // redirects could forward invitation or lease capabilities to a
+            // different authority selected by a compromised proxy response.
+            .redirect(reqwest::redirect::Policy::none())
             .user_agent(concat!("piqae-agent/", env!("CARGO_PKG_VERSION")))
             .build()?;
         Ok(Self {

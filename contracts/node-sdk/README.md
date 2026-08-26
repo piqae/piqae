@@ -17,5 +17,12 @@ terminal result, a proven pre-handoff rejection, or an ambiguous handoff. The
 same unresolved operation and fence are replayed after restart; an operation in
 `handoff_started` or `accepted` must never be submitted to the native API again.
 
+Protocol 4 removes bearer capability tokens from secret-bearing IPC requests.
+Rust derives a proof key from the one-time credential, authenticates each
+request and response with domain-separated HMAC-SHA256, and durably rejects
+fresh-nonce replay. Platform bindings call the Rust broker client and must not
+reimplement JSON canonicalization. Protocol 1 presence remains intentionally
+non-secret; protocol 3 bearer execution is rejected by current brokers.
+
 The `v1/adapter-*.json` fixtures are allocator-neutral `piqae_node_command`
 payloads. Paths, identifiers, and document bytes are synthetic.

@@ -119,6 +119,32 @@ pub struct ConnectorRecord {
 struct ConnectorRegistryDocument {
     version: u16,
     connectors: Vec<ConnectorRecord>,
+    #[serde(default)]
+    prepared_keys: Vec<PreparedConnectorKey>,
+    #[serde(default)]
+    key_cleanup: Vec<SecureKeyHandle>,
+    #[serde(default)]
+    installation_identity: Option<InstallationSigningIdentity>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct InstallationSigningIdentity {
+    pub installation_id: String,
+    pub handle: SecureKeyHandle,
+    pub public_key: [u8; 32],
+}
+
+/// Opaque key generated for an invitation which has not yet become active.
+///
+/// It is durable so abandoned exchange flows are reclaimed after a restart
+/// instead of leaking platform credentials forever.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PreparedConnectorKey {
+    pub handle: SecureKeyHandle,
+    pub public_key: [u8; 32],
+    pub expires_unix_ms: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -133,6 +159,9 @@ pub struct ConnectorRuntimePaths {
 pub struct ConnectorRegistry {
     root: PathBuf,
     records: BTreeMap<String, ConnectorRecord>,
+    prepared_keys: Vec<PreparedConnectorKey>,
+    key_cleanup: Vec<SecureKeyHandle>,
+    installation_identity: Option<InstallationSigningIdentity>,
     #[cfg(test)]
     fail_next_persist: bool,
 }
@@ -148,6 +177,9 @@ impl ConnectorRegistry {
                 ConnectorRegistryDocument {
                     version: REGISTRY_VERSION,
                     connectors: Vec::new(),
+                    prepared_keys: Vec::new(),
+                    key_cleanup: Vec::new(),
+                    installation_identity: None,
                 }
             }
             Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
@@ -172,9 +204,13 @@ impl ConnectorRegistry {
                 bail!("connector registry contains a duplicate connector id");
             }
         }
+        validate_key_state(&records, &document.prepared_keys, &document.key_cleanup)?;
         Ok(Self {
             root,
             records,
+            prepared_keys: document.prepared_keys,
+            key_cleanup: document.key_cleanup,
+            installation_identity: document.installation_identity,
             #[cfg(test)]
             fail_next_persist: false,
         })
@@ -186,6 +222,162 @@ impl ConnectorRegistry {
 
     pub fn records(&self) -> impl Iterator<Item = &ConnectorRecord> {
         self.records.values()
+    }
+
+    #[must_use]
+    pub const fn installation_identity(&self) -> Option<&InstallationSigningIdentity> {
+        self.installation_identity.as_ref()
+    }
+
+    /// Stores the installation signing principal once. It is intentionally
+    /// outside connector revocation and cleanup lifecycles.
+    pub fn set_installation_identity_once(
+        &mut self,
+        identity: InstallationSigningIdentity,
+    ) -> Result<()> {
+        if self.installation_identity.is_some() || self.handle_is_known(&identity.handle) {
+            bail!("installation signing identity already exists or reuses a connector key");
+        }
+        if !identity.installation_id.starts_with("ins_") || identity.installation_id.len() > 128 {
+            bail!("invalid installation identity");
+        }
+        self.persist_all(
+            &self.records.clone(),
+            &self.prepared_keys.clone(),
+            &self.key_cleanup.clone(),
+            Some(identity.clone()),
+        )?;
+        self.installation_identity = Some(identity);
+        Ok(())
+    }
+
+    /// Durably records an invitation key before its handle is returned to the
+    /// host UI. Active and cleanup-pending handles may never be reused.
+    pub fn register_prepared_key(
+        &mut self,
+        handle: SecureKeyHandle,
+        public_key: [u8; 32],
+        expires_unix_ms: i64,
+    ) -> Result<()> {
+        if expires_unix_ms <= chrono::Utc::now().timestamp_millis() || self.handle_is_known(&handle)
+        {
+            bail!("prepared connector key is invalid or already known");
+        }
+        let mut prepared = self.prepared_keys.clone();
+        prepared.push(PreparedConnectorKey {
+            handle,
+            public_key,
+            expires_unix_ms,
+        });
+        self.persist_state(&self.records.clone(), &prepared, &self.key_cleanup.clone())?;
+        self.prepared_keys = prepared;
+        Ok(())
+    }
+
+    /// Atomically activates a prepared key and removes its expiry record.
+    pub fn complete_prepared(&mut self, mut record: ConnectorRecord) -> Result<()> {
+        validate_record(&record)?;
+        record.allowed_printer_ids.sort();
+        let handle = record
+            .secure_key_handle
+            .as_ref()
+            .context("embedded connector has no secure key handle")?;
+        let Some(prepared_index) = self
+            .prepared_keys
+            .iter()
+            .position(|pending| pending.handle == *handle)
+        else {
+            bail!("connector key was not prepared by this runtime");
+        };
+        if self.prepared_keys[prepared_index].expires_unix_ms
+            <= chrono::Utc::now().timestamp_millis()
+        {
+            bail!("connector key preparation expired");
+        }
+        if self.records.contains_key(&record.connector_id) {
+            bail!("connector already exists");
+        }
+        let mut records = self.records.clone();
+        records.insert(record.connector_id.clone(), record);
+        let mut prepared = self.prepared_keys.clone();
+        prepared.remove(prepared_index);
+        self.persist_state(&records, &prepared, &self.key_cleanup.clone())?;
+        self.records = records;
+        self.prepared_keys = prepared;
+        Ok(())
+    }
+
+    /// Schedules an abandoned prepared key for idempotent provider deletion.
+    /// The durable cleanup intent is committed before the caller invokes the
+    /// provider.
+    pub fn cancel_prepared_key(&mut self, handle: &SecureKeyHandle) -> Result<bool> {
+        let Some(index) = self
+            .prepared_keys
+            .iter()
+            .position(|pending| pending.handle == *handle)
+        else {
+            return Ok(false);
+        };
+        let mut prepared = self.prepared_keys.clone();
+        let removed = prepared.remove(index);
+        let mut cleanup = self.key_cleanup.clone();
+        if !cleanup.contains(&removed.handle) {
+            cleanup.push(removed.handle);
+        }
+        self.persist_state(&self.records.clone(), &prepared, &cleanup)?;
+        self.prepared_keys = prepared;
+        self.key_cleanup = cleanup;
+        Ok(true)
+    }
+
+    /// Moves every expired preparation into the durable cleanup queue.
+    pub fn expire_prepared_keys(&mut self, now_unix_ms: i64) -> Result<usize> {
+        let (expired, retained): (Vec<_>, Vec<_>) = self
+            .prepared_keys
+            .iter()
+            .cloned()
+            .partition(|pending| pending.expires_unix_ms <= now_unix_ms);
+        if expired.is_empty() {
+            return Ok(0);
+        }
+        let mut cleanup = self.key_cleanup.clone();
+        for pending in &expired {
+            if !cleanup.contains(&pending.handle) {
+                cleanup.push(pending.handle.clone());
+            }
+        }
+        self.persist_state(&self.records.clone(), &retained, &cleanup)?;
+        self.prepared_keys = retained;
+        self.key_cleanup = cleanup;
+        Ok(expired.len())
+    }
+
+    #[must_use]
+    pub fn key_cleanup(&self) -> &[SecureKeyHandle] {
+        &self.key_cleanup
+    }
+
+    #[must_use]
+    pub fn prepared_key(&self, handle: &SecureKeyHandle) -> Option<&PreparedConnectorKey> {
+        self.prepared_keys
+            .iter()
+            .find(|pending| pending.handle == *handle)
+    }
+
+    /// Removes a cleanup intent only after the secure provider confirms its
+    /// idempotent delete. Active connector handles are never eligible.
+    pub fn confirm_key_cleanup(&mut self, handle: &SecureKeyHandle) -> Result<bool> {
+        if self.active_handle(handle) {
+            bail!("refusing to clean up an active connector key");
+        }
+        let Some(index) = self.key_cleanup.iter().position(|value| value == handle) else {
+            return Ok(false);
+        };
+        let mut cleanup = self.key_cleanup.clone();
+        cleanup.remove(index);
+        self.persist_state(&self.records.clone(), &self.prepared_keys.clone(), &cleanup)?;
+        self.key_cleanup = cleanup;
+        Ok(true)
     }
 
     #[must_use]
@@ -247,8 +439,15 @@ impl ConnectorRegistry {
         if let Some(record) = candidate.get_mut(connector_id) {
             record.enabled = false;
         }
-        self.persist_records(&candidate)?;
+        let mut cleanup = self.key_cleanup.clone();
+        if let Some(handle) = record.secure_key_handle.as_ref()
+            && !cleanup.contains(handle)
+        {
+            cleanup.push(handle.clone());
+        }
+        self.persist_state(&candidate, &self.prepared_keys.clone(), &cleanup)?;
         self.records = candidate;
+        self.key_cleanup = cleanup;
         Ok(true)
     }
 
@@ -267,7 +466,11 @@ impl ConnectorRegistry {
             .context("connector was not found")?;
         let mut candidate = self.records.clone();
         candidate.insert(record.connector_id.clone(), record);
-        self.persist_records(&candidate)?;
+        self.persist_state(
+            &candidate,
+            &self.prepared_keys.clone(),
+            &self.key_cleanup.clone(),
+        )?;
         self.records = candidate;
         Ok(previous)
     }
@@ -277,6 +480,42 @@ impl ConnectorRegistry {
         reason = "test fault injection is consumed atomically before the replacement"
     )]
     fn persist_records(&mut self, records: &BTreeMap<String, ConnectorRecord>) -> Result<()> {
+        self.persist_state(
+            records,
+            &self.prepared_keys.clone(),
+            &self.key_cleanup.clone(),
+        )
+    }
+
+    #[allow(
+        clippy::needless_pass_by_ref_mut,
+        reason = "test fault injection is consumed by the delegated atomic replacement"
+    )]
+    fn persist_state(
+        &mut self,
+        records: &BTreeMap<String, ConnectorRecord>,
+        prepared_keys: &[PreparedConnectorKey],
+        key_cleanup: &[SecureKeyHandle],
+    ) -> Result<()> {
+        self.persist_all(
+            records,
+            prepared_keys,
+            key_cleanup,
+            self.installation_identity.clone(),
+        )
+    }
+
+    #[allow(
+        clippy::needless_pass_by_ref_mut,
+        reason = "test builds consume the injected atomic replacement failure"
+    )]
+    fn persist_all(
+        &mut self,
+        records: &BTreeMap<String, ConnectorRecord>,
+        prepared_keys: &[PreparedConnectorKey],
+        key_cleanup: &[SecureKeyHandle],
+        installation_identity: Option<InstallationSigningIdentity>,
+    ) -> Result<()> {
         #[cfg(test)]
         if std::mem::take(&mut self.fail_next_persist) {
             bail!("injected connector registry replacement failure");
@@ -285,6 +524,9 @@ impl ConnectorRegistry {
         let document = ConnectorRegistryDocument {
             version: REGISTRY_VERSION,
             connectors: records.values().cloned().collect(),
+            prepared_keys: prepared_keys.to_vec(),
+            key_cleanup: key_cleanup.to_vec(),
+            installation_identity,
         };
         let bytes = serde_json::to_vec_pretty(&document)?;
         crate::durable_file::replace_json(&path, &bytes)?;
@@ -295,6 +537,47 @@ impl ConnectorRegistry {
         }
         Ok(())
     }
+
+    fn active_handle(&self, handle: &SecureKeyHandle) -> bool {
+        self.records
+            .values()
+            .any(|record| record.enabled && record.secure_key_handle.as_ref() == Some(handle))
+    }
+
+    fn handle_is_known(&self, handle: &SecureKeyHandle) -> bool {
+        self.records
+            .values()
+            .any(|record| record.secure_key_handle.as_ref() == Some(handle))
+            || self
+                .prepared_keys
+                .iter()
+                .any(|value| value.handle == *handle)
+            || self.key_cleanup.contains(handle)
+            || self
+                .installation_identity
+                .as_ref()
+                .is_some_and(|identity| identity.handle == *handle)
+    }
+}
+
+fn validate_key_state(
+    records: &BTreeMap<String, ConnectorRecord>,
+    prepared: &[PreparedConnectorKey],
+    cleanup: &[SecureKeyHandle],
+) -> Result<()> {
+    if prepared.len() > MAX_CONNECTORS || cleanup.len() > MAX_CONNECTORS.saturating_mul(2) {
+        bail!("connector key state exceeds supported bounds");
+    }
+    for pending in prepared {
+        if records
+            .values()
+            .any(|record| record.secure_key_handle.as_ref() == Some(&pending.handle))
+            || cleanup.contains(&pending.handle)
+        {
+            bail!("connector key state overlaps active or cleanup state");
+        }
+    }
+    Ok(())
 }
 
 fn validate_record(record: &ConnectorRecord) -> Result<()> {
@@ -374,6 +657,7 @@ fn validate_record(record: &ConnectorRecord) -> Result<()> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use chrono::Utc;
     use piqae_agent_storage::AgentStore;
 
     fn record(id: &str) -> ConnectorRecord {
@@ -646,6 +930,126 @@ mod tests {
         assert_eq!(
             b_store.setting("cloud_cursor").unwrap().as_deref(),
             Some("9001")
+        );
+    }
+
+    #[test]
+    fn prepared_keys_expire_and_cleanup_retries_across_restart_without_touching_active_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let pending = SecureKeyHandle::new("keychain/pending".into()).unwrap();
+        let active = SecureKeyHandle::new("keychain/active".into()).unwrap();
+        let mut registry = ConnectorRegistry::load(dir.path()).unwrap();
+        registry
+            .register_prepared_key(pending.clone(), [3; 32], Utc::now().timestamp_millis() + 1)
+            .unwrap();
+        registry
+            .register_prepared_key(
+                active.clone(),
+                [5; 32],
+                Utc::now().timestamp_millis() + 60_000,
+            )
+            .unwrap();
+        let mut connector = record("ncon_embedded_active");
+        connector.device_key_file = None;
+        connector.secure_key_handle = Some(active.clone());
+        registry.complete_prepared(connector).unwrap();
+        assert_eq!(
+            registry
+                .expire_prepared_keys(Utc::now().timestamp_millis() + 5)
+                .unwrap(),
+            1
+        );
+        drop(registry);
+
+        let mut restarted = ConnectorRegistry::load(dir.path()).unwrap();
+        assert_eq!(restarted.key_cleanup(), &[pending.clone()]);
+        assert!(restarted.confirm_key_cleanup(&active).is_err());
+        // A provider failure leaves this list unchanged; only a confirmed
+        // idempotent provider delete calls confirm_key_cleanup.
+        drop(restarted);
+        let mut retried = ConnectorRegistry::load(dir.path()).unwrap();
+        assert_eq!(retried.key_cleanup(), &[pending.clone()]);
+        assert!(retried.confirm_key_cleanup(&pending).unwrap());
+        assert!(
+            ConnectorRegistry::load(dir.path())
+                .unwrap()
+                .key_cleanup()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn revocation_is_durable_before_secure_key_cleanup_and_never_reenables_on_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let handle = SecureKeyHandle::new("credential/child".into()).unwrap();
+        let mut registry = ConnectorRegistry::load(dir.path()).unwrap();
+        registry
+            .register_prepared_key(
+                handle.clone(),
+                [7; 32],
+                Utc::now().timestamp_millis() + 60_000,
+            )
+            .unwrap();
+        let mut connector = record("ncon_child_secure");
+        connector.device_key_file = None;
+        connector.secure_key_handle = Some(handle.clone());
+        registry.complete_prepared(connector).unwrap();
+        assert!(registry.revoke("ncon_child_secure").unwrap());
+        assert_eq!(registry.key_cleanup(), &[handle.clone()]);
+        drop(registry);
+
+        let restarted = ConnectorRegistry::load(dir.path()).unwrap();
+        assert!(!restarted.records["ncon_child_secure"].enabled);
+        assert_eq!(restarted.key_cleanup(), &[handle]);
+    }
+
+    #[test]
+    fn installation_identity_survives_first_connector_revocation_and_second_enrollment() {
+        let dir = tempfile::tempdir().unwrap();
+        let installation = InstallationSigningIdentity {
+            installation_id: "ins_stable_fixture".into(),
+            handle: SecureKeyHandle::new("keychain/installation".into()).unwrap(),
+            public_key: [29; 32],
+        };
+        let first = SecureKeyHandle::new("keychain/first".into()).unwrap();
+        let mut registry = ConnectorRegistry::load(dir.path()).unwrap();
+        registry
+            .set_installation_identity_once(installation.clone())
+            .unwrap();
+        registry
+            .register_prepared_key(
+                first.clone(),
+                [31; 32],
+                Utc::now().timestamp_millis() + 60_000,
+            )
+            .unwrap();
+        let mut first_record = record("ncon_first");
+        first_record.device_key_file = None;
+        first_record.secure_key_handle = Some(first);
+        registry.complete_prepared(first_record).unwrap();
+        registry.revoke("ncon_first").unwrap();
+        drop(registry);
+
+        let second = SecureKeyHandle::new("keychain/second".into()).unwrap();
+        let mut restarted = ConnectorRegistry::load(dir.path()).unwrap();
+        assert_eq!(restarted.installation_identity(), Some(&installation));
+        assert!(!restarted.key_cleanup().contains(&installation.handle));
+        restarted
+            .register_prepared_key(
+                second.clone(),
+                [37; 32],
+                Utc::now().timestamp_millis() + 60_000,
+            )
+            .unwrap();
+        let mut second_record = record("ncon_second");
+        second_record.device_key_file = None;
+        second_record.secure_key_handle = Some(second);
+        restarted.complete_prepared(second_record).unwrap();
+        assert_eq!(
+            ConnectorRegistry::load(dir.path())
+                .unwrap()
+                .installation_identity(),
+            Some(&installation)
         );
     }
 }
