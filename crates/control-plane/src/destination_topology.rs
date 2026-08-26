@@ -28,11 +28,27 @@ use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use std::collections::{HashMap, HashSet};
 
-fn enum_name<T: Serialize>(value: &T) -> String {
-    serde_json::to_value(value)
-        .ok()
-        .and_then(|value| value.as_str().map(ToOwned::to_owned))
-        .unwrap_or_else(|| "unknown".into())
+const fn stored_observation_state(value: piqae_domain::PrinterState) -> &'static str {
+    match value {
+        piqae_domain::PrinterState::Online => "idle",
+        piqae_domain::PrinterState::Busy => "processing",
+        piqae_domain::PrinterState::Paused
+        | piqae_domain::PrinterState::PaperOut
+        | piqae_domain::PrinterState::Error => "stopped",
+        piqae_domain::PrinterState::Offline => "unavailable",
+        piqae_domain::PrinterState::Unknown => "unknown",
+    }
+}
+
+fn public_observation_state(value: &str) -> String {
+    match value {
+        "idle" => "online",
+        "processing" => "busy",
+        "stopped" => "paused",
+        "unavailable" => "offline",
+        other => other,
+    }
+    .to_owned()
 }
 
 const fn stored_route_state(value: piqae_domain::PrinterState) -> &'static str {
@@ -320,7 +336,7 @@ const fn identity_confidence(value: IdentityConfidence) -> &'static str {
 
 fn evidence_confidence(evidence: &IdentityEvidence) -> &'static str {
     if evidence.conflicts {
-        "distinct"
+        "conflict"
     } else {
         match evidence.strength.as_str() {
             "verified" => "verified",
@@ -336,7 +352,7 @@ fn observation_response(value: RouteObservation) -> RouteObservationResponse {
         id: value.id,
         route_id: value.route_id,
         sequence: value.sequence,
-        printer_state: value.printer_state,
+        printer_state: public_observation_state(&value.printer_state),
         state_reasons: value.state_reasons,
         accepting_jobs: value.accepting_jobs.unwrap_or(false),
         total_jobs: value.total_jobs,
@@ -393,16 +409,16 @@ async fn route_response(
             .as_ref()
             .map(|value| value.printer_state.as_str())
         {
-            Some("online")
+            Some("idle")
                 if observation
                     .as_ref()
                     .is_some_and(|value| value.accepting_jobs == Some(true)) =>
             {
                 "ready"
             }
-            Some("busy") | Some("printing") => "busy",
-            Some("paused" | "paper_out" | "error") => "needs_operator",
-            Some("offline") => "offline",
+            Some("processing") => "busy",
+            Some("stopped") => "needs_operator",
+            Some("unavailable") => "offline",
             _ => "unknown",
         }
     };
@@ -467,19 +483,44 @@ async fn destination_response(
     tenant_scope: TenantScope,
     destination: StoredPhysicalDestination,
 ) -> Result<PhysicalDestinationResponse, AppError> {
-    let route_count = state
+    let routes = state
         .destination_topology
         .list_routes(tenant_scope, &destination.id)
         .await
-        .map_err(storage_error)?
-        .len();
+        .map_err(storage_error)?;
+    let route_count = routes.len();
+    let mut has_ready_route = false;
+    let now = Utc::now();
+    for route in &routes {
+        if !route.enabled || route.state != "available" {
+            continue;
+        }
+        if let Ok(observation) = state
+            .destination_topology
+            .latest_route_observation(tenant_scope, &route.id)
+            .await
+        {
+            if observation.fresh_until >= now
+                && observation.accepting_jobs == Some(true)
+                && matches!(observation.printer_state.as_str(), "idle" | "processing")
+            {
+                has_ready_route = true;
+                break;
+            }
+        }
+    }
+    let public_status = if destination.state == "available" && !has_ready_route {
+        "needs_review".into()
+    } else {
+        public_destination_state(&destination.state)
+    };
     Ok(PhysicalDestinationResponse {
         id: destination.id,
         display_name: destination.name,
         manufacturer: None,
         model: None,
         identity_confidence: identity_confidence(destination.identity_confidence),
-        status: public_destination_state(&destination.state),
+        status: public_status,
         route_count,
         created_at: destination.updated_at,
         updated_at: destination.updated_at,
@@ -538,6 +579,8 @@ fn evidence_kind(kind: piqae_protocol::agent::PhysicalIdentityEvidenceKind) -> &
         Kind::CertificateKey => "certificate_key",
         Kind::NetworkMac => "network_mac",
         Kind::NetworkEndpoint => "network_endpoint",
+        Kind::ManufacturerModel => "manufacturer_model",
+        Kind::CapabilityFingerprint => "capability_fingerprint",
         Kind::DriverFingerprint => "driver_fingerprint",
     }
 }
@@ -635,7 +678,7 @@ pub(crate) async fn project_agent_topology(
                 authority_id: authority_id.clone(),
                 agent_id: request.agent_id.to_string(),
                 site_id: request.agent_id.to_string(),
-                state: "online".into(),
+                state: "active".into(),
                 last_seen_at: Some(request.health.observed_at),
             },
         )
@@ -736,6 +779,20 @@ pub(crate) async fn project_agent_topology(
                 .as_ref()
                 .map(|route| route.id.clone())
                 .unwrap_or_else(|| format!("rte_{}", ulid::Ulid::new()));
+            let route_role = if let Some(route) = existing.as_ref() {
+                route.role.clone()
+            } else if state
+                .destination_topology
+                .list_routes(tenant_scope, &destination_id)
+                .await
+                .map_err(storage_error)?
+                .into_iter()
+                .any(|route| route.enabled && route.role == "primary")
+            {
+                "standby".into()
+            } else {
+                "primary".into()
+            };
             state
                 .destination_topology
                 .upsert_route(
@@ -748,10 +805,7 @@ pub(crate) async fn project_agent_topology(
                         agent_id: request.agent_id.to_string(),
                         native_queue_id: printer.native_id.clone(),
                         state: stored_route_state(printer.state).into(),
-                        role: existing
-                            .as_ref()
-                            .map_or("standby", |route| route.role.as_str())
-                            .into(),
+                        role: route_role,
                         priority: existing.as_ref().map_or(100, |route| route.priority),
                         enabled: true,
                         capability_revision: printer.capability_revision,
@@ -891,8 +945,8 @@ pub(crate) async fn project_agent_topology(
                 &RouteObservation {
                     id: format!("rob_{}", ulid::Ulid::new()),
                     route_id: route.id,
-                    sequence: observation.inventory_revision.max(1),
-                    printer_state: enum_name(&observation.state),
+                    sequence: observation.sequence,
+                    printer_state: stored_observation_state(observation.state).into(),
                     accepting_jobs: Some(observation.accepts_jobs),
                     state_reasons: observation.state_reasons.clone(),
                     total_jobs: queue.total_jobs,
@@ -1074,6 +1128,53 @@ pub(crate) async fn accept_job_route(
             .await
             .map_err(storage_error)?;
     }
+    Ok(())
+}
+
+/// Renews the destination fence alongside a slow job download. Legacy agents
+/// omit all three proof fields; partial proof is always rejected.
+pub(crate) async fn renew_job_route(
+    state: &AppState,
+    tenant: crate::authentication::TenantContext,
+    job_id: &str,
+    lease_until: DateTime<Utc>,
+    reservation_id: Option<uuid::Uuid>,
+    generation: Option<u64>,
+    fencing_token: Option<&str>,
+) -> Result<(), AppError> {
+    let (Some(reservation_id), Some(generation), Some(fencing_token)) =
+        (reservation_id, generation, fencing_token)
+    else {
+        if reservation_id.is_none() && generation.is_none() && fencing_token.is_none() {
+            return Ok(());
+        }
+        return Err(AppError::invalid(
+            "invalid_route_fence",
+            "Route reservation proof must include reservation ID, generation, and token.",
+        ));
+    };
+    let attempt = state
+        .destination_topology
+        .get_delivery_attempt_by_reservation(scope(tenant), &reservation_id.to_string())
+        .await
+        .map_err(storage_error)?;
+    if attempt.job_id != job_id || attempt.generation != generation {
+        return Err(AppError::conflict(
+            "stale_route_fence",
+            "The route reservation no longer authorizes this job.",
+        ));
+    }
+    state
+        .destination_topology
+        .renew_delivery_attempt(
+            scope(tenant),
+            &reservation_id.to_string(),
+            generation,
+            fencing_token,
+            lease_until,
+        )
+        .await
+        .map_err(storage_error)?;
     Ok(())
 }
 

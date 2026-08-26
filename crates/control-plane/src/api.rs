@@ -2923,6 +2923,16 @@ pub async fn renew_agent_lease(
             &request.lease_token,
         )
         .await?;
+    crate::destination_topology::renew_job_route(
+        &state,
+        identity.tenant,
+        &job_id,
+        lease_expires_at,
+        request.route_reservation_id,
+        request.route_generation,
+        request.route_fencing_token.as_deref(),
+    )
+    .await?;
     Ok(Json(AgentRenewLeaseResponse { lease_expires_at }))
 }
 
