@@ -202,6 +202,13 @@ pub struct PendingCloudAcceptance {
     pub request: AgentAcceptJobRequest,
 }
 
+/// A legacy or corrupt local intent which cannot prove its physical route.
+#[derive(Clone, Debug)]
+pub struct PendingCloudRelease {
+    pub job_id: JobId,
+    pub request: AgentReleaseLeaseRequest,
+}
+
 /// Persists and activates connector-isolated queue state. `prepare` must be
 /// idempotent for a job and commit the no-replay/handoff intent before return.
 #[async_trait]
@@ -211,6 +218,9 @@ pub trait DurableOfferAcceptor<M>: fmt::Debug + Send + Sync {
         Ok(true)
     }
     async fn pending(&mut self) -> Result<Vec<PendingCloudAcceptance>, CloudWorkerError>;
+    async fn invalid_pending(&mut self) -> Result<Vec<PendingCloudRelease>, CloudWorkerError> {
+        Ok(Vec::new())
+    }
     async fn prepare(
         &mut self,
         offer: &JobOffer,
@@ -375,6 +385,12 @@ where
     }
 
     async fn resume_pending_acceptances(&mut self) -> Result<(), CloudWorkerError> {
+        for invalid in self.acceptor.invalid_pending().await? {
+            self.authority
+                .release(invalid.job_id, &invalid.request)
+                .await?;
+            self.acceptor.abandon(invalid.job_id).await?;
+        }
         for pending in self.acceptor.pending().await? {
             if !self.acceptor.admission_valid().await? {
                 self.acceptor.abandon(pending.job_id).await?;
@@ -383,16 +399,20 @@ where
             self.authority
                 .accept(pending.job_id, &pending.request)
                 .await?;
-            if !self.acceptor.admission_valid().await? {
-                self.acceptor.abandon(pending.job_id).await?;
-                return Err(CloudWorkerError::new("connector_admission_revoked"));
-            }
+            // Authority acceptance transfers durable responsibility to this
+            // installation. A concurrent connector revoke prevents new work,
+            // but must never erase or strand work already accepted remotely.
             self.acceptor.activate(pending.job_id).await?;
         }
         Ok(())
     }
 
     async fn process_offer(&mut self, offer: JobOffer) -> Result<(), CloudWorkerError> {
+        if offer.route_reservation.is_none() {
+            self.release_offer(&offer, "route_reservation_required")
+                .await?;
+            return Ok(());
+        }
         if !self.runtime.snapshot().accepting_cloud_leases
             || !self.acceptor.admission_valid().await?
         {
@@ -445,13 +465,9 @@ where
             return Err(CloudWorkerError::new("connector_admission_revoked"));
         }
         self.authority.accept(job_id, &pending.request).await?;
-        if !self.acceptor.admission_valid().await? {
-            self.acceptor.abandon(job_id).await?;
-            let _ = self
-                .release_offer(&offer, "connector_admission_revoked")
-                .await;
-            return Err(CloudWorkerError::new("connector_admission_revoked"));
-        }
+        // Once the authority confirms acceptance, local activation is the
+        // required compensation even if connector admission was revoked in
+        // the same race window. Revocation fences later offers and signing.
         self.acceptor.activate(job_id).await
     }
 
@@ -790,6 +806,32 @@ mod tests {
                 .collect())
         }
 
+        async fn invalid_pending(&mut self) -> Result<Vec<PendingCloudRelease>, CloudWorkerError> {
+            let invalid = self
+                .document
+                .pending
+                .iter()
+                .filter(|(_, request)| {
+                    request.route_reservation_id.is_none()
+                        || request.route_generation.is_none()
+                        || request.route_fencing_token.is_none()
+                })
+                .map(|(job_id, request)| (*job_id, request.clone()))
+                .collect::<Vec<_>>();
+            let mut releases = Vec::with_capacity(invalid.len());
+            for (job_id, request) in invalid {
+                releases.push(PendingCloudRelease {
+                    job_id,
+                    request: AgentReleaseLeaseRequest {
+                        lease_id: request.lease_id,
+                        lease_token: request.lease_token,
+                        reason: "route_reservation_required".into(),
+                    },
+                });
+            }
+            Ok(releases)
+        }
+
         async fn prepare(
             &mut self,
             offer: &JobOffer,
@@ -802,15 +844,19 @@ mod tests {
                 .document
                 .pending
                 .entry(offer.job.id)
-                .or_insert_with(|| AgentAcceptJobRequest {
-                    lease_id: offer.lease_id,
-                    lease_token: offer.lease_token.clone(),
-                    content_sha256:
-                        "d308e0b2d4b253d56eeca365fa4f032c65bf3fb7696b4799840f886abc3f6c7c".into(),
-                    local_sequence: 1,
-                    route_reservation_id: None,
-                    route_generation: None,
-                    route_fencing_token: None,
+                .or_insert_with(|| {
+                    let route = offer.route_reservation.as_ref();
+                    AgentAcceptJobRequest {
+                        lease_id: offer.lease_id,
+                        lease_token: offer.lease_token.clone(),
+                        content_sha256:
+                            "d308e0b2d4b253d56eeca365fa4f032c65bf3fb7696b4799840f886abc3f6c7c"
+                                .into(),
+                        local_sequence: 1,
+                        route_reservation_id: route.map(|value| value.reservation_id),
+                        route_generation: route.map(|value| value.generation),
+                        route_fencing_token: route.map(|value| value.fencing_token.clone()),
+                    }
                 })
                 .clone();
             if self.document.handoffs.insert(offer.job.id) {
@@ -915,7 +961,14 @@ mod tests {
                 sha256: None,
                 bytes: Some(7),
             },
-            route_reservation: None,
+            route_reservation: Some(piqae_protocol::agent::CloudRouteReservation {
+                route_id: "route_fixture".into(),
+                local_route_key: "fake:fixture".into(),
+                reservation_id: uuid::Uuid::new_v4(),
+                generation: 1,
+                fencing_token: "deterministic-route-fence".into(),
+                lease_expires_at: Utc::now() + TimeDelta::minutes(1),
+            }),
         }
     }
 
@@ -1138,6 +1191,93 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn offers_without_route_proof_are_released_before_materialization() {
+        let directory = tempfile::tempdir().unwrap();
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let provider = Arc::new(FakeSecureStore {
+            key: SigningKey::from_bytes(&[14; 32]),
+            deleted: Mutex::new(false),
+        });
+        let generated = provider.generate("com.example.pos").unwrap();
+        let identity: Arc<dyn DeviceRequestSigner> = Arc::new(HostBackedDeviceIdentity::new(
+            AgentId::new(),
+            generated.handle,
+            provider,
+        ));
+        let mut missing = offer(JobId::new());
+        missing.route_reservation = None;
+        let mut response = empty_response();
+        response.candidate_jobs.push(missing);
+        let mut worker = worker(
+            authority(
+                identity,
+                ed25519_dalek::VerifyingKey::from_bytes(&generated.public_key).unwrap(),
+                vec![Ok(response)],
+                Arc::clone(&log),
+            ),
+            &log,
+            &directory.path().join("missing-route.json"),
+            runtime(&directory.path().join("runtime-missing-route")),
+            false,
+        );
+        worker.reconcile_once().await.unwrap();
+        let entries = log.lock().unwrap();
+        assert!(entries.contains(&"remote_release"));
+        assert!(!entries.contains(&"materialize"));
+        drop(entries);
+    }
+
+    #[tokio::test]
+    async fn legacy_pending_accept_without_route_proof_is_abandoned_and_released() {
+        let directory = tempfile::tempdir().unwrap();
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let provider = Arc::new(FakeSecureStore {
+            key: SigningKey::from_bytes(&[15; 32]),
+            deleted: Mutex::new(false),
+        });
+        let generated = provider.generate("com.example.pos").unwrap();
+        let identity: Arc<dyn DeviceRequestSigner> = Arc::new(HostBackedDeviceIdentity::new(
+            AgentId::new(),
+            generated.handle,
+            provider,
+        ));
+        let state = directory.path().join("legacy-pending.json");
+        let mut worker = worker(
+            authority(
+                identity,
+                ed25519_dalek::VerifyingKey::from_bytes(&generated.public_key).unwrap(),
+                vec![Ok(empty_response())],
+                Arc::clone(&log),
+            ),
+            &log,
+            &state,
+            runtime(&directory.path().join("runtime-legacy")),
+            false,
+        );
+        let job_id = JobId::new();
+        worker.acceptor.document.pending.insert(
+            job_id,
+            AgentAcceptJobRequest {
+                lease_id: uuid::Uuid::new_v4(),
+                lease_token: "redacted-legacy-token".into(),
+                content_sha256: "d308e0b2d4b253d56eeca365fa4f032c65bf3fb7696b4799840f886abc3f6c7c"
+                    .into(),
+                local_sequence: 1,
+                route_reservation_id: None,
+                route_generation: None,
+                route_fencing_token: None,
+            },
+        );
+        worker.acceptor.persist().unwrap();
+        worker.reconcile_once().await.unwrap();
+        let entries = log.lock().unwrap();
+        assert!(entries.contains(&"abandon"));
+        assert!(entries.contains(&"remote_release"));
+        assert!(!entries.contains(&"remote_accept"));
+        drop(entries);
+    }
+
+    #[tokio::test]
     async fn revoked_secure_handle_fails_closed_before_sync_or_inventory_mutation() {
         let directory = tempfile::tempdir().unwrap();
         let log = Arc::new(Mutex::new(Vec::new()));
@@ -1173,7 +1313,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn revoke_during_remote_accept_never_activates_prepared_local_work() {
+    async fn revoke_after_remote_accept_keeps_durable_local_responsibility() {
         let directory = tempfile::tempdir().unwrap();
         let log = Arc::new(Mutex::new(Vec::new()));
         let provider = Arc::new(FakeSecureStore {
@@ -1203,14 +1343,11 @@ mod tests {
         );
         worker.authority.revoke_after_accept = Some(Arc::clone(&admission));
         worker.acceptor.admission = Some(admission);
-        assert_eq!(
-            worker.reconcile_once().await.unwrap_err().code,
-            "connector_admission_revoked"
-        );
+        worker.reconcile_once().await.unwrap();
         let entries = log.lock().unwrap();
         assert!(entries.contains(&"remote_accept"));
-        assert!(entries.contains(&"abandon"));
-        assert!(!entries.contains(&"activate"));
+        assert!(!entries.contains(&"abandon"));
+        assert!(entries.contains(&"activate"));
         drop(entries);
     }
 }

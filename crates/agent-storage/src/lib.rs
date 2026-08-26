@@ -12,7 +12,7 @@ use piqae_domain::{
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use thiserror::Error;
 
@@ -312,6 +312,31 @@ pub struct CloudAcceptIntent {
     pub lease_expires_unix_ms: i64,
     pub content_sha256: String,
     pub local_sequence: u64,
+    pub route_reservation_id: Option<String>,
+    pub route_generation: Option<u64>,
+    pub route_fencing_token: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CloudRouteProof {
+    pub reservation_id: String,
+    pub generation: u64,
+    pub fencing_token: String,
+}
+
+impl CloudAcceptIntent {
+    #[must_use]
+    pub fn route_proof(&self) -> Option<CloudRouteProof> {
+        let proof = CloudRouteProof {
+            reservation_id: self.route_reservation_id.clone()?,
+            generation: self.route_generation?,
+            fencing_token: self.route_fencing_token.clone()?,
+        };
+        (!proof.reservation_id.is_empty()
+            && proof.generation > 0
+            && !proof.fencing_token.is_empty())
+        .then_some(proof)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -336,6 +361,9 @@ impl std::fmt::Debug for CloudAcceptIntent {
             .field("lease_expires_unix_ms", &self.lease_expires_unix_ms)
             .field("content_sha256", &self.content_sha256)
             .field("local_sequence", &self.local_sequence)
+            .field("route_reservation_id", &self.route_reservation_id)
+            .field("route_generation", &self.route_generation)
+            .field("route_fencing_token", &"[REDACTED]")
             .finish()
     }
 }
@@ -600,6 +628,13 @@ impl AgentStore {
             "reclaiming",
             "INTEGER NOT NULL DEFAULT 0 CHECK (reclaiming IN (0, 1))",
         )?;
+        for (name, definition) in [
+            ("route_reservation_id", "TEXT"),
+            ("route_generation", "INTEGER"),
+            ("route_fencing_token", "TEXT"),
+        ] {
+            ensure_column(&connection, "cloud_accept_intents", name, definition)?;
+        }
         // A claim is process-transient but persisted to close the delete race.
         // On restart the claimant is gone, so make the file eligible for a
         // fresh existence check and claim/finalize attempt.
@@ -2371,10 +2406,17 @@ impl AgentStore {
         lease_id: &str,
         lease_token: &str,
         lease_expires_unix_ms: i64,
+        route: &CloudRouteProof,
     ) -> Result<LocalJob, StorageError> {
-        if !job.cloud_managed || lease_token.is_empty() {
+        if !job.cloud_managed
+            || lease_token.is_empty()
+            || route.reservation_id.is_empty()
+            || route.generation == 0
+            || route.fencing_token.is_empty()
+        {
             return Err(StorageError::InvalidLocalEvent(
-                "cloud acceptance requires a managed job and lease token".into(),
+                "cloud acceptance requires a managed job, lease, and route reservation proof"
+                    .into(),
             ));
         }
         let transaction = self
@@ -2400,6 +2442,7 @@ impl AgentStore {
                 lease_id,
                 lease_token,
                 lease_expires_unix_ms,
+                route,
                 job.accepted_unix_ms,
             )?;
             transaction.commit()?;
@@ -2480,6 +2523,7 @@ impl AgentStore {
             lease_id,
             lease_token,
             lease_expires_unix_ms,
+            route,
             job.accepted_unix_ms,
         )?;
         transaction.commit()?;
@@ -2661,11 +2705,57 @@ impl AgentStore {
     pub fn pending_cloud_accepts(&self) -> Result<Vec<CloudAcceptIntent>, StorageError> {
         let mut statement = self.connection.prepare(
             "SELECT job_id, lease_id, lease_token, lease_expires_unix_ms,
-                    content_sha256, local_sequence
+                    content_sha256, local_sequence, route_reservation_id,
+                    route_generation, route_fencing_token
              FROM cloud_accept_intents ORDER BY prepared_unix_ms, job_id",
         )?;
         let rows = statement.query_map([], row_to_cloud_accept_intent)?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Returns the bounded set of content paths durably referenced by this queue.
+    ///
+    /// Callers use this after a crash to remove only files which never crossed
+    /// the `SQLite` responsibility boundary.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the bounded path inventory cannot be read.
+    pub fn tracked_content_paths(&self) -> Result<BTreeSet<String>, StorageError> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT path FROM content_files ORDER BY path LIMIT 4097")?;
+        let paths = statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        if paths.len() > 4096 {
+            return Err(StorageError::InvalidLocalEvent(
+                "content path inventory exceeds reconciliation bounds".into(),
+            ));
+        }
+        Ok(paths)
+    }
+
+    /// Reports whether this isolated queue still owns work which may become
+    /// runnable after a retry deadline or inventory restoration.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the queue state cannot be read.
+    pub fn has_queued_work(&self) -> Result<bool, StorageError> {
+        self.connection
+            .query_row(
+                "SELECT EXISTS(
+                   SELECT 1 FROM jobs
+                   WHERE state IN (
+                     'queued_local','failed_retryable','preparing','rendering',
+                     'spool_intent','accepted_by_spooler','spooling','printing'
+                   ) LIMIT 1
+                 )",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
     }
 
     /// Atomically makes a remotely confirmed cloud job runnable, emits its
@@ -3895,19 +3985,24 @@ fn upsert_cloud_accept_intent(
     lease_id: &str,
     lease_token: &str,
     lease_expires_unix_ms: i64,
+    route: &CloudRouteProof,
     prepared_unix_ms: i64,
 ) -> Result<(), StorageError> {
     connection.execute(
         "INSERT INTO cloud_accept_intents (
             job_id, lease_id, lease_token, lease_expires_unix_ms,
-            content_sha256, local_sequence, prepared_unix_ms
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            content_sha256, local_sequence, route_reservation_id,
+            route_generation, route_fencing_token, prepared_unix_ms
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
          ON CONFLICT(job_id) DO UPDATE SET
             lease_id = excluded.lease_id,
             lease_token = excluded.lease_token,
             lease_expires_unix_ms = excluded.lease_expires_unix_ms,
             content_sha256 = excluded.content_sha256,
             local_sequence = excluded.local_sequence,
+            route_reservation_id = excluded.route_reservation_id,
+            route_generation = excluded.route_generation,
+            route_fencing_token = excluded.route_fencing_token,
             prepared_unix_ms = excluded.prepared_unix_ms",
         params![
             job.job_id,
@@ -3916,6 +4011,11 @@ fn upsert_cloud_accept_intent(
             lease_expires_unix_ms,
             job.content_sha256,
             job.printer_sequence,
+            route.reservation_id,
+            i64::try_from(route.generation).map_err(|_| StorageError::InvalidLocalEvent(
+                "route generation exceeds durable storage bounds".into()
+            ))?,
+            route.fencing_token,
             prepared_unix_ms,
         ],
     )?;
@@ -3926,6 +4026,7 @@ fn row_to_cloud_accept_intent(
     row: &rusqlite::Row<'_>,
 ) -> Result<CloudAcceptIntent, rusqlite::Error> {
     let local_sequence: i64 = row.get(5)?;
+    let route_generation: Option<i64> = row.get(7)?;
     Ok(CloudAcceptIntent {
         job_id: row.get(0)?,
         lease_id: row.get(1)?,
@@ -3939,6 +4040,19 @@ fn row_to_cloud_accept_intent(
                 Box::new(error),
             )
         })?,
+        route_reservation_id: row.get(6)?,
+        route_generation: route_generation
+            .map(|value| {
+                u64::try_from(value).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        7,
+                        rusqlite::types::Type::Integer,
+                        Box::new(error),
+                    )
+                })
+            })
+            .transpose()?,
+        route_fencing_token: row.get(8)?,
     })
 }
 
@@ -3971,6 +4085,14 @@ fn row_to_job(row: &rusqlite::Row<'_>) -> Result<LocalJob, rusqlite::Error> {
 mod tests {
     use super::*;
 
+    fn cloud_route_proof() -> CloudRouteProof {
+        CloudRouteProof {
+            reservation_id: "00000000-0000-4000-8000-000000000001".into(),
+            generation: 1,
+            fencing_token: "deterministic-route-fence".into(),
+        }
+    }
+
     #[test]
     fn configure_adds_confidential_retention_column_independently() {
         let connection = Connection::open_in_memory().unwrap();
@@ -3988,6 +4110,60 @@ mod tests {
             |row| row.get(0),
         ).unwrap();
         assert!(present);
+    }
+
+    #[test]
+    fn legacy_cloud_accept_rows_upgrade_without_fabricating_route_proof() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch(SCHEMA).unwrap();
+        for column in [
+            "route_reservation_id",
+            "route_generation",
+            "route_fencing_token",
+        ] {
+            connection
+                .execute(
+                    &format!("ALTER TABLE cloud_accept_intents DROP COLUMN {column}"),
+                    [],
+                )
+                .unwrap();
+        }
+        connection
+            .execute_batch("PRAGMA foreign_keys = OFF;")
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO cloud_accept_intents (
+                    job_id, lease_id, lease_token, lease_expires_unix_ms,
+                    content_sha256, local_sequence, prepared_unix_ms
+                 ) VALUES ('job-legacy', 'lease-legacy', 'redacted', 10,
+                           'sha-legacy', 1, 1)",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute_batch("PRAGMA foreign_keys = ON;")
+            .unwrap();
+
+        let store = AgentStore::configure(connection).unwrap();
+        let intents = store.pending_cloud_accepts().unwrap();
+        assert_eq!(intents.len(), 1);
+        assert!(intents[0].route_proof().is_none());
+        for column in [
+            "route_reservation_id",
+            "route_generation",
+            "route_fencing_token",
+        ] {
+            let present: bool = store
+                .connection
+                .query_row(
+                    "SELECT EXISTS (SELECT 1 FROM pragma_table_info('cloud_accept_intents') WHERE name = ?1)",
+                    [column],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(present);
+        }
     }
 
     fn job(id: &str, printer: &str, accepted: i64) -> AcceptedJob {
@@ -4075,7 +4251,13 @@ mod tests {
         {
             let mut store = AgentStore::open(&database).unwrap();
             let prepared = store
-                .prepare_cloud_job(&cloud, lease_id, "secret-token", 30_000)
+                .prepare_cloud_job(
+                    &cloud,
+                    lease_id,
+                    "secret-token",
+                    30_000,
+                    &cloud_route_proof(),
+                )
                 .unwrap();
             assert_eq!(prepared.state, "cloud_accept_pending");
             assert!(store.runnable_heads(20).unwrap().is_empty());
@@ -4113,11 +4295,17 @@ mod tests {
         let mut cloud = job("cloud", "p1", 10);
         cloud.cloud_managed = true;
         store
-            .prepare_cloud_job(&cloud, "old-lease", "old-token", 30_000)
+            .prepare_cloud_job(
+                &cloud,
+                "old-lease",
+                "old-token",
+                30_000,
+                &cloud_route_proof(),
+            )
             .unwrap();
         let new_lease = "new-lease";
         let duplicate = store
-            .prepare_cloud_job(&cloud, new_lease, "new-token", 60_000)
+            .prepare_cloud_job(&cloud, new_lease, "new-token", 60_000, &cloud_route_proof())
             .unwrap();
         assert_eq!(duplicate.printer_sequence, 1);
         let intents = store.pending_cloud_accepts().unwrap();
@@ -4134,7 +4322,13 @@ mod tests {
         let mut cancelled = job("cancelled", "p1", 10);
         cancelled.cloud_managed = true;
         store
-            .prepare_cloud_job(&cancelled, "cancel-lease", "cancel-token", 30_000)
+            .prepare_cloud_job(
+                &cancelled,
+                "cancel-lease",
+                "cancel-token",
+                30_000,
+                &cloud_route_proof(),
+            )
             .unwrap();
         assert!(store.request_cancel("cancelled", 20).unwrap());
         assert_eq!(
@@ -4146,7 +4340,13 @@ mod tests {
         expired.cloud_managed = true;
         expired.expires_unix_ms = Some(25);
         store
-            .prepare_cloud_job(&expired, "expire-lease", "expire-token", 30_000)
+            .prepare_cloud_job(
+                &expired,
+                "expire-lease",
+                "expire-token",
+                30_000,
+                &cloud_route_proof(),
+            )
             .unwrap();
         assert_eq!(store.expire_waiting(26).unwrap(), 1);
         assert_eq!(store.get_job("expired").unwrap().unwrap().state, "expired");
@@ -4330,7 +4530,7 @@ mod tests {
             encrypted.content_sha256 = format!("sha-{index}");
             encrypted.content_path = format!("/content/confidential-{index}");
             store
-                .prepare_cloud_job(&encrypted, "lease", "secret", 60_000)
+                .prepare_cloud_job(&encrypted, "lease", "secret", 60_000, &cloud_route_proof())
                 .unwrap();
             store
                 .connection
@@ -4374,7 +4574,7 @@ mod tests {
             encrypted.content_sha256 = format!("sha-{job_id}");
             encrypted.content_path = format!("/content/confidential-{job_id}");
             store
-                .prepare_cloud_job(&encrypted, "lease", "secret", 60_000)
+                .prepare_cloud_job(&encrypted, "lease", "secret", 60_000, &cloud_route_proof())
                 .unwrap();
             store.connection.execute(
                 "UPDATE jobs SET state = ?2, confidential_delete_after_unix_ms = 1 WHERE job_id = ?1",

@@ -31,8 +31,8 @@ use piqae_agent_core::{
     document_resources::{DocumentResourceCache, NodeResourceDescriptor, RESOURCE_ABI},
 };
 use piqae_agent_storage::{
-    AcceptedJob, AgentStore, CloudAcceptIntent, NativeProfileCapture, PendingEvent, QueueCounts,
-    StorageError, StoredLoadedMedia, StoredNamedProfile, StoredPrinter,
+    AcceptedJob, AgentStore, CloudAcceptIntent, CloudRouteProof, NativeProfileCapture,
+    PendingEvent, QueueCounts, StorageError, StoredLoadedMedia, StoredNamedProfile, StoredPrinter,
 };
 use piqae_domain::{
     AgentId, ContentKind, EventId, JobEvent, JobFailureReason, JobId, JobState, NativeProfileKind,
@@ -55,17 +55,18 @@ use piqae_node_runtime::{
     BrokerServerState, CloudCommandApplier, CloudConnectorWorker, CloudWorkerError,
     ContentMaterializer, DurableOfferAcceptor, EventAcknowledger, HostCapabilities, HostKind,
     InventorySnapshotProvider, LifecycleEvent, NodeRuntime, NodeRuntimeMode,
-    PendingCloudAcceptance, PrinterTransport, RuntimeConfiguration, WakeReconciler,
+    PendingCloudAcceptance, PendingCloudRelease, PrinterTransport, RuntimeConfiguration,
+    WakeReconciler,
     command::{ConnectorInvitationRequest, ConnectorInvitationResult},
     connector_registry as connector_runtime, route_coordinator,
 };
 use piqae_protocol::{
     CURRENT_PROTOCOL_VERSION,
     agent::{
-        AgentAcceptJobRequest, AgentCommand, AgentHealth, AgentSyncRequest, ContentDescriptor,
-        CreateDeviceAuthorizationRequest, EnrolRequest, InstallationMode,
-        InventoryProjectionAcknowledgement, JobOffer, PrinterGrant, PrinterProfileSnapshot,
-        PrinterSnapshot, QueueSnapshot,
+        AgentAcceptJobRequest, AgentCommand, AgentHealth, AgentReleaseLeaseRequest,
+        AgentSyncRequest, ContentDescriptor, CreateDeviceAuthorizationRequest, EnrolRequest,
+        InstallationMode, InventoryProjectionAcknowledgement, JobOffer, PrinterGrant,
+        PrinterProfileSnapshot, PrinterSnapshot, QueueSnapshot,
     },
     executor::{DiscoveredPrinter, ExecutorOperation, ExecutorResult, NativeJobObservation},
 };
@@ -4437,12 +4438,44 @@ impl DurableOfferAcceptor<InstalledMaterializedOffer> for InstalledOfferAcceptor
             .map_err(|_| CloudWorkerError::new("pending_accept_read_failed"))?;
         let mut pending = Vec::with_capacity(intents.len());
         for intent in intents {
-            pending.push(
-                pending_cloud_acceptance(&self.route_coordinator, &self.connector_id, intent)
-                    .await?,
-            );
+            if intent.route_proof().is_some() {
+                pending.push(pending_cloud_acceptance(intent)?);
+            }
         }
         Ok(pending)
+    }
+
+    async fn invalid_pending(&mut self) -> Result<Vec<PendingCloudRelease>, CloudWorkerError> {
+        let intents = self
+            .stores
+            .lock()
+            .await
+            .queue
+            .pending_cloud_accepts()
+            .map_err(|_| CloudWorkerError::new("pending_accept_read_failed"))?;
+        let mut releases = Vec::new();
+        for intent in intents
+            .into_iter()
+            .filter(|intent| intent.route_proof().is_none())
+        {
+            let job_id = intent
+                .job_id
+                .parse()
+                .map_err(|_| CloudWorkerError::new("pending_accept_invalid"))?;
+            let lease_id = intent
+                .lease_id
+                .parse()
+                .map_err(|_| CloudWorkerError::new("pending_accept_invalid"))?;
+            releases.push(PendingCloudRelease {
+                job_id,
+                request: AgentReleaseLeaseRequest {
+                    lease_id,
+                    lease_token: intent.lease_token,
+                    reason: "route_reservation_required".into(),
+                },
+            });
+        }
+        Ok(releases)
     }
 
     async fn prepare(
@@ -4450,8 +4483,28 @@ impl DurableOfferAcceptor<InstalledMaterializedOffer> for InstalledOfferAcceptor
         offer: &JobOffer,
         materialized: InstalledMaterializedOffer,
     ) -> Result<PendingCloudAcceptance, CloudWorkerError> {
-        let mut stores = self.stores.lock().await;
         let job_id = offer.job.id;
+        let reservation = offer
+            .route_reservation
+            .as_ref()
+            .ok_or_else(|| CloudWorkerError::new("route_reservation_required"))?;
+        self.route_coordinator
+            .lock()
+            .await
+            .register_authoritative(
+                &self.connector_id,
+                &materialized.printer.native_id,
+                &job_id.to_string(),
+                reservation,
+                Utc::now(),
+            )
+            .map_err(|_| CloudWorkerError::new("route_reservation_failed"))?;
+        let route_proof = CloudRouteProof {
+            reservation_id: reservation.reservation_id.to_string(),
+            generation: reservation.generation,
+            fencing_token: reservation.fencing_token.clone(),
+        };
+        let mut stores = self.stores.lock().await;
         let local = stores
             .queue
             .prepare_cloud_job(
@@ -4477,21 +4530,9 @@ impl DurableOfferAcceptor<InstalledMaterializedOffer> for InstalledOfferAcceptor
                 &offer.lease_id.to_string(),
                 &offer.lease_token,
                 offer.lease_expires_at.timestamp_millis(),
+                &route_proof,
             )
             .map_err(|_| CloudWorkerError::new("durable_accept_prepare_failed"))?;
-        if let Some(reservation) = &offer.route_reservation {
-            self.route_coordinator
-                .lock()
-                .await
-                .register_authoritative(
-                    &self.connector_id,
-                    &materialized.printer.native_id,
-                    &job_id.to_string(),
-                    reservation,
-                    Utc::now(),
-                )
-                .map_err(|_| CloudWorkerError::new("route_reservation_failed"))?;
-        }
         if let Some(pin) = materialized
             .profile_pin
             .filter(|_| !materialized.uses_current_printer_defaults)
@@ -4516,16 +4557,15 @@ impl DurableOfferAcceptor<InstalledMaterializedOffer> for InstalledOfferAcceptor
             lease_expires_unix_ms: offer.lease_expires_at.timestamp_millis(),
             content_sha256: materialized.stored.sha256,
             local_sequence: u64::try_from(local.printer_sequence).unwrap_or(u64::MAX),
+            route_reservation_id: Some(route_proof.reservation_id),
+            route_generation: Some(route_proof.generation),
+            route_fencing_token: Some(route_proof.fencing_token),
         };
         drop(stores);
-        pending_cloud_acceptance(&self.route_coordinator, &self.connector_id, intent).await
+        pending_cloud_acceptance(intent)
     }
 
     async fn activate(&mut self, job_id: JobId) -> Result<(), CloudWorkerError> {
-        if !self.admission_valid().await? {
-            self.abandon(job_id).await?;
-            return Err(CloudWorkerError::new("connector_admission_revoked"));
-        }
         self.stores
             .lock()
             .await
@@ -4576,9 +4616,7 @@ impl WakeReconciler for InstalledWakeAdapter {
     }
 }
 
-async fn pending_cloud_acceptance(
-    route_coordinator: &Arc<Mutex<route_coordinator::RouteCoordinator>>,
-    connector_id: &str,
+fn pending_cloud_acceptance(
     intent: CloudAcceptIntent,
 ) -> Result<PendingCloudAcceptance, CloudWorkerError> {
     let job_id = intent
@@ -4589,10 +4627,9 @@ async fn pending_cloud_acceptance(
         .lease_id
         .parse()
         .map_err(|_| CloudWorkerError::new("pending_accept_invalid"))?;
-    let route_proof = route_coordinator
-        .lock()
-        .await
-        .cloud_proof_for_job(connector_id, &intent.job_id);
+    let route_proof = intent
+        .route_proof()
+        .ok_or_else(|| CloudWorkerError::new("route_reservation_missing"))?;
     Ok(PendingCloudAcceptance {
         job_id,
         request: AgentAcceptJobRequest {
@@ -4600,9 +4637,14 @@ async fn pending_cloud_acceptance(
             lease_token: intent.lease_token,
             content_sha256: intent.content_sha256,
             local_sequence: intent.local_sequence,
-            route_reservation_id: route_proof.as_ref().map(|proof| proof.reservation_id),
-            route_generation: route_proof.as_ref().map(|proof| proof.generation),
-            route_fencing_token: route_proof.map(|proof| proof.fencing_token),
+            route_reservation_id: Some(
+                route_proof
+                    .reservation_id
+                    .parse()
+                    .map_err(|_| CloudWorkerError::new("route_reservation_invalid"))?,
+            ),
+            route_generation: Some(route_proof.generation),
+            route_fencing_token: Some(route_proof.fencing_token),
         },
     })
 }

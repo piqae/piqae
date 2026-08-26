@@ -9,7 +9,8 @@ use crate::{
     AgentClientAuthority, CloudCommandApplier, CloudConnectorWorker, CloudWorkerError,
     ConnectorKeyError, ContentMaterializer, DurableOfferAcceptor, EmbeddedQueue, EventAcknowledger,
     GeneratedConnectorKey, HostBackedDeviceIdentity, InventorySnapshotProvider, NodeRuntime,
-    PendingCloudAcceptance, SecureConnectorSigner, SecureKeyHandle, WakeReconciler,
+    PendingCloudAcceptance, PendingCloudRelease, SecureConnectorSigner, SecureKeyHandle,
+    WakeReconciler,
 };
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -37,6 +38,8 @@ const MAX_EMBEDDED_CLOUD_CONTENT: usize = 16 * 1024 * 1024;
 /// carries no connector, job, document, lease or credential data.
 pub trait WorkAvailableNotifier: std::fmt::Debug + Send + Sync {
     fn notify(&self);
+    fn epoch(&self) -> u64;
+    fn clear_if_epoch(&self, observed_epoch: u64);
     fn clear(&self);
 }
 
@@ -503,15 +506,53 @@ impl DurableOfferAcceptor<Vec<u8>> for EmbeddedAcceptor {
     }
 
     async fn pending(&mut self) -> Result<Vec<PendingCloudAcceptance>, CloudWorkerError> {
-        self.0
+        let intents = self
+            .0
             .queue
             .lock()
             .map_err(|_| CloudWorkerError::new("embedded_queue_unavailable"))?
             .pending_connector_accepts(&self.0.connector_id)
-            .map_err(|_| CloudWorkerError::new("embedded_pending_accept_failed"))?
+            .map_err(|_| CloudWorkerError::new("embedded_pending_accept_failed"))?;
+        let mut pending = Vec::with_capacity(intents.len());
+        for intent in intents {
+            if intent.route_proof().is_some() {
+                pending.push(pending_acceptance(intent)?);
+            }
+        }
+        Ok(pending)
+    }
+
+    async fn invalid_pending(&mut self) -> Result<Vec<PendingCloudRelease>, CloudWorkerError> {
+        let intents = self
+            .0
+            .queue
+            .lock()
+            .map_err(|_| CloudWorkerError::new("embedded_queue_unavailable"))?
+            .pending_connector_accepts(&self.0.connector_id)
+            .map_err(|_| CloudWorkerError::new("embedded_pending_accept_failed"))?;
+        let mut releases = Vec::new();
+        for intent in intents
             .into_iter()
-            .map(pending_acceptance)
-            .collect()
+            .filter(|intent| intent.route_proof().is_none())
+        {
+            let job_id = intent
+                .job_id
+                .parse()
+                .map_err(|_| CloudWorkerError::new("embedded_pending_accept_invalid"))?;
+            let lease_id = intent
+                .lease_id
+                .parse()
+                .map_err(|_| CloudWorkerError::new("embedded_pending_accept_invalid"))?;
+            releases.push(PendingCloudRelease {
+                job_id,
+                request: piqae_protocol::agent::AgentReleaseLeaseRequest {
+                    lease_id,
+                    lease_token: intent.lease_token,
+                    reason: "route_reservation_required".into(),
+                },
+            });
+        }
+        Ok(releases)
     }
 
     async fn prepare(
@@ -535,16 +576,15 @@ impl DurableOfferAcceptor<Vec<u8>> for EmbeddedAcceptor {
     }
 
     async fn activate(&mut self, job_id: JobId) -> Result<(), CloudWorkerError> {
-        if !self.admission_valid().await? {
-            self.abandon(job_id).await?;
-            return Err(CloudWorkerError::new("connector_admission_revoked"));
-        }
-        self.0
+        let mut queue = self
+            .0
             .queue
             .lock()
-            .map_err(|_| CloudWorkerError::new("embedded_queue_unavailable"))?
+            .map_err(|_| CloudWorkerError::new("embedded_queue_unavailable"))?;
+        queue
             .activate_connector_offer(&self.0.connector_id, job_id)
             .map_err(|_| CloudWorkerError::new("embedded_accept_activate_failed"))?;
+        drop(queue);
         if let Some(notifier) = &self.0.work_notifier {
             notifier.notify();
         }
@@ -576,6 +616,9 @@ impl DurableOfferAcceptor<Vec<u8>> for EmbeddedAcceptor {
 fn pending_acceptance(
     intent: piqae_agent_storage::CloudAcceptIntent,
 ) -> Result<PendingCloudAcceptance, CloudWorkerError> {
+    let route_proof = intent
+        .route_proof()
+        .ok_or_else(|| CloudWorkerError::new("embedded_route_reservation_missing"))?;
     Ok(PendingCloudAcceptance {
         job_id: intent
             .job_id
@@ -589,9 +632,14 @@ fn pending_acceptance(
             lease_token: intent.lease_token,
             content_sha256: intent.content_sha256,
             local_sequence: intent.local_sequence,
-            route_reservation_id: None,
-            route_generation: None,
-            route_fencing_token: None,
+            route_reservation_id: Some(
+                route_proof
+                    .reservation_id
+                    .parse()
+                    .map_err(|_| CloudWorkerError::new("embedded_route_reservation_invalid"))?,
+            ),
+            route_generation: Some(route_proof.generation),
+            route_fencing_token: Some(route_proof.fencing_token),
         },
     })
 }

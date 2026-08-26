@@ -295,6 +295,9 @@ CREATE TABLE IF NOT EXISTS cloud_accept_intents (
   lease_expires_unix_ms INTEGER NOT NULL,
   content_sha256 TEXT NOT NULL,
   local_sequence INTEGER NOT NULL CHECK (local_sequence > 0),
+  route_reservation_id TEXT,
+  route_generation INTEGER,
+  route_fencing_token TEXT,
   prepared_unix_ms INTEGER NOT NULL
 );
 
