@@ -222,7 +222,7 @@ fn test_changed(root: &Path) -> TaskResult {
         {
             javascript = true;
         }
-        if file.starts_with("shells/macos") {
+        if file.starts_with("shells/macos") || file.starts_with("sdk/apple") {
             macos = true;
         }
     }
@@ -363,6 +363,35 @@ fn test_macos(root: &Path) -> TaskResult {
         root,
         "swift",
         ["test", "--package-path", "shells/macos"],
+    ))?;
+    run(command(
+        root,
+        "swift",
+        [
+            "test",
+            "--package-path",
+            "sdk/apple",
+            "-Xswiftc",
+            "-strict-concurrency=complete",
+            "-Xswiftc",
+            "-warnings-as-errors",
+        ],
+    ))?;
+    run(command(
+        root,
+        "xcodebuild",
+        [
+            "-scheme",
+            "PiqaeNodeKit-Package",
+            "-destination",
+            "generic/platform=iOS Simulator",
+            "-derivedDataPath",
+            ".piqae-test-fixtures/apple-sdk-derived-data",
+            "CODE_SIGNING_ALLOWED=NO",
+            "SWIFT_TREAT_WARNINGS_AS_ERRORS=YES",
+            "SWIFT_STRICT_CONCURRENCY=complete",
+            "build",
+        ],
     ))
 }
 
@@ -792,7 +821,32 @@ const CHECKS: &[Check] = &[
         scopes: &["macos_shell"],
         job: "CI / macOS menu shell",
         needs: &[Need::Os("macos"), Need::Tool("swift")],
-        steps: &[&["swift", "test", "--package-path", "shells/macos"]],
+        steps: &[
+            &["swift", "test", "--package-path", "shells/macos"],
+            &[
+                "swift",
+                "test",
+                "--package-path",
+                "sdk/apple",
+                "-Xswiftc",
+                "-strict-concurrency=complete",
+                "-Xswiftc",
+                "-warnings-as-errors",
+            ],
+            &[
+                "xcodebuild",
+                "-scheme",
+                "PiqaeNodeKit-Package",
+                "-destination",
+                "generic/platform=iOS Simulator",
+                "-derivedDataPath",
+                ".piqae-test-fixtures/apple-sdk-derived-data",
+                "CODE_SIGNING_ALLOWED=NO",
+                "SWIFT_TREAT_WARNINGS_AS_ERRORS=YES",
+                "SWIFT_STRICT_CONCURRENCY=complete",
+                "build",
+            ],
+        ],
     },
     Check {
         scopes: &["windows_rust"],

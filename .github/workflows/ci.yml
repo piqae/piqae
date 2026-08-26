@@ -214,9 +214,28 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
-          path: shells/macos/.build
-          key: swiftpm-macos-${{ hashFiles('shells/macos/Package.resolved', 'shells/macos/Package.swift') }}
-      - run: swift test --package-path shells/macos
+          path: |
+            shells/macos/.build
+            sdk/apple/.build
+            .piqae-test-fixtures/apple-sdk-derived-data
+          key: swiftpm-macos-${{ hashFiles('shells/macos/Package.resolved', 'shells/macos/Package.swift', 'sdk/apple/Package.resolved', 'sdk/apple/Package.swift') }}
+      - name: Test macOS menu shell
+        run: swift test --package-path shells/macos
+      - name: Test Apple node SDK with strict concurrency
+        run: >-
+          swift test --package-path sdk/apple
+          -Xswiftc -strict-concurrency=complete
+          -Xswiftc -warnings-as-errors
+      - name: Build Apple node SDK for iOS Simulator
+        run: >-
+          xcodebuild
+          -scheme PiqaeNodeKit-Package
+          -destination 'generic/platform=iOS Simulator'
+          -derivedDataPath .piqae-test-fixtures/apple-sdk-derived-data
+          CODE_SIGNING_ALLOWED=NO
+          SWIFT_TREAT_WARNINGS_AS_ERRORS=YES
+          SWIFT_STRICT_CONCURRENCY=complete
+          build
 
   rust-windows:
     name: Rust (windows-latest)
