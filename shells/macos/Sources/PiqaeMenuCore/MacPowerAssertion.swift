@@ -87,8 +87,21 @@ public struct PiqaeDispatchPowerAssertionScheduler: PiqaePowerAssertionScheduler
         _ operation: @escaping @Sendable () -> Void
     ) -> @Sendable () -> Void {
         let item = DispatchWorkItem(block: operation)
+        let scheduled = PiqaeScheduledPowerAssertionExpiry(item: item)
         DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + seconds, execute: item)
-        return { item.cancel() }
+        return { scheduled.cancel() }
+    }
+}
+
+private final class PiqaeScheduledPowerAssertionExpiry: @unchecked Sendable {
+    private let item: DispatchWorkItem
+
+    init(item: DispatchWorkItem) {
+        self.item = item
+    }
+
+    func cancel() {
+        item.cancel()
     }
 }
 

@@ -131,6 +131,17 @@ pending durable work. Each adapter pass is bounded and yields between batches.
 In the background, NodeKit begins no new native handoff unless the host supplies
 an explicit remaining-time budget that passes the admission margin.
 
+Native status observation is a separate bounded loop. An accepted handoff no
+longer occupies the runnable-work edge, so another printer on the same adapter
+can accept its next fenced operation while the earlier native job is still
+printing. Accepted operations remain durably keyed by operation ID, fence, and
+native job ID and are polled with capped backoff until a terminal observation.
+Terminal completion re-arms the runnable drain because it may unlock that
+printer's next FIFO head. Foreground, wake, and network-restored lifecycle
+events resume both loops; background observation runs only inside an explicit
+remaining-time budget. Stop cancels and joins both loops before destroying the
+runtime. This is status reconciliation, not proof that paper was produced.
+
 Named profile create, update, delete, and list operations are stored by the same
 runtime. An adapter may capture native settings, but the durable profile record
 is authoritative. Attached clients currently list the installed node's profiles;
@@ -212,9 +223,13 @@ sdk/apple/scripts/build-xcframework.sh
 The script builds universal macOS, iOS arm64, and arm64/x86_64 iOS Simulator
 static-library slices, assembles `sdk/apple/.artifacts/PiqaeNode.xcframework`,
 archives it, and writes a local JSON manifest with SHA-256 and SwiftPM checksum.
-Pass `--replace` only to replace those generated outputs. When the XCFramework
-is present, this package consumes it as a binary target; otherwise it remains a
-source facade and `PiqaeNativeRuntime.start()` fails closed.
+Pass `--replace` only to replace those generated outputs. Repository builds use
+the source facade unless `PIQAE_REQUIRE_LINKED_RUNTIME_TESTS=1` explicitly opts
+into the local XCFramework; opting in without a built artifact fails during
+package evaluation. This prevents an ignored stale artifact from silently
+changing normal SDK or macOS-shell tests. The linked validation script exports
+the opt-in for every SDK and clean-consumer build. Tagged source packages use
+their staged, checksum-pinned native target instead of this development gate.
 
 Validate clean consumers with:
 

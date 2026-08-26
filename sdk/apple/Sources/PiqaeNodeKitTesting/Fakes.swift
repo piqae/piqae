@@ -19,9 +19,12 @@ public actor PiqaeFakeEmbeddedRuntime: PiqaeEmbeddedNodeRuntime {
     private let failsToConnect: Bool
     private let connector: PiqaeRuntimeConnectorSnapshot?
     private var nextOperationDelayNanoseconds: UInt64
+    private var nativeObservationDelayNanoseconds: UInt64 = 0
     private var workAvailableHandler: (@Sendable () -> Void)?
     private var operationsByAdapter: [String: [PiqaeRuntimeAdapterOperation]] = [:]
+    private var observationsByAdapter: [String: [PiqaeRuntimeAdapterOperation]] = [:]
     private var nextOperationCallCountValue = 0
+    private var nativeObservationCallCountValue = 0
     private var activeNextOperationCalls = 0
     private var maximumConcurrentNextOperationCallsValue = 0
     public private(set) var startCount = 0
@@ -99,6 +102,16 @@ public actor PiqaeFakeEmbeddedRuntime: PiqaeEmbeddedNodeRuntime {
         copy(operation, phase: .handoffStarted, nativeJobID: nil)
     }
 
+    public func nativeObservations(adapterID: String) async throws
+        -> [PiqaeRuntimeAdapterOperation]
+    {
+        nativeObservationCallCountValue += 1
+        if nativeObservationDelayNanoseconds > 0 {
+            try await Task.sleep(nanoseconds: nativeObservationDelayNanoseconds)
+        }
+        return observationsByAdapter[adapterID] ?? []
+    }
+
     public func complete(
         _ operation: PiqaeRuntimeAdapterOperation,
         outcome: PiqaeRuntimeAdapterOutcome
@@ -106,10 +119,41 @@ public actor PiqaeFakeEmbeddedRuntime: PiqaeEmbeddedNodeRuntime {
         operationsByAdapter[operation.adapterID]?.removeAll {
             $0.operationID == operation.operationID
         }
+        let state: String
+        switch outcome {
+        case let .accepted(nativeJobID):
+            observationsByAdapter[operation.adapterID, default: []].removeAll {
+                $0.operationID == operation.operationID
+            }
+            observationsByAdapter[operation.adapterID, default: []].append(
+                copy(operation, phase: .accepted, nativeJobID: nativeJobID)
+            )
+            state = "accepted_by_spooler"
+        case .completedReported:
+            observationsByAdapter[operation.adapterID]?.removeAll {
+                $0.operationID == operation.operationID
+            }
+            state = "completed_reported"
+        case .failedTerminal:
+            observationsByAdapter[operation.adapterID]?.removeAll {
+                $0.operationID == operation.operationID
+            }
+            state = "failed_terminal"
+        case .ambiguous:
+            observationsByAdapter[operation.adapterID]?.removeAll {
+                $0.operationID == operation.operationID
+            }
+            state = "delivery_uncertain"
+        case .rejectedBeforeHandoff:
+            observationsByAdapter[operation.adapterID]?.removeAll {
+                $0.operationID == operation.operationID
+            }
+            state = "queued"
+        }
         return PiqaeRuntimeAdapterAcknowledgement(
             operationID: operation.operationID,
             jobID: operation.jobID,
-            state: "completed_reported"
+            state: state
         )
     }
 
@@ -124,6 +168,15 @@ public actor PiqaeFakeEmbeddedRuntime: PiqaeEmbeddedNodeRuntime {
         for _ in 0..<max(0, notificationCount) { workAvailableHandler() }
     }
 
+    public func activateNativeObservation(
+        _ operation: PiqaeRuntimeAdapterOperation,
+        nativeJobID: String
+    ) {
+        observationsByAdapter[operation.adapterID, default: []].append(
+            copy(operation, phase: .accepted, nativeJobID: nativeJobID)
+        )
+    }
+
     public func notifyWorkAvailable(count: Int = 1) {
         guard let workAvailableHandler else { return }
         for _ in 0..<max(0, count) { workAvailableHandler() }
@@ -133,7 +186,12 @@ public actor PiqaeFakeEmbeddedRuntime: PiqaeEmbeddedNodeRuntime {
         nextOperationDelayNanoseconds = value
     }
 
+    public func setNativeObservationDelayNanoseconds(_ value: UInt64) {
+        nativeObservationDelayNanoseconds = value
+    }
+
     public func nextOperationCallCount() -> Int { nextOperationCallCountValue }
+    public func nativeObservationCallCount() -> Int { nativeObservationCallCountValue }
 
     public func maximumConcurrentNextOperationCalls() -> Int {
         maximumConcurrentNextOperationCallsValue
@@ -191,6 +249,9 @@ public actor PiqaeFakePrinterAdapter: PiqaePrinterAdapter {
     private var profileInventory: [PiqaePrinterID: [PiqaePrintProfile]]
     private var submissionCountValue = 0
     private let submissionBehavior: SubmissionBehavior
+    private var observationsByNativeJobID: [String: [PiqaeNativeJobObservation]] = [:]
+    private var observationCountsByNativeJobID: [String: Int] = [:]
+    private var nativeObservationDelayNanoseconds: UInt64 = 0
     private let now: Date
 
     public init(
@@ -236,7 +297,16 @@ public actor PiqaeFakePrinterAdapter: PiqaePrinterAdapter {
         nativeJobID: String,
         printer: PiqaePrinter
     ) async throws -> PiqaeNativeJobObservation {
-        submissionBehavior == .acceptedAndCompleted ? .completedReported : .unknown
+        observationCountsByNativeJobID[nativeJobID, default: 0] += 1
+        if nativeObservationDelayNanoseconds > 0 {
+            try await Task.sleep(nanoseconds: nativeObservationDelayNanoseconds)
+        }
+        if var observations = observationsByNativeJobID[nativeJobID], !observations.isEmpty {
+            let observation = observations.removeFirst()
+            observationsByNativeJobID[nativeJobID] = observations
+            return observation
+        }
+        return submissionBehavior == .acceptedAndCompleted ? .completedReported : .unknown
     }
 
     public func profiles(for printer: PiqaePrinter) async throws -> [PiqaePrintProfile] {
@@ -262,6 +332,21 @@ public actor PiqaeFakePrinterAdapter: PiqaePrinterAdapter {
     }
 
     public func submissionCount() -> Int { submissionCountValue }
+
+    public func setNativeObservations(
+        _ observations: [PiqaeNativeJobObservation],
+        for nativeJobID: String
+    ) {
+        observationsByNativeJobID[nativeJobID] = observations
+    }
+
+    public func setNativeObservationDelayNanoseconds(_ value: UInt64) {
+        nativeObservationDelayNanoseconds = value
+    }
+
+    public func nativeObservationCount(for nativeJobID: String) -> Int {
+        observationCountsByNativeJobID[nativeJobID, default: 0]
+    }
 
     public static func printer(
         id: String = "prn_fake",

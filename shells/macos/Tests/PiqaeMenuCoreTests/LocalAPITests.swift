@@ -658,7 +658,12 @@ final class LocalAPITests: XCTestCase {
 }
 
 private final class StubURLProtocol: URLProtocol {
-    static var handler: ((URLRequest) throws -> (HTTPURLResponse, Data))?
+    typealias Handler = (URLRequest) throws -> (HTTPURLResponse, Data)
+    private static let storage = StubURLProtocolHandlerStorage()
+    static var handler: Handler? {
+        get { storage.load() }
+        set { storage.store(newValue) }
+    }
 
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
@@ -675,4 +680,17 @@ private final class StubURLProtocol: URLProtocol {
     }
 
     override func stopLoading() {}
+}
+
+private final class StubURLProtocolHandlerStorage: @unchecked Sendable {
+    private let lock = NSLock()
+    private var handler: StubURLProtocol.Handler?
+
+    func load() -> StubURLProtocol.Handler? {
+        lock.withLock { handler }
+    }
+
+    func store(_ handler: StubURLProtocol.Handler?) {
+        lock.withLock { self.handler = handler }
+    }
 }

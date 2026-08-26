@@ -1063,11 +1063,13 @@ final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         alert.addButton(withTitle: "Cancel")
         NSApplication.shared.activate(ignoringOtherApps: true)
         guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let profileID = context.profileID
+        let printerID = printer.printerID
 
         performAction(successMessage: "Test page accepted for \(printer.name).") { client in
             _ = try await client.submitDriverTest(
-                printerID: printer.printerID,
-                profileID: context.profileID
+                printerID: printerID,
+                profileID: profileID
             )
         }
     }
@@ -1157,15 +1159,16 @@ final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             refresh()
             return
         }
+        let authorizationID = context.request.authorizationID
+        let approved = context.approved
+        let grantedCapabilities = approved ? context.request.requestedCapabilities : []
 
-        performAction(successMessage: context.approved ? "Application access approved." : "Application access denied.") {
+        performAction(successMessage: approved ? "Application access approved." : "Application access denied.") {
             client in
             try await client.decideBrokerAuthorization(
-                authorizationID: context.request.authorizationID,
-                approved: context.approved,
-                grantedCapabilities: context.approved
-                    ? context.request.requestedCapabilities
-                    : []
+                authorizationID: authorizationID,
+                approved: approved,
+                grantedCapabilities: grantedCapabilities
             )
         }
     }

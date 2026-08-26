@@ -358,6 +358,9 @@ pub enum NativeCommand {
     NextAdapterOperation {
         adapter_id: String,
     },
+    AdapterObservations {
+        adapter_id: String,
+    },
     BeginAdapterHandoff {
         adapter_id: String,
         operation_id: String,
@@ -1050,7 +1053,7 @@ pub extern "C" fn piqae_node_command(handle: u64, data: *const u8, length: usize
                         .map_err(|_| FfiError::AdapterOperation)?;
                     if operation.is_none()
                         && !queue
-                            .has_adapter_work()
+                            .has_runnable_adapter_work()
                             .map_err(|_| FfiError::AdapterOperation)?
                         && let Some(notifier) = &work_notifier
                         && let Some(observed_epoch) = observed_epoch
@@ -1064,6 +1067,12 @@ pub extern "C" fn piqae_node_command(handle: u64, data: *const u8, length: usize
                     operation
                 };
                 return Ok(json!({ "handle": handle, "operation": operation }));
+            }
+            NativeCommand::AdapterObservations { adapter_id } => {
+                let operations = lock_embedded(&embedded_queue)?
+                    .adapter_observations(&adapter_id)
+                    .map_err(|_| FfiError::AdapterOperation)?;
+                return Ok(json!({ "handle": handle, "operations": operations }));
             }
             NativeCommand::BeginAdapterHandoff {
                 adapter_id,
@@ -1081,9 +1090,17 @@ pub extern "C" fn piqae_node_command(handle: u64, data: *const u8, length: usize
                 fence,
                 result,
             } => {
-                let acknowledgement = lock_embedded(&embedded_queue)?
-                    .complete_operation(&adapter_id, &operation_id, &fence, &result)
-                    .map_err(|_| FfiError::AdapterOperation)?;
+                let acknowledgement = {
+                    lock_embedded(&embedded_queue)?
+                        .complete_operation(&adapter_id, &operation_id, &fence, &result)
+                        .map_err(|_| FfiError::AdapterOperation)?
+                };
+                // Completing an operation can unlock the next FIFO head. The
+                // data-free edge is safe even when no new work is runnable;
+                // the host's next empty pull clears it with the epoch proof.
+                if let Some(notifier) = &work_notifier {
+                    piqae_node_runtime::WorkAvailableNotifier::notify(notifier.as_ref());
+                }
                 return Ok(json!({ "handle": handle, "acknowledgement": acknowledgement }));
             }
             NativeCommand::JobSnapshot { job_id } => {
@@ -1706,13 +1723,22 @@ mod tests {
             json!({
                 "type": "observe_printer_inventory",
                 "adapter_id": "com.example.pos.airprint",
-                "printers": [{
-                    "native_id": "ipps://printer/ipp/print",
-                    "name": "Kitchen",
-                    "state": "available",
-                    "is_default": true,
-                    "native_options": {}
-                }]
+                "printers": [
+                    {
+                        "native_id": "ipps://printer/ipp/print",
+                        "name": "Kitchen",
+                        "state": "available",
+                        "is_default": true,
+                        "native_options": {}
+                    },
+                    {
+                        "native_id": "ipps://second/ipp/print",
+                        "name": "Second kitchen",
+                        "state": "available",
+                        "is_default": false,
+                        "native_options": {}
+                    }
+                ]
             }),
         );
         let printer_id = inventory["data"]["printers"][0]["printer_id"]
@@ -1763,24 +1789,73 @@ mod tests {
             )["data"]["operation"]["phase"],
             "handoff_started"
         );
-        for result in [
-            json!({"outcome":"accepted","native_job_id":"native-42"}),
-            json!({"outcome":"completed_reported","native_job_id":"native-42"}),
-        ] {
-            assert_eq!(
-                command(
-                    handle,
-                    json!({
-                        "type":"complete_adapter_operation",
-                        "adapter_id":"com.example.pos.airprint",
-                        "operation_id":operation_id,
-                        "fence":fence,
-                        "result":result
-                    }),
-                )["ok"],
-                true
-            );
-        }
+        assert_eq!(
+            command(
+                handle,
+                json!({
+                    "type":"complete_adapter_operation",
+                    "adapter_id":"com.example.pos.airprint",
+                    "operation_id":operation_id,
+                    "fence":fence,
+                    "result":{"outcome":"accepted","native_job_id":"native-42"}
+                }),
+            )["ok"],
+            true
+        );
+        let observations = command(
+            handle,
+            json!({"type":"adapter_observations","adapter_id":"com.example.pos.airprint"}),
+        );
+        assert_eq!(
+            observations["data"]["operations"][0]["operation_id"],
+            operation_id
+        );
+        assert_eq!(
+            observations["data"]["operations"][0]["native_job_id"],
+            "native-42"
+        );
+
+        let second_printer_id = inventory["data"]["printers"][1]["printer_id"]
+            .as_str()
+            .unwrap();
+        let second = command(
+            handle,
+            json!({
+                "type": "enqueue_local_job",
+                "adapter_id": "com.example.pos.airprint",
+                "idempotency_key": "order-43",
+                "printer_id": second_printer_id,
+                "title": "Order 43",
+                "content_kind": "pdf",
+                "content_base64": base64::engine::general_purpose::STANDARD.encode(b"%PDF second fake"),
+                "options_json": "{}",
+                "expires_unix_ms": null
+            }),
+        );
+        let second_job_id = second["data"]["job"]["job_id"].as_str().unwrap();
+        let second_next = command(
+            handle,
+            json!({"type":"next_adapter_operation","adapter_id":"com.example.pos.airprint"}),
+        );
+        assert_eq!(second_next["data"]["operation"]["job_id"], second_job_id);
+        assert_ne!(
+            second_next["data"]["operation"]["operation_id"],
+            operation_id
+        );
+
+        assert_eq!(
+            command(
+                handle,
+                json!({
+                    "type":"complete_adapter_operation",
+                    "adapter_id":"com.example.pos.airprint",
+                    "operation_id":operation_id,
+                    "fence":fence,
+                    "result":{"outcome":"completed_reported","native_job_id":"native-42"}
+                }),
+            )["ok"],
+            true
+        );
         let _ = read_and_free(piqae_node_stop(handle));
         let _ = read_and_free(piqae_node_start(handle));
         assert_eq!(

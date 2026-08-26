@@ -7,26 +7,40 @@ xcframework="$artifact_directory/PiqaeNode.xcframework"
 archive="$artifact_directory/PiqaeNode.xcframework.zip"
 mode=${1:-build-clean}
 cleanup_artifact=false
-temporary_directory=""
+temporary_directory=$(mktemp -d "${TMPDIR:-/tmp}/piqae-apple-sdk-linked.XXXXXX")
+artifact_backup="$temporary_directory/original-artifacts"
 verify_reproducible=false
 
 cleanup() {
-  if [[ -n "$temporary_directory" ]]; then
-    rm -rf -- "$temporary_directory"
-  fi
   if [[ "$cleanup_artifact" == true ]]; then
-    rm -rf -- "$artifact_directory"
+    rm -rf -- "$xcframework"
+    rm -f -- "$archive" "$artifact_directory/PiqaeNode.artifact.json"
+    if [[ -d "$artifact_backup" ]]; then
+      mkdir -p "$artifact_directory"
+      for original in "$artifact_backup"/*; do
+        [[ -e "$original" ]] || continue
+        mv -- "$original" "$artifact_directory/"
+      done
+    fi
+    rmdir "$artifact_directory" 2>/dev/null || true
   fi
+  rm -rf -- "$temporary_directory"
 }
 trap cleanup EXIT
 
 case "$mode" in
   build-clean)
-    if [[ -e "$artifact_directory" ]]; then
-      echo "Apple SDK artifact directory already exists; refusing to remove an unowned path." >&2
-      exit 2
-    fi
     cleanup_artifact=true
+    mkdir -p "$artifact_backup"
+    for generated in \
+      "$xcframework" \
+      "$archive" \
+      "$artifact_directory/PiqaeNode.artifact.json"
+    do
+      if [[ -e "$generated" ]]; then
+        mv -- "$generated" "$artifact_backup/"
+      fi
+    done
     "$repository_root/sdk/apple/scripts/build-xcframework.sh"
     verify_reproducible=true
     ;;
@@ -59,9 +73,9 @@ if [[ "$verify_reproducible" == true ]]; then
   fi
 fi
 
-temporary_directory=$(mktemp -d "${TMPDIR:-/tmp}/piqae-apple-sdk-linked.XXXXXX")
+export PIQAE_REQUIRE_LINKED_RUNTIME_TESTS=1
 
-PIQAE_REQUIRE_LINKED_RUNTIME_TESTS=1 swift test \
+swift test \
   --package-path "$repository_root/sdk/apple" \
   --scratch-path "$temporary_directory/nodekit" \
   -Xswiftc -strict-concurrency=complete \

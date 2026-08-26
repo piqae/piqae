@@ -3,11 +3,18 @@ import PackageDescription
 import Foundation
 
 let nativeArtifactPath = ".artifacts/PiqaeNode.xcframework"
-let hasNativeArtifact = FileManager.default.fileExists(
+let nativeArtifactExists = FileManager.default.fileExists(
     atPath: URL(fileURLWithPath: #filePath)
         .deletingLastPathComponent()
         .appendingPathComponent(nativeArtifactPath).path
 )
+let requiresNativeArtifact = ProcessInfo.processInfo.environment[
+    "PIQAE_REQUIRE_LINKED_RUNTIME_TESTS"
+] == "1"
+if requiresNativeArtifact && !nativeArtifactExists {
+    fatalError("PIQAE_REQUIRE_LINKED_RUNTIME_TESTS requires a built PiqaeNode XCFramework.")
+}
+let hasNativeArtifact = requiresNativeArtifact && nativeArtifactExists
 
 var abiDependencies: [Target.Dependency] = []
 var abiSettings: [CSetting] = []
