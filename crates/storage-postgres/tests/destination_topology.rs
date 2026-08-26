@@ -640,7 +640,7 @@ async fn postgres_topology_is_tenant_isolated_and_fences_delivery() {
         .enqueue_delivery_uncertainty_resolution(
             first,
             FIRST_JOB_ID,
-            "confirmed_delivered",
+            "reprint_authorized",
             Some("operator verified the physical output"),
             "operator_redacted",
             "resolve_job_first",
@@ -676,6 +676,30 @@ async fn postgres_topology_is_tenant_isolated_and_fences_delivery() {
         .expect("finalize acknowledged uncertainty resolution")
         .expect("acknowledged resolution");
     assert_eq!(resolution.attempt_id, "attempt_1");
+    let recoverable = store
+        .finalize_acknowledged_uncertainty_resolutions(first, "agt_first", 100)
+        .await
+        .expect("finalized reprint remains recoverable");
+    assert_eq!(recoverable.as_slice(), [resolution.clone()]);
+    sqlx::query("INSERT INTO jobs (id,workspace_id,environment_id,printer_id,agent_id,payload,state,per_printer_sequence,expires_at,destination_id,route_id) VALUES ('job_reprint_registered',$1,$2,'ptr_shared','agt_first',jsonb_build_object('metadata',jsonb_build_object('piqae.uncertainty_resolution_id',$3::text)),'registered',20,now()+interval '1 hour','destination_shared','route_first')")
+        .bind(first.workspace_id.to_string()).bind(first.environment_id.to_string()).bind(&resolution.id).execute(store.pool()).await.expect("crash-left registered replacement");
+    assert_eq!(
+        store
+            .finalize_acknowledged_uncertainty_resolutions(first, "agt_first", 100)
+            .await
+            .expect("registered replacement remains recoverable")
+            .as_slice(),
+        [resolution.clone()]
+    );
+    sqlx::query("UPDATE jobs SET state='completed_reported' WHERE workspace_id=$1 AND environment_id=$2 AND id='job_reprint_registered'")
+        .bind(first.workspace_id.to_string()).bind(first.environment_id.to_string()).execute(store.pool()).await.expect("repair registered replacement");
+    assert!(
+        store
+            .finalize_acknowledged_uncertainty_resolutions(first, "agt_first", 100)
+            .await
+            .expect("durable replacement closes recovery intent")
+            .is_empty()
+    );
     assert!(
         !store
             .has_unresolved_destination_uncertainty(first, "destination_shared")

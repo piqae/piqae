@@ -2633,7 +2633,7 @@ pub async fn agent_sync(
     }
     schedule_waiting_destination_jobs(&state, tenant).await?;
     for event in &request.events {
-        match state
+        let should_reconcile = match state
             .repository
             .apply_agent_event(
                 tenant.workspace_id,
@@ -2655,17 +2655,31 @@ pub async fn agent_sync(
                         .publish(tenant, "job.delivery_uncertain", &job)
                         .await?;
                 }
+                true
             }
-            Ok(None) | Err(RepositoryError::ConcurrentStateChange) => {}
+            Ok(None) => {
+                // A replay can repair a crash between the ordinary job event
+                // and the attempt projection, but only when this exact state
+                // is already durable. A stale event must never advance the
+                // physical delivery attempt.
+                state
+                    .repository
+                    .get_job(tenant.workspace_id, tenant.environment_id, event.job_id)
+                    .await
+                    .is_ok_and(|job| job.state == event.state)
+            }
+            Err(RepositoryError::ConcurrentStateChange) => false,
             Err(error) => return Err(error.into()),
+        };
+        if should_reconcile {
+            crate::destination_topology::reconcile_post_spooler_event(
+                &state,
+                tenant,
+                request.agent_id,
+                event,
+            )
+            .await?;
         }
-        crate::destination_topology::reconcile_post_spooler_event(
-            &state,
-            tenant,
-            request.agent_id,
-            event,
-        )
-        .await?;
     }
     let command_batch = state
         .repository

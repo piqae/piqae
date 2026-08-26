@@ -1609,6 +1609,50 @@ impl DestinationTopologyRepository for PostgresStore {
                 resolutions.push(resolution);
             }
         }
+        // Acknowledgement finalization and replacement-job creation cross the
+        // topology/job repository boundary. Keep finalized reprint intents
+        // visible until an idempotently linked replacement is durable so a
+        // process crash cannot lose an authorized reprint.
+        let remaining = i64::from(limit.clamp(1, 100))
+            .saturating_sub(i64::try_from(resolutions.len()).unwrap_or(i64::MAX));
+        if remaining > 0 {
+            let rows = sqlx::query(
+                "SELECT resolution.id,resolution.job_id,resolution.attempt_id,
+                        resolution.destination_id,resolution.resolution,resolution.note,
+                        resolution.actor_id,resolution.request_id,resolution.created_at
+                 FROM delivery_uncertainty_resolutions resolution
+                 JOIN delivery_uncertainty_resolution_commands pending
+                   ON pending.workspace_id=resolution.workspace_id
+                  AND pending.environment_id=resolution.environment_id
+                  AND pending.request_id=resolution.request_id
+                 WHERE resolution.workspace_id=$1 AND resolution.environment_id=$2
+                   AND pending.agent_id=$3 AND resolution.resolution='reprint_authorized'
+                   AND NOT EXISTS (
+                     SELECT 1 FROM jobs replacement
+                     WHERE replacement.workspace_id=resolution.workspace_id
+                       AND replacement.environment_id=resolution.environment_id
+                       AND replacement.payload #>> '{metadata,piqae.uncertainty_resolution_id}' = resolution.id
+                       AND replacement.state <> 'registered'
+                   )
+                 ORDER BY resolution.created_at,resolution.request_id LIMIT $4",
+            )
+            .bind(scope.workspace_id.to_string())
+            .bind(scope.environment_id.to_string())
+            .bind(agent_id)
+            .bind(remaining)
+            .fetch_all(self.pool())
+            .await?;
+            let already_returned: std::collections::HashSet<_> = resolutions
+                .iter()
+                .map(|resolution| resolution.request_id.clone())
+                .collect();
+            for row in rows {
+                let resolution = map_uncertainty_resolution(&row)?;
+                if !already_returned.contains(&resolution.request_id) {
+                    resolutions.push(resolution);
+                }
+            }
+        }
         Ok(resolutions)
     }
 
@@ -3036,6 +3080,34 @@ impl DestinationTopologyRepository for MemoryDestinationTopologyRepository {
                 .await?
             {
                 resolutions.push(resolution);
+            }
+        }
+        if resolutions.len() < usize::try_from(limit.clamp(1, 100)).unwrap_or(100) {
+            let state = read_state(self)?;
+            let mut recoverable: Vec<_> = state
+                .uncertainty_resolutions
+                .iter()
+                .filter_map(|((tenant, _), resolution)| {
+                    let pending = state
+                        .pending_uncertainty_resolutions
+                        .get(&(*tenant, resolution.request_id.clone()))?;
+                    (*tenant == scope
+                        && pending.agent_id == agent_id
+                        && resolution.resolution == "reprint_authorized")
+                        .then_some(resolution.clone())
+                })
+                .collect();
+            recoverable.sort_by_key(|resolution| (resolution.created_at, resolution.id.clone()));
+            for resolution in recoverable {
+                if resolutions.len() >= usize::try_from(limit.clamp(1, 100)).unwrap_or(100) {
+                    break;
+                }
+                if !resolutions
+                    .iter()
+                    .any(|item| item.request_id == resolution.request_id)
+                {
+                    resolutions.push(resolution);
+                }
             }
         }
         Ok(resolutions)

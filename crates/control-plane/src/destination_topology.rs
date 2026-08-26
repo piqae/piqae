@@ -32,7 +32,7 @@ use piqae_storage_postgres::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 const fn stored_observation_state(value: piqae_domain::PrinterState) -> &'static str {
     match value {
@@ -1366,6 +1366,36 @@ pub(crate) async fn reconcile_post_spooler_event(
             "The authenticated node does not own this delivery route.",
         ));
     }
+    let already_projected = match next {
+        DeliveryAttemptState::PrintingReported => matches!(
+            current.state,
+            DeliveryAttemptState::PrintingReported | DeliveryAttemptState::CompletedReported
+        ),
+        DeliveryAttemptState::CompletedReported => {
+            current.state == DeliveryAttemptState::CompletedReported
+        }
+        DeliveryAttemptState::Failed => current.state == DeliveryAttemptState::Failed,
+        DeliveryAttemptState::DeliveryUncertain => {
+            current.state == DeliveryAttemptState::DeliveryUncertain
+        }
+        _ => false,
+    };
+    if already_projected {
+        return Ok(Some(current));
+    }
+    if matches!(
+        current.state,
+        DeliveryAttemptState::CompletedReported
+            | DeliveryAttemptState::Failed
+            | DeliveryAttemptState::DeliveryUncertain
+            | DeliveryAttemptState::Cancelled
+            | DeliveryAttemptState::Superseded
+    ) {
+        // A stale or conflicting final report cannot rewrite a terminal
+        // attempt. The ordinary job projection is the gate that decides which
+        // report is durable; this path remains a safe no-op on replay.
+        return Ok(Some(current));
+    }
     let attempt = if next == DeliveryAttemptState::DeliveryUncertain {
         state
             .destination_topology
@@ -1941,6 +1971,29 @@ async fn validate_reprintable_job(
     }
 }
 
+fn replacement_metadata(
+    mut metadata: BTreeMap<String, String>,
+    resolution: &piqae_storage_postgres::destination_topology::DeliveryUncertaintyResolution,
+) -> BTreeMap<String, String> {
+    metadata.retain(|key, _| {
+        !key.starts_with("piqae.delivery_")
+            && !key.starts_with("piqae.uncertainty_")
+            && !key.starts_with("piqae.attempt_")
+            && !key.starts_with("piqae.reprint_")
+            && !key.starts_with("spool.delivery_")
+    });
+    metadata.insert("piqae.reprint_of".into(), resolution.job_id.clone());
+    metadata.insert(
+        "piqae.uncertainty_resolution_id".into(),
+        resolution.id.clone(),
+    );
+    metadata.insert(
+        "piqae.reprint_authorization_request_id".into(),
+        resolution.request_id.clone(),
+    );
+    metadata
+}
+
 async fn create_authorized_reprint(
     state: &AppState,
     tenant: crate::authentication::TenantContext,
@@ -1973,12 +2026,7 @@ async fn create_authorized_reprint(
         .parse()
         .map_err(|_| AppError::service_unavailable("invalid_uncertain_route_agent"))?;
     let now = Utc::now();
-    let mut metadata = original.metadata.clone();
-    metadata.insert("piqae.reprint_of".into(), resolution.job_id.clone());
-    metadata.insert(
-        "piqae.uncertainty_resolution_id".into(),
-        resolution.id.clone(),
-    );
+    let metadata = replacement_metadata(original.metadata.clone(), resolution);
     let replacement = piqae_domain::Job {
         id: piqae_domain::JobId::new(),
         workspace_id: tenant.workspace_id,
@@ -2017,22 +2065,25 @@ async fn create_authorized_reprint(
         )
         .await?;
     let replacement = match stored {
-        crate::repository::CreateResult::Created(created) => {
-            state
-                .repository
-                .transition_job(
-                    tenant.workspace_id,
-                    tenant.environment_id,
-                    created.id,
-                    piqae_domain::JobState::WaitingForAgent,
-                    None,
-                    Some("Explicit reprint authorized after uncertain delivery".into()),
-                    None,
-                    None,
-                )
-                .await?
-        }
-        crate::repository::CreateResult::Existing(existing) => existing,
+        crate::repository::CreateResult::Created(created)
+        | crate::repository::CreateResult::Existing(created) => created,
+    };
+    let replacement = if replacement.state == piqae_domain::JobState::Registered {
+        state
+            .repository
+            .transition_job(
+                tenant.workspace_id,
+                tenant.environment_id,
+                replacement.id,
+                piqae_domain::JobState::WaitingForAgent,
+                None,
+                Some("Explicit reprint authorized after uncertain delivery".into()),
+                None,
+                None,
+            )
+            .await?
+    } else {
+        replacement
     };
     state.publish(tenant, "job.updated", &replacement).await?;
     Ok(Some(replacement))
@@ -2271,6 +2322,52 @@ mod tests {
             metadata: serde_json::json!({}),
         };
         assert_eq!(evidence_confidence(&evidence), "conflict");
+    }
+
+    #[test]
+    fn authorized_reprint_metadata_drops_prior_delivery_outcomes() {
+        let resolution =
+            piqae_storage_postgres::destination_topology::DeliveryUncertaintyResolution {
+                id: "dur_new".into(),
+                job_id: "01J00000000000000000000000".into(),
+                attempt_id: "attempt_old".into(),
+                destination_id: "destination_old".into(),
+                resolution: "reprint_authorized".into(),
+                note: None,
+                actor_id: "operator".into(),
+                request_id: "request_new".into(),
+                created_at: Utc::now(),
+            };
+        let metadata = replacement_metadata(
+            BTreeMap::from([
+                (
+                    "piqae.delivery_resolution".into(),
+                    "reprint_authorized".into(),
+                ),
+                ("piqae.delivery_resolution_request_id".into(), "old".into()),
+                ("piqae.delivery_result".into(), "uncertain".into()),
+                ("piqae.attempt_id".into(), "attempt_old".into()),
+                ("piqae.route_id".into(), "route_kept".into()),
+            ]),
+            &resolution,
+        );
+        assert!(!metadata.contains_key("piqae.delivery_resolution"));
+        assert!(!metadata.contains_key("piqae.delivery_result"));
+        assert!(!metadata.contains_key("piqae.attempt_id"));
+        assert_eq!(
+            metadata.get("piqae.route_id").map(String::as_str),
+            Some("route_kept")
+        );
+        assert_eq!(
+            metadata.get("piqae.reprint_of").map(String::as_str),
+            Some(resolution.job_id.as_str())
+        );
+        assert_eq!(
+            metadata
+                .get("piqae.reprint_authorization_request_id")
+                .map(String::as_str),
+            Some("request_new")
+        );
     }
 
     #[tokio::test]
@@ -2723,6 +2820,196 @@ mod tests {
                     .await
                     .expect("resolved replay response");
                 assert_eq!(resolved.status(), StatusCode::OK);
+
+                let crash_resolution =
+                    piqae_storage_postgres::destination_topology::DeliveryUncertaintyResolution {
+                        id: "dur_crash_reprint".into(),
+                        job_id: job_id.to_string(),
+                        attempt_id: "attempt_control_uncertain".into(),
+                        destination_id: destinations[0].id.clone(),
+                        resolution: "reprint_authorized".into(),
+                        note: Some("simulate crash after registered replacement".into()),
+                        actor_id: "operator".into(),
+                        request_id: "resolve-control-reprint-crash".into(),
+                        created_at: Utc::now(),
+                    };
+                let mut crash_replacement = uncertain_job.clone();
+                crash_replacement.id = JobId::new();
+                crash_replacement.state = JobState::Registered;
+                crash_replacement.metadata =
+                    replacement_metadata(uncertain_job.metadata.clone(), &crash_resolution);
+                let reprint_digest = Sha256::digest(crash_resolution.request_id.as_bytes());
+                let reprint_key =
+                    format!("uncertainty-reprint-{}", &hex::encode(reprint_digest)[..32]);
+                let reprint_request = serde_json::to_vec(&serde_json::json!({
+                    "original_job_id": crash_resolution.job_id,
+                    "resolution_request_id": crash_resolution.request_id,
+                }))
+                .expect("reprint request JSON");
+                store
+                    .create_cloud_job(
+                        &crash_replacement,
+                        agent_id,
+                        Some(&reprint_key),
+                        &reprint_request,
+                        false,
+                    )
+                    .await
+                    .expect("crash-left registered reprint");
+                let recovered_reprint =
+                    create_authorized_reprint(&state, tenant, &crash_resolution)
+                        .await
+                        .expect("recover registered reprint")
+                        .expect("authorized replacement");
+                assert_eq!(recovered_reprint.id, crash_replacement.id);
+                assert_eq!(recovered_reprint.state, JobState::WaitingForAgent);
+                assert!(
+                    !recovered_reprint
+                        .metadata
+                        .contains_key("piqae.delivery_resolution")
+                );
+                sqlx::query("UPDATE jobs SET state='completed_reported' WHERE workspace_id=$1 AND environment_id=$2 AND id=$3")
+                    .bind(workspace_id.to_string()).bind(environment_id.to_string()).bind(recovered_reprint.id.to_string()).execute(&pool).await.expect("retire recovered reprint fixture");
+
+                // A signed telemetry replay repairs a crash between the job
+                // and attempt projections, while a stale report after a final
+                // state cannot rewrite the completed attempt.
+                let lifecycle_job_id = JobId::new();
+                let lifecycle_job = Job {
+                    id: lifecycle_job_id,
+                    title: "Replay-safe post-spooler lifecycle".into(),
+                    metadata: BTreeMap::from([
+                        ("piqae.destination_id".into(), destinations[0].id.clone()),
+                        ("piqae.route_id".into(), routes[0].id.clone()),
+                    ]),
+                    ..uncertain_job.clone()
+                };
+                store
+                    .create_job(&lifecycle_job, agent_id, None, b"lifecycle-replay-test")
+                    .await
+                    .expect("lifecycle job fixture");
+                sqlx::query("UPDATE jobs SET state='accepted_by_spooler' WHERE workspace_id=$1 AND environment_id=$2 AND id=$3")
+                    .bind(workspace_id.to_string()).bind(environment_id.to_string()).bind(lifecycle_job_id.to_string()).execute(&pool).await.expect("seed accepted lifecycle job");
+                let lifecycle = store
+                    .begin_delivery_attempt(
+                        tenant_scope,
+                        NewDeliveryAttempt {
+                            attempt_id: "attempt_control_lifecycle",
+                            reservation_id: "00000000-0000-0000-0000-000000000002",
+                            job_id: &lifecycle_job_id.to_string(),
+                            destination_id: &destinations[0].id,
+                            route_id: &routes[0].id,
+                            lease_until: now + TimeDelta::minutes(2),
+                        },
+                    )
+                    .await
+                    .expect("begin lifecycle attempt");
+                for next in [
+                    DeliveryAttemptState::AcceptedByNode,
+                    DeliveryAttemptState::QueuedLocal,
+                    DeliveryAttemptState::HandingToSpooler,
+                    DeliveryAttemptState::AcceptedBySpooler,
+                ] {
+                    store
+                        .transition_delivery_attempt(
+                            tenant_scope,
+                            "attempt_control_lifecycle",
+                            lifecycle.attempt.generation,
+                            &lifecycle.fencing_token,
+                            next,
+                        )
+                        .await
+                        .expect("advance lifecycle attempt");
+                }
+                let mut last_sync = None;
+                for (sequence, state_name) in [
+                    JobState::Spooling,
+                    JobState::Printing,
+                    JobState::CompletedReported,
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    let event = piqae_domain::JobEvent {
+                        id: piqae_domain::EventId::new(),
+                        job_id: lifecycle_job_id,
+                        sequence: u64::try_from(sequence + 1).expect("event sequence"),
+                        state: state_name,
+                        reason: None,
+                        message: None,
+                        agent_id: Some(agent_id),
+                        native_job_id: None,
+                        occurred_at: Utc::now(),
+                    };
+                    let mut lifecycle_sync = request.clone();
+                    lifecycle_sync.events = vec![event];
+                    let body = serde_json::to_vec(&lifecycle_sync).expect("lifecycle sync JSON");
+                    let response = application
+                        .clone()
+                        .oneshot(signed_agent_request(agent_id, &signing_key, body.clone()))
+                        .await
+                        .expect("lifecycle sync response");
+                    let status = response.status();
+                    let response_body = response
+                        .into_body()
+                        .collect()
+                        .await
+                        .expect("lifecycle response body")
+                        .to_bytes();
+                    assert_eq!(
+                        status,
+                        StatusCode::OK,
+                        "lifecycle sync failed: {}",
+                        String::from_utf8_lossy(&response_body)
+                    );
+                    last_sync = Some(body);
+                }
+                let replay = application
+                    .clone()
+                    .oneshot(signed_agent_request(
+                        agent_id,
+                        &signing_key,
+                        last_sync.expect("completed sync body"),
+                    ))
+                    .await
+                    .expect("completed replay response");
+                assert_eq!(replay.status(), StatusCode::OK);
+                let attempt = store
+                    .get_latest_delivery_attempt(tenant_scope, &lifecycle_job_id.to_string())
+                    .await
+                    .expect("completed lifecycle attempt");
+                assert_eq!(attempt.state, DeliveryAttemptState::CompletedReported);
+
+                let mut stale_sync = request.clone();
+                stale_sync.events = vec![piqae_domain::JobEvent {
+                    id: piqae_domain::EventId::new(),
+                    job_id: lifecycle_job_id,
+                    sequence: 99,
+                    state: JobState::Printing,
+                    reason: None,
+                    message: None,
+                    agent_id: Some(agent_id),
+                    native_job_id: None,
+                    occurred_at: Utc::now(),
+                }];
+                let stale_response = application
+                    .clone()
+                    .oneshot(signed_agent_request(
+                        agent_id,
+                        &signing_key,
+                        serde_json::to_vec(&stale_sync).expect("stale sync JSON"),
+                    ))
+                    .await
+                    .expect("stale sync response");
+                assert_ne!(stale_response.status(), StatusCode::OK);
+                assert_eq!(
+                    store
+                        .get_latest_delivery_attempt(tenant_scope, &lifecycle_job_id.to_string(),)
+                        .await
+                        .expect("attempt after stale report")
+                        .state,
+                    DeliveryAttemptState::CompletedReported
+                );
             }
 
             let mut conflicting_retry = request.clone();
