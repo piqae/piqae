@@ -3643,6 +3643,112 @@ impl PostgresStore {
         agent_id: AgentId,
     ) -> Result<(), StorageError> {
         let mut transaction = self.pool.begin().await?;
+        let route_ids: Vec<String> = sqlx::query_scalar(
+            "SELECT id FROM printer_routes
+             WHERE agent_id = $1 AND workspace_id = $2 AND environment_id = $3
+               AND retired_at IS NULL
+             FOR UPDATE",
+        )
+        .bind(agent_id.to_string())
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .fetch_all(&mut *transaction)
+        .await?;
+        if !route_ids.is_empty() {
+            let route_leased_attempts: Vec<String> = sqlx::query_scalar(
+                "SELECT id FROM delivery_attempts
+                 WHERE workspace_id = $1 AND environment_id = $2
+                   AND route_id = ANY($3) AND state = 'route_leased'
+                   AND final_at IS NULL
+                 FOR UPDATE",
+            )
+            .bind(workspace_id.to_string())
+            .bind(environment_id.to_string())
+            .bind(&route_ids)
+            .fetch_all(&mut *transaction)
+            .await?;
+            if !route_leased_attempts.is_empty() {
+                // A route lease has not crossed node acceptance, so it is the
+                // only delivery attempt that can be safely released during
+                // node revocation. Every later attempt remains durable for
+                // explicit delivery-uncertain recovery.
+                sqlx::query(
+                    "UPDATE route_reservations
+                     SET state = 'superseded', released_at = now(), updated_at = now()
+                     WHERE workspace_id = $1 AND environment_id = $2
+                       AND attempt_id = ANY($3) AND state = 'active'",
+                )
+                .bind(workspace_id.to_string())
+                .bind(environment_id.to_string())
+                .bind(&route_leased_attempts)
+                .execute(&mut *transaction)
+                .await?;
+                sqlx::query(
+                    "UPDATE delivery_attempts
+                     SET state = 'superseded', final_at = now(), updated_at = now()
+                     WHERE workspace_id = $1 AND environment_id = $2
+                       AND id = ANY($3) AND state = 'route_leased'
+                       AND final_at IS NULL",
+                )
+                .bind(workspace_id.to_string())
+                .bind(environment_id.to_string())
+                .bind(&route_leased_attempts)
+                .execute(&mut *transaction)
+                .await?;
+            }
+            sqlx::query(
+                "UPDATE printer_routes
+                 SET state = 'retired', role = 'disabled', enabled = false,
+                     retired_at = now(), updated_at = now()
+                 WHERE workspace_id = $1 AND environment_id = $2
+                   AND id = ANY($3) AND retired_at IS NULL",
+            )
+            .bind(workspace_id.to_string())
+            .bind(environment_id.to_string())
+            .bind(&route_ids)
+            .execute(&mut *transaction)
+            .await?;
+            sqlx::query(
+                "UPDATE physical_destinations destination
+                 SET state = 'unavailable', updated_at = now()
+                 WHERE destination.workspace_id = $1
+                   AND destination.environment_id = $2
+                   AND destination.retired_at IS NULL
+                   AND NOT EXISTS (
+                       SELECT 1 FROM printer_routes route
+                       WHERE route.workspace_id = destination.workspace_id
+                         AND route.environment_id = destination.environment_id
+                         AND route.destination_id = destination.id
+                         AND route.enabled AND route.retired_at IS NULL
+                   )",
+            )
+            .bind(workspace_id.to_string())
+            .bind(environment_id.to_string())
+            .execute(&mut *transaction)
+            .await?;
+        }
+        sqlx::query(
+            "UPDATE site_coordinator_memberships
+             SET state = 'revoked', revoked_at = now()
+             WHERE agent_id = $1 AND workspace_id = $2 AND environment_id = $3
+               AND state <> 'revoked'",
+        )
+        .bind(agent_id.to_string())
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "UPDATE node_wake_hints
+             SET status = 'cancelled'
+             WHERE agent_id = $1 AND workspace_id = $2 AND environment_id = $3
+               AND status = 'pending'",
+        )
+        .bind(agent_id.to_string())
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .execute(&mut *transaction)
+        .await?;
         sqlx::query(
             "UPDATE node_connectors SET revoked_at = now(), updated_at = now()
              WHERE agent_id = $1 AND workspace_id = $2 AND environment_id = $3
