@@ -9,15 +9,15 @@ publish = false
 
 [dependencies]
 async-trait.workspace = true
-piqae-local-ipc = { path = "../local-ipc", version = "0.1.21" }
-piqae-node-runtime = { path = "../node-runtime", version = "0.1.21" }
+piqae-local-ipc = { path = "../local-ipc", version = "0.1.22" }
+piqae-node-runtime = { path = "../node-runtime", version = "0.1.22" }
 serde.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
-piqae-node-runtime = { path = "../node-runtime", version = "0.1.21", features = ["test-peer-identity"] }
+piqae-node-runtime = { path = "../node-runtime", version = "0.1.22", features = ["test-peer-identity"] }
 serde_json.workspace = true
 tempfile = "3.20.0"
 
