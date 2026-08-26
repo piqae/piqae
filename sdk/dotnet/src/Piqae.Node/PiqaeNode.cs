@@ -170,18 +170,18 @@ public sealed class PiqaeNode : IDisposable
     {
         ValidateReconcileTimeout(timeout);
         var request = RequestCloudReconcile();
-        if (!request.CloudConfigured || request.Generation is null)
-            return NoCloudOutcome();
+        if (!request.CloudConfigured) return NoCloudOutcome();
+        var generation = request.Generation!.Value;
         var elapsed = Stopwatch.StartNew();
         while (elapsed.Elapsed < timeout)
         {
-            var result = PollCloudReconcile(request.Generation.Value);
+            var result = PollCloudReconcile(generation);
             if (result is not null) return result;
             var remaining = timeout - elapsed.Elapsed;
             if (remaining <= TimeSpan.Zero) break;
             Thread.Sleep(MinPollDelay(remaining));
         }
-        return TimedOutOutcome(request.Generation.Value);
+        return TimedOutOutcome(generation);
     }
 
     /// <summary>Cancellable nonblocking reconcile for hosted applications and services.</summary>
@@ -192,19 +192,19 @@ public sealed class PiqaeNode : IDisposable
         ValidateReconcileTimeout(timeout);
         cancellationToken.ThrowIfCancellationRequested();
         var request = RequestCloudReconcile();
-        if (!request.CloudConfigured || request.Generation is null)
-            return NoCloudOutcome();
+        if (!request.CloudConfigured) return NoCloudOutcome();
+        var generation = request.Generation!.Value;
         var elapsed = Stopwatch.StartNew();
         while (elapsed.Elapsed < timeout)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var result = PollCloudReconcile(request.Generation.Value);
+            var result = PollCloudReconcile(generation);
             if (result is not null) return result;
             var remaining = timeout - elapsed.Elapsed;
             if (remaining <= TimeSpan.Zero) break;
             await Task.Delay(MinPollDelay(remaining), cancellationToken).ConfigureAwait(false);
         }
-        return TimedOutOutcome(request.Generation.Value);
+        return TimedOutOutcome(generation);
     }
 
     private static TimeSpan MinPollDelay(TimeSpan remaining)
@@ -218,21 +218,40 @@ public sealed class PiqaeNode : IDisposable
         var result = Command(new { type = "reconcile_cloud_request" });
         var configured = RequiredBoolean(result, "cloud_configured");
         ulong? generation = null;
-        if (result.TryGetProperty("generation", out var value)
-            && value.ValueKind == JsonValueKind.Number
-            && value.TryGetUInt64(out var parsed)) generation = parsed;
+        if (result.TryGetProperty("generation", out var value))
+        {
+            if (value.ValueKind == JsonValueKind.Number && value.TryGetUInt64(out var parsed))
+                generation = parsed;
+            else if (value.ValueKind != JsonValueKind.Null)
+                throw InvalidNativeResponse();
+        }
+        if ((configured && (generation is null || generation == 0))
+            || (!configured && generation is not null)) throw InvalidNativeResponse();
         return (configured, generation);
     }
 
     private CloudReconcileOutcome? PollCloudReconcile(ulong generation)
     {
         var result = Command(new { type = "reconcile_cloud_poll", generation });
-        if (!result.TryGetProperty("outcome", out var outcome)
-            || outcome.ValueKind == JsonValueKind.Null) return null;
+        if (!RequiredBoolean(result, "cloud_configured")
+            || RequiredUInt64(result, "generation") != generation)
+            throw InvalidNativeResponse();
+        var pending = RequiredBoolean(result, "pending");
+        if (!result.TryGetProperty("outcome", out var outcome)) throw InvalidNativeResponse();
+        if (outcome.ValueKind == JsonValueKind.Null)
+        {
+            if (!pending) throw InvalidNativeResponse();
+            return null;
+        }
+        if (pending) throw InvalidNativeResponse();
         if (outcome.ValueKind != JsonValueKind.Object) throw InvalidNativeResponse();
+        var outcomeGeneration = RequiredUInt64(outcome, "generation");
+        // Requests may be coalesced into a later pass, but an older outcome can
+        // never satisfy the generation we asked the supervisor to complete.
+        if (outcomeGeneration < generation) throw InvalidNativeResponse();
         return new CloudReconcileOutcome(
-            outcome.GetProperty("generation").GetUInt64(),
-            RequiredBoolean(result, "cloud_configured"),
+            outcomeGeneration,
+            true,
             RequiredBoolean(outcome, "loop_completed"),
             outcome.GetProperty("connector_count").GetInt32(),
             outcome.GetProperty("succeeded_count").GetInt32(),
@@ -616,6 +635,15 @@ public sealed class PiqaeNode : IDisposable
         if (!element.TryGetProperty(propertyName, out var value)
             || value.ValueKind != JsonValueKind.Number
             || !value.TryGetInt64(out var number))
+            throw InvalidNativeResponse();
+        return number;
+    }
+
+    private static ulong RequiredUInt64(JsonElement element, string propertyName)
+    {
+        if (!element.TryGetProperty(propertyName, out var value)
+            || value.ValueKind != JsonValueKind.Number
+            || !value.TryGetUInt64(out var number))
             throw InvalidNativeResponse();
         return number;
     }
