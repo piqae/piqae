@@ -108,6 +108,7 @@ final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var refreshTimer: Timer?
     private var updateCoordinator: PiqaeUpdateCoordinator?
     private var nativeComponentUpdateTask: Task<String?, Never>?
+    private var hostLifecycleMonitor: PiqaeMacHostLifecycleMonitor?
     private let connectReplayGuard = NodeConnectReplayGuard()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -138,6 +139,13 @@ final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         updateCoordinator?.onPresentationChange = { [weak self] in
             self?.rebuildMenu()
         }
+        if let client {
+            let monitor = PiqaeMacHostLifecycleMonitor(
+                reporter: PiqaeLocalAPIHostLifecycleReporter(client: client)
+            )
+            monitor.start()
+            hostLifecycleMonitor = monitor
+        }
 
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         item.button?.image = symbol(
@@ -165,6 +173,7 @@ final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         refreshTask?.cancel()
         actionTask?.cancel()
         refreshTimer?.invalidate()
+        hostLifecycleMonitor?.stop()
     }
 
     func application(_ application: NSApplication, open urls: [URL]) {

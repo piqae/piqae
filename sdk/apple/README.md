@@ -25,7 +25,10 @@ is not evidence that paper was produced.
 The recommended API mirrors the durable runtime boundary:
 
 ```swift
-let airPrint = PiqaeAirPrintAdapter(knownPrinterURLs: savedPrinterURLs)
+let airPrint = try PiqaeAirPrintAdapter(
+    identityProvider: nativeRuntime,
+    knownPrinterURLs: savedPrinterURLs
+)
 let node = PiqaeNode(
     .localOnly(
         startupMode: .automatic,
@@ -73,6 +76,21 @@ short-lived invitation and returns a connector summary. Platform service-account
 keys stay on the integrator's backend; they must not be compiled into the app.
 `PiqaeSensitiveString` is redacted from normal and debug descriptions.
 
+Remote notification registration is also opt-in and backend-injected:
+
+```swift
+try await node.remoteNotifications.register(
+    deviceToken: deviceToken,
+    environment: .production,
+    bundleIdentifier: "com.example.printing"
+)
+```
+
+`PiqaeRemoteNotificationRegistrationProvider` receives a redacted device token
+and installation ID. The host application's backend registers that route; APNs
+signing keys and platform credentials never belong in NodeKit or the app binary.
+No registration occurs implicitly.
+
 Printer adapters publish an exact ID/version descriptor and, for mobile support
 pack matching, a display-safe `PiqaeAdapterFingerprint`: platform, exact adapter
 version, and optional device family/firmware. Never put serial numbers,
@@ -92,9 +110,10 @@ UIKit doesn't provide silent enumeration of all nearby printers. Present
 `PiqaeAirPrintPicker.selectPrinter()`, retain the returned `ipp`/`ipps` URL in the
 host app, and pass registered URLs back to `PiqaeAirPrintAdapter` on launch.
 Discovery contacts only those user-selected printers.
-The adapter keeps the routable printer URL inside the process and publishes a
-stable SHA-256-derived printer identifier, rather than projecting a reversible
-local network URL into inventory.
+The adapter canonicalizes a user-selected route by removing credentials, query,
+and fragment before retaining it. Published inventory identity is gated on the
+shared runtime's installation-keyed, domain-separated HMAC; neither the
+canonical endpoint nor the raw installation key may be persisted or projected.
 
 The AirPrint adapter currently accepts PDF or image data, one copy, and optional
 orientation. Media pinning, density, raw printer languages, route-bound profiles,
@@ -110,6 +129,14 @@ The admission policy refuses a new native handoff when the payload isn't durable
 the app is suspended, the route is foreground-only, or the remaining budget is
 too short. Bounded background time is used only to finish work that already
 started.
+
+The coordinator can register an APNs device token through the injected provider
+and can forward an opaque collapse ID from the app delegate. It begins a bounded
+background task for reconciliation, reports expiration as `suspend_imminent`,
+and cancels the worker. A repeated hint is safe because it only reconciles; a
+lost hint performs no work and never fabricates eligibility. The API cannot run
+after user force-quit and reports only opportunistic availability while the app
+is installed.
 
 Apple controls background scheduling and doesn't guarantee silent push delivery.
 A force-quit, powered-off, or suspended iPad is an unavailable route. Do not
@@ -141,6 +168,9 @@ to keep the process alive.
 - [`UIPrintInteractionController`](https://developer.apple.com/documentation/uikit/uiprintinteractioncontroller) and [`UIPrinter.contactPrinter`](https://developer.apple.com/documentation/uikit/uiprinter/contactprinter(_:)): direct printing and known-printer capability contact.
 - [Keychain Services](https://developer.apple.com/documentation/security/using-the-keychain-to-manage-user-secrets): installation identity is stored as a device-only Keychain item.
 - [`SMAppService`](https://developer.apple.com/documentation/servicemanagement/smappservice): persistent macOS helpers remain explicit, bundled, and user/admin approved.
+- [`NSWorkspace` notifications](https://developer.apple.com/documentation/appkit/nsworkspace): macOS sleep/wake facts come from the workspace notification center.
+- [`NWPathMonitor`](https://developer.apple.com/documentation/network/nwpathmonitor): network availability and Low Data Mode constraints are observations, not wake guarantees.
+- [`IOPMAssertionCreateWithName`](https://developer.apple.com/documentation/iokit/1557134-iopmassertioncreatewithname): the menu/replay host uses a bounded no-idle-sleep assertion only during an active native handoff and always releases it.
 - [App Review Guidelines 2.5.2 and 2.5.4](https://developer.apple.com/app-store/review/guidelines/): apps can't download executable feature code and background modes must serve their intended purpose.
 
 ## Validation
