@@ -98,6 +98,102 @@ public sealed class NodeTests
     }
 
     [Fact]
+    public void SecretBearingSdkValuesAreRedactedFromDiagnosticStrings()
+    {
+        const string secret = "fixture-secret-must-not-escape";
+        var credential = new BrokerCredential("com.piqae.tests", secret);
+        var invitation = new PiqaeConnectorInvitation(
+            new Uri("https://api.piqae.test"),
+            secret,
+            "wcred-ed25519-v1.connector.0123456789abcdef",
+            PiqaePrinterGrant.AllLocalPrinters,
+            Array.Empty<string>(),
+            "Test node",
+            "test-host");
+
+        Assert.DoesNotContain(secret, credential.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain(secret, invitation.ToString(), StringComparison.Ordinal);
+        Assert.Contains("[REDACTED]", credential.ToString(), StringComparison.Ordinal);
+        Assert.Contains("[REDACTED]", invitation.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            typeof(PiqaeNode).GetMethods(),
+            method => method.Name.Contains("CompleteConnector", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void UnsafeInvitationOriginIsRejectedBeforeNativeExchange()
+    {
+        if (!OperatingSystem.IsWindows() || Environment.GetEnvironmentVariable("PIQAE_NODE_NATIVE_TEST") != "1") return;
+        using var node = new PiqaeNode(new(
+            HostMode.EmbeddedApplication,
+            AvailabilityClass.ForegroundOnly,
+            true,
+            "com.piqae.tests",
+            $"tests-{Guid.NewGuid():N}"));
+        node.Start();
+        var invitation = new PiqaeConnectorInvitation(
+            new Uri("http://attacker.invalid"),
+            "fixture-invitation-token",
+            "wcred-ed25519-v1.connector.0123456789abcdef",
+            PiqaePrinterGrant.SelectedPrinters,
+            new[] { "printer-one" },
+            "Test node",
+            "test-host");
+
+        Assert.Throws<ArgumentException>(() => { _ = node.Connect(invitation); });
+    }
+
+    [Fact]
+    public void ConnectorProviderCallbackFailureIsRedactedAndFailsClosed()
+    {
+        if (!OperatingSystem.IsWindows() || Environment.GetEnvironmentVariable("PIQAE_NODE_NATIVE_TEST") != "1") return;
+        const string secret = "provider-secret-must-not-escape";
+        using var node = new PiqaeNode(new(
+            HostMode.EmbeddedApplication,
+            AvailabilityClass.ForegroundOnly,
+            false,
+            "com.piqae.tests",
+            $"tests-{Guid.NewGuid():N}"), new ThrowingConnectorKeyProvider(secret));
+
+        var failure = Assert.Throws<PiqaeNodeException>(() => { _ = node.Start(); });
+        Assert.Equal("secure_connector_provider_required", failure.Code);
+        Assert.DoesNotContain(secret, failure.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void PreparedConnectorKeyCanBeCancelledAcrossProviderRestart()
+    {
+        if (!OperatingSystem.IsWindows() || Environment.GetEnvironmentVariable("PIQAE_NODE_NATIVE_TEST") != "1") return;
+        var installation = $"tests-{Guid.NewGuid():N}";
+        var provider = new WindowsCredentialConnectorKeyProvider(installation);
+        PreparedConnectorInvitation? prepared = null;
+        try
+        {
+            using var node = new PiqaeNode(new(
+                HostMode.EmbeddedApplication,
+                AvailabilityClass.ForegroundOnly,
+                false,
+                "com.piqae.tests",
+                $"tests-{Guid.NewGuid():N}"), provider);
+            node.Start();
+            prepared = node.PrepareConnectorInvitation();
+            Assert.True(prepared.ExpiresUnixMs > DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+            Assert.Equal(43, prepared.PublicKeyBase64.Length);
+            Assert.DoesNotContain('=', prepared.PublicKeyBase64);
+            Assert.True(node.CancelPreparedConnectorInvitation(prepared.KeyHandle));
+            Assert.False(node.CancelPreparedConnectorInvitation(prepared.KeyHandle));
+
+            var restarted = new WindowsCredentialConnectorKeyProvider(installation);
+            Assert.Throws<CryptographicException>(() => restarted.Sign(prepared.KeyHandle, "cancelled"u8));
+        }
+        finally
+        {
+            if (prepared is not null) provider.Delete(prepared.KeyHandle);
+            provider.DeleteInstallationForTests("installation/com.piqae.tests");
+        }
+    }
+
+    [Fact]
     public async Task ConnectorKeyPersistsAcrossProvidersAndDeleteIsIdempotent()
     {
         if (!OperatingSystem.IsWindows()) return;
@@ -147,5 +243,12 @@ public sealed class NodeTests
             finally { restarted.Delete(connector.Handle); }
         }
         finally { provider.DeleteInstallationForTests(scope); }
+    }
+
+    private sealed class ThrowingConnectorKeyProvider(string secret) : IPiqaeConnectorKeyProvider
+    {
+        public PiqaeGeneratedConnectorKey Generate(string scope) => throw new InvalidOperationException(secret);
+        public byte[] Sign(string handle, ReadOnlySpan<byte> message) => throw new InvalidOperationException(secret);
+        public void Delete(string handle) => throw new InvalidOperationException(secret);
     }
 }

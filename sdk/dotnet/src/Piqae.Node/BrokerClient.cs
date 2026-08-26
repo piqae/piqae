@@ -13,7 +13,10 @@ public enum BrokerCapability { ObserveStatus, ObservePrinters, ManageProfiles, S
 
 public sealed record BrokerApplication(string ApplicationId, string DisplayName, string? SigningIdentitySha256 = null);
 public sealed record BrokerAuthorizationHandle(Guid AuthorizationId, string Nonce, long ExpiresUnixMs);
-public sealed record BrokerCredential(string ApplicationId, string Token);
+public sealed record BrokerCredential(string ApplicationId, string Token)
+{
+    public override string ToString() => $"BrokerCredential {{ ApplicationId = {ApplicationId}, Token = [REDACTED] }}";
+}
 
 public sealed class PiqaeBrokerClient
 {
@@ -24,6 +27,7 @@ public sealed class PiqaeBrokerClient
         PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower,
         Converters = { new JsonStringEnumConverter(JsonNamingPolicy.SnakeCaseLower) }
     };
+    private readonly string _endpoint;
     private readonly string _pipeName;
 
     public PiqaeBrokerClient(string endpoint)
@@ -35,6 +39,7 @@ public sealed class PiqaeBrokerClient
             || endpoint.Length > 240
             || endpoint[prefix.Length..].Any(character => !char.IsAsciiLetterOrDigit(character) && character != '-'))
             throw new ArgumentException("A local Windows Piqae pipe endpoint is required.", nameof(endpoint));
+        _endpoint = endpoint;
         _pipeName = endpoint[prefix.Length..];
     }
 
@@ -68,28 +73,74 @@ public sealed class PiqaeBrokerClient
     public async Task<BrokerCredential> ExchangeAndStoreAsync(BrokerAuthorizationHandle handle, CancellationToken cancellationToken = default)
     {
         var result = await RequestAsync("exchange_authorization", new { handle }, cancellationToken).ConfigureAwait(false);
-        var credential = JsonSerializer.Deserialize<BrokerCredential>(result.GetRawText(), JsonOptions)
+        var credential = result.Deserialize<BrokerCredential>(JsonOptions)
             ?? throw new PiqaeNodeException("invalid_broker_response", "The broker response was incomplete.");
-        WindowsCredentialStore.Write(CredentialTarget(credential.ApplicationId), JsonSerializer.Serialize(credential, JsonOptions));
+        var credentialBytes = JsonSerializer.SerializeToUtf8Bytes(credential, JsonOptions);
+        try { WindowsCredentialStore.WriteBytes(CredentialTarget(credential.ApplicationId), credentialBytes); }
+        finally { CryptographicOperations.ZeroMemory(credentialBytes); }
         return credential;
     }
 
     public BrokerCredential? LoadStoredCredential(string applicationId)
     {
-        var stored = WindowsCredentialStore.Read(CredentialTarget(applicationId));
-        return stored is null ? null : JsonSerializer.Deserialize<BrokerCredential>(stored, JsonOptions);
+        var stored = WindowsCredentialStore.ReadBytes(CredentialTarget(applicationId));
+        if (stored is null) return null;
+        try { return JsonSerializer.Deserialize<BrokerCredential>(stored, JsonOptions); }
+        finally { CryptographicOperations.ZeroMemory(stored); }
     }
 
-    public Task<JsonElement> ExecuteSdkAsync(
+    public async Task<JsonElement> ExecuteSdkAsync(
         BrokerCredential credential,
         BrokerCapability capability,
         object sdkOperation,
-        CancellationToken cancellationToken = default) => RequestAsync("execute", new
+        CancellationToken cancellationToken = default)
     {
-        credential,
-        capability,
-        operation = new { type = "sdk", operation = sdkOperation }
-    }, cancellationToken);
+        ArgumentNullException.ThrowIfNull(credential);
+        ArgumentNullException.ThrowIfNull(sdkOperation);
+        cancellationToken.ThrowIfCancellationRequested();
+
+        // Authentication, canonicalization, request/response proof verification,
+        // replay protection, and the bounded timeout all remain in the Rust v4
+        // client. In particular, this SDK never sends the bearer token to a pipe.
+        return await Task.Run(() =>
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var endpoint = Encoding.UTF8.GetBytes(_endpoint);
+            var credentialJson = JsonSerializer.SerializeToUtf8Bytes(credential, JsonOptions);
+            var capabilityJson = JsonSerializer.SerializeToUtf8Bytes(capability, JsonOptions);
+            var operationJson = JsonSerializer.SerializeToUtf8Bytes(new
+            {
+                type = "sdk",
+                operation = sdkOperation
+            }, JsonOptions);
+            try
+            {
+                using var response = NativeResponse.CallBroker(
+                    endpoint,
+                    credentialJson,
+                    capabilityJson,
+                    operationJson);
+                if (!response.Data.TryGetProperty("result", out var result)
+                    || result.ValueKind != JsonValueKind.Object
+                    || !result.TryGetProperty("type", out var type)
+                    || type.ValueKind != JsonValueKind.String
+                    || type.GetString() != "sdk"
+                    || !result.TryGetProperty("data", out var data)
+                    || data.ValueKind == JsonValueKind.Undefined)
+                    throw new PiqaeNodeException(
+                        "invalid_broker_response",
+                        "The authenticated node broker returned an unexpected result.");
+                return data.Clone();
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(endpoint);
+                CryptographicOperations.ZeroMemory(credentialJson);
+                CryptographicOperations.ZeroMemory(capabilityJson);
+                CryptographicOperations.ZeroMemory(operationJson);
+            }
+        }, cancellationToken).ConfigureAwait(false);
+    }
 
     private string CredentialTarget(string applicationId) => $"Piqae.Node/{_pipeName}/{applicationId}";
 
@@ -101,36 +152,43 @@ public sealed class PiqaeBrokerClient
         await pipe.ConnectAsync(deadline.Token).ConfigureAwait(false);
         var requestId = Guid.NewGuid();
         var fieldsJson = JsonSerializer.SerializeToElement(fields, JsonOptions);
-        using var document = JsonDocument.Parse(JsonSerializer.SerializeToUtf8Bytes(new
+        var body = JsonSerializer.SerializeToUtf8Bytes(new
         {
-            protocol = 3,
+            protocol = 4,
             request_id = requestId,
             operation = MergeOperation(operationType, fieldsJson)
-        }, JsonOptions));
-        var body = JsonSerializer.SerializeToUtf8Bytes(document.RootElement, JsonOptions);
-        if (body.Length > MaximumMessageBytes) throw new PiqaeNodeException("message_too_large", "The broker request is too large.");
+        }, JsonOptions);
         var prefix = new byte[4];
-        BinaryPrimitives.WriteUInt32BigEndian(prefix, (uint)body.Length);
-        await pipe.WriteAsync(prefix, deadline.Token).ConfigureAwait(false);
-        await pipe.WriteAsync(body, deadline.Token).ConfigureAwait(false);
-        await pipe.FlushAsync(deadline.Token).ConfigureAwait(false);
+        try
+        {
+            if (body.Length > MaximumMessageBytes) throw new PiqaeNodeException("message_too_large", "The broker request is too large.");
+            BinaryPrimitives.WriteUInt32BigEndian(prefix, (uint)body.Length);
+            await pipe.WriteAsync(prefix, deadline.Token).ConfigureAwait(false);
+            await pipe.WriteAsync(body, deadline.Token).ConfigureAwait(false);
+            await pipe.FlushAsync(deadline.Token).ConfigureAwait(false);
+        }
+        finally { CryptographicOperations.ZeroMemory(body); }
         await ReadExactlyAsync(pipe, prefix, deadline.Token).ConfigureAwait(false);
         var length = BinaryPrimitives.ReadUInt32BigEndian(prefix);
         if (length == 0 || length > MaximumMessageBytes) throw new PiqaeNodeException("invalid_broker_response", "The broker response length is invalid.");
         body = new byte[length];
-        await ReadExactlyAsync(pipe, body, deadline.Token).ConfigureAwait(false);
-        using var response = JsonDocument.Parse(body);
-        var root = response.RootElement;
-        if (!root.TryGetProperty("protocol", out var protocol) || protocol.GetUInt16() is < 1 or > 3)
-            throw new PiqaeNodeException("unsupported_broker_protocol", "The node broker protocol is incompatible.");
-        if (root.GetProperty("request_id").GetGuid() != requestId)
-            throw new PiqaeNodeException("response_id_mismatch", "The broker response did not match the request.");
-        var result = root.GetProperty("result");
-        if (result.TryGetProperty("Err", out var failure))
-            throw new PiqaeNodeException(failure.GetProperty("code").GetString() ?? "broker_error", failure.GetProperty("message").GetString() ?? "The broker rejected the request.");
-        if (!result.TryGetProperty("Ok", out var success))
-            throw new PiqaeNodeException("invalid_broker_response", "The broker response was incomplete.");
-        return success.Clone();
+        try
+        {
+            await ReadExactlyAsync(pipe, body, deadline.Token).ConfigureAwait(false);
+            using var response = JsonDocument.Parse(body);
+            var root = response.RootElement;
+            if (!root.TryGetProperty("protocol", out var protocol) || protocol.GetUInt16() != 4)
+                throw new PiqaeNodeException("unsupported_broker_protocol", "The node broker protocol is incompatible.");
+            if (root.GetProperty("request_id").GetGuid() != requestId)
+                throw new PiqaeNodeException("response_id_mismatch", "The broker response did not match the request.");
+            var result = root.GetProperty("result");
+            if (result.TryGetProperty("Err", out var failure))
+                throw new PiqaeNodeException(failure.GetProperty("code").GetString() ?? "broker_error", failure.GetProperty("message").GetString() ?? "The broker rejected the request.");
+            if (!result.TryGetProperty("Ok", out var success))
+                throw new PiqaeNodeException("invalid_broker_response", "The broker response was incomplete.");
+            return success.Clone();
+        }
+        finally { CryptographicOperations.ZeroMemory(body); }
     }
 
     private static JsonElement MergeOperation(string type, JsonElement fields)
@@ -169,9 +227,10 @@ internal static class WindowsCredentialStore
         if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException();
         if (secret.Length > 5120) throw new ArgumentOutOfRangeException(nameof(secret));
         var bytes = secret.ToArray();
-        var blob = Marshal.AllocHGlobal(bytes.Length);
+        var blob = IntPtr.Zero;
         try
         {
+            blob = Marshal.AllocHGlobal(bytes.Length);
             Marshal.Copy(bytes, 0, blob, bytes.Length);
             var credential = new NativeCredential
             {
@@ -192,7 +251,7 @@ internal static class WindowsCredentialStore
                 var zeros = new byte[secret.Length];
                 Marshal.Copy(zeros, 0, blob, zeros.Length);
             }
-            Marshal.FreeHGlobal(blob);
+            if (blob != IntPtr.Zero) Marshal.FreeHGlobal(blob);
         }
     }
 

@@ -23,7 +23,27 @@ var options = new PiqaeNodeOptions(
 var keys = new WindowsCredentialConnectorKeyProvider(options.ApplicationId);
 using var node = new PiqaeNode(options, keys);
 node.Start();
+
+var prepared = node.PrepareConnectorInvitation();
+// Send prepared.PublicKeyBase64 to the trusted UI that issued the invitation,
+// then redeem only the authority-issued token and the prepared opaque handle.
+string invitationToken = "<authority-issued, single-use invitation token>";
+var connector = node.Connect(new PiqaeConnectorInvitation(
+    new Uri("https://api.piqae.com"),
+    invitationToken,
+    prepared.KeyHandle,
+    PiqaePrinterGrant.AllLocalPrinters,
+    Array.Empty<string>(),
+    Environment.MachineName,
+    Environment.MachineName));
 ```
+
+If the user abandons the flow, call
+`CancelPreparedConnectorInvitation(prepared.KeyHandle)`. Pending-key expiry,
+cancel cleanup, and deletion retry are durable native-runtime operations. The
+SDK does not maintain a second enrollment state machine. `Connect` accepts no
+connector record: ownership, workspace identity, agent identity, and management
+URLs come only from the verified response at the exact HTTPS invitation origin.
 
 The provider returns only opaque handles, public keys, and signatures to the
 native runtime. Connector records and application configuration never contain
@@ -41,5 +61,10 @@ not a hardware-backed/non-exporting-key claim. See Microsoft guidance for
 and the [`CredWrite` lifecycle](https://learn.microsoft.com/windows/win32/api/wincred/nf-wincred-credwritew).
 
 No API treats a claimed application ID or signing digest as authorization.
+Installed-node SDK operations use the native Rust protocol-v4 client. The .NET
+process passes the credential only into that in-process ABI; the bearer token is
+never sent through the named pipe. Rust owns canonicalization, request and
+response proofs, replay rejection, and downgrade rejection, and returns data
+only after authentication succeeds.
 The SDK does not claim background execution or physical-print support merely
 because the native library loads.
