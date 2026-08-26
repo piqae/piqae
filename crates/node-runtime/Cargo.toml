@@ -15,12 +15,12 @@ chrono.workspace = true
 fs2 = "0.4.3"
 hex.workspace = true
 piqae-domain.workspace = true
-piqae-agent-client = { path = "../agent-client" }
-piqae-agent-storage = { path = "../agent-storage" }
-piqae-local-ipc = { path = "../local-ipc" }
-piqae-node-host-api = { path = "../node-host-api" }
+piqae-agent-client = { path = "../agent-client", version = "0.1.21" }
+piqae-agent-storage = { path = "../agent-storage", version = "0.1.21" }
+piqae-local-ipc = { path = "../local-ipc", version = "0.1.21" }
+piqae-node-host-api = { path = "../node-host-api", version = "0.1.21" }
 piqae-protocol.workspace = true
-piqae-support-packs = { path = "../support-packs" }
+piqae-support-packs = { path = "../support-packs", version = "0.1.21" }
 rand.workspace = true
 serde.workspace = true
 serde_json.workspace = true

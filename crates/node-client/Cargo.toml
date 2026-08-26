@@ -9,8 +9,8 @@ publish = false
 
 [dependencies]
 async-trait.workspace = true
-piqae-local-ipc = { path = "../local-ipc" }
-piqae-node-runtime = { path = "../node-runtime" }
+piqae-local-ipc = { path = "../local-ipc", version = "0.1.21" }
+piqae-node-runtime = { path = "../node-runtime", version = "0.1.21" }
 serde.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
