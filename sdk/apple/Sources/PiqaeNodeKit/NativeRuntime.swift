@@ -178,6 +178,13 @@ public actor PiqaeNativeRuntime: PiqaeEmbeddedNodeRuntime, PiqaeOpaqueIdentityPr
     }
 
     public func reconcileCloud(timeoutMilliseconds: UInt64) async throws -> Bool {
+        let outcome = try await reconcileCloudOutcome(timeoutMilliseconds: timeoutMilliseconds)
+        return outcome.loopCompleted && outcome.failedCount == 0
+    }
+
+    public func reconcileCloudOutcome(
+        timeoutMilliseconds: UInt64
+    ) async throws -> PiqaeCloudReconcileOutcome {
         let timeout = min(max(1, timeoutMilliseconds), 10_000)
         guard let library, let handle else {
             throw PiqaeNativeRuntimeError.rejected(
@@ -185,17 +192,56 @@ public actor PiqaeNativeRuntime: PiqaeEmbeddedNodeRuntime, PiqaeOpaqueIdentityPr
                 message: "The native runtime has not started."
             )
         }
-        let request = try JSONEncoder().encode(
-            ReconcileCloudCommand(type: "reconcile_cloud", timeoutMilliseconds: timeout)
+        let requestData = try JSONEncoder().encode(
+            TypeOnlyCommand(type: "reconcile_cloud_request")
         )
-        // Waiting for a supervisor generation uses a native condvar. Keep the
-        // bounded wait off Swift's cooperative executor; the FFI handle is
-        // process-scoped and independently serializes stop/destroy races.
-        let data = await Task.detached(priority: .utility) {
-            library.command(handle, request)
-        }.value
-        let response: ReconcileCloudData = try Self.unwrap(data)
-        return response.completed
+        let request: ReconcileCloudRequestData = try Self.unwrap(
+            library.command(handle, requestData)
+        )
+        guard request.cloudConfigured, let generation = request.generation else {
+            return .noCloud
+        }
+        let deadline = ContinuousClock.now.advanced(by: .milliseconds(Int64(timeout)))
+        while ContinuousClock.now < deadline {
+            try Task.checkCancellation()
+            let pollData = try JSONEncoder().encode(
+                ReconcileCloudPollCommand(
+                    type: "reconcile_cloud_poll",
+                    generation: generation
+                )
+            )
+            let poll: ReconcileCloudPollData = try Self.unwrap(
+                library.command(handle, pollData)
+            )
+            if let outcome = poll.outcome {
+                return PiqaeCloudReconcileOutcome(
+                    generation: outcome.generation,
+                    cloudConfigured: poll.cloudConfigured,
+                    loopCompleted: outcome.loopCompleted,
+                    connectorCount: outcome.connectorCount,
+                    succeededCount: outcome.succeededCount,
+                    failedCount: outcome.failedCount,
+                    allSucceeded: outcome.successScope == .all,
+                    partialSuccess: outcome.successScope == .partial,
+                    retryable: outcome.retryable,
+                    failureClass: outcome.failureClass
+                )
+            }
+            let remaining = ContinuousClock.now.duration(to: deadline)
+            try await Task.sleep(for: min(.milliseconds(25), remaining))
+        }
+        return PiqaeCloudReconcileOutcome(
+            generation: generation,
+            cloudConfigured: true,
+            loopCompleted: false,
+            connectorCount: 0,
+            succeededCount: 0,
+            failedCount: 0,
+            allSucceeded: false,
+            partialSuccess: false,
+            retryable: true,
+            failureClass: .transient
+        )
     }
 
     public func deriveOpaqueID(
@@ -551,13 +597,9 @@ private struct LifecycleCommand: Encodable {
     let type: String
     let event: PiqaeHostLifecycleEvent
 }
-private struct ReconcileCloudCommand: Encodable {
+private struct ReconcileCloudPollCommand: Encodable {
     let type: String
-    let timeoutMilliseconds: UInt64
-    enum CodingKeys: String, CodingKey {
-        case type
-        case timeoutMilliseconds = "timeout_ms"
-    }
+    let generation: UInt64
 }
 
 private struct OpaqueEvidenceCommand: Encodable {
@@ -787,12 +829,43 @@ private struct NativeErrorData: Decodable {
 private struct HandleData: Decodable { let handle: UInt64 }
 private struct DestroyData: Decodable { let destroyed: Bool }
 private struct NativeSnapshot: Decodable { let handle: UInt64 }
-private struct ReconcileCloudData: Decodable {
+private struct ReconcileCloudRequestData: Decodable {
     let cloudConfigured: Bool
-    let completed: Bool
+    let generation: UInt64?
     enum CodingKeys: String, CodingKey {
         case cloudConfigured = "cloud_configured"
-        case completed
+        case generation
+    }
+}
+private struct NativeReconcileCloudOutcomeData: Decodable {
+    enum SuccessScope: String, Decodable { case none, partial, all }
+    let generation: UInt64
+    let loopCompleted: Bool
+    let connectorCount: Int
+    let succeededCount: Int
+    let failedCount: Int
+    let successScope: SuccessScope
+    let retryable: Bool
+    let failureClass: PiqaeCloudReconcileFailureClass
+    enum CodingKeys: String, CodingKey {
+        case generation
+        case loopCompleted = "loop_completed"
+        case connectorCount = "connector_count"
+        case succeededCount = "succeeded_count"
+        case failedCount = "failed_count"
+        case successScope = "success_scope"
+        case retryable
+        case failureClass = "failure_class"
+    }
+}
+private struct ReconcileCloudPollData: Decodable {
+    let cloudConfigured: Bool
+    let generation: UInt64
+    let pending: Bool
+    let outcome: NativeReconcileCloudOutcomeData?
+    enum CodingKeys: String, CodingKey {
+        case cloudConfigured = "cloud_configured"
+        case generation, pending, outcome
     }
 }
 private struct OpaqueEvidenceData: Decodable {

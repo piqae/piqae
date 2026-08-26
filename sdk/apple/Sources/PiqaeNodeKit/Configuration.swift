@@ -106,6 +106,81 @@ public protocol PiqaeInstallationIdentityStore: Sendable {
     func loadOrCreateInstallationID() async throws -> PiqaeInstallationID
 }
 
+public enum PiqaeCloudReconcileFailureClass: String, Codable, Equatable, Sendable {
+    case none
+    case transient
+    case authentication
+    case configuration
+    case localState = "local_state"
+    case `protocol`
+    case mixed
+    case stopped
+}
+
+/// Generation-bound, privacy-safe result of one native supervisor pass.
+/// Counts contain no connector, workspace, printer, job or document identity.
+public struct PiqaeCloudReconcileOutcome: Codable, Equatable, Sendable {
+    public let generation: UInt64
+    public let cloudConfigured: Bool
+    public let loopCompleted: Bool
+    public let connectorCount: Int
+    public let succeededCount: Int
+    public let failedCount: Int
+    public let allSucceeded: Bool
+    public let partialSuccess: Bool
+    public let retryable: Bool
+    public let failureClass: PiqaeCloudReconcileFailureClass
+
+    public init(
+        generation: UInt64 = 0,
+        cloudConfigured: Bool,
+        loopCompleted: Bool,
+        connectorCount: Int,
+        succeededCount: Int,
+        failedCount: Int,
+        allSucceeded: Bool,
+        partialSuccess: Bool,
+        retryable: Bool,
+        failureClass: PiqaeCloudReconcileFailureClass
+    ) {
+        self.generation = generation
+        self.cloudConfigured = cloudConfigured
+        self.loopCompleted = loopCompleted
+        self.connectorCount = connectorCount
+        self.succeededCount = succeededCount
+        self.failedCount = failedCount
+        self.allSucceeded = allSucceeded
+        self.partialSuccess = partialSuccess
+        self.retryable = retryable
+        self.failureClass = failureClass
+    }
+
+    public static let noCloud = PiqaeCloudReconcileOutcome(
+        cloudConfigured: false,
+        loopCompleted: true,
+        connectorCount: 0,
+        succeededCount: 0,
+        failedCount: 0,
+        allSucceeded: true,
+        partialSuccess: false,
+        retryable: false,
+        failureClass: .none
+    )
+
+    enum CodingKeys: String, CodingKey {
+        case generation
+        case cloudConfigured = "cloud_configured"
+        case loopCompleted = "loop_completed"
+        case connectorCount = "connector_count"
+        case succeededCount = "succeeded_count"
+        case failedCount = "failed_count"
+        case allSucceeded = "all_succeeded"
+        case partialSuccess = "partial_success"
+        case retryable
+        case failureClass = "failure_class"
+    }
+}
+
 /// The shared durable node runtime hosted inside an application process.
 /// Platform facades must never implement a second queue beside this runtime.
 public protocol PiqaeEmbeddedNodeRuntime: PiqaeHostLifecycleReporter, Sendable {
@@ -116,6 +191,11 @@ public protocol PiqaeEmbeddedNodeRuntime: PiqaeHostLifecycleReporter, Sendable {
     /// Requests one immediate cloud sync and waits only for the bounded native
     /// supervisor pass. This is a nudge, not a lease or remote-wake proof.
     func reconcileCloud(timeoutMilliseconds: UInt64) async throws -> Bool
+    /// Generation-bound form used by lifecycle coordinators. The legacy Bool
+    /// requirement remains so existing custom runtimes continue to compile.
+    func reconcileCloudOutcome(
+        timeoutMilliseconds: UInt64
+    ) async throws -> PiqaeCloudReconcileOutcome
     func start() async throws
     func stop() async throws
     func registerAdapter(_ registration: PiqaeRuntimeAdapterRegistration) async throws
@@ -155,10 +235,25 @@ public protocol PiqaeEmbeddedNodeRuntime: PiqaeHostLifecycleReporter, Sendable {
 
 public extension PiqaeEmbeddedNodeRuntime {
     func setWorkAvailableHandler(_ handler: @escaping @Sendable () -> Void) async throws {}
-    /// Source-compatible default for custom runtimes built before immediate
-    /// reconciliation existed. Unsupported runtimes must defer, not claim that
-    /// a cloud pass completed.
     func reconcileCloud(timeoutMilliseconds: UInt64) async throws -> Bool { false }
+    /// Adapts an older Bool-only runtime without inventing connector counts or
+    /// retrying an unclassified failure. Native runtimes override this method.
+    func reconcileCloudOutcome(
+        timeoutMilliseconds: UInt64
+    ) async throws -> PiqaeCloudReconcileOutcome {
+        let completed = try await reconcileCloud(timeoutMilliseconds: timeoutMilliseconds)
+        return PiqaeCloudReconcileOutcome(
+            cloudConfigured: true,
+            loopCompleted: completed,
+            connectorCount: 0,
+            succeededCount: 0,
+            failedCount: completed ? 0 : 1,
+            allSucceeded: completed,
+            partialSuccess: false,
+            retryable: false,
+            failureClass: completed ? .none : .protocol
+        )
+    }
     func registerAdapter(_ registration: PiqaeRuntimeAdapterRegistration) async throws {
         throw PiqaeNodeError.unsupportedOperation("The embedded runtime does not expose adapters.")
     }

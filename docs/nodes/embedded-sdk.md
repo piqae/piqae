@@ -126,6 +126,14 @@ Webhook delivery and mobile background execution are both at-least-once or
 best-effort boundaries; deduplicate by the opaque wake-hint ID and never treat
 a notification as acceptance.
 
+Swift and .NET request a monotonic reconcile generation and poll it without
+holding a language executor or native ABI call across network work. The result
+separates loop completion, cloud configuration, all/partial/no success,
+connector success/failure counts, retryability, and a privacy-safe failure
+class. SDKs retry only explicitly retryable results inside the host's measured
+execution budget. Stop and destroy interrupt the supervisor, join its worker,
+and wake generation waiters before releasing callback contexts.
+
 - macOS and Windows may hold a bounded power assertion while downloading,
   rendering, or crossing native handoff. They do not prevent idle sleep merely
   to wait for jobs. Wake-on-LAN/network wake is hardware, network, policy, and

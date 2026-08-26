@@ -28,3 +28,8 @@ non-secret; protocol 3 bearer execution is rejected by current brokers.
 
 The `v1/adapter-*.json` fixtures are allocator-neutral `piqae_node_command`
 payloads. Paths, identifiers, and document bytes are synthetic.
+
+`reconcile-cloud-request.json` and `reconcile-cloud-poll.json` pin the
+nonblocking generation-fenced cloud-reconciliation ABI used by Swift and .NET.
+The poll result contains aggregate counts, success scope, retryability, and a
+privacy-safe failure class only; it never contains connector or tenant identity.

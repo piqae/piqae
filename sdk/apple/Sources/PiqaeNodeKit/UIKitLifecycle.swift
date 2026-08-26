@@ -71,6 +71,7 @@ public final class PiqaeUIKitLifecycleCoordinator {
         let cancellation = PiqaeTaskCancellation()
         let lifecycleNode = node
         let identifier = UIApplication.shared.beginBackgroundTask(withName: "Piqae reconcile") {
+            lifecycleNode.expireExecutionSynchronously()
             cancellation.cancel()
             Task { try? await lifecycleNode.reportHostLifecycle(.suspendImminent) }
         }
@@ -225,7 +226,11 @@ public final class PiqaeUIKitMaintenanceScheduler {
             }
             return result == .reconciled && !Task.isCancelled
         }
-        task.expirationHandler = { worker.cancel() }
+        let lifecycleNode = node
+        task.expirationHandler = {
+            lifecycleNode.expireExecutionSynchronously()
+            worker.cancel()
+        }
         task.setTaskCompleted(success: await worker.value)
     }
 }

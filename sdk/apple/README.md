@@ -267,11 +267,15 @@ The coordinator can register an APNs device token through the injected provider
 and can forward an opaque collapse ID from the app delegate. It begins a bounded
 background task for reconciliation, requests an immediate generation-fenced
 cloud supervisor pass instead of waiting for the normal poll interval, retries
-transient failures with bounded exponential backoff inside the measured
-execution deadline, reports expiration as `suspend_imminent`, and cancels the
-worker. A repeated hint is safe because Rust idempotency and
-handoff fences prevent native replay; a lost hint leaves durable work queued and
-never fabricates eligibility. The API cannot run
+only failures explicitly classified as retryable with bounded exponential
+backoff inside the measured execution deadline, reports expiration as
+`suspend_imminent`, and cancels the worker. Native request/poll does not block
+Swift cancellation, and identical in-flight collapse IDs share one pass.
+Expiration closes the drain/wake/observation generation synchronously before
+asynchronous cleanup, while a native call already past the durable handoff
+boundary remains accepted or ambiguous. A repeated hint is safe because Rust
+idempotency and handoff fences prevent native replay; a lost hint leaves durable
+work queued and never fabricates eligibility. The API cannot run
 after user force-quit and reports only opportunistic availability while the app
 is installed.
 

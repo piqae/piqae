@@ -47,6 +47,14 @@ job ID, title, document metadata, lease, or content reference. Delivery is
 at-least-once, so a crash may repeat the event, but every repeat carries the
 same opaque hint ID. The receiver must deduplicate on that ID.
 
+An embedded host's immediate reconcile request is fenced by a monotonic local
+generation. Its aggregate outcome distinguishes no-cloud configuration, an
+unfinished loop, complete success, partial success, and complete failure using
+counts plus a privacy-safe failure class. SDK lifecycle coordinators retry only
+explicitly retryable aggregate failures. A request arriving after a pass
+captured its generation requires a later pass and cannot inherit the in-flight
+pass's result.
+
 Piqae stores no APNs token or provider credential in this path. Enqueuing the
 webhook proves only that the tenant relay was notified; it does not prove a
 provider delivered a push or woke the device. The app must reconcile, report a

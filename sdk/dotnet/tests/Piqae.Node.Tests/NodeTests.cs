@@ -30,6 +30,10 @@ public sealed class NodeTests
         var suspended = node.ApplyLifecycle(LifecycleEvent.SuspendImminent);
         Assert.False(suspended.GetProperty("lifecycle").GetProperty("accepting_cloud_leases").GetBoolean());
         Assert.True(node.ReconcileCloud(TimeSpan.FromSeconds(1)));
+        var reconciliation = node.ReconcileCloudOutcome(TimeSpan.FromSeconds(1));
+        Assert.False(reconciliation.CloudConfigured);
+        Assert.True(reconciliation.LoopCompleted);
+        Assert.Equal(CloudReconcileSuccessScope.All, reconciliation.SuccessScope);
         Assert.Throws<ArgumentOutOfRangeException>(() => node.ReconcileCloud(TimeSpan.Zero));
         Assert.False(node.Stop().GetProperty("started").GetBoolean());
     }

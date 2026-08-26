@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
@@ -9,6 +10,20 @@ namespace Piqae.Node;
 public enum HostMode { MachineService, UserAgent, EmbeddedApplication, AttachedClient }
 public enum AvailabilityClass { ContinuousWhileAwake, ForegroundOnly, BackgroundOpportunistic, ManagedKiosk, WakeRelayCapable }
 public enum LifecycleEvent { Started, EnteredForeground, EnteredBackground, SuspendImminent, Sleeping, Woke, NetworkAvailable, NetworkConstrained, NetworkUnavailable, ShutdownRequested }
+public enum CloudReconcileFailureClass { None, Transient, Authentication, Configuration, LocalState, Protocol, Mixed, Stopped }
+public enum CloudReconcileSuccessScope { None, Partial, All }
+
+/// <summary>Privacy-safe result for one exact native cloud-supervisor generation.</summary>
+public sealed record CloudReconcileOutcome(
+    ulong Generation,
+    bool CloudConfigured,
+    bool LoopCompleted,
+    int ConnectorCount,
+    int SucceededCount,
+    int FailedCount,
+    CloudReconcileSuccessScope SuccessScope,
+    bool Retryable,
+    CloudReconcileFailureClass FailureClass);
 
 public sealed record PiqaeNodeOptions(
     HostMode HostMode,
@@ -143,15 +158,110 @@ public sealed class PiqaeNode : IDisposable
     /// </summary>
     public bool ReconcileCloud(TimeSpan timeout)
     {
+        var outcome = ReconcileCloudOutcome(timeout);
+        return outcome.LoopCompleted && outcome.FailedCount == 0;
+    }
+
+    /// <summary>
+    /// Requests and polls one exact supervisor generation. Polling never holds
+    /// the managed/native gate while the supervisor performs network I/O.
+    /// </summary>
+    public CloudReconcileOutcome ReconcileCloudOutcome(TimeSpan timeout)
+    {
+        ValidateReconcileTimeout(timeout);
+        var request = RequestCloudReconcile();
+        if (!request.CloudConfigured || request.Generation is null)
+            return NoCloudOutcome();
+        var elapsed = Stopwatch.StartNew();
+        while (elapsed.Elapsed < timeout)
+        {
+            var result = PollCloudReconcile(request.Generation.Value);
+            if (result is not null) return result;
+            var remaining = timeout - elapsed.Elapsed;
+            if (remaining <= TimeSpan.Zero) break;
+            Thread.Sleep(MinPollDelay(remaining));
+        }
+        return TimedOutOutcome(request.Generation.Value);
+    }
+
+    /// <summary>Cancellable nonblocking reconcile for hosted applications and services.</summary>
+    public async Task<CloudReconcileOutcome> ReconcileCloudAsync(
+        TimeSpan timeout,
+        CancellationToken cancellationToken = default)
+    {
+        ValidateReconcileTimeout(timeout);
+        cancellationToken.ThrowIfCancellationRequested();
+        var request = RequestCloudReconcile();
+        if (!request.CloudConfigured || request.Generation is null)
+            return NoCloudOutcome();
+        var elapsed = Stopwatch.StartNew();
+        while (elapsed.Elapsed < timeout)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var result = PollCloudReconcile(request.Generation.Value);
+            if (result is not null) return result;
+            var remaining = timeout - elapsed.Elapsed;
+            if (remaining <= TimeSpan.Zero) break;
+            await Task.Delay(MinPollDelay(remaining), cancellationToken).ConfigureAwait(false);
+        }
+        return TimedOutOutcome(request.Generation.Value);
+    }
+
+    private static TimeSpan MinPollDelay(TimeSpan remaining)
+    {
+        var interval = TimeSpan.FromMilliseconds(25);
+        return remaining < interval ? remaining : interval;
+    }
+
+    private (bool CloudConfigured, ulong? Generation) RequestCloudReconcile()
+    {
+        var result = Command(new { type = "reconcile_cloud_request" });
+        var configured = RequiredBoolean(result, "cloud_configured");
+        ulong? generation = null;
+        if (result.TryGetProperty("generation", out var value)
+            && value.ValueKind == JsonValueKind.Number
+            && value.TryGetUInt64(out var parsed)) generation = parsed;
+        return (configured, generation);
+    }
+
+    private CloudReconcileOutcome? PollCloudReconcile(ulong generation)
+    {
+        var result = Command(new { type = "reconcile_cloud_poll", generation });
+        if (!result.TryGetProperty("outcome", out var outcome)
+            || outcome.ValueKind == JsonValueKind.Null) return null;
+        if (outcome.ValueKind != JsonValueKind.Object) throw InvalidNativeResponse();
+        return new CloudReconcileOutcome(
+            outcome.GetProperty("generation").GetUInt64(),
+            RequiredBoolean(result, "cloud_configured"),
+            RequiredBoolean(outcome, "loop_completed"),
+            outcome.GetProperty("connector_count").GetInt32(),
+            outcome.GetProperty("succeeded_count").GetInt32(),
+            outcome.GetProperty("failed_count").GetInt32(),
+            ParseEnum<CloudReconcileSuccessScope>(outcome, "success_scope"),
+            RequiredBoolean(outcome, "retryable"),
+            ParseEnum<CloudReconcileFailureClass>(outcome, "failure_class"));
+    }
+
+    private static T ParseEnum<T>(JsonElement element, string propertyName) where T : struct, Enum
+    {
+        var raw = RequiredString(element, propertyName).Replace("_", "", StringComparison.Ordinal);
+        if (!Enum.TryParse<T>(raw, ignoreCase: true, out var value)) throw InvalidNativeResponse();
+        return value;
+    }
+
+    private static void ValidateReconcileTimeout(TimeSpan timeout)
+    {
         if (timeout <= TimeSpan.Zero || timeout > TimeSpan.FromSeconds(10))
             throw new ArgumentOutOfRangeException(nameof(timeout));
-        var result = Command(new
-        {
-            type = "reconcile_cloud",
-            timeout_ms = checked((ulong)Math.Ceiling(timeout.TotalMilliseconds))
-        });
-        return result.GetProperty("completed").GetBoolean();
     }
+
+    private static CloudReconcileOutcome NoCloudOutcome() => new(
+        0, false, true, 0, 0, 0, CloudReconcileSuccessScope.All, false,
+        CloudReconcileFailureClass.None);
+
+    private static CloudReconcileOutcome TimedOutOutcome(ulong generation) => new(
+        generation, true, false, 0, 0, 0, CloudReconcileSuccessScope.None, true,
+        CloudReconcileFailureClass.Transient);
 
     public JsonElement RegisterAdapter(AdapterRegistration registration) => Command(new
     {
