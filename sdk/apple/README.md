@@ -5,19 +5,21 @@ node from iOS, iPadOS, and macOS applications. The API is instance-based, so an
 application can test configurations independently without process-global
 credentials or mutable singleton setup.
 
-This package is **Preview**. It is a source Swift Package, not a published binary
-XCFramework. The durable Rust runtime/FFI artifact, signed XCFramework release
-pipeline, production cloud enrollment provider, and physical-printer
-certification remain separate release gates. Compilation or an AirPrint callback
-is not evidence that paper was produced.
+This package is **Preview**. The repository can build a real local XCFramework
+containing the shared durable Rust runtime for macOS, iOS devices, and iOS
+Simulator; it is not yet a signed or published binary release. Production cloud
+enrollment, App Store distribution, and physical-printer certification remain
+separate release gates. Compilation or a native print callback is not evidence
+that paper was produced.
 
 ## Products
 
 - `PiqaeNodeKit`: configuration, observable services, lifecycle admission,
   Keychain installation identity, adapter registry, and installed-node IPC
   abstraction.
-- `PiqaeNodeKitAirPrint`: user-selected AirPrint printer registry and direct
-  handoff adapter on iOS/iPadOS.
+- `PiqaeNodeKitAirPrint`: user-selected AirPrint inventory and native handoff
+  foundation on iOS/iPadOS. Embedded submission remains disabled until the
+  durable runtime executor ABI owns the adapter pull/ack boundary.
 - `PiqaeNodeKitUI`: optional SwiftUI printer inventory for low-code adoption.
 - `PiqaeNodeKitTesting`: deterministic identity, enrollment, installed-node,
   and printer fakes. It never contacts a physical printer.
@@ -25,6 +27,14 @@ is not evidence that paper was produced.
 The recommended API mirrors the durable runtime boundary:
 
 ```swift
+let nativeRuntime = PiqaeNativeRuntime(
+    configuration: .init(
+        applicationID: "com.example.printing",
+        availability: .backgroundOpportunistic,
+        localOnly: true
+    )
+)
+try await nativeRuntime.start()
 let airPrint = try PiqaeAirPrintAdapter(
     identityProvider: nativeRuntime,
     knownPrinterURLs: savedPrinterURLs
@@ -32,7 +42,8 @@ let airPrint = try PiqaeAirPrintAdapter(
 let node = PiqaeNode(
     .localOnly(
         startupMode: .automatic,
-        printerAdapters: [airPrint]
+        printerAdapters: [airPrint],
+        hostLifecycleReporter: nativeRuntime
     )
 )
 
@@ -70,6 +81,12 @@ let printers = try await node.printers.list(refresh: true)
 let profiles = try await node.profiles.list(for: printers[0].id)
 let receipt = try await node.jobs.submit(request)
 ```
+
+The last call currently fails closed for an embedded host. NodeKit never calls
+`adapter.submit` directly: the shared runtime must first persist the document,
+operation ID, route fence, deadline, and idempotency key, then expose a bounded
+adapter operation and durably acknowledge its exact outcome. Attached clients
+also require an explicitly approved broker capability.
 
 `PiqaeCloudEnrollmentProvider` is deliberately injected. It exchanges a
 short-lived invitation and returns a connector summary. Platform service-account
@@ -119,6 +136,33 @@ The AirPrint adapter currently accepts PDF or image data, one copy, and optional
 orientation. Media pinning, density, raw printer languages, route-bound profiles,
 and cutter instructions fail closed and require a certified network, Bluetooth,
 External Accessory, or vendor adapter.
+
+## Native artifact
+
+Build the local artifact from repository root:
+
+```console
+sdk/apple/scripts/build-xcframework.sh
+```
+
+The script builds universal macOS, iOS arm64, and arm64/x86_64 iOS Simulator
+static-library slices, assembles `sdk/apple/.artifacts/PiqaeNode.xcframework`,
+archives it, and writes a local JSON manifest with SHA-256 and SwiftPM checksum.
+Pass `--replace` only to replace those generated outputs. When the XCFramework
+is present, this package consumes it as a binary target; otherwise it remains a
+source facade and `PiqaeNativeRuntime.start()` fails closed.
+
+Validate clean consumers with:
+
+```console
+swift build --package-path sdk/apple/Examples/ConsumerFixture
+xcodebuild -scheme PiqaeNodeKitConsumerFixture \
+  -destination 'generic/platform=iOS Simulator' \
+  -sdk iphonesimulator CODE_SIGNING_ALLOWED=NO build
+```
+
+The artifact is unsigned. Signing, provenance, notarization where applicable,
+publication, and App Store review evidence belong to the native release gate.
 
 ## iPadOS lifecycle and sleep
 
@@ -178,7 +222,7 @@ to keep the process alive.
 ```console
 swift test --package-path sdk/apple
 swift test --package-path shells/macos
-xcodebuild -scheme PiqaeNodeKit-Package \
+xcodebuild -scheme PiqaeNodeKit \
   -destination 'generic/platform=iOS Simulator' \
   CODE_SIGNING_ALLOWED=NO build
 ```

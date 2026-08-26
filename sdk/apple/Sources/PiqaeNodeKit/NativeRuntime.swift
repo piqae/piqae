@@ -331,9 +331,23 @@ private final class PiqaeNativeLibrary: @unchecked Sendable {
     private let freeOperation: FreeOperation
 
     init(url: URL?) throws {
-        let dynamicHandle: UnsafeMutableRawPointer?
-        if let url { dynamicHandle = dlopen(url.path, RTLD_NOW | RTLD_LOCAL) }
-        else { dynamicHandle = dlopen(nil, RTLD_NOW | RTLD_LOCAL) }
+        if url == nil {
+            guard piqae_node_link_anchor() != 0 else {
+                throw PiqaeNativeRuntimeError.libraryUnavailable
+            }
+            dynamicHandle = nil
+            descriptor = piqae_node_linked_abi_descriptor
+            createOperation = piqae_node_linked_create
+            startOperation = piqae_node_linked_start
+            providerOperation = piqae_node_linked_set_host_key_provider
+            stopOperation = piqae_node_linked_stop
+            commandOperation = piqae_node_linked_command
+            destroyOperation = piqae_node_linked_destroy
+            freeOperation = piqae_node_linked_free
+            return
+        }
+        guard let url else { throw PiqaeNativeRuntimeError.libraryUnavailable }
+        let dynamicHandle = dlopen(url.path, RTLD_NOW | RTLD_LOCAL)
         guard let dynamicHandle else { throw PiqaeNativeRuntimeError.libraryUnavailable }
         do {
             descriptor = try Self.symbol(dynamicHandle, "piqae_node_abi_descriptor")

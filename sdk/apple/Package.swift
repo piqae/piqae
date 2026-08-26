@@ -9,8 +9,12 @@ let hasNativeArtifact = FileManager.default.fileExists(
         .appendingPathComponent(nativeArtifactPath).path
 )
 
-var nodeKitDependencies: [Target.Dependency] = ["CPiqaeNodeABI"]
-if hasNativeArtifact { nodeKitDependencies.append("PiqaeNodeNative") }
+var abiDependencies: [Target.Dependency] = []
+var abiSettings: [CSetting] = []
+if hasNativeArtifact {
+    abiDependencies.append("PiqaeNodeNative")
+    abiSettings.append(.define("PIQAE_NODE_HAS_NATIVE_ARTIFACT"))
+}
 
 let package = Package(
     name: "PiqaeNodeKit",
@@ -27,9 +31,11 @@ let package = Package(
     targets: [
         .target(
             name: "CPiqaeNodeABI",
-            publicHeadersPath: "include"
+            dependencies: abiDependencies,
+            publicHeadersPath: "include",
+            cSettings: abiSettings
         ),
-        .target(name: "PiqaeNodeKit", dependencies: nodeKitDependencies),
+        .target(name: "PiqaeNodeKit", dependencies: ["CPiqaeNodeABI"]),
         .target(
             name: "PiqaeNodeKitAirPrint",
             dependencies: ["PiqaeNodeKit"]
@@ -55,6 +61,6 @@ let package = Package(
 
 if hasNativeArtifact {
     package.targets.append(
-        .binaryTarget(name: "PiqaeNodeNative", path: nativeArtifactPath)
+        Target.binaryTarget(name: "PiqaeNodeNative", path: nativeArtifactPath)
     )
 }
