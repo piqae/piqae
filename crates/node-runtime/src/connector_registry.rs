@@ -12,6 +12,7 @@
 )]
 
 use anyhow::{Context, Result, bail};
+use piqae_node_host_api::SecureKeyHandle;
 use piqae_protocol::agent::PrinterGrant;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -97,7 +98,12 @@ pub struct ConnectorRecord {
     pub manage_url: Option<Url>,
     /// Relative to the installation data directory. Never accept an absolute
     /// or parent-traversing path from a downloaded enrolment response.
-    pub device_key_file: PathBuf,
+    #[serde(default)]
+    pub device_key_file: Option<PathBuf>,
+    /// Opaque non-exporting secure-store reference used by embedded hosts.
+    /// Exactly one signing credential representation must be present.
+    #[serde(default)]
+    pub secure_key_handle: Option<SecureKeyHandle>,
     pub enabled: bool,
     /// Durable authorization policy. Older registry documents safely decode as
     /// selected-printer grants rather than widening access.
@@ -120,7 +126,7 @@ struct ConnectorRegistryDocument {
 pub struct ConnectorRuntimePaths {
     pub database: PathBuf,
     pub content: PathBuf,
-    pub device_key: PathBuf,
+    pub device_key: Option<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -190,7 +196,10 @@ impl ConnectorRegistry {
         Ok(ConnectorRuntimePaths {
             database: connector_root.join("agent.sqlite3"),
             content: connector_root.join("content"),
-            device_key: self.root.join(&record.device_key_file),
+            device_key: record
+                .device_key_file
+                .as_ref()
+                .map(|path| self.root.join(path)),
         })
     }
 
@@ -303,16 +312,20 @@ fn validate_record(record: &ConnectorRecord) -> Result<()> {
     {
         bail!("plaintext control-plane URLs are allowed only for loopback development");
     }
-    if record.device_key_file.is_absolute()
-        || record.device_key_file.components().any(|part| {
-            matches!(
-                part,
-                std::path::Component::ParentDir
-                    | std::path::Component::RootDir
-                    | std::path::Component::Prefix(_)
-            )
-        })
-    {
+    if record.device_key_file.is_some() == record.secure_key_handle.is_some() {
+        bail!("connector must have exactly one secure signing credential");
+    }
+    if record.device_key_file.as_ref().is_some_and(|path| {
+        path.is_absolute()
+            || path.components().any(|part| {
+                matches!(
+                    part,
+                    std::path::Component::ParentDir
+                        | std::path::Component::RootDir
+                        | std::path::Component::Prefix(_)
+                )
+            })
+    }) {
         bail!("device key path must remain inside the installation data directory");
     }
     if (record.printer_grant == PrinterGrant::SelectedPrinters
@@ -354,7 +367,8 @@ mod tests {
             environment_id: Some("env_live".into()),
             requesting_service_account_id: Some("svc_example".into()),
             manage_url: Some(Url::parse("https://app.example/manage").unwrap()),
-            device_key_file: format!("connectors/{id}/device.key").into(),
+            device_key_file: Some(format!("connectors/{id}/device.key").into()),
+            secure_key_handle: None,
             enabled: true,
             printer_grant: PrinterGrant::SelectedPrinters,
             allowed_printer_ids: vec!["prn_allowed".into()],
@@ -470,13 +484,42 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut registry = ConnectorRegistry::load(dir.path()).unwrap();
         let mut invalid = record("ncon_escape");
-        invalid.device_key_file = "../device.key".into();
+        invalid.device_key_file = Some("../device.key".into());
         assert!(registry.add(invalid).is_err());
         let mut insecure = record("ncon_http");
         insecure.control_plane_url = Url::parse("http://example.com").unwrap();
         assert!(registry.add(insecure).is_err());
         registry.add(record("ncon_a")).unwrap();
         assert!(registry.add(record("ncon_a")).is_err());
+    }
+
+    #[test]
+    fn embedded_connector_persists_only_an_opaque_secure_key_handle() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut registry = ConnectorRegistry::load(dir.path()).unwrap();
+        let mut connector = record("ncon_embedded");
+        connector.device_key_file = None;
+        connector.secure_key_handle =
+            Some(SecureKeyHandle::new("app/connector-key".into()).unwrap());
+        registry.add(connector).unwrap();
+        drop(registry);
+
+        let restarted = ConnectorRegistry::load(dir.path()).unwrap();
+        let connector = restarted.records.get("ncon_embedded").unwrap();
+        assert!(connector.device_key_file.is_none());
+        assert_eq!(
+            connector.secure_key_handle.as_ref().unwrap().as_str(),
+            "app/connector-key"
+        );
+        assert!(
+            restarted
+                .paths("ncon_embedded")
+                .unwrap()
+                .device_key
+                .is_none()
+        );
+        let serialized = std::fs::read_to_string(dir.path().join("connectors.json")).unwrap();
+        assert!(!serialized.contains("PRIVATE KEY"));
     }
 
     #[test]
@@ -499,7 +542,7 @@ mod tests {
         let mut registry = ConnectorRegistry::load(dir.path()).unwrap();
         let healthy = record("ncon_healthy");
         let mut stale = record("ncon_child");
-        stale.device_key_file = "connectors/keys/stale.key".into();
+        stale.device_key_file = Some("connectors/keys/stale.key".into());
         stale.enabled = false;
         registry.add(healthy.clone()).unwrap();
         registry.add(stale.clone()).unwrap();
@@ -507,13 +550,13 @@ mod tests {
         let mut replacement = stale;
         replacement.enabled = true;
         replacement.agent_id = "agt_child_reauthenticated".into();
-        replacement.device_key_file = "connectors/keys/current.key".into();
+        replacement.device_key_file = Some("connectors/keys/current.key".into());
         replacement.printer_grant = PrinterGrant::AllLocalPrinters;
         replacement.allowed_printer_ids.clear();
         let previous = registry.replace(replacement.clone()).unwrap();
         assert_eq!(
             previous.device_key_file,
-            PathBuf::from("connectors/keys/stale.key")
+            Some(PathBuf::from("connectors/keys/stale.key"))
         );
 
         let restarted = ConnectorRegistry::load(dir.path()).unwrap();

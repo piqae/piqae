@@ -15,6 +15,7 @@ chrono.workspace = true
 fs2 = "0.4.3"
 hex.workspace = true
 piqae-domain.workspace = true
+piqae-agent-client = { path = "../agent-client" }
 piqae-agent-storage = { path = "../agent-storage" }
 piqae-local-ipc = { path = "../local-ipc" }
 piqae-node-host-api = { path = "../node-host-api" }
@@ -33,6 +34,7 @@ uuid.workspace = true
 windows-sys = { version = "0.59.0", features = ["Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
+ed25519-dalek.workspace = true
 tempfile = "3.20.0"
 tokio.workspace = true
 
