@@ -240,7 +240,7 @@ to keep the process alive.
 
 ```console
 swift test --package-path sdk/apple
-PIQAE_REQUIRE_LINKED_RUNTIME_TESTS=1 swift test --package-path sdk/apple
+release/tools/test_apple_node_sdk_linked.sh
 swift test --package-path shells/macos
 xcodebuild -scheme PiqaeNodeKit \
   -destination 'generic/platform=iOS Simulator' \

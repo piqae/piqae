@@ -223,6 +223,8 @@ jobs:
         run: swift test --package-path shells/macos
       - name: Test and build Apple node SDK
         run: release/tools/test_apple_node_sdk.sh
+      - name: Validate the linked Apple node runtime
+        run: release/tools/test_apple_node_sdk_linked.sh
 
   rust-windows:
     name: Rust (windows-latest)
