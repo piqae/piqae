@@ -749,6 +749,25 @@ fn map_observation(row: &sqlx::postgres::PgRow) -> Result<RouteObservation, Stor
     })
 }
 
+fn route_observations_semantically_equal(
+    stored: &RouteObservation,
+    submitted: &RouteObservation,
+) -> bool {
+    if stored.observed_at.timestamp_micros() != submitted.observed_at.timestamp_micros()
+        || stored.fresh_until.timestamp_micros() != submitted.fresh_until.timestamp_micros()
+    {
+        return false;
+    }
+    let mut canonical = stored.clone();
+    // Route plus durable sequence is the idempotency key; the generated row ID
+    // is intentionally not part of retry identity.
+    canonical.id.clone_from(&submitted.id);
+    // PostgreSQL TIMESTAMPTZ canonicalises nanoseconds to microseconds.
+    canonical.observed_at = submitted.observed_at;
+    canonical.fresh_until = submitted.fresh_until;
+    canonical == *submitted
+}
+
 fn map_projection_acknowledgement(
     row: &sqlx::postgres::PgRow,
 ) -> Result<ProjectionAcknowledgement, StorageError> {
@@ -1020,9 +1039,8 @@ impl DestinationTopologyRepository for PostgresStore {
             .map_err(|_| StorageError::InvalidData("observation sequence exceeds bigint".into()))?;
         if let Some(existing) = sqlx::query("SELECT id,route_id,sequence,printer_state,accepting_jobs,state_reasons,total_jobs,connector_jobs,other_piqae_or_external_jobs,unknown_jobs,active_jobs,held_jobs,estimated_busy_seconds,privacy_level,stock_state,observed_at,fresh_until FROM route_observations WHERE workspace_id=$1 AND environment_id=$2 AND route_id=$3 AND sequence=$4")
             .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).bind(&observation.route_id).bind(sequence).fetch_optional(&mut *tx).await? {
-            let mut stored = map_observation(&existing)?;
-            stored.id.clone_from(&observation.id);
-            if stored == *observation {
+            let stored = map_observation(&existing)?;
+            if route_observations_semantically_equal(&stored, observation) {
                 tx.commit().await?;
                 return Ok(());
             }
@@ -2440,9 +2458,7 @@ impl DestinationTopologyRepository for MemoryDestinationTopologyRepository {
                 .iter()
                 .find(|item| item.sequence == observation.sequence)
         }) {
-            let mut existing = existing.clone();
-            existing.id.clone_from(&observation.id);
-            return if existing == *observation {
+            return if route_observations_semantically_equal(existing, observation) {
                 Ok(())
             } else {
                 Err(StorageError::IdempotencyConflict)
@@ -3840,5 +3856,65 @@ mod tests {
             .unwrap();
         assert_eq!(acknowledgements.len(), 1);
         assert_eq!(acknowledgements[0].inventory_revision, 2);
+    }
+
+    #[tokio::test]
+    async fn memory_observation_retries_use_postgres_timestamp_precision() {
+        let repository = MemoryDestinationTopologyRepository::default();
+        let tenant = scope();
+        repository
+            .upsert_destination(tenant, &destination("dst_precision"))
+            .await
+            .unwrap();
+        repository
+            .upsert_route(tenant, &route("route_precision", "dst_precision"))
+            .await
+            .unwrap();
+        let timestamp = |value: &str| {
+            DateTime::parse_from_rfc3339(value)
+                .unwrap()
+                .with_timezone(&Utc)
+        };
+        let observation_at = timestamp("2026-08-26T01:02:03.123456789Z");
+        let mut observation = RouteObservation {
+            id: "obs_precision_first".into(),
+            route_id: "route_precision".into(),
+            sequence: 1,
+            printer_state: "idle".into(),
+            accepting_jobs: Some(true),
+            state_reasons: Vec::new(),
+            total_jobs: 0,
+            connector_jobs: 0,
+            other_piqae_or_external_jobs: 0,
+            unknown_jobs: 0,
+            active_jobs: 0,
+            held_jobs: 0,
+            estimated_busy_seconds: None,
+            privacy_level: "counts_only".into(),
+            stock_state: serde_json::json!({}),
+            observed_at: observation_at,
+            fresh_until: observation_at + chrono::Duration::minutes(1),
+        };
+        repository
+            .record_route_observation(tenant, &observation)
+            .await
+            .unwrap();
+
+        observation.id = "obs_precision_retry".into();
+        observation.observed_at = timestamp("2026-08-26T01:02:03.123456700Z");
+        observation.fresh_until = observation.observed_at + chrono::Duration::minutes(1);
+        repository
+            .record_route_observation(tenant, &observation)
+            .await
+            .unwrap();
+
+        observation.observed_at = timestamp("2026-08-26T01:02:03.123457000Z");
+        observation.fresh_until = observation.observed_at + chrono::Duration::minutes(1);
+        assert!(matches!(
+            repository
+                .record_route_observation(tenant, &observation)
+                .await,
+            Err(StorageError::IdempotencyConflict)
+        ));
     }
 }

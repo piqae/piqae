@@ -4,7 +4,7 @@
     reason = "the PostgreSQL evidence test keeps one disposable-schema lifecycle auditable"
 )]
 
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Duration, Utc};
 use piqae_domain::{EnvironmentId, WorkspaceId};
 use piqae_storage_postgres::{
     PostgresStore, StorageError,
@@ -416,6 +416,9 @@ async fn postgres_topology_is_tenant_isolated_and_fences_delivery() {
     let restored_state:String=sqlx::query_scalar("SELECT state FROM physical_destinations WHERE workspace_id=$1 AND environment_id=$2 AND id='destination_source'").bind(first.workspace_id.to_string()).bind(first.environment_id.to_string()).fetch_one(store.pool()).await.expect("restored source");
     assert_eq!(restored_state, "available");
 
+    let observed_at = DateTime::parse_from_rfc3339("2026-08-26T01:02:03.123456789Z")
+        .expect("valid nanosecond timestamp")
+        .with_timezone(&Utc);
     let observation = RouteObservation {
         id: "observation_1".into(),
         route_id: "route_first".into(),
@@ -432,8 +435,8 @@ async fn postgres_topology_is_tenant_isolated_and_fences_delivery() {
         estimated_busy_seconds: None,
         privacy_level: "counts_only".into(),
         stock_state: serde_json::json!({"reported":false}),
-        observed_at: Utc::now(),
-        fresh_until: Utc::now() + Duration::seconds(20),
+        observed_at,
+        fresh_until: observed_at + Duration::seconds(20),
     };
     store
         .record_route_observation(first, &observation)

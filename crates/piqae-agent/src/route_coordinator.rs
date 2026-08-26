@@ -814,6 +814,10 @@ fn replace_file_atomically(staged: &Path, destination: &Path) -> Result<()> {
 }
 
 #[cfg(windows)]
+#[allow(
+    unsafe_code,
+    reason = "isolated, documented MoveFileExW call required for atomic Windows journal replacement"
+)]
 fn replace_file_atomically(staged: &Path, destination: &Path) -> Result<()> {
     use std::os::windows::ffi::OsStrExt as _;
     use windows_sys::Win32::Storage::FileSystem::{
