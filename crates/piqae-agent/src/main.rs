@@ -20,7 +20,7 @@ use clap::{Parser, ValueEnum};
 use futures::TryStreamExt;
 use hkdf::Hkdf;
 use p256::{PublicKey, SecretKey, ecdh::diffie_hellman, pkcs8::EncodePublicKey as _};
-use piqae_agent_client::{AgentClient, ClientError, DeviceIdentity};
+use piqae_agent_client::{AgentClient, ClientError, DeviceIdentity, DeviceRequestSigner};
 use piqae_agent_core::{
     AgentEngine, ContentStore, Executor, ExecutorFailure, FakeExecutor, LocalSubmission,
     NativeAcceptance, NativeJobReference, SystemClock,
@@ -200,10 +200,10 @@ struct Arguments {
     enrolment_name: Option<String>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct CloudConfiguration {
     client: AgentClient,
-    identity: DeviceIdentity,
+    identity: Arc<dyn DeviceRequestSigner>,
     agent_id: AgentId,
     content_encryption_keys: Arc<content_key_store::ContentKeyring>,
     allowed_printer_ids: Option<std::collections::BTreeSet<String>>,
@@ -3744,7 +3744,7 @@ fn cloud_configuration(arguments: &Arguments) -> Result<CloudConfiguration> {
     )?;
     Ok(CloudConfiguration {
         client: AgentClient::new(base_url)?,
-        identity: DeviceIdentity::from_secret_bytes(agent_id, &secret),
+        identity: Arc::new(DeviceIdentity::from_secret_bytes(agent_id, &secret)),
         agent_id,
         content_encryption_keys: Arc::new(content_encryption_keys),
         allowed_printer_ids: None,
@@ -3778,7 +3778,7 @@ fn cloud_configuration_from_connector(
         content_key_store::load_or_create(&encryption_path, &record.agent_id)?;
     Ok(CloudConfiguration {
         client: AgentClient::new(record.control_plane_url.clone())?,
-        identity: DeviceIdentity::from_secret_bytes(agent_id, &secret),
+        identity: Arc::new(DeviceIdentity::from_secret_bytes(agent_id, &secret)),
         agent_id,
         content_encryption_keys: Arc::new(content_encryption_keys),
         allowed_printer_ids: connector_allowed_printers(record),
@@ -3914,7 +3914,7 @@ async fn run_cloud_sync_loop(
         match cloud
             .client
             .register_content_encryption_key(
-                &cloud.identity,
+                cloud.identity.as_ref(),
                 active_content_key_id,
                 &public_key_spki,
             )
@@ -3973,7 +3973,7 @@ async fn run_cloud_sync_loop(
         if !submitted_printer_inventory && refresh_printers {
             printer_inventory_dirty.store(true, Ordering::Release);
         }
-        let delay = match cloud.client.sync(&cloud.identity, &request).await {
+        let delay = match cloud.client.sync(cloud.identity.as_ref(), &request).await {
             Ok(response) => {
                 let projection_acknowledged = inventory_projection_confirmed(
                     response.inventory_projection_acknowledgement_supported,
@@ -4423,7 +4423,7 @@ async fn accept_offer(
         cloud
             .client
             .release_lease(
-                &cloud.identity,
+                cloud.identity.as_ref(),
                 offer.job.id,
                 &AgentReleaseLeaseRequest {
                     lease_id: offer.lease_id,
@@ -4442,7 +4442,7 @@ async fn accept_offer(
         cloud
             .client
             .release_lease(
-                &cloud.identity,
+                cloud.identity.as_ref(),
                 offer.job.id,
                 &AgentReleaseLeaseRequest {
                     lease_id: offer.lease_id,
@@ -4475,7 +4475,7 @@ async fn accept_offer(
             tokio::time::timeout(
                 LEASE_RENEWAL_REQUEST_TIMEOUT,
                 cloud.client.renew_lease(
-                    &cloud.identity,
+                    cloud.identity.as_ref(),
                     job_id,
                     &AgentRenewLeaseRequest {
                         lease_id,
@@ -4518,7 +4518,7 @@ async fn accept_offer(
             let _ = cloud
                 .client
                 .release_lease(
-                    &cloud.identity,
+                    cloud.identity.as_ref(),
                     job_id,
                     &AgentReleaseLeaseRequest {
                         lease_id,
@@ -4819,7 +4819,7 @@ async fn confirm_cloud_accept(
     cloud
         .client
         .accept_job(
-            &cloud.identity,
+            cloud.identity.as_ref(),
             job_id,
             &AgentAcceptJobRequest {
                 lease_id: intent.lease_id.parse()?,
@@ -4919,7 +4919,7 @@ async fn materialize_descriptor(
             }
             let response = cloud
                 .client
-                .download_content(&cloud.identity, job_id, lease_id, lease_token)
+                .download_content(cloud.identity.as_ref(), job_id, lease_id, lease_token)
                 .await?;
             if response
                 .content_length()
@@ -4983,7 +4983,7 @@ async fn materialize_descriptor(
                 .context("encrypted job recipient key is unavailable")?;
             let response = cloud
                 .client
-                .download_content(&cloud.identity, job_id, lease_id, lease_token)
+                .download_content(cloud.identity.as_ref(), job_id, lease_id, lease_token)
                 .await?;
             if response
                 .content_length()
@@ -5204,7 +5204,7 @@ async fn download_document_resource_bounded(
     let response = cloud
         .client
         .download_document_resource(
-            &cloud.identity,
+            cloud.identity.as_ref(),
             job_id,
             lease_id,
             lease_token,
@@ -6855,7 +6855,7 @@ mod tests {
         let cloud = CloudConfiguration {
             client: AgentClient::new(Url::parse(&format!("http://{address}/")).expect("base URL"))
                 .expect("client"),
-            identity: DeviceIdentity::generate(agent_id),
+            identity: Arc::new(DeviceIdentity::generate(agent_id)),
             agent_id,
             content_encryption_keys: Arc::new(content_key_store::ContentKeyring::from_active(
                 "cek_test".into(),

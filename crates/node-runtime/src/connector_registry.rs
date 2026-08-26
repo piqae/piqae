@@ -133,6 +133,8 @@ pub struct ConnectorRuntimePaths {
 pub struct ConnectorRegistry {
     root: PathBuf,
     records: BTreeMap<String, ConnectorRecord>,
+    #[cfg(test)]
+    fail_next_persist: bool,
 }
 
 impl ConnectorRegistry {
@@ -170,7 +172,12 @@ impl ConnectorRegistry {
                 bail!("connector registry contains a duplicate connector id");
             }
         }
-        Ok(Self { root, records })
+        Ok(Self {
+            root,
+            records,
+            #[cfg(test)]
+            fail_next_persist: false,
+        })
     }
 
     pub fn enabled(&self) -> impl Iterator<Item = &ConnectorRecord> {
@@ -217,8 +224,11 @@ impl ConnectorRegistry {
         if self.records.contains_key(&record.connector_id) {
             bail!("connector already exists");
         }
-        self.records.insert(record.connector_id.clone(), record);
-        self.persist()
+        let mut candidate = self.records.clone();
+        candidate.insert(record.connector_id.clone(), record);
+        self.persist_records(&candidate)?;
+        self.records = candidate;
+        Ok(())
     }
 
     /// Revocation is fail-closed and durable before the caller stops its task.
@@ -227,14 +237,18 @@ impl ConnectorRegistry {
         reason = "called by the native consent IPC in the next integration slice"
     )]
     pub fn revoke(&mut self, connector_id: &str) -> Result<bool> {
-        let Some(record) = self.records.get_mut(connector_id) else {
+        let Some(record) = self.records.get(connector_id) else {
             return Ok(false);
         };
         if !record.enabled {
             return Ok(false);
         }
-        record.enabled = false;
-        self.persist()?;
+        let mut candidate = self.records.clone();
+        if let Some(record) = candidate.get_mut(connector_id) {
+            record.enabled = false;
+        }
+        self.persist_records(&candidate)?;
+        self.records = candidate;
         Ok(true)
     }
 
@@ -251,19 +265,26 @@ impl ConnectorRegistry {
             .get(&record.connector_id)
             .cloned()
             .context("connector was not found")?;
-        self.records.insert(record.connector_id.clone(), record);
-        if let Err(error) = self.persist() {
-            self.records.insert(previous.connector_id.clone(), previous);
-            return Err(error);
-        }
+        let mut candidate = self.records.clone();
+        candidate.insert(record.connector_id.clone(), record);
+        self.persist_records(&candidate)?;
+        self.records = candidate;
         Ok(previous)
     }
 
-    fn persist(&self) -> Result<()> {
+    #[allow(
+        clippy::needless_pass_by_ref_mut,
+        reason = "test fault injection is consumed atomically before the replacement"
+    )]
+    fn persist_records(&mut self, records: &BTreeMap<String, ConnectorRecord>) -> Result<()> {
+        #[cfg(test)]
+        if std::mem::take(&mut self.fail_next_persist) {
+            bail!("injected connector registry replacement failure");
+        }
         let path = self.root.join("connectors.json");
         let document = ConnectorRegistryDocument {
             version: REGISTRY_VERSION,
-            connectors: self.records.values().cloned().collect(),
+            connectors: records.values().cloned().collect(),
         };
         let bytes = serde_json::to_vec_pretty(&document)?;
         crate::durable_file::replace_json(&path, &bytes)?;
@@ -563,6 +584,40 @@ mod tests {
         assert_eq!(restarted.records["ncon_healthy"], healthy);
         assert_eq!(restarted.records["ncon_child"], replacement);
         assert_eq!(restarted.enabled().count(), 2);
+    }
+
+    #[test]
+    fn failed_replacements_never_change_live_or_restarted_registry_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut registry = ConnectorRegistry::load(dir.path()).unwrap();
+
+        registry.fail_next_persist = true;
+        assert!(registry.add(record("ncon_add")).is_err());
+        assert!(!registry.contains("ncon_add"));
+        assert!(
+            !ConnectorRegistry::load(dir.path())
+                .unwrap()
+                .contains("ncon_add")
+        );
+
+        registry.add(record("ncon_existing")).unwrap();
+        registry.fail_next_persist = true;
+        assert!(registry.revoke("ncon_existing").is_err());
+        assert!(registry.records["ncon_existing"].enabled);
+        assert!(ConnectorRegistry::load(dir.path()).unwrap().records["ncon_existing"].enabled);
+
+        let mut replacement = record("ncon_existing");
+        replacement.agent_id = "agt_rotated".into();
+        registry.fail_next_persist = true;
+        assert!(registry.replace(replacement).is_err());
+        assert_eq!(
+            registry.records["ncon_existing"].agent_id,
+            "agt_ncon_existing"
+        );
+        assert_eq!(
+            ConnectorRegistry::load(dir.path()).unwrap().records["ncon_existing"].agent_id,
+            "agt_ncon_existing"
+        );
     }
 
     #[test]
