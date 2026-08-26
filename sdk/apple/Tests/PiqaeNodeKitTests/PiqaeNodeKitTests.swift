@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import XCTest
 @testable import PiqaeNodeKit
@@ -20,6 +21,8 @@ final class PiqaeNodeKitTests: XCTestCase {
             ),
             keyStore: PiqaeFixedHostKeyStore()
         )
+        let workSignals = LockedCounter()
+        try await runtime.setWorkAvailableHandler { workSignals.increment() }
         do {
             try await runtime.start()
         } catch PiqaeNativeRuntimeError.libraryUnavailable {
@@ -35,6 +38,7 @@ final class PiqaeNodeKitTests: XCTestCase {
         )
         XCTAssertTrue(opaque.hasPrefix("pid_"))
         try await runtime.stop()
+        XCTAssertEqual(workSignals.value, 0)
     }
 
     func testNativeRuntimeBindsLifecycleAndOpaqueEvidenceWhenArtifactIsProvided() async throws {
@@ -58,6 +62,7 @@ final class PiqaeNodeKitTests: XCTestCase {
             ),
             keyStore: PiqaeFixedHostKeyStore()
         )
+        try await runtime.setWorkAvailableHandler {}
         addTeardownBlock {
             try await runtime.stop()
             try? FileManager.default.removeItem(at: stateDirectory)
@@ -304,7 +309,7 @@ final class PiqaeNodeKitTests: XCTestCase {
         )
         let status = try await node.jobs.status(queued.jobID)
         let count = await adapter.submissionCount()
-        XCTAssertEqual(result, .reconciledWithoutLeasing)
+        XCTAssertEqual(result, .reconciled)
         XCTAssertEqual(status.state, "completed_reported")
         XCTAssertEqual(count, 1)
     }
@@ -752,9 +757,136 @@ final class PiqaeNodeKitTests: XCTestCase {
             hint,
             context: .init(phase: .background, source: .backgroundPush, remainingSeconds: 30)
         )
-        XCTAssertEqual(result, .reconciledWithoutLeasing)
+        XCTAssertEqual(result, .reconciled)
         let submissionCount = await adapter.submissionCount()
         XCTAssertEqual(submissionCount, 0)
+    }
+
+    func testRemoteQueueActivationDrainsWithoutManualRefresh() async throws {
+        let fixture = try automaticDrainFixture("remote-activation")
+        defer { try? FileManager.default.removeItem(at: fixture.contentURL) }
+        try await fixture.node.start()
+        defer { Task { await fixture.node.stop() } }
+
+        await fixture.runtime.activateRemoteOperation(fixture.operation)
+
+        let submitted = await eventually { await fixture.adapter.submissionCount() == 1 }
+        let submissionCount = await fixture.adapter.submissionCount()
+        XCTAssertTrue(submitted)
+        XCTAssertEqual(submissionCount, 1)
+    }
+
+    func testDuplicateWorkSignalsCoalesceIntoOneAdapterDrain() async throws {
+        let fixture = try automaticDrainFixture("duplicate-signals")
+        defer { try? FileManager.default.removeItem(at: fixture.contentURL) }
+        try await fixture.node.start()
+        defer { Task { await fixture.node.stop() } }
+        await fixture.runtime.setNextOperationDelayNanoseconds(30_000_000)
+
+        await fixture.runtime.activateRemoteOperation(
+            fixture.operation,
+            notificationCount: 20
+        )
+
+        let submitted = await eventually { await fixture.adapter.submissionCount() == 1 }
+        let submissionCount = await fixture.adapter.submissionCount()
+        let maximumConcurrentCalls = await fixture.runtime.maximumConcurrentNextOperationCalls()
+        XCTAssertTrue(submitted)
+        XCTAssertEqual(submissionCount, 1)
+        XCTAssertEqual(maximumConcurrentCalls, 1)
+    }
+
+    func testBackgroundWorkDefersUntilAnExplicitBudgetIsAvailable() async throws {
+        let fixture = try automaticDrainFixture(
+            "background-budget",
+            availability: .backgroundOpportunistic
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.contentURL) }
+        try await fixture.node.start()
+        defer { Task { await fixture.node.stop() } }
+        await fixture.node.updateExecutionContext(
+            .init(phase: .background, source: .backgroundPush, remainingSeconds: 3)
+        )
+
+        await fixture.runtime.activateRemoteOperation(fixture.operation)
+        try await Task.sleep(nanoseconds: 50_000_000)
+        let shortBudgetSubmissionCount = await fixture.adapter.submissionCount()
+        XCTAssertEqual(shortBudgetSubmissionCount, 0)
+
+        await fixture.node.updateExecutionContext(
+            .init(phase: .background, source: .backgroundPush, remainingSeconds: 30)
+        )
+        let submittedWithBudget = await eventually {
+            await fixture.adapter.submissionCount() == 1
+        }
+        XCTAssertTrue(submittedWithBudget)
+    }
+
+    func testForegroundWakeAndNetworkRestorationReconcilePendingWork() async throws {
+        let fixture = try automaticDrainFixture("lifecycle-reconcile")
+        defer { try? FileManager.default.removeItem(at: fixture.contentURL) }
+        try await fixture.node.start()
+        defer { Task { await fixture.node.stop() } }
+        await fixture.node.updateExecutionContext(
+            .init(phase: .background, source: .foreground)
+        )
+
+        await fixture.runtime.activateRemoteOperation(fixture.operation)
+        try await Task.sleep(nanoseconds: 30_000_000)
+        let backgroundSubmissionCount = await fixture.adapter.submissionCount()
+        XCTAssertEqual(backgroundSubmissionCount, 0)
+        try await fixture.node.reportHostLifecycle(.enteredForeground)
+        let foregroundSubmitted = await eventually {
+            await fixture.adapter.submissionCount() == 1
+        }
+        XCTAssertTrue(foregroundSubmitted)
+
+        let networkOperation = try automaticOperation(
+            "network-restored",
+            contentURL: fixture.contentURL
+        )
+        await fixture.runtime.activateRemoteOperation(networkOperation, notificationCount: 0)
+        try await fixture.node.reportHostLifecycle(.networkAvailable)
+        let networkSubmitted = await eventually {
+            await fixture.adapter.submissionCount() == 2
+        }
+        XCTAssertTrue(networkSubmitted)
+
+        let wakeOperation = try automaticOperation(
+            "wake-restored",
+            contentURL: fixture.contentURL
+        )
+        try await fixture.node.reportHostLifecycle(.sleeping)
+        await fixture.runtime.activateRemoteOperation(wakeOperation, notificationCount: 0)
+        try await fixture.node.reportHostLifecycle(.woke)
+        let wakeSubmitted = await eventually { await fixture.adapter.submissionCount() == 3 }
+        XCTAssertTrue(wakeSubmitted)
+    }
+
+    func testStopCancelsAndJoinsAutomaticDrainBeforeReleasingHandler() async throws {
+        let fixture = try automaticDrainFixture("stop-join")
+        defer { try? FileManager.default.removeItem(at: fixture.contentURL) }
+        try await fixture.node.start()
+        await fixture.runtime.setNextOperationDelayNanoseconds(60_000_000_000)
+        let callsBeforeActivation = await fixture.runtime.nextOperationCallCount()
+        await fixture.runtime.activateRemoteOperation(fixture.operation)
+        let drainStarted = await eventually {
+            await fixture.runtime.nextOperationCallCount() > callsBeforeActivation
+        }
+        XCTAssertTrue(drainStarted)
+
+        await fixture.node.stop()
+
+        let hasHandler = await fixture.runtime.hasWorkAvailableHandler()
+        let stopCount = await fixture.runtime.stopCount
+        let submissionCount = await fixture.adapter.submissionCount()
+        XCTAssertFalse(hasHandler)
+        XCTAssertEqual(stopCount, 1)
+        XCTAssertEqual(submissionCount, 0)
+        await fixture.runtime.notifyWorkAvailable(count: 3)
+        try await Task.sleep(nanoseconds: 20_000_000)
+        let submissionCountAfterStop = await fixture.adapter.submissionCount()
+        XCTAssertEqual(submissionCountAfterStop, 0)
     }
 
     func testProcessRegistryPreventsTwoEmbeddedOwners() async throws {
@@ -794,6 +926,78 @@ final class PiqaeNodeKitTests: XCTestCase {
             ),
             stateDirectory
         )
+    }
+
+    private func automaticDrainFixture(
+        _ label: String,
+        availability: PiqaeNodeAvailabilityClass = .continuousWhileAwake
+    ) throws -> (
+        node: PiqaeNode,
+        runtime: PiqaeFakeEmbeddedRuntime,
+        adapter: PiqaeFakePrinterAdapter,
+        operation: PiqaeRuntimeAdapterOperation,
+        contentURL: URL
+    ) {
+        let contentURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("piqae-nodekit-\(UUID().uuidString).pdf")
+        try Data("%PDF-piqae-fake".utf8).write(to: contentURL, options: .atomic)
+        let runtime = PiqaeFakeEmbeddedRuntime()
+        let adapter = PiqaeFakePrinterAdapter(
+            printers: [PiqaeFakePrinterAdapter.printer()]
+        )
+        let node = PiqaeNode(
+            .localOnly(
+                startupMode: .embedded,
+                availability: availability,
+                identityStore: PiqaeMemoryInstallationIdentityStore(
+                    id: .init(rawValue: "ins_auto_\(label)")
+                ),
+                embeddedRuntime: runtime,
+                printerAdapters: [adapter]
+            )
+        )
+        return (
+            node,
+            runtime,
+            adapter,
+            try automaticOperation(label, contentURL: contentURL),
+            contentURL
+        )
+    }
+
+    private func automaticOperation(
+        _ label: String,
+        contentURL: URL
+    ) throws -> PiqaeRuntimeAdapterOperation {
+        let content = try Data(contentsOf: contentURL)
+        let digest = SHA256.hash(data: content).map { String(format: "%02x", $0) }.joined()
+        return PiqaeRuntimeAdapterOperation(
+            operationID: "op_\(label)",
+            adapterID: "fake.printer",
+            jobID: "job_\(label)",
+            idempotencyKey: "idem-\(label)",
+            fence: "fence_\(label)",
+            deadlineUnixMilliseconds: Int64(Date().addingTimeInterval(60).timeIntervalSince1970 * 1_000),
+            printerID: "prn_fake",
+            printerNativeID: "virtual://prn_fake",
+            title: "Automatic drain \(label)",
+            contentPath: contentURL.path,
+            contentKind: "pdf",
+            contentSHA256: digest,
+            optionsJSON: #"{"intent":{"copies":1}}"#,
+            phase: .claimed
+        )
+    }
+
+    private func eventually(
+        attempts: Int = 100,
+        condition: @escaping @Sendable () async -> Bool
+    ) async -> Bool {
+        for _ in 0..<attempts {
+            if await condition() { return true }
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        return false
     }
 
     private func requireLinkedRuntime() throws {
@@ -904,5 +1108,16 @@ private extension XCTestCase {
         } catch {
             handler(error)
         }
+    }
+}
+
+private final class LockedCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedValue = 0
+
+    var value: Int { lock.withLock { storedValue } }
+
+    func increment() {
+        lock.withLock { storedValue += 1 }
     }
 }

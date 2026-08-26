@@ -18,6 +18,12 @@ public actor PiqaeFakeEmbeddedRuntime: PiqaeEmbeddedNodeRuntime {
     private let failsToStart: Bool
     private let failsToConnect: Bool
     private let connector: PiqaeRuntimeConnectorSnapshot?
+    private var nextOperationDelayNanoseconds: UInt64
+    private var workAvailableHandler: (@Sendable () -> Void)?
+    private var operationsByAdapter: [String: [PiqaeRuntimeAdapterOperation]] = [:]
+    private var nextOperationCallCountValue = 0
+    private var activeNextOperationCalls = 0
+    private var maximumConcurrentNextOperationCallsValue = 0
     public private(set) var startCount = 0
     public private(set) var stopCount = 0
     public private(set) var connectCount = 0
@@ -26,11 +32,19 @@ public actor PiqaeFakeEmbeddedRuntime: PiqaeEmbeddedNodeRuntime {
     public init(
         failsToStart: Bool = false,
         failsToConnect: Bool = false,
-        connector: PiqaeRuntimeConnectorSnapshot? = nil
+        connector: PiqaeRuntimeConnectorSnapshot? = nil,
+        nextOperationDelayNanoseconds: UInt64 = 0
     ) {
         self.failsToStart = failsToStart
         self.failsToConnect = failsToConnect
         self.connector = connector
+        self.nextOperationDelayNanoseconds = nextOperationDelayNanoseconds
+    }
+
+    public func setWorkAvailableHandler(
+        _ handler: @escaping @Sendable () -> Void
+    ) async throws {
+        workAvailableHandler = handler
     }
 
     public func start() async throws {
@@ -38,11 +52,94 @@ public actor PiqaeFakeEmbeddedRuntime: PiqaeEmbeddedNodeRuntime {
         if failsToStart { throw StartFailure.requested }
     }
 
-    public func stop() async throws { stopCount += 1 }
+    public func stop() async throws {
+        stopCount += 1
+        workAvailableHandler = nil
+    }
 
     public func report(_ event: PiqaeHostLifecycleEvent) async throws {
         lifecycleEvents.append(event)
     }
+
+    public func registerAdapter(_ registration: PiqaeRuntimeAdapterRegistration) async throws {}
+
+    public func observePrinterInventory(
+        adapterID: String,
+        printers: [PiqaeRuntimePrinterObservation]
+    ) async throws -> [PiqaeRuntimePrinterSnapshot] {
+        printers.map { printer in
+            PiqaeRuntimePrinterSnapshot(
+                printerID: printer.nativeID.replacingOccurrences(of: "virtual://", with: ""),
+                adapterID: adapterID,
+                nativeID: printer.nativeID,
+                name: printer.name,
+                state: printer.state,
+                observedUnixMilliseconds: 1_700_000_000_000
+            )
+        }
+    }
+
+    public func nextOperation(adapterID: String) async throws -> PiqaeRuntimeAdapterOperation? {
+        nextOperationCallCountValue += 1
+        activeNextOperationCalls += 1
+        maximumConcurrentNextOperationCallsValue = max(
+            maximumConcurrentNextOperationCallsValue,
+            activeNextOperationCalls
+        )
+        defer { activeNextOperationCalls -= 1 }
+        if nextOperationDelayNanoseconds > 0 {
+            try await Task.sleep(nanoseconds: nextOperationDelayNanoseconds)
+        }
+        return operationsByAdapter[adapterID]?.first
+    }
+
+    public func beginHandoff(
+        _ operation: PiqaeRuntimeAdapterOperation
+    ) async throws -> PiqaeRuntimeAdapterOperation {
+        copy(operation, phase: .handoffStarted, nativeJobID: nil)
+    }
+
+    public func complete(
+        _ operation: PiqaeRuntimeAdapterOperation,
+        outcome: PiqaeRuntimeAdapterOutcome
+    ) async throws -> PiqaeRuntimeAdapterAcknowledgement {
+        operationsByAdapter[operation.adapterID]?.removeAll {
+            $0.operationID == operation.operationID
+        }
+        return PiqaeRuntimeAdapterAcknowledgement(
+            operationID: operation.operationID,
+            jobID: operation.jobID,
+            state: "completed_reported"
+        )
+    }
+
+    /// Adds durable work as if it arrived from a cloud connector. Tests may
+    /// deliberately issue duplicate notifications to verify host coalescing.
+    public func activateRemoteOperation(
+        _ operation: PiqaeRuntimeAdapterOperation,
+        notificationCount: Int = 1
+    ) {
+        operationsByAdapter[operation.adapterID, default: []].append(operation)
+        guard let workAvailableHandler else { return }
+        for _ in 0..<max(0, notificationCount) { workAvailableHandler() }
+    }
+
+    public func notifyWorkAvailable(count: Int = 1) {
+        guard let workAvailableHandler else { return }
+        for _ in 0..<max(0, count) { workAvailableHandler() }
+    }
+
+    public func setNextOperationDelayNanoseconds(_ value: UInt64) {
+        nextOperationDelayNanoseconds = value
+    }
+
+    public func nextOperationCallCount() -> Int { nextOperationCallCountValue }
+
+    public func maximumConcurrentNextOperationCalls() -> Int {
+        maximumConcurrentNextOperationCallsValue
+    }
+
+    public func hasWorkAvailableHandler() -> Bool { workAvailableHandler != nil }
 
     public func connectInvitation(_ request: PiqaeEnrollmentRequest) async throws
         -> PiqaeRuntimeConnectorSnapshot
@@ -53,6 +150,30 @@ public actor PiqaeFakeEmbeddedRuntime: PiqaeEmbeddedNodeRuntime {
             throw PiqaeNodeError.unsupportedOperation("No fake connector was configured.")
         }
         return connector
+    }
+
+    private func copy(
+        _ operation: PiqaeRuntimeAdapterOperation,
+        phase: PiqaeRuntimeAdapterOperationPhase,
+        nativeJobID: String?
+    ) -> PiqaeRuntimeAdapterOperation {
+        PiqaeRuntimeAdapterOperation(
+            operationID: operation.operationID,
+            adapterID: operation.adapterID,
+            jobID: operation.jobID,
+            idempotencyKey: operation.idempotencyKey,
+            fence: operation.fence,
+            deadlineUnixMilliseconds: operation.deadlineUnixMilliseconds,
+            printerID: operation.printerID,
+            printerNativeID: operation.printerNativeID,
+            title: operation.title,
+            contentPath: operation.contentPath,
+            contentKind: operation.contentKind,
+            contentSHA256: operation.contentSHA256,
+            optionsJSON: operation.optionsJSON,
+            phase: phase,
+            nativeJobID: nativeJobID
+        )
     }
 }
 

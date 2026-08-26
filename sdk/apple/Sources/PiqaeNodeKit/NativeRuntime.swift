@@ -58,6 +58,8 @@ public actor PiqaeNativeRuntime: PiqaeEmbeddedNodeRuntime, PiqaeOpaqueIdentityPr
     private var handle: UInt64?
     private var keyContext: PiqaeHostKeyCallbackContext?
     private var connectorKeyContext: PiqaeConnectorKeyCallbackContext?
+    private var workAvailableHandler: (@Sendable () -> Void)?
+    private var workAvailableContext: PiqaeWorkAvailableCallbackContext?
 
     public init(
         configuration: PiqaeNativeRuntimeConfiguration,
@@ -111,11 +113,22 @@ public actor PiqaeNativeRuntime: PiqaeEmbeddedNodeRuntime, PiqaeOpaqueIdentityPr
             _ = try Self.unwrap(
                 library.setConnectorKeyProvider(createdData.handle, connectorProvider)
             ) as HandleData
+            let workContext = PiqaeWorkAvailableCallbackContext(
+                handler: workAvailableHandler ?? {}
+            )
+            let workProvider = PiqaeWorkAvailableProvider(
+                context: Unmanaged.passUnretained(workContext).toOpaque(),
+                notify: piqaeAppleWorkAvailable
+            )
+            _ = try Self.unwrap(
+                library.setWorkAvailableProvider(createdData.handle, workProvider)
+            ) as HandleData
             _ = try Self.unwrap(library.start(createdData.handle)) as NativeSnapshot
             self.library = library
             handle = createdData.handle
             self.keyContext = keyContext
             connectorKeyContext = connectorContext
+            workAvailableContext = workContext
         } catch {
             _ = try? Self.unwrap(library.destroy(createdData.handle)) as DestroyData
             throw error
@@ -141,9 +154,22 @@ public actor PiqaeNativeRuntime: PiqaeEmbeddedNodeRuntime, PiqaeOpaqueIdentityPr
         self.handle = nil
         keyContext = nil
         connectorKeyContext = nil
+        workAvailableContext = nil
         self.library = nil
         if let destroyError { throw destroyError }
         if let stopError { throw stopError }
+    }
+
+    public func setWorkAvailableHandler(
+        _ handler: @escaping @Sendable () -> Void
+    ) async throws {
+        guard handle == nil else {
+            throw PiqaeNativeRuntimeError.rejected(
+                code: "runtime_started",
+                message: "The work-available handler must be installed before start."
+            )
+        }
+        workAvailableHandler = handler
     }
 
     public func report(_ event: PiqaeHostLifecycleEvent) async throws {
@@ -434,6 +460,22 @@ public final class PiqaeKeychainHostKeyStore: @unchecked Sendable, PiqaeHostKeyS
 private final class PiqaeHostKeyCallbackContext: @unchecked Sendable {
     let key: SymmetricKey
     init(key: Data) { self.key = SymmetricKey(data: key) }
+}
+
+private final class PiqaeWorkAvailableCallbackContext: @unchecked Sendable {
+    private let handler: @Sendable () -> Void
+
+    init(handler: @escaping @Sendable () -> Void) {
+        self.handler = handler
+    }
+
+    func notify() { handler() }
+}
+
+private let piqaeAppleWorkAvailable: PiqaeWorkAvailableCallback = { context in
+    guard let context else { return }
+    Unmanaged<PiqaeWorkAvailableCallbackContext>
+        .fromOpaque(context).takeUnretainedValue().notify()
 }
 
 private let piqaeAppleHMACSHA256: PiqaeHmacSha256Callback = {
@@ -739,6 +781,9 @@ private final class PiqaeNativeLibrary: @unchecked Sendable {
     private typealias ConnectorProviderOperation = @convention(c) (
         UInt64, PiqaeConnectorKeyProvider
     ) -> PiqaeBuffer
+    private typealias WorkAvailableProviderOperation = @convention(c) (
+        UInt64, PiqaeWorkAvailableProvider
+    ) -> PiqaeBuffer
     private typealias CommandOperation = @convention(c) (
         UInt64, UnsafePointer<UInt8>?, Int
     ) -> PiqaeBuffer
@@ -750,6 +795,7 @@ private final class PiqaeNativeLibrary: @unchecked Sendable {
     private let startOperation: HandleOperation
     private let providerOperation: ProviderOperation
     private let connectorProviderOperation: ConnectorProviderOperation
+    private let workAvailableProviderOperation: WorkAvailableProviderOperation
     private let stopOperation: HandleOperation
     private let commandOperation: CommandOperation
     private let destroyOperation: HandleOperation
@@ -766,6 +812,7 @@ private final class PiqaeNativeLibrary: @unchecked Sendable {
             startOperation = piqae_node_linked_start
             providerOperation = piqae_node_linked_set_host_key_provider
             connectorProviderOperation = piqae_node_linked_set_connector_key_provider
+            workAvailableProviderOperation = piqae_node_linked_set_work_available_provider
             stopOperation = piqae_node_linked_stop
             commandOperation = piqae_node_linked_command
             destroyOperation = piqae_node_linked_destroy
@@ -782,6 +829,9 @@ private final class PiqaeNativeLibrary: @unchecked Sendable {
             providerOperation = try Self.symbol(dynamicHandle, "piqae_node_set_host_key_provider")
             connectorProviderOperation = try Self.symbol(
                 dynamicHandle, "piqae_node_set_connector_key_provider"
+            )
+            workAvailableProviderOperation = try Self.symbol(
+                dynamicHandle, "piqae_node_set_work_available_provider"
             )
             stopOperation = try Self.symbol(dynamicHandle, "piqae_node_stop")
             commandOperation = try Self.symbol(dynamicHandle, "piqae_node_command")
@@ -804,6 +854,12 @@ private final class PiqaeNativeLibrary: @unchecked Sendable {
     }
     func setConnectorKeyProvider(_ handle: UInt64, _ provider: PiqaeConnectorKeyProvider) -> Data {
         read(connectorProviderOperation(handle, provider))
+    }
+    func setWorkAvailableProvider(
+        _ handle: UInt64,
+        _ provider: PiqaeWorkAvailableProvider
+    ) -> Data {
+        read(workAvailableProviderOperation(handle, provider))
     }
     func stop(_ handle: UInt64) -> Data { read(stopOperation(handle)) }
     func command(_ handle: UInt64, _ data: Data) -> Data {

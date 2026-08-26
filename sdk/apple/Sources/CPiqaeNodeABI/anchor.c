@@ -57,6 +57,17 @@ PiqaeBuffer piqae_node_linked_set_connector_key_provider(
 #endif
 }
 
+PiqaeBuffer piqae_node_linked_set_work_available_provider(
+    uint64_t handle, PiqaeWorkAvailableProvider provider) {
+#if PIQAE_NODE_HAS_NATIVE_ARTIFACT
+  return piqae_node_set_work_available_provider(handle, provider);
+#else
+  (void)handle;
+  (void)provider;
+  return (PiqaeBuffer){0, 0};
+#endif
+}
+
 PiqaeBuffer piqae_node_linked_stop(uint64_t handle) {
 #if PIQAE_NODE_HAS_NATIVE_ARTIFACT
   return piqae_node_stop(handle);

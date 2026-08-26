@@ -118,6 +118,24 @@ public struct PiqaeRuntimePrinterSnapshot: Codable, Equatable, Sendable {
     public let isDefault: Bool
     public let observedUnixMilliseconds: Int64
 
+    public init(
+        printerID: String,
+        adapterID: String,
+        nativeID: String,
+        name: String,
+        state: String,
+        isDefault: Bool = false,
+        observedUnixMilliseconds: Int64
+    ) {
+        self.printerID = printerID
+        self.adapterID = adapterID
+        self.nativeID = nativeID
+        self.name = name
+        self.state = state
+        self.isDefault = isDefault
+        self.observedUnixMilliseconds = observedUnixMilliseconds
+    }
+
     enum CodingKeys: String, CodingKey {
         case printerID = "printer_id"
         case adapterID = "adapter_id"
@@ -188,6 +206,40 @@ public struct PiqaeRuntimeAdapterOperation: Codable, Equatable, Sendable {
     public let phase: PiqaeRuntimeAdapterOperationPhase
     public let nativeJobID: String?
 
+    public init(
+        operationID: String,
+        adapterID: String,
+        jobID: String,
+        idempotencyKey: String,
+        fence: String,
+        deadlineUnixMilliseconds: Int64,
+        printerID: String,
+        printerNativeID: String,
+        title: String,
+        contentPath: String,
+        contentKind: String,
+        contentSHA256: String,
+        optionsJSON: String,
+        phase: PiqaeRuntimeAdapterOperationPhase,
+        nativeJobID: String? = nil
+    ) {
+        self.operationID = operationID
+        self.adapterID = adapterID
+        self.jobID = jobID
+        self.idempotencyKey = idempotencyKey
+        self.fence = fence
+        self.deadlineUnixMilliseconds = deadlineUnixMilliseconds
+        self.printerID = printerID
+        self.printerNativeID = printerNativeID
+        self.title = title
+        self.contentPath = contentPath
+        self.contentKind = contentKind
+        self.contentSHA256 = contentSHA256
+        self.optionsJSON = optionsJSON
+        self.phase = phase
+        self.nativeJobID = nativeJobID
+    }
+
     enum CodingKeys: String, CodingKey {
         case operationID = "operation_id"
         case adapterID = "adapter_id"
@@ -248,6 +300,12 @@ public struct PiqaeRuntimeAdapterAcknowledgement: Codable, Equatable, Sendable {
     public let jobID: String
     public let state: String
     public let duplicate: Bool
+    public init(operationID: String, jobID: String, state: String, duplicate: Bool = false) {
+        self.operationID = operationID
+        self.jobID = jobID
+        self.state = state
+        self.duplicate = duplicate
+    }
     enum CodingKeys: String, CodingKey {
         case operationID = "operation_id"
         case jobID = "job_id"

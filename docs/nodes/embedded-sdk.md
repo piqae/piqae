@@ -33,6 +33,14 @@ self-hosted workspace requires a separately approved `manage_connectors`
 capability; the installed node—not the application—exchanges the short-lived
 invitation and starts the resulting durable connector worker.
 
+For an embedded host, that worker signals NodeKit only after remote work is
+durably activated. The callback carries no tenant, job, printer, document, or
+credential data. Signals are coalesced until NodeKit observes each adapter queue
+empty, so several connectors still feed one durable runtime and one adapter
+drain. Foreground entry, wake, and restored network availability immediately
+retry pending work. Stopping NodeKit cancels and joins the Swift drain before
+the native runtime destroys the callback context.
+
 ## Intended application experiences
 
 The high-level SDK follows an instance pattern:

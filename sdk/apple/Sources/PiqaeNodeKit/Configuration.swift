@@ -109,6 +109,10 @@ public protocol PiqaeInstallationIdentityStore: Sendable {
 /// The shared durable node runtime hosted inside an application process.
 /// Platform facades must never implement a second queue beside this runtime.
 public protocol PiqaeEmbeddedNodeRuntime: PiqaeHostLifecycleReporter, Sendable {
+    /// Installs the data-free wakeup used when durable remote work becomes
+    /// available. Implementations invoke it from any thread and retain it only
+    /// for the lifetime of the started runtime.
+    func setWorkAvailableHandler(_ handler: @escaping @Sendable () -> Void) async throws
     func start() async throws
     func stop() async throws
     func registerAdapter(_ registration: PiqaeRuntimeAdapterRegistration) async throws
@@ -143,6 +147,7 @@ public protocol PiqaeEmbeddedNodeRuntime: PiqaeHostLifecycleReporter, Sendable {
 }
 
 public extension PiqaeEmbeddedNodeRuntime {
+    func setWorkAvailableHandler(_ handler: @escaping @Sendable () -> Void) async throws {}
     func registerAdapter(_ registration: PiqaeRuntimeAdapterRegistration) async throws {
         throw PiqaeNodeError.unsupportedOperation("The embedded runtime does not expose adapters.")
     }
