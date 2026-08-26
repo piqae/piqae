@@ -2830,7 +2830,9 @@ dependencies = [
 name = "piqae-node-ffi"
 version = "0.1.21"
 dependencies = [
+ "base64 0.22.1",
  "piqae-node-runtime",
+ "piqae-support-packs",
  "serde",
  "serde_json",
  "thiserror",
@@ -2861,6 +2863,7 @@ dependencies = [
  "piqae-local-ipc",
  "piqae-node-host-api",
  "piqae-protocol",
+ "piqae-support-packs",
  "rand 0.8.7",
  "serde",
  "serde_json",

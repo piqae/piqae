@@ -10,6 +10,8 @@
 pub mod broker;
 pub mod command;
 pub mod connector_registry;
+mod durable_file;
+pub mod embedded;
 pub mod installation;
 pub mod route_coordinator;
 pub mod runtime;
@@ -20,6 +22,7 @@ pub use broker::{
     BrokerRegistry, BrokerServerState, BrokerToken,
 };
 pub use command::*;
+pub use embedded::*;
 pub use installation::{
     AttachPolicy, BrokerEndpoint, InstallationGuard, InstallationLockError, RuntimeDisposition,
     RuntimeSelectionError, select_runtime,
