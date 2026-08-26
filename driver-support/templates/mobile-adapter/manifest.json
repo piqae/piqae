@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "pack_id": "org.example.mobile-printer",
+  "pack_version": "0.1.0",
+  "vendor": "Example vendor",
+  "family": "Example mobile printer family",
+  "maintainers": ["Your name or organisation"],
+  "adapter_selectors": [
+    {
+      "platform": "ios_external_accessory",
+      "adapter_id": "org.example.printer-adapter",
+      "adapter_version": "1.0.0",
+      "device_family": "Replace with exact documented family",
+      "firmware_version": "Replace with tested firmware"
+    }
+  ],
+  "platforms": ["ios_external_accessory"],
+  "facets": ["media.sensing"],
+  "evidence": "discovered",
+  "mappings": ["mappings/options.json"],
+  "conformance": ["tests/conformance.json"],
+  "fixtures": ["fixtures/capabilities.redacted.json"],
+  "license": "Apache-2.0"
+}
