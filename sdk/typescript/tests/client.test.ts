@@ -697,6 +697,34 @@ describe("PiqaeClient", () => {
     ]);
   });
 
+  it("keeps wake hints separate from job submission and includes idempotency", async () => {
+    const fetcher = vi.fn<typeof fetch>().mockImplementation(async () => Response.json([]));
+    const client = new PiqaeClient({
+      apiKey: "piq_live_wake",
+      fetch: fetcher,
+      baseUrl: "https://print.example.test",
+    });
+
+    await client.nodes.runtime("agt / one");
+    await client.nodes.runtimes({ limit: 25, after: "agt_01" });
+    await client.nodes.wakeHints("agt / one", { limit: 5 });
+    await client.nodes.requestWake(
+      "agt / one",
+      { reason: "job_available", expires_in_seconds: 120 },
+      "wake-request-0001",
+    );
+
+    expect(fetcher.mock.calls.map(([url]) => String(url))).toEqual([
+      "https://print.example.test/v1/nodes/agt%20%2F%20one/runtime",
+      "https://print.example.test/v1/nodes/runtime-observations?limit=25&after=agt_01",
+      "https://print.example.test/v1/nodes/agt%20%2F%20one/wake-hints?limit=5",
+      "https://print.example.test/v1/nodes/agt%20%2F%20one/wake-hints",
+    ]);
+    expect((fetcher.mock.calls[3]?.[1]?.headers as Record<string, string>)["idempotency-key"]).toBe(
+      "wake-request-0001",
+    );
+  });
+
   it("uploads declared content through the authenticated proxy without base64", async () => {
     const created = {
       id: "upl_01",

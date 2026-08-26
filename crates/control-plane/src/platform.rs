@@ -54,6 +54,8 @@ pub struct PlatformOperationsRow {
     routes: Vec<crate::destination_topology::PrinterRouteResponse>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     route_observations: Vec<crate::destination_topology::RouteObservationResponse>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    runtime_observations: Vec<crate::destination_topology::NodeRuntimeObservationResponse>,
 }
 
 #[derive(Debug, Serialize)]
@@ -438,6 +440,21 @@ pub async fn operations(
                 MAX_RESOURCES_PER_CUSTOMER,
             )
             .await?;
+        let runtime_observations = state
+            .destination_topology
+            .list_latest_node_runtime_observations(
+                piqae_storage_postgres::destination_topology::TenantScope {
+                    workspace_id,
+                    environment_id,
+                },
+                None,
+                u32::try_from(MAX_RESOURCES_PER_CUSTOMER).unwrap_or(100),
+            )
+            .await
+            .map_err(crate::destination_topology::map_storage_error)?
+            .into_iter()
+            .map(crate::destination_topology::runtime_observation_response)
+            .collect();
         data.push(PlatformOperationsRow {
             customer: PlatformOperationsCustomer {
                 id: workspace_id.to_string(),
@@ -454,6 +471,7 @@ pub async fn operations(
             physical_destinations,
             routes,
             route_observations,
+            runtime_observations,
         });
     }
     let next_cursor = has_more

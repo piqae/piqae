@@ -97,7 +97,7 @@ async fn insert_durable_job(
     store: &PostgresStore,
     workspace_id: WorkspaceId,
     environment_id: EnvironmentId,
-) -> JobId {
+) -> (JobId, AgentId) {
     let agent_id = AgentId::new();
     let printer_id = PrinterId::new();
     sqlx::query(
@@ -149,7 +149,7 @@ async fn insert_durable_job(
         .create_job(&job, agent_id, None, b"durable archive fixture")
         .await
         .expect("durable job");
-    job.id
+    (job.id, agent_id)
 }
 
 #[tokio::test]
@@ -268,13 +268,16 @@ async fn postgres_http_platform_accounts_are_owned_idempotent_and_archive_safely
         None,
         None,
     );
-    let application = router(AppState::new_with_resources(
-        Arc::new(store.clone()) as Arc<dyn Repository>,
-        Arc::new(authenticator),
-        [7; 32],
-        piqae_control_plane::document_crypto::DocumentSecretBox::new([0; 32]),
-        Arc::new(MemoryObjectStore::default()),
-    ));
+    let application = router(
+        AppState::new_with_resources(
+            Arc::new(store.clone()) as Arc<dyn Repository>,
+            Arc::new(authenticator),
+            [7; 32],
+            piqae_control_plane::document_crypto::DocumentSecretBox::new([0; 32]),
+            Arc::new(MemoryObjectStore::default()),
+        )
+        .with_destination_topology(Arc::new(store.clone())),
+    );
     let meta = application
         .clone()
         .oneshot(
@@ -461,7 +464,15 @@ async fn postgres_http_platform_accounts_are_owned_idempotent_and_archive_safely
     .expect("exact platform grants");
     assert_eq!(exact_grants, 2);
 
-    let durable_job = insert_durable_job(&pool, &store, customer_workspace, customer_live).await;
+    let (durable_job, durable_agent) =
+        insert_durable_job(&pool, &store, customer_workspace, customer_live).await;
+    sqlx::query("INSERT INTO node_runtime_observations (workspace_id,environment_id,id,agent_id,sequence,host_mode,availability_class,lifecycle_state,accepts_cloud_jobs,wake_mechanisms,observed_at,fresh_until) VALUES ($1,$2,'nro_platform_test',$3,1,'embedded_application','foreground_only','foreground',true,'{}',now(),now()+interval '60 seconds')")
+        .bind(customer_workspace.to_string())
+        .bind(customer_live.to_string())
+        .bind(durable_agent.to_string())
+        .execute(&pool)
+        .await
+        .expect("customer runtime observation");
     let operations = application
         .clone()
         .oneshot(request(
@@ -511,6 +522,14 @@ async fn postgres_http_platform_accounts_are_owned_idempotent_and_archive_safely
     assert!(printer_id.starts_with("ptr_"));
     assert_eq!(customer_operations["printers"][0]["agent_id"], agent_id);
     assert_eq!(customer_operations["jobs"][0]["printer_id"], printer_id);
+    assert_eq!(
+        customer_operations["runtime_observations"][0]["node_id"],
+        agent_id
+    );
+    assert_eq!(
+        customer_operations["runtime_observations"][0]["host_mode"],
+        "embedded_application"
+    );
     assert!(
         customer_operations["jobs"][0]["id"]
             .as_str()

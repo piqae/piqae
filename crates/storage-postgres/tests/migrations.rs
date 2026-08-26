@@ -5,6 +5,98 @@ use sqlx::{PgPool, migrate::Migrator, postgres::PgPoolOptions};
 use std::{borrow::Cow, env};
 
 #[tokio::test]
+async fn runtime_availability_upgrade_is_additive_and_tenant_isolated() {
+    let Some(database_url) = env::var("PIQAE_TEST_DATABASE_URL").ok() else {
+        eprintln!("skipped: set PIQAE_TEST_DATABASE_URL to run PostgreSQL migration evidence");
+        return;
+    };
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&database_url)
+        .await
+        .expect("connect PostgreSQL test database");
+    let all = sqlx::migrate!("../../migrations/postgres");
+
+    for mode in ["upgrade", "fresh"] {
+        let schema = format!("piqae_runtime_{mode}_{}", ulid::Ulid::new()).to_ascii_lowercase();
+        sqlx::query(&format!("CREATE SCHEMA {schema}"))
+            .execute(&admin)
+            .await
+            .expect("create exact disposable schema");
+        let pool = schema_pool(&database_url, &schema).await;
+        if mode == "upgrade" {
+            let previous = Migrator {
+                migrations: Cow::Owned(
+                    all.iter()
+                        .filter(|migration| migration.version < 43)
+                        .cloned()
+                        .collect(),
+                ),
+                ignore_missing: false,
+                locking: true,
+                no_tx: false,
+            };
+            previous.run(&pool).await.expect("apply version 42 schema");
+        }
+        PostgresStore::from_pool(pool.clone())
+            .migrate()
+            .await
+            .expect("start storage on latest schema");
+
+        for suffix in ["a", "b"] {
+            sqlx::query("INSERT INTO workspaces (id,name,slug) VALUES ($1,$2,$3)")
+                .bind(format!("wsp_runtime_{suffix}"))
+                .bind(format!("Runtime {suffix}"))
+                .bind(format!("runtime-{mode}-{suffix}"))
+                .execute(&pool)
+                .await
+                .expect("insert workspace fixture");
+            sqlx::query(
+                "INSERT INTO environments (id,workspace_id,kind,name) VALUES ($1,$2,'test','Test')",
+            )
+            .bind(format!("env_runtime_{suffix}"))
+            .bind(format!("wsp_runtime_{suffix}"))
+            .execute(&pool)
+            .await
+            .expect("insert environment fixture");
+            sqlx::query("INSERT INTO agents (id,workspace_id,environment_id,name,installation_id,os,architecture,version,protocol_version) VALUES ($1,$2,$3,'Node',$4,'linux','x86_64','test',1)")
+                .bind(format!("agt_runtime_{suffix}"))
+                .bind(format!("wsp_runtime_{suffix}"))
+                .bind(format!("env_runtime_{suffix}"))
+                .bind(format!("install-runtime-{suffix}"))
+                .execute(&pool).await.expect("insert agent fixture");
+        }
+        sqlx::query("INSERT INTO node_runtime_observations (workspace_id,environment_id,id,agent_id,sequence,host_mode,availability_class,lifecycle_state,accepts_cloud_jobs,execution_budget_ms,wake_mechanisms,observed_at,fresh_until) VALUES ('wsp_runtime_a','env_runtime_a','nro_a','agt_runtime_a',1,'embedded_application','background_opportunistic','background',true,30000,ARRAY['apns_background'],now(),now()+interval '60 seconds')")
+            .execute(&pool).await.expect("insert tenant runtime observation");
+        sqlx::query("INSERT INTO node_wake_hints (workspace_id,environment_id,id,agent_id,idempotency_key,reason,status,requested_at,expires_at) VALUES ('wsp_runtime_a','env_runtime_a','wkh_a','agt_runtime_a','wake-key-a','job_available','pending',now(),now()+interval '5 minutes')")
+            .execute(&pool).await.expect("insert tenant wake hint");
+        let cross_tenant_runtime = sqlx::query("INSERT INTO node_runtime_observations (workspace_id,environment_id,id,agent_id,sequence,host_mode,availability_class,lifecycle_state,accepts_cloud_jobs,wake_mechanisms,observed_at,fresh_until) VALUES ('wsp_runtime_b','env_runtime_b','nro_cross','agt_runtime_a',2,'embedded_application','foreground_only','foreground',false,'{}',now(),now()+interval '60 seconds')")
+            .execute(&pool).await;
+        assert!(
+            cross_tenant_runtime.is_err(),
+            "the composite agent foreign key must reject cross-tenant runtime state"
+        );
+        let cross_tenant_hint = sqlx::query("INSERT INTO node_wake_hints (workspace_id,environment_id,id,agent_id,idempotency_key,reason,status,requested_at,expires_at) VALUES ('wsp_runtime_b','env_runtime_b','wkh_cross','agt_runtime_a','wake-cross','job_available','pending',now(),now()+interval '5 minutes')")
+            .execute(&pool).await;
+        assert!(
+            cross_tenant_hint.is_err(),
+            "the composite agent foreign key must reject cross-tenant wake state"
+        );
+        let other_runtime: i64 = sqlx::query_scalar("SELECT count(*) FROM node_runtime_observations WHERE workspace_id='wsp_runtime_b' AND environment_id='env_runtime_b' AND agent_id='agt_runtime_a'")
+            .fetch_one(&pool).await.expect("probe other tenant runtime");
+        let other_hints: i64 = sqlx::query_scalar("SELECT count(*) FROM node_wake_hints WHERE workspace_id='wsp_runtime_b' AND environment_id='env_runtime_b' AND agent_id='agt_runtime_a'")
+            .fetch_one(&pool).await.expect("probe other tenant hints");
+        assert_eq!((other_runtime, other_hints), (0, 0));
+
+        pool.close().await;
+        sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+            .execute(&admin)
+            .await
+            .expect("drop exact disposable schema");
+    }
+}
+
+#[tokio::test]
 async fn semantic_capabilities_upgrade_is_tenant_scoped_and_backfilled() {
     let Some(database_url) = env::var("PIQAE_TEST_DATABASE_URL").ok() else {
         eprintln!("skipped: set PIQAE_TEST_DATABASE_URL to run PostgreSQL migration evidence");
@@ -249,7 +341,7 @@ async fn postgres_reported_complete_billing_upgrades_from_previous_schema() {
         .fetch_one(&pool)
         .await
         .expect("read latest schema version");
-    assert_eq!(latest, 42);
+    assert_eq!(latest, 43);
     let billable_index: Option<String> =
         sqlx::query_scalar("SELECT to_regclass('usage_one_billable_print_per_job_idx')::text")
             .fetch_one(&pool)
@@ -461,7 +553,7 @@ async fn documents_migrate_and_enforce_tenant_scoped_references() {
         .fetch_one(&pool)
         .await
         .expect("read schema version");
-    assert_eq!(latest, 42);
+    assert_eq!(latest, 43);
     pool.close().await;
     sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
         .execute(&admin)
@@ -855,7 +947,7 @@ async fn agent_health_migrates_empty_and_previous_schemas_with_tenant_fencing() 
         .fetch_one(&empty_pool)
         .await
         .expect("read empty-database schema version");
-    assert_eq!(latest, 42);
+    assert_eq!(latest, 43);
     empty_pool.close().await;
     sqlx::query(&format!("DROP SCHEMA {empty_schema} CASCADE"))
         .execute(&admin)
@@ -1004,7 +1096,7 @@ async fn content_encryption_key_algorithm_migrates_fresh_and_legacy_schemas() {
         .fetch_one(&empty_pool)
         .await
         .expect("read empty-database schema version");
-    assert_eq!(empty_latest, 42);
+    assert_eq!(empty_latest, 43);
     empty_pool.close().await;
     sqlx::query(&format!("DROP SCHEMA {empty_schema} CASCADE"))
         .execute(&admin)
@@ -1072,7 +1164,7 @@ async fn content_encryption_key_algorithm_migrates_fresh_and_legacy_schemas() {
         .fetch_one(&upgrade_pool)
         .await
         .expect("read upgraded schema version");
-    assert_eq!(latest, 42);
+    assert_eq!(latest, 43);
     let reference_guard_config: Vec<String> = sqlx::query_scalar(
         "SELECT coalesce(proconfig, ARRAY[]::text[])
          FROM pg_proc JOIN pg_namespace ON pg_namespace.oid = pg_proc.pronamespace
