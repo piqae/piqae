@@ -25,7 +25,7 @@ use piqae_storage_postgres::{
     },
 };
 use serde::{Deserialize, Serialize};
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 
 const fn stored_observation_state(value: piqae_domain::PrinterState) -> &'static str {
@@ -1027,7 +1027,17 @@ pub(crate) async fn project_agent_topology(
             .record_route_observation(
                 tenant_scope,
                 &RouteObservation {
-                    id: format!("rob_{}", ulid::Ulid::new()),
+                    // The node's durable route sequence is the idempotency key.
+                    // Hashing the server route resource keeps the public storage
+                    // identifier bounded while making an identical sync retry
+                    // address the exact same observation.
+                    id: format!(
+                        "rob_{}",
+                        &hex::encode(Sha256::digest(format!(
+                            "{}\0{}",
+                            route.id, observation.sequence
+                        )))[..32]
+                    ),
                     route_id: route.id,
                     sequence: observation.sequence,
                     printer_state: stored_observation_state(observation.state).into(),
@@ -1062,11 +1072,15 @@ pub(crate) async fn project_agent_topology(
 }
 
 /// Acquires the destination-wide native-handoff fence for an already leased
-/// job. The route is resolved by immutable tenant printer/agent identity; a
-/// missing topology row is the bounded compatibility path for older nodes.
+/// job. Route identity must have been durably projected before a job can be
+/// offered: an unfenced compatibility handoff would defeat destination-wide
+/// ordering during a rolling node upgrade.
 pub(crate) enum JobRouteReservation {
-    Legacy,
     Busy,
+    ProjectionRequired {
+        destination_id: Option<String>,
+        route_id: Option<String>,
+    },
     Reserved(piqae_protocol::agent::CloudRouteReservation),
 }
 
@@ -1108,10 +1122,16 @@ pub(crate) async fn reserve_job_route(
         (matching.len() == 1).then(|| matching[0].clone())
     };
     let Some(route) = route else {
-        return Ok(JobRouteReservation::Legacy);
+        return Ok(JobRouteReservation::ProjectionRequired {
+            destination_id: job.metadata.get("piqae.destination_id").cloned(),
+            route_id: job.metadata.get("piqae.route_id").cloned(),
+        });
     };
     let Some(local_route_key) = route.local_route_key.clone() else {
-        return Ok(JobRouteReservation::Legacy);
+        return Ok(JobRouteReservation::ProjectionRequired {
+            destination_id: Some(route.destination_id),
+            route_id: Some(route.id),
+        });
     };
     let destination = state
         .destination_topology
@@ -2033,7 +2053,8 @@ mod tests {
         use piqae_protocol::agent::{
             AgentHealth, AgentProtocolCapabilities, AgentSyncRequest, IdentityEvidenceStrength,
             PhysicalIdentityEvidence, PhysicalIdentityEvidenceKind, PrinterRouteSnapshot,
-            PrinterSnapshot, QueueSnapshot,
+            PrinterSnapshot, PrivacySafeQueueObservation, QueueSnapshot,
+            RouteObservation as AgentRouteObservation,
         };
         use piqae_storage_postgres::PostgresStore;
         use sqlx::postgres::PgPoolOptions;
@@ -2139,7 +2160,18 @@ mod tests {
                 diagnostics: Vec::new(),
                 document_render: Default::default(),
                 capabilities: AgentProtocolCapabilities::default(),
-                route_observations: Vec::new(),
+                route_observations: vec![AgentRouteObservation {
+                    local_route_key: format!("rte_{}", format!("{index:x}").repeat(32)),
+                    sequence: 1,
+                    observed_at: now,
+                    inventory_revision: 1,
+                    state: PrinterState::Online,
+                    accepts_jobs: true,
+                    state_reasons: Vec::new(),
+                    queue: Some(PrivacySafeQueueObservation::default()),
+                    profile_observed_at: Some(now),
+                    stock_observed_at: Some(now),
+                }],
                 topology_changes: Vec::new(),
                 native_handoffs: Vec::new(),
             };
@@ -2166,6 +2198,22 @@ mod tests {
                 .await
                 .expect("evidence");
             assert_eq!(evidence.len(), 1);
+            let routes = store.list_all_routes(tenant_scope).await.expect("routes");
+            let observations = store
+                .list_route_observations(tenant_scope, &routes[0].id, 10)
+                .await
+                .expect("observations");
+            assert_eq!(observations.len(), 1, "a sync retry is idempotent");
+
+            let mut conflicting_retry = request.clone();
+            conflicting_retry.route_observations[0].state = PrinterState::Busy;
+            let error = project_agent_topology(&state, tenant, &conflicting_retry)
+                .await
+                .expect_err("a reused route sequence cannot change its payload");
+            assert_eq!(
+                axum::response::IntoResponse::into_response(error).status(),
+                axum::http::StatusCode::CONFLICT
+            );
             destination_ids.push(destinations[0].id.clone());
             stored_digests.push(evidence[0].value_digest.clone());
         }

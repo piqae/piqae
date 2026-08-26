@@ -2651,7 +2651,6 @@ pub async fn agent_sync(
         )
         .await?
         {
-            crate::destination_topology::JobRouteReservation::Legacy => None,
             crate::destination_topology::JobRouteReservation::Reserved(reservation) => {
                 Some(reservation)
             }
@@ -2665,6 +2664,37 @@ pub async fn agent_sync(
                         lease.job.id,
                         lease.lease_id,
                         &lease.lease_token,
+                    )
+                    .await?;
+                continue;
+            }
+            crate::destination_topology::JobRouteReservation::ProjectionRequired {
+                destination_id,
+                route_id,
+            } => {
+                state
+                    .repository
+                    .release_agent_lease(
+                        tenant.workspace_id,
+                        tenant.environment_id,
+                        request.agent_id,
+                        lease.job.id,
+                        lease.lease_id,
+                        &lease.lease_token,
+                    )
+                    .await?;
+                state
+                    .publish(
+                        tenant,
+                        "route.updated",
+                        &serde_json::json!({
+                            "agent_id": request.agent_id,
+                            "destination_id": destination_id,
+                            "route_id": route_id,
+                            "readiness": "projection_required",
+                            "reason": "node_upgrade_required",
+                            "observed_at": request.health.observed_at,
+                        }),
                     )
                     .await?;
                 continue;
