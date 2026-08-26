@@ -136,6 +136,23 @@ public sealed class PiqaeNode : IDisposable
         return response.Data.Clone();
     }
 
+    /// <summary>
+    /// Requests one immediate pass of every configured cloud connector. This
+    /// is an advisory nudge after foreground, resume, or network recovery; it
+    /// does not wake Windows, acquire a job lease, or bypass route fencing.
+    /// </summary>
+    public bool ReconcileCloud(TimeSpan timeout)
+    {
+        if (timeout <= TimeSpan.Zero || timeout > TimeSpan.FromSeconds(10))
+            throw new ArgumentOutOfRangeException(nameof(timeout));
+        var result = Command(new
+        {
+            type = "reconcile_cloud",
+            timeout_ms = checked((ulong)Math.Ceiling(timeout.TotalMilliseconds))
+        });
+        return result.GetProperty("completed").GetBoolean();
+    }
+
     public JsonElement RegisterAdapter(AdapterRegistration registration) => Command(new
     {
         type = "register_adapter",

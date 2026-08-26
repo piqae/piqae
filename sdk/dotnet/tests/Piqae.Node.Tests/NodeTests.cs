@@ -29,6 +29,8 @@ public sealed class NodeTests
         Assert.True(node.Start().GetProperty("started").GetBoolean());
         var suspended = node.ApplyLifecycle(LifecycleEvent.SuspendImminent);
         Assert.False(suspended.GetProperty("lifecycle").GetProperty("accepting_cloud_leases").GetBoolean());
+        Assert.True(node.ReconcileCloud(TimeSpan.FromSeconds(1)));
+        Assert.Throws<ArgumentOutOfRangeException>(() => node.ReconcileCloud(TimeSpan.Zero));
         Assert.False(node.Stop().GetProperty("started").GetBoolean());
     }
 

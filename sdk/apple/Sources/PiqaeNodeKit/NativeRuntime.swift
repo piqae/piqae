@@ -177,6 +177,27 @@ public actor PiqaeNativeRuntime: PiqaeEmbeddedNodeRuntime, PiqaeOpaqueIdentityPr
         _ = try commandResponse(command, as: NativeSnapshot.self)
     }
 
+    public func reconcileCloud(timeoutMilliseconds: UInt64) async throws -> Bool {
+        let timeout = min(max(1, timeoutMilliseconds), 10_000)
+        guard let library, let handle else {
+            throw PiqaeNativeRuntimeError.rejected(
+                code: "runtime_not_started",
+                message: "The native runtime has not started."
+            )
+        }
+        let request = try JSONEncoder().encode(
+            ReconcileCloudCommand(type: "reconcile_cloud", timeoutMilliseconds: timeout)
+        )
+        // Waiting for a supervisor generation uses a native condvar. Keep the
+        // bounded wait off Swift's cooperative executor; the FFI handle is
+        // process-scoped and independently serializes stop/destroy races.
+        let data = await Task.detached(priority: .utility) {
+            library.command(handle, request)
+        }.value
+        let response: ReconcileCloudData = try Self.unwrap(data)
+        return response.completed
+    }
+
     public func deriveOpaqueID(
         namespace: String,
         canonicalIdentity: Data
@@ -530,6 +551,14 @@ private struct LifecycleCommand: Encodable {
     let type: String
     let event: PiqaeHostLifecycleEvent
 }
+private struct ReconcileCloudCommand: Encodable {
+    let type: String
+    let timeoutMilliseconds: UInt64
+    enum CodingKeys: String, CodingKey {
+        case type
+        case timeoutMilliseconds = "timeout_ms"
+    }
+}
 
 private struct OpaqueEvidenceCommand: Encodable {
     let type: String
@@ -758,6 +787,14 @@ private struct NativeErrorData: Decodable {
 private struct HandleData: Decodable { let handle: UInt64 }
 private struct DestroyData: Decodable { let destroyed: Bool }
 private struct NativeSnapshot: Decodable { let handle: UInt64 }
+private struct ReconcileCloudData: Decodable {
+    let cloudConfigured: Bool
+    let completed: Bool
+    enum CodingKeys: String, CodingKey {
+        case cloudConfigured = "cloud_configured"
+        case completed
+    }
+}
 private struct OpaqueEvidenceData: Decodable {
     let opaqueEvidence: String
     enum CodingKeys: String, CodingKey { case opaqueEvidence = "opaque_evidence" }

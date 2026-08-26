@@ -1,5 +1,8 @@
 # Runtime availability, wake hints, and authority boundaries
 
+The cross-platform retry and failover sequence is specified in
+[Remote wake and delivery reliability](remote-wake-and-delivery-reliability.md).
+
 Piqae schedules work from authenticated observations, not from a device's
 platform name or from the existence of a connection. Embedded and mobile hosts
 report a bounded runtime observation on agent sync. It contains the host mode,

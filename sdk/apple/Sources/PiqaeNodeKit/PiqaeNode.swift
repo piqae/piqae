@@ -203,6 +203,10 @@ private actor PiqaeProcessRuntimeRegistry {
     }
 }
 
+private enum PiqaeWakeReconciliationError: Error {
+    case cloudCycleTimedOut
+}
+
 actor PiqaeNodeEngine {
     private let configuration: PiqaeNodeConfiguration
     private let admissionPolicy = PiqaeBackgroundAdmissionPolicy()
@@ -665,6 +669,7 @@ actor PiqaeNodeEngine {
         _ hint: PiqaeWakeHint,
         context: PiqaeExecutionContext
     ) async -> PiqaeWakeHintResult {
+        _ = hint // The opaque ID is intentionally never interpreted as job metadata.
         guard started else { return .deferred(reason: "The node has not started.") }
         guard !Task.isCancelled else {
             return .deferred(reason: "The host execution budget expired.")
@@ -673,15 +678,52 @@ actor PiqaeNodeEngine {
             return .deferred(reason: "The host application is suspended.")
         }
         await updateExecutionContext(context)
-        do {
-            try await refresh()
-            guard !Task.isCancelled else {
+        let policy = configuration.wakeRetryPolicy
+        var attempt = 0
+        while attempt < policy.maximumAttempts {
+            attempt += 1
+            do {
+                if selectedIPC == nil, let runtime = configuration.embeddedRuntime {
+                    let available = effectiveExecutionContext.remainingSeconds.map {
+                        max(0, $0 - policy.executionSafetyMarginSeconds)
+                    }
+                    let timeout = min(
+                        policy.cloudCycleTimeoutSeconds,
+                        available ?? policy.cloudCycleTimeoutSeconds
+                    )
+                    guard timeout > 0 else {
+                        return .deferred(reason: "The host execution budget expired.")
+                    }
+                    let milliseconds = UInt64(
+                        min(timeout * 1_000, Double(UInt64.max))
+                    )
+                    guard try await runtime.reconcileCloud(timeoutMilliseconds: milliseconds) else {
+                        throw PiqaeWakeReconciliationError.cloudCycleTimedOut
+                    }
+                }
+                try await refresh()
+                guard !Task.isCancelled else {
+                    return .deferred(reason: "The host execution budget expired.")
+                }
+                return .reconciled
+            } catch is CancellationError {
                 return .deferred(reason: "The host execution budget expired.")
+            } catch {
+                let delay = policy.delay(
+                    after: attempt,
+                    remainingSeconds: effectiveExecutionContext.remainingSeconds
+                )
+                guard let delay, delay > 0 else { break }
+                do {
+                    try await Task.sleep(
+                        nanoseconds: UInt64(min(delay * 1_000_000_000, Double(UInt64.max)))
+                    )
+                } catch {
+                    return .deferred(reason: "The host execution budget expired.")
+                }
             }
-            return .reconciled
-        } catch {
-            return .deferred(reason: "Reconciliation is temporarily unavailable.")
         }
+        return .deferred(reason: "Reconciliation is temporarily unavailable.")
     }
 
     private func startEmbedded() async throws {

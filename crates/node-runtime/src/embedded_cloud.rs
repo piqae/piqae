@@ -25,8 +25,8 @@ use piqae_protocol::agent::{
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        Arc, Condvar, Mutex,
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     thread::JoinHandle,
     time::Duration,
@@ -46,7 +46,74 @@ pub trait WorkAvailableNotifier: std::fmt::Debug + Send + Sync {
 #[derive(Debug)]
 pub struct EmbeddedCloudSupervisor {
     stop: Arc<AtomicBool>,
+    reconcile: Arc<ReconcileControl>,
     thread: Option<JoinHandle<()>>,
+}
+
+#[derive(Debug)]
+pub struct EmbeddedCloudReconcileRequest {
+    control: Arc<ReconcileControl>,
+    generation: u64,
+}
+
+impl EmbeddedCloudReconcileRequest {
+    /// Waits until the supervisor has completed a connector pass which began
+    /// after this request was issued.
+    #[must_use]
+    pub fn wait(self, timeout: Duration) -> bool {
+        self.control.wait(self.generation, timeout)
+    }
+}
+
+#[derive(Debug, Default)]
+struct ReconcileControl {
+    requested_generation: AtomicU64,
+    completed_generation: Mutex<u64>,
+    completed: Condvar,
+}
+
+impl ReconcileControl {
+    fn request(&self) -> u64 {
+        self.requested_generation
+            .fetch_add(1, Ordering::AcqRel)
+            .saturating_add(1)
+    }
+
+    fn requested_after(&self, completed: u64) -> Option<u64> {
+        let requested = self.requested_generation.load(Ordering::Acquire);
+        (requested > completed).then_some(requested)
+    }
+
+    fn complete(&self, generation: u64) {
+        let mut completed = self
+            .completed_generation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *completed = (*completed).max(generation);
+        drop(completed);
+        self.completed.notify_all();
+    }
+
+    // The mutex guard must be moved into `wait_timeout_while`; Clippy cannot
+    // follow that move through the condvar result and reports a false positive.
+    #[allow(clippy::significant_drop_tightening)]
+    fn wait(&self, target: u64, timeout: Duration) -> bool {
+        let completed = self
+            .completed_generation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if *completed >= target {
+            drop(completed);
+            return true;
+        }
+        let (completed, _) = self
+            .completed
+            .wait_timeout_while(completed, timeout, |completed| *completed < target)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let reached_target = *completed >= target;
+        drop(completed);
+        reached_target
+    }
 }
 
 impl EmbeddedCloudSupervisor {
@@ -64,6 +131,8 @@ impl EmbeddedCloudSupervisor {
     ) -> Result<Self, std::io::Error> {
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = Arc::clone(&stop);
+        let reconcile = Arc::new(ReconcileControl::default());
+        let thread_reconcile = Arc::clone(&reconcile);
         let thread = std::thread::Builder::new()
             .name("piqae-embedded-cloud".into())
             .spawn(move || {
@@ -79,13 +148,33 @@ impl EmbeddedCloudSupervisor {
                     provider,
                     runtime,
                     thread_stop,
+                    thread_reconcile,
                     work_notifier,
                 ));
             })?;
         Ok(Self {
             stop,
+            reconcile,
             thread: Some(thread),
         })
+    }
+
+    /// Requests one immediate connector pass and waits for the exact request
+    /// generation to finish. Requests coalesce, while a request arriving in
+    /// the middle of a pass is guaranteed a later pass rather than being
+    /// mistaken for completion of the in-flight work.
+    #[must_use]
+    pub fn request_reconcile(&self) -> EmbeddedCloudReconcileRequest {
+        let generation = self.reconcile.request();
+        EmbeddedCloudReconcileRequest {
+            control: Arc::clone(&self.reconcile),
+            generation,
+        }
+    }
+
+    #[must_use]
+    pub fn reconcile_now(&self, timeout: Duration) -> bool {
+        self.request_reconcile().wait(timeout)
     }
 
     pub fn stop(&mut self) {
@@ -108,12 +197,15 @@ async fn run_supervisor(
     provider: Arc<dyn SecureConnectorSigner>,
     runtime: Arc<NodeRuntime>,
     stop: Arc<AtomicBool>,
+    reconcile: Arc<ReconcileControl>,
     work_notifier: Option<Arc<dyn WorkAvailableNotifier>>,
 ) {
     let mut next_due = BTreeMap::<String, tokio::time::Instant>::new();
     let mut failures = BTreeMap::<String, u32>::new();
     let started_at = Utc::now();
+    let mut completed_reconcile_generation = 0_u64;
     while !stop.load(Ordering::Acquire) {
+        let forced_generation = reconcile.requested_after(completed_reconcile_generation);
         let pending_revocations = match registry.lock() {
             Ok(registry) => registry
                 .pending_remote_revocations()
@@ -147,9 +239,10 @@ async fn run_supervisor(
             if stop.load(Ordering::Acquire) {
                 break;
             }
-            if next_due
-                .get(&record.connector_id)
-                .is_some_and(|due| *due > tokio::time::Instant::now())
+            if forced_generation.is_none()
+                && next_due
+                    .get(&record.connector_id)
+                    .is_some_and(|due| *due > tokio::time::Instant::now())
             {
                 continue;
             }
@@ -173,7 +266,42 @@ async fn run_supervisor(
             };
             next_due.insert(record.connector_id, tokio::time::Instant::now() + delay);
         }
+        if !stop.load(Ordering::Acquire)
+            && let Some(generation) = forced_generation
+        {
+            completed_reconcile_generation = generation;
+            reconcile.complete(generation);
+        }
         tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+#[cfg(test)]
+mod reconcile_control_tests {
+    use super::ReconcileControl;
+    use std::{sync::Arc, time::Duration};
+
+    #[test]
+    fn exact_request_generation_does_not_complete_early() {
+        let control = Arc::new(ReconcileControl::default());
+        let first = control.request();
+        let second = control.request();
+        control.complete(first);
+        assert!(control.wait(first, Duration::ZERO));
+        assert!(!control.wait(second, Duration::from_millis(1)));
+        control.complete(second);
+        assert!(control.wait(second, Duration::ZERO));
+    }
+
+    #[test]
+    fn requests_are_monotonic_and_coalescible() {
+        let control = ReconcileControl::default();
+        let first = control.request();
+        let second = control.request();
+        assert!(second > first);
+        assert_eq!(control.requested_after(0), Some(second));
+        control.complete(second);
+        assert!(control.requested_after(second).is_none());
     }
 }
 
