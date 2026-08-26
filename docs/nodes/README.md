@@ -2,6 +2,7 @@
 
 - [macOS](macos.md)
 - [Windows](windows.md)
+- [iPhone and iPad standalone Preview](../../apps/node-apple/README.md)
 - [Headless Linux](linux-headless.md)
 - [Pairing](pairing.md)
 - [Updates](updates.md)

@@ -7,6 +7,106 @@ import PiqaeNodeKitTesting
 private enum LinkedRuntimeRequired: Error { case unavailable }
 
 final class PiqaeNodeKitTests: XCTestCase {
+    func testPortableHostConfigurationIsBoundedAndSnakeCase() throws {
+        let identity = try PiqaeNodeIdentityConfiguration(
+            displayName: "Dispatch iPad",
+            site: "Warehouse",
+            location: "Desk 4",
+            labels: ["shipping", "backup"]
+        )
+        let policy = try PiqaeConnectionPolicy.integratorManaged(
+            allowedAuthorityOrigins: [XCTUnwrap(URL(string: "https://api.piqae.com"))]
+        )
+        let host = try PiqaeHostConfiguration(
+            product: .embedded,
+            applicationID: "com.example.shipping",
+            identity: identity,
+            installedHostPolicy: .preferInstalled,
+            connectionPolicy: policy
+        )
+
+        let data = try JSONEncoder().encode(host)
+        let value = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertEqual(value["application_id"] as? String, "com.example.shipping")
+        XCTAssertEqual(value["installed_host_policy"] as? String, "prefer_installed")
+        XCTAssertEqual((value["connection_policy"] as? [String: Any])?["allows_multiple"] as? Bool, true)
+        XCTAssertEqual(try JSONDecoder().decode(PiqaeHostConfiguration.self, from: data), host)
+        XCTAssertEqual(host.effectiveStartupMode, .automatic)
+        XCTAssertTrue(host.allowsEmbeddedFallback)
+        XCTAssertThrowsError(try policy.validateAuthority(
+            XCTUnwrap(URL(string: "https://other.example"))
+        ))
+    }
+
+    func testStandaloneAndEmbeddedConnectionPoliciesDoNotImposeSingleConnectorLimit() throws {
+        XCTAssertTrue(PiqaeConnectionPolicy.standaloneUserManaged.allowsMultiple)
+        let embedded = try PiqaeConnectionPolicy.integratorManaged(
+            allowedAuthorityOrigins: [XCTUnwrap(URL(string: "https://api.piqae.com"))],
+            allowsMultiple: true
+        )
+        XCTAssertTrue(embedded.allowsMultiple)
+        XCTAssertThrowsError(try PiqaeConnectionPolicy(
+            management: .hostManaged,
+            allowedAuthorityOrigins: []
+        ))
+        XCTAssertThrowsError(try PiqaeNodeIdentityConfiguration(
+            displayName: "Node",
+            labels: ["duplicate", "duplicate"]
+        ))
+    }
+
+    func testNativeRuntimeConfigurationBoundsNamesByUTF8BytesWithoutSplittingCharacters() {
+        let configuration = PiqaeNativeRuntimeConfiguration(
+            applicationID: "com.piqae.tests.bounded-name",
+            availability: .backgroundOpportunistic,
+            localOnly: true,
+            nodeName: String(repeating: "🖨️", count: 40),
+            hostname: String(repeating: "é", count: 80)
+        )
+
+        XCTAssertLessThanOrEqual(configuration.nodeName.utf8.count, 120)
+        XCTAssertLessThanOrEqual(configuration.hostname.utf8.count, 120)
+        XCTAssertFalse(configuration.nodeName.unicodeScalars.isEmpty)
+        XCTAssertFalse(configuration.hostname.unicodeScalars.isEmpty)
+    }
+
+    func testMultipleConnectionsSurviveRuntimeRestartAndRevokeIndependently() async throws {
+        let runtime = PiqaeFakeEmbeddedRuntime()
+        await runtime.queueConnector(runtimeConnector(id: "ncon_one", workspace: "Workspace one"))
+        await runtime.queueConnector(runtimeConnector(id: "ncon_two", workspace: "Workspace two"))
+        let identity = PiqaeMemoryInstallationIdentityStore(
+            id: .init(rawValue: "ins_many_connectors")
+        )
+        let firstNode = PiqaeNode(.localOnly(
+            startupMode: .embedded,
+            identityStore: identity,
+            embeddedRuntime: runtime
+        ))
+        try await firstNode.start()
+        let cloud = try PiqaeCloudConfiguration(
+            authorityURL: XCTUnwrap(URL(string: "https://api.piqae.com")),
+            invitation: PiqaeSensitiveString("invitation")
+        )
+        _ = try await firstNode.connections.connect(cloud)
+        _ = try await firstNode.connections.connect(cloud)
+        let firstConnections = try await firstNode.connections.list()
+        XCTAssertEqual(firstConnections.count, 2)
+        await firstNode.stop()
+
+        let restarted = PiqaeNode(.localOnly(
+            startupMode: .embedded,
+            identityStore: identity,
+            embeddedRuntime: runtime
+        ))
+        try await restarted.start()
+        let restoredConnections = try await restarted.connections.list()
+        XCTAssertEqual(restoredConnections.count, 2)
+        try await restarted.connections.disconnect(.init(rawValue: "ncon_one"))
+        let remainingConnections = try await restarted.connections.list()
+        XCTAssertEqual(remainingConnections.map(\.id.rawValue), ["ncon_two"])
+        await restarted.stop()
+    }
+
     func testLinkedNativeRuntimeArtifactStartsWhenPresent() async throws {
         let applicationID = "com.piqae.tests.linked.\(UUID().uuidString.lowercased())"
         let stateDirectory = FileManager.default.homeDirectoryForCurrentUser
@@ -128,11 +228,13 @@ final class PiqaeNodeKitTests: XCTestCase {
         let first = try await node.jobs.submit(request)
         let second = try await node.jobs.submit(request)
         let status = try await node.jobs.status(first.jobID)
+        let history = try await node.jobs.history(offset: 0, limit: 20)
 
         XCTAssertEqual(first.jobID, second.jobID)
         XCTAssertEqual(first.handoffState, .acceptedBySpooler)
         XCTAssertEqual(second.handoffState, .acceptedBySpooler)
         XCTAssertEqual(status.state, "completed_reported")
+        XCTAssertEqual(history.jobs.map(\.jobID), [first.jobID])
         let submissionCount = await adapter.submissionCount()
         XCTAssertEqual(submissionCount, 1)
     }

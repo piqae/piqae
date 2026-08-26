@@ -72,14 +72,14 @@ public struct PiqaeNodeIdentityConfiguration: Codable, Equatable, Sendable {
 
     private static func optional(_ value: String?, field: String, maximum: Int) throws -> String? {
         guard let value else { return nil }
-        let value = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        if value.isEmpty { return nil }
-        guard value.utf8.count <= maximum else {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty { return nil }
+        guard trimmed.utf8.count <= maximum else {
             throw PiqaeNodeError.invalidConfiguration(
                 "\(field) must contain at most \(maximum) UTF-8 bytes."
             )
         }
-        return value
+        return trimmed
     }
 
     enum CodingKeys: String, CodingKey {
@@ -251,7 +251,7 @@ public struct PiqaeHostConfiguration: Codable, Equatable, Sendable {
         #if os(iOS)
         // App sandboxing prevents an iOS application from becoming or using a
         // persistent cross-application daemon.
-        .embedded
+        installedHostPolicy == .requireInstalled ? .attach : .embedded
         #else
         switch installedHostPolicy {
         case .preferInstalled: .automatic
@@ -263,9 +263,35 @@ public struct PiqaeHostConfiguration: Codable, Equatable, Sendable {
 
     public var allowsEmbeddedFallback: Bool {
         #if os(iOS)
-        true
+        installedHostPolicy == .preferInstalled
         #else
         installedHostPolicy == .preferInstalled
+        #endif
+    }
+
+    public func nativeRuntimeConfiguration(
+        dataDirectory: String = "node-runtime",
+        availability: PiqaeNodeAvailabilityClass,
+        localOnly: Bool,
+        libraryURL: URL? = nil
+    ) -> PiqaeNativeRuntimeConfiguration {
+        PiqaeNativeRuntimeConfiguration(
+            applicationID: applicationID,
+            dataDirectory: dataDirectory,
+            hostMode: .embeddedApplication,
+            availability: availability,
+            localOnly: localOnly,
+            nodeName: identity.displayName,
+            hostname: Self.platformHostname,
+            libraryURL: libraryURL
+        )
+    }
+
+    private static var platformHostname: String {
+        #if os(iOS)
+        "ios-application-host"
+        #else
+        String(ProcessInfo.processInfo.hostName.prefix(120))
         #endif
     }
 
@@ -298,6 +324,7 @@ public struct PiqaeHostConfiguration: Codable, Equatable, Sendable {
 public enum PiqaeLocalNodeNameSuggestion {
     /// Returns an operator-visible suggestion only. It never reads a login,
     /// contacts, postal address, advertising identifier, or serial number.
+    @MainActor
     public static func make(productName: String = "Piqae Node") -> String {
         #if os(iOS)
         // On iOS 16+, UIDevice.name is generic unless Apple grants a special

@@ -217,6 +217,7 @@ public protocol PiqaeEmbeddedNodeRuntime: PiqaeHostLifecycleReporter, Sendable {
         outcome: PiqaeRuntimeAdapterOutcome
     ) async throws -> PiqaeRuntimeAdapterAcknowledgement
     func job(id: PiqaeJobID) async throws -> PiqaeRuntimeJobSnapshot
+    func jobHistory(offset: Int, limit: Int) async throws -> PiqaeJobHistoryPage
     func profiles(printerID: PiqaePrinterID) async throws -> [PiqaeRuntimeProfileSnapshot]
     func createProfile(_ request: PiqaeRuntimeProfileCreateRequest) async throws
         -> PiqaeRuntimeProfileSnapshot
@@ -282,6 +283,9 @@ public extension PiqaeEmbeddedNodeRuntime {
     }
     func job(id: PiqaeJobID) async throws -> PiqaeRuntimeJobSnapshot {
         throw PiqaeNodeError.unsupportedOperation("The embedded runtime does not expose jobs.")
+    }
+    func jobHistory(offset: Int, limit: Int) async throws -> PiqaeJobHistoryPage {
+        throw PiqaeNodeError.unsupportedOperation("The embedded runtime does not expose history.")
     }
     func profiles(printerID: PiqaePrinterID) async throws -> [PiqaeRuntimeProfileSnapshot] { [] }
     func createProfile(_ request: PiqaeRuntimeProfileCreateRequest) async throws

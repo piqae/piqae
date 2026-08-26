@@ -118,6 +118,33 @@ Typical supported shapes are:
 - a local-only application later adds hosted and self-hosted connectors while
   keeping the same installation and local history.
 
+## Standalone and embedded host products
+
+The portable host configuration is defined by
+`sdk/contracts/node-host-configuration.schema.json` and has matching Swift and
+.NET types. `standalone` and `embedded` describe product ownership and UI, not
+separate queue implementations:
+
+- the standalone macOS/Windows/iOS apps provide operator-owned connection,
+  printer, profile, queue/history, identity, and diagnostics UI;
+- an embedded app can use Piqae's optional UI or the same service interfaces
+  from custom UI;
+- either product can hold one or many connections. A host-managed integrator
+  pins its allowed HTTPS authority origins; a standalone user-managed host
+  accepts an authority only through an explicit local connection flow;
+- a desktop embedded SDK prefers an OS-authenticated installed-node attachment
+  so the machine has one durable queue. Isolated fallback is explicit and never
+  follows a consent, proof, or compatibility failure;
+- iOS sandboxing prevents cross-app daemon attachment, so every iOS app has an
+  isolated installation. Cloud physical-destination routing can coordinate
+  strong matching routes within one authority, but unrelated apps never open
+  one another's database.
+
+Node metadata uses the shared Node name / Site / Location / Labels vocabulary.
+It is bounded and operator-visible. SDKs do not infer login names, contacts,
+addresses, or tracking identifiers. Linux can adopt this contract later, but no
+Linux SDK or standalone UI is claimed by this work.
+
 ## Multiple apps, nodes, and authorities
 
 One installed desktop node can hold many isolated connectors. All connectors
