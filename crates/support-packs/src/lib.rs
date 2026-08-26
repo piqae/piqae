@@ -31,7 +31,13 @@ pub struct Manifest {
     pub vendor: String,
     pub family: String,
     pub maintainers: Vec<String>,
+    #[serde(default)]
     pub selectors: Vec<Selector>,
+    /// Exact selectors for an application-bundled printer adapter. These are
+    /// data-only fingerprints; support packs never load or distribute the
+    /// adapter binary itself.
+    #[serde(default)]
+    pub adapter_selectors: Vec<AdapterSelector>,
     pub platforms: Vec<Platform>,
     pub facets: Vec<String>,
     pub evidence: EvidenceTier,
@@ -55,11 +61,29 @@ pub struct Selector {
     pub firmware_version: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AdapterSelector {
+    pub platform: Platform,
+    /// Stable reverse-DNS identifier owned by the adapter publisher.
+    pub adapter_id: String,
+    /// Exact bundled adapter or vendor SDK version.
+    pub adapter_version: String,
+    #[serde(default)]
+    pub device_family: Option<String>,
+    #[serde(default)]
+    pub firmware_version: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum Platform {
     Windows,
     CupsIpp,
+    IosAirPrint,
+    IosNetwork,
+    IosBluetoothLe,
+    IosExternalAccessory,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -129,6 +153,18 @@ pub struct PrinterFingerprint {
     pub driver_id: String,
     pub driver_version: String,
     pub device_id: Option<String>,
+    pub firmware_version: Option<String>,
+}
+
+/// Display-safe evidence supplied by an embedded host for an adapter that is
+/// compiled into that application. It intentionally excludes device serials,
+/// credentials and executable material.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdapterFingerprint {
+    pub platform: Platform,
+    pub adapter_id: String,
+    pub adapter_version: String,
+    pub device_family: Option<String>,
     pub firmware_version: Option<String>,
 }
 
@@ -228,60 +264,96 @@ impl SupportPackRegistry {
             Err(PackError::NoMatch) => return Ok(SemanticPrinterCapabilities::default()),
             Err(error) => return Err(error),
         };
-        let mut values = BTreeMap::<String, BTreeSet<String>>::new();
-        let mut resolutions =
-            BTreeMap::<String, BTreeMap<String, Option<SemanticNativeResolution>>>::new();
-        for rule in &pack.mappings {
-            if rule.platform != fingerprint.platform {
-                continue;
-            }
-            let Some(option) = native_options.get(&rule.native_capability_key) else {
-                continue;
-            };
-            for native_choice in &option.choices {
-                if let Some(semantic_choice) = rule.choices.get(&native_choice.value) {
-                    values
-                        .entry(rule.semantic_facet.clone())
-                        .or_default()
-                        .insert(semantic_choice.clone());
-                    let candidate = SemanticNativeResolution {
-                        native_option: rule.native_capability_key.clone(),
-                        native_choice: native_choice.value.clone(),
-                    };
-                    resolutions
-                        .entry(rule.semantic_facet.clone())
-                        .or_default()
-                        .entry(semantic_choice.clone())
-                        .and_modify(|current| {
-                            if current.as_ref() != Some(&candidate) {
-                                *current = None;
-                            }
-                        })
-                        .or_insert(Some(candidate));
-                }
+        Ok(project_capabilities(
+            pack,
+            fingerprint.platform,
+            native_options,
+        ))
+    }
+
+    /// Projects options reported by an exact application-bundled adapter
+    /// through one trusted pack. No match is an empty projection and multiple
+    /// matches fail closed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PackError::Ambiguous`] when multiple packs match.
+    pub fn normalize_adapter(
+        &self,
+        fingerprint: &AdapterFingerprint,
+        native_options: &BTreeMap<String, NativePrinterOption>,
+    ) -> Result<SemanticPrinterCapabilities, PackError> {
+        let pack = match select_adapter_pack(&self.packs, fingerprint) {
+            Ok(pack) => pack,
+            Err(PackError::NoMatch) => return Ok(SemanticPrinterCapabilities::default()),
+            Err(error) => return Err(error),
+        };
+        Ok(project_capabilities(
+            pack,
+            fingerprint.platform,
+            native_options,
+        ))
+    }
+}
+
+fn project_capabilities(
+    pack: &LoadedPack,
+    platform: Platform,
+    native_options: &BTreeMap<String, NativePrinterOption>,
+) -> SemanticPrinterCapabilities {
+    let mut values = BTreeMap::<String, BTreeSet<String>>::new();
+    let mut resolutions =
+        BTreeMap::<String, BTreeMap<String, Option<SemanticNativeResolution>>>::new();
+    for rule in &pack.mappings {
+        if rule.platform != platform {
+            continue;
+        }
+        let Some(option) = native_options.get(&rule.native_capability_key) else {
+            continue;
+        };
+        for native_choice in &option.choices {
+            if let Some(semantic_choice) = rule.choices.get(&native_choice.value) {
+                values
+                    .entry(rule.semantic_facet.clone())
+                    .or_default()
+                    .insert(semantic_choice.clone());
+                let candidate = SemanticNativeResolution {
+                    native_option: rule.native_capability_key.clone(),
+                    native_choice: native_choice.value.clone(),
+                };
+                resolutions
+                    .entry(rule.semantic_facet.clone())
+                    .or_default()
+                    .entry(semantic_choice.clone())
+                    .and_modify(|current| {
+                        if current.as_ref() != Some(&candidate) {
+                            *current = None;
+                        }
+                    })
+                    .or_insert(Some(candidate));
             }
         }
-        Ok(SemanticPrinterCapabilities {
-            facets: values
-                .into_iter()
-                .map(|(facet, choices)| (facet, choices.into_iter().collect()))
-                .collect(),
-            native_resolutions: resolutions
-                .into_iter()
-                .filter_map(|(facet, choices)| {
-                    let choices = choices
-                        .into_iter()
-                        .filter_map(|(choice, resolution)| resolution.map(|value| (choice, value)))
-                        .collect::<BTreeMap<_, _>>();
-                    (!choices.is_empty()).then_some((facet, choices))
-                })
-                .collect(),
-            support_pack: Some(SupportPackProvenance {
-                pack_id: pack.manifest.pack_id.clone(),
-                digest_sha256: hex::encode(pack.digest),
-                evidence: evidence_name(pack.manifest.evidence).into(),
-            }),
-        })
+    }
+    SemanticPrinterCapabilities {
+        facets: values
+            .into_iter()
+            .map(|(facet, choices)| (facet, choices.into_iter().collect()))
+            .collect(),
+        native_resolutions: resolutions
+            .into_iter()
+            .filter_map(|(facet, choices)| {
+                let choices = choices
+                    .into_iter()
+                    .filter_map(|(choice, resolution)| resolution.map(|value| (choice, value)))
+                    .collect::<BTreeMap<_, _>>();
+                (!choices.is_empty()).then_some((facet, choices))
+            })
+            .collect(),
+        support_pack: Some(SupportPackProvenance {
+            pack_id: pack.manifest.pack_id.clone(),
+            digest_sha256: hex::encode(pack.digest),
+            evidence: evidence_name(pack.manifest.evidence).into(),
+        }),
     }
 }
 
@@ -398,6 +470,31 @@ pub fn select_pack<'a>(
     }
 }
 
+/// Selects the sole trusted pack whose exact predicates match an embedded
+/// mobile adapter.
+///
+/// # Errors
+///
+/// Returns [`PackError::NoMatch`] or [`PackError::Ambiguous`].
+pub fn select_adapter_pack<'a>(
+    packs: &'a [LoadedPack],
+    adapter: &AdapterFingerprint,
+) -> Result<&'a LoadedPack, PackError> {
+    let matching: Vec<_> = packs
+        .iter()
+        .filter(|pack| matches_adapter(pack, adapter))
+        .collect();
+    match matching.as_slice() {
+        [one] => Ok(one),
+        [] => Err(PackError::NoMatch),
+        many => Err(PackError::Ambiguous(
+            many.iter()
+                .map(|pack| pack.manifest.pack_id.clone())
+                .collect(),
+        )),
+    }
+}
+
 fn matches(pack: &LoadedPack, printer: &PrinterFingerprint) -> bool {
     pack.manifest.platforms.contains(&printer.platform)
         && pack.manifest.selectors.iter().any(|selector| {
@@ -415,6 +512,23 @@ fn matches(pack: &LoadedPack, printer: &PrinterFingerprint) -> bool {
         })
 }
 
+fn matches_adapter(pack: &LoadedPack, adapter: &AdapterFingerprint) -> bool {
+    pack.manifest.platforms.contains(&adapter.platform)
+        && pack.manifest.adapter_selectors.iter().any(|selector| {
+            selector.platform == adapter.platform
+                && selector.adapter_id == adapter.adapter_id
+                && selector.adapter_version == adapter.adapter_version
+                && selector
+                    .device_family
+                    .as_ref()
+                    .is_none_or(|family| adapter.device_family.as_ref() == Some(family))
+                && selector
+                    .firmware_version
+                    .as_ref()
+                    .is_none_or(|version| adapter.firmware_version.as_ref() == Some(version))
+        })
+}
+
 fn validate_manifest(manifest: &Manifest) -> Result<(), PackError> {
     if manifest.schema_version != 1 {
         return Err(PackError::Invalid("unsupported manifest schema".into()));
@@ -424,12 +538,12 @@ fn validate_manifest(manifest: &Manifest) -> Result<(), PackError> {
     validate_id("vendor", &manifest.vendor, 128)?;
     validate_id("family", &manifest.family, 128)?;
     validate_id("license", &manifest.license, 128)?;
-    if manifest.selectors.is_empty()
+    if (manifest.selectors.is_empty() && manifest.adapter_selectors.is_empty())
         || manifest.platforms.is_empty()
         || manifest.maintainers.is_empty()
     {
         return Err(PackError::Invalid(
-            "selectors, platforms and maintainers must not be empty".into(),
+            "a driver or adapter selector, platforms and maintainers must not be empty".into(),
         ));
     }
     if manifest.mappings.is_empty() {
@@ -443,6 +557,21 @@ fn validate_manifest(manifest: &Manifest) -> Result<(), PackError> {
             return Err(PackError::Invalid(
                 "driver_id and driver_version must be exact non-empty values".into(),
             ));
+        }
+    }
+    for selector in &manifest.adapter_selectors {
+        if !manifest.platforms.contains(&selector.platform) {
+            return Err(PackError::Invalid(
+                "adapter selector declares an unlisted platform".into(),
+            ));
+        }
+        validate_id("adapter_id", &selector.adapter_id, 256)?;
+        validate_id("adapter_version", &selector.adapter_version, 64)?;
+        if let Some(device_family) = &selector.device_family {
+            validate_id("device_family", device_family, 128)?;
+        }
+        if let Some(firmware_version) = &selector.firmware_version {
+            validate_id("firmware_version", firmware_version, 128)?;
         }
     }
     for maintainer in &manifest.maintainers {
@@ -783,6 +912,17 @@ mod tests {
             Ok(Self(root))
         }
 
+        fn new_mobile() -> Result<Self, Box<dyn std::error::Error>> {
+            let pack = Self::new()?;
+            fs::write(pack.0.join("manifest.json"), mobile_manifest_json())?;
+            fs::write(pack.0.join("mappings/options.json"), mobile_mapping_json())?;
+            fs::write(
+                pack.0.join("tests/conformance.json"),
+                mobile_conformance_json(),
+            )?;
+            Ok(pack)
+        }
+
         fn trust(&self) -> Result<TrustPolicy, PackError> {
             let digest = canonical_digest(&self.0, &inventory(&self.0)?)?;
             Ok(TrustPolicy {
@@ -814,6 +954,24 @@ mod tests {
         r#"{"schema_version":1,"rules":[{"platform":"windows","native_capability_key":"display-safe-option","semantic_facet":"media.sensing","choices":{"Native A":"gap","Native B":"black_mark"}}]}"#
     }
 
+    fn mobile_manifest_json() -> &'static str {
+        r#"{
+          "schema_version":1,"pack_id":"pack.example.mobile","pack_version":"1.0.0",
+          "vendor":"Example","family":"Example Mobile","maintainers":["Example Maintainer"],
+          "adapter_selectors":[{"platform":"ios_external_accessory","adapter_id":"com.example.print-adapter","adapter_version":"5.4.0","device_family":"Example Mobile","firmware_version":"4.5"}],
+          "platforms":["ios_external_accessory"],"facets":["media.sensing"],"evidence":"mapped",
+          "mappings":["mappings/options.json"],"conformance":["tests/conformance.json"],"fixtures":["fixtures/capabilities.redacted.json"],"license":"Apache-2.0"
+        }"#
+    }
+
+    fn mobile_mapping_json() -> &'static str {
+        r#"{"schema_version":1,"rules":[{"platform":"ios_external_accessory","native_capability_key":"display-safe-option","semantic_facet":"media.sensing","choices":{"Native A":"gap","Native B":"black_mark"}}]}"#
+    }
+
+    fn mobile_conformance_json() -> &'static str {
+        r#"{"schema_version":1,"cases":[{"name":"maps","platform":"ios_external_accessory","native_capability_key":"display-safe-option","native_choice":"Native A","expected_semantic_facet":"media.sensing","expected_semantic_choice":"gap"},{"name":"unknown","platform":"ios_external_accessory","native_capability_key":"display-safe-option","native_choice":"Other","expected_error":"unsupported_native_choice"}]}"#
+    }
+
     fn conformance_json() -> &'static str {
         r#"{"schema_version":1,"cases":[{"name":"maps","platform":"windows","native_capability_key":"display-safe-option","native_choice":"Native A","expected_semantic_facet":"media.sensing","expected_semantic_choice":"gap"},{"name":"unknown","platform":"windows","native_capability_key":"display-safe-option","native_choice":"Other","expected_error":"unsupported_native_choice"}]}"#
     }
@@ -825,6 +983,16 @@ mod tests {
             driver_id: "example-driver".into(),
             driver_version: "1.2.3".into(),
             device_id: Some("USBPRINT/example".into()),
+            firmware_version: Some("4.5".into()),
+        }
+    }
+
+    fn adapter_fingerprint() -> AdapterFingerprint {
+        AdapterFingerprint {
+            platform: Platform::IosExternalAccessory,
+            adapter_id: "com.example.print-adapter".into(),
+            adapter_version: "5.4.0".into(),
+            device_family: Some("Example Mobile".into()),
             firmware_version: Some("4.5".into()),
         }
     }
@@ -936,6 +1104,90 @@ mod tests {
             SupportPackRegistry::load(&config)?.normalize(Some(&incomplete), &options)?,
             SemanticPrinterCapabilities::default()
         );
+        Ok(())
+    }
+
+    #[test]
+    fn registry_projects_only_exact_bundled_adapter_fingerprints()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let pack = TestPack::new_mobile()?;
+        let digest = pack_digest(&pack.0)?;
+        let config = RegistryConfig {
+            pack_directories: vec![pack.0.clone()],
+            pinned_digest_hex: vec![hex::encode(digest)],
+            ed25519_public_key_hex: Vec::new(),
+        };
+        let registry = SupportPackRegistry::load(&config)?;
+        let options = BTreeMap::from([(
+            "display-safe-option".into(),
+            NativePrinterOption {
+                display_name: "Sensing".into(),
+                default_choice: Some("Native A".into()),
+                selected_choice: None,
+                choices: vec![piqae_domain::NativePrinterChoice {
+                    value: "Native A".into(),
+                    display_name: "Native A".into(),
+                }],
+            },
+        )]);
+
+        let projection = registry.normalize_adapter(&adapter_fingerprint(), &options)?;
+        assert_eq!(projection.facets["media.sensing"], ["gap"]);
+        assert_eq!(
+            projection
+                .support_pack
+                .as_ref()
+                .map(|pack| pack.pack_id.as_str()),
+            Some("pack.example.mobile")
+        );
+
+        let mut wrong_version = adapter_fingerprint();
+        wrong_version.adapter_version = "5.4.1".into();
+        assert_eq!(
+            registry.normalize_adapter(&wrong_version, &options)?,
+            SemanticPrinterCapabilities::default()
+        );
+        let mut missing_firmware = adapter_fingerprint();
+        missing_firmware.firmware_version = None;
+        assert_eq!(
+            registry.normalize_adapter(&missing_firmware, &options)?,
+            SemanticPrinterCapabilities::default()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn ambiguous_bundled_adapter_matches_fail_closed() -> Result<(), Box<dyn std::error::Error>> {
+        let first = TestPack::new_mobile()?;
+        let second = TestPack::new_mobile()?;
+        fs::write(
+            second.0.join("manifest.json"),
+            mobile_manifest_json().replace("pack.example.mobile", "pack.other.mobile"),
+        )?;
+        let packs = [
+            load_pack(&first.0, &first.trust()?)?,
+            load_pack(&second.0, &second.trust()?)?,
+        ];
+        assert!(
+            matches!(select_adapter_pack(&packs, &adapter_fingerprint()), Err(PackError::Ambiguous(ids)) if ids.len() == 2)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn checked_in_mobile_adapter_template_is_valid() -> Result<(), Box<dyn std::error::Error>> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../driver-support/templates/mobile-adapter");
+        let digest = pack_digest(&root)?;
+        let loaded = load_pack(
+            &root,
+            &TrustPolicy {
+                pinned_digests: BTreeSet::from([digest]),
+                verifying_keys: Vec::new(),
+            },
+        )?;
+        assert_eq!(loaded.manifest.adapter_selectors.len(), 1);
+        assert!(loaded.manifest.selectors.is_empty());
         Ok(())
     }
 
