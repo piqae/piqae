@@ -22,7 +22,7 @@ use piqae_local_ipc::{
     constant_time_proof_eq, read_message, write_message,
 };
 
-const DOCUMENT_VERSION: u16 = 2;
+const DOCUMENT_VERSION: u16 = 3;
 const MAX_APPLICATIONS: usize = 128;
 const MAX_PENDING_AUTHORIZATIONS: usize = 64;
 const AUTHORIZATION_LIFETIME_MS: i64 = 5 * 60 * 1_000;
@@ -96,6 +96,11 @@ pub struct ApplicationAuthorization {
 #[serde(deny_unknown_fields)]
 struct DurableApplicationAuthorization {
     identity: ApplicationIdentity,
+    /// Digest of the operating-system verified application principal. Legacy
+    /// entries deliberately deserialize without one and can never authenticate;
+    /// the signed application must obtain fresh local consent.
+    #[serde(default)]
+    verified_principal_sha256: Option<String>,
     capabilities: ApplicationCapabilities,
     token_sha256: String,
     revoked: bool,
@@ -144,20 +149,28 @@ impl BrokerRegistry {
             },
             Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
         };
-        if !matches!(document.version, 1 | DOCUMENT_VERSION) {
+        if !matches!(document.version, 1 | 2 | DOCUMENT_VERSION) {
             bail!("unsupported broker registry version {}", document.version);
         }
         if document.applications.len() > MAX_APPLICATIONS {
             bail!("broker application registry exceeds supported bounds");
         }
         let mut applications = BTreeMap::new();
+        let mut application_ids = BTreeSet::new();
         for authorization in document.applications {
             validate_identity(&authorization.identity)?;
-            if applications
-                .insert(authorization.identity.application_id.clone(), authorization)
-                .is_some()
-            {
+            if !application_ids.insert(authorization.identity.application_id.clone()) {
                 bail!("broker application registry contains a duplicate application id");
+            }
+            let principal_key = match authorization.verified_principal_sha256.as_deref() {
+                Some(principal) => {
+                    validate_principal_digest(principal)?;
+                    principal.to_owned()
+                }
+                None => format!("legacy:{}", authorization.identity.application_id),
+            };
+            if applications.insert(principal_key, authorization).is_some() {
+                bail!("broker application registry contains a duplicate verified principal");
             }
         }
         if document.replay_proofs.len() > MAX_REPLAY_PROOFS {
@@ -191,20 +204,26 @@ impl BrokerRegistry {
     pub fn authorize(
         &mut self,
         identity: ApplicationIdentity,
+        verified_principal_sha256: &str,
         capabilities: ApplicationCapabilities,
     ) -> Result<ApplicationAuthorization> {
         validate_identity(&identity)?;
-        if !self.applications.contains_key(&identity.application_id)
-            && self.applications.len() >= MAX_APPLICATIONS
-        {
+        validate_principal_digest(verified_principal_sha256)?;
+        let replaces_existing = self
+            .applications
+            .values()
+            .any(|entry| entry.identity.application_id == identity.application_id);
+        if !replaces_existing && self.applications.len() >= MAX_APPLICATIONS {
             bail!("broker application limit reached");
         }
         let token = generate_token();
         let mut applications = self.applications.clone();
+        applications.retain(|_, entry| entry.identity.application_id != identity.application_id);
         applications.insert(
-            identity.application_id.clone(),
+            verified_principal_sha256.to_owned(),
             DurableApplicationAuthorization {
                 identity: identity.clone(),
+                verified_principal_sha256: Some(verified_principal_sha256.to_owned()),
                 capabilities,
                 token_sha256: token_digest(token.expose_for_client()),
                 revoked: false,
@@ -223,17 +242,22 @@ impl BrokerRegistry {
     pub fn authenticate(
         &self,
         application_id: &str,
+        verified_principal_sha256: &str,
         token: &str,
         requested: ApplicationCapabilities,
     ) -> bool {
-        self.applications.get(application_id).is_some_and(|entry| {
-            !entry.revoked
-                && entry.capabilities.allows(requested)
-                && constant_time_eq(
-                    entry.token_sha256.as_bytes(),
-                    token_digest(token).as_bytes(),
-                )
-        })
+        self.applications
+            .get(verified_principal_sha256)
+            .is_some_and(|entry| {
+                !entry.revoked
+                    && entry.identity.application_id == application_id
+                    && entry.verified_principal_sha256.as_deref() == Some(verified_principal_sha256)
+                    && entry.capabilities.allows(requested)
+                    && constant_time_eq(
+                        entry.token_sha256.as_bytes(),
+                        token_digest(token).as_bytes(),
+                    )
+            })
     }
 
     /// Verifies a protocol-v4 request and durably consumes its nonce before
@@ -247,6 +271,7 @@ impl BrokerRegistry {
         &mut self,
         request_id: uuid::Uuid,
         application_id: &str,
+        verified_principal_sha256: &str,
         capability: BrokerCapability,
         operation: &LocalOperation,
         nonce: &str,
@@ -255,16 +280,19 @@ impl BrokerRegistry {
         now_unix_ms: i64,
     ) -> Result<Option<[u8; 32]>> {
         if application_id.is_empty()
+            || validate_principal_digest(verified_principal_sha256).is_err()
             || nonce.len() < 32
             || nonce.len() > 128
             || now_unix_ms.abs_diff(issued_unix_ms) > BROKER_PROOF_MAX_SKEW_MS.unsigned_abs()
         {
             return Ok(None);
         }
-        let Some(entry) = self.applications.get(application_id) else {
+        let Some(entry) = self.applications.get(verified_principal_sha256) else {
             return Ok(None);
         };
         if entry.revoked
+            || entry.identity.application_id != application_id
+            || entry.verified_principal_sha256.as_deref() != Some(verified_principal_sha256)
             || !entry
                 .capabilities
                 .allows(ApplicationCapabilities::requiring(capability))
@@ -312,15 +340,20 @@ impl BrokerRegistry {
     ///
     /// Returns an error when durable registry replacement fails.
     pub fn revoke(&mut self, application_id: &str) -> Result<bool> {
-        let Some(entry) = self.applications.get(application_id) else {
+        let Some((principal, entry)) = self
+            .applications
+            .iter()
+            .find(|(_, entry)| entry.identity.application_id == application_id)
+        else {
             return Ok(false);
         };
         if entry.revoked {
             return Ok(false);
         }
+        let principal = principal.clone();
         let mut applications = self.applications.clone();
         applications
-            .get_mut(application_id)
+            .get_mut(&principal)
             .context("broker authorization disappeared")?
             .revoked = true;
         self.persist_state(&applications, &self.replay_proofs)?;
@@ -408,6 +441,7 @@ impl ApplicationCapabilities {
 #[derive(Debug)]
 struct PendingAuthorization {
     view: PendingBrokerAuthorization,
+    verified_principal_sha256: String,
     nonce_sha256: String,
     decision: Option<Result<Vec<BrokerCapability>, ()>>,
 }
@@ -511,16 +545,26 @@ impl BrokerConsentHandle {
 
     async fn request(
         &self,
-        application: BrokerApplicationIdentity,
+        claimed_application: Option<&BrokerApplicationIdentity>,
+        peer: &piqae_local_ipc::PeerApplicationEvidence,
         capabilities: Vec<BrokerCapability>,
     ) -> Result<BrokerAuthorizationHandle, LocalFailure> {
-        validate_identity(&application).map_err(|_| {
+        validate_identity(peer.application()).map_err(|_| {
             local_failure(
-                "invalid_application_identity",
-                "the application identity is invalid",
+                "broker_peer_identity_unverified",
+                "the operating system did not provide a supported signed application identity",
                 false,
             )
         })?;
+        if claimed_application
+            .is_some_and(|claimed| !claimed_identity_matches(claimed, peer.application()))
+        {
+            return Err(local_failure(
+                "broker_application_identity_mismatch",
+                "the claimed application identity does not match the signed broker peer",
+                false,
+            ));
+        }
         let capabilities = validated_capabilities(&capabilities).map_err(|()| {
             local_failure(
                 "invalid_requested_capabilities",
@@ -546,11 +590,12 @@ impl BrokerConsentHandle {
             PendingAuthorization {
                 view: PendingBrokerAuthorization {
                     authorization_id,
-                    application,
+                    application: peer.application().clone(),
                     requested_capabilities: capabilities,
                     requested_unix_ms: now,
                     expires_unix_ms,
                 },
+                verified_principal_sha256: peer.principal_sha256().to_owned(),
                 nonce_sha256: token_digest(nonce.expose_for_client()),
                 decision: None,
             },
@@ -571,6 +616,7 @@ impl BrokerConsentHandle {
     async fn status(
         &self,
         handle: &BrokerAuthorizationHandle,
+        peer: &piqae_local_ipc::PeerApplicationEvidence,
     ) -> Result<BrokerAuthorizationState, LocalFailure> {
         let now = Utc::now().timestamp_millis();
         if handle.expires_unix_ms <= now {
@@ -579,6 +625,12 @@ impl BrokerConsentHandle {
         let mut state = self.consent.lock().await;
         prune_expired(&mut state, now);
         let pending = authenticated_pending(&state, handle)?;
+        if !constant_time_eq(
+            pending.verified_principal_sha256.as_bytes(),
+            peer.principal_sha256().as_bytes(),
+        ) {
+            return Err(peer_mismatch());
+        }
         Ok(match &pending.decision {
             None => BrokerAuthorizationState::Pending,
             Some(Ok(_)) => BrokerAuthorizationState::Approved,
@@ -589,11 +641,18 @@ impl BrokerConsentHandle {
     async fn exchange(
         &self,
         handle: &BrokerAuthorizationHandle,
+        peer: &piqae_local_ipc::PeerApplicationEvidence,
     ) -> Result<BrokerCredential, LocalFailure> {
         let now = Utc::now().timestamp_millis();
         let mut state = self.consent.lock().await;
         prune_expired(&mut state, now);
         let pending = authenticated_pending(&state, handle)?;
+        if !constant_time_eq(
+            pending.verified_principal_sha256.as_bytes(),
+            peer.principal_sha256().as_bytes(),
+        ) {
+            return Err(peer_mismatch());
+        }
         let capabilities = match &pending.decision {
             None => {
                 return Err(local_failure(
@@ -618,6 +677,7 @@ impl BrokerConsentHandle {
             .await
             .authorize(
                 application.clone(),
+                peer.principal_sha256(),
                 ApplicationCapabilities::from_capabilities(&capabilities),
             )
             .map_err(|_| {
@@ -718,7 +778,11 @@ impl BrokerServerState {
         clippy::too_many_lines,
         reason = "the exhaustive protocol-version dispatch is intentionally kept at one boundary"
     )]
-    async fn handle(&self, request: BrokerRequest) -> BrokerResponse {
+    async fn handle(
+        &self,
+        request: BrokerRequest,
+        peer: Option<&piqae_local_ipc::PeerApplicationEvidence>,
+    ) -> BrokerResponse {
         let mut response_authentication = None;
         let result = if (BROKER_PROTOCOL_MIN_VERSION..=BROKER_PROTOCOL_VERSION)
             .contains(&request.protocol)
@@ -731,21 +795,34 @@ impl BrokerServerState {
                 BrokerOperation::RequestAuthorization {
                     application,
                     requested_capabilities,
-                } if request.protocol >= 2 => self
-                    .consent_handle()
-                    .request(application, requested_capabilities)
-                    .await
-                    .map(BrokerResult::AuthorizationRequested),
-                BrokerOperation::AuthorizationStatus { handle } if request.protocol >= 2 => self
-                    .consent_handle()
-                    .status(&handle)
-                    .await
-                    .map(|state| BrokerResult::AuthorizationStatus { state }),
-                BrokerOperation::ExchangeAuthorization { handle } if request.protocol >= 2 => self
-                    .consent_handle()
-                    .exchange(&handle)
-                    .await
-                    .map(BrokerResult::AuthorizationExchanged),
+                } if request.protocol >= 2 => match verified_peer(peer) {
+                    Ok(peer) => self
+                        .consent_handle()
+                        .request(application.as_ref(), peer, requested_capabilities)
+                        .await
+                        .map(BrokerResult::AuthorizationRequested),
+                    Err(failure) => Err(failure),
+                },
+                BrokerOperation::AuthorizationStatus { handle } if request.protocol >= 2 => {
+                    match verified_peer(peer) {
+                        Ok(peer) => self
+                            .consent_handle()
+                            .status(&handle, peer)
+                            .await
+                            .map(|state| BrokerResult::AuthorizationStatus { state }),
+                        Err(failure) => Err(failure),
+                    }
+                }
+                BrokerOperation::ExchangeAuthorization { handle } if request.protocol >= 2 => {
+                    match verified_peer(peer) {
+                        Ok(peer) => self
+                            .consent_handle()
+                            .exchange(&handle, peer)
+                            .await
+                            .map(BrokerResult::AuthorizationExchanged),
+                        Err(failure) => Err(failure),
+                    }
+                }
                 BrokerOperation::RequestAuthorization { .. }
                 | BrokerOperation::AuthorizationStatus { .. }
                 | BrokerOperation::ExchangeAuthorization { .. } => Err(local_failure(
@@ -770,10 +847,13 @@ impl BrokerServerState {
                     proof,
                 } if request.protocol == 4 => {
                     let required = required_capability(&operation);
-                    if required == Some(capability) {
+                    if required == Some(capability)
+                        && let Ok(peer) = verified_peer(peer)
+                    {
                         let authentication = self.registry.lock().await.authenticate_proof(
                             request.request_id,
                             &application_id,
+                            peer.principal_sha256(),
                             capability,
                             &operation,
                             &nonce,
@@ -799,12 +879,14 @@ impl BrokerServerState {
                                 true,
                             )),
                         }
-                    } else {
+                    } else if required != Some(capability) {
                         Err(local_failure(
                             "capability_mismatch",
                             "the declared capability does not authorize this operation",
                             false,
                         ))
+                    } else {
+                        Err(unverified_peer())
                     }
                 }
                 BrokerOperation::ExecuteAuthenticated { .. } => Err(local_failure(
@@ -852,7 +934,43 @@ pub async fn serve_unix_broker(
         let state = state.clone();
         tokio::spawn(async move {
             let _permit = permit;
-            serve_connection(&mut stream, state).await;
+            let peer = piqae_local_ipc::verify_unix_peer(&stream).ok();
+            serve_connection(
+                &mut stream,
+                state,
+                peer.as_ref()
+                    .map(piqae_local_ipc::VerifiedPeerConnection::evidence),
+            )
+            .await;
+        });
+    }
+}
+
+#[cfg(all(unix, feature = "test-peer-identity"))]
+#[doc(hidden)]
+/// Serves a broker with deterministic peer evidence for cross-platform
+/// transport tests. Production entrypoints never call this function.
+///
+/// # Errors
+///
+/// Returns an error if the isolated test endpoint cannot be bound or accepted.
+pub async fn serve_unix_broker_with_test_peer(
+    path: impl Into<PathBuf>,
+    state: BrokerServerState,
+    peer: piqae_local_ipc::PeerApplicationEvidence,
+) -> Result<(), piqae_local_ipc::LocalIpcError> {
+    let endpoint = piqae_local_ipc::LocalEndpoint::bind(path)?;
+    let capacity = std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_BROKER_CONNECTIONS));
+    loop {
+        let mut stream = endpoint.accept().await?;
+        let Ok(permit) = std::sync::Arc::clone(&capacity).try_acquire_owned() else {
+            continue;
+        };
+        let state = state.clone();
+        let peer = peer.clone();
+        tokio::spawn(async move {
+            let _permit = permit;
+            serve_connection(&mut stream, state, Some(&peer)).await;
         });
     }
 }
@@ -882,7 +1000,14 @@ pub async fn serve_windows_broker(
         let state = state.clone();
         tokio::spawn(async move {
             let _permit = permit;
-            serve_connection(&mut connected, state).await;
+            let peer = piqae_local_ipc::verify_windows_peer(&connected).ok();
+            serve_connection(
+                &mut connected,
+                state,
+                peer.as_ref()
+                    .map(piqae_local_ipc::VerifiedPeerConnection::evidence),
+            )
+            .await;
         });
     }
 }
@@ -890,13 +1015,14 @@ pub async fn serve_windows_broker(
 async fn serve_connection(
     stream: &mut (impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send),
     state: BrokerServerState,
+    peer: Option<&piqae_local_ipc::PeerApplicationEvidence>,
 ) {
     let Ok(Ok(request)) =
         tokio::time::timeout(BROKER_IO_TIMEOUT, read_message::<BrokerRequest>(stream)).await
     else {
         return;
     };
-    let response = state.handle(request).await;
+    let response = state.handle(request, peer).await;
     let _ = tokio::time::timeout(BROKER_IO_TIMEOUT, write_message(stream, &response)).await;
 }
 
@@ -1266,6 +1392,39 @@ fn local_failure(code: &str, message: &str, retryable: bool) -> LocalFailure {
     }
 }
 
+fn verified_peer(
+    peer: Option<&piqae_local_ipc::PeerApplicationEvidence>,
+) -> Result<&piqae_local_ipc::PeerApplicationEvidence, LocalFailure> {
+    peer.ok_or_else(unverified_peer)
+}
+
+fn unverified_peer() -> LocalFailure {
+    local_failure(
+        "broker_peer_identity_unverified",
+        "the operating system could not verify the signed application attached to this connection",
+        false,
+    )
+}
+
+fn peer_mismatch() -> LocalFailure {
+    local_failure(
+        "broker_peer_identity_mismatch",
+        "the authorization belongs to a different signed application",
+        false,
+    )
+}
+
+fn claimed_identity_matches(
+    claimed: &BrokerApplicationIdentity,
+    verified: &BrokerApplicationIdentity,
+) -> bool {
+    claimed.application_id == verified.application_id
+        && claimed
+            .signing_identity_sha256
+            .as_deref()
+            .is_none_or(|digest| verified.signing_identity_sha256.as_deref() == Some(digest))
+}
+
 fn validate_identity(identity: &ApplicationIdentity) -> Result<()> {
     if identity.application_id.is_empty()
         || identity.application_id.len() > 255
@@ -1283,6 +1442,13 @@ fn validate_identity(identity: &ApplicationIdentity) -> Result<()> {
             })
     {
         bail!("invalid broker application identity");
+    }
+    Ok(())
+}
+
+fn validate_principal_digest(value: &str) -> Result<()> {
+    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        bail!("invalid verified broker principal digest");
     }
     Ok(())
 }
@@ -1316,6 +1482,36 @@ mod tests {
     };
     use uuid::Uuid;
 
+    fn peer() -> piqae_local_ipc::PeerApplicationEvidence {
+        piqae_local_ipc::deterministic_test_connection(
+            "com.example.pos",
+            "example-signer",
+            "process-1",
+        )
+        .evidence()
+        .clone()
+    }
+
+    fn other_peer() -> piqae_local_ipc::PeerApplicationEvidence {
+        piqae_local_ipc::deterministic_test_connection(
+            "com.example.other",
+            "other-signer",
+            "process-2",
+        )
+        .evidence()
+        .clone()
+    }
+
+    fn changed_signer_peer() -> piqae_local_ipc::PeerApplicationEvidence {
+        piqae_local_ipc::deterministic_test_connection(
+            "com.example.pos",
+            "replacement-signer",
+            "process-3",
+        )
+        .evidence()
+        .clone()
+    }
+
     fn identity() -> ApplicationIdentity {
         ApplicationIdentity {
             application_id: "com.example.pos".into(),
@@ -1328,8 +1524,13 @@ mod tests {
     fn token_is_returned_once_and_registry_survives_restart() {
         let directory = tempfile::tempdir().unwrap();
         let mut registry = BrokerRegistry::load(directory.path()).unwrap();
+        let peer = peer();
         let issued = registry
-            .authorize(identity(), ApplicationCapabilities::OBSERVE_ONLY)
+            .authorize(
+                identity(),
+                peer.principal_sha256(),
+                ApplicationCapabilities::OBSERVE_ONLY,
+            )
             .unwrap();
         assert!(!format!("{issued:?}").contains(issued.token.expose_for_client()));
         drop(registry);
@@ -1337,8 +1538,45 @@ mod tests {
         let registry = BrokerRegistry::load(directory.path()).unwrap();
         assert!(registry.authenticate(
             "com.example.pos",
+            peer.principal_sha256(),
             issued.token.expose_for_client(),
             ApplicationCapabilities::OBSERVE_ONLY
+        ));
+    }
+
+    #[test]
+    fn legacy_authorization_without_verified_principal_requires_fresh_consent() {
+        let directory = tempfile::tempdir().unwrap();
+        let token = "legacy-token-never-authorized";
+        let mut application = serde_json::to_value(DurableApplicationAuthorization {
+            identity: identity(),
+            verified_principal_sha256: None,
+            capabilities: ApplicationCapabilities::OBSERVE_ONLY,
+            token_sha256: token_digest(token),
+            revoked: false,
+        })
+        .unwrap();
+        application
+            .as_object_mut()
+            .unwrap()
+            .remove("verified_principal_sha256");
+        std::fs::write(
+            directory.path().join("broker-applications.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "version": 2,
+                "applications": [application],
+                "replay_proofs": []
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let registry = BrokerRegistry::load(directory.path()).unwrap();
+        assert!(!registry.authenticate(
+            "com.example.pos",
+            peer().principal_sha256(),
+            token,
+            ApplicationCapabilities::OBSERVE_ONLY,
         ));
     }
 
@@ -1346,11 +1584,17 @@ mod tests {
     fn least_privilege_and_revocation_are_enforced() {
         let directory = tempfile::tempdir().unwrap();
         let mut registry = BrokerRegistry::load(directory.path()).unwrap();
+        let peer = peer();
         let issued = registry
-            .authorize(identity(), ApplicationCapabilities::OBSERVE_ONLY)
+            .authorize(
+                identity(),
+                peer.principal_sha256(),
+                ApplicationCapabilities::OBSERVE_ONLY,
+            )
             .unwrap();
         assert!(!registry.authenticate(
             "com.example.pos",
+            peer.principal_sha256(),
             issued.token.expose_for_client(),
             ApplicationCapabilities {
                 submit_local_jobs: true,
@@ -1360,6 +1604,7 @@ mod tests {
         assert!(registry.revoke("com.example.pos").unwrap());
         assert!(!registry.authenticate(
             "com.example.pos",
+            peer.principal_sha256(),
             issued.token.expose_for_client(),
             ApplicationCapabilities::OBSERVE_ONLY
         ));
@@ -1369,19 +1614,30 @@ mod tests {
     fn rotating_one_app_does_not_authorize_the_previous_token() {
         let directory = tempfile::tempdir().unwrap();
         let mut registry = BrokerRegistry::load(directory.path()).unwrap();
+        let peer = peer();
         let old = registry
-            .authorize(identity(), ApplicationCapabilities::OBSERVE_ONLY)
+            .authorize(
+                identity(),
+                peer.principal_sha256(),
+                ApplicationCapabilities::OBSERVE_ONLY,
+            )
             .unwrap();
         let current = registry
-            .authorize(identity(), ApplicationCapabilities::OBSERVE_ONLY)
+            .authorize(
+                identity(),
+                peer.principal_sha256(),
+                ApplicationCapabilities::OBSERVE_ONLY,
+            )
             .unwrap();
         assert!(!registry.authenticate(
             "com.example.pos",
+            peer.principal_sha256(),
             old.token.expose_for_client(),
             ApplicationCapabilities::OBSERVE_ONLY
         ));
         assert!(registry.authenticate(
             "com.example.pos",
+            peer.principal_sha256(),
             current.token.expose_for_client(),
             ApplicationCapabilities::OBSERVE_ONLY
         ));
@@ -1391,14 +1647,24 @@ mod tests {
     fn repeated_authorize_rotate_revoke_is_durable_across_restart() {
         let directory = tempfile::tempdir().unwrap();
         let mut registry = BrokerRegistry::load(directory.path()).unwrap();
+        let peer = peer();
         let first = registry
-            .authorize(identity(), ApplicationCapabilities::OBSERVE_ONLY)
+            .authorize(
+                identity(),
+                peer.principal_sha256(),
+                ApplicationCapabilities::OBSERVE_ONLY,
+            )
             .unwrap();
         let second = registry
-            .authorize(identity(), ApplicationCapabilities::OBSERVE_ONLY)
+            .authorize(
+                identity(),
+                peer.principal_sha256(),
+                ApplicationCapabilities::OBSERVE_ONLY,
+            )
             .unwrap();
         assert!(!registry.authenticate(
             "com.example.pos",
+            peer.principal_sha256(),
             first.token.expose_for_client(),
             ApplicationCapabilities::OBSERVE_ONLY
         ));
@@ -1408,11 +1674,13 @@ mod tests {
         let registry = BrokerRegistry::load(directory.path()).unwrap();
         assert!(!registry.authenticate(
             "com.example.pos",
+            peer.principal_sha256(),
             first.token.expose_for_client(),
             ApplicationCapabilities::OBSERVE_ONLY
         ));
         assert!(!registry.authenticate(
             "com.example.pos",
+            peer.principal_sha256(),
             second.token.expose_for_client(),
             ApplicationCapabilities::OBSERVE_ONLY
         ));
@@ -1422,8 +1690,13 @@ mod tests {
     async fn broker_dispatches_only_an_authorized_capability() {
         let directory = tempfile::tempdir().unwrap();
         let mut registry = BrokerRegistry::load(directory.path()).unwrap();
+        let peer = peer();
         let issued = registry
-            .authorize(identity(), ApplicationCapabilities::OBSERVE_ONLY)
+            .authorize(
+                identity(),
+                peer.principal_sha256(),
+                ApplicationCapabilities::OBSERVE_ONLY,
+            )
             .unwrap();
         let (commands, mut receive) = mpsc::channel(1);
         let state = BrokerServerState::new(registry, commands);
@@ -1468,7 +1741,7 @@ mod tests {
         };
         let serialized = serde_json::to_string(&request).unwrap();
         assert!(!serialized.contains(issued.token.expose_for_client()));
-        let response = state.handle(request).await;
+        let response = state.handle(request, Some(&peer)).await;
         assert!(matches!(
             response.result,
             Ok(BrokerResult::Local {
@@ -1482,8 +1755,13 @@ mod tests {
     fn authenticated_proofs_reject_tamper_and_replay_across_restart() {
         let directory = tempfile::tempdir().unwrap();
         let mut registry = BrokerRegistry::load(directory.path()).unwrap();
+        let peer = peer();
         let issued = registry
-            .authorize(identity(), ApplicationCapabilities::OBSERVE_ONLY)
+            .authorize(
+                identity(),
+                peer.principal_sha256(),
+                ApplicationCapabilities::OBSERVE_ONLY,
+            )
             .unwrap();
         let key = broker_proof_key(issued.token.expose_for_client());
         let request_id = Uuid::new_v4();
@@ -1504,6 +1782,7 @@ mod tests {
                 .authenticate_proof(
                     request_id,
                     "com.example.pos",
+                    peer.principal_sha256(),
                     BrokerCapability::ObserveStatus,
                     &LocalOperation::Status,
                     &nonce,
@@ -1522,6 +1801,7 @@ mod tests {
                 .authenticate_proof(
                     request_id,
                     "com.example.pos",
+                    peer.principal_sha256(),
                     BrokerCapability::ObserveStatus,
                     &LocalOperation::Status,
                     &nonce,
@@ -1537,6 +1817,7 @@ mod tests {
                 .authenticate_proof(
                     Uuid::new_v4(),
                     "com.example.pos",
+                    peer.principal_sha256(),
                     BrokerCapability::ObserveStatus,
                     &LocalOperation::Printers,
                     &Uuid::new_v4().simple().to_string(),
@@ -1553,24 +1834,32 @@ mod tests {
     async fn raw_token_execute_is_rejected_after_protocol_upgrade() {
         let directory = tempfile::tempdir().unwrap();
         let mut registry = BrokerRegistry::load(directory.path()).unwrap();
+        let peer = peer();
         let issued = registry
-            .authorize(identity(), ApplicationCapabilities::OBSERVE_ONLY)
+            .authorize(
+                identity(),
+                peer.principal_sha256(),
+                ApplicationCapabilities::OBSERVE_ONLY,
+            )
             .unwrap();
         let (commands, _receive) = mpsc::channel(1);
         let response = BrokerServerState::new(registry, commands)
-            .handle(BrokerRequest {
-                protocol: 3,
-                request_id: Uuid::new_v4(),
-                operation: BrokerOperation::Execute {
-                    credential: piqae_local_ipc::BrokerCredential {
-                        application_id: "com.example.pos".into(),
-                        token: issued.token.expose_for_client().into(),
-                        granted_capabilities: vec![BrokerCapability::ObserveStatus],
+            .handle(
+                BrokerRequest {
+                    protocol: 3,
+                    request_id: Uuid::new_v4(),
+                    operation: BrokerOperation::Execute {
+                        credential: piqae_local_ipc::BrokerCredential {
+                            application_id: "com.example.pos".into(),
+                            token: issued.token.expose_for_client().into(),
+                            granted_capabilities: vec![BrokerCapability::ObserveStatus],
+                        },
+                        capability: BrokerCapability::ObserveStatus,
+                        operation: LocalOperation::Status,
                     },
-                    capability: BrokerCapability::ObserveStatus,
-                    operation: LocalOperation::Status,
                 },
-            })
+                Some(&peer),
+            )
             .await;
         assert!(matches!(
             response.result,
@@ -1586,9 +1875,11 @@ mod tests {
         let state =
             BrokerServerState::new(BrokerRegistry::load(directory.path()).unwrap(), commands);
         let consent = state.consent_handle();
+        let peer = peer();
         let handle = consent
             .request(
-                identity(),
+                None,
+                &peer,
                 vec![
                     BrokerCapability::ObserveStatus,
                     BrokerCapability::ObservePrinters,
@@ -1600,6 +1891,7 @@ mod tests {
         assert_eq!(consent.pending().await.len(), 1);
         assert!(!state.registry.lock().await.authenticate(
             "com.example.pos",
+            peer.principal_sha256(),
             "claimed-signing-identity-is-not-a-token",
             ApplicationCapabilities::OBSERVE_ONLY,
         ));
@@ -1614,13 +1906,13 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            consent.status(&handle).await.unwrap(),
+            consent.status(&handle, &peer).await.unwrap(),
             BrokerAuthorizationState::Approved
         );
-        let credential = consent.exchange(&handle).await.unwrap();
+        let credential = consent.exchange(&handle, &peer).await.unwrap();
         assert!(!format!("{credential:?}").contains(&credential.token));
         assert!(matches!(
-            consent.exchange(&handle).await,
+            consent.exchange(&handle, &peer).await,
             Err(LocalFailure { code, .. }) if code == "authorization_not_found"
         ));
     }
@@ -1632,8 +1924,9 @@ mod tests {
         let state =
             BrokerServerState::new(BrokerRegistry::load(directory.path()).unwrap(), commands);
         let consent = state.consent_handle();
+        let peer = peer();
         let handle = consent
-            .request(identity(), vec![BrokerCapability::ObserveStatus])
+            .request(None, &peer, vec![BrokerCapability::ObserveStatus])
             .await
             .unwrap();
         {
@@ -1648,7 +1941,7 @@ mod tests {
         assert!(consent.pending().await.is_empty());
 
         let handle = consent
-            .request(identity(), vec![BrokerCapability::ObserveStatus])
+            .request(None, &peer, vec![BrokerCapability::ObserveStatus])
             .await
             .unwrap();
         drop(state);
@@ -1656,8 +1949,137 @@ mod tests {
         let restarted =
             BrokerServerState::new(BrokerRegistry::load(directory.path()).unwrap(), commands);
         assert!(matches!(
-            restarted.consent_handle().status(&handle).await,
+            restarted.consent_handle().status(&handle, &peer).await,
             Err(LocalFailure { code, .. }) if code == "authorization_not_found"
         ));
+    }
+
+    #[tokio::test]
+    async fn consent_fails_closed_without_verified_peer_or_for_a_spoofed_claim() {
+        let directory = tempfile::tempdir().unwrap();
+        let (commands, _receive) = mpsc::channel(1);
+        let state =
+            BrokerServerState::new(BrokerRegistry::load(directory.path()).unwrap(), commands);
+        let request = |application: Option<BrokerApplicationIdentity>| BrokerRequest {
+            protocol: BROKER_PROTOCOL_VERSION,
+            request_id: Uuid::new_v4(),
+            operation: BrokerOperation::RequestAuthorization {
+                application,
+                requested_capabilities: vec![BrokerCapability::ObserveStatus],
+            },
+        };
+
+        let unverified = state.handle(request(None), None).await;
+        assert!(matches!(
+            unverified.result,
+            Err(LocalFailure { ref code, .. }) if code == "broker_peer_identity_unverified"
+        ));
+        let signed_other = other_peer();
+        let spoofed = state
+            .handle(request(Some(identity())), Some(&signed_other))
+            .await;
+        assert!(matches!(
+            spoofed.result,
+            Err(LocalFailure { ref code, .. }) if code == "broker_application_identity_mismatch"
+        ));
+        let mut wrong_signature = identity();
+        wrong_signature.signing_identity_sha256 = Some("f".repeat(64));
+        let signature_spoof = state
+            .handle(request(Some(wrong_signature)), Some(&peer()))
+            .await;
+        assert!(matches!(
+            signature_spoof.result,
+            Err(LocalFailure { ref code, .. }) if code == "broker_application_identity_mismatch"
+        ));
+        assert!(state.consent_handle().pending().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn consent_ui_and_exchange_are_bound_only_to_the_verified_principal() {
+        let directory = tempfile::tempdir().unwrap();
+        let (commands, _receive) = mpsc::channel(1);
+        let state =
+            BrokerServerState::new(BrokerRegistry::load(directory.path()).unwrap(), commands);
+        let consent = state.consent_handle();
+        let peer = peer();
+        let other = other_peer();
+        let handle = consent
+            .request(None, &peer, vec![BrokerCapability::ObserveStatus])
+            .await
+            .unwrap();
+        let pending = consent.pending().await;
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].application, peer.application().clone());
+        assert!(matches!(
+            consent.status(&handle, &other).await,
+            Err(LocalFailure { code, .. }) if code == "broker_peer_identity_mismatch"
+        ));
+        consent
+            .decide(
+                handle.authorization_id,
+                BrokerAuthorizationDecision {
+                    approved: true,
+                    granted_capabilities: vec![BrokerCapability::ObserveStatus],
+                },
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            consent.exchange(&handle, &other).await,
+            Err(LocalFailure { code, .. }) if code == "broker_peer_identity_mismatch"
+        ));
+        assert!(consent.exchange(&handle, &peer).await.is_ok());
+    }
+
+    #[test]
+    fn principal_or_signature_change_invalidates_credentials_across_restart() {
+        let directory = tempfile::tempdir().unwrap();
+        let peer = peer();
+        let other = changed_signer_peer();
+        let mut registry = BrokerRegistry::load(directory.path()).unwrap();
+        let issued = registry
+            .authorize(
+                identity(),
+                peer.principal_sha256(),
+                ApplicationCapabilities::OBSERVE_ONLY,
+            )
+            .unwrap();
+        drop(registry);
+
+        let restarted = BrokerRegistry::load(directory.path()).unwrap();
+        assert!(restarted.authenticate(
+            "com.example.pos",
+            peer.principal_sha256(),
+            issued.token.expose_for_client(),
+            ApplicationCapabilities::OBSERVE_ONLY,
+        ));
+        assert!(!restarted.authenticate(
+            "com.example.pos",
+            other.principal_sha256(),
+            issued.token.expose_for_client(),
+            ApplicationCapabilities::OBSERVE_ONLY,
+        ));
+    }
+
+    #[test]
+    fn pid_substitution_cannot_overwrite_transport_derived_process_evidence() {
+        let first = piqae_local_ipc::deterministic_test_connection(
+            "com.example.pos",
+            "same-signer",
+            "pid-generation-1",
+        );
+        let substituted = piqae_local_ipc::deterministic_test_connection(
+            "com.example.pos",
+            "same-signer",
+            "pid-generation-2",
+        );
+        assert_eq!(
+            first.evidence().principal_sha256(),
+            substituted.evidence().principal_sha256()
+        );
+        assert_ne!(
+            first.evidence().process_instance_sha256(),
+            substituted.evidence().process_instance_sha256()
+        );
     }
 }
