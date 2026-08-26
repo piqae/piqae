@@ -1076,6 +1076,29 @@ impl EmbeddedQueue {
         Ok(None)
     }
 
+    /// Lists retained jobs across the local queue and every isolated connector
+    /// scope. Job IDs are time-sortable and globally unique, so the merged
+    /// newest-first view does not reveal connector ownership or need a second
+    /// history database in an SDK shell.
+    pub fn job_history(&self, offset: usize, limit: usize) -> Result<(Vec<LocalJob>, bool)> {
+        let limit = limit.clamp(1, 200);
+        let fetch = offset.saturating_add(limit).saturating_add(1).min(10_201);
+        let mut jobs = self.store.local_job_history(0, fetch)?;
+        for store in self.connector_stores.values() {
+            jobs.extend(store.local_job_history(0, fetch)?);
+        }
+        jobs.sort_by(|left, right| right.job_id.cmp(&left.job_id));
+        jobs.dedup_by(|left, right| left.job_id == right.job_id);
+        let mut page = jobs
+            .into_iter()
+            .skip(offset)
+            .take(limit + 1)
+            .collect::<Vec<_>>();
+        let has_more = page.len() > limit;
+        page.truncate(limit);
+        Ok((page, has_more))
+    }
+
     pub fn profiles(&self, printer_id: &str) -> Result<Vec<StoredNamedProfile>> {
         self.store.named_profiles(printer_id).map_err(Into::into)
     }

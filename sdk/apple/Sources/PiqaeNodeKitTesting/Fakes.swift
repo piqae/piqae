@@ -18,7 +18,9 @@ public actor PiqaeFakeEmbeddedRuntime: PiqaeEmbeddedNodeRuntime {
 
     private let failsToStart: Bool
     private let failsToConnect: Bool
-    private let connector: PiqaeRuntimeConnectorSnapshot?
+    private var connectorQueue: [PiqaeRuntimeConnectorSnapshot]
+    private var connectedConnectors: [PiqaeRuntimeConnectorSnapshot] = []
+    private var historyPage = PiqaeJobHistoryPage(jobs: [], nextOffset: nil)
     private var nextOperationDelayNanoseconds: UInt64
     private var nativeObservationDelayNanoseconds: UInt64 = 0
     private var reconcileFailuresRemaining = 0
@@ -47,7 +49,7 @@ public actor PiqaeFakeEmbeddedRuntime: PiqaeEmbeddedNodeRuntime {
     ) {
         self.failsToStart = failsToStart
         self.failsToConnect = failsToConnect
-        self.connector = connector
+        connectorQueue = connector.map { [$0] } ?? []
         self.nextOperationDelayNanoseconds = nextOperationDelayNanoseconds
     }
 
@@ -266,10 +268,35 @@ public actor PiqaeFakeEmbeddedRuntime: PiqaeEmbeddedNodeRuntime {
     {
         connectCount += 1
         if failsToConnect { throw ConnectFailure.requested }
-        guard let connector else {
+        guard !connectorQueue.isEmpty else {
             throw PiqaeNodeError.unsupportedOperation("No fake connector was configured.")
         }
+        let connector = connectorQueue.removeFirst()
+        connectedConnectors.removeAll { $0.connectorID == connector.connectorID }
+        connectedConnectors.append(connector)
         return connector
+    }
+
+    public func connectors() async throws -> [PiqaeRuntimeConnectorSnapshot] {
+        connectedConnectors
+    }
+
+    public func revokeConnector(id: PiqaeConnectionID) async throws {
+        connectedConnectors.removeAll { $0.connectorID == id.rawValue }
+    }
+
+    public func jobHistory(offset: Int, limit: Int) async throws -> PiqaeJobHistoryPage {
+        let jobs = Array(historyPage.jobs.dropFirst(offset).prefix(limit))
+        let next = offset + jobs.count < historyPage.jobs.count ? offset + jobs.count : nil
+        return PiqaeJobHistoryPage(jobs: jobs, nextOffset: next)
+    }
+
+    public func queueConnector(_ connector: PiqaeRuntimeConnectorSnapshot) {
+        connectorQueue.append(connector)
+    }
+
+    public func replaceHistory(_ history: PiqaeJobHistoryPage) {
+        historyPage = history
     }
 
     private func copy(

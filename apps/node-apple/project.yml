@@ -1,0 +1,87 @@
+name: PiqaeNodeApple
+options:
+  minimumXcodeGenVersion: 2.46.0
+  deploymentTarget:
+    iOS: "16.0"
+  createIntermediateGroups: true
+packages:
+  PiqaeNodeKit:
+    path: ../../sdk/apple
+settings:
+  base:
+    SWIFT_VERSION: 6.0
+    IPHONEOS_DEPLOYMENT_TARGET: 16.0
+    MARKETING_VERSION: 0.1.22
+    CURRENT_PROJECT_VERSION: 1
+    CODE_SIGN_STYLE: Automatic
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+    CLANG_ENABLE_MODULES: YES
+targets:
+  PiqaeNode:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources
+      - path: Resources
+    info:
+      path: Config/Info.plist
+      properties:
+        CFBundleDisplayName: Piqae Node
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UIBackgroundModes:
+          - fetch
+          - remote-notification
+        BGTaskSchedulerPermittedIdentifiers:
+          - com.piqae.node.maintenance
+        NSLocalNetworkUsageDescription: Piqae contacts only printers you select so it can report their availability and submit your print jobs.
+    entitlements:
+      path: Config/PiqaeNode.entitlements
+      properties:
+        keychain-access-groups:
+          - $(AppIdentifierPrefix)com.piqae.node
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.piqae.node
+        PRODUCT_NAME: PiqaeNode
+        TARGETED_DEVICE_FAMILY: 1,2
+        SUPPORTS_MACCATALYST: NO
+        ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS: YES
+    dependencies:
+      - package: PiqaeNodeKit
+        product: PiqaeNodeKit
+      - package: PiqaeNodeKit
+        product: PiqaeNodeKitAirPrint
+      - package: PiqaeNodeKit
+        product: PiqaeNodeKitUI
+  PiqaeNodeTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: Tests
+    dependencies:
+      - target: PiqaeNode
+      - package: PiqaeNodeKit
+        product: PiqaeNodeKitTesting
+schemes:
+  PiqaeNode:
+    build:
+      targets:
+        PiqaeNode: all
+        PiqaeNodeTests: [test]
+    test:
+      gatherCoverageData: true
+      targets:
+        - PiqaeNodeTests
+    archive:
+      config: Release

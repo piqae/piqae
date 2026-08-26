@@ -591,9 +591,12 @@ actor PiqaeNodeEngine {
     func jobHistory(offset: Int, limit: Int) async throws -> PiqaeJobHistoryPage {
         try requireStarted()
         if let selectedIPC { return try await selectedIPC.jobHistory(offset: offset, limit: limit) }
-        throw PiqaeNodeError.unsupportedOperation(
-            "Embedded print history pagination is not exposed by this runtime contract."
-        )
+        guard let runtime = configuration.embeddedRuntime else {
+            throw PiqaeNodeError.unsupportedOperation(
+                "Embedded print history requires the durable native runtime."
+            )
+        }
+        return try await runtime.jobHistory(offset: offset, limit: limit)
     }
 
     func profiles(for printerID: PiqaePrinterID) async throws -> [PiqaePrintProfile] {

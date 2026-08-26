@@ -28,6 +28,11 @@ public struct PiqaeNativeRuntimeConfiguration: Sendable {
     public let hostMode: PiqaeNodeHostMode
     public let availability: PiqaeNodeAvailabilityClass
     public let localOnly: Bool
+    /// Operator-visible name used only when enrolling a new connector.
+    public let nodeName: String
+    /// Bounded platform hint. iOS defaults to a generic value rather than the
+    /// user-assigned device name or a login-derived hostname.
+    public let hostname: String
     public let libraryURL: URL?
 
     public init(
@@ -36,6 +41,8 @@ public struct PiqaeNativeRuntimeConfiguration: Sendable {
         hostMode: PiqaeNodeHostMode = .embeddedApplication,
         availability: PiqaeNodeAvailabilityClass,
         localOnly: Bool,
+        nodeName: String? = nil,
+        hostname: String? = nil,
         libraryURL: URL? = nil
     ) {
         self.applicationID = applicationID
@@ -43,7 +50,36 @@ public struct PiqaeNativeRuntimeConfiguration: Sendable {
         self.hostMode = hostMode
         self.availability = availability
         self.localOnly = localOnly
+        let proposedName = nodeName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        self.nodeName = Self.boundedUTF8(
+            proposedName.isEmpty ? applicationID : proposedName,
+            maximumBytes: 120
+        )
+        let proposedHostname = hostname?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        #if os(iOS)
+        self.hostname = Self.boundedUTF8(
+            proposedHostname.isEmpty ? "ios-application-host" : proposedHostname,
+            maximumBytes: 120
+        )
+        #else
+        self.hostname = Self.boundedUTF8(
+            proposedHostname.isEmpty ? ProcessInfo.processInfo.hostName : proposedHostname,
+            maximumBytes: 120
+        )
+        #endif
         self.libraryURL = libraryURL
+    }
+
+    private static func boundedUTF8(_ value: String, maximumBytes: Int) -> String {
+        var result = ""
+        var usedBytes = 0
+        for character in value {
+            let characterBytes = String(character).utf8.count
+            guard usedBytes + characterBytes <= maximumBytes else { break }
+            result.append(character)
+            usedBytes += characterBytes
+        }
+        return result
     }
 }
 
@@ -60,6 +96,7 @@ public actor PiqaeNativeRuntime: PiqaeEmbeddedNodeRuntime, PiqaeOpaqueIdentityPr
     private var connectorKeyContext: PiqaeConnectorKeyCallbackContext?
     private var workAvailableHandler: (@Sendable () -> Void)?
     private var workAvailableContext: PiqaeWorkAvailableCallbackContext?
+    private var enrollmentNodeName: String
 
     public init(
         configuration: PiqaeNativeRuntimeConfiguration,
@@ -67,12 +104,26 @@ public actor PiqaeNativeRuntime: PiqaeEmbeddedNodeRuntime, PiqaeOpaqueIdentityPr
         connectorKeyStore: (any PiqaeConnectorKeyStore)? = nil
     ) {
         self.configuration = configuration
+        enrollmentNodeName = configuration.nodeName
         self.keyStore = keyStore ?? PiqaeKeychainHostKeyStore(
             account: "host-hmac-sha256-v1.\(configuration.applicationID)"
         )
         self.connectorKeyStore = connectorKeyStore ?? PiqaeKeychainConnectorKeyStore(
             service: "com.piqae.nodekit.connector-signing.v1.\(configuration.applicationID)"
         )
+    }
+
+    /// Updates only the operator-visible name used for future connector
+    /// enrollment. Existing cloud resources are renamed through their scoped
+    /// management API; this never rewrites credentials or queue identity.
+    public func updateEnrollmentNodeName(_ value: String) throws {
+        let value = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty, value.utf8.count <= 120 else {
+            throw PiqaeNodeError.invalidConfiguration(
+                "Node name must contain 1 to 120 UTF-8 bytes."
+            )
+        }
+        enrollmentNodeName = value
     }
 
     public func start() async throws {
@@ -365,6 +416,34 @@ public actor PiqaeNativeRuntime: PiqaeEmbeddedNodeRuntime, PiqaeOpaqueIdentityPr
         ).job
     }
 
+    public func jobHistory(offset: Int, limit: Int) async throws -> PiqaeJobHistoryPage {
+        guard offset >= 0, offset <= 10_000, (1 ... 200).contains(limit) else {
+            throw PiqaeNodeError.invalidConfiguration(
+                "History pagination must use an offset from 0 to 10,000 and a limit from 1 to 200."
+            )
+        }
+        let response = try commandResponse(
+            JobHistoryCommand(type: "job_history", offset: offset, limit: limit),
+            as: JobHistoryData.self
+        )
+        return PiqaeJobHistoryPage(
+            jobs: response.jobs.map {
+                PiqaeJobHistoryEntry(
+                    jobID: .init(rawValue: $0.jobID),
+                    printerID: .init(rawValue: $0.printerID),
+                    title: $0.title,
+                    state: $0.state,
+                    nativeJobID: $0.nativeJobID,
+                    canReprint: $0.canReprint,
+                    createdAt: $0.createdUnixMilliseconds.map {
+                        Date(timeIntervalSince1970: TimeInterval($0) / 1_000)
+                    }
+                )
+            },
+            nextOffset: response.nextOffset
+        )
+    }
+
     public func profiles(printerID: PiqaePrinterID) async throws
         -> [PiqaeRuntimeProfileSnapshot]
     {
@@ -442,8 +521,8 @@ public actor PiqaeNativeRuntime: PiqaeEmbeddedNodeRuntime, PiqaeOpaqueIdentityPr
                     connectorKeyHandle: prepared.keyHandle,
                     printerGrant: "all_local_printers",
                     allowedPrinterIDs: [],
-                    nodeName: configuration.applicationID,
-                    hostname: ProcessInfo.processInfo.hostName
+                    nodeName: enrollmentNodeName,
+                    hostname: configuration.hostname
                 ),
                 as: ConnectedConnectorData.self
             ).connector
@@ -721,6 +800,12 @@ private struct JobIDCommand: Encodable {
     enum CodingKeys: String, CodingKey { case type; case jobID = "job_id" }
 }
 
+private struct JobHistoryCommand: Encodable {
+    let type: String
+    let offset: Int
+    let limit: Int
+}
+
 private struct PrinterIDCommand: Encodable {
     let type: String
     let printerID: String
@@ -898,6 +983,31 @@ private struct AdapterAcknowledgementData: Decodable {
     let acknowledgement: PiqaeRuntimeAdapterAcknowledgement
 }
 private struct JobSnapshotData: Decodable { let job: PiqaeRuntimeJobSnapshot }
+private struct JobHistoryData: Decodable {
+    let jobs: [JobHistoryItem]
+    let nextOffset: Int?
+    enum CodingKeys: String, CodingKey {
+        case jobs
+        case nextOffset = "next_offset"
+    }
+}
+private struct JobHistoryItem: Decodable {
+    let jobID: String
+    let printerID: String
+    let title: String
+    let state: String
+    let nativeJobID: String?
+    let canReprint: Bool
+    let createdUnixMilliseconds: Int64?
+    enum CodingKeys: String, CodingKey {
+        case jobID = "job_id"
+        case printerID = "printer_id"
+        case title, state
+        case nativeJobID = "native_job_id"
+        case canReprint = "can_reprint"
+        case createdUnixMilliseconds = "created_unix_ms"
+    }
+}
 private struct ProfileSnapshotsData: Decodable { let profiles: [PiqaeRuntimeProfileSnapshot] }
 private struct ProfileSnapshotData: Decodable { let profile: PiqaeRuntimeProfileSnapshot }
 private struct ConnectorSnapshotsData: Decodable { let connectors: [PiqaeRuntimeConnectorSnapshot] }

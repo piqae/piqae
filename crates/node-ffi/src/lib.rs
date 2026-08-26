@@ -412,6 +412,10 @@ pub enum NativeCommand {
     JobSnapshot {
         job_id: String,
     },
+    JobHistory {
+        offset: usize,
+        limit: usize,
+    },
     ProfileSnapshots {
         printer_id: String,
     },
@@ -1277,6 +1281,30 @@ pub extern "C" fn piqae_node_command(handle: u64, data: *const u8, length: usize
                     .job(&job_id)
                     .map_err(|_| FfiError::AdapterOperation)?;
                 return Ok(json!({ "handle": handle, "job": job }));
+            }
+            NativeCommand::JobHistory { offset, limit } => {
+                if limit == 0 || limit > 200 || offset > 10_000 {
+                    return Err(FfiError::AdapterOperation);
+                }
+                let (jobs, has_more) = lock_embedded(&embedded_queue)?
+                    .job_history(offset, limit)
+                    .map_err(|_| FfiError::AdapterOperation)?;
+                let jobs = jobs
+                    .into_iter()
+                    .map(|job| {
+                        json!({
+                            "job_id": job.job_id,
+                            "printer_id": job.printer_id,
+                            "title": job.title,
+                            "state": job.state,
+                            "native_job_id": job.native_job_id,
+                            "can_reprint": false,
+                            "created_unix_ms": null
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                let next_offset = has_more.then_some(offset.saturating_add(jobs.len()));
+                return Ok(json!({ "handle": handle, "jobs": jobs, "next_offset": next_offset }));
             }
             NativeCommand::ProfileSnapshots { printer_id } => {
                 let profiles = lock_embedded(&embedded_queue)?
@@ -2161,6 +2189,19 @@ mod tests {
         assert_eq!(
             command(handle, json!({"type":"job_snapshot","job_id":job_id}))["data"]["job"]["state"],
             "completed_reported"
+        );
+        let history = command(handle, json!({"type":"job_history","offset":0,"limit":20}));
+        assert_eq!(history["data"]["jobs"].as_array().map(Vec::len), Some(2));
+        assert!(
+            history["data"]["jobs"]
+                .as_array()
+                .is_some_and(|jobs| jobs.iter().any(|job| job["job_id"] == job_id))
+        );
+        assert!(history["data"]["jobs"][0]["created_unix_ms"].is_null());
+        assert_eq!(history["data"]["next_offset"], serde_json::Value::Null);
+        assert_eq!(
+            command(handle, json!({"type":"job_history","offset":0,"limit":0}))["error"]["code"],
+            "adapter_operation_failed"
         );
         let _ = read_and_free(piqae_node_destroy(handle));
     }
