@@ -36,18 +36,26 @@ public actor PiqaeFakeEmbeddedRuntime: PiqaeEmbeddedNodeRuntime {
 }
 
 public actor PiqaeFakePrinterAdapter: PiqaePrinterAdapter {
+    public enum SubmissionBehavior: Equatable, Sendable {
+        case acceptedAndCompleted
+        case acceptedWithoutNativeID
+        case throwAfterHandoff
+    }
+
+    public enum SubmissionFailure: Error { case requested }
     public nonisolated let adapterID: String
     public nonisolated let descriptor: PiqaePrinterAdapterDescriptor
     private var inventory: [PiqaePrinter]
     private var profileInventory: [PiqaePrinterID: [PiqaePrintProfile]]
     private var submissionCountValue = 0
-    private var receiptsByIdempotencyKey: [String: PiqaeJobReceipt] = [:]
+    private let submissionBehavior: SubmissionBehavior
     private let now: Date
 
     public init(
         adapterID: String = "fake.printer",
         printers: [PiqaePrinter],
         profiles: [PiqaePrinterID: [PiqaePrintProfile]] = [:],
+        submissionBehavior: SubmissionBehavior = .acceptedAndCompleted,
         now: Date = Date(timeIntervalSince1970: 1_700_000_000)
     ) {
         self.adapterID = adapterID
@@ -61,6 +69,7 @@ public actor PiqaeFakePrinterAdapter: PiqaePrinterAdapter {
         )
         inventory = printers
         profileInventory = profiles
+        self.submissionBehavior = submissionBehavior
         self.now = now
     }
 
@@ -70,16 +79,22 @@ public actor PiqaeFakePrinterAdapter: PiqaePrinterAdapter {
         _ request: PiqaePrintRequest,
         to printer: PiqaePrinter
     ) async throws -> PiqaeJobReceipt {
-        if let prior = receiptsByIdempotencyKey[request.idempotencyKey] { return prior }
         submissionCountValue += 1
-        let receipt = PiqaeJobReceipt(
+        if submissionBehavior == .throwAfterHandoff { throw SubmissionFailure.requested }
+        return PiqaeJobReceipt(
             jobID: .init(rawValue: "job_fake_\(submissionCountValue)"),
-            nativeJobID: "native_fake_\(submissionCountValue)",
+            nativeJobID: submissionBehavior == .acceptedWithoutNativeID
+                ? nil : "native_fake_\(submissionCountValue)",
             handoffState: .acceptedBySpooler,
             acceptedAt: now
         )
-        receiptsByIdempotencyKey[request.idempotencyKey] = receipt
-        return receipt
+    }
+
+    public func observeNativeJob(
+        nativeJobID: String,
+        printer: PiqaePrinter
+    ) async throws -> PiqaeNativeJobObservation {
+        submissionBehavior == .acceptedAndCompleted ? .completedReported : .unknown
     }
 
     public func profiles(for printer: PiqaePrinter) async throws -> [PiqaePrintProfile] {

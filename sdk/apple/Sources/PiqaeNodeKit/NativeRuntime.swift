@@ -50,6 +50,7 @@ public struct PiqaeNativeRuntimeConfiguration: Sendable {
 /// Real allocator-neutral binding to `piqae-node-ffi`. This object owns the
 /// native handle and Keychain callback context until `stop()` destroys it.
 public actor PiqaeNativeRuntime: PiqaeEmbeddedNodeRuntime, PiqaeOpaqueIdentityProvider {
+    public static var linkedLibraryAvailable: Bool { piqae_node_link_anchor() != 0 }
     private let configuration: PiqaeNativeRuntimeConfiguration
     private let keyStore: any PiqaeHostKeyStore
     private var library: PiqaeNativeLibrary?
@@ -146,6 +147,144 @@ public actor PiqaeNativeRuntime: PiqaeEmbeddedNodeRuntime, PiqaeOpaqueIdentityPr
         )
         let response = try commandResponse(command, as: OpaqueEvidenceData.self)
         return response.opaqueEvidence
+    }
+
+    public func registerAdapter(_ registration: PiqaeRuntimeAdapterRegistration) async throws {
+        _ = try commandResponse(
+            RegisterAdapterCommand(type: "register_adapter", registration: registration),
+            as: RegisteredData.self
+        )
+    }
+
+    public func observePrinterInventory(
+        adapterID: String,
+        printers: [PiqaeRuntimePrinterObservation]
+    ) async throws -> [PiqaeRuntimePrinterSnapshot] {
+        let response = try commandResponse(
+            ObserveInventoryCommand(
+                type: "observe_printer_inventory",
+                adapterID: adapterID,
+                printers: printers
+            ),
+            as: PrinterInventoryData.self
+        )
+        return response.printers
+    }
+
+    public func printerInventory() async throws -> [PiqaeRuntimePrinterSnapshot] {
+        try commandResponse(TypeOnlyCommand(type: "printer_inventory"), as: PrinterInventoryData.self)
+            .printers
+    }
+
+    public func enqueue(_ request: PiqaeRuntimeJobRequest) async throws -> PiqaeRuntimeJobAccepted {
+        let response = try commandResponse(
+            EnqueueJobCommand(request: request),
+            as: JobAcceptedData.self
+        )
+        return response.job
+    }
+
+    public func nextOperation(adapterID: String) async throws -> PiqaeRuntimeAdapterOperation? {
+        try commandResponse(
+            AdapterIDCommand(type: "next_adapter_operation", adapterID: adapterID),
+            as: AdapterOperationData.self
+        ).operation
+    }
+
+    public func beginHandoff(_ operation: PiqaeRuntimeAdapterOperation) async throws
+        -> PiqaeRuntimeAdapterOperation
+    {
+        let response = try commandResponse(
+            AdapterOperationCommand(
+                type: "begin_adapter_handoff",
+                adapterID: operation.adapterID,
+                operationID: operation.operationID,
+                fence: operation.fence
+            ),
+            as: AdapterOperationData.self
+        )
+        guard let started = response.operation else { throw PiqaeNativeRuntimeError.invalidResponse }
+        return started
+    }
+
+    public func complete(
+        _ operation: PiqaeRuntimeAdapterOperation,
+        outcome: PiqaeRuntimeAdapterOutcome
+    ) async throws -> PiqaeRuntimeAdapterAcknowledgement {
+        try commandResponse(
+            CompleteOperationCommand(
+                type: "complete_adapter_operation",
+                adapterID: operation.adapterID,
+                operationID: operation.operationID,
+                fence: operation.fence,
+                result: outcome
+            ),
+            as: AdapterAcknowledgementData.self
+        ).acknowledgement
+    }
+
+    public func job(id: PiqaeJobID) async throws -> PiqaeRuntimeJobSnapshot {
+        try commandResponse(
+            JobIDCommand(type: "job_snapshot", jobID: id.rawValue),
+            as: JobSnapshotData.self
+        ).job
+    }
+
+    public func profiles(printerID: PiqaePrinterID) async throws
+        -> [PiqaeRuntimeProfileSnapshot]
+    {
+        try commandResponse(
+            PrinterIDCommand(type: "profile_snapshots", printerID: printerID.rawValue),
+            as: ProfileSnapshotsData.self
+        ).profiles
+    }
+
+    public func createProfile(_ request: PiqaeRuntimeProfileCreateRequest) async throws
+        -> PiqaeRuntimeProfileSnapshot
+    {
+        try commandResponse(
+            CreateProfileCommand(request: request),
+            as: ProfileSnapshotData.self
+        ).profile
+    }
+
+    public func updateProfile(_ request: PiqaeRuntimeProfileUpdateRequest) async throws
+        -> PiqaeRuntimeProfileSnapshot
+    {
+        try commandResponse(
+            UpdateProfileCommand(request: request),
+            as: ProfileSnapshotData.self
+        ).profile
+    }
+
+    public func deleteProfile(
+        printerID: PiqaePrinterID,
+        profileID: PiqaeProfileID,
+        expectedRevision: UInt64
+    ) async throws {
+        _ = try commandResponse(
+            DeleteProfileCommand(
+                type: "delete_profile",
+                printerID: printerID.rawValue,
+                profileID: profileID.rawValue,
+                expectedRevision: expectedRevision
+            ),
+            as: DeletedData.self
+        )
+    }
+
+    public func connectors() async throws -> [PiqaeRuntimeConnectorSnapshot] {
+        try commandResponse(
+            TypeOnlyCommand(type: "connector_snapshots"),
+            as: ConnectorSnapshotsData.self
+        ).connectors
+    }
+
+    public func revokeConnector(id: PiqaeConnectionID) async throws {
+        _ = try commandResponse(
+            ConnectorIDCommand(type: "revoke_connector", connectorID: id.rawValue),
+            as: RevokedData.self
+        )
     }
 
     private func commandResponse<Request: Encodable, Response: Decodable>(
@@ -291,6 +430,171 @@ private struct OpaqueEvidenceCommand: Encodable {
     }
 }
 
+private struct TypeOnlyCommand: Encodable { let type: String }
+
+private struct RegisterAdapterCommand: Encodable {
+    let type: String
+    let registration: PiqaeRuntimeAdapterRegistration
+}
+
+private struct ObserveInventoryCommand: Encodable {
+    let type: String
+    let adapterID: String
+    let printers: [PiqaeRuntimePrinterObservation]
+    enum CodingKeys: String, CodingKey {
+        case type
+        case adapterID = "adapter_id"
+        case printers
+    }
+}
+
+private struct AdapterIDCommand: Encodable {
+    let type: String
+    let adapterID: String
+    enum CodingKeys: String, CodingKey { case type; case adapterID = "adapter_id" }
+}
+
+private struct AdapterOperationCommand: Encodable {
+    let type: String
+    let adapterID: String
+    let operationID: String
+    let fence: String
+    enum CodingKeys: String, CodingKey {
+        case type
+        case adapterID = "adapter_id"
+        case operationID = "operation_id"
+        case fence
+    }
+}
+
+private struct CompleteOperationCommand: Encodable {
+    let type: String
+    let adapterID: String
+    let operationID: String
+    let fence: String
+    let result: PiqaeRuntimeAdapterOutcome
+    enum CodingKeys: String, CodingKey {
+        case type
+        case adapterID = "adapter_id"
+        case operationID = "operation_id"
+        case fence, result
+    }
+}
+
+private struct EnqueueJobCommand: Encodable {
+    let type = "enqueue_local_job"
+    let adapterID: String
+    let idempotencyKey: String
+    let printerID: String
+    let title: String
+    let contentKind: String
+    let contentBase64: String
+    let optionsJSON: String
+    let expiresUnixMilliseconds: Int64?
+
+    init(request: PiqaeRuntimeJobRequest) {
+        adapterID = request.adapterID
+        idempotencyKey = request.idempotencyKey
+        printerID = request.printerID.rawValue
+        title = request.title
+        contentKind = request.contentKind
+        contentBase64 = request.content.base64EncodedString()
+        optionsJSON = request.optionsJSON
+        expiresUnixMilliseconds = request.expiresUnixMilliseconds
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case adapterID = "adapter_id"
+        case idempotencyKey = "idempotency_key"
+        case printerID = "printer_id"
+        case title
+        case contentKind = "content_kind"
+        case contentBase64 = "content_base64"
+        case optionsJSON = "options_json"
+        case expiresUnixMilliseconds = "expires_unix_ms"
+    }
+}
+
+private struct JobIDCommand: Encodable {
+    let type: String
+    let jobID: String
+    enum CodingKeys: String, CodingKey { case type; case jobID = "job_id" }
+}
+
+private struct PrinterIDCommand: Encodable {
+    let type: String
+    let printerID: String
+    enum CodingKeys: String, CodingKey { case type; case printerID = "printer_id" }
+}
+
+private struct CreateProfileCommand: Encodable {
+    let type = "create_profile"
+    let printerID: String
+    let name: String
+    let isDefault: Bool
+    let optionsJSON: String
+    init(request: PiqaeRuntimeProfileCreateRequest) {
+        printerID = request.printerID.rawValue
+        name = request.name
+        isDefault = request.isDefault
+        optionsJSON = request.optionsJSON
+    }
+    enum CodingKeys: String, CodingKey {
+        case type
+        case printerID = "printer_id"
+        case name
+        case isDefault = "is_default"
+        case optionsJSON = "options_json"
+    }
+}
+
+private struct UpdateProfileCommand: Encodable {
+    let type = "update_profile"
+    let printerID: String
+    let profileID: String
+    let expectedRevision: UInt64
+    let name: String
+    let isDefault: Bool
+    let optionsJSON: String
+    init(request: PiqaeRuntimeProfileUpdateRequest) {
+        printerID = request.printerID.rawValue
+        profileID = request.profileID.rawValue
+        expectedRevision = request.expectedRevision
+        name = request.name
+        isDefault = request.isDefault
+        optionsJSON = request.optionsJSON
+    }
+    enum CodingKeys: String, CodingKey {
+        case type
+        case printerID = "printer_id"
+        case profileID = "profile_id"
+        case expectedRevision = "expected_revision"
+        case name
+        case isDefault = "is_default"
+        case optionsJSON = "options_json"
+    }
+}
+
+private struct DeleteProfileCommand: Encodable {
+    let type: String
+    let printerID: String
+    let profileID: String
+    let expectedRevision: UInt64
+    enum CodingKeys: String, CodingKey {
+        case type
+        case printerID = "printer_id"
+        case profileID = "profile_id"
+        case expectedRevision = "expected_revision"
+    }
+}
+
+private struct ConnectorIDCommand: Encodable {
+    let type: String
+    let connectorID: String
+    enum CodingKeys: String, CodingKey { case type; case connectorID = "connector_id" }
+}
+
 private struct NativeEnvelope<Value: Decodable>: Decodable {
     let ok: Bool
     let data: Value?
@@ -309,6 +613,19 @@ private struct OpaqueEvidenceData: Decodable {
     let opaqueEvidence: String
     enum CodingKeys: String, CodingKey { case opaqueEvidence = "opaque_evidence" }
 }
+private struct RegisteredData: Decodable { let registered: Bool }
+private struct PrinterInventoryData: Decodable { let printers: [PiqaeRuntimePrinterSnapshot] }
+private struct JobAcceptedData: Decodable { let job: PiqaeRuntimeJobAccepted }
+private struct AdapterOperationData: Decodable { let operation: PiqaeRuntimeAdapterOperation? }
+private struct AdapterAcknowledgementData: Decodable {
+    let acknowledgement: PiqaeRuntimeAdapterAcknowledgement
+}
+private struct JobSnapshotData: Decodable { let job: PiqaeRuntimeJobSnapshot }
+private struct ProfileSnapshotsData: Decodable { let profiles: [PiqaeRuntimeProfileSnapshot] }
+private struct ProfileSnapshotData: Decodable { let profile: PiqaeRuntimeProfileSnapshot }
+private struct ConnectorSnapshotsData: Decodable { let connectors: [PiqaeRuntimeConnectorSnapshot] }
+private struct DeletedData: Decodable { let deleted: Bool }
+private struct RevokedData: Decodable { let revoked: Bool }
 
 private final class PiqaeNativeLibrary: @unchecked Sendable {
     private typealias AbiDescriptor = @convention(c) () -> PiqaeNodeAbiDescriptor

@@ -18,8 +18,8 @@ that paper was produced.
   Keychain installation identity, adapter registry, and installed-node IPC
   abstraction.
 - `PiqaeNodeKitAirPrint`: user-selected AirPrint inventory and native handoff
-  foundation on iOS/iPadOS. Embedded submission remains disabled until the
-  durable runtime executor ABI owns the adapter pull/ack boundary.
+  foundation on iOS/iPadOS. The shared runtime durably owns enqueue,
+  idempotency, fenced handoff, restart recovery, and exact outcome ACKs.
 - `PiqaeNodeKitUI`: optional SwiftUI printer inventory for low-code adoption.
 - `PiqaeNodeKitTesting`: deterministic identity, enrollment, installed-node,
   and printer fakes. It never contacts a physical printer.
@@ -80,13 +80,23 @@ let adapters = try await node.printers.adapters()
 let printers = try await node.printers.list(refresh: true)
 let profiles = try await node.profiles.list(for: printers[0].id)
 let receipt = try await node.jobs.submit(request)
+let status = try await node.jobs.status(receipt.jobID)
 ```
 
-The last call currently fails closed for an embedded host. NodeKit never calls
-`adapter.submit` directly: the shared runtime must first persist the document,
-operation ID, route fence, deadline, and idempotency key, then expose a bounded
-adapter operation and durably acknowledge its exact outcome. Attached clients
-also require an explicitly approved broker capability.
+For an embedded host, NodeKit calls `adapter.submit` only after the shared
+runtime has persisted the document, operation ID, route fence, deadline, and
+idempotency key and then durably recorded that native handoff is beginning. A
+restart never replays a `handoff_started` or `accepted` operation. Unverifiable
+native acceptance becomes `delivery_uncertain`; a retry with the same
+idempotency key returns the original durable job. Attached clients also require
+an explicitly approved broker capability.
+
+Named profile create, update, delete, and list operations are stored by the same
+runtime. An adapter may capture native settings, but the durable profile record
+is authoritative. Connector listing and revocation are likewise runtime-owned.
+Completing a new connector invitation remains intentionally unavailable in the
+raw ABI until the host supplies the secure signer/exchange provider; NodeKit
+does not fabricate or persist a partial cloud credential.
 
 `PiqaeCloudEnrollmentProvider` is deliberately injected. It exchanges a
 short-lived invitation and returns a connector summary. Platform service-account
@@ -119,7 +129,9 @@ freshness.
 `PiqaeJobReceipt.acceptedBySpooler` means the native printing subsystem accepted
 the handoff. It never means that ink reached paper. If a route may have crossed
 that boundary, automatic rerouting must stop and the durable runtime owns the
-`delivery_uncertain` decision.
+`delivery_uncertain` decision. `queuedLocally` means the content is durable but
+the host has not begun native handoff, for example while iPadOS has not granted
+enough background time.
 
 ## AirPrint
 
@@ -136,6 +148,12 @@ The AirPrint adapter currently accepts PDF or image data, one copy, and optional
 orientation. Media pinning, density, raw printer languages, route-bound profiles,
 and cutter instructions fail closed and require a certified network, Bluetooth,
 External Accessory, or vendor adapter.
+
+UIKit does not return an authoritative native spooler job identifier for this
+API. After the system print controller reports completion, NodeKit therefore
+records the durable attempt as `delivery_uncertain` instead of inventing an ID
+or claiming spooler acceptance. A certified adapter that returns a stable native
+job ID can report `accepted_by_spooler` and later reconcile a terminal status.
 
 ## Native artifact
 
@@ -168,17 +186,18 @@ publication, and App Store review evidence belong to the native release gate.
 
 `PiqaeUIKitLifecycleCoordinator` forwards foreground/background state and the
 remaining execution budget. A background push is a metadata-free **wake hint**:
-it reconciles inventory and connector state without leasing or accepting a job.
-The admission policy refuses a new native handoff when the payload isn't durable,
-the app is suspended, the route is foreground-only, or the remaining budget is
-too short. Bounded background time is used only to finish work that already
-started.
+it reconciles inventory and may advance a job that was already durably accepted
+by the embedded runtime when the host reports enough remaining budget. It never
+carries a document or grants eligibility by itself. The admission policy refuses
+a new native handoff when the payload is not durable, the app is suspended, the
+route is foreground-only, or the remaining budget is too short.
 
 The coordinator can register an APNs device token through the injected provider
 and can forward an opaque collapse ID from the app delegate. It begins a bounded
 background task for reconciliation, reports expiration as `suspend_imminent`,
-and cancels the worker. A repeated hint is safe because it only reconciles; a
-lost hint performs no work and never fabricates eligibility. The API cannot run
+and cancels the worker. A repeated hint is safe because Rust idempotency and
+handoff fences prevent native replay; a lost hint leaves durable work queued and
+never fabricates eligibility. The API cannot run
 after user force-quit and reports only opportunistic availability while the app
 is installed.
 
@@ -221,6 +240,7 @@ to keep the process alive.
 
 ```console
 swift test --package-path sdk/apple
+PIQAE_REQUIRE_LINKED_RUNTIME_TESTS=1 swift test --package-path sdk/apple
 swift test --package-path shells/macos
 xcodebuild -scheme PiqaeNodeKit \
   -destination 'generic/platform=iOS Simulator' \
