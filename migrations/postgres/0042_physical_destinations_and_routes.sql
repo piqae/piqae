@@ -129,9 +129,10 @@ CREATE TABLE destination_identity_evidence (
         REFERENCES physical_destinations(workspace_id, environment_id, id) ON DELETE CASCADE,
     FOREIGN KEY (workspace_id, environment_id, route_id)
         REFERENCES printer_routes(workspace_id, environment_id, id) ON DELETE CASCADE,
-    CHECK ((metadata - 'source' - 'schema_version' - 'normalization') = '{}'::jsonb),
+    CHECK ((metadata - 'source' - 'schema_version' - 'normalization' - 'key_version') = '{}'::jsonb),
     CHECK (NOT (metadata ? 'source') OR metadata->>'source' IN ('node', 'operator', 'migration')),
-    CHECK (NOT (metadata ? 'normalization') OR char_length(metadata->>'normalization') BETWEEN 1 AND 64)
+    CHECK (NOT (metadata ? 'normalization') OR char_length(metadata->>'normalization') BETWEEN 1 AND 64),
+    CHECK (NOT (metadata ? 'key_version') OR metadata->>'key_version' ~ '^v[0-9]{1,6}$')
 );
 
 CREATE INDEX destination_identity_evidence_match_idx
@@ -224,7 +225,7 @@ CREATE INDEX route_observations_latest_idx
 CREATE TABLE projection_acknowledgements (
     workspace_id text NOT NULL,
     environment_id text NOT NULL,
-    connector_id text NOT NULL,
+    agent_id text NOT NULL,
     route_id text NOT NULL,
     inventory_revision bigint NOT NULL CHECK (inventory_revision >= 0),
     capability_revision bigint NOT NULL CHECK (capability_revision >= 0),
@@ -233,9 +234,9 @@ CREATE TABLE projection_acknowledgements (
     observed_at timestamptz NOT NULL,
     acknowledged_at timestamptz,
     updated_at timestamptz NOT NULL DEFAULT now(),
-    PRIMARY KEY (workspace_id, environment_id, connector_id, route_id),
-    FOREIGN KEY (workspace_id, environment_id, connector_id)
-        REFERENCES node_connectors(workspace_id, environment_id, id) ON DELETE CASCADE,
+    PRIMARY KEY (workspace_id, environment_id, agent_id, route_id),
+    FOREIGN KEY (workspace_id, environment_id, agent_id)
+        REFERENCES agents(workspace_id, environment_id, id) ON DELETE CASCADE,
     FOREIGN KEY (workspace_id, environment_id, route_id)
         REFERENCES printer_routes(workspace_id, environment_id, id) ON DELETE CASCADE,
     CHECK ((status = 'acknowledged') = (acknowledged_at IS NOT NULL)),
@@ -272,8 +273,6 @@ CREATE TABLE delivery_attempts (
         REFERENCES physical_destinations(workspace_id, environment_id, id),
     FOREIGN KEY (workspace_id, environment_id, route_id)
         REFERENCES printer_routes(workspace_id, environment_id, id),
-    FOREIGN KEY (workspace_id, environment_id, destination_id, route_id)
-        REFERENCES printer_routes(workspace_id, environment_id, destination_id, id),
     CHECK ((final_at IS NULL) = (state NOT IN ('completed_reported', 'cancelled', 'failed', 'delivery_uncertain', 'superseded')))
 );
 
@@ -306,8 +305,6 @@ CREATE TABLE route_reservations (
         REFERENCES printer_routes(workspace_id, environment_id, id),
     FOREIGN KEY (workspace_id, environment_id, destination_id)
         REFERENCES physical_destinations(workspace_id, environment_id, id),
-    FOREIGN KEY (workspace_id, environment_id, destination_id, route_id)
-        REFERENCES printer_routes(workspace_id, environment_id, destination_id, id),
     FOREIGN KEY (workspace_id, environment_id, job_id)
         REFERENCES jobs(workspace_id, environment_id, id) ON DELETE CASCADE,
     FOREIGN KEY (workspace_id, environment_id, attempt_id)
@@ -434,8 +431,8 @@ FROM printers
 ON CONFLICT (workspace_id, environment_id, printer_id, agent_id) DO NOTHING;
 
 -- Existing logical targets become route-aware. The compatibility printer and
--- agent columns remain temporarily readable, but destination_id/route_id are
--- destination_id is authoritative. route_id records the preferred/profile
+-- agent columns remain temporarily readable. destination_id is authoritative;
+-- route_id records the preferred/profile
 -- source route; the scheduler may select another compatible healthy route.
 ALTER TABLE target_bindings
     ADD COLUMN destination_id text,
@@ -451,8 +448,6 @@ WHERE route.workspace_id = binding.workspace_id
   AND route.agent_id = binding.agent_id;
 
 ALTER TABLE target_bindings
-    ALTER COLUMN destination_id SET NOT NULL,
-    ALTER COLUMN route_id SET NOT NULL,
     ADD CONSTRAINT target_bindings_destination_tenant_fkey
         FOREIGN KEY (workspace_id, environment_id, destination_id)
         REFERENCES physical_destinations(workspace_id, environment_id, id),

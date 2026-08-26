@@ -184,7 +184,7 @@ pub struct RouteObservation {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ProjectionAcknowledgement {
-    pub connector_id: String,
+    pub agent_id: String,
     pub route_id: String,
     pub inventory_revision: u64,
     pub capability_revision: u64,
@@ -434,7 +434,7 @@ pub trait DestinationTopologyRepository: Send + Sync {
     async fn get_projection_acknowledgement(
         &self,
         scope: TenantScope,
-        connector_id: &str,
+        agent_id: &str,
         route_id: &str,
     ) -> Result<ProjectionAcknowledgement, StorageError>;
     async fn upsert_site_membership(
@@ -477,11 +477,21 @@ pub trait DestinationTopologyRepository: Send + Sync {
         scope: TenantScope,
         destination_id: &str,
     ) -> Result<bool, StorageError>;
+    async fn recompute_destination_attention(
+        &self,
+        scope: TenantScope,
+        destination_id: &str,
+    ) -> Result<StoredPhysicalDestination, StorageError>;
     async fn list_delivery_attempts(
         &self,
         scope: TenantScope,
         job_id: &str,
     ) -> Result<Vec<DeliveryAttempt>, StorageError>;
+    async fn get_latest_delivery_attempt(
+        &self,
+        scope: TenantScope,
+        job_id: &str,
+    ) -> Result<DeliveryAttempt, StorageError>;
     async fn get_delivery_attempt_by_reservation(
         &self,
         scope: TenantScope,
@@ -547,11 +557,14 @@ const fn valid_attempt_transition(from: DeliveryAttemptState, to: DeliveryAttemp
             to,
             DeliveryAttemptState::PrintingReported
                 | DeliveryAttemptState::CompletedReported
+                | DeliveryAttemptState::Failed
                 | DeliveryAttemptState::DeliveryUncertain
         ),
         DeliveryAttemptState::PrintingReported => matches!(
             to,
-            DeliveryAttemptState::CompletedReported | DeliveryAttemptState::DeliveryUncertain
+            DeliveryAttemptState::CompletedReported
+                | DeliveryAttemptState::Failed
+                | DeliveryAttemptState::DeliveryUncertain
         ),
         DeliveryAttemptState::CompletedReported
         | DeliveryAttemptState::Cancelled
@@ -667,7 +680,7 @@ fn map_projection_acknowledgement(
     row: &sqlx::postgres::PgRow,
 ) -> Result<ProjectionAcknowledgement, StorageError> {
     Ok(ProjectionAcknowledgement {
-        connector_id: row.try_get("connector_id")?,
+        agent_id: row.try_get("agent_id")?,
         route_id: row.try_get("route_id")?,
         inventory_revision: i64_to_u64(row.try_get("inventory_revision")?, "inventory_revision")?,
         capability_revision: i64_to_u64(
@@ -942,19 +955,19 @@ impl DestinationTopologyRepository for PostgresStore {
         scope: TenantScope,
         acknowledgement: &ProjectionAcknowledgement,
     ) -> Result<(), StorageError> {
-        sqlx::query("INSERT INTO projection_acknowledgements (workspace_id,environment_id,connector_id,route_id,inventory_revision,capability_revision,status,error_code,observed_at,acknowledged_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT (workspace_id,environment_id,connector_id,route_id) DO UPDATE SET inventory_revision=EXCLUDED.inventory_revision,capability_revision=EXCLUDED.capability_revision,status=EXCLUDED.status,error_code=EXCLUDED.error_code,observed_at=EXCLUDED.observed_at,acknowledged_at=EXCLUDED.acknowledged_at,updated_at=now() WHERE projection_acknowledgements.inventory_revision <= EXCLUDED.inventory_revision")
-            .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).bind(&acknowledgement.connector_id).bind(&acknowledgement.route_id).bind(i64::try_from(acknowledgement.inventory_revision).map_err(|_| StorageError::InvalidData("inventory revision exceeds bigint".into()))?).bind(i64::try_from(acknowledgement.capability_revision).map_err(|_| StorageError::InvalidData("capability revision exceeds bigint".into()))?).bind(&acknowledgement.status).bind(&acknowledgement.error_code).bind(acknowledgement.observed_at).bind(acknowledgement.acknowledged_at).execute(self.pool()).await?;
+        sqlx::query("INSERT INTO projection_acknowledgements (workspace_id,environment_id,agent_id,route_id,inventory_revision,capability_revision,status,error_code,observed_at,acknowledged_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT (workspace_id,environment_id,agent_id,route_id) DO UPDATE SET inventory_revision=EXCLUDED.inventory_revision,capability_revision=EXCLUDED.capability_revision,status=EXCLUDED.status,error_code=EXCLUDED.error_code,observed_at=EXCLUDED.observed_at,acknowledged_at=EXCLUDED.acknowledged_at,updated_at=now() WHERE projection_acknowledgements.inventory_revision <= EXCLUDED.inventory_revision")
+            .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).bind(&acknowledgement.agent_id).bind(&acknowledgement.route_id).bind(i64::try_from(acknowledgement.inventory_revision).map_err(|_| StorageError::InvalidData("inventory revision exceeds bigint".into()))?).bind(i64::try_from(acknowledgement.capability_revision).map_err(|_| StorageError::InvalidData("capability revision exceeds bigint".into()))?).bind(&acknowledgement.status).bind(&acknowledgement.error_code).bind(acknowledgement.observed_at).bind(acknowledgement.acknowledged_at).execute(self.pool()).await?;
         Ok(())
     }
 
     async fn get_projection_acknowledgement(
         &self,
         scope: TenantScope,
-        connector_id: &str,
+        agent_id: &str,
         route_id: &str,
     ) -> Result<ProjectionAcknowledgement, StorageError> {
-        let row = sqlx::query("SELECT connector_id,route_id,inventory_revision,capability_revision,status,error_code,observed_at,acknowledged_at FROM projection_acknowledgements WHERE workspace_id=$1 AND environment_id=$2 AND connector_id=$3 AND route_id=$4")
-            .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).bind(connector_id).bind(route_id).fetch_optional(self.pool()).await?.ok_or(StorageError::NotFound)?;
+        let row = sqlx::query("SELECT agent_id,route_id,inventory_revision,capability_revision,status,error_code,observed_at,acknowledged_at FROM projection_acknowledgements WHERE workspace_id=$1 AND environment_id=$2 AND agent_id=$3 AND route_id=$4")
+            .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).bind(agent_id).bind(route_id).fetch_optional(self.pool()).await?.ok_or(StorageError::NotFound)?;
         map_projection_acknowledgement(&row)
     }
 
@@ -984,6 +997,11 @@ impl DestinationTopologyRepository for PostgresStore {
         .fetch_optional(&mut *tx)
         .await?
         .ok_or(StorageError::NotFound)?;
+        let route_matches_destination: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM printer_routes WHERE workspace_id=$1 AND environment_id=$2 AND id=$3 AND destination_id=$4 AND enabled AND retired_at IS NULL)")
+            .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).bind(request.route_id).bind(request.destination_id).fetch_one(&mut *tx).await?;
+        if !route_matches_destination {
+            return Err(StorageError::NotFound);
+        }
         // Serialize schedulers at the physical destination boundary, including
         // schedulers choosing different node routes for the same printer.
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
@@ -1158,6 +1176,15 @@ impl DestinationTopologyRepository for PostgresStore {
         request_id: &str,
     ) -> Result<DeliveryUncertaintyResolution, StorageError> {
         let mut tx = self.pool().begin().await?;
+        if let Some(existing) = sqlx::query("SELECT id,job_id,attempt_id,destination_id,resolution,note,actor_id,request_id,created_at FROM delivery_uncertainty_resolutions WHERE workspace_id=$1 AND environment_id=$2 AND request_id=$3")
+            .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).bind(request_id).fetch_optional(&mut *tx).await? {
+            let existing = map_uncertainty_resolution(&existing)?;
+            if existing.job_id == job_id && existing.resolution == resolution && existing.note.as_deref() == note && existing.actor_id == actor_id {
+                tx.commit().await?;
+                return Ok(existing);
+            }
+            return Err(StorageError::IdempotencyConflict);
+        }
         let attempt = sqlx::query("SELECT id,destination_id FROM delivery_attempts WHERE workspace_id=$1 AND environment_id=$2 AND job_id=$3 AND state='delivery_uncertain' ORDER BY generation DESC LIMIT 1 FOR UPDATE")
             .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).bind(job_id).fetch_optional(&mut *tx).await?.ok_or(StorageError::NotFound)?;
         let attempt_id: String = attempt.try_get("id")?;
@@ -1184,6 +1211,20 @@ impl DestinationTopologyRepository for PostgresStore {
             .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).bind(destination_id).fetch_one(self.pool()).await?)
     }
 
+    async fn recompute_destination_attention(
+        &self,
+        scope: TenantScope,
+        destination_id: &str,
+    ) -> Result<StoredPhysicalDestination, StorageError> {
+        let mut tx = self.pool().begin().await?;
+        let unresolved: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM delivery_attempts attempt WHERE attempt.workspace_id=$1 AND attempt.environment_id=$2 AND attempt.destination_id=$3 AND attempt.state='delivery_uncertain' AND NOT EXISTS (SELECT 1 FROM delivery_uncertainty_resolutions resolution WHERE resolution.workspace_id=attempt.workspace_id AND resolution.environment_id=attempt.environment_id AND resolution.attempt_id=attempt.id))")
+            .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).bind(destination_id).fetch_one(&mut *tx).await?;
+        let row = sqlx::query("UPDATE physical_destinations SET state=CASE WHEN $4 THEN 'attention' WHEN state='attention' THEN 'available' ELSE state END,updated_at=now() WHERE workspace_id=$1 AND environment_id=$2 AND id=$3 RETURNING id,name,identity_confidence,state,scheduling_authority_id,identity_revision,updated_at")
+            .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).bind(destination_id).bind(unresolved).fetch_optional(&mut *tx).await?.ok_or(StorageError::NotFound)?;
+        tx.commit().await?;
+        map_destination(&row)
+    }
+
     async fn list_delivery_attempts(
         &self,
         scope: TenantScope,
@@ -1192,6 +1233,16 @@ impl DestinationTopologyRepository for PostgresStore {
         let rows = sqlx::query("SELECT id,job_id,destination_id,route_id,generation,state,lease_until,accepted_at,handoff_started_at,spooler_accepted_at,final_at,created_at,updated_at FROM delivery_attempts WHERE workspace_id=$1 AND environment_id=$2 AND job_id=$3 ORDER BY generation,id")
             .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).bind(job_id).fetch_all(self.pool()).await?;
         rows.iter().map(map_attempt).collect()
+    }
+
+    async fn get_latest_delivery_attempt(
+        &self,
+        scope: TenantScope,
+        job_id: &str,
+    ) -> Result<DeliveryAttempt, StorageError> {
+        let row = sqlx::query("SELECT id,job_id,destination_id,route_id,generation,state,lease_until,accepted_at,handoff_started_at,spooler_accepted_at,final_at,created_at,updated_at FROM delivery_attempts WHERE workspace_id=$1 AND environment_id=$2 AND job_id=$3 ORDER BY generation DESC,id DESC LIMIT 1")
+            .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).bind(job_id).fetch_optional(self.pool()).await?.ok_or(StorageError::NotFound)?;
+        map_attempt(&row)
     }
 
     async fn get_delivery_attempt_by_reservation(
@@ -1274,7 +1325,7 @@ async fn apply_identity_decision(
                     ));
                 }
             }
-            let route_busy: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM route_reservations WHERE workspace_id=$1 AND environment_id=$2 AND route_id=ANY($3) AND state='active')")
+            let route_busy: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM route_reservations WHERE workspace_id=$1 AND environment_id=$2 AND route_id=ANY($3) AND state='active') OR EXISTS(SELECT 1 FROM delivery_attempts WHERE workspace_id=$1 AND environment_id=$2 AND route_id=ANY($3) AND final_at IS NULL)")
                 .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).bind(&decision.route_ids).fetch_one(&mut *transaction).await?;
             if route_busy {
                 return Err(StorageError::ConcurrentStateChange);
@@ -1347,7 +1398,7 @@ async fn reverse_applied_identity_decision(
             })
         })
         .collect::<Result<_, _>>()?;
-    let route_busy: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM route_reservations WHERE workspace_id=$1 AND environment_id=$2 AND route_id=ANY($3) AND state='active')")
+    let route_busy: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM route_reservations WHERE workspace_id=$1 AND environment_id=$2 AND route_id=ANY($3) AND state='active') OR EXISTS(SELECT 1 FROM delivery_attempts WHERE workspace_id=$1 AND environment_id=$2 AND route_id=ANY($3) AND final_at IS NULL)")
         .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).bind(&route_ids).fetch_one(&mut *transaction).await?;
     if route_busy {
         return Err(StorageError::ConcurrentStateChange);
@@ -1631,6 +1682,8 @@ impl DestinationTopologyRepository for MemoryDestinationTopologyRepository {
                 *tenant == scope
                     && reservation.route_id == *route_id
                     && reservation.state == "active"
+            }) || state.attempts.iter().any(|((tenant, _), (attempt, _))| {
+                *tenant == scope && attempt.route_id == *route_id && !attempt.state.is_final()
             })
         }) {
             return Err(StorageError::ConcurrentStateChange);
@@ -1766,6 +1819,8 @@ impl DestinationTopologyRepository for MemoryDestinationTopologyRepository {
         if snapshot.routes.iter().any(|route| {
             state.reservations.values().any(|reservation| {
                 reservation.route_id == route.id && reservation.state == "active"
+            }) || state.attempts.iter().any(|((tenant, _), (attempt, _))| {
+                *tenant == scope && attempt.route_id.eq(&route.id) && !attempt.state.is_final()
             })
         }) {
             return Err(StorageError::ConcurrentStateChange);
@@ -1866,7 +1921,7 @@ impl DestinationTopologyRepository for MemoryDestinationTopologyRepository {
         let mut state = write_state(self)?;
         let key = (
             scope,
-            acknowledgement.connector_id.clone(),
+            acknowledgement.agent_id.clone(),
             acknowledgement.route_id.clone(),
         );
         if state.acknowledgements.get(&key).is_none_or(|existing| {
@@ -1879,12 +1934,12 @@ impl DestinationTopologyRepository for MemoryDestinationTopologyRepository {
     async fn get_projection_acknowledgement(
         &self,
         scope: TenantScope,
-        connector_id: &str,
+        agent_id: &str,
         route_id: &str,
     ) -> Result<ProjectionAcknowledgement, StorageError> {
         read_state(self)?
             .acknowledgements
-            .get(&(scope, connector_id.to_owned(), route_id.to_owned()))
+            .get(&(scope, agent_id.to_owned(), route_id.to_owned()))
             .cloned()
             .ok_or(StorageError::NotFound)
     }
@@ -1910,6 +1965,13 @@ impl DestinationTopologyRepository for MemoryDestinationTopologyRepository {
     ) -> Result<StartedDeliveryAttempt, StorageError> {
         let mut state = write_state(self)?;
         let now = Utc::now();
+        if !state
+            .routes
+            .get(&(scope, request.route_id.to_owned()))
+            .is_some_and(|route| route.destination_id == request.destination_id && route.enabled)
+        {
+            return Err(StorageError::NotFound);
+        }
         let active_key = state
             .attempts
             .iter()
@@ -2217,6 +2279,33 @@ impl DestinationTopologyRepository for MemoryDestinationTopologyRepository {
                     .any(|item| item.attempt_id == attempt.id)
         }))
     }
+    async fn recompute_destination_attention(
+        &self,
+        scope: TenantScope,
+        destination_id: &str,
+    ) -> Result<StoredPhysicalDestination, StorageError> {
+        let mut state = write_state(self)?;
+        let unresolved = state.attempts.iter().any(|((tenant, _), (attempt, _))| {
+            *tenant == scope
+                && attempt.destination_id == destination_id
+                && attempt.state == DeliveryAttemptState::DeliveryUncertain
+                && !state
+                    .uncertainty_resolutions
+                    .values()
+                    .any(|resolution| resolution.attempt_id == attempt.id)
+        });
+        let destination = state
+            .destinations
+            .get_mut(&(scope, destination_id.to_owned()))
+            .ok_or(StorageError::NotFound)?;
+        if unresolved {
+            destination.state = "attention".into();
+        } else if destination.state == "attention" {
+            destination.state = "available".into();
+        }
+        destination.updated_at = Utc::now();
+        Ok(destination.clone())
+    }
     async fn list_delivery_attempts(
         &self,
         scope: TenantScope,
@@ -2230,6 +2319,21 @@ impl DestinationTopologyRepository for MemoryDestinationTopologyRepository {
             .collect();
         attempts.sort_by_key(|attempt| attempt.generation);
         Ok(attempts)
+    }
+    async fn get_latest_delivery_attempt(
+        &self,
+        scope: TenantScope,
+        job_id: &str,
+    ) -> Result<DeliveryAttempt, StorageError> {
+        read_state(self)?
+            .attempts
+            .iter()
+            .filter_map(|((tenant, _), (attempt, _))| {
+                (*tenant == scope && attempt.job_id == job_id).then_some(attempt)
+            })
+            .max_by_key(|attempt| attempt.generation)
+            .cloned()
+            .ok_or(StorageError::NotFound)
     }
     async fn get_delivery_attempt_by_reservation(
         &self,

@@ -256,6 +256,38 @@ async fn postgres_topology_is_tenant_isolated_and_fences_delivery() {
         .record_identity_evidence(first, &evidence)
         .await
         .expect("record conflict evidence");
+    let mut evidence_retry = evidence.clone();
+    evidence_retry.id = "evidence_conflict_retry".into();
+    evidence_retry.observed_at = Utc::now() + Duration::seconds(1);
+    store
+        .record_identity_evidence(first, &evidence_retry)
+        .await
+        .expect("repeat projection updates the existing pseudonymous evidence");
+    assert_eq!(
+        store
+            .list_identity_evidence(first, "destination_shared")
+            .await
+            .expect("deduplicated evidence")
+            .len(),
+        1
+    );
+    let mut raw_evidence = evidence.clone();
+    raw_evidence.id = "evidence_raw_rejected".into();
+    raw_evidence.value_digest = "a".repeat(64);
+    assert!(matches!(
+        store.record_identity_evidence(first, &raw_evidence).await,
+        Err(StorageError::Database(_))
+    ));
+    let mut leaking_metadata = evidence.clone();
+    leaking_metadata.id = "evidence_metadata_rejected".into();
+    leaking_metadata.value_digest = format!("hmac-sha256:{}", "b".repeat(64));
+    leaking_metadata.metadata = serde_json::json!({"serial":"must-never-be-stored"});
+    assert!(matches!(
+        store
+            .record_identity_evidence(first, &leaking_metadata)
+            .await,
+        Err(StorageError::Database(_))
+    ));
     assert_eq!(
         store
             .get_destination(first, "destination_shared")
@@ -338,6 +370,15 @@ async fn postgres_topology_is_tenant_isolated_and_fences_delivery() {
         .reverse_identity_decision(first, &reversal)
         .await
         .expect("reversal restores topology");
+    let mut duplicate_reversal = reversal.clone();
+    duplicate_reversal.id = "decision_reverse_again".into();
+    duplicate_reversal.request_id = Some("request_reverse_again".into());
+    assert!(matches!(
+        store
+            .reverse_identity_decision(first, &duplicate_reversal)
+            .await,
+        Err(StorageError::ConcurrentStateChange)
+    ));
     assert_eq!(
         store
             .get_route(first, "route_first_backup")
@@ -372,6 +413,40 @@ async fn postgres_topology_is_tenant_isolated_and_fences_delivery() {
         .record_route_observation(first, &observation)
         .await
         .expect("privacy-safe observation");
+    store
+        .record_route_observation(first, &observation)
+        .await
+        .expect("observation retry is idempotent");
+    assert_eq!(
+        store
+            .list_route_observations(first, "route_first", 10)
+            .await
+            .expect("one observation after retry")
+            .len(),
+        1
+    );
+    let mut concurrent_a = observation.clone();
+    concurrent_a.id = "observation_2".into();
+    let mut concurrent_b = observation.clone();
+    concurrent_b.id = "observation_3".into();
+    let observer_a = store.clone();
+    let observer_b = store.clone();
+    let (recorded_a, recorded_b) = tokio::join!(
+        observer_a.record_route_observation(first, &concurrent_a),
+        observer_b.record_route_observation(first, &concurrent_b)
+    );
+    recorded_a.expect("first concurrent observation");
+    recorded_b.expect("second concurrent observation");
+    assert_eq!(
+        store
+            .list_route_observations(first, "route_first", 10)
+            .await
+            .expect("atomic observation sequence")
+            .iter()
+            .map(|item| item.sequence)
+            .collect::<Vec<_>>(),
+        vec![3, 2, 1]
+    );
     assert_eq!(
         store
             .latest_route_observation(first, "route_first")
@@ -389,7 +464,7 @@ async fn postgres_topology_is_tenant_isolated_and_fences_delivery() {
         .acknowledge_projection(
             first,
             &ProjectionAcknowledgement {
-                connector_id: "ncon_first".into(),
+                agent_id: "agt_first".into(),
                 route_id: "route_first".into(),
                 inventory_revision: 10,
                 capability_revision: 1,
@@ -401,6 +476,20 @@ async fn postgres_topology_is_tenant_isolated_and_fences_delivery() {
         )
         .await
         .expect("projection acknowledgement");
+    assert_eq!(
+        store
+            .get_projection_acknowledgement(first, "agt_first", "route_first")
+            .await
+            .expect("agent-scoped projection acknowledgement")
+            .inventory_revision,
+        10
+    );
+    assert!(matches!(
+        store
+            .get_projection_acknowledgement(second, "agt_first", "route_first")
+            .await,
+        Err(StorageError::NotFound)
+    ));
     store
         .upsert_site_membership(
             first,
@@ -514,8 +603,32 @@ async fn postgres_topology_is_tenant_isolated_and_fences_delivery() {
             .await,
         Err(StorageError::ConcurrentStateChange)
     ));
+    assert!(
+        store
+            .has_unresolved_destination_uncertainty(first, "destination_shared")
+            .await
+            .expect("unresolved uncertainty")
+    );
+    let resolution = store
+        .resolve_delivery_uncertainty(
+            first,
+            "job_first",
+            "confirmed_delivered",
+            Some("operator verified the physical output"),
+            "operator_redacted",
+            "resolve_job_first",
+        )
+        .await
+        .expect("durable uncertainty resolution");
+    assert_eq!(resolution.attempt_id, "attempt_1");
+    assert!(
+        !store
+            .has_unresolved_destination_uncertainty(first, "destination_shared")
+            .await
+            .expect("uncertainty cleared")
+    );
 
-    sqlx::query("INSERT INTO jobs (id,workspace_id,environment_id,printer_id,agent_id,payload,state,per_printer_sequence,expires_at,destination_id,route_id) VALUES ('job_expired',$1,$2,'ptr_backup','agt_first_backup','{}'::jsonb,'registered',2,now()+interval '1 hour','destination_shared','route_first_backup')")
+    sqlx::query("INSERT INTO jobs (id,workspace_id,environment_id,printer_id,agent_id,payload,state,per_printer_sequence,expires_at,destination_id,route_id) VALUES ('job_expired',$1,$2,'ptr_backup','agt_first_backup','{}'::jsonb,'registered',2,now()+interval '1 hour','destination_source','route_first_backup')")
         .bind(first.workspace_id.to_string()).bind(first.environment_id.to_string()).execute(store.pool()).await.expect("expired lease job");
     let expired = store
         .begin_delivery_attempt(
@@ -524,7 +637,7 @@ async fn postgres_topology_is_tenant_isolated_and_fences_delivery() {
                 attempt_id: "attempt_expired_1",
                 reservation_id: "reservation_expired_1",
                 job_id: "job_expired",
-                destination_id: "destination_shared",
+                destination_id: "destination_source",
                 route_id: "route_first_backup",
                 lease_until: Utc::now() - Duration::seconds(1),
             },
@@ -538,7 +651,7 @@ async fn postgres_topology_is_tenant_isolated_and_fences_delivery() {
                 attempt_id: "attempt_expired_2",
                 reservation_id: "reservation_expired_2",
                 job_id: "job_expired",
-                destination_id: "destination_shared",
+                destination_id: "destination_source",
                 route_id: "route_first_backup",
                 lease_until: Utc::now() + Duration::minutes(1),
             },
@@ -546,6 +659,29 @@ async fn postgres_topology_is_tenant_isolated_and_fences_delivery() {
         .await
         .expect("atomically supersede expired unaccepted attempt");
     assert_eq!(recovered.attempt.generation, 2);
+    assert!(matches!(
+        store
+            .renew_delivery_attempt(
+                first,
+                "reservation_expired_2",
+                2,
+                "stale-token",
+                Utc::now() + Duration::minutes(2),
+            )
+            .await,
+        Err(StorageError::ConcurrentStateChange)
+    ));
+    let renewed = store
+        .renew_delivery_attempt(
+            first,
+            "reservation_expired_2",
+            2,
+            &recovered.fencing_token,
+            Utc::now() + Duration::minutes(2),
+        )
+        .await
+        .expect("fenced attempt and reservation renew atomically");
+    assert_eq!(renewed.attempt.lease_until, renewed.reservation.lease_until);
     assert!(matches!(
         store
             .transition_delivery_attempt(
@@ -578,7 +714,7 @@ async fn postgres_topology_is_tenant_isolated_and_fences_delivery() {
                     attempt_id: "attempt_expired_3",
                     reservation_id: "reservation_expired_3",
                     job_id: "job_expired",
-                    destination_id: "destination_shared",
+                    destination_id: "destination_source",
                     route_id: "route_first_backup",
                     lease_until: Utc::now() + Duration::minutes(1)
                 }
@@ -599,9 +735,102 @@ async fn postgres_topology_is_tenant_isolated_and_fences_delivery() {
         Err(StorageError::NotFound)
     ));
 
-    for (job_id, sequence) in [("job_race_a", 2_i64), ("job_race_b", 3_i64)] {
-        sqlx::query("INSERT INTO jobs (id,workspace_id,environment_id,printer_id,agent_id,payload,state,per_printer_sequence,expires_at,destination_id,route_id) VALUES ($1,$2,$3,'ptr_shared','agt_first','{}'::jsonb,'registered',$4,now()+interval '1 hour','destination_shared','route_first')")
-            .bind(job_id).bind(first.workspace_id.to_string()).bind(first.environment_id.to_string()).bind(sequence).execute(store.pool()).await.expect("scheduler race job");
+    let busy_merge = IdentityDecision {
+        id: "decision_busy_merge".into(),
+        kind: IdentityDecisionKind::Merge,
+        destination_id: "destination_shared".into(),
+        related_destination_ids: vec!["destination_source".into()],
+        route_ids: vec!["route_first_backup".into()],
+        evidence_ids: vec![],
+        actor_kind: "operator".into(),
+        actor_id: Some("operator_redacted".into()),
+        reason: "combine redundant routes after verified evidence".into(),
+        reverses_decision_id: None,
+        request_id: Some("request_busy_merge".into()),
+        created_at: Utc::now(),
+    };
+    assert!(matches!(
+        store.record_identity_decision(first, &busy_merge).await,
+        Err(StorageError::ConcurrentStateChange)
+    ));
+    store
+        .transition_delivery_attempt(
+            first,
+            "attempt_expired_2",
+            2,
+            &recovered.fencing_token,
+            DeliveryAttemptState::QueuedLocal,
+        )
+        .await
+        .expect("queue recovered job");
+    store
+        .transition_delivery_attempt(
+            first,
+            "attempt_expired_2",
+            2,
+            &recovered.fencing_token,
+            DeliveryAttemptState::HandingToSpooler,
+        )
+        .await
+        .expect("handoff recovered job");
+    let overlapping = store
+        .transition_delivery_attempt(
+            first,
+            "attempt_expired_2",
+            2,
+            &recovered.fencing_token,
+            DeliveryAttemptState::AcceptedBySpooler,
+        )
+        .await
+        .expect("release only the handoff reservation");
+    assert!(overlapping.final_at.is_none());
+    assert!(matches!(
+        store.record_identity_decision(first, &busy_merge).await,
+        Err(StorageError::ConcurrentStateChange)
+    ));
+    store
+        .transition_delivery_attempt(
+            first,
+            "attempt_expired_2",
+            2,
+            &recovered.fencing_token,
+            DeliveryAttemptState::PrintingReported,
+        )
+        .await
+        .expect("printing remains tracked after reservation release");
+    store
+        .transition_delivery_attempt(
+            first,
+            "attempt_expired_2",
+            2,
+            &recovered.fencing_token,
+            DeliveryAttemptState::CompletedReported,
+        )
+        .await
+        .expect("finish before topology mutation");
+    store
+        .record_identity_decision(first, &busy_merge)
+        .await
+        .expect("topology mutation succeeds once handoff reservation releases");
+
+    for (job_id, sequence, printer_id, agent_id, route_id) in [
+        (
+            "job_race_a",
+            2_i64,
+            "ptr_shared",
+            "agt_first",
+            "route_first",
+        ),
+        (
+            "job_race_b",
+            3_i64,
+            "ptr_backup",
+            "agt_first_backup",
+            "route_first_backup",
+        ),
+    ] {
+        sqlx::query("INSERT INTO jobs (id,workspace_id,environment_id,printer_id,agent_id,payload,state,per_printer_sequence,expires_at,destination_id,route_id) VALUES ($1,$2,$3,$4,$5,'{}'::jsonb,'registered',$6,now()+interval '1 hour','destination_shared',$7)")
+            .bind(job_id).bind(first.workspace_id.to_string()).bind(first.environment_id.to_string()).bind(printer_id).bind(agent_id).bind(sequence).bind(route_id).execute(store.pool()).await.expect("scheduler race job");
     }
     let scheduler_a = store.clone();
     let scheduler_b = store.clone();
@@ -624,7 +853,7 @@ async fn postgres_topology_is_tenant_isolated_and_fences_delivery() {
                 reservation_id: "reservation_race_b",
                 job_id: "job_race_b",
                 destination_id: "destination_shared",
-                route_id: "route_first",
+                route_id: "route_first_backup",
                 lease_until: Utc::now() + Duration::minutes(1)
             }
         )
@@ -635,8 +864,93 @@ async fn postgres_topology_is_tenant_isolated_and_fences_delivery() {
         Some(StorageError::ConcurrentStateChange)
     ));
 
+    let (winner, loser_job, loser_route) = match (race_a, race_b) {
+        (Ok(winner), Err(_)) => (winner, "job_race_b", "route_first_backup"),
+        (Err(_), Ok(winner)) => (winner, "job_race_a", "route_first"),
+        _ => panic!("exactly one scheduler must reserve the physical destination"),
+    };
+    for next in [
+        DeliveryAttemptState::AcceptedByNode,
+        DeliveryAttemptState::QueuedLocal,
+        DeliveryAttemptState::HandingToSpooler,
+        DeliveryAttemptState::AcceptedBySpooler,
+    ] {
+        store
+            .transition_delivery_attempt(
+                first,
+                &winner.attempt.id,
+                winner.attempt.generation,
+                &winner.fencing_token,
+                next,
+            )
+            .await
+            .expect("advance winning handoff");
+    }
+    let after_handoff = store
+        .begin_delivery_attempt(
+            first,
+            NewDeliveryAttempt {
+                attempt_id: "attempt_after_handoff",
+                reservation_id: "reservation_after_handoff",
+                job_id: loser_job,
+                destination_id: "destination_shared",
+                route_id: loser_route,
+                lease_until: Utc::now() + Duration::minutes(1),
+            },
+        )
+        .await
+        .expect("next job may hand off while the prior spooler job remains active");
+    assert_eq!(
+        after_handoff.attempt.state,
+        DeliveryAttemptState::RouteLeased
+    );
+    let winner_attempts = store
+        .list_delivery_attempts(first, &winner.attempt.job_id)
+        .await
+        .expect("winner still tracked");
+    assert_eq!(
+        winner_attempts.last().expect("winner attempt").state,
+        DeliveryAttemptState::AcceptedBySpooler
+    );
+    assert!(
+        winner_attempts
+            .last()
+            .expect("winner attempt")
+            .final_at
+            .is_none()
+    );
+    store
+        .transition_delivery_attempt(
+            first,
+            &winner.attempt.id,
+            winner.attempt.generation,
+            &winner.fencing_token,
+            DeliveryAttemptState::PrintingReported,
+        )
+        .await
+        .expect("native printing event");
+    let definitively_failed = store
+        .transition_delivery_attempt(
+            first,
+            &winner.attempt.id,
+            winner.attempt.generation,
+            &winner.fencing_token,
+            DeliveryAttemptState::Failed,
+        )
+        .await
+        .expect("definitive post-spooler native failure becomes final");
+    assert!(definitively_failed.final_at.is_some());
+    assert_eq!(
+        store
+            .get_latest_delivery_attempt(first, &winner.attempt.job_id)
+            .await
+            .expect("latest attempt by job")
+            .state,
+        DeliveryAttemptState::Failed
+    );
+
     let decision_count: i64 = sqlx::query_scalar("SELECT count(*) FROM destination_identity_decisions WHERE workspace_id=$1 AND environment_id=$2").bind(first.workspace_id.to_string()).bind(first.environment_id.to_string()).fetch_one(&pool).await.expect("decision count");
-    assert_eq!(decision_count, 2);
+    assert_eq!(decision_count, 3);
     let raw_token_count: i64 =
         sqlx::query_scalar("SELECT count(*) FROM delivery_attempts WHERE fencing_token_hash=$1")
             .bind(&started.fencing_token)
@@ -692,6 +1006,18 @@ async fn migration_42_upgrades_41_and_backfills_without_inferring_route_merges()
         .migrate()
         .await
         .expect("upgrade application from 41 to 42");
+    sqlx::query("INSERT INTO jobs (id,workspace_id,environment_id,printer_id,agent_id,payload,state,per_printer_sequence,expires_at) VALUES ('job_upgrade_legacy_writer',$1,$2,'ptr_upgrade','agt_upgrade','{}'::jsonb,'registered',2,now()+interval '1 hour')")
+        .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).execute(&pool).await.expect("N-1 writer remains compatible while destination columns are nullable");
+    let legacy_destination: Option<String> = sqlx::query_scalar("SELECT destination_id FROM jobs WHERE workspace_id=$1 AND environment_id=$2 AND id='job_upgrade_legacy_writer'")
+        .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).fetch_one(&pool).await.expect("legacy row remains intentionally unprojected");
+    assert!(legacy_destination.is_none());
+    sqlx::query("INSERT INTO targets (id,workspace_id,environment_id,name) VALUES ('target_upgrade_legacy',$1,$2,'Legacy writer target')")
+        .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).execute(&pool).await.expect("legacy target fixture");
+    sqlx::query("INSERT INTO target_bindings (id,workspace_id,environment_id,target_id,printer_id,agent_id,profile_id,profile_revision,role) VALUES ('binding_upgrade_legacy',$1,$2,'target_upgrade_legacy','ptr_upgrade','agt_upgrade','profile_legacy',1,'primary')")
+        .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).execute(&pool).await.expect("N-1 target writer remains compatible while route columns are nullable");
+    let legacy_binding_destination: Option<String> = sqlx::query_scalar("SELECT destination_id FROM target_bindings WHERE workspace_id=$1 AND environment_id=$2 AND id='binding_upgrade_legacy'")
+        .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).fetch_one(&pool).await.expect("legacy binding remains intentionally unprojected");
+    assert!(legacy_binding_destination.is_none());
     let destination_count: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM physical_destinations WHERE workspace_id=$1 AND environment_id=$2",
     )
@@ -713,6 +1039,50 @@ async fn migration_42_upgrades_41_and_backfills_without_inferring_route_merges()
         (destination_count, route_count, confidence.as_str()),
         (1, 1, "unknown")
     );
+    let backfilled_route = store
+        .list_all_routes(scope)
+        .await
+        .expect("backfilled route is readable")
+        .pop()
+        .expect("one backfilled route");
+    assert!(backfilled_route.id.starts_with("rte_"));
+    assert!(backfilled_route.local_route_key.is_none());
+    let stable_route_id = backfilled_route.id.clone();
+    let mut upgraded_node_route = backfilled_route.clone();
+    upgraded_node_route.id = format!("rte_{}", "f".repeat(32));
+    upgraded_node_route.local_route_key = Some(format!("rte_{}", "e".repeat(32)));
+    upgraded_node_route.updated_at = Utc::now();
+    store
+        .upsert_route(scope, &upgraded_node_route)
+        .await
+        .expect("new node snapshot attaches its local route key to the backfilled row");
+    let resolved = store
+        .get_route_by_local_key(
+            scope,
+            "agt_upgrade",
+            upgraded_node_route
+                .local_route_key
+                .as_deref()
+                .expect("local route key"),
+        )
+        .await
+        .expect("resolve node-local route key");
+    assert_eq!(resolved.id, stable_route_id);
+    let started = store
+        .begin_delivery_attempt(
+            scope,
+            NewDeliveryAttempt {
+                attempt_id: "attempt_upgrade",
+                reservation_id: "reservation_upgrade",
+                job_id: "job_upgrade",
+                destination_id: &resolved.destination_id,
+                route_id: &resolved.id,
+                lease_until: Utc::now() + Duration::minutes(1),
+            },
+        )
+        .await
+        .expect("server route ID reserves the upgraded node route without rewriting its PK");
+    assert_eq!(started.attempt.route_id, stable_route_id);
     pool.close().await;
     sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
         .execute(&admin)
