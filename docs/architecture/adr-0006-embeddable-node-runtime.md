@@ -35,4 +35,3 @@ secret embedded in an application.
 - iPad unattended printing requires an explicitly supported kiosk, accessory,
   direct-printer, or always-awake gateway topology.
 - Independent control planes cannot silently share a global delivery fence.
-

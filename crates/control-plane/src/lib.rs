@@ -1137,7 +1137,11 @@ mod tests {
             piqae_protocol::agent::WakeDeliveryChannel::ExternalPush
         );
 
-        let mut foreground = sync(3, NodeAvailability::Foreground, true);
+        let unsafe_suspended = sync(3, NodeAvailability::Suspended, true);
+        let unsafe_suspended_response = sync_agent_request(&application, &unsafe_suspended).await;
+        assert!(unsafe_suspended_response.candidate_jobs.is_empty());
+
+        let mut foreground = sync(4, NodeAvailability::Foreground, true);
         foreground
             .runtime
             .as_mut()

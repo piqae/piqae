@@ -2212,7 +2212,10 @@ paths:
       tags: [Nodes]
       operationId: listNodeWakeHints
       parameters:
-        - $ref: "#/components/parameters/Limit"
+        - name: limit
+          in: query
+          description: Maximum number of newest wake requests to return.
+          schema: { type: integer, minimum: 1, maximum: 100, default: 100 }
       responses:
         "200":
           description: Newest tenant-scoped wake requests first.

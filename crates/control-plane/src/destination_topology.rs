@@ -1464,19 +1464,16 @@ pub(crate) async fn record_runtime_availability(
                 runtime.lifecycle_state,
                 piqae_protocol::agent::NodeAvailability::Foreground
             );
+        let safe_for_cloud_offers = background_budget_ok
+            && attached_client_safe
+            && lifecycle_acceptance_safe
+            && availability_class_safe;
         // Persist a node's truthful availability class independently of relay
         // authorization. Nothing in route admission or wake dispatch treats
-        // this self-report as proof of a registered external relay.
-        if !background_budget_ok
-            || !attached_client_safe
-            || !lifecycle_acceptance_safe
-            || !availability_class_safe
-        {
-            return Err(AppError::invalid(
-                "unsafe_runtime_admission",
-                "This host cannot safely accept cloud work in its current execution mode.",
-            ));
-        }
+        // this self-report as proof of a registered external relay. An unsafe
+        // self-report denies new offers but must not reject the whole sync:
+        // terminal events, handoff evidence, command acknowledgements, and
+        // inventory reconciliation still need to make forward progress.
         let stored = StoredNodeRuntimeObservation {
             id: format!(
                 "nro_{}",
@@ -1507,7 +1504,8 @@ pub(crate) async fn record_runtime_availability(
             .record_node_runtime_observation(tenant_scope, &stored)
             .await
             .map_err(storage_error)?;
-        runtime.accepts_cloud_jobs
+        safe_for_cloud_offers
+            && runtime.accepts_cloud_jobs
             && runtime.fresh_until >= now
             && matches!(
                 runtime.lifecycle_state,

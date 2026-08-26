@@ -7550,7 +7550,8 @@ export interface operations {
     listNodeWakeHints: {
         parameters: {
             query?: {
-                limit?: components["parameters"]["Limit"];
+                /** @description Maximum number of newest wake requests to return. */
+                limit?: number;
             };
             header?: never;
             path: {

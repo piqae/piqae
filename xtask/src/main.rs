@@ -368,6 +368,11 @@ fn test_macos(root: &Path) -> TaskResult {
         root,
         "release/tools/test_apple_node_sdk.sh",
         std::iter::empty::<&str>(),
+    ))?;
+    run(command(
+        root,
+        "release/tools/test_apple_node_sdk_linked.sh",
+        std::iter::empty::<&str>(),
     ))
 }
 

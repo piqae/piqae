@@ -303,4 +303,3 @@ stronger availability than `continuous_while_awake`. A server rollback retains
 new observations without leasing them to an older scheduler. SDK applications
 can disable cloud connectors while retaining their local queue. Schema columns
 are not removed during rollback.
-
