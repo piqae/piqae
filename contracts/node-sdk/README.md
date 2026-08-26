@@ -6,9 +6,11 @@ must not reinterpret a checked-in fixture. Tokens in request fixtures are
 synthetic and never represent an enrolled node or application capability.
 
 Broker protocol 1 covers non-sensitive presence and existing authorized
-operations. Protocol 2 adds the bounded request/status/exchange consent flow;
-the claimed application and signing fields are display evidence only and never
-grant access without an explicit node-side decision.
+operations. Protocol 2 added the bounded request/status/exchange consent flow.
+Protocol 4 authorization requests omit application identity entirely: the node
+derives the process identity from the accepted operating-system transport and
+shows only that verified principal in consent UI. Legacy claimed identities are
+accepted only when they exactly match that evidence; they never grant access.
 
 Protocol 3 adds the durable embedded-adapter SDK operations. A host must pull a
 persisted operation, acknowledge `begin_adapter_handoff` before invoking the

@@ -200,7 +200,9 @@ mod tests {
     #[test]
     fn first_instance_collision_fails_closed() {
         let name = format!(r"\\.\pipe\piqae-node-{}", uuid::Uuid::new_v4().simple());
-        let first = create_current_user_server(&name, true).expect("first owner-only pipe");
+        let Ok(first) = create_current_user_server(&name, true) else {
+            panic!("first owner-only pipe could not be created");
+        };
         assert!(create_current_user_server(&name, true).is_err());
         drop(first);
     }

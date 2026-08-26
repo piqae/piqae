@@ -17,9 +17,18 @@ use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use uuid::Uuid;
 
+mod peer_identity;
 #[cfg(windows)]
 mod windows_pipe;
 
+#[cfg(any(test, feature = "test-peer-identity"))]
+#[doc(hidden)]
+pub use peer_identity::deterministic_test_connection;
+#[cfg(unix)]
+pub use peer_identity::verify_unix_peer;
+#[cfg(windows)]
+pub use peer_identity::verify_windows_peer;
+pub use peer_identity::{PeerApplicationEvidence, VerifiedPeerConnection};
 #[cfg(windows)]
 pub use windows_pipe::create_current_user_server as create_current_user_pipe_server;
 
@@ -162,7 +171,11 @@ pub struct BrokerRequest {
 pub enum BrokerOperation {
     Presence,
     RequestAuthorization {
-        application: BrokerApplicationIdentity,
+        /// Legacy protocol 2/3 clients supplied a self-asserted identity. It is
+        /// retained only to reject a mismatch; new clients omit it and the
+        /// accepted transport is the sole identity source.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        application: Option<BrokerApplicationIdentity>,
         requested_capabilities: Vec<BrokerCapability>,
     },
     AuthorizationStatus {
@@ -948,18 +961,30 @@ mod tests {
     }
 
     #[test]
-    fn checked_in_broker_consent_fixtures_pin_protocol_two_without_trusting_claims() {
-        let request: BrokerRequest = serde_json::from_slice(include_bytes!(
+    fn checked_in_broker_consent_fixtures_preserve_legacy_claim_mismatch_checks() {
+        let legacy_request: BrokerRequest = serde_json::from_slice(include_bytes!(
             "../../../contracts/node-sdk/v1/broker-authorization-request.json"
         ))
         .unwrap();
-        assert_eq!(request.protocol, 2);
+        assert_eq!(legacy_request.protocol, 2);
         assert!(matches!(
-            request.operation,
+            legacy_request.operation,
             BrokerOperation::RequestAuthorization {
-                application: BrokerApplicationIdentity { ref application_id, .. },
+                application: Some(BrokerApplicationIdentity { ref application_id, .. }),
                 ..
             } if application_id == "com.example.pos"
+        ));
+        let verified_request: BrokerRequest = serde_json::from_slice(include_bytes!(
+            "../../../contracts/node-sdk/v1/broker-v4-authorization-request.json"
+        ))
+        .unwrap();
+        assert_eq!(verified_request.protocol, 4);
+        assert!(matches!(
+            verified_request.operation,
+            BrokerOperation::RequestAuthorization {
+                application: None,
+                ..
+            }
         ));
         let response: BrokerResponse = serde_json::from_slice(include_bytes!(
             "../../../contracts/node-sdk/v1/broker-authorization-requested-response.json"
