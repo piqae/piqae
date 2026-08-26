@@ -152,6 +152,136 @@ jobs:
       publish: ${{ needs.prepare.outputs.publish == 'true' }}
     secrets: inherit
 
+  apple_sdk:
+    name: Apple embedded node SDK candidate
+    needs: prepare
+    runs-on: ${{ vars.PIQAE_RELEASE_MACOS_RUNNER || 'macos-15' }}
+    timeout-minutes: 45
+    permissions:
+      attestations: write
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: 1.88.0
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+        with:
+          shared-key: release-apple-node-sdk
+          save-if: ${{ github.ref_type == 'tag' }}
+      - name: Validate the source package
+        run: release/tools/test_apple_node_sdk.sh
+      - name: Build the reproducible XCFramework
+        run: sdk/apple/scripts/build-xcframework.sh
+      - name: Stage versioned Apple SDK evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          stage=artifacts/apple-node-sdk
+          mkdir -p "$stage"
+          archive="PiqaeNode.xcframework-${{ needs.prepare.outputs.version }}.zip"
+          cp sdk/apple/.artifacts/PiqaeNode.xcframework.zip "$stage/$archive"
+          cp sdk/apple/.artifacts/PiqaeNode.artifact.json "$stage/PiqaeNode.artifact.json"
+          shasum -a 256 "$stage/$archive" > "$stage/$archive.sha256"
+      - name: Generate Apple SDK SPDX SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        with:
+          path: sdk/apple/.artifacts/PiqaeNode.xcframework
+          format: spdx-json
+          output-file: artifacts/apple-node-sdk/PiqaeNode.xcframework.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+      - uses: actions/attest-build-provenance@96b4a1ef7235a096b17240c259729fdd70c83d45 # v2
+        if: github.event.repository.private == false
+        with:
+          subject-path: artifacts/apple-node-sdk/*
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: piqae-node-apple-sdk
+          path: artifacts/apple-node-sdk/*
+          if-no-files-found: error
+          retention-days: 14
+
+  windows_sdk:
+    name: Windows embedded node SDK candidate
+    needs: prepare
+    runs-on: ${{ vars.PIQAE_RELEASE_WINDOWS_RUNNER || 'windows-latest' }}
+    timeout-minutes: 45
+    permissions:
+      attestations: write
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: 1.88.0
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+        with:
+          shared-key: release-windows-node-sdk
+          save-if: ${{ github.ref_type == 'tag' }}
+      - uses: actions/setup-dotnet@d4c94342e560b34958eacfc5d055d21461ed1c5d # v5
+        with:
+          dotnet-version: 8.0.x
+      - name: Build native SDK library
+        run: cargo build --locked --release --target x86_64-pc-windows-msvc -p piqae-node-ffi
+      - name: Compile and run the public C ABI consumer
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $installation = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $installation) { throw "Visual Studio C++ tools were not found" }
+          $developer = Join-Path $installation "Common7\Tools\VsDevCmd.bat"
+          $library = (Resolve-Path "target\x86_64-pc-windows-msvc\release\piqae_node_ffi.dll.lib").Path
+          cmd /d /s /c "`"$developer`" -arch=x64 -host_arch=x64 >nul && cl /nologo /W4 /WX /I sdk\native\include sdk\native\tests\abi_smoke.c `"$library`" /Fe:target\piqae-node-abi-smoke.exe"
+          if ($LASTEXITCODE -ne 0) { throw "C ABI smoke consumer failed to compile" }
+          $env:PATH = "$(Resolve-Path 'target\x86_64-pc-windows-msvc\release');$env:PATH"
+          & "target\piqae-node-abi-smoke.exe"
+          if ($LASTEXITCODE -ne 0) { throw "C ABI smoke consumer failed at runtime" }
+      - name: Test and pack the .NET SDK
+        shell: pwsh
+        run: |
+          $native = (Resolve-Path "target\x86_64-pc-windows-msvc\release\piqae_node_ffi.dll").Path
+          $env:PATH = "$(Split-Path $native);$env:PATH"
+          $env:PIQAE_NODE_NATIVE_TEST = "1"
+          dotnet test sdk/dotnet/tests/Piqae.Node.Tests/Piqae.Node.Tests.csproj --configuration Release
+          if ($LASTEXITCODE -ne 0) { throw ".NET node SDK tests failed" }
+          dotnet pack sdk/dotnet/src/Piqae.Node/Piqae.Node.csproj --configuration Release --output artifacts/windows-node-sdk /p:PiqaeNativeLibrary="$native" /p:PackageVersion="${{ needs.prepare.outputs.version }}"
+          if ($LASTEXITCODE -ne 0) { throw ".NET node SDK packaging failed" }
+          if (-not (Get-ChildItem artifacts/windows-node-sdk/Piqae.Node.*.nupkg)) { throw "Piqae.Node package was not produced" }
+      - name: Stage the native C SDK bundle
+        shell: pwsh
+        run: |
+          $stage = "artifacts\windows-node-sdk\native"
+          New-Item -ItemType Directory -Force $stage | Out-Null
+          Copy-Item "target\x86_64-pc-windows-msvc\release\piqae_node_ffi.dll", "target\x86_64-pc-windows-msvc\release\piqae_node_ffi.dll.lib", "sdk\native\include\piqae_node.h", "LICENSE", "NOTICE", "sdk\dotnet\README.md" $stage
+          $archive = "artifacts\windows-node-sdk\PiqaeNode-native-windows-x64-${{ needs.prepare.outputs.version }}.zip"
+          Compress-Archive -Path "$stage\*" -DestinationPath $archive
+          Get-ChildItem "artifacts\windows-node-sdk\*.nupkg", $archive | ForEach-Object {
+            $hash = (Get-FileHash -Algorithm SHA256 $_.FullName).Hash.ToLowerInvariant()
+            "$hash  $($_.Name)" | Out-File -Encoding ascii "$($_.FullName).sha256"
+          }
+      - name: Generate Windows SDK SPDX SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        with:
+          path: artifacts/windows-node-sdk/native
+          format: spdx-json
+          output-file: artifacts/windows-node-sdk/PiqaeNode-native-windows-x64.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+      - uses: actions/attest-build-provenance@96b4a1ef7235a096b17240c259729fdd70c83d45 # v2
+        if: github.event.repository.private == false
+        with:
+          subject-path: artifacts/windows-node-sdk/*.*
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: piqae-node-windows-sdk
+          path: artifacts/windows-node-sdk/*.*
+          if-no-files-found: error
+          retention-days: 14
+
   linux:
     name: Linux (${{ matrix.artifact }})
     needs: prepare
@@ -284,12 +414,14 @@ jobs:
 
   finalize:
     name: Publish GitHub prerelease
-    needs: [prepare, macos, windows, linux, server]
+    needs: [prepare, macos, windows, apple_sdk, windows_sdk, linux, server]
     if: >-
       always() && needs.prepare.outputs.publish == 'true'
       && needs.prepare.result == 'success'
       && needs.macos.result == 'success'
       && (needs.windows.result == 'success' || needs.windows.result == 'skipped')
+      && needs.apple_sdk.result == 'success'
+      && needs.windows_sdk.result == 'success'
       && needs.linux.result == 'success'
       && needs.server.result == 'success'
     runs-on: ${{ vars.PIQAE_RELEASE_LINUX_RUNNER || 'ubuntu-latest' }}
@@ -303,7 +435,12 @@ jobs:
           pattern: piqae-linux-*
           path: linux-artifacts
           merge-multiple: true
-      - name: Attach Linux assets and publish the draft prerelease
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: piqae-node-*-sdk
+          path: sdk-artifacts
+          merge-multiple: true
+      - name: Attach Linux and SDK assets and publish the draft prerelease
         env:
           CANONICAL_REPOSITORY: ${{ vars.PIQAE_CANONICAL_REPOSITORY || 'piqae/piqae' }}
           GH_REPO: ${{ github.repository }}
@@ -317,4 +454,5 @@ jobs:
           fi
           gh release view "$RELEASE_TAG" --json isDraft --jq '.isDraft' | grep -Fx true
           gh release upload "$RELEASE_TAG" linux-artifacts/* --clobber
+          gh release upload "$RELEASE_TAG" sdk-artifacts/* --clobber
           gh release edit "$RELEASE_TAG" --draft=false --prerelease

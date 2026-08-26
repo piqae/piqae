@@ -175,6 +175,16 @@ monorepo.
   continues to use Piqae's signed updater, preserving the documented N/N-1
   broker window.
 
+The tagged prerelease workflow builds both SDK candidates from the same source
+revision as the server and node: an Apple XCFramework archive and manifest, and
+a Windows native C bundle plus `Piqae.Node` NuGet package. Each candidate is
+published with a SHA-256 checksum, SPDX SBOM, and GitHub build provenance. These
+are Preview engineering artifacts, not a public package-registry promise: the
+Apple framework and Windows DLL remain unsigned until their dedicated signing
+and clean-consumer gates are configured. Applications must pin the exact tag,
+verify the checksum and provenance, and must not redistribute a candidate as a
+production SDK while its support tier remains Preview or Disabled.
+
 ## Testing and support claims
 
 Use fake printers for lifecycle, restart, connector, idempotency, and routing
