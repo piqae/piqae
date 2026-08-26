@@ -102,6 +102,64 @@ fn sumatra_settings(options: &piqae_domain::JobOptions) -> Result<Vec<String>, E
 }
 
 #[cfg(any(windows, test))]
+fn windows_identity_evidence(
+    server_name: Option<&str>,
+    share_name: Option<&str>,
+    port_name: Option<&str>,
+    driver_name: Option<&str>,
+) -> Vec<piqae_protocol::agent::PhysicalIdentityEvidence> {
+    use piqae_protocol::agent::{
+        IdentityEvidenceStrength, PhysicalIdentityEvidence, PhysicalIdentityEvidenceKind,
+    };
+    use sha2::{Digest as _, Sha256};
+
+    let hashed = |kind, value: &str, strength| PhysicalIdentityEvidence {
+        kind,
+        value_sha256: hex::encode(Sha256::digest(value.as_bytes())),
+        strength,
+    };
+    let mut evidence = Vec::new();
+    if let Some(port) = port_name
+        .map(str::trim)
+        .filter(|port| !port.is_empty() && port.len() <= 512)
+    {
+        let canonical = port.to_ascii_lowercase();
+        evidence.push(hashed(
+            PhysicalIdentityEvidenceKind::NetworkEndpoint,
+            &canonical,
+            IdentityEvidenceStrength::Medium,
+        ));
+    }
+    if let Some(driver) = driver_name
+        .map(str::trim)
+        .filter(|driver| !driver.is_empty() && driver.len() <= 512)
+    {
+        evidence.push(hashed(
+            PhysicalIdentityEvidenceKind::DriverFingerprint,
+            &driver.to_ascii_lowercase(),
+            IdentityEvidenceStrength::Weak,
+        ));
+    }
+    // A server/share name identifies a logical print-server queue, not a
+    // physical device. It is intentionally not promoted to strong evidence.
+    if let (Some(server), Some(share)) = (server_name, share_name)
+        && !server.trim().is_empty()
+        && !share.trim().is_empty()
+    {
+        evidence.push(hashed(
+            PhysicalIdentityEvidenceKind::NetworkEndpoint,
+            &format!(
+                "unc:{}/{}",
+                server.trim().to_ascii_lowercase(),
+                share.trim().to_ascii_lowercase()
+            ),
+            IdentityEvidenceStrength::Weak,
+        ));
+    }
+    evidence
+}
+
+#[cfg(any(windows, test))]
 fn raw_submission_rejection(
     options: &piqae_domain::JobOptions,
     has_native_profile: bool,
@@ -124,6 +182,7 @@ fn raw_submission_rejection(
 
 #[cfg(windows)]
 mod platform {
+    use super::windows_identity_evidence;
     use piqae_domain::{ContentKind, PrinterCapabilities, PrinterState};
     use piqae_protocol::executor::{
         DiscoveredPrinter, ExecutorError, ExecutorOperation, ExecutorResult, NativeJobObservation,
@@ -137,12 +196,13 @@ mod platform {
         },
         Graphics::Printing::{
             ClosePrinter, DOC_INFO_1W, EndDocPrinter, EndPagePrinter, EnumPrintersW, GetJobW,
-            JOB_CONTROL_CANCEL, JOB_INFO_1W, JOB_STATUS_BLOCKED_DEVQ, JOB_STATUS_COMPLETE,
-            JOB_STATUS_DELETED, JOB_STATUS_DELETING, JOB_STATUS_ERROR, JOB_STATUS_OFFLINE,
-            JOB_STATUS_PAPEROUT, JOB_STATUS_PAUSED, JOB_STATUS_PRINTED, JOB_STATUS_PRINTING,
-            JOB_STATUS_RENDERING_LOCALLY, JOB_STATUS_SPOOLING, JOB_STATUS_USER_INTERVENTION,
-            OpenPrinterW, PRINTER_ENUM_CONNECTIONS, PRINTER_ENUM_LOCAL, PRINTER_INFO_4W, SetJobW,
-            StartDocPrinterW, StartPagePrinter, WritePrinter,
+            GetPrinterW, JOB_CONTROL_CANCEL, JOB_INFO_1W, JOB_STATUS_BLOCKED_DEVQ,
+            JOB_STATUS_COMPLETE, JOB_STATUS_DELETED, JOB_STATUS_DELETING, JOB_STATUS_ERROR,
+            JOB_STATUS_OFFLINE, JOB_STATUS_PAPEROUT, JOB_STATUS_PAUSED, JOB_STATUS_PRINTED,
+            JOB_STATUS_PRINTING, JOB_STATUS_RENDERING_LOCALLY, JOB_STATUS_SPOOLING,
+            JOB_STATUS_USER_INTERVENTION, OpenPrinterW, PRINTER_ENUM_CONNECTIONS,
+            PRINTER_ENUM_LOCAL, PRINTER_INFO_2W, PRINTER_INFO_4W, SetJobW, StartDocPrinterW,
+            StartPagePrinter, WritePrinter,
         },
     };
 
@@ -388,18 +448,86 @@ mod platform {
             let printers = records
                 .iter()
                 .filter_map(|record| wide_pointer(record.pPrinterName, &buffer))
-                .map(|name| DiscoveredPrinter {
-                    native_id: name.clone(),
-                    name,
-                    is_default: false,
-                    state: PrinterState::Unknown,
-                    capabilities: PrinterCapabilities::default(),
-                    native_options: std::collections::BTreeMap::new(),
-                    driver_fingerprint: None,
-                    identity_evidence: Vec::new(),
+                .map(|name| {
+                    let details = printer_identity_details(&name);
+                    let identity_evidence = windows_identity_evidence(
+                        details.as_ref().and_then(|value| value.server.as_deref()),
+                        details.as_ref().and_then(|value| value.share.as_deref()),
+                        details.as_ref().and_then(|value| value.port.as_deref()),
+                        details.as_ref().and_then(|value| value.driver.as_deref()),
+                    );
+                    let driver_fingerprint = details
+                        .as_ref()
+                        .and_then(|value| value.driver.clone())
+                        .map(|driver_name| piqae_domain::DriverFingerprint {
+                            platform: "windows".into(),
+                            driver_name,
+                            driver_version: None,
+                            architecture: None,
+                            native_queue_id: name.clone(),
+                            device_fingerprint: details
+                                .as_ref()
+                                .and_then(|value| value.port.as_deref())
+                                .map(|port| {
+                                    use sha2::{Digest as _, Sha256};
+                                    hex::encode(Sha256::digest(
+                                        port.trim().to_ascii_lowercase().as_bytes(),
+                                    ))
+                                }),
+                            driver_package_fingerprint: None,
+                            firmware_version: None,
+                        });
+                    DiscoveredPrinter {
+                        native_id: name.clone(),
+                        name,
+                        is_default: false,
+                        state: PrinterState::Unknown,
+                        capabilities: PrinterCapabilities::default(),
+                        native_options: std::collections::BTreeMap::new(),
+                        driver_fingerprint,
+                        identity_evidence,
+                    }
                 })
                 .collect();
             Ok(ExecutorResult::Printers { printers })
+        }
+    }
+
+    struct PrinterIdentityDetails {
+        server: Option<String>,
+        share: Option<String>,
+        port: Option<String>,
+        driver: Option<String>,
+    }
+
+    fn printer_identity_details(name: &str) -> Option<PrinterIdentityDetails> {
+        let encoded = wide(name);
+        let mut handle: HANDLE = ptr::null_mut();
+        // SAFETY: buffers follow the documented two-call GetPrinterW pattern;
+        // every returned string pointer is copied while that buffer is live.
+        unsafe {
+            if OpenPrinterW(encoded.as_ptr(), &mut handle, ptr::null()) == 0 {
+                return None;
+            }
+            let mut needed = 0_u32;
+            GetPrinterW(handle, 2, ptr::null_mut(), 0, &mut needed);
+            if needed == 0 || GetLastError() != ERROR_INSUFFICIENT_BUFFER {
+                ClosePrinter(handle);
+                return None;
+            }
+            let mut buffer = vec![0_u8; usize::try_from(needed).ok()?];
+            if GetPrinterW(handle, 2, buffer.as_mut_ptr(), needed, &mut needed) == 0 {
+                ClosePrinter(handle);
+                return None;
+            }
+            ClosePrinter(handle);
+            let record = &*buffer.as_ptr().cast::<PRINTER_INFO_2W>();
+            Some(PrinterIdentityDetails {
+                server: wide_pointer(record.pServerName, &buffer),
+                share: wide_pointer(record.pShareName, &buffer),
+                port: wide_pointer(record.pPortName, &buffer),
+                driver: wide_pointer(record.pDriverName, &buffer),
+            })
         }
     }
 
@@ -677,6 +805,44 @@ mod tests {
         let error =
             raw_submission_rejection(&JobOptions::default(), true).expect("RAW profile rejection");
         assert_eq!(error.code, "native_profile_backend_unavailable");
+    }
+
+    #[test]
+    fn windows_queue_identity_never_treats_server_driver_or_share_as_strong() {
+        use piqae_protocol::agent::{IdentityEvidenceStrength, PhysicalIdentityEvidenceKind};
+
+        let first = windows_identity_evidence(
+            Some("\\\\print-server"),
+            Some("queue-a"),
+            Some("IP_192.0.2.10"),
+            Some("Shared Universal Driver"),
+        );
+        let second = windows_identity_evidence(
+            Some("\\\\print-server"),
+            Some("queue-b"),
+            Some("IP_192.0.2.11"),
+            Some("Shared Universal Driver"),
+        );
+        assert!(
+            first
+                .iter()
+                .chain(&second)
+                .all(|item| item.strength != IdentityEvidenceStrength::Strong)
+        );
+        assert_ne!(
+            first
+                .iter()
+                .find(|item| item.kind == PhysicalIdentityEvidenceKind::NetworkEndpoint)
+                .map(|item| &item.value_sha256),
+            second
+                .iter()
+                .find(|item| item.kind == PhysicalIdentityEvidenceKind::NetworkEndpoint)
+                .map(|item| &item.value_sha256),
+            "different direct ports must remain different physical evidence"
+        );
+        let json = serde_json::to_string(&first).expect("identity JSON");
+        assert!(!json.contains("print-server"));
+        assert!(!json.contains("Universal Driver"));
     }
 }
 

@@ -32,6 +32,9 @@ mod platform {
         Duplex, JobOptions, NativePrinterChoice, NativePrinterOption, NativeProfileKind,
         PrinterCapabilities, PrinterState, Rotation, SafeProfileOverride,
     };
+    use piqae_protocol::agent::{
+        IdentityEvidenceStrength, PhysicalIdentityEvidence, PhysicalIdentityEvidenceKind,
+    };
     use piqae_protocol::executor::{
         DiscoveredPrinter, ExecutorError, ExecutorOperation, ExecutorResult, NativeJobObservation,
         NativeJobState, NativeProfilePayload, NativeQueueJob,
@@ -327,7 +330,14 @@ mod platform {
                     let state = destination_option(destination, "printer-state")
                         .and_then(|value| value.parse::<u8>().ok())
                         .map_or(PrinterState::Unknown, cups_printer_state);
-                    Some((native_id, destination.is_default != 0, state))
+                    Some((
+                        native_id,
+                        destination.is_default != 0,
+                        state,
+                        destination_option(destination, "printer-uuid"),
+                        destination_option(destination, "device-uri"),
+                        destination_option(destination, "printer-make-and-model"),
+                    ))
                 })
                 .collect();
             if !destinations.is_null() {
@@ -335,22 +345,113 @@ mod platform {
             }
             let printers = printer_stubs
                 .into_iter()
-                .map(|(native_id, is_default, state)| {
-                    let (capabilities, native_options) = capability_profile(&native_id);
-                    DiscoveredPrinter {
-                        name: native_id.clone(),
-                        native_id,
-                        is_default,
-                        state,
-                        capabilities,
-                        native_options,
-                        driver_fingerprint: None,
-                        identity_evidence: Vec::new(),
-                    }
-                })
+                .map(
+                    |(native_id, is_default, state, printer_uuid, device_uri, make_model)| {
+                        let (capabilities, native_options) = capability_profile(&native_id);
+                        let identity_evidence = cups_identity_evidence(
+                            printer_uuid.as_deref(),
+                            device_uri.as_deref(),
+                            make_model.as_deref(),
+                            &capabilities,
+                        );
+                        let driver_fingerprint =
+                            make_model.map(|driver_name| piqae_domain::DriverFingerprint {
+                                platform: "cups".into(),
+                                driver_name,
+                                driver_version: None,
+                                architecture: None,
+                                native_queue_id: native_id.clone(),
+                                device_fingerprint: canonical_device_endpoint(
+                                    device_uri.as_deref().unwrap_or_default(),
+                                )
+                                .map(|endpoint| hash_identity(&endpoint)),
+                                driver_package_fingerprint: None,
+                                firmware_version: None,
+                            });
+                        DiscoveredPrinter {
+                            name: native_id.clone(),
+                            native_id,
+                            is_default,
+                            state,
+                            capabilities,
+                            native_options,
+                            driver_fingerprint,
+                            identity_evidence,
+                        }
+                    },
+                )
                 .collect();
             Ok(ExecutorResult::Printers { printers })
         }
+    }
+
+    fn hash_identity(value: &str) -> String {
+        hex::encode(Sha256::digest(value.as_bytes()))
+    }
+
+    fn canonical_device_endpoint(raw: &str) -> Option<String> {
+        let mut endpoint = url::Url::parse(raw.trim()).ok()?;
+        if !matches!(
+            endpoint.scheme(),
+            "ipp" | "ipps" | "lpd" | "socket" | "usb" | "dnssd"
+        ) {
+            return None;
+        }
+        if !endpoint.username().is_empty() {
+            endpoint.set_username("").ok()?;
+        }
+        endpoint.set_password(None).ok()?;
+        if let Some(host) = endpoint.host_str().map(str::to_ascii_lowercase) {
+            endpoint.set_host(Some(&host)).ok()?;
+        }
+        endpoint.set_query(None);
+        endpoint.set_fragment(None);
+        let canonical = endpoint.to_string();
+        Some(canonical.trim_end_matches('/').to_owned())
+    }
+
+    fn cups_identity_evidence(
+        printer_uuid: Option<&str>,
+        device_uri: Option<&str>,
+        make_model: Option<&str>,
+        capabilities: &PrinterCapabilities,
+    ) -> Vec<PhysicalIdentityEvidence> {
+        let mut evidence = Vec::new();
+        if let Some(uuid) = printer_uuid
+            .map(str::trim)
+            .filter(|uuid| !uuid.is_empty() && uuid.len() <= 256)
+        {
+            evidence.push(PhysicalIdentityEvidence {
+                kind: PhysicalIdentityEvidenceKind::IppPrinterUuid,
+                value_sha256: hash_identity(&uuid.to_ascii_lowercase()),
+                strength: IdentityEvidenceStrength::Strong,
+            });
+        }
+        if let Some(endpoint) = device_uri.and_then(canonical_device_endpoint) {
+            evidence.push(PhysicalIdentityEvidence {
+                kind: PhysicalIdentityEvidenceKind::NetworkEndpoint,
+                value_sha256: hash_identity(&endpoint),
+                strength: IdentityEvidenceStrength::Medium,
+            });
+        }
+        if let Some(model) = make_model
+            .map(str::trim)
+            .filter(|model| !model.is_empty() && model.len() <= 512)
+        {
+            evidence.push(PhysicalIdentityEvidence {
+                kind: PhysicalIdentityEvidenceKind::ManufacturerModel,
+                value_sha256: hash_identity(&model.to_ascii_lowercase()),
+                strength: IdentityEvidenceStrength::Medium,
+            });
+        }
+        if let Ok(encoded) = serde_json::to_vec(capabilities) {
+            evidence.push(PhysicalIdentityEvidence {
+                kind: PhysicalIdentityEvidenceKind::CapabilityFingerprint,
+                value_sha256: hex::encode(Sha256::digest(encoded)),
+                strength: IdentityEvidenceStrength::Medium,
+            });
+        }
+        evidence
     }
 
     unsafe fn destination_option(destination: &CupsDest, key: &str) -> Option<String> {
@@ -1545,6 +1646,39 @@ mod platform {
             assert_eq!(cups_observation(8).state, NativeJobState::Failed);
             assert_eq!(cups_observation(42).state, NativeJobState::Unknown);
             assert_eq!(missing_observation().state, NativeJobState::Missing);
+        }
+
+        #[test]
+        fn device_endpoints_are_canonical_and_strip_credentials() {
+            assert_eq!(
+                canonical_device_endpoint(
+                    "ipps://user:secret@PRINT.EXAMPLE:631/printers/Office?token=secret#part"
+                )
+                .as_deref(),
+                Some("ipps://print.example:631/printers/Office")
+            );
+            assert!(canonical_device_endpoint("file:///private/document.pdf").is_none());
+        }
+
+        #[test]
+        fn cups_identity_is_hashed_and_uuid_is_the_only_strong_signal() {
+            let evidence = cups_identity_evidence(
+                Some("urn:uuid:DEVICE-123"),
+                Some("ipp://print.example/printers/office"),
+                Some("Example Model 1"),
+                &PrinterCapabilities::default(),
+            );
+            assert_eq!(
+                evidence
+                    .iter()
+                    .filter(|item| item.strength == IdentityEvidenceStrength::Strong)
+                    .count(),
+                1
+            );
+            let encoded = serde_json::to_string(&evidence).expect("evidence JSON");
+            assert!(!encoded.contains("DEVICE-123"));
+            assert!(!encoded.contains("print.example"));
+            assert!(!encoded.contains("Example Model"));
         }
 
         #[test]
