@@ -1,3 +1,9 @@
+param(
+    [ValidatePattern('^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$')]
+    [string]$PackageVersion = "",
+    [string]$OutputDirectory = "artifacts/dotnet"
+)
+
 $ErrorActionPreference = "Stop"
 
 cargo build --locked --release --target x86_64-pc-windows-msvc -p piqae-node-ffi
@@ -19,6 +25,10 @@ if ($LASTEXITCODE -ne 0) { throw "C ABI smoke consumer failed at runtime" }
 $env:PIQAE_NODE_NATIVE_TEST = "1"
 dotnet test sdk/dotnet/tests/Piqae.Node.Tests/Piqae.Node.Tests.csproj --configuration Release /p:TreatWarningsAsErrors=true
 if ($LASTEXITCODE -ne 0) { throw ".NET node SDK tests failed" }
-dotnet pack sdk/dotnet/src/Piqae.Node/Piqae.Node.csproj --configuration Release --output artifacts/dotnet /p:PiqaeNativeLibrary="$native"
+if ($PackageVersion) {
+    dotnet pack sdk/dotnet/src/Piqae.Node/Piqae.Node.csproj --configuration Release --output $OutputDirectory /p:PiqaeNativeLibrary="$native" /p:PackageVersion="$PackageVersion"
+} else {
+    dotnet pack sdk/dotnet/src/Piqae.Node/Piqae.Node.csproj --configuration Release --output $OutputDirectory /p:PiqaeNativeLibrary="$native"
+}
 if ($LASTEXITCODE -ne 0) { throw ".NET node SDK package build failed" }
-if (-not (Get-ChildItem artifacts/dotnet/Piqae.Node.*.nupkg)) { throw "Piqae.Node package was not produced" }
+if (-not (Get-ChildItem (Join-Path $OutputDirectory "Piqae.Node.*.nupkg"))) { throw "Piqae.Node package was not produced" }
