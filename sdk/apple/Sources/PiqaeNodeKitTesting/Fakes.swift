@@ -11,6 +11,30 @@ public actor PiqaeMemoryInstallationIdentityStore: PiqaeInstallationIdentityStor
     public func loadOrCreateInstallationID() async throws -> PiqaeInstallationID { id }
 }
 
+public actor PiqaeFakeEmbeddedRuntime: PiqaeEmbeddedNodeRuntime {
+    public enum StartFailure: Error { case requested }
+
+    private let failsToStart: Bool
+    public private(set) var startCount = 0
+    public private(set) var stopCount = 0
+    public private(set) var lifecycleEvents: [PiqaeHostLifecycleEvent] = []
+
+    public init(failsToStart: Bool = false) {
+        self.failsToStart = failsToStart
+    }
+
+    public func start() async throws {
+        startCount += 1
+        if failsToStart { throw StartFailure.requested }
+    }
+
+    public func stop() async throws { stopCount += 1 }
+
+    public func report(_ event: PiqaeHostLifecycleEvent) async throws {
+        lifecycleEvents.append(event)
+    }
+}
+
 public actor PiqaeFakePrinterAdapter: PiqaePrinterAdapter {
     public nonisolated let adapterID: String
     public nonisolated let descriptor: PiqaePrinterAdapterDescriptor

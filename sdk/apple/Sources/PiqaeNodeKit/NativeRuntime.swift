@@ -49,7 +49,7 @@ public struct PiqaeNativeRuntimeConfiguration: Sendable {
 
 /// Real allocator-neutral binding to `piqae-node-ffi`. This object owns the
 /// native handle and Keychain callback context until `stop()` destroys it.
-public actor PiqaeNativeRuntime: PiqaeHostLifecycleReporter, PiqaeOpaqueIdentityProvider {
+public actor PiqaeNativeRuntime: PiqaeEmbeddedNodeRuntime, PiqaeOpaqueIdentityProvider {
     private let configuration: PiqaeNativeRuntimeConfiguration
     private let keyStore: any PiqaeHostKeyStore
     private var library: PiqaeNativeLibrary?
@@ -66,7 +66,7 @@ public actor PiqaeNativeRuntime: PiqaeHostLifecycleReporter, PiqaeOpaqueIdentity
         )
     }
 
-    public func start() throws {
+    public func start() async throws {
         guard handle == nil else { return }
         let library = try PiqaeNativeLibrary(url: configuration.libraryURL)
         let descriptor = library.abiDescriptor()
@@ -104,7 +104,7 @@ public actor PiqaeNativeRuntime: PiqaeHostLifecycleReporter, PiqaeOpaqueIdentity
         }
     }
 
-    public func stop() throws {
+    public func stop() async throws {
         guard let library, let handle else { return }
         let stopError: Error?
         do {
