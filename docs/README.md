@@ -19,6 +19,8 @@ print jobs through the same API used by the dashboard.
   compatibility subset, then adopt native Piqae resources.
 - [Embeddable node runtime RFC](rfcs/0001-embeddable-node-runtime.md) — shared
   desktop/iPad SDK, lifecycle, identity, queue, and coexistence contract.
+- [Embedded node SDK deployment guide](nodes/embedded-sdk.md) — topology,
+  iPad background truth, multi-app coexistence, sleep, and adapter selection.
 
 ## Build an integration
 
