@@ -335,6 +335,25 @@ pub enum LocalOperation {
     Sdk { operation: SdkBrokerOperation },
 }
 
+/// One-time connector capability whose debug representation is always
+/// redacted while its JSON representation remains the SDK string contract.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ConnectorInvitationToken(String);
+
+impl ConnectorInvitationToken {
+    #[must_use]
+    pub fn expose_for_exchange(self) -> String {
+        self.0
+    }
+}
+
+impl std::fmt::Debug for ConnectorInvitationToken {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ConnectorInvitationToken([REDACTED])")
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[allow(
@@ -342,6 +361,19 @@ pub enum LocalOperation {
     reason = "bounded SDK wire operation keeps the generated schema direct"
 )]
 pub enum SdkBrokerOperation {
+    /// Exchanges a short-lived invitation at its pinned authority. Ownership
+    /// metadata is deliberately absent: it comes only from the authenticated
+    /// preview/enrolment response handled by the node runtime.
+    ConnectInvitation {
+        control_plane_url: String,
+        invitation_token: ConnectorInvitationToken,
+        #[serde(default)]
+        printer_grant: piqae_protocol::agent::PrinterGrant,
+        #[serde(default)]
+        allowed_printer_ids: Vec<String>,
+        node_name: String,
+        hostname: String,
+    },
     SubmitLocalJob {
         printer_id: String,
         title: String,
@@ -965,6 +997,26 @@ mod tests {
         .unwrap();
         assert_eq!(response.protocol, BROKER_PROTOCOL_VERSION);
         assert!(response.proof.is_some());
+    }
+
+    #[test]
+    fn connector_invitation_wire_is_direct_but_debug_is_redacted() {
+        let operation: LocalOperation = serde_json::from_value(serde_json::json!({
+            "type": "sdk",
+            "operation": {
+                "type": "connect_invitation",
+                "control_plane_url": "https://api.example.test",
+                "invitation_token": "one-time-secret",
+                "printer_grant": "all_local_printers",
+                "allowed_printer_ids": [],
+                "node_name": "Till",
+                "hostname": "till.local"
+            }
+        }))
+        .unwrap();
+        let encoded = serde_json::to_string(&operation).unwrap();
+        assert!(encoded.contains("one-time-secret"));
+        assert!(!format!("{operation:?}").contains("one-time-secret"));
     }
 
     #[tokio::test]

@@ -56,6 +56,7 @@ use piqae_node_runtime::{
     ContentMaterializer, DurableOfferAcceptor, EventAcknowledger, HostCapabilities, HostKind,
     InventorySnapshotProvider, LifecycleEvent, NodeRuntime, NodeRuntimeMode,
     PendingCloudAcceptance, PrinterTransport, RuntimeConfiguration, WakeReconciler,
+    command::{ConnectorInvitationRequest, ConnectorInvitationResult},
     connector_registry as connector_runtime, route_coordinator,
 };
 use piqae_protocol::{
@@ -304,6 +305,10 @@ impl StopSignal {
 }
 
 enum ConnectorSupervisorCommand {
+    Connect {
+        request: Box<ConnectorInvitationRequest>,
+        respond_to: oneshot::Sender<Result<ConnectorInvitationResult, ControlFailure>>,
+    },
     Reload {
         respond_to: oneshot::Sender<Result<(), ControlFailure>>,
     },
@@ -325,6 +330,19 @@ fn reject_connector_supervisor_command(
         mpsc::error::TrySendError::Closed(command) => (false, command),
     };
     match command {
+        ConnectorSupervisorCommand::Connect { respond_to, .. } => {
+            let _ = respond_to.send(Err(if is_full {
+                control_failure(
+                    "connector_connect_deferred",
+                    "connector supervisor is busy; retry the invitation exchange",
+                )
+            } else {
+                control_failure(
+                    "connector_supervisor_unavailable",
+                    "connector supervisor is unavailable",
+                )
+            }));
+        }
         ConnectorSupervisorCommand::Reload { respond_to } => {
             let failure = if is_full {
                 control_failure(
@@ -1298,6 +1316,242 @@ async fn add_connector(arguments: &Arguments, consent: ConnectorConsentInput) ->
     Ok(())
 }
 
+/// Node-owned attached-app invitation exchange. The application supplies only
+/// the pinned origin, one-time capability, and local printer consent. Every
+/// ownership field in the durable connector record is sourced from the
+/// authenticated authority responses below.
+#[allow(
+    clippy::too_many_lines,
+    reason = "the pinned preview, installation proof, exchange and durable activation remain one auditable invitation boundary"
+)]
+async fn connect_installed_invitation(
+    data_dir: &Path,
+    request: ConnectorInvitationRequest,
+) -> Result<ConnectorInvitationResult> {
+    let ConnectorInvitationRequest {
+        control_plane_url,
+        invitation_token,
+        printer_grant,
+        mut allowed_printer_ids,
+        node_name,
+        hostname,
+    } = request;
+    let base_url: Url = control_plane_url
+        .parse()
+        .context("connector authority URL is invalid")?;
+    validate_attached_invitation_input(
+        &base_url,
+        &invitation_token,
+        printer_grant,
+        &allowed_printer_ids,
+        &node_name,
+        &hostname,
+    )?;
+    allowed_printer_ids.sort();
+    allowed_printer_ids.dedup();
+    let client = AgentClient::new(base_url.clone())?;
+    let preview = client
+        .preview_connect_session(&invitation_token)
+        .await
+        .context("preview attached connector invitation")?;
+    anyhow::ensure!(
+        preview.expires_at > Utc::now(),
+        "connector invitation expired"
+    );
+    validate_attached_preview_grant(&preview.printer_grant, printer_grant)?;
+
+    let (installation, installation_key_path) = installed_identity_from_data_dir(data_dir)?;
+    let installation_identity =
+        read_device_identity(&installation.agent_id, &installation_key_path)
+            .context("read stable installation signing identity")?;
+    let fingerprint = hex::encode(Sha256::digest(invitation_token.as_bytes()));
+    let relative_key = PathBuf::from("connectors")
+        .join("keys")
+        .join(format!("{fingerprint}.key"));
+    let connector_key_path = data_dir.join(&relative_key);
+    let created_key = !connector_key_path.exists();
+    let connector_identity = if created_key {
+        let identity = DeviceIdentity::generate(AgentId::new());
+        write_new_device_key(&connector_key_path, &identity.secret_bytes())?;
+        identity
+    } else {
+        read_device_identity(&AgentId::new().to_string(), &connector_key_path)
+            .context("read pending attached connector identity")?
+    };
+    let connector_public_key = connector_identity.public_key_base64();
+    let proof_message = connector_installation_proof_message(
+        &invitation_token,
+        &installation.installation_id,
+        &connector_public_key,
+        printer_grant,
+        &allowed_printer_ids,
+    );
+    let enrolment = client
+        .enrol(&EnrolRequest {
+            token: invitation_token,
+            public_key: connector_public_key,
+            name: node_name,
+            hostname,
+            platform: std::env::consts::OS.to_owned(),
+            architecture: std::env::consts::ARCH.to_owned(),
+            installation_mode: InstallationMode::User,
+            agent_version: env!("CARGO_PKG_VERSION").to_owned(),
+            protocol_version: CURRENT_PROTOCOL_VERSION,
+            installation_id: Some(installation.installation_id),
+            installation_public_key: Some(installation_identity.public_key_base64()),
+            printer_grant,
+            allowed_printer_ids: allowed_printer_ids.clone(),
+            installation_proof: Some(installation_identity.sign_base64(&proof_message)),
+        })
+        .await;
+    let enrolled = match enrolment {
+        Ok(enrolled) => enrolled,
+        Err(error) => {
+            if created_key {
+                let _ = std::fs::remove_file(&connector_key_path);
+            }
+            return Err(error).context("exchange attached connector invitation");
+        }
+    };
+    let connector_id = enrolled
+        .connector_id
+        .context("authority response omitted connector id")?;
+    let record = connector_runtime::ConnectorRecord {
+        connector_id: connector_id.clone(),
+        agent_id: enrolled.agent_id.to_string(),
+        control_plane_url: base_url,
+        display_name: preview
+            .requesting_service_name
+            .or_else(|| Some(preview.workspace_name.clone())),
+        workspace_name: Some(preview.workspace_name),
+        authorization_type: Some(preview.authorization_type),
+        workspace_id: Some(preview.workspace_id),
+        environment_id: Some(preview.environment_id),
+        requesting_service_account_id: preview.requesting_service_account_id,
+        manage_url: preview.return_url.and_then(|value| value.parse().ok()),
+        device_key_file: Some(relative_key),
+        secure_key_handle: None,
+        enabled: true,
+        printer_grant,
+        allowed_printer_ids,
+    };
+    let result = ConnectorInvitationResult {
+        connector_id,
+        agent_id: record.agent_id.clone(),
+        display_name: record.display_name.clone(),
+        workspace_name: record.workspace_name.clone(),
+        manage_url: record.manage_url.as_ref().map(ToString::to_string),
+    };
+    let mut registry = connector_runtime::ConnectorRegistry::load(data_dir)?;
+    let persist = if registry.contains(&record.connector_id) {
+        registry.replace(record).map(|_| ())
+    } else {
+        registry.add(record)
+    };
+    if let Err(error) = persist {
+        if created_key {
+            let _ = std::fs::remove_file(&connector_key_path);
+        }
+        return Err(error).context("persist authenticated attached connector");
+    }
+    Ok(result)
+}
+
+fn validate_attached_invitation_input(
+    origin: &Url,
+    token: &str,
+    grant: PrinterGrant,
+    allowed_printer_ids: &[String],
+    node_name: &str,
+    hostname: &str,
+) -> Result<()> {
+    let loopback_http = origin.scheme() == "http"
+        && origin
+            .host_str()
+            .is_some_and(|host| matches!(host, "localhost" | "127.0.0.1" | "::1"));
+    anyhow::ensure!(
+        (origin.scheme() == "https" || loopback_http)
+            && origin.username().is_empty()
+            && origin.password().is_none()
+            && origin.fragment().is_none(),
+        "connector authority origin is not permitted"
+    );
+    anyhow::ensure!(
+        !token.is_empty() && token.len() <= 4096,
+        "connector invitation is outside supported bounds"
+    );
+    anyhow::ensure!(
+        !node_name.trim().is_empty()
+            && node_name.len() <= 256
+            && !hostname.trim().is_empty()
+            && hostname.len() <= 256
+            && allowed_printer_ids.len() <= 128,
+        "connector invitation metadata is outside supported bounds"
+    );
+    match grant {
+        PrinterGrant::AllLocalPrinters => anyhow::ensure!(
+            allowed_printer_ids.is_empty(),
+            "all-printer consent cannot include selected printers"
+        ),
+        PrinterGrant::SelectedPrinters => anyhow::ensure!(
+            !allowed_printer_ids.is_empty(),
+            "selected-printer consent requires at least one printer"
+        ),
+    }
+    Ok(())
+}
+
+fn validate_attached_preview_grant(preview: &str, grant: PrinterGrant) -> Result<()> {
+    let matches = match grant {
+        PrinterGrant::AllLocalPrinters => matches!(preview, "all_local_printers" | "all_printers"),
+        PrinterGrant::SelectedPrinters => matches!(preview, "selected_printers" | "selected"),
+    };
+    anyhow::ensure!(matches, "local printer consent does not match invitation");
+    Ok(())
+}
+
+fn installed_identity_from_data_dir(data_dir: &Path) -> Result<(ExistingInstallation, PathBuf)> {
+    let config_path = data_dir.join("agent-config.json");
+    if config_path.exists() {
+        let installation = existing_installation(&config_path)?;
+        let body: serde_json::Value = serde_json::from_slice(&std::fs::read(&config_path)?)?;
+        let key_path = body
+            .get("device_key_file")
+            .and_then(serde_json::Value::as_str)
+            .map(PathBuf::from)
+            .context("installed configuration has no device key path")?;
+        return Ok((installation, key_path));
+    }
+    let agent_id = std::fs::read_to_string(data_dir.join("agent-id"))?
+        .trim()
+        .to_owned();
+    anyhow::ensure!(
+        !agent_id.is_empty(),
+        "local installation has no durable identity"
+    );
+    Ok((
+        ExistingInstallation {
+            installation_id: agent_id.clone(),
+            agent_id,
+        },
+        data_dir.join("device.key"),
+    ))
+}
+
+fn read_device_identity(agent_id: &str, key_path: &Path) -> Result<DeviceIdentity> {
+    let encoded = std::fs::read_to_string(key_path)
+        .with_context(|| format!("read {}", key_path.display()))?;
+    let secret: [u8; 32] = hex::decode(encoded.trim())?
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("device signing key is invalid"))?;
+    let agent_id = agent_id
+        .strip_prefix("agt_")
+        .unwrap_or(agent_id)
+        .parse()
+        .context("installed agent id is invalid")?;
+    Ok(DeviceIdentity::from_secret_bytes(agent_id, &secret))
+}
+
 fn print_connector_connected(agent_id: &AgentId) {
     println!(
         "{}",
@@ -1979,6 +2233,33 @@ async fn connector_supervisor_loop(
             break;
         };
         match command {
+            ConnectorSupervisorCommand::Connect {
+                request,
+                respond_to,
+            } => {
+                let result = async {
+                    let connected = connect_installed_invitation(&data_dir, *request).await?;
+                    retire_legacy_cloud_worker_if_needed(&data_dir, &mut legacy_cloud_worker)
+                        .await?;
+                    reload_connector_workers(
+                        &data_dir,
+                        &mut workers,
+                        &executor,
+                        &uri_fetcher,
+                        &printer_discovery,
+                        &support_packs,
+                        &connections,
+                        &node_runtime,
+                    )
+                    .await?;
+                    Ok(connected)
+                }
+                .await
+                .map_err(|error: anyhow::Error| {
+                    control_failure("connector_connect_failed", &error.to_string())
+                });
+                let _ = respond_to.send(result);
+            }
             ConnectorSupervisorCommand::Reload { respond_to } => {
                 let result =
                     match retire_legacy_cloud_worker_if_needed(&data_dir, &mut legacy_cloud_worker)
@@ -2455,6 +2736,17 @@ async fn handle_control_request(
     node_runtime: &NodeRuntime,
 ) {
     match request {
+        ControlRequest::ConnectInvitation {
+            request,
+            respond_to,
+        } => {
+            if let Err(error) = connector_supervisor.try_send(ConnectorSupervisorCommand::Connect {
+                request,
+                respond_to,
+            }) {
+                reject_connector_supervisor_command(error);
+            }
+        }
         ControlRequest::ApplyHostLifecycle { event, respond_to } => {
             let _ = respond_to.send(node_runtime.apply_lifecycle(event));
         }
