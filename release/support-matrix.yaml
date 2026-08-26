@@ -60,7 +60,7 @@ features:
     reason: the shared runtime, versioned broker and native ABI have deterministic local-only, connector-isolation, lifecycle and restart evidence; signed SDK artifacts, host-app fleet soak and physical printing remain release gates
   apple_nodekit:
     tier: preview
-    reason: the source Swift package exposes attach-first and app-scoped APIs with foreground-safe AirPrint and lifecycle tests; signed binary distribution, App Store review, accessory entitlements, prolonged kiosk and physical printer evidence remain incomplete
+    reason: the source Swift package exposes fail-closed protocol-v4 installed-node consent plus app-scoped APIs with Keychain-backed connector signing, foreground-safe AirPrint and lifecycle tests; signed binary distribution, App Store review, accessory entitlements, prolonged kiosk and physical printer evidence remain incomplete
   windows_node_sdk:
     tier: disabled
     reason: the native ABI and managed facade require Windows CI, signed NuGet publication, Credential Manager, named-pipe consent, suspend-resume and physical Winspool evidence before use outside development

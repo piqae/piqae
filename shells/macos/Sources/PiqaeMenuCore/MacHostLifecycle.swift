@@ -81,6 +81,8 @@ public final class PiqaeMacHostLifecycleMonitor {
         observers.removeAll()
         network.onChange = nil
         network.cancel()
+        reportTail?.cancel()
+        reportTail = nil
     }
 
     /// Waits for reports already queued by synchronous Apple notifications.
@@ -103,7 +105,7 @@ public final class PiqaeMacHostLifecycleMonitor {
 public final class PiqaeNWPathSource: PiqaeMacNetworkPathSource {
     public var onChange: (@Sendable (PiqaeMacNetworkPathState) -> Void)?
 
-    private let monitor = NWPathMonitor()
+    private var monitor: NWPathMonitor?
     private let queue = DispatchQueue(label: "com.piqae.nodekit.network-path")
     private var started = false
 
@@ -112,6 +114,8 @@ public final class PiqaeNWPathSource: PiqaeMacNetworkPathSource {
     public func start() {
         guard !started else { return }
         started = true
+        let monitor = NWPathMonitor()
+        self.monitor = monitor
         monitor.pathUpdateHandler = { [weak self] path in
             guard let self else { return }
             let state: PiqaeMacNetworkPathState
@@ -126,6 +130,7 @@ public final class PiqaeNWPathSource: PiqaeMacNetworkPathSource {
     public func cancel() {
         guard started else { return }
         started = false
-        monitor.cancel()
+        monitor?.cancel()
+        monitor = nil
     }
 }

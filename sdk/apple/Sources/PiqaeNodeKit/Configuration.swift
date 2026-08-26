@@ -50,20 +50,18 @@ public struct PiqaeEnrollmentRequest: Sendable {
 }
 
 public protocol PiqaeCloudEnrollmentProvider: Sendable {
-    /// Exchanges a short-lived invitation. Platform service-account credentials
-    /// belong in the provider's backend and must never be embedded in an app.
+    /// Legacy preview hook retained for source compatibility. NodeKit no longer
+    /// invokes it because only the durable runtime may persist a connector.
     func enroll(_ request: PiqaeEnrollmentRequest) async throws -> PiqaeConnection
 }
 
 public struct PiqaeCloudConfiguration: Sendable {
     public let authorityURL: URL
     public let invitation: PiqaeSensitiveString
-    public let provider: any PiqaeCloudEnrollmentProvider
 
     public init(
         authorityURL: URL,
-        invitation: PiqaeSensitiveString,
-        provider: any PiqaeCloudEnrollmentProvider
+        invitation: PiqaeSensitiveString
     ) throws {
         guard Self.isSafeAuthorityURL(authorityURL) else {
             throw PiqaeNodeError.invalidConfiguration(
@@ -72,7 +70,15 @@ public struct PiqaeCloudConfiguration: Sendable {
         }
         self.authorityURL = authorityURL
         self.invitation = invitation
-        self.provider = provider
+    }
+
+    @available(*, deprecated, message: "The provider is ignored; use init(authorityURL:invitation:).")
+    public init(
+        authorityURL: URL,
+        invitation: PiqaeSensitiveString,
+        provider _: any PiqaeCloudEnrollmentProvider
+    ) throws {
+        try self.init(authorityURL: authorityURL, invitation: invitation)
     }
 
     private static func isSafeAuthorityURL(_ url: URL) -> Bool {
@@ -131,6 +137,8 @@ public protocol PiqaeEmbeddedNodeRuntime: PiqaeHostLifecycleReporter, Sendable {
         expectedRevision: UInt64
     ) async throws
     func connectors() async throws -> [PiqaeRuntimeConnectorSnapshot]
+    func connectInvitation(_ request: PiqaeEnrollmentRequest) async throws
+        -> PiqaeRuntimeConnectorSnapshot
     func revokeConnector(id: PiqaeConnectionID) async throws
 }
 
@@ -182,6 +190,13 @@ public extension PiqaeEmbeddedNodeRuntime {
         throw PiqaeNodeError.unsupportedOperation("The embedded runtime does not expose profiles.")
     }
     func connectors() async throws -> [PiqaeRuntimeConnectorSnapshot] { [] }
+    func connectInvitation(_ request: PiqaeEnrollmentRequest) async throws
+        -> PiqaeRuntimeConnectorSnapshot
+    {
+        throw PiqaeNodeError.unsupportedOperation(
+            "The embedded runtime does not expose connector enrollment."
+        )
+    }
     func revokeConnector(id: PiqaeConnectionID) async throws {
         throw PiqaeNodeError.unsupportedOperation("The embedded runtime does not expose connectors.")
     }
@@ -204,13 +219,16 @@ public struct PiqaeInstalledNodeProbe: Equatable, Sendable {
 /// not reveal tenant or printer data. Authorization belongs to the host broker.
 public protocol PiqaeInstalledNodeIPC: Sendable {
     func probe() async -> PiqaeInstalledNodeProbe
+    func prepareForAttachment() async throws
     func snapshot() async throws -> PiqaeNodeSnapshot
     func connect(_ request: PiqaeEnrollmentRequest) async throws -> PiqaeConnection
     func submit(_ request: PiqaePrintRequest) async throws -> PiqaeJobReceipt
     func profiles(for printerID: PiqaePrinterID) async throws -> [PiqaePrintProfile]
+    func jobHistory(offset: Int, limit: Int) async throws -> PiqaeJobHistoryPage
 }
 
 public extension PiqaeInstalledNodeIPC {
+    func prepareForAttachment() async throws {}
     func connect(_ request: PiqaeEnrollmentRequest) async throws -> PiqaeConnection {
         throw PiqaeNodeError.unsupportedOperation(
             "The installed node broker does not expose connection enrollment."
@@ -226,10 +244,16 @@ public extension PiqaeInstalledNodeIPC {
     func profiles(for printerID: PiqaePrinterID) async throws -> [PiqaePrintProfile] {
         []
     }
+
+    func jobHistory(offset: Int, limit: Int) async throws -> PiqaeJobHistoryPage {
+        throw PiqaeNodeError.unsupportedOperation(
+            "The installed node broker does not expose print history."
+        )
+    }
 }
 
 public struct PiqaeNodeConfiguration: Sendable {
-    public static let supportedLocalProtocolVersions: ClosedRange<UInt32> = 1 ... 1
+    public static let supportedLocalProtocolVersions: ClosedRange<UInt32> = 4 ... 4
 
     public let startupMode: PiqaeNodeStartupMode
     public let connectivity: PiqaeConnectivityConfiguration
@@ -240,6 +264,9 @@ public struct PiqaeNodeConfiguration: Sendable {
     public let printerAdapters: [any PiqaePrinterAdapter]
     public let hostLifecycleReporter: (any PiqaeHostLifecycleReporter)?
     public let remoteNotificationProvider: (any PiqaeRemoteNotificationRegistrationProvider)?
+    /// Desktop automatic mode may create a separate app-scoped node only when
+    /// the host explicitly opts into that topology.
+    public let allowsEmbeddedFallback: Bool
 
     public init(
         startupMode: PiqaeNodeStartupMode = .automatic,
@@ -250,7 +277,8 @@ public struct PiqaeNodeConfiguration: Sendable {
         embeddedRuntime: (any PiqaeEmbeddedNodeRuntime)? = nil,
         printerAdapters: [any PiqaePrinterAdapter] = [],
         hostLifecycleReporter: (any PiqaeHostLifecycleReporter)? = nil,
-        remoteNotificationProvider: (any PiqaeRemoteNotificationRegistrationProvider)? = nil
+        remoteNotificationProvider: (any PiqaeRemoteNotificationRegistrationProvider)? = nil,
+        allowsEmbeddedFallback: Bool = false
     ) {
         self.startupMode = startupMode
         self.connectivity = connectivity
@@ -261,6 +289,7 @@ public struct PiqaeNodeConfiguration: Sendable {
         self.printerAdapters = printerAdapters
         self.hostLifecycleReporter = hostLifecycleReporter
         self.remoteNotificationProvider = remoteNotificationProvider
+        self.allowsEmbeddedFallback = allowsEmbeddedFallback
     }
 
     public static func localOnly(
@@ -270,7 +299,8 @@ public struct PiqaeNodeConfiguration: Sendable {
         installedNodeIPC: (any PiqaeInstalledNodeIPC)? = nil,
         embeddedRuntime: (any PiqaeEmbeddedNodeRuntime)? = nil,
         printerAdapters: [any PiqaePrinterAdapter] = [],
-        hostLifecycleReporter: (any PiqaeHostLifecycleReporter)? = nil
+        hostLifecycleReporter: (any PiqaeHostLifecycleReporter)? = nil,
+        allowsEmbeddedFallback: Bool = false
     ) -> PiqaeNodeConfiguration {
         PiqaeNodeConfiguration(
             startupMode: startupMode,
@@ -280,7 +310,8 @@ public struct PiqaeNodeConfiguration: Sendable {
             installedNodeIPC: installedNodeIPC,
             embeddedRuntime: embeddedRuntime,
             printerAdapters: printerAdapters,
-            hostLifecycleReporter: hostLifecycleReporter
+            hostLifecycleReporter: hostLifecycleReporter,
+            allowsEmbeddedFallback: allowsEmbeddedFallback
         )
     }
 

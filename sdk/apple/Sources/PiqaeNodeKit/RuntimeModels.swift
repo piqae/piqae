@@ -332,6 +332,21 @@ public struct PiqaeRuntimeConnectorSnapshot: Codable, Equatable, Sendable {
     public let displayName: String?
     public let workspaceName: String?
     public let enabled: Bool
+
+    public init(
+        connectorID: String,
+        controlPlaneURL: URL,
+        displayName: String? = nil,
+        workspaceName: String? = nil,
+        enabled: Bool
+    ) {
+        self.connectorID = connectorID
+        self.controlPlaneURL = controlPlaneURL
+        self.displayName = displayName
+        self.workspaceName = workspaceName
+        self.enabled = enabled
+    }
+
     enum CodingKeys: String, CodingKey {
         case connectorID = "connector_id"
         case controlPlaneURL = "control_plane_url"

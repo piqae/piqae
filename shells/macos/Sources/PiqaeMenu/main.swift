@@ -435,6 +435,10 @@ final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     loadedAuthorizations = try await client.pendingBrokerAuthorizations()
                 } catch let LocalAPIError.rejected(status, _) where [404, 405].contains(status) {
                     loadedAuthorizations = []
+                } catch {
+                    // Consent polling is additive. A transient failure must not
+                    // discard otherwise fresh status, printer, and queue data.
+                    loadedAuthorizations = pendingBrokerAuthorizations
                 }
 
                 var loadedJobs: [RecentJob] = []
@@ -1125,7 +1129,7 @@ final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func decideApplicationAuthorization(_ sender: NSMenuItem) {
         guard
             let context = sender.representedObject as? BrokerAuthorizationActionContext,
-            context.request.expiresUnixMS > Int64(Date().timeIntervalSince1970 * 1_000)
+            !context.request.isExpired()
         else {
             refresh()
             return
@@ -1145,6 +1149,14 @@ final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         alert.addButton(withTitle: "Cancel")
         NSApplication.shared.activate(ignoringOtherApps: true)
         guard alert.runModal() == .alertFirstButtonReturn else { return }
+        guard !context.request.isExpired() else {
+            showAlert(
+                title: "Application request expired",
+                message: "Ask the application to request access again. No access was granted."
+            )
+            refresh()
+            return
+        }
 
         performAction(successMessage: context.approved ? "Application access approved." : "Application access denied.") {
             client in

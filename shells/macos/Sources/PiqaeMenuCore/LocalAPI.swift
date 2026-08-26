@@ -212,6 +212,7 @@ public struct LocalLifecycleSnapshot: Codable, Equatable, Sendable {
 public enum LocalBrokerCapability: String, Codable, CaseIterable, Hashable, Sendable {
     case observeStatus = "observe_status"
     case observePrinters = "observe_printers"
+    case observeJobHistory = "observe_job_history"
     case manageProfiles = "manage_profiles"
     case submitLocalJobs = "submit_local_jobs"
     case manageConnectors = "manage_connectors"
@@ -220,6 +221,7 @@ public enum LocalBrokerCapability: String, Codable, CaseIterable, Hashable, Send
         switch self {
         case .observeStatus: "View node status"
         case .observePrinters: "View printers"
+        case .observeJobHistory: "View print history"
         case .manageProfiles: "Manage print presets"
         case .submitLocalJobs: "Submit print jobs"
         case .manageConnectors: "Manage connections"
@@ -247,6 +249,10 @@ public struct LocalPendingBrokerAuthorization: Codable, Equatable, Identifiable,
     public let expiresUnixMS: Int64
 
     public var id: UUID { authorizationID }
+
+    public func isExpired(at date: Date = Date()) -> Bool {
+        expiresUnixMS <= Int64(date.timeIntervalSince1970 * 1_000)
+    }
 
     enum CodingKeys: String, CodingKey {
         case authorizationID = "authorization_id"

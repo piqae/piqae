@@ -9,14 +9,10 @@ import UIKit
 @MainActor
 public final class PiqaeUIKitLifecycleCoordinator {
     private let node: PiqaeNode
-    private var observers: [NSObjectProtocol] = []
+    private let observers = PiqaeNotificationObserverBag()
 
     public init(node: PiqaeNode) {
         self.node = node
-    }
-
-    deinit {
-        for observer in observers { NotificationCenter.default.removeObserver(observer) }
     }
 
     public func startObserving() {
@@ -58,7 +54,6 @@ public final class PiqaeUIKitLifecycleCoordinator {
     }
 
     public func stopObserving() {
-        for observer in observers { NotificationCenter.default.removeObserver(observer) }
         observers.removeAll()
     }
 
@@ -73,6 +68,15 @@ public final class PiqaeUIKitLifecycleCoordinator {
         guard remaining.isFinite, remaining >= 5 else {
             return .deferred(reason: "iPadOS did not grant a safe reconciliation budget.")
         }
+        let cancellation = PiqaeTaskCancellation()
+        let lifecycleNode = node
+        let identifier = UIApplication.shared.beginBackgroundTask(withName: "Piqae reconcile") {
+            cancellation.cancel()
+            Task { try? await lifecycleNode.reportHostLifecycle(.suspendImminent) }
+        }
+        guard identifier != .invalid else {
+            return .deferred(reason: "iPadOS did not grant background execution.")
+        }
         try? await node.reportHostLifecycle(.enteredBackground)
         let worker = Task { [node] in
             await node.handleWakeHint(
@@ -84,15 +88,7 @@ public final class PiqaeUIKitLifecycleCoordinator {
                 )
             )
         }
-        let lifecycleNode = node
-        let identifier = UIApplication.shared.beginBackgroundTask(withName: "Piqae reconcile") {
-            worker.cancel()
-            Task { try? await lifecycleNode.reportHostLifecycle(.suspendImminent) }
-        }
-        guard identifier != .invalid else {
-            worker.cancel()
-            return .deferred(reason: "iPadOS did not grant background execution.")
-        }
+        cancellation.install { worker.cancel() }
         defer { UIApplication.shared.endBackgroundTask(identifier) }
         return await worker.value
     }
@@ -103,26 +99,67 @@ public final class PiqaeUIKitLifecycleCoordinator {
         named name: String,
         operation: @escaping @Sendable () async throws -> T
     ) async throws -> T {
-        let expiration = PiqaeExpirationState()
+        let cancellation = PiqaeTaskCancellation()
         let identifier = UIApplication.shared.beginBackgroundTask(withName: name) {
-            Task { await expiration.expire() }
+            cancellation.cancel()
         }
         guard identifier != .invalid else {
             throw PiqaeNodeError.backgroundExecutionUnavailable
         }
         defer { UIApplication.shared.endBackgroundTask(identifier) }
-        let result = try await operation()
-        guard !(await expiration.isExpired) else {
-            throw PiqaeNodeError.backgroundExecutionUnavailable
-        }
-        return result
+        let worker = Task { try await operation() }
+        cancellation.install { worker.cancel() }
+        return try await worker.value
     }
 }
 
-private actor PiqaeExpirationState {
-    private var expired = false
-    var isExpired: Bool { expired }
-    func expire() { expired = true }
+/// NotificationCenter block tokens are not declared Sendable even though this
+/// bag is only mutated by the coordinator's main actor. Keeping cleanup in the
+/// bag's synchronized lifetime avoids touching non-Sendable tokens from an
+/// actor-isolated deinitializer under Swift 6.
+private final class PiqaeNotificationObserverBag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [NSObjectProtocol] = []
+
+    var isEmpty: Bool { lock.withLock { values.isEmpty } }
+
+    func append(_ value: NSObjectProtocol) {
+        lock.withLock { values.append(value) }
+    }
+
+    func removeAll() {
+        let removed = lock.withLock {
+            let removed = values
+            values.removeAll()
+            return removed
+        }
+        for observer in removed { NotificationCenter.default.removeObserver(observer) }
+    }
+
+    deinit { removeAll() }
+}
+
+private final class PiqaeTaskCancellation: @unchecked Sendable {
+    private let lock = NSLock()
+    private var cancelled = false
+    private var action: (@Sendable () -> Void)?
+
+    func install(_ action: @escaping @Sendable () -> Void) {
+        let shouldCancel = lock.withLock {
+            if cancelled { return true }
+            self.action = action
+            return false
+        }
+        if shouldCancel { action() }
+    }
+
+    func cancel() {
+        let action = lock.withLock {
+            cancelled = true
+            return self.action
+        }
+        action?()
+    }
 }
 
 /// Schedules best-effort reconciliation, never immediate delivery. The host

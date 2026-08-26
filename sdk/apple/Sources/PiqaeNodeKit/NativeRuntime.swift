@@ -53,17 +53,23 @@ public actor PiqaeNativeRuntime: PiqaeEmbeddedNodeRuntime, PiqaeOpaqueIdentityPr
     public static var linkedLibraryAvailable: Bool { piqae_node_link_anchor() != 0 }
     private let configuration: PiqaeNativeRuntimeConfiguration
     private let keyStore: any PiqaeHostKeyStore
+    private let connectorKeyStore: any PiqaeConnectorKeyStore
     private var library: PiqaeNativeLibrary?
     private var handle: UInt64?
     private var keyContext: PiqaeHostKeyCallbackContext?
+    private var connectorKeyContext: PiqaeConnectorKeyCallbackContext?
 
     public init(
         configuration: PiqaeNativeRuntimeConfiguration,
-        keyStore: (any PiqaeHostKeyStore)? = nil
+        keyStore: (any PiqaeHostKeyStore)? = nil,
+        connectorKeyStore: (any PiqaeConnectorKeyStore)? = nil
     ) {
         self.configuration = configuration
         self.keyStore = keyStore ?? PiqaeKeychainHostKeyStore(
             account: "host-hmac-sha256-v1.\(configuration.applicationID)"
+        )
+        self.connectorKeyStore = connectorKeyStore ?? PiqaeKeychainConnectorKeyStore(
+            service: "com.piqae.nodekit.connector-signing.v1.\(configuration.applicationID)"
         )
     }
 
@@ -95,10 +101,21 @@ public actor PiqaeNativeRuntime: PiqaeEmbeddedNodeRuntime, PiqaeOpaqueIdentityPr
             _ = try Self.unwrap(
                 library.setHostKeyProvider(createdData.handle, provider)
             ) as HandleData
+            let connectorContext = PiqaeConnectorKeyCallbackContext(store: connectorKeyStore)
+            let connectorProvider = PiqaeConnectorKeyProvider(
+                context: Unmanaged.passUnretained(connectorContext).toOpaque(),
+                generate: piqaeAppleGenerateConnectorKey,
+                sign: piqaeAppleSignConnector,
+                delete_key: piqaeAppleDeleteConnectorKey
+            )
+            _ = try Self.unwrap(
+                library.setConnectorKeyProvider(createdData.handle, connectorProvider)
+            ) as HandleData
             _ = try Self.unwrap(library.start(createdData.handle)) as NativeSnapshot
             self.library = library
             handle = createdData.handle
             self.keyContext = keyContext
+            connectorKeyContext = connectorContext
         } catch {
             _ = try? Self.unwrap(library.destroy(createdData.handle)) as DestroyData
             throw error
@@ -123,6 +140,7 @@ public actor PiqaeNativeRuntime: PiqaeEmbeddedNodeRuntime, PiqaeOpaqueIdentityPr
         }
         self.handle = nil
         keyContext = nil
+        connectorKeyContext = nil
         self.library = nil
         if let destroyError { throw destroyError }
         if let stopError { throw stopError }
@@ -278,6 +296,50 @@ public actor PiqaeNativeRuntime: PiqaeEmbeddedNodeRuntime, PiqaeOpaqueIdentityPr
             TypeOnlyCommand(type: "connector_snapshots"),
             as: ConnectorSnapshotsData.self
         ).connectors
+    }
+
+    public func connectInvitation(_ request: PiqaeEnrollmentRequest) async throws
+        -> PiqaeRuntimeConnectorSnapshot
+    {
+        let prepared = try commandResponse(
+            PrepareConnectorKeyCommand(
+                type: "prepare_connector_key",
+                applicationScope: configuration.applicationID
+            ),
+            as: PreparedConnectorKeyData.self
+        )
+        do {
+            let token = try request.invitation.withValue { value in
+                guard value.utf8.count <= 4_096 else {
+                    throw PiqaeNodeError.invalidConfiguration(
+                        "The invitation exceeds the supported size."
+                    )
+                }
+                return value
+            }
+            return try commandResponse(
+                ConnectInvitationCommand(
+                    type: "connect_invitation",
+                    controlPlaneURL: request.authorityURL,
+                    invitationToken: token,
+                    connectorKeyHandle: prepared.keyHandle,
+                    printerGrant: "all_local_printers",
+                    allowedPrinterIDs: [],
+                    nodeName: configuration.applicationID,
+                    hostname: ProcessInfo.processInfo.hostName
+                ),
+                as: ConnectedConnectorData.self
+            ).connector
+        } catch {
+            _ = try? commandResponse(
+                CancelPreparedConnectorKeyCommand(
+                    type: "cancel_prepared_connector_key",
+                    keyHandle: prepared.keyHandle
+                ),
+                as: CancelledConnectorKeyData.self
+            )
+            throw error
+        }
     }
 
     public func revokeConnector(id: PiqaeConnectionID) async throws {
@@ -594,6 +656,42 @@ private struct ConnectorIDCommand: Encodable {
     let connectorID: String
     enum CodingKeys: String, CodingKey { case type; case connectorID = "connector_id" }
 }
+private struct PrepareConnectorKeyCommand: Encodable {
+    let type: String
+    let applicationScope: String
+    enum CodingKeys: String, CodingKey {
+        case type
+        case applicationScope = "application_scope"
+    }
+}
+private struct CancelPreparedConnectorKeyCommand: Encodable {
+    let type: String
+    let keyHandle: String
+    enum CodingKeys: String, CodingKey {
+        case type
+        case keyHandle = "key_handle"
+    }
+}
+private struct ConnectInvitationCommand: Encodable {
+    let type: String
+    let controlPlaneURL: URL
+    let invitationToken: String
+    let connectorKeyHandle: String
+    let printerGrant: String
+    let allowedPrinterIDs: [String]
+    let nodeName: String
+    let hostname: String
+    enum CodingKeys: String, CodingKey {
+        case type
+        case controlPlaneURL = "control_plane_url"
+        case invitationToken = "invitation_token"
+        case connectorKeyHandle = "connector_key_handle"
+        case printerGrant = "printer_grant"
+        case allowedPrinterIDs = "allowed_printer_ids"
+        case nodeName = "node_name"
+        case hostname
+    }
+}
 
 private struct NativeEnvelope<Value: Decodable>: Decodable {
     let ok: Bool
@@ -624,6 +722,12 @@ private struct JobSnapshotData: Decodable { let job: PiqaeRuntimeJobSnapshot }
 private struct ProfileSnapshotsData: Decodable { let profiles: [PiqaeRuntimeProfileSnapshot] }
 private struct ProfileSnapshotData: Decodable { let profile: PiqaeRuntimeProfileSnapshot }
 private struct ConnectorSnapshotsData: Decodable { let connectors: [PiqaeRuntimeConnectorSnapshot] }
+private struct PreparedConnectorKeyData: Decodable {
+    let keyHandle: String
+    enum CodingKeys: String, CodingKey { case keyHandle = "key_handle" }
+}
+private struct ConnectedConnectorData: Decodable { let connector: PiqaeRuntimeConnectorSnapshot }
+private struct CancelledConnectorKeyData: Decodable { let cancelled: Bool }
 private struct DeletedData: Decodable { let deleted: Bool }
 private struct RevokedData: Decodable { let revoked: Bool }
 
@@ -632,6 +736,9 @@ private final class PiqaeNativeLibrary: @unchecked Sendable {
     private typealias InputOperation = @convention(c) (UnsafePointer<UInt8>?, Int) -> PiqaeBuffer
     private typealias HandleOperation = @convention(c) (UInt64) -> PiqaeBuffer
     private typealias ProviderOperation = @convention(c) (UInt64, PiqaeHostKeyProvider) -> PiqaeBuffer
+    private typealias ConnectorProviderOperation = @convention(c) (
+        UInt64, PiqaeConnectorKeyProvider
+    ) -> PiqaeBuffer
     private typealias CommandOperation = @convention(c) (
         UInt64, UnsafePointer<UInt8>?, Int
     ) -> PiqaeBuffer
@@ -642,6 +749,7 @@ private final class PiqaeNativeLibrary: @unchecked Sendable {
     private let createOperation: InputOperation
     private let startOperation: HandleOperation
     private let providerOperation: ProviderOperation
+    private let connectorProviderOperation: ConnectorProviderOperation
     private let stopOperation: HandleOperation
     private let commandOperation: CommandOperation
     private let destroyOperation: HandleOperation
@@ -657,6 +765,7 @@ private final class PiqaeNativeLibrary: @unchecked Sendable {
             createOperation = piqae_node_linked_create
             startOperation = piqae_node_linked_start
             providerOperation = piqae_node_linked_set_host_key_provider
+            connectorProviderOperation = piqae_node_linked_set_connector_key_provider
             stopOperation = piqae_node_linked_stop
             commandOperation = piqae_node_linked_command
             destroyOperation = piqae_node_linked_destroy
@@ -671,6 +780,9 @@ private final class PiqaeNativeLibrary: @unchecked Sendable {
             createOperation = try Self.symbol(dynamicHandle, "piqae_node_create")
             startOperation = try Self.symbol(dynamicHandle, "piqae_node_start")
             providerOperation = try Self.symbol(dynamicHandle, "piqae_node_set_host_key_provider")
+            connectorProviderOperation = try Self.symbol(
+                dynamicHandle, "piqae_node_set_connector_key_provider"
+            )
             stopOperation = try Self.symbol(dynamicHandle, "piqae_node_stop")
             commandOperation = try Self.symbol(dynamicHandle, "piqae_node_command")
             destroyOperation = try Self.symbol(dynamicHandle, "piqae_node_destroy")
@@ -689,6 +801,9 @@ private final class PiqaeNativeLibrary: @unchecked Sendable {
     func start(_ handle: UInt64) -> Data { read(startOperation(handle)) }
     func setHostKeyProvider(_ handle: UInt64, _ provider: PiqaeHostKeyProvider) -> Data {
         read(providerOperation(handle, provider))
+    }
+    func setConnectorKeyProvider(_ handle: UInt64, _ provider: PiqaeConnectorKeyProvider) -> Data {
+        read(connectorProviderOperation(handle, provider))
     }
     func stop(_ handle: UInt64) -> Data { read(stopOperation(handle)) }
     func command(_ handle: UInt64, _ data: Data) -> Data {

@@ -22,6 +22,17 @@ application and its requested capabilities. If embedded isolation is selected,
 the app receives a distinct installation identity, state root, connector set,
 and printer route.
 
+On macOS, automatic fallback to that distinct embedded installation is opt-in.
+An unavailable broker may use it only when `allowsEmbeddedFallback` is true;
+incompatible protocol, denied or partial consent, invalid proof, replay, and
+forged responses always fail closed. Protocol-v4 job, printer, profile, and
+history operations use nonce-bound request and response HMAC proofs inside the
+shared Rust client. The bearer capability is retained as a device-only Keychain
+item and is never sent over the local socket. Connecting another hosted or
+self-hosted workspace requires a separately approved `manage_connectors`
+capability; the installed node—not the application—exchanges the short-lived
+invitation and starts the resulting durable connector worker.
+
 ## Intended application experiences
 
 The high-level SDK follows an instance pattern:
@@ -39,6 +50,13 @@ same services and build their own interface. A platform service-account secret
 never belongs in an app. An integrator backend creates a short-lived invitation;
 the node exchanges it into a connector credential held in Keychain, DPAPI, or
 the platform's equivalent secure store.
+
+The invitation is an input to the shared connector worker, not permission for
+an SDK caller to construct a connector record. The worker verifies origin
+policy, expiry, proof-of-possession, and returned workspace/environment identity
+before durable commit. Apple hosts provide only an opaque Keychain key handle,
+32-byte Ed25519 public key, and signing callbacks; private key material does not
+cross the native ABI.
 
 Typical supported shapes are:
 
@@ -171,6 +189,9 @@ monorepo.
 - Both packages expose their native ABI and local broker protocol ranges. A
   desktop client attaches only when those ranges overlap; it never guesses or
   opens the installed node's database as a fallback.
+- Installed-node execution requires protocol-v4 authenticated proofs. Older
+  secret-bearing execution is rejected instead of being accepted as an N/N-1
+  downgrade; presence and consent remain data-minimizing discovery operations.
 - Embedded native code updates with the host app. An attached machine service
   continues to use Piqae's signed updater, preserving the documented N/N-1
   broker window.

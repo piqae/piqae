@@ -267,6 +267,12 @@ public enum PiqaeNodeError: Error, LocalizedError, Equatable, Sendable {
     case invalidConfiguration(String)
     case backgroundExecutionUnavailable
     case submissionRejected(String)
+    case brokerAuthorizationRequired
+    case brokerAuthorizationDenied
+    case brokerAuthorizationExpired
+    case brokerCapabilityDenied(String)
+    case brokerRejected(code: String)
+    case invalidBrokerResponse
 
     public var errorDescription: String? {
         switch self {
@@ -283,6 +289,13 @@ public enum PiqaeNodeError: Error, LocalizedError, Equatable, Sendable {
              let .submissionRejected(message): message
         case .backgroundExecutionUnavailable:
             "iPadOS did not grant enough execution time; the work remains queued."
+        case .brokerAuthorizationRequired: "The installed node requires local application approval."
+        case .brokerAuthorizationDenied: "The node operator denied this application's access."
+        case .brokerAuthorizationExpired: "The local application approval request expired."
+        case let .brokerCapabilityDenied(capability):
+            "The installed node did not approve required capability \(capability)."
+        case let .brokerRejected(code): "The installed node rejected the request (\(code))."
+        case .invalidBrokerResponse: "The installed node returned an invalid broker response."
         }
     }
 }

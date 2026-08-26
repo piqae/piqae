@@ -184,8 +184,22 @@ impl<T: BrokerTransport> NodeClient<T> {
             credential: BrokerCredential {
                 application_id: application_id.into(),
                 token: token.into(),
+                granted_capabilities: Vec::new(),
             },
         }
+    }
+
+    #[must_use]
+    pub const fn from_credential(transport: T, credential: BrokerCredential) -> Self {
+        Self {
+            transport,
+            credential,
+        }
+    }
+
+    #[must_use]
+    pub fn granted_capabilities(&self) -> &[BrokerCapability] {
+        &self.credential.granted_capabilities
     }
 
     pub async fn presence(&self) -> Result<piqae_local_ipc::BrokerPresence, NodeClientError> {
@@ -413,7 +427,17 @@ impl BrokerTransport for WindowsBrokerTransport {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use piqae_local_ipc::{BrokerPresence, ConnectionState, LocalFailure};
+    use piqae_local_ipc::{
+        BrokerAuthorizationDecision, BrokerPresence, ConnectionState, LocalFailure, LocalPrinter,
+        LocalPrinterQueueCounts,
+    };
+    #[cfg(unix)]
+    use piqae_node_runtime::{
+        BrokerConsentHandle, BrokerRegistry, BrokerServerState, RuntimeCommand,
+        broker::serve_unix_broker,
+    };
+    #[cfg(unix)]
+    use std::collections::BTreeMap;
     use std::sync::Arc;
     use tokio::sync::Mutex;
 
@@ -598,5 +622,212 @@ mod tests {
             Err(NodeClientError::Timeout)
         ));
         server.abort();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn real_unix_broker_preserves_consent_and_credential_across_restart() {
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("runtime/node.sock");
+        let (consent, server) = spawn_test_broker(directory.path(), &socket).await;
+        let transport = UnixBrokerTransport::new(&socket);
+        let authorization = NodeAuthorizationClient::new(transport.clone());
+        let capabilities = vec![
+            BrokerCapability::ObserveStatus,
+            BrokerCapability::ObservePrinters,
+        ];
+        let handle = authorization
+            .request(test_application("com.example.pos"), capabilities.clone())
+            .await
+            .unwrap();
+        assert_eq!(consent.pending().await.len(), 1);
+        consent
+            .decide(
+                handle.authorization_id,
+                BrokerAuthorizationDecision {
+                    approved: true,
+                    granted_capabilities: capabilities,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            authorization.status(handle.clone()).await.unwrap(),
+            BrokerAuthorizationState::Approved
+        );
+        let credential = authorization.exchange(handle).await.unwrap();
+        let client = NodeClient::from_credential(transport, credential.clone());
+        assert_eq!(client.status().await.unwrap().version, "fake-macos-node");
+        assert_eq!(
+            client.printers().await.unwrap()[0].native_id,
+            "virtual-printer"
+        );
+
+        server.abort();
+        let _ = server.await;
+        let (restarted_consent, restarted_server) =
+            spawn_test_broker(directory.path(), &socket).await;
+        let restarted = NodeClient::from_credential(UnixBrokerTransport::new(&socket), credential);
+        assert_eq!(restarted.status().await.unwrap().version, "fake-macos-node");
+
+        let restarted_authorization =
+            NodeAuthorizationClient::new(UnixBrokerTransport::new(&socket));
+        let denied = restarted_authorization
+            .request(
+                test_application("com.example.denied"),
+                vec![BrokerCapability::ObservePrinters],
+            )
+            .await
+            .unwrap();
+        let pending = restarted_consent.pending().await;
+        let denied_id = pending
+            .iter()
+            .find(|item| item.application.application_id == "com.example.denied")
+            .unwrap()
+            .authorization_id;
+        restarted_consent
+            .decide(
+                denied_id,
+                BrokerAuthorizationDecision {
+                    approved: false,
+                    granted_capabilities: Vec::new(),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            restarted_authorization
+                .status(denied.clone())
+                .await
+                .unwrap(),
+            BrokerAuthorizationState::Denied
+        );
+        assert!(matches!(
+            restarted_authorization.exchange(denied).await,
+            Err(NodeClientError::Rejected { code, .. }) if code == "authorization_denied"
+        ));
+
+        prove_partial_grant_fails_closed(&restarted_authorization, &restarted_consent, &socket)
+            .await;
+
+        let expiring = restarted_authorization
+            .request(
+                test_application("com.example.expired"),
+                vec![BrokerCapability::ObserveStatus],
+            )
+            .await
+            .unwrap();
+        let expired = BrokerAuthorizationHandle {
+            expires_unix_ms: 0,
+            ..expiring
+        };
+        assert_eq!(
+            restarted_authorization.status(expired).await.unwrap(),
+            BrokerAuthorizationState::Expired
+        );
+        restarted_server.abort();
+    }
+
+    #[cfg(unix)]
+    async fn prove_partial_grant_fails_closed(
+        authorization: &NodeAuthorizationClient<UnixBrokerTransport>,
+        consent: &BrokerConsentHandle,
+        socket: &std::path::Path,
+    ) {
+        let partial = authorization
+            .request(
+                test_application("com.example.partial"),
+                vec![
+                    BrokerCapability::ObserveStatus,
+                    BrokerCapability::ObservePrinters,
+                ],
+            )
+            .await
+            .unwrap();
+        consent
+            .decide(
+                partial.authorization_id,
+                BrokerAuthorizationDecision {
+                    approved: true,
+                    granted_capabilities: vec![BrokerCapability::ObserveStatus],
+                },
+            )
+            .await
+            .unwrap();
+        let credential = authorization.exchange(partial).await.unwrap();
+        let client = NodeClient::from_credential(UnixBrokerTransport::new(socket), credential);
+        assert_eq!(client.status().await.unwrap().version, "fake-macos-node");
+        assert!(matches!(
+            client.printers().await,
+            // A request outside the durable grant is intentionally answered
+            // without a proof, so the client treats it like any forged reply.
+            Err(NodeClientError::UnexpectedResponse)
+        ));
+    }
+
+    #[cfg(unix)]
+    async fn spawn_test_broker(
+        root: &std::path::Path,
+        socket: &std::path::Path,
+    ) -> (BrokerConsentHandle, tokio::task::JoinHandle<()>) {
+        let (commands, mut receiver) = tokio::sync::mpsc::channel(8);
+        tokio::spawn(async move {
+            while let Some(command) = receiver.recv().await {
+                match command {
+                    RuntimeCommand::Status { respond_to } => {
+                        let _ = respond_to.send(LocalStatus {
+                            agent_id: Some("agt_fake".into()),
+                            workspace_name: Some("Fake workspace".into()),
+                            version: "fake-macos-node".into(),
+                            connection: ConnectionState::LocalOnly,
+                            queued_jobs: 0,
+                            active_jobs: 0,
+                            printer_warnings: 0,
+                            paused: false,
+                        });
+                    }
+                    RuntimeCommand::Printers { respond_to } => {
+                        let _ = respond_to.send(vec![LocalPrinter {
+                            printer_id: "prn_fake".into(),
+                            native_id: "virtual-printer".into(),
+                            name: "Virtual printer".into(),
+                            state: "idle".into(),
+                            is_default: true,
+                            exposed: true,
+                            capability_revision: 1,
+                            capabilities: serde_json::from_str("{}").unwrap(),
+                            native_options: BTreeMap::new(),
+                            profiles: Vec::new(),
+                            queue_counts: LocalPrinterQueueCounts::default(),
+                        }]);
+                    }
+                    _ => {}
+                }
+            }
+        });
+        let state = BrokerServerState::new(BrokerRegistry::load(root).unwrap(), commands);
+        let consent = state.consent_handle();
+        let socket = socket.to_path_buf();
+        let server_socket = socket.clone();
+        let server = tokio::spawn(async move {
+            serve_unix_broker(server_socket, state).await.unwrap();
+        });
+        for _ in 0..100 {
+            if tokio::net::UnixStream::connect(&socket).await.is_ok() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        }
+        assert!(tokio::net::UnixStream::connect(&socket).await.is_ok());
+        (consent, server)
+    }
+
+    #[cfg(unix)]
+    fn test_application(application_id: &str) -> BrokerApplicationIdentity {
+        BrokerApplicationIdentity {
+            application_id: application_id.into(),
+            display_name: "Example app".into(),
+            signing_identity_sha256: None,
+        }
     }
 }

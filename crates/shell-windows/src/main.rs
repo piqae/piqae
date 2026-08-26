@@ -870,6 +870,7 @@ mod windows_shell {
             .map(|capability| match capability {
                 piqae_local_ipc::BrokerCapability::ObserveStatus => "node status",
                 piqae_local_ipc::BrokerCapability::ObservePrinters => "printer list",
+                piqae_local_ipc::BrokerCapability::ObserveJobHistory => "print history",
                 piqae_local_ipc::BrokerCapability::ManageProfiles => "printer profiles",
                 piqae_local_ipc::BrokerCapability::SubmitLocalJobs => "local printing",
                 piqae_local_ipc::BrokerCapability::ManageConnectors => "connections",

@@ -95,9 +95,11 @@ public actor PiqaeAirPrintAdapter: PiqaePrinterAdapter {
     ) async throws -> PiqaeJobReceipt {
         try await validate(request, for: printer)
         var matchingURL: URL?
-        for url in knownPrinterURLs where try await id(for: url).rawValue == printer.nativeID {
-            matchingURL = url
-            break
+        for url in knownPrinterURLs {
+            if try await id(for: url).rawValue == printer.nativeID {
+                matchingURL = url
+                break
+            }
         }
         guard let url = matchingURL else {
             throw PiqaeNodeError.printerNotFound(printer.id)

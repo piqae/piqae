@@ -64,6 +64,11 @@ pub struct BrokerPresence {
 pub struct BrokerCredential {
     pub application_id: String,
     pub token: String,
+    /// Exact node-side grants returned with the one-time credential. Older
+    /// peers omit this field; protocol 3 SDK clients fail closed when a
+    /// required grant is absent instead of probing with a live action.
+    #[serde(default)]
+    pub granted_capabilities: Vec<BrokerCapability>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -125,6 +130,7 @@ impl std::fmt::Debug for BrokerCredential {
             .debug_struct("BrokerCredential")
             .field("application_id", &self.application_id)
             .field("token", &"[REDACTED]")
+            .field("granted_capabilities", &self.granted_capabilities)
             .finish()
     }
 }
@@ -134,6 +140,7 @@ impl std::fmt::Debug for BrokerCredential {
 pub enum BrokerCapability {
     ObserveStatus,
     ObservePrinters,
+    ObserveJobHistory,
     ManageProfiles,
     SubmitLocalJobs,
     ManageConnectors,
@@ -319,6 +326,10 @@ pub struct LocalRequest {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "the bounded SDK operation remains direct to keep the versioned JSON contract simple"
+)]
 pub enum LocalOperation {
     Status,
     Printers,
@@ -377,6 +388,9 @@ pub enum SdkBrokerOperation {
     SubmitLocalJob {
         printer_id: String,
         title: String,
+        idempotency_key: String,
+        #[serde(default)]
+        profile_id: Option<String>,
         content_kind: piqae_domain::ContentKind,
         content_base64: String,
         #[serde(default)]
@@ -906,6 +920,7 @@ mod tests {
         let credential = BrokerCredential {
             application_id: "com.example.pos".into(),
             token: "sensitive-token".into(),
+            granted_capabilities: vec![BrokerCapability::ObserveStatus],
         };
         let output = format!("{credential:?}");
         assert!(output.contains("com.example.pos"));
