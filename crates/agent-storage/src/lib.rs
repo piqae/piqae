@@ -2731,6 +2731,29 @@ impl AgentStore {
             .ok_or_else(|| StorageError::JobNotFound(job_id.to_owned()))
     }
 
+    /// Fail-closed rollback for a durable cloud acceptance intent whose
+    /// connector lost admission before remote confirmation could be safely
+    /// activated. The terminal row remains as audit evidence and its content
+    /// follows normal retention/reclamation policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the job is absent, no longer prepared, or the
+    /// transactional terminal transition cannot be committed.
+    pub fn abandon_cloud_accept(
+        &mut self,
+        job_id: &str,
+        observed_unix_ms: i64,
+    ) -> Result<(), StorageError> {
+        self.terminalize_prepared_cloud_job(
+            job_id,
+            "cancelled",
+            "connector_revoked",
+            "Connector admission ended before cloud acceptance completed",
+            observed_unix_ms,
+        )
+    }
+
     /// Looks up one locally durable job.
     ///
     /// # Errors

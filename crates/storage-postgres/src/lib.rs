@@ -3036,6 +3036,47 @@ impl PostgresStore {
         agent_id: AgentId,
     ) -> Result<AgentAuthenticationRecord, StorageError> {
         let row = sqlx::query(
+            "SELECT agent.workspace_id, agent.environment_id, agent.public_key
+             FROM agents agent
+             WHERE agent.id = $1 AND agent.revoked_at IS NULL
+               AND (
+                 NOT EXISTS (
+                   SELECT 1 FROM node_connectors connector
+                   WHERE connector.agent_id = agent.id
+                 )
+                 OR EXISTS (
+                   SELECT 1 FROM node_connectors connector
+                   WHERE connector.agent_id = agent.id
+                     AND connector.workspace_id = agent.workspace_id
+                     AND connector.environment_id = agent.environment_id
+                     AND connector.revoked_at IS NULL
+                 )
+               )",
+        )
+        .bind(agent_id.to_string())
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(StorageError::NotFound)?;
+        let workspace_id: String = row.try_get("workspace_id")?;
+        let environment_id: String = row.try_get("environment_id")?;
+        Ok(AgentAuthenticationRecord {
+            workspace_id: workspace_id.parse().map_err(|error| {
+                StorageError::InvalidData(format!("workspace id `{workspace_id}`: {error}"))
+            })?,
+            environment_id: environment_id.parse().map_err(|error| {
+                StorageError::InvalidData(format!("environment id `{environment_id}`: {error}"))
+            })?,
+            public_key: row
+                .try_get::<Option<Vec<u8>>, _>("public_key")?
+                .ok_or_else(|| StorageError::InvalidData("agent has no public key".into()))?,
+        })
+    }
+
+    pub async fn agent_for_revocation_authentication(
+        &self,
+        agent_id: AgentId,
+    ) -> Result<AgentAuthenticationRecord, StorageError> {
+        let row = sqlx::query(
             "SELECT workspace_id, environment_id, public_key
              FROM agents WHERE id = $1 AND revoked_at IS NULL",
         )
@@ -3895,7 +3936,22 @@ impl PostgresStore {
         .await?
         .rows_affected();
         if affected != 1 {
-            return Err(StorageError::NotFound);
+            let already_revoked = sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS (
+                    SELECT 1 FROM node_connectors
+                    WHERE id = $1 AND agent_id = $2 AND workspace_id = $3
+                      AND environment_id = $4 AND revoked_at IS NOT NULL
+                 )",
+            )
+            .bind(connector_id)
+            .bind(agent_id.to_string())
+            .bind(workspace_id.to_string())
+            .bind(environment_id.to_string())
+            .fetch_one(&mut *transaction)
+            .await?;
+            if !already_revoked {
+                return Err(StorageError::NotFound);
+            }
         }
         transaction.commit().await?;
         Ok(())

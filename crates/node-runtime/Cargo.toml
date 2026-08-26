@@ -14,6 +14,7 @@ base64.workspace = true
 chrono.workspace = true
 ed25519-dalek.workspace = true
 fs2 = "0.4.3"
+futures.workspace = true
 hex.workspace = true
 piqae-domain.workspace = true
 piqae-agent-client = { path = "../agent-client", version = "0.1.21" }

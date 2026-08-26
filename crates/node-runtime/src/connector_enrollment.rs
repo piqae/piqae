@@ -321,6 +321,10 @@ mod tests {
     }
 
     async fn fake_authority() -> (Url, tokio::task::JoinHandle<()>) {
+        fake_authority_attempts(1).await
+    }
+
+    async fn fake_authority_attempts(attempts: usize) -> (Url, tokio::task::JoinHandle<()>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let task = tokio::spawn(async move {
@@ -343,22 +347,65 @@ mod tests {
                 sync_after_ms: 250,
                 connector_id: Some("ncon_authenticated".into()),
             };
-            for body in [
-                serde_json::to_vec(&preview).unwrap(),
-                serde_json::to_vec(&enrolled).unwrap(),
-            ] {
-                let (mut stream, _) = listener.accept().await.unwrap();
-                let mut request = vec![0_u8; 16 * 1024];
-                let _ = stream.read(&mut request).await.unwrap();
-                let header = format!(
-                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
-                    body.len()
-                );
-                stream.write_all(header.as_bytes()).await.unwrap();
-                stream.write_all(&body).await.unwrap();
+            for _ in 0..attempts {
+                for body in [
+                    serde_json::to_vec(&preview).unwrap(),
+                    serde_json::to_vec(&enrolled).unwrap(),
+                ] {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    let mut request = vec![0_u8; 16 * 1024];
+                    let _ = stream.read(&mut request).await.unwrap();
+                    let header = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    stream.write_all(header.as_bytes()).await.unwrap();
+                    stream.write_all(&body).await.unwrap();
+                }
             }
         });
         (Url::parse(&format!("http://{address}/")).unwrap(), task)
+    }
+
+    #[tokio::test]
+    async fn post_enrol_persist_failure_restarts_and_replays_without_orphaning_key() {
+        let directory = tempfile::tempdir().unwrap();
+        let provider = TestProvider::default();
+        let mut registry = ConnectorRegistry::load(directory.path()).unwrap();
+        ensure_installation_identity(&mut registry, &provider, "com.example.pos").unwrap();
+        let prepared =
+            prepare_connector_identity(&mut registry, &provider, "com.example.pos").unwrap();
+        let (origin, server) = fake_authority_attempts(2).await;
+        let make_request = || ConnectorInvitationExchange {
+            control_plane_url: origin.clone(),
+            invitation_token: "piq_retryable_invitation".into(),
+            connector_key_handle: prepared.handle.clone(),
+            application_scope: "com.example.pos".into(),
+            printer_grant: PrinterGrant::AllLocalPrinters,
+            allowed_printer_ids: Vec::new(),
+            node_name: "POS iPad".into(),
+            hostname: "ipad".into(),
+            platform: "ios".into(),
+            architecture: "arm64".into(),
+        };
+        registry.inject_next_persist_failure();
+        assert!(
+            exchange_connector_invitation(&mut registry, &provider, make_request())
+                .await
+                .is_err()
+        );
+        assert!(registry.prepared_key(&prepared.handle).is_some());
+        drop(registry);
+
+        let mut restarted = ConnectorRegistry::load(directory.path()).unwrap();
+        assert!(restarted.prepared_key(&prepared.handle).is_some());
+        let record = exchange_connector_invitation(&mut restarted, &provider, make_request())
+            .await
+            .unwrap();
+        assert_eq!(record.connector_id, "ncon_authenticated");
+        assert!(restarted.prepared_key(&prepared.handle).is_none());
+        assert!(restarted.contains("ncon_authenticated"));
+        server.await.unwrap();
     }
 
     #[tokio::test]

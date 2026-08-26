@@ -206,6 +206,10 @@ pub struct PendingCloudAcceptance {
 /// idempotent for a job and commit the no-replay/handoff intent before return.
 #[async_trait]
 pub trait DurableOfferAcceptor<M>: fmt::Debug + Send + Sync {
+    /// Admission generation fence checked at each remote side-effect boundary.
+    async fn admission_valid(&mut self) -> Result<bool, CloudWorkerError> {
+        Ok(true)
+    }
     async fn pending(&mut self) -> Result<Vec<PendingCloudAcceptance>, CloudWorkerError>;
     async fn prepare(
         &mut self,
@@ -213,6 +217,9 @@ pub trait DurableOfferAcceptor<M>: fmt::Debug + Send + Sync {
         content: M,
     ) -> Result<PendingCloudAcceptance, CloudWorkerError>;
     async fn activate(&mut self, job_id: JobId) -> Result<(), CloudWorkerError>;
+    async fn abandon(&mut self, _job_id: JobId) -> Result<(), CloudWorkerError> {
+        Ok(())
+    }
     async fn has_durable_intent(&mut self, job_id: JobId) -> Result<bool, CloudWorkerError>;
 }
 
@@ -369,16 +376,26 @@ where
 
     async fn resume_pending_acceptances(&mut self) -> Result<(), CloudWorkerError> {
         for pending in self.acceptor.pending().await? {
+            if !self.acceptor.admission_valid().await? {
+                self.acceptor.abandon(pending.job_id).await?;
+                continue;
+            }
             self.authority
                 .accept(pending.job_id, &pending.request)
                 .await?;
+            if !self.acceptor.admission_valid().await? {
+                self.acceptor.abandon(pending.job_id).await?;
+                return Err(CloudWorkerError::new("connector_admission_revoked"));
+            }
             self.acceptor.activate(pending.job_id).await?;
         }
         Ok(())
     }
 
     async fn process_offer(&mut self, offer: JobOffer) -> Result<(), CloudWorkerError> {
-        if !self.runtime.snapshot().accepting_cloud_leases {
+        if !self.runtime.snapshot().accepting_cloud_leases
+            || !self.acceptor.admission_valid().await?
+        {
             self.release_offer(&offer, "host_lifecycle_unavailable")
                 .await?;
             return Ok(());
@@ -420,7 +437,21 @@ where
                 return Err(error);
             }
         };
+        if !self.acceptor.admission_valid().await? {
+            self.acceptor.abandon(job_id).await?;
+            let _ = self
+                .release_offer(&offer, "connector_admission_revoked")
+                .await;
+            return Err(CloudWorkerError::new("connector_admission_revoked"));
+        }
         self.authority.accept(job_id, &pending.request).await?;
+        if !self.acceptor.admission_valid().await? {
+            self.acceptor.abandon(job_id).await?;
+            let _ = self
+                .release_offer(&offer, "connector_admission_revoked")
+                .await;
+            return Err(CloudWorkerError::new("connector_admission_revoked"));
+        }
         self.acceptor.activate(job_id).await
     }
 
@@ -501,7 +532,10 @@ mod tests {
     use std::{
         collections::{BTreeMap, BTreeSet, VecDeque},
         path::{Path, PathBuf},
-        sync::Mutex,
+        sync::{
+            Mutex,
+            atomic::{AtomicBool, Ordering},
+        },
     };
 
     type Log = Arc<Mutex<Vec<&'static str>>>;
@@ -552,6 +586,7 @@ mod tests {
         responses: Mutex<VecDeque<Result<AgentSyncResponse, CloudWorkerError>>>,
         accepted: Mutex<BTreeSet<JobId>>,
         released: Mutex<Vec<JobId>>,
+        revoke_after_accept: Option<Arc<AtomicBool>>,
         log: Log,
     }
 
@@ -607,6 +642,9 @@ mod tests {
         ) -> Result<(), CloudWorkerError> {
             self.log.lock().unwrap().push("remote_accept");
             self.accepted.lock().unwrap().insert(job_id);
+            if let Some(admission) = &self.revoke_after_accept {
+                admission.store(false, Ordering::Release);
+            }
             Ok(())
         }
     }
@@ -705,6 +743,7 @@ mod tests {
         path: PathBuf,
         document: DurableDocument,
         log: Log,
+        admission: Option<Arc<AtomicBool>>,
     }
 
     impl FileAcceptor {
@@ -717,6 +756,7 @@ mod tests {
                 path: path.to_owned(),
                 document,
                 log,
+                admission: None,
             }
         }
 
@@ -730,6 +770,13 @@ mod tests {
 
     #[async_trait]
     impl DurableOfferAcceptor<Vec<u8>> for FileAcceptor {
+        async fn admission_valid(&mut self) -> Result<bool, CloudWorkerError> {
+            Ok(self
+                .admission
+                .as_ref()
+                .is_none_or(|admission| admission.load(Ordering::Acquire)))
+        }
+
         async fn pending(&mut self) -> Result<Vec<PendingCloudAcceptance>, CloudWorkerError> {
             Ok(self
                 .document
@@ -779,6 +826,12 @@ mod tests {
         async fn activate(&mut self, job_id: JobId) -> Result<(), CloudWorkerError> {
             self.log.lock().unwrap().push("activate");
             self.document.active.insert(job_id);
+            self.persist()
+        }
+
+        async fn abandon(&mut self, job_id: JobId) -> Result<(), CloudWorkerError> {
+            self.log.lock().unwrap().push("abandon");
+            self.document.pending.remove(&job_id);
             self.persist()
         }
 
@@ -952,6 +1005,7 @@ mod tests {
             responses: Mutex::new(responses.into()),
             accepted: Mutex::new(BTreeSet::new()),
             released: Mutex::new(Vec::new()),
+            revoke_after_accept: None,
             log,
         }
     }
@@ -1116,5 +1170,47 @@ mod tests {
             "signing_failed"
         );
         assert!(!log.lock().unwrap().contains(&"event_ack"));
+    }
+
+    #[tokio::test]
+    async fn revoke_during_remote_accept_never_activates_prepared_local_work() {
+        let directory = tempfile::tempdir().unwrap();
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let provider = Arc::new(FakeSecureStore {
+            key: SigningKey::from_bytes(&[19; 32]),
+            deleted: Mutex::new(false),
+        });
+        let generated = provider.generate("com.example.pos").unwrap();
+        let identity: Arc<dyn DeviceRequestSigner> = Arc::new(HostBackedDeviceIdentity::new(
+            AgentId::new(),
+            generated.handle,
+            provider,
+        ));
+        let mut response = empty_response();
+        response.candidate_jobs.push(offer(JobId::new()));
+        let admission = Arc::new(AtomicBool::new(true));
+        let mut worker = worker(
+            authority(
+                identity,
+                ed25519_dalek::VerifyingKey::from_bytes(&generated.public_key).unwrap(),
+                vec![Ok(response)],
+                Arc::clone(&log),
+            ),
+            &log,
+            &directory.path().join("revoke-race.json"),
+            runtime(&directory.path().join("runtime")),
+            false,
+        );
+        worker.authority.revoke_after_accept = Some(Arc::clone(&admission));
+        worker.acceptor.admission = Some(admission);
+        assert_eq!(
+            worker.reconcile_once().await.unwrap_err().code,
+            "connector_admission_revoked"
+        );
+        let entries = log.lock().unwrap();
+        assert!(entries.contains(&"remote_accept"));
+        assert!(entries.contains(&"abandon"));
+        assert!(!entries.contains(&"activate"));
+        drop(entries);
     }
 }
