@@ -305,6 +305,8 @@ describe('managed customer selection', () => {
       jobs: async () => emptyPage,
       printers: async () => emptyPage,
       agents: async () => ({ data: [{ id: rawId, name: 'Piqae node' }], nextCursor: null }),
+      destinations: async () => emptyPage,
+      routes: async () => emptyPage,
       nodeDiagnostics: async () => []
     };
     dashboardSource.mockReturnValue({

@@ -351,7 +351,7 @@ impl RouteCoordinator {
             expires_unix_ms: now_unix_ms.saturating_add(RESERVATION_LIFETIME_MS),
         };
         let result = RouteReservation {
-            local_route_key: route_id.clone(),
+            local_route_key: route_id,
             server_route_id: None,
             coordination_key: coordination_key.clone(),
             reservation_id: reservation.reservation_id,
