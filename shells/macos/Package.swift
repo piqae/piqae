@@ -9,13 +9,19 @@ let package = Package(
         .executable(name: "PiqaePrintCoreReplay", targets: ["PiqaePrintCoreReplay"]),
     ],
     dependencies: [
+        .package(name: "PiqaeNodeKit", path: "../../sdk/apple"),
         .package(
             url: "https://github.com/sparkle-project/Sparkle",
             exact: "2.9.2"
         ),
     ],
     targets: [
-        .target(name: "PiqaeMenuCore"),
+        .target(
+            name: "PiqaeMenuCore",
+            dependencies: [
+                .product(name: "PiqaeNodeKit", package: "PiqaeNodeKit"),
+            ]
+        ),
         .target(name: "PiqaeProfileHost", dependencies: ["PiqaeMenuCore"]),
         .target(
             name: "PiqaePrintCoreReplayCore",
