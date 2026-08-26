@@ -15,6 +15,7 @@ pub mod embedded;
 pub mod installation;
 pub mod route_coordinator;
 pub mod runtime;
+pub mod secure_connector;
 pub mod supervision;
 
 pub use broker::{
@@ -28,9 +29,11 @@ pub use installation::{
     RuntimeSelectionError, select_runtime,
 };
 pub use piqae_node_host_api::{
-    AvailabilityClass, HostCapabilities, HostKeyError, HostKeyProvider, HostKind, HostLifecycle,
-    LeaseAdmission, LifecycleEvent, LifecycleSnapshot, NetworkAvailability, NodeRuntimeMode,
-    PowerAvailability, PrinterTransport, RuntimeConfiguration,
+    AvailabilityClass, ConnectorKeyError, GeneratedConnectorKey, HostCapabilities, HostKeyError,
+    HostKeyProvider, HostKind, HostLifecycle, LeaseAdmission, LifecycleEvent, LifecycleSnapshot,
+    NetworkAvailability, NodeRuntimeMode, PowerAvailability, PrinterTransport,
+    RuntimeConfiguration, SecureConnectorSigner, SecureKeyHandle,
 };
 pub use runtime::NodeRuntime;
+pub use secure_connector::HostBackedDeviceIdentity;
 pub use supervision::{ConnectorReconciliation, WorkerObservation, plan_connector_reconciliation};

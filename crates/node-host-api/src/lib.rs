@@ -25,6 +25,100 @@ pub trait HostKeyProvider: std::fmt::Debug + Send + Sync {
     fn hmac_sha256(&self, key_scope: &str, message: &[u8]) -> Result<[u8; 32], HostKeyError>;
 }
 
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum ConnectorKeyError {
+    #[error("the host connector key store is unavailable")]
+    Unavailable,
+    #[error("the host connector key handle or signature is invalid")]
+    InvalidKeyMaterial,
+    #[error("the host connector key operation was rejected")]
+    Rejected,
+}
+
+/// Opaque reference to a non-exportable Ed25519 key held by the host secure
+/// store. The identifier is persisted; key material is never returned to Rust.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SecureKeyHandle(String);
+
+impl SecureKeyHandle {
+    /// Constructs a bounded provider-owned handle.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidKeyMaterial` for an empty, oversized, or unsafe handle.
+    pub fn new(value: String) -> Result<Self, ConnectorKeyError> {
+        if value.is_empty()
+            || value.len() > 256
+            || !value.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_' | b'/')
+            })
+        {
+            return Err(ConnectorKeyError::InvalidKeyMaterial);
+        }
+        Ok(Self(value))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for SecureKeyHandle {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("SecureKeyHandle([REDACTED])")
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct GeneratedConnectorKey {
+    pub handle: SecureKeyHandle,
+    pub public_key: [u8; 32],
+}
+
+impl std::fmt::Debug for GeneratedConnectorKey {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("GeneratedConnectorKey")
+            .field("handle", &self.handle)
+            .field("public_key", &"[PUBLIC KEY]")
+            .finish()
+    }
+}
+
+/// Non-exporting connector identity provider.
+///
+/// Apple hosts implement this with Keychain/Secure Enclave where supported;
+/// Windows hosts use Credential Manager/DPAPI-backed material. Calls may be
+/// concurrent and remain valid until all connector workers have stopped.
+pub trait SecureConnectorSigner: std::fmt::Debug + Send + Sync {
+    /// Generates a new key under an application-scoped label and returns only
+    /// an opaque durable handle plus its public verification key.
+    ///
+    /// # Errors
+    ///
+    /// Returns a provider error if secure generation or persistence fails.
+    fn generate(&self, application_scope: &str)
+    -> Result<GeneratedConnectorKey, ConnectorKeyError>;
+
+    /// Signs one bounded canonical request without exporting private bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns a provider error for an absent key or rejected signing request.
+    fn sign(&self, handle: &SecureKeyHandle, message: &[u8])
+    -> Result<[u8; 64], ConnectorKeyError>;
+
+    /// Deletes a key after connector revocation. Failure must leave the
+    /// connector revoked; callers retry secure-store cleanup separately.
+    ///
+    /// # Errors
+    ///
+    /// Returns a provider error when secure-store cleanup could not complete.
+    fn delete(&self, handle: &SecureKeyHandle) -> Result<(), ConnectorKeyError>;
+}
+
 /// Whether this runtime has no remote authority or may hold isolated cloud
 /// connectors. `CloudCapable` does not imply that a connector is configured.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

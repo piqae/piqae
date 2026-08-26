@@ -1274,7 +1274,8 @@ async fn add_connector(arguments: &Arguments, consent: ConnectorConsentInput) ->
         environment_id: Some(preview.environment_id),
         requesting_service_account_id: preview.requesting_service_account_id,
         manage_url: preview.return_url.and_then(|value| value.parse().ok()),
-        device_key_file: relative_key,
+        device_key_file: Some(relative_key),
+        secure_key_handle: None,
         enabled: true,
         printer_grant,
         allowed_printer_ids,
@@ -2298,7 +2299,11 @@ async fn start_connector_worker(
     let scheduler_stop = StopSignal::default();
     // Resolve every fallible runtime dependency before spawning either half;
     // a failed key/content setup must not leave an orphan scheduler behind.
-    let cloud = cloud_configuration_from_connector(&record, &paths.device_key)?;
+    let device_key = paths
+        .device_key
+        .as_ref()
+        .context("installed connector has no file-backed signing key")?;
+    let cloud = cloud_configuration_from_connector(&record, device_key)?;
     let content = ContentStore::open(paths.content).await?;
     let connector_executor = executor.for_connector(record.connector_id.clone());
     let route_coordinator = Arc::clone(&executor.coordinator);
@@ -5902,7 +5907,8 @@ mod tests {
             environment_id: Some("env_test".to_owned()),
             requesting_service_account_id: Some("svc_test".to_owned()),
             manage_url: Some(Url::parse("https://app.example/manage").expect("url")),
-            device_key_file: format!("connectors/{id}/device.key").into(),
+            device_key_file: Some(format!("connectors/{id}/device.key").into()),
+            secure_key_handle: None,
             enabled: true,
             printer_grant: PrinterGrant::SelectedPrinters,
             allowed_printer_ids: vec!["prn_test".to_owned()],

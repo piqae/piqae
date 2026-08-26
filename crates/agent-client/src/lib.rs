@@ -48,6 +48,8 @@ pub enum ClientError {
     ResponseTooLarge,
     #[error("device authorization request failed")]
     DeviceAuthorization,
+    #[error("device request signing failed")]
+    Signing,
 }
 
 impl ClientError {
@@ -146,6 +148,72 @@ fn status_error(status: u16, bytes: &[u8]) -> ClientError {
 pub struct DeviceIdentity {
     agent_id: AgentId,
     signing_key: SigningKey,
+}
+
+/// Signing contract shared by file-backed installed nodes and embedded hosts
+/// whose connector private keys never leave Keychain/Credential Manager.
+pub trait DeviceRequestSigner: std::fmt::Debug + Send + Sync {
+    fn agent_id(&self) -> &AgentId;
+    /// Signs one bounded canonical HTTP request.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Signing` when the backing identity cannot sign safely.
+    fn sign(&self, message: &[u8]) -> Result<[u8; 64], ClientError>;
+
+    /// Builds the complete authenticated header set for one exact request.
+    ///
+    /// # Errors
+    ///
+    /// Returns a signing or invalid-header error.
+    fn signed_headers(
+        &self,
+        method: &str,
+        path: &str,
+        body: &[u8],
+        timestamp_unix_ms: i64,
+        nonce: Uuid,
+    ) -> Result<HeaderMap, ClientError> {
+        let digest = format!("{:x}", Sha256::digest(body));
+        let canonical = format!(
+            "{}\n{}\n{}\n{}\n{}",
+            method.to_ascii_uppercase(),
+            path,
+            timestamp_unix_ms,
+            nonce,
+            digest
+        );
+        let signature = self.sign(canonical.as_bytes())?;
+        let mut headers = HeaderMap::new();
+        insert_header(
+            &mut headers,
+            "x-piqae-agent-id",
+            &self.agent_id().to_string(),
+        )?;
+        insert_header(
+            &mut headers,
+            "x-piqae-timestamp",
+            &timestamp_unix_ms.to_string(),
+        )?;
+        insert_header(&mut headers, "x-piqae-nonce", &nonce.to_string())?;
+        insert_header(&mut headers, "x-piqae-body-sha256", &digest)?;
+        insert_header(
+            &mut headers,
+            "x-piqae-signature",
+            &STANDARD_NO_PAD.encode(signature),
+        )?;
+        Ok(headers)
+    }
+}
+
+impl DeviceRequestSigner for DeviceIdentity {
+    fn agent_id(&self) -> &AgentId {
+        &self.agent_id
+    }
+
+    fn sign(&self, message: &[u8]) -> Result<[u8; 64], ClientError> {
+        Ok(self.signing_key.sign(message).to_bytes())
+    }
 }
 
 impl DeviceIdentity {
@@ -359,7 +427,7 @@ impl AgentClient {
     /// or response-decoding failure.
     pub async fn sync(
         &self,
-        identity: &DeviceIdentity,
+        identity: &dyn DeviceRequestSigner,
         request: &AgentSyncRequest,
     ) -> Result<AgentSyncResponse, ClientError> {
         self.post_json("v1/agent/sync", request, Some(identity))
@@ -373,7 +441,7 @@ impl AgentClient {
     /// Returns an error for signing, serialization, transport, status, or decoding failure.
     pub async fn register_content_encryption_key(
         &self,
-        identity: &DeviceIdentity,
+        identity: &dyn DeviceRequestSigner,
         key_id: &str,
         public_key_spki: &str,
     ) -> Result<serde_json::Value, ClientError> {
@@ -411,7 +479,7 @@ impl AgentClient {
     /// or response-decoding failure.
     pub async fn accept_job(
         &self,
-        identity: &DeviceIdentity,
+        identity: &dyn DeviceRequestSigner,
         job_id: JobId,
         request: &AgentAcceptJobRequest,
     ) -> Result<AgentAcceptJobResponse, ClientError> {
@@ -431,7 +499,7 @@ impl AgentClient {
     /// or response-decoding failure.
     pub async fn renew_lease(
         &self,
-        identity: &DeviceIdentity,
+        identity: &dyn DeviceRequestSigner,
         job_id: JobId,
         request: &AgentRenewLeaseRequest,
     ) -> Result<AgentRenewLeaseResponse, ClientError> {
@@ -451,7 +519,7 @@ impl AgentClient {
     /// or response-decoding failure.
     pub async fn release_lease(
         &self,
-        identity: &DeviceIdentity,
+        identity: &dyn DeviceRequestSigner,
         job_id: JobId,
         request: &AgentReleaseLeaseRequest,
     ) -> Result<serde_json::Value, ClientError> {
@@ -474,7 +542,7 @@ impl AgentClient {
     /// failures.
     pub async fn download_content(
         &self,
-        identity: &DeviceIdentity,
+        identity: &dyn DeviceRequestSigner,
         job_id: JobId,
         lease_id: Uuid,
         lease_token: &str,
@@ -513,7 +581,7 @@ impl AgentClient {
     /// or HTTP status failure.
     pub async fn download_document_resource(
         &self,
-        identity: &DeviceIdentity,
+        identity: &dyn DeviceRequestSigner,
         job_id: JobId,
         lease_id: Uuid,
         lease_token: &str,
@@ -558,7 +626,7 @@ impl AgentClient {
         &self,
         path: &str,
         request: &Req,
-        identity: Option<&DeviceIdentity>,
+        identity: Option<&dyn DeviceRequestSigner>,
     ) -> Result<Res, ClientError> {
         let body = serde_json::to_vec(request)?;
         let url = self.base_url.join(path)?;
