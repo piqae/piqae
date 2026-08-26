@@ -115,6 +115,47 @@ impl Drop for EmbeddedCloudSupervisor {
     }
 }
 
+#[derive(Debug, Default)]
+struct ConnectorRetrySchedule {
+    next_due: BTreeMap<String, tokio::time::Instant>,
+    failures: BTreeMap<String, u32>,
+}
+
+impl ConnectorRetrySchedule {
+    fn is_due(&self, connector_id: &str, now: tokio::time::Instant) -> bool {
+        self.next_due
+            .get(connector_id)
+            .is_none_or(|due| *due <= now)
+    }
+
+    fn record_failure(&mut self, connector_id: &str, now: tokio::time::Instant) -> Duration {
+        let count = self.failures.entry(connector_id.to_owned()).or_default();
+        *count = count.saturating_add(1);
+        let delay = Duration::from_secs(1_u64.checked_shl((*count).min(5)).unwrap_or(30).min(30));
+        self.next_due.insert(connector_id.to_owned(), now + delay);
+        delay
+    }
+
+    fn record_success(
+        &mut self,
+        connector_id: &str,
+        now: tokio::time::Instant,
+        next_delay: Option<Duration>,
+    ) {
+        self.failures.remove(connector_id);
+        if let Some(delay) = next_delay {
+            self.next_due.insert(connector_id.to_owned(), now + delay);
+        } else {
+            self.next_due.remove(connector_id);
+        }
+    }
+
+    fn retain(&mut self, connector_ids: &BTreeSet<String>) {
+        self.next_due.retain(|id, _| connector_ids.contains(id));
+        self.failures.retain(|id, _| connector_ids.contains(id));
+    }
+}
+
 async fn run_supervisor(
     queue: Arc<Mutex<EmbeddedQueue>>,
     registry: Arc<Mutex<ConnectorRegistry>>,
@@ -123,8 +164,7 @@ async fn run_supervisor(
     stop: Arc<AtomicBool>,
     work_notifier: Option<Arc<dyn WorkAvailableNotifier>>,
 ) {
-    let mut next_due = BTreeMap::<String, tokio::time::Instant>::new();
-    let mut failures = BTreeMap::<String, u32>::new();
+    let mut retry_schedule = ConnectorRetrySchedule::default();
     let started_at = Utc::now();
     while !stop.load(Ordering::Acquire) {
         let pending_revocations = match registry.lock() {
@@ -134,33 +174,44 @@ async fn run_supervisor(
                 .collect::<Vec<_>>(),
             Err(_) => break,
         };
+        let mut tracked = pending_revocations
+            .iter()
+            .map(|record| record.connector_id.clone())
+            .collect::<BTreeSet<_>>();
         for record in pending_revocations {
-            let _ = finish_remote_connector_revocation(
+            if stop.load(Ordering::Acquire) {
+                break;
+            }
+            let now = tokio::time::Instant::now();
+            if !retry_schedule.is_due(&record.connector_id, now) {
+                continue;
+            }
+            let outcome = finish_remote_connector_revocation(
                 Arc::clone(&queue),
                 Arc::clone(&registry),
                 &record,
                 Arc::clone(&provider),
             )
             .await;
+            let completed_at = tokio::time::Instant::now();
+            if outcome.is_ok() {
+                retry_schedule.record_success(&record.connector_id, completed_at, None);
+            } else {
+                retry_schedule.record_failure(&record.connector_id, completed_at);
+            }
         }
         let records = match registry.lock() {
             Ok(registry) => registry.enabled().cloned().collect::<Vec<_>>(),
             Err(_) => break,
         };
-        let active = records
-            .iter()
-            .map(|record| record.connector_id.clone())
-            .collect::<BTreeSet<_>>();
-        next_due.retain(|id, _| active.contains(id));
-        failures.retain(|id, _| active.contains(id));
+        tracked.extend(records.iter().map(|record| record.connector_id.clone()));
+        retry_schedule.retain(&tracked);
         for record in records {
             if stop.load(Ordering::Acquire) {
                 break;
             }
-            if next_due
-                .get(&record.connector_id)
-                .is_some_and(|due| *due > tokio::time::Instant::now())
-            {
+            let now = tokio::time::Instant::now();
+            if !retry_schedule.is_due(&record.connector_id, now) {
                 continue;
             }
             let outcome = reconcile_connector(
@@ -173,15 +224,12 @@ async fn run_supervisor(
                 work_notifier.clone(),
             )
             .await;
-            let delay = if let Ok(delay) = outcome {
-                failures.remove(&record.connector_id);
-                delay
+            let completed_at = tokio::time::Instant::now();
+            if let Ok(delay) = outcome {
+                retry_schedule.record_success(&record.connector_id, completed_at, Some(delay));
             } else {
-                let count = failures.entry(record.connector_id.clone()).or_default();
-                *count = count.saturating_add(1);
-                Duration::from_secs(1_u64.checked_shl((*count).min(5)).unwrap_or(30).min(30))
-            };
-            next_due.insert(record.connector_id, tokio::time::Instant::now() + delay);
+                retry_schedule.record_failure(&record.connector_id, completed_at);
+            }
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
@@ -771,7 +819,8 @@ impl WakeReconciler for EmbeddedWake {
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod disconnect_compatibility_tests {
     use super::{
-        connector_disconnect_requires_authority_upgrade, finish_remote_connector_revocation,
+        ConnectorRetrySchedule, connector_disconnect_requires_authority_upgrade,
+        finish_remote_connector_revocation,
     };
     use crate::connector_registry::{ConnectorRecord, ConnectorRegistry};
     use crate::{
@@ -785,7 +834,11 @@ mod disconnect_compatibility_tests {
     use piqae_domain::{AgentId, JobId};
     use piqae_protocol::agent::PrinterGrant;
     use piqae_support_packs::SupportPackRegistry;
-    use std::sync::{Arc, Mutex};
+    use std::{
+        collections::BTreeSet,
+        sync::{Arc, Mutex},
+        time::Duration,
+    };
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use url::Url;
 
@@ -863,6 +916,45 @@ mod disconnect_compatibility_tests {
                 body: "retry".into(),
             })
         ));
+    }
+
+    #[test]
+    fn pending_revocation_failures_back_off_and_success_clears_retry_state() {
+        let connector_id = "ncon_retry";
+        let started_at = tokio::time::Instant::now();
+        let mut schedule = ConnectorRetrySchedule::default();
+        assert!(schedule.is_due(connector_id, started_at));
+
+        assert_eq!(
+            schedule.record_failure(connector_id, started_at),
+            Duration::from_secs(2)
+        );
+        assert!(!schedule.is_due(connector_id, started_at + Duration::from_millis(250)));
+        assert!(schedule.is_due(connector_id, started_at + Duration::from_secs(2)));
+
+        let second_attempt = started_at + Duration::from_secs(2);
+        assert_eq!(
+            schedule.record_failure(connector_id, second_attempt),
+            Duration::from_secs(4)
+        );
+        assert!(!schedule.is_due(connector_id, second_attempt + Duration::from_secs(3)));
+        assert!(schedule.is_due(connector_id, second_attempt + Duration::from_secs(4)));
+
+        let mut capped_at = second_attempt + Duration::from_secs(4);
+        for _ in 0..8 {
+            assert!(schedule.record_failure(connector_id, capped_at) <= Duration::from_secs(30));
+            capped_at += Duration::from_secs(30);
+        }
+
+        schedule.record_success(connector_id, capped_at, None);
+        assert!(schedule.is_due(connector_id, capped_at));
+        assert!(!schedule.failures.contains_key(connector_id));
+        assert!(!schedule.next_due.contains_key(connector_id));
+
+        schedule.record_failure("removed", started_at);
+        schedule.retain(&BTreeSet::from([connector_id.to_owned()]));
+        assert!(!schedule.failures.contains_key("removed"));
+        assert!(!schedule.next_due.contains_key("removed"));
     }
 
     #[tokio::test]
