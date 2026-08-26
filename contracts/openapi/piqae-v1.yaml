@@ -4249,6 +4249,9 @@ components:
           minLength: 8
           maxLength: 128
           description: Stable physical installation ID when adding an isolated connector.
+        installation_public_key:
+          type: string
+          description: Base64 Ed25519 public key for a new physical installation identity. Required only on the first connector for an installation; subsequent connectors are verified against the stored key.
         allowed_printer_ids:
           type: array
           maxItems: 128

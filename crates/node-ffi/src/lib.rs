@@ -1566,6 +1566,74 @@ mod tests {
     }
 
     #[test]
+    fn stop_serializes_command_admission_and_restart() {
+        let fixture = unique_fixture();
+        let created = read_and_free(piqae_node_create(fixture.as_ptr(), fixture.len()));
+        let handle = created["data"]["handle"].as_u64().unwrap();
+        let (entered_send, entered_receive) = std::sync::mpsc::channel();
+        let (release_send, release_receive) = std::sync::mpsc::channel();
+        let context = Box::into_raw(Box::new(BlockingHmacContext {
+            entered: entered_send,
+            release: Mutex::new(release_receive),
+        }));
+        assert_eq!(
+            read_and_free(piqae_node_set_host_key_provider(
+                handle,
+                PiqaeHostKeyProvider {
+                    context: context.cast(),
+                    hmac_sha256: Some(blocking_hmac),
+                },
+            ))["ok"],
+            true
+        );
+        assert_eq!(read_and_free(piqae_node_start(handle))["ok"], true);
+        let command_thread = std::thread::spawn(move || {
+            command(
+                handle,
+                json!({
+                    "type":"derive_opaque_evidence",
+                    "namespace":"airprint",
+                    "canonical_identity":"ipps://printer/ipp/print"
+                }),
+            )
+        });
+        entered_receive
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        let (stopped_send, stopped_receive) = std::sync::mpsc::channel();
+        let stop_thread = std::thread::spawn(move || {
+            let _ = stopped_send.send(read_and_free(piqae_node_stop(handle)));
+        });
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        assert_eq!(
+            read_and_free(piqae_node_start(handle))["error"]["code"],
+            "runtime_transition_in_progress"
+        );
+        assert_eq!(
+            command(handle, json!({"type":"snapshot"}))["error"]["code"],
+            "runtime_transition_in_progress"
+        );
+        assert!(
+            stopped_receive
+                .recv_timeout(std::time::Duration::from_millis(30))
+                .is_err()
+        );
+        release_send.send(()).unwrap();
+        assert_eq!(command_thread.join().unwrap()["ok"], true);
+        assert_eq!(
+            stopped_receive
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .unwrap()["ok"],
+            true
+        );
+        stop_thread.join().unwrap();
+        assert_eq!(read_and_free(piqae_node_start(handle))["ok"], true);
+        assert_eq!(read_and_free(piqae_node_destroy(handle))["ok"], true);
+        // SAFETY: destroy has waited for every callback and owns no provider.
+        unsafe { drop(Box::from_raw(context)) };
+    }
+
+    #[test]
     fn apple_adapter_platform_names_are_stable_in_abi_json() {
         for platform in [
             "ios_air_print",

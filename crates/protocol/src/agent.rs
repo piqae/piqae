@@ -29,6 +29,10 @@ pub struct EnrolRequest {
     /// adds an isolated connector; it never replaces another tenant's key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub installation_id: Option<String>,
+    /// Public key for a new, stable installation principal. This key is
+    /// distinct from every connector key and is accepted only on first use.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installation_public_key: Option<String>,
     /// Locally approved printer identifiers. Empty never means all printers.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_printer_ids: Vec<String>,

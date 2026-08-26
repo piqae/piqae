@@ -82,15 +82,6 @@ impl ContentKeyring {
     fn generation_count(&self) -> usize {
         self.keys.len()
     }
-
-    #[cfg(test)]
-    pub(crate) fn from_active(key_id: String, private: SecretKey) -> Self {
-        Self {
-            active_key_id: key_id.clone(),
-            keys: BTreeMap::from([(key_id, private)]),
-            decrypt_only_key_ids: Vec::new(),
-        }
-    }
 }
 
 pub fn load_or_create(path: &Path, stable_identity: &str) -> Result<ContentKeyring> {

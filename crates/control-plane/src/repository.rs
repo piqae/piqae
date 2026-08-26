@@ -775,6 +775,7 @@ pub trait Repository: Send + Sync + 'static {
         protocol_version: u16,
         enforce_cloud_billing: bool,
         _installation_id: &str,
+        _installation_public_key: &[u8],
         _printer_grant: &str,
         _allowed_printer_ids: &[String],
     ) -> Result<EnrolledAgent, RepositoryError> {
@@ -2577,6 +2578,7 @@ impl Repository for PostgresStore {
         protocol_version: u16,
         enforce_cloud_billing: bool,
         installation_id: &str,
+        installation_public_key: &[u8],
         printer_grant: &str,
         allowed_printer_ids: &[String],
     ) -> Result<EnrolledAgent, RepositoryError> {
@@ -2592,6 +2594,7 @@ impl Repository for PostgresStore {
             protocol_version,
             enforce_cloud_billing,
             Some(installation_id),
+            Some(installation_public_key),
             printer_grant,
             allowed_printer_ids,
         )
@@ -3351,6 +3354,7 @@ struct MemoryState {
     /// instead of admitting a duplicate — matching the `PostgreSQL` behaviour
     /// that in-place key rotation depends on.
     agent_installations: HashMap<(WorkspaceId, EnvironmentId, String), AgentId>,
+    installation_public_keys: HashMap<String, Vec<u8>>,
     agent_public_keys: HashMap<AgentId, Vec<u8>>,
     content_encryption_keys: HashMap<(AgentId, String), StoredContentEncryptionKey>,
     encrypted_job_key_references: HashSet<(JobId, AgentId, String)>,
@@ -4262,15 +4266,9 @@ impl Repository for MemoryRepository {
         installation_key: &str,
     ) -> Result<Vec<u8>, RepositoryError> {
         let state = self.state.read().await;
-        let agent_id = state
-            .agent_installations
-            .iter()
-            .find(|((_, _, key), _)| key == installation_key)
-            .map(|(_, agent_id)| *agent_id)
-            .ok_or(RepositoryError::NotFound)?;
         state
-            .agent_public_keys
-            .get(&agent_id)
+            .installation_public_keys
+            .get(installation_key)
             .cloned()
             .ok_or(RepositoryError::NotFound)
     }
@@ -5505,7 +5503,11 @@ impl Repository for MemoryRepository {
         state
             .agents
             .insert(agent_id, (workspace_id, environment_id, agent));
+        let installation_key = installation.2.clone();
         state.agent_installations.insert(installation, agent_id);
+        state
+            .installation_public_keys
+            .insert(installation_key, public_key.clone());
         state.agent_public_keys.insert(agent_id, public_key);
         Ok(EnrolledAgent {
             agent_id,
@@ -5588,6 +5590,87 @@ impl Repository for MemoryRepository {
             workspace_id,
             environment_id,
             connector_id: Some(format!("ncon_{agent_id}")),
+        })
+    }
+
+    async fn enrol_agent_connector_with_billing(
+        &self,
+        secret_hash: &str,
+        public_key: &[u8],
+        name: &str,
+        hostname: &str,
+        platform: &str,
+        architecture: &str,
+        version: &str,
+        protocol_version: u16,
+        _enforce_cloud_billing: bool,
+        installation_id: &str,
+        installation_public_key: &[u8],
+        printer_grant: &str,
+        allowed_printer_ids: &[String],
+    ) -> Result<EnrolledAgent, RepositoryError> {
+        {
+            let state = self.state.read().await;
+            if state
+                .installation_public_keys
+                .get(installation_id)
+                .is_some_and(|existing| existing != installation_public_key)
+            {
+                return Err(RepositoryError::NotFound);
+            }
+        }
+        let enrolled = self
+            .enrol_agent(
+                secret_hash,
+                public_key,
+                name,
+                hostname,
+                platform,
+                architecture,
+                version,
+                protocol_version,
+            )
+            .await?;
+        let connector_id = enrolled
+            .connector_id
+            .clone()
+            .unwrap_or_else(|| format!("ncon_{}", enrolled.agent_id));
+        let mut state = self.state.write().await;
+        state
+            .installation_public_keys
+            .entry(installation_id.to_owned())
+            .or_insert_with(|| installation_public_key.to_vec());
+        state.agent_installations.insert(
+            (
+                enrolled.workspace_id,
+                enrolled.environment_id,
+                installation_id.to_owned(),
+            ),
+            enrolled.agent_id,
+        );
+        let printers = if printer_grant == "all_local_printers" {
+            serde_json::Value::String("all".into())
+        } else {
+            serde_json::to_value(allowed_printer_ids).map_err(|_| RepositoryError::NotFound)?
+        };
+        state.node_connectors.insert(
+            (
+                enrolled.workspace_id,
+                enrolled.environment_id,
+                enrolled.agent_id,
+                connector_id.clone(),
+            ),
+            StoredNodeConnector {
+                id: connector_id.clone(),
+                node_id: enrolled.agent_id,
+                permissions: serde_json::json!({"printers":printers,"print_jobs":"create_and_monitor"}),
+                revoked_at: None,
+                created_at: Utc::now(),
+            },
+        );
+        Ok(EnrolledAgent {
+            connector_id: Some(connector_id),
+            ..enrolled
         })
     }
 

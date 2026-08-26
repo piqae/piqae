@@ -5224,6 +5224,7 @@ impl PostgresStore {
             protocol_version,
             enforce_cloud_billing,
             None,
+            None,
             "selected_printers",
             &[],
         )
@@ -5243,6 +5244,7 @@ impl PostgresStore {
         protocol_version: u16,
         enforce_cloud_billing: bool,
         physical_installation_id: Option<&str>,
+        installation_public_key: Option<&[u8]>,
         printer_grant: &str,
         allowed_printer_ids: &[String],
     ) -> Result<EnrolledAgent, StorageError> {
@@ -5366,7 +5368,7 @@ impl PostgresStore {
             let connector_id = upsert_node_connector(
                 &mut transaction,
                 &installation_id,
-                public_key,
+                installation_public_key.unwrap_or(public_key),
                 workspace_id,
                 environment_id,
                 &existing,
@@ -5421,7 +5423,7 @@ impl PostgresStore {
         let connector_id = upsert_node_connector(
             &mut transaction,
             &installation_id,
-            public_key,
+            installation_public_key.unwrap_or(public_key),
             workspace_id,
             environment_id,
             &agent_id.to_string(),
@@ -10468,6 +10470,7 @@ async fn upsert_node_connector(
          VALUES ($1,$2,$3)
          ON CONFLICT (installation_key) DO UPDATE
          SET updated_at = node_installations.updated_at
+         WHERE node_installations.public_key = EXCLUDED.public_key
          RETURNING id",
     )
     .bind(installation_id)
