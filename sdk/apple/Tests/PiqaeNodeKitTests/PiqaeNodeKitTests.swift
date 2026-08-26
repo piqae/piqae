@@ -105,6 +105,29 @@ final class PiqaeNodeKitTests: XCTestCase {
         await node.stop()
     }
 
+    func testEmbeddedRuntimeOwnsLifecycleAndStopsWithFacade() async throws {
+        let runtime = PiqaeFakeEmbeddedRuntime()
+        let node = PiqaeNode(
+            .localOnly(
+                startupMode: .embedded,
+                identityStore: PiqaeMemoryInstallationIdentityStore(
+                    id: .init(rawValue: "ins_native_runtime_lifecycle")
+                ),
+                embeddedRuntime: runtime
+            )
+        )
+        try await node.start()
+        try await node.reportHostLifecycle(.enteredBackground)
+        await node.stop()
+
+        let startCount = await runtime.startCount
+        let stopCount = await runtime.stopCount
+        let events = await runtime.lifecycleEvents
+        XCTAssertEqual(startCount, 1)
+        XCTAssertEqual(stopCount, 1)
+        XCTAssertEqual(events, [.enteredBackground])
+    }
+
     func testRemoteNotificationRegistrationIsExplicitAndRedacted() async throws {
         let provider = PiqaeFakeRemoteNotificationProvider()
         let identity = PiqaeMemoryInstallationIdentityStore(

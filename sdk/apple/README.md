@@ -34,7 +34,6 @@ let nativeRuntime = PiqaeNativeRuntime(
         localOnly: true
     )
 )
-try await nativeRuntime.start()
 let airPrint = try PiqaeAirPrintAdapter(
     identityProvider: nativeRuntime,
     knownPrinterURLs: savedPrinterURLs
@@ -42,8 +41,9 @@ let airPrint = try PiqaeAirPrintAdapter(
 let node = PiqaeNode(
     .localOnly(
         startupMode: .automatic,
+        embeddedRuntime: nativeRuntime,
         printerAdapters: [airPrint],
-        hostLifecycleReporter: nativeRuntime
+        hostLifecycleReporter: nil
     )
 )
 
