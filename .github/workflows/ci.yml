@@ -221,21 +221,8 @@ jobs:
           key: swiftpm-macos-${{ hashFiles('shells/macos/Package.resolved', 'shells/macos/Package.swift', 'sdk/apple/Package.resolved', 'sdk/apple/Package.swift') }}
       - name: Test macOS menu shell
         run: swift test --package-path shells/macos
-      - name: Test Apple node SDK with strict concurrency
-        run: >-
-          swift test --package-path sdk/apple
-          -Xswiftc -strict-concurrency=complete
-          -Xswiftc -warnings-as-errors
-      - name: Build Apple node SDK for iOS Simulator
-        run: >-
-          xcodebuild
-          -scheme PiqaeNodeKit-Package
-          -destination 'generic/platform=iOS Simulator'
-          -derivedDataPath .piqae-test-fixtures/apple-sdk-derived-data
-          CODE_SIGNING_ALLOWED=NO
-          SWIFT_TREAT_WARNINGS_AS_ERRORS=YES
-          SWIFT_STRICT_CONCURRENCY=complete
-          build
+      - name: Test and build Apple node SDK
+        run: release/tools/test_apple_node_sdk.sh
 
   rust-windows:
     name: Rust (windows-latest)
