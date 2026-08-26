@@ -4395,6 +4395,21 @@ mod tests {
                 .is_empty()
         );
 
+        let expired = NodeWakeHint {
+            id: "wkh_expired".into(),
+            agent_id: "agt_shared".into(),
+            reason: "job_available".into(),
+            delivery_channel: "connected_session".into(),
+            status: "pending".into(),
+            requested_at: observed_at - chrono::Duration::days(8),
+            expires_at: observed_at - chrono::Duration::days(8) + chrono::Duration::minutes(5),
+            observed_at: None,
+        };
+        repository
+            .create_node_wake_hint(first, &expired, "wake-key-expired")
+            .await
+            .unwrap();
+
         let hint = NodeWakeHint {
             id: "wkh_first".into(),
             agent_id: "agt_shared".into(),
@@ -4410,6 +4425,16 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(stored.status, "pending");
+        assert_eq!(
+            repository
+                .list_node_wake_hints(first, "agt_shared", 100)
+                .await
+                .unwrap()
+                .iter()
+                .map(|value| value.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["wkh_first"]
+        );
         let mut second_hint = hint.clone();
         second_hint.id = "wkh_second".into();
         let second_stored = repository

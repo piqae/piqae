@@ -11,7 +11,7 @@ use piqae_storage_postgres::{
     destination_topology::{
         DeliveryAttemptState, DestinationTopologyRepository, IdentityConfidence, IdentityDecision,
         IdentityDecisionKind, IdentityEvidence, NewDeliveryAttempt, NodeRuntimeObservation,
-        ProjectionAcknowledgement, RouteObservation, SchedulingAuthority,
+        NodeWakeHint, ProjectionAcknowledgement, RouteObservation, SchedulingAuthority,
         SiteCoordinatorMembership, StoredPhysicalDestination, StoredPrinterRoute, TenantScope,
     },
 };
@@ -210,6 +210,48 @@ async fn postgres_topology_is_tenant_isolated_and_fences_delivery() {
             .await,
         Err(StorageError::ConcurrentStateChange)
     ));
+    for (scope, suffix) in [(first, "first"), (second, "second")] {
+        sqlx::query("INSERT INTO node_wake_hints (workspace_id,environment_id,id,agent_id,idempotency_key,reason,delivery_channel,status,requested_at,expires_at) VALUES ($1,$2,$3,$4,$5,'job_available','connected_session','pending',now()-interval '9 days',now()-interval '9 days'+interval '5 minutes')")
+            .bind(scope.workspace_id.to_string())
+            .bind(scope.environment_id.to_string())
+            .bind(format!("wkh_old_{suffix}"))
+            .bind(format!("agt_{suffix}"))
+            .bind(format!("old-wake-key-{suffix}"))
+            .execute(store.pool())
+            .await
+            .expect("insert expired wake fixture");
+    }
+    let current_hint = NodeWakeHint {
+        id: "wkh_current_first".into(),
+        agent_id: "agt_first".into(),
+        reason: "inventory_refresh".into(),
+        delivery_channel: "connected_session".into(),
+        status: "pending".into(),
+        requested_at: runtime_observed_at,
+        expires_at: runtime_observed_at + Duration::minutes(5),
+        observed_at: None,
+    };
+    store
+        .create_node_wake_hint(first, &current_hint, "current-wake-key-first")
+        .await
+        .expect("create wake hint and prune old tenant-local history");
+    let first_old_wakes: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM node_wake_hints WHERE workspace_id=$1 AND environment_id=$2 AND id='wkh_old_first'",
+    )
+    .bind(first.workspace_id.to_string())
+    .bind(first.environment_id.to_string())
+    .fetch_one(store.pool())
+    .await
+    .expect("count pruned first-tenant wake history");
+    let second_old_wakes: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM node_wake_hints WHERE workspace_id=$1 AND environment_id=$2 AND id='wkh_old_second'",
+    )
+    .bind(second.workspace_id.to_string())
+    .bind(second.environment_id.to_string())
+    .fetch_one(store.pool())
+    .await
+    .expect("count isolated second-tenant wake history");
+    assert_eq!((first_old_wakes, second_old_wakes), (0, 1));
     sqlx::query("INSERT INTO agents (id,workspace_id,environment_id,name,installation_id,public_key,os,architecture,version,protocol_version) VALUES ('agt_first_backup',$1,$2,'Backup node','installation-first-backup',$3,'linux','x86_64','test',1)")
         .bind(first.workspace_id.to_string()).bind(first.environment_id.to_string()).bind(vec![9_u8;32]).execute(store.pool()).await.expect("backup route agent");
     sqlx::query("INSERT INTO printers (id,workspace_id,environment_id,agent_id,native_id,name,state,capabilities_revision) VALUES ('ptr_backup',$1,$2,'agt_first_backup','native-first-backup','Shared printer backup route','online',1)")
