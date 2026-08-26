@@ -180,9 +180,11 @@ private crates whose queue/storage contracts can change together inside the
 monorepo.
 
 - Apple applications consume `PiqaeNodeKit` through Swift Package Manager. A
-  tagged binary release must reference the reviewed, signed XCFramework
-  checksum produced from the same Piqae tag; a source checkout is for Preview
-  development only.
+  tagged candidate supplies a versioned source-package archive whose manifest
+  references the same tag's versioned XCFramework URL and exact SwiftPM
+  checksum; CI unpacks both staged assets and links them from a clean consumer.
+  A repository checkout is for Preview development only. The candidate remains
+  unsigned until the signing gate described below is configured.
 - Windows applications consume the safe `Piqae.Node` .NET facade. A tagged
   NuGet package contains the matching native runtime for supported RIDs and is
   validated in a clean consumer before publication.
@@ -197,14 +199,17 @@ monorepo.
   broker window.
 
 The tagged prerelease workflow builds both SDK candidates from the same source
-revision as the server and node: an Apple XCFramework archive and manifest, and
-a Windows native C bundle plus `Piqae.Node` NuGet package. Each candidate is
-published with a SHA-256 checksum, SPDX SBOM, and GitHub build provenance. These
-are Preview engineering artifacts, not a public package-registry promise: the
-Apple framework and Windows DLL remain unsigned until their dedicated signing
-and clean-consumer gates are configured. Applications must pin the exact tag,
-verify the checksum and provenance, and must not redistribute a candidate as a
-production SDK while its support tier remains Preview or Disabled.
+revision as the server and node: a versioned Apple package-source archive,
+XCFramework, and cross-referencing manifest, and a Windows native C bundle plus
+`Piqae.Node` NuGet package. Each candidate is published with a SHA-256 checksum,
+complete SPDX evidence, and GitHub build provenance. Clean consumers link and
+execute the staged Apple binary and restore/execute the exact Windows NuGet from
+an isolated feed before attestation. These are Preview engineering artifacts,
+not a public package-registry promise: the Apple framework and Windows DLL
+remain unsigned until their dedicated signing gates are configured.
+Applications must pin the exact tag, verify the checksum and provenance, and
+must not redistribute a candidate as a production SDK while its support tier
+remains Preview or Disabled.
 
 ## Testing and support claims
 

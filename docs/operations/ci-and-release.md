@@ -200,8 +200,11 @@ native applications, embedded-node SDK candidates, manifest, and appcasts are
 all built from the same commit and version by `release.yml`. SDK candidates
 include checksums, SPDX SBOMs, and build provenance. They remain unsigned
 Preview artifacts and are not pushed to Swift or NuGet registries until their
-separate signing and clean-consumer gates are enabled. A consumer requiring a
-new API must not be released before that platform tag completes. The TypeScript SDK and MCP server
+separate signing and registry-publication gates are enabled. Their clean
+consumer gates already resolve the exact staged assets, execute the packaged
+native ABI, and verify the managed/native dependency evidence. A consumer
+requiring a new API must not be released before that platform tag completes.
+The TypeScript SDK and MCP server
 remain independently versioned with `sdk-v*` and `mcp-v*`; publish them only
 after the compatible platform release and express their minimum supported API
 contract in code and release notes. Do not create all three tags concurrently.

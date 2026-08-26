@@ -176,16 +176,22 @@ jobs:
         run: sdk/apple/scripts/build-xcframework.sh
       - name: Validate the linked XCFramework and consumers
         run: release/tools/test_apple_node_sdk_linked.sh verify-existing
+      - name: Validate Apple release staging failure paths
+        run: python3 -m unittest release/tools/test_stage_apple_node_sdk.py
       - name: Stage versioned Apple SDK evidence
         shell: bash
         run: |
           set -euo pipefail
           stage=artifacts/apple-node-sdk
-          mkdir -p "$stage"
-          archive="PiqaeNode.xcframework-${{ needs.prepare.outputs.version }}.zip"
-          cp sdk/apple/.artifacts/PiqaeNode.xcframework.zip "$stage/$archive"
-          cp sdk/apple/.artifacts/PiqaeNode.artifact.json "$stage/PiqaeNode.artifact.json"
-          (cd "$stage" && shasum -a 256 "$archive" > "$archive.sha256")
+          python3 release/tools/stage_apple_node_sdk.py stage \
+            --repository-root "$PWD" \
+            --version "${{ needs.prepare.outputs.version }}" \
+            --output "$stage"
+      - name: Validate clean downloaded-style Apple SDK consumers
+        run: >-
+          release/tools/test_apple_node_sdk_release.sh
+          "${{ needs.prepare.outputs.version }}"
+          artifacts/apple-node-sdk
       - name: Generate Apple SDK SPDX SBOM
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
         with:
@@ -227,6 +233,9 @@ jobs:
       - uses: actions/setup-dotnet@d4c94342e560b34958eacfc5d055d21461ed1c5d # v5
         with:
           dotnet-version: 8.0.x
+      - name: Validate Windows package and SBOM failure paths
+        shell: pwsh
+        run: python -m unittest release/tools/test_windows_sdk_release.py
       - name: Validate and pack the Windows SDK
         shell: pwsh
         run: release/tools/test_windows_node_sdk.ps1 -PackageVersion "${{ needs.prepare.outputs.version }}" -OutputDirectory "artifacts/windows-node-sdk"
@@ -242,14 +251,11 @@ jobs:
             $hash = (Get-FileHash -Algorithm SHA256 $_.FullName).Hash.ToLowerInvariant()
             "$hash  $($_.Name)" | Out-File -Encoding ascii "$($_.FullName).sha256"
           }
-      - name: Generate Windows SDK SPDX SBOM
-        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
-        with:
-          path: artifacts/windows-node-sdk/native
-          format: spdx-json
-          output-file: artifacts/windows-node-sdk/PiqaeNode-native-windows-x64.spdx.json
-          upload-artifact: false
-          upload-release-assets: false
+      - name: Gate the complete Windows SDK SPDX SBOM
+        shell: pwsh
+        run: |
+          python release/tools/windows_sdk_release.py validate-sbom --input artifacts/windows-node-sdk/PiqaeNode-native-windows-x64.spdx.json --version "${{ needs.prepare.outputs.version }}"
+          python release/tools/release_bundle.py validate-sbom artifacts/windows-node-sdk/PiqaeNode-native-windows-x64.spdx.json
       - uses: actions/attest-build-provenance@96b4a1ef7235a096b17240c259729fdd70c83d45 # v2
         if: github.event.repository.private == false
         with:

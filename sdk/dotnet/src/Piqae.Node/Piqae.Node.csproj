@@ -16,13 +16,13 @@
     <GeneratePackageOnBuild>false</GeneratePackageOnBuild>
   </PropertyGroup>
   <ItemGroup>
-    <PackageReference Include="BouncyCastle.Cryptography" Version="2.6.2" />
+    <PackageReference Include="BouncyCastle.Cryptography" Version="[2.6.2]" />
   </ItemGroup>
   <ItemGroup>
     <None Include="../../README.md" Pack="true" PackagePath="/" />
     <None Condition="'$(PiqaeNativeLibrary)' != ''"
           Include="$(PiqaeNativeLibrary)"
           Pack="true"
-          PackagePath="runtimes/win-x64/native/piqae_node_ffi.dll" />
+          PackagePath="runtimes/win-x64/native" />
   </ItemGroup>
 </Project>

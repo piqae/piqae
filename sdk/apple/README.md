@@ -216,6 +216,16 @@ xcodebuild -scheme PiqaeNodeKitConsumerFixture \
 The artifact is unsigned. Signing, provenance, notarization where applicable,
 publication, and App Store review evidence belong to the native release gate.
 
+A product `v<version>` candidate additionally contains two versioned assets:
+`PiqaeNodeKit-<version>.zip` (the Swift package sources) and
+`PiqaeNode.xcframework-<version>.zip` (the binary target). The package manifest
+references the immutable GitHub release URL and the exact SwiftPM checksum in
+`PiqaeNode.artifact.json`. Download both assets from the same tag, verify their
+SHA-256 sidecars and repository-bound provenance, then extract the source
+package and use its directory as a SwiftPM package dependency. The release gate
+does this from a clean temporary consumer and executes the packaged macOS ABI;
+repository-local `.artifacts` output is not accepted as release evidence.
+
 ## iPadOS lifecycle and sleep
 
 `PiqaeUIKitLifecycleCoordinator` forwards foreground/background state and the

@@ -68,3 +68,12 @@ response proofs, replay rejection, and downgrade rejection, and returns data
 only after authentication succeeds.
 The SDK does not claim background execution or physical-print support merely
 because the native library loads.
+
+The product release candidate is `Piqae.Node.<version>.nupkg`. Its only native
+RID is currently `win-x64`, and the package pins
+`BouncyCastle.Cryptography` 2.6.2 exactly. The release gate restores that exact
+NuGet and dependency from an isolated local feed into a new consumer, publishes
+for `win-x64`, executes the packaged native ABI, and checks the managed facade,
+dependency, and runtime DLL in the output. The accompanying SPDX document lists
+all three components and their staged checksums. These unsigned candidates
+remain engineering evidence rather than a public NuGet publication promise.
