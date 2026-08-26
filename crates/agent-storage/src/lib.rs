@@ -318,6 +318,12 @@ pub struct ConfidentialFile {
     pub path: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReclaimableContent {
+    pub sha256: String,
+    pub path: String,
+}
+
 impl std::fmt::Debug for CloudAcceptIntent {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -2487,6 +2493,87 @@ impl AgentStore {
             [job_id],
         )?;
         Ok(())
+    }
+
+    /// Returns content referenced exclusively by truthful terminal jobs.
+    /// Delivery-uncertain jobs deliberately remain retention barriers.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the bounded candidate query cannot be executed.
+    pub fn reclaimable_terminal_content(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<ReclaimableContent>, StorageError> {
+        let bounded = i64::try_from(limit.clamp(1, 256)).unwrap_or(256);
+        let mut statement = self.connection.prepare(
+            "SELECT c.sha256, c.path
+             FROM content_files c
+             WHERE NOT EXISTS (
+               SELECT 1 FROM jobs retained
+               WHERE retained.content_sha256 = c.sha256
+                 AND retained.content_path = c.path
+                 AND retained.state NOT IN (
+                   'completed_reported','failed_terminal','cancelled','expired'
+                 )
+             )
+             ORDER BY c.verified_unix_ms, c.sha256
+             LIMIT ?1",
+        )?;
+        let rows = statement.query_map([bounded], |row| {
+            Ok(ReclaimableContent {
+                sha256: row.get(0)?,
+                path: row.get(1)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Retires one file after the caller has removed it. The reference check
+    /// is repeated transactionally so an active or uncertain job can never
+    /// lose its document through a stale cleanup candidate.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the transactional reference check or retirement
+    /// cannot be persisted.
+    pub fn mark_terminal_content_reclaimed(
+        &mut self,
+        sha256: &str,
+        path: &str,
+    ) -> Result<bool, StorageError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let retained: bool = transaction.query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM jobs
+               WHERE content_sha256 = ?1 AND content_path = ?2
+                 AND state NOT IN (
+                   'completed_reported','failed_terminal','cancelled','expired'
+                 )
+             )",
+            params![sha256, path],
+            |row| row.get(0),
+        )?;
+        if retained {
+            transaction.commit()?;
+            return Ok(false);
+        }
+        transaction.execute(
+            "UPDATE jobs SET content_path = 'retired:' || content_sha256
+             WHERE content_sha256 = ?1 AND content_path = ?2
+               AND state IN (
+                 'completed_reported','failed_terminal','cancelled','expired'
+               )",
+            params![sha256, path],
+        )?;
+        transaction.execute(
+            "DELETE FROM content_files WHERE sha256 = ?1 AND path = ?2",
+            params![sha256, path],
+        )?;
+        transaction.commit()?;
+        Ok(true)
     }
 
     /// Returns accepted cloud jobs whose acknowledgement has not reached the control plane.

@@ -16,8 +16,6 @@ use piqae_protocol::agent::PrinterGrant;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs::OpenOptions,
-    io::Write as _,
     path::{Path, PathBuf},
 };
 use url::Url;
@@ -173,6 +171,10 @@ impl ConnectorRegistry {
         self.records.values().filter(|record| record.enabled)
     }
 
+    pub fn records(&self) -> impl Iterator<Item = &ConnectorRecord> {
+        self.records.values()
+    }
+
     #[must_use]
     pub fn contains(&self, connector_id: &str) -> bool {
         self.records.contains_key(connector_id)
@@ -249,27 +251,13 @@ impl ConnectorRegistry {
     }
 
     fn persist(&self) -> Result<()> {
-        std::fs::create_dir_all(&self.root)?;
         let path = self.root.join("connectors.json");
-        let staged = self.root.join("connectors.json.replacing");
-        let _ = std::fs::remove_file(&staged);
         let document = ConnectorRegistryDocument {
             version: REGISTRY_VERSION,
             connectors: self.records.values().cloned().collect(),
         };
         let bytes = serde_json::to_vec_pretty(&document)?;
-        let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt as _;
-            options.mode(0o600);
-        }
-        let mut file = options.open(&staged)?;
-        file.write_all(&bytes)?;
-        file.sync_all()?;
-        drop(file);
-        std::fs::rename(&staged, &path)?;
+        crate::durable_file::replace_json(&path, &bytes)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;

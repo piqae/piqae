@@ -1,0 +1,10 @@
+{
+  "type": "complete_adapter_operation",
+  "adapter_id": "com.example.pos.airprint",
+  "operation_id": "aop_fixture",
+  "fence": "synthetic-fence",
+  "result": {
+    "outcome": "accepted",
+    "native_job_id": "native-fixture-42"
+  }
+}

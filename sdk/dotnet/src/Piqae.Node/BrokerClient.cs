@@ -80,6 +80,17 @@ public sealed class PiqaeBrokerClient
         return stored is null ? null : JsonSerializer.Deserialize<BrokerCredential>(stored, JsonOptions);
     }
 
+    public Task<JsonElement> ExecuteSdkAsync(
+        BrokerCredential credential,
+        BrokerCapability capability,
+        object sdkOperation,
+        CancellationToken cancellationToken = default) => RequestAsync("execute", new
+    {
+        credential,
+        capability,
+        operation = new { type = "sdk", operation = sdkOperation }
+    }, cancellationToken);
+
     private string CredentialTarget(string applicationId) => $"Piqae.Node/{_pipeName}/{applicationId}";
 
     private async Task<JsonElement> RequestAsync(string operationType, object fields, CancellationToken cancellationToken)
@@ -92,7 +103,7 @@ public sealed class PiqaeBrokerClient
         var fieldsJson = JsonSerializer.SerializeToElement(fields, JsonOptions);
         using var document = JsonDocument.Parse(JsonSerializer.SerializeToUtf8Bytes(new
         {
-            protocol = 2,
+            protocol = 3,
             request_id = requestId,
             operation = MergeOperation(operationType, fieldsJson)
         }, JsonOptions));
@@ -110,7 +121,7 @@ public sealed class PiqaeBrokerClient
         await ReadExactlyAsync(pipe, body, deadline.Token).ConfigureAwait(false);
         using var response = JsonDocument.Parse(body);
         var root = response.RootElement;
-        if (!root.TryGetProperty("protocol", out var protocol) || protocol.GetUInt16() is < 1 or > 2)
+        if (!root.TryGetProperty("protocol", out var protocol) || protocol.GetUInt16() is < 1 or > 3)
             throw new PiqaeNodeException("unsupported_broker_protocol", "The node broker protocol is incompatible.");
         if (root.GetProperty("request_id").GetGuid() != requestId)
             throw new PiqaeNodeException("response_id_mismatch", "The broker response did not match the request.");

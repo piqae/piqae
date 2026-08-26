@@ -1,0 +1,6 @@
+{
+  "type": "begin_adapter_handoff",
+  "adapter_id": "com.example.pos.airprint",
+  "operation_id": "aop_fixture",
+  "fence": "synthetic-fence"
+}

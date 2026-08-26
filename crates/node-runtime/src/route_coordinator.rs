@@ -27,8 +27,6 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs::OpenOptions,
-    io::Write as _,
     path::{Path, PathBuf},
 };
 use uuid::Uuid;
@@ -810,72 +808,10 @@ impl RouteCoordinator {
     }
 
     fn persist(&self) -> Result<()> {
-        std::fs::create_dir_all(&self.root)?;
         let path = self.root.join("route-coordinator.json");
-        let staged = self.root.join("route-coordinator.json.replacing");
-        let _ = std::fs::remove_file(&staged);
         let bytes = serde_json::to_vec_pretty(&self.document)?;
-        let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt as _;
-            options.mode(0o600);
-        }
-        let mut file = options.open(&staged)?;
-        file.write_all(&bytes)?;
-        file.sync_all()?;
-        drop(file);
-        replace_file_atomically(&staged, &path)?;
-        #[cfg(unix)]
-        std::fs::File::open(&self.root)
-            .and_then(|directory| directory.sync_all())
-            .with_context(|| format!("sync {}", self.root.display()))?;
-        Ok(())
+        crate::durable_file::replace_json(&path, &bytes)
     }
-}
-
-#[cfg(not(windows))]
-fn replace_file_atomically(staged: &Path, destination: &Path) -> Result<()> {
-    std::fs::rename(staged, destination)
-        .with_context(|| format!("replace {}", destination.display()))
-}
-
-#[cfg(windows)]
-#[allow(
-    unsafe_code,
-    reason = "isolated, documented MoveFileExW call required for atomic Windows journal replacement"
-)]
-fn replace_file_atomically(staged: &Path, destination: &Path) -> Result<()> {
-    use std::os::windows::ffi::OsStrExt as _;
-    use windows_sys::Win32::Storage::FileSystem::{
-        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
-    };
-
-    let staged = staged
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect::<Vec<_>>();
-    let destination_wide = destination
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect::<Vec<_>>();
-    // SAFETY: both paths are live NUL-terminated UTF-16 buffers. Replace and
-    // write-through preserve an existing journal without a delete gap.
-    if unsafe {
-        MoveFileExW(
-            staged.as_ptr(),
-            destination_wide.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    } == 0
-    {
-        return Err(std::io::Error::last_os_error())
-            .with_context(|| format!("replace {}", destination.display()));
-    }
-    Ok(())
 }
 
 fn trim_front<T>(values: &mut Vec<T>, limit: usize) {

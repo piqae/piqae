@@ -15,9 +15,11 @@ chrono.workspace = true
 fs2 = "0.4.3"
 hex.workspace = true
 piqae-domain.workspace = true
+piqae-agent-storage = { path = "../agent-storage" }
 piqae-local-ipc = { path = "../local-ipc" }
 piqae-node-host-api = { path = "../node-host-api" }
 piqae-protocol.workspace = true
+piqae-support-packs = { path = "../support-packs" }
 rand.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -31,7 +33,6 @@ uuid.workspace = true
 windows-sys = { version = "0.59.0", features = ["Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
-piqae-agent-storage = { path = "../agent-storage" }
 tempfile = "3.20.0"
 tokio.workspace = true
 
