@@ -37,7 +37,7 @@ piqae-executor-supervisor = { path = "../executor-supervisor", version = "0.1.2"
 piqae-local-api = { path = "../local-api", version = "0.1.2" }
 piqae-local-ipc = { path = "../local-ipc", version = "0.1.2" }
 piqae-native-logging = { path = "../native-logging", version = "0.1.10" }
-piqae-node-runtime = { path = "../node-runtime", version = "0.1.21" }
+piqae-node-runtime = { path = "../node-runtime", version = "0.1.22" }
 piqae-protocol.workspace = true
 piqae-support-packs = { path = "../support-packs", version = "0.1.11" }
 tokio.workspace = true
