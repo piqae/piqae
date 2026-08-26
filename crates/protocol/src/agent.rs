@@ -706,6 +706,18 @@ pub struct AgentAcceptJobResponse {
     pub state: piqae_domain::JobState,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct AgentAcceptanceReconciliationResponse {
+    pub accepted: bool,
+    pub connector_revoked: bool,
+    pub fenced: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct AgentAcceptanceAbandonResponse {
+    pub abandoned: bool,
+}
+
 #[derive(Clone, Deserialize, Serialize)]
 pub struct AgentRenewLeaseRequest {
     pub lease_id: Uuid,

@@ -16,7 +16,7 @@ use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use chrono::Utc;
 use futures::StreamExt as _;
-use piqae_agent_client::{AgentClient, DeviceRequestSigner};
+use piqae_agent_client::{AgentClient, ClientError, DeviceRequestSigner};
 use piqae_domain::{AgentId, EventId, JobId};
 use piqae_protocol::agent::{
     AgentAcceptJobRequest, AgentCommand, AgentSyncRequest, ContentDescriptor,
@@ -33,6 +33,19 @@ use std::{
 };
 
 const MAX_EMBEDDED_CLOUD_CONTENT: usize = 16 * 1024 * 1024;
+
+/// Returns whether disconnect must retain all local authority and queue
+/// evidence until an N-1 authority is upgraded with exact compensation routes.
+#[must_use]
+pub fn connector_disconnect_requires_authority_upgrade(
+    has_pending_acceptance: bool,
+    abandon_error: Option<&ClientError>,
+    reconciliation_error: Option<&ClientError>,
+) -> bool {
+    has_pending_acceptance
+        && abandon_error.is_some_and(ClientError::is_endpoint_unsupported)
+        && reconciliation_error.is_some_and(ClientError::is_endpoint_unsupported)
+}
 
 /// Coalesced host signal that runnable adapter work became available. It
 /// carries no connector, job, document, lease or credential data.
@@ -214,16 +227,13 @@ async fn run_supervisor(
             Err(_) => break,
         };
         for record in pending_revocations {
-            if revoke_remote_connector(&record, Arc::clone(&provider))
-                .await
-                .is_ok()
-                && let Ok(mut registry) = registry.lock()
-                && registry
-                    .confirm_remote_revocation(&record.connector_id)
-                    .is_ok()
-            {
-                retry_secure_cleanup(&mut registry, provider.as_ref());
-            }
+            let _ = finish_remote_connector_revocation(
+                Arc::clone(&queue),
+                Arc::clone(&registry),
+                &record,
+                Arc::clone(&provider),
+            )
+            .await;
         }
         let records = match registry.lock() {
             Ok(registry) => registry.enabled().cloned().collect::<Vec<_>>(),
@@ -305,7 +315,26 @@ mod reconcile_control_tests {
     }
 }
 
+async fn finish_remote_connector_revocation(
+    queue: Arc<Mutex<EmbeddedQueue>>,
+    registry: Arc<Mutex<ConnectorRegistry>>,
+    record: &ConnectorRecord,
+    provider: Arc<dyn SecureConnectorSigner>,
+) -> Result<(), CloudWorkerError> {
+    revoke_remote_connector(queue, record, Arc::clone(&provider)).await?;
+    let mut registry = registry
+        .lock()
+        .map_err(|_| CloudWorkerError::new("connector_registry_unavailable"))?;
+    registry
+        .confirm_remote_revocation(&record.connector_id)
+        .map_err(|_| CloudWorkerError::new("connector_revocation_persist_failed"))?;
+    retry_secure_cleanup(&mut registry, provider.as_ref());
+    drop(registry);
+    Ok(())
+}
+
 async fn revoke_remote_connector(
+    queue: Arc<Mutex<EmbeddedQueue>>,
     record: &ConnectorRecord,
     provider: Arc<dyn SecureConnectorSigner>,
 ) -> Result<(), CloudWorkerError> {
@@ -318,11 +347,79 @@ async fn revoke_remote_connector(
         .parse::<AgentId>()
         .map_err(|_| CloudWorkerError::new("connector_identity_invalid"))?;
     let identity = HostBackedDeviceIdentity::new(agent_id, handle, provider);
-    AgentClient::new(record.control_plane_url.clone())
-        .map_err(|_| CloudWorkerError::new("connector_origin_invalid"))?
+    let client = AgentClient::new(record.control_plane_url.clone())
+        .map_err(|_| CloudWorkerError::new("connector_origin_invalid"))?;
+    let intents = {
+        let mut queue = queue
+            .lock()
+            .map_err(|_| CloudWorkerError::new("embedded_queue_unavailable"))?;
+        queue
+            .quarantine_invalid_connector_offers(&record.connector_id)
+            .map_err(|_| CloudWorkerError::new("embedded_pending_quarantine_failed"))?;
+        queue
+            .pending_connector_accepts(&record.connector_id)
+            .map_err(|_| CloudWorkerError::new("embedded_pending_accept_failed"))?
+    };
+    let mut abandon_after_revoke = Vec::new();
+    for intent in intents {
+        let pending = pending_acceptance(intent)?;
+        let abandon = client
+            .abandon_acceptance(&identity, pending.job_id, &pending.request)
+            .await;
+        if !matches!(&abandon, Ok(true)) {
+            let reconciliation = match client
+                .reconcile_acceptance(&identity, pending.job_id, &pending.request)
+                .await
+            {
+                Ok(reconciliation) => reconciliation,
+                Err(error)
+                    if connector_disconnect_requires_authority_upgrade(
+                        true,
+                        abandon.as_ref().err(),
+                        Some(&error),
+                    ) =>
+                {
+                    return Err(CloudWorkerError::new(
+                        "connector_authority_upgrade_required",
+                    ));
+                }
+                Err(error) => return Err(error.into()),
+            };
+            if reconciliation.accepted && !reconciliation.fenced {
+                return Err(abandon.err().map_or_else(
+                    || CloudWorkerError::new("acceptance_compensation_rejected"),
+                    CloudWorkerError::from,
+                ));
+            }
+            if !reconciliation.connector_revoked && !reconciliation.fenced {
+                abandon_after_revoke.push(pending.job_id);
+                continue;
+            }
+        }
+        let mut queue = queue
+            .lock()
+            .map_err(|_| CloudWorkerError::new("embedded_queue_unavailable"))?;
+        queue
+            .abandon_connector_offer(&record.connector_id, pending.job_id)
+            .map_err(|_| CloudWorkerError::new("embedded_accept_abandon_failed"))?;
+    }
+    client
         .revoke_connector(&identity, &record.connector_id)
         .await
-        .map_err(Into::into)
+        .map_err(CloudWorkerError::from)?;
+    let mut queue = queue
+        .lock()
+        .map_err(|_| CloudWorkerError::new("embedded_queue_unavailable"))?;
+    for job_id in abandon_after_revoke {
+        queue
+            .abandon_connector_offer(&record.connector_id, job_id)
+            .map_err(|_| CloudWorkerError::new("embedded_accept_abandon_failed"))?;
+    }
+    queue
+        .complete_all_connector_release_cleanups(&record.connector_id)
+        .map_err(|_| CloudWorkerError::new("embedded_release_cleanup_complete_failed"))?;
+    drop(queue);
+    Ok(())
 }
 
 fn retry_secure_cleanup(registry: &mut ConnectorRegistry, provider: &dyn SecureConnectorSigner) {
@@ -656,13 +753,10 @@ impl DurableOfferAcceptor<Vec<u8>> for EmbeddedAcceptor {
             .queue
             .lock()
             .map_err(|_| CloudWorkerError::new("embedded_queue_unavailable"))?
-            .pending_connector_accepts(&self.0.connector_id)
-            .map_err(|_| CloudWorkerError::new("embedded_pending_accept_failed"))?;
+            .quarantine_invalid_connector_offers(&self.0.connector_id)
+            .map_err(|_| CloudWorkerError::new("embedded_pending_quarantine_failed"))?;
         let mut releases = Vec::new();
-        for intent in intents
-            .into_iter()
-            .filter(|intent| intent.route_proof().is_none())
-        {
+        for intent in intents {
             let job_id = intent
                 .job_id
                 .parse()
@@ -681,6 +775,15 @@ impl DurableOfferAcceptor<Vec<u8>> for EmbeddedAcceptor {
             });
         }
         Ok(releases)
+    }
+
+    async fn complete_release_cleanup(&mut self, job_id: JobId) -> Result<(), CloudWorkerError> {
+        self.0
+            .queue
+            .lock()
+            .map_err(|_| CloudWorkerError::new("embedded_queue_unavailable"))?
+            .complete_connector_release_cleanup(&self.0.connector_id, job_id)
+            .map_err(|_| CloudWorkerError::new("embedded_release_cleanup_complete_failed"))
     }
 
     async fn prepare(
@@ -719,6 +822,15 @@ impl DurableOfferAcceptor<Vec<u8>> for EmbeddedAcceptor {
         Ok(())
     }
 
+    async fn confirm_remote_accept(&mut self, job_id: JobId) -> Result<(), CloudWorkerError> {
+        self.0
+            .queue
+            .lock()
+            .map_err(|_| CloudWorkerError::new("embedded_queue_unavailable"))?
+            .confirm_connector_offer(&self.0.connector_id, job_id)
+            .map_err(|_| CloudWorkerError::new("embedded_accept_confirm_failed"))
+    }
+
     async fn abandon(&mut self, job_id: JobId) -> Result<(), CloudWorkerError> {
         self.0
             .queue
@@ -752,6 +864,7 @@ fn pending_acceptance(
             .job_id
             .parse()
             .map_err(|_| CloudWorkerError::new("embedded_pending_accept_invalid"))?,
+        remote_accept_confirmed: intent.remote_accept_confirmed,
         request: AgentAcceptJobRequest {
             lease_id: intent
                 .lease_id
@@ -779,5 +892,207 @@ struct EmbeddedWake;
 impl WakeReconciler for EmbeddedWake {
     async fn reconcile(&mut self) -> Result<(), CloudWorkerError> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod disconnect_compatibility_tests {
+    use super::{
+        connector_disconnect_requires_authority_upgrade, finish_remote_connector_revocation,
+    };
+    use crate::connector_registry::{ConnectorRecord, ConnectorRegistry};
+    use crate::{
+        ConnectorKeyError, EmbeddedQueue, GeneratedConnectorKey, SecureConnectorSigner,
+        SecureKeyHandle,
+    };
+    use chrono::Utc;
+    use ed25519_dalek::{Signer as _, SigningKey};
+    use piqae_agent_client::ClientError;
+    use piqae_agent_storage::{AcceptedJob, AgentStore, CloudRouteProof};
+    use piqae_domain::{AgentId, JobId};
+    use piqae_protocol::agent::PrinterGrant;
+    use piqae_support_packs::SupportPackRegistry;
+    use std::sync::{Arc, Mutex};
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    use url::Url;
+
+    #[derive(Debug)]
+    struct TestSigner(SigningKey);
+
+    impl SecureConnectorSigner for TestSigner {
+        fn generate(&self, _scope: &str) -> Result<GeneratedConnectorKey, ConnectorKeyError> {
+            Err(ConnectorKeyError::Unavailable)
+        }
+
+        fn sign(
+            &self,
+            _handle: &SecureKeyHandle,
+            message: &[u8],
+        ) -> Result<[u8; 64], ConnectorKeyError> {
+            Ok(self.0.sign(message).to_bytes())
+        }
+
+        fn delete(&self, _handle: &SecureKeyHandle) -> Result<(), ConnectorKeyError> {
+            panic!("failed revocation must retain the secure key")
+        }
+    }
+
+    async fn unsupported_authority() -> (Url, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = [0_u8; 16 * 1024];
+                let _ = stream.read(&mut request).await.unwrap();
+                let body = br#"{"error":{"code":"not_found"}}"#;
+                stream
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+                stream.write_all(body).await.unwrap();
+            }
+        });
+        (Url::parse(&format!("http://{address}/")).unwrap(), task)
+    }
+
+    #[test]
+    fn n_minus_one_disconnect_is_open_without_pending_and_fenced_with_pending_evidence() {
+        let abandon = ClientError::Status {
+            status: 404,
+            body: "not found".into(),
+        };
+        let reconcile = ClientError::Status {
+            status: 405,
+            body: "method not allowed".into(),
+        };
+        assert!(!connector_disconnect_requires_authority_upgrade(
+            false,
+            Some(&abandon),
+            Some(&reconcile)
+        ));
+        assert!(connector_disconnect_requires_authority_upgrade(
+            true,
+            Some(&abandon),
+            Some(&reconcile)
+        ));
+        assert!(!connector_disconnect_requires_authority_upgrade(
+            true,
+            Some(&abandon),
+            Some(&ClientError::Status {
+                status: 500,
+                body: "retry".into(),
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn embedded_n_minus_one_disconnect_retains_registry_key_and_pending_queue() {
+        let directory = tempfile::tempdir().unwrap();
+        let connector_id = "ncon_embedded_upgrade";
+        let agent_id = AgentId::new();
+        let handle = SecureKeyHandle::new("connector/test/upgrade".into()).unwrap();
+        let (origin, server) = unsupported_authority().await;
+        let record = ConnectorRecord {
+            connector_id: connector_id.into(),
+            agent_id: agent_id.to_string(),
+            control_plane_url: origin,
+            display_name: Some("Old authority".into()),
+            workspace_name: Some("Fixture".into()),
+            authorization_type: Some("workspace".into()),
+            workspace_id: Some("wsp_fixture".into()),
+            environment_id: Some("env_fixture".into()),
+            requesting_service_account_id: None,
+            manage_url: None,
+            device_key_file: None,
+            secure_key_handle: Some(handle.clone()),
+            enabled: true,
+            printer_grant: PrinterGrant::AllLocalPrinters,
+            allowed_printer_ids: Vec::new(),
+        };
+        let mut registry = ConnectorRegistry::load(directory.path()).unwrap();
+        registry
+            .register_prepared_key(handle, [7; 32], Utc::now().timestamp_millis() + 60_000)
+            .unwrap();
+        registry.complete_prepared(record.clone()).unwrap();
+        registry.revoke(connector_id).unwrap();
+        let registry = Arc::new(Mutex::new(registry));
+
+        let mut queue =
+            EmbeddedQueue::open(directory.path(), SupportPackRegistry::default()).unwrap();
+        queue.ensure_connector_queue(connector_id).unwrap();
+        let job_id = JobId::new();
+        let mut store = AgentStore::open(
+            directory
+                .path()
+                .join("connectors")
+                .join(connector_id)
+                .join("agent.sqlite3"),
+        )
+        .unwrap();
+        store
+            .prepare_cloud_job(
+                &AcceptedJob {
+                    job_id: job_id.to_string(),
+                    submission_id: "sub_upgrade".into(),
+                    printer_id: "prn_upgrade".into(),
+                    printer_native_id: "fake:upgrade".into(),
+                    title: "Upgrade fence".into(),
+                    content_sha256: "0".repeat(64),
+                    content_path: directory
+                        .path()
+                        .join("fixture.pdf")
+                        .to_string_lossy()
+                        .into(),
+                    content_kind: "pdf".into(),
+                    options_json: "{}".into(),
+                    expires_unix_ms: None,
+                    accepted_unix_ms: Utc::now().timestamp_millis(),
+                    cloud_managed: true,
+                },
+                &uuid::Uuid::new_v4().to_string(),
+                "redacted-lease-token",
+                Utc::now().timestamp_millis() + 60_000,
+                &CloudRouteProof {
+                    reservation_id: uuid::Uuid::new_v4().to_string(),
+                    generation: 1,
+                    fencing_token: "redacted-route-fence".into(),
+                },
+            )
+            .unwrap();
+        drop(store);
+        let queue = Arc::new(Mutex::new(queue));
+        let provider: Arc<dyn SecureConnectorSigner> =
+            Arc::new(TestSigner(SigningKey::from_bytes(&[9; 32])));
+
+        let error = finish_remote_connector_revocation(
+            Arc::clone(&queue),
+            Arc::clone(&registry),
+            &record,
+            provider,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, "connector_authority_upgrade_required");
+        server.await.unwrap();
+        assert_eq!(
+            queue
+                .lock()
+                .unwrap()
+                .pending_connector_accepts(connector_id)
+                .unwrap()
+                .len(),
+            1
+        );
+        let restarted = ConnectorRegistry::load(directory.path()).unwrap();
+        assert_eq!(restarted.pending_remote_revocations().count(), 1);
+        assert!(restarted.key_cleanup().is_empty());
     }
 }

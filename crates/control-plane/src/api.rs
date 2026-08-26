@@ -37,14 +37,15 @@ use piqae_domain::{
 };
 use piqae_object_store::{ObjectByteStream, ObjectStoreError, digest_hex};
 use piqae_protocol::agent::{
-    AgentAcceptJobRequest, AgentAcceptJobResponse, AgentReleaseLeaseRequest,
-    AgentRenewLeaseRequest, AgentRenewLeaseResponse, AgentSyncRequest, AgentSyncResponse,
-    ConnectSessionPreview, ConnectSessionPreviewRequest, ContentDescriptor, EnrolRequest,
-    EnrolResponse, JobOffer,
+    AgentAcceptJobRequest, AgentAcceptJobResponse, AgentAcceptanceAbandonResponse,
+    AgentAcceptanceReconciliationResponse, AgentReleaseLeaseRequest, AgentRenewLeaseRequest,
+    AgentRenewLeaseResponse, AgentSyncRequest, AgentSyncResponse, ConnectSessionPreview,
+    ConnectSessionPreviewRequest, ContentDescriptor, EnrolRequest, EnrolResponse, JobOffer,
 };
 use piqae_storage_postgres::{
     StoredAgent, StoredApiKey, StoredNodeConnector, StoredPrinter, StoredTargetBinding,
     StoredUpload, StoredWebhook, StoredWebhookDelivery, SyncedPrinter,
+    acceptance_revocation_webhook_idempotency_key, agent_acceptance_webhook_idempotency_key,
 };
 use rand::{RngCore, rngs::OsRng};
 use serde::{Deserialize, Serialize};
@@ -263,16 +264,38 @@ pub async fn patch_node(
     Ok(Json(node))
 }
 
+async fn publish_acceptance_revocation(
+    state: &AppState,
+    tenant: TenantContext,
+    job: &Job,
+) -> Result<(), AppError> {
+    for event_type in ["job.updated", "job.delivery_uncertain"] {
+        let idempotency_key = acceptance_revocation_webhook_idempotency_key(
+            tenant.workspace_id,
+            tenant.environment_id,
+            job.id,
+            event_type,
+        );
+        state
+            .publish_idempotently(&idempotency_key, tenant, event_type, job)
+            .await?;
+    }
+    Ok(())
+}
+
 pub async fn delete_node(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(node_id): Path<AgentId>,
 ) -> Result<StatusCode, AppError> {
     let tenant = authenticate_native(&state, &headers, Scope::AgentsWrite).await?;
-    state
+    let affected_jobs = state
         .repository
         .revoke_agent(tenant.workspace_id, tenant.environment_id, node_id)
         .await?;
+    for job in affected_jobs {
+        publish_acceptance_revocation(&state, tenant, &job).await?;
+    }
     state
         .publish(
             tenant,
@@ -494,7 +517,7 @@ pub async fn revoke_node_connector(
     let tenant = authenticate_native(&state, &headers, Scope::AgentsWrite).await?;
     let node_id = AgentId::from_str(&node_id)
         .map_err(|_| AppError::invalid("invalid_node_id", "The node ID is invalid."))?;
-    state
+    let affected_jobs = state
         .repository
         .revoke_node_connector(
             tenant.workspace_id,
@@ -503,6 +526,9 @@ pub async fn revoke_node_connector(
             &connector_id,
         )
         .await?;
+    for job in affected_jobs {
+        publish_acceptance_revocation(&state, tenant, &job).await?;
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -519,7 +545,7 @@ pub async fn revoke_agent_connector(
     let path = format!("/v1/agent/connectors/{connector_id}/revoke");
     let identity =
         authenticate_agent_for_revocation(&state, &headers, "POST", &path, &body).await?;
-    state
+    let affected_jobs = state
         .repository
         .revoke_node_connector(
             identity.tenant.workspace_id,
@@ -528,6 +554,9 @@ pub async fn revoke_agent_connector(
             &connector_id,
         )
         .await?;
+    for job in affected_jobs {
+        publish_acceptance_revocation(&state, identity.tenant, &job).await?;
+    }
     Ok(Json(serde_json::json!({"revoked": true})))
 }
 
@@ -3191,11 +3220,143 @@ pub async fn accept_agent_job(
             },
         )
         .await?;
-    state.publish(identity.tenant, "job.updated", &job).await?;
+    state
+        .publish_idempotently(
+            &agent_acceptance_webhook_idempotency_key(
+                identity.tenant.workspace_id,
+                identity.tenant.environment_id,
+                job.id,
+            ),
+            identity.tenant,
+            "job.updated",
+            &job,
+        )
+        .await?;
     Ok(Json(AgentAcceptJobResponse {
         accepted_at: Utc::now(),
         state: job.state,
     }))
+}
+
+pub async fn reconcile_agent_acceptance(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(job_id): Path<String>,
+    body: Bytes,
+) -> Result<Json<AgentAcceptanceReconciliationResponse>, AppError> {
+    let path = format!("/v1/agent/jobs/{job_id}/acceptance/reconcile");
+    let identity =
+        authenticate_agent_for_revocation(&state, &headers, "POST", &path, &body).await?;
+    let request: AgentAcceptJobRequest = serde_json::from_slice(&body)?;
+    let (Some(route_reservation_id), Some(route_generation), Some(route_fencing_token)) = (
+        request.route_reservation_id,
+        request.route_generation,
+        request.route_fencing_token.as_deref(),
+    ) else {
+        return Err(AppError::conflict(
+            "route_fence_required",
+            "A complete physical-destination reservation proof is required.",
+        ));
+    };
+    let reservation_id = route_reservation_id.to_string();
+    let (accepted, connector_revoked, fenced) = state
+        .repository
+        .reconcile_agent_acceptance(
+            identity.tenant.workspace_id,
+            identity.tenant.environment_id,
+            identity.agent_id,
+            parse_job_id(&job_id)?,
+            request.lease_id,
+            &request.lease_token,
+            &request.content_sha256,
+            request.local_sequence,
+            piqae_storage_postgres::DeliveryAttemptProof {
+                reservation_id: &reservation_id,
+                generation: route_generation,
+                fencing_token: route_fencing_token,
+            },
+        )
+        .await?;
+    if accepted {
+        let job_id = parse_job_id(&job_id)?;
+        let job = state
+            .repository
+            .get_job(
+                identity.tenant.workspace_id,
+                identity.tenant.environment_id,
+                job_id,
+            )
+            .await?;
+        state
+            .publish_idempotently(
+                &agent_acceptance_webhook_idempotency_key(
+                    identity.tenant.workspace_id,
+                    identity.tenant.environment_id,
+                    job_id,
+                ),
+                identity.tenant,
+                "job.updated",
+                &job,
+            )
+            .await?;
+    }
+    Ok(Json(AgentAcceptanceReconciliationResponse {
+        accepted,
+        connector_revoked,
+        fenced,
+    }))
+}
+
+pub async fn abandon_agent_acceptance(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(job_id): Path<String>,
+    body: Bytes,
+) -> Result<Json<AgentAcceptanceAbandonResponse>, AppError> {
+    let path = format!("/v1/agent/jobs/{job_id}/acceptance/abandon");
+    let identity = authenticate_agent(&state, &headers, "POST", &path, &body).await?;
+    let request: AgentAcceptJobRequest = serde_json::from_slice(&body)?;
+    let (Some(route_reservation_id), Some(route_generation), Some(route_fencing_token)) = (
+        request.route_reservation_id,
+        request.route_generation,
+        request.route_fencing_token.as_deref(),
+    ) else {
+        return Err(AppError::conflict(
+            "route_fence_required",
+            "A complete physical-destination reservation proof is required.",
+        ));
+    };
+    let reservation_id = route_reservation_id.to_string();
+    let abandoned = state
+        .repository
+        .abandon_agent_acceptance(
+            identity.tenant.workspace_id,
+            identity.tenant.environment_id,
+            identity.agent_id,
+            parse_job_id(&job_id)?,
+            request.lease_id,
+            &request.lease_token,
+            &request.content_sha256,
+            request.local_sequence,
+            piqae_storage_postgres::DeliveryAttemptProof {
+                reservation_id: &reservation_id,
+                generation: route_generation,
+                fencing_token: route_fencing_token,
+            },
+        )
+        .await?;
+    if abandoned {
+        let job = state
+            .repository
+            .get_job(
+                identity.tenant.workspace_id,
+                identity.tenant.environment_id,
+                parse_job_id(&job_id)?,
+            )
+            .await?;
+        state.publish(identity.tenant, "job.updated", &job).await?;
+    }
+    Ok(Json(AgentAcceptanceAbandonResponse { abandoned }))
 }
 
 pub async fn renew_agent_lease(

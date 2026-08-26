@@ -2840,6 +2840,101 @@ paths:
           $ref: "#/components/responses/Error"
         "409":
           $ref: "#/components/responses/Error"
+  /v1/agent/jobs/{job_id}/acceptance/reconcile:
+    parameters:
+      - $ref: "#/components/parameters/JobId"
+    post:
+      summary: Reconcile an exact durable acceptance after a crash
+      description: >-
+        Evidence-only recovery for the crash window after the authority
+        committed an acceptance but before the node persisted its response.
+        The request must exactly match the stored lease, content, local
+        sequence, and physical-route proof. During a mixed-version rollout the
+        authority may durably backfill appended proof columns after validating
+        the live route under lock. The node may activate only when accepted is
+        true and fenced is false; fenced is always a terminal local-abandon
+        instruction even after a connector has been re-enrolled.
+      tags: [Agents, Jobs]
+      operationId: reconcileAgentAcceptance
+      security:
+        - agentId: []
+          agentTimestamp: []
+          agentNonce: []
+          agentBodyDigest: []
+          agentSignature: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AgentExactAcceptanceRequest"
+      responses:
+        "200":
+          description: Exact durable acceptance evidence and revocation stability.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [accepted, connector_revoked, fenced]
+                properties:
+                  accepted:
+                    type: boolean
+                  connector_revoked:
+                    type: boolean
+                    description: >-
+                      Admission for this connector or its owning node has been
+                      revoked. When true, an acceptance absent from the exact
+                      evidence set must not become runnable locally.
+                  fenced:
+                    type: boolean
+                    description: >-
+                      The exact acceptance belongs to a revoked or superseded
+                      connector incarnation, or its job is already terminal;
+                      the node must abandon local pending work.
+        "401":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+  /v1/agent/jobs/{job_id}/acceptance/abandon:
+    parameters:
+      - $ref: "#/components/parameters/JobId"
+    post:
+      summary: Abandon an exact accepted job before local queue activation
+      description: >-
+        Compensates the narrow crash boundary where the authority committed an
+        acceptance but the node has not activated durable local work. The
+        connector must still be active and the complete lease, content, local
+        sequence, and physical-route proof must match. This operation cannot
+        cancel work after local activation.
+      tags: [Agents, Jobs]
+      operationId: abandonAgentAcceptance
+      security:
+        - agentId: []
+          agentTimestamp: []
+          agentNonce: []
+          agentBodyDigest: []
+          agentSignature: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AgentExactAcceptanceRequest"
+      responses:
+        "200":
+          description: Whether the exact accepted job was safely abandoned.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [abandoned]
+                properties:
+                  abandoned:
+                    type: boolean
+        "401":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
   /v1/agent/jobs/{job_id}/lease:
     parameters:
       - $ref: "#/components/parameters/JobId"
@@ -4830,6 +4925,40 @@ components:
               type: integer
               format: int64
               minimum: 0
+            route_reservation_id:
+              type: string
+              format: uuid
+            route_generation:
+              type: integer
+              format: int64
+              minimum: 1
+            route_fencing_token:
+              type: string
+              writeOnly: true
+              minLength: 1
+              maxLength: 1024
+    AgentExactAcceptanceRequest:
+      description: >-
+        Complete durable lease and physical-route evidence used only for exact
+        crash reconciliation or pre-activation compensation.
+      allOf:
+        - $ref: "#/components/schemas/AgentAcceptRequest"
+        - type: object
+          required:
+            [route_reservation_id, route_generation, route_fencing_token]
+          properties:
+            route_reservation_id:
+              type: string
+              format: uuid
+            route_generation:
+              type: integer
+              format: int64
+              minimum: 1
+            route_fencing_token:
+              type: string
+              writeOnly: true
+              minLength: 1
+              maxLength: 1024
     AgentAcceptResponse:
       type: object
       required: [accepted_at, state]

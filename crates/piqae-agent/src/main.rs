@@ -58,7 +58,8 @@ use piqae_node_runtime::{
     PendingCloudAcceptance, PendingCloudRelease, PrinterTransport, RuntimeConfiguration,
     WakeReconciler,
     command::{ConnectorInvitationRequest, ConnectorInvitationResult},
-    connector_registry as connector_runtime, route_coordinator,
+    connector_disconnect_requires_authority_upgrade, connector_registry as connector_runtime,
+    route_coordinator,
 };
 use piqae_protocol::{
     CURRENT_PROTOCOL_VERSION,
@@ -2461,11 +2462,56 @@ async fn revoke_installed_authority(
     let key_path = data_dir.join(relative_key);
     let identity = read_device_identity(&record.agent_id, &key_path)
         .context("read connector identity for remote revocation")?;
-    AgentClient::new(record.control_plane_url.clone())?
+    let client = AgentClient::new(record.control_plane_url.clone())?;
+    let mut registry = connector_runtime::ConnectorRegistry::load(data_dir)?;
+    let paths = registry.paths(&record.connector_id)?;
+    let mut queue = AgentStore::open(paths.database)?;
+    queue.quarantine_invalid_cloud_accepts(Utc::now().timestamp_millis())?;
+    let mut abandon_after_revoke = Vec::new();
+    for intent in queue.pending_cloud_accepts()? {
+        let pending = pending_cloud_acceptance(intent)?;
+        let abandon = client
+            .abandon_acceptance(&identity, pending.job_id, &pending.request)
+            .await;
+        if !matches!(&abandon, Ok(true)) {
+            let reconciliation = match client
+                .reconcile_acceptance(&identity, pending.job_id, &pending.request)
+                .await
+            {
+                Ok(reconciliation) => reconciliation,
+                Err(error)
+                    if connector_disconnect_requires_authority_upgrade(
+                        true,
+                        abandon.as_ref().err(),
+                        Some(&error),
+                    ) =>
+                {
+                    anyhow::bail!("connector_authority_upgrade_required");
+                }
+                Err(error) => {
+                    return Err(error)
+                        .context("reconcile pending connector acceptance during revocation");
+                }
+            };
+            if reconciliation.accepted && !reconciliation.fenced {
+                abandon.context("compensate pending connector acceptance")?;
+                anyhow::bail!("pending connector acceptance was not compensated");
+            }
+            if !reconciliation.connector_revoked && !reconciliation.fenced {
+                abandon_after_revoke.push(pending.job_id);
+                continue;
+            }
+        }
+        queue.abandon_cloud_accept(&pending.job_id.to_string(), Utc::now().timestamp_millis())?;
+    }
+    client
         .revoke_connector(&identity, &record.connector_id)
         .await
         .context("revoke connector authority grant")?;
-    let mut registry = connector_runtime::ConnectorRegistry::load(data_dir)?;
+    for job_id in abandon_after_revoke {
+        queue.abandon_cloud_accept(&job_id.to_string(), Utc::now().timestamp_millis())?;
+    }
+    queue.complete_all_cloud_release_cleanups()?;
     registry.confirm_remote_revocation(&record.connector_id)?;
     remove_connector_file_key(&key_path)?;
     Ok(())
@@ -4446,18 +4492,16 @@ impl DurableOfferAcceptor<InstalledMaterializedOffer> for InstalledOfferAcceptor
     }
 
     async fn invalid_pending(&mut self) -> Result<Vec<PendingCloudRelease>, CloudWorkerError> {
-        let intents = self
-            .stores
-            .lock()
-            .await
-            .queue
-            .pending_cloud_accepts()
-            .map_err(|_| CloudWorkerError::new("pending_accept_read_failed"))?;
+        let intents = {
+            self.stores
+                .lock()
+                .await
+                .queue
+                .quarantine_invalid_cloud_accepts(Utc::now().timestamp_millis())
+                .map_err(|_| CloudWorkerError::new("pending_accept_quarantine_failed"))?
+        };
         let mut releases = Vec::new();
-        for intent in intents
-            .into_iter()
-            .filter(|intent| intent.route_proof().is_none())
-        {
+        for intent in intents {
             let job_id = intent
                 .job_id
                 .parse()
@@ -4476,6 +4520,15 @@ impl DurableOfferAcceptor<InstalledMaterializedOffer> for InstalledOfferAcceptor
             });
         }
         Ok(releases)
+    }
+
+    async fn complete_release_cleanup(&mut self, job_id: JobId) -> Result<(), CloudWorkerError> {
+        self.stores
+            .lock()
+            .await
+            .queue
+            .complete_cloud_release_cleanup(&job_id.to_string())
+            .map_err(|_| CloudWorkerError::new("release_cleanup_complete_failed"))
     }
 
     async fn prepare(
@@ -4560,6 +4613,7 @@ impl DurableOfferAcceptor<InstalledMaterializedOffer> for InstalledOfferAcceptor
             route_reservation_id: Some(route_proof.reservation_id),
             route_generation: Some(route_proof.generation),
             route_fencing_token: Some(route_proof.fencing_token),
+            remote_accept_confirmed: false,
         };
         drop(stores);
         pending_cloud_acceptance(intent)
@@ -4573,6 +4627,15 @@ impl DurableOfferAcceptor<InstalledMaterializedOffer> for InstalledOfferAcceptor
             .activate_cloud_job(&job_id.to_string(), Utc::now().timestamp_millis())
             .map(|_| ())
             .map_err(|_| CloudWorkerError::new("durable_accept_activate_failed"))
+    }
+
+    async fn confirm_remote_accept(&mut self, job_id: JobId) -> Result<(), CloudWorkerError> {
+        self.stores
+            .lock()
+            .await
+            .queue
+            .confirm_cloud_accept(&job_id.to_string(), Utc::now().timestamp_millis())
+            .map_err(|_| CloudWorkerError::new("durable_accept_confirm_failed"))
     }
 
     async fn abandon(&mut self, job_id: JobId) -> Result<(), CloudWorkerError> {
@@ -4632,6 +4695,7 @@ fn pending_cloud_acceptance(
         .ok_or_else(|| CloudWorkerError::new("route_reservation_missing"))?;
     Ok(PendingCloudAcceptance {
         job_id,
+        remote_accept_confirmed: intent.remote_accept_confirmed,
         request: AgentAcceptJobRequest {
             lease_id,
             lease_token: intent.lease_token,
@@ -6237,6 +6301,7 @@ fn load_or_create_private_token(path: &Path) -> Result<String> {
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     #[test]
     fn approved_connectors_enable_cloud_runtime_in_every_launch_mode() {
@@ -6297,6 +6362,116 @@ mod tests {
             printer_grant: PrinterGrant::SelectedPrinters,
             allowed_printer_ids: vec!["prn_test".to_owned()],
         }
+    }
+
+    async fn unsupported_connector_authority() -> (Url, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind old authority fixture");
+        let address = listener.local_addr().expect("old authority address");
+        let task = tokio::spawn(async move {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().await.expect("accept request");
+                let mut request = [0_u8; 16 * 1024];
+                let _ = stream.read(&mut request).await.expect("read request");
+                let body = br#"{"error":{"code":"not_found"}}"#;
+                stream
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .expect("write response headers");
+                stream.write_all(body).await.expect("write response body");
+            }
+        });
+        (
+            Url::parse(&format!("http://{address}/")).expect("old authority URL"),
+            task,
+        )
+    }
+
+    #[tokio::test]
+    async fn installed_n_minus_one_disconnect_retains_key_registry_and_pending_queue() {
+        let directory = tempfile::tempdir().expect("connector directory");
+        let connector_id = "ncon_installed_upgrade";
+        let agent_id = AgentId::new();
+        let (origin, server) = unsupported_connector_authority().await;
+        let mut record = test_connector_record(connector_id);
+        record.agent_id = agent_id.to_string();
+        record.control_plane_url = origin;
+        record.device_key_file = Some(PathBuf::from("connectors/installed-upgrade/device.key"));
+        let key_path = directory
+            .path()
+            .join(record.device_key_file.as_ref().expect("key path"));
+        std::fs::create_dir_all(key_path.parent().expect("key parent")).expect("create key parent");
+        std::fs::write(&key_path, hex::encode([11_u8; 32])).expect("write device key");
+
+        let mut registry = connector_runtime::ConnectorRegistry::load(directory.path())
+            .expect("load connector registry");
+        registry.add(record.clone()).expect("add connector");
+        registry.revoke(connector_id).expect("prepare revocation");
+        let paths = registry.paths(connector_id).expect("connector paths");
+        std::fs::create_dir_all(paths.database.parent().expect("queue parent"))
+            .expect("create queue parent");
+        let mut store = AgentStore::open(&paths.database).expect("connector queue");
+        let job_id = JobId::new();
+        store
+            .prepare_cloud_job(
+                &AcceptedJob {
+                    job_id: job_id.to_string(),
+                    submission_id: "sub_installed_upgrade".into(),
+                    printer_id: "prn_installed_upgrade".into(),
+                    printer_native_id: "fake:installed-upgrade".into(),
+                    title: "Installed upgrade fence".into(),
+                    content_sha256: "0".repeat(64),
+                    content_path: directory
+                        .path()
+                        .join("fixture.pdf")
+                        .to_string_lossy()
+                        .into(),
+                    content_kind: "pdf".into(),
+                    options_json: "{}".into(),
+                    expires_unix_ms: None,
+                    accepted_unix_ms: Utc::now().timestamp_millis(),
+                    cloud_managed: true,
+                },
+                &uuid::Uuid::new_v4().to_string(),
+                "redacted-lease-token",
+                Utc::now().timestamp_millis() + 60_000,
+                &CloudRouteProof {
+                    reservation_id: uuid::Uuid::new_v4().to_string(),
+                    generation: 1,
+                    fencing_token: "redacted-route-fence".into(),
+                },
+            )
+            .expect("prepare pending acceptance");
+        drop(store);
+
+        let error = revoke_installed_authority(&record, directory.path())
+            .await
+            .expect_err("old authority must fail closed");
+        assert!(
+            format!("{error:#}").contains("connector_authority_upgrade_required"),
+            "unexpected error: {error:#}"
+        );
+        server.await.expect("old authority fixture");
+        assert!(key_path.exists());
+        let restarted = connector_runtime::ConnectorRegistry::load(directory.path())
+            .expect("restart connector registry");
+        assert_eq!(restarted.pending_remote_revocations().count(), 1);
+        assert!(restarted.key_cleanup().is_empty());
+        assert_eq!(
+            AgentStore::open(paths.database)
+                .expect("restart connector queue")
+                .pending_cloud_accepts()
+                .expect("pending acceptance")
+                .len(),
+            1
+        );
     }
 
     #[tokio::test]

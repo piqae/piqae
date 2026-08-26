@@ -75,6 +75,9 @@ fn acceptance_intent_queue_and_event_cursor_survive_separate_restart_windows() {
         assert!(!format!("{:?}", intents[0]).contains("deterministic-route-fence"));
 
         store
+            .confirm_cloud_accept("job_offline_recovery", 39)
+            .expect("persist remote acceptance outcome");
+        store
             .activate_cloud_job("job_offline_recovery", 40)
             .expect("remote acceptance confirmed");
         store
@@ -148,6 +151,9 @@ fn accelerated_disconnect_retry_soak_has_no_loss_or_duplicate_activation() {
                     .iter()
                     .any(|intent| intent.job_id == format!("job_soak_{number:04}"))
             );
+            store
+                .confirm_cloud_accept(&format!("job_soak_{number:04}"), 99 + timestamp)
+                .expect("persist acceptance response");
             store
                 .activate_cloud_job(&format!("job_soak_{number:04}"), 100 + timestamp)
                 .expect("first acceptance response");

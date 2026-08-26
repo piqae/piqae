@@ -74,7 +74,10 @@ piqae-webhooks = { path = "../webhooks", version = "0.1.2" }
 aes-gcm.workspace = true
 hkdf.workspace = true
 http-body-util = "0.1"
+piqae-agent-storage = { path = "../agent-storage", version = "0.1.22" }
+rusqlite.workspace = true
 sqlx.workspace = true
+tempfile = "3"
 
 [lints]
 workspace = true

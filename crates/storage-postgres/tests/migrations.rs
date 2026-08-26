@@ -1,8 +1,25 @@
 #![allow(clippy::expect_used)]
 
-use piqae_storage_postgres::PostgresStore;
+use piqae_domain::{AgentId, EventId, JobFailureReason, JobId, JobState};
+use piqae_storage_postgres::{DeliveryAttemptProof, PostgresStore};
+use sha2::{Digest, Sha256};
 use sqlx::{PgPool, migrate::Migrator, postgres::PgPoolOptions};
 use std::{borrow::Cow, env};
+use uuid::Uuid;
+
+#[derive(Clone, Copy)]
+struct AcceptanceMigrationFixture {
+    name: &'static str,
+    workspace_id: &'static str,
+    environment_id: &'static str,
+    agent_id: &'static str,
+    printer_id: &'static str,
+    job_id: &'static str,
+    lease_id: &'static str,
+    job_state: &'static str,
+    attempt_state: &'static str,
+    revoked: bool,
+}
 
 #[tokio::test]
 async fn automatic_wake_outbox_upgrades_43_and_is_tenant_isolated() {
@@ -94,13 +111,871 @@ async fn automatic_wake_outbox_upgrades_43_and_is_tenant_isolated() {
         .fetch_one(&pool)
         .await
         .expect("read schema version");
-    assert_eq!(latest, 44);
+    assert_eq!(latest, 45);
 
     pool.close().await;
     sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
         .execute(&admin)
         .await
         .expect("drop exact disposable schema");
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn acceptance_route_reconciliation_upgrades_44_and_fences_tenants() {
+    let Some(database_url) = env::var("PIQAE_TEST_DATABASE_URL").ok() else {
+        eprintln!("skipped: set PIQAE_TEST_DATABASE_URL to run PostgreSQL migration evidence");
+        return;
+    };
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&database_url)
+        .await
+        .expect("connect PostgreSQL test database");
+    let all = sqlx::migrate!("../../migrations/postgres");
+
+    let upgrade_schema =
+        format!("piqae_acceptance_upgrade_{}", ulid::Ulid::new()).to_ascii_lowercase();
+    sqlx::query(&format!("CREATE SCHEMA {upgrade_schema}"))
+        .execute(&admin)
+        .await
+        .expect("create exact disposable upgrade schema");
+    let upgrade_pool = schema_pool(&database_url, &upgrade_schema).await;
+    let previous = Migrator {
+        migrations: Cow::Owned(
+            all.iter()
+                .filter(|migration| migration.version < 45)
+                .cloned()
+                .collect(),
+        ),
+        ignore_missing: false,
+        locking: true,
+        no_tx: false,
+    };
+    previous
+        .run(&upgrade_pool)
+        .await
+        .expect("apply version 44 schema");
+
+    let fixtures = [
+        AcceptanceMigrationFixture {
+            name: "active",
+            workspace_id: "wsp_01J00000000000000000000100",
+            environment_id: "env_01J00000000000000000000101",
+            agent_id: "agt_01J00000000000000000000102",
+            printer_id: "ptr_01J00000000000000000000103",
+            job_id: "job_01J00000000000000000000104",
+            lease_id: "10000000-0000-0000-0000-000000000001",
+            job_state: "agent_accepted",
+            attempt_state: "queued_local",
+            revoked: false,
+        },
+        AcceptanceMigrationFixture {
+            name: "revoked_agent",
+            workspace_id: "wsp_01J00000000000000000000200",
+            environment_id: "env_01J00000000000000000000201",
+            agent_id: "agt_01J00000000000000000000202",
+            printer_id: "ptr_01J00000000000000000000203",
+            job_id: "job_01J00000000000000000000204",
+            lease_id: "20000000-0000-0000-0000-000000000001",
+            job_state: "agent_accepted",
+            attempt_state: "queued_local",
+            revoked: true,
+        },
+        AcceptanceMigrationFixture {
+            name: "revoked_queued",
+            workspace_id: "wsp_01J00000000000000000000300",
+            environment_id: "env_01J00000000000000000000301",
+            agent_id: "agt_01J00000000000000000000302",
+            printer_id: "ptr_01J00000000000000000000303",
+            job_id: "job_01J00000000000000000000304",
+            lease_id: "30000000-0000-0000-0000-000000000001",
+            job_state: "queued_local",
+            attempt_state: "queued_local",
+            revoked: true,
+        },
+        AcceptanceMigrationFixture {
+            name: "legacy",
+            workspace_id: "wsp_01J00000000000000000000400",
+            environment_id: "env_01J00000000000000000000401",
+            agent_id: "agt_01J00000000000000000000402",
+            printer_id: "ptr_01J00000000000000000000403",
+            job_id: "job_01J00000000000000000000404",
+            lease_id: "40000000-0000-0000-0000-000000000001",
+            job_state: "agent_accepted",
+            attempt_state: "accepted_by_node",
+            revoked: false,
+        },
+        AcceptanceMigrationFixture {
+            name: "cross",
+            workspace_id: "wsp_01J00000000000000000000500",
+            environment_id: "env_01J00000000000000000000501",
+            agent_id: "agt_01J00000000000000000000502",
+            printer_id: "ptr_01J00000000000000000000503",
+            job_id: "job_01J00000000000000000000504",
+            lease_id: "50000000-0000-0000-0000-000000000001",
+            job_state: "agent_accepted",
+            attempt_state: "queued_local",
+            revoked: false,
+        },
+    ];
+    for fixture in fixtures {
+        sqlx::query("INSERT INTO workspaces (id,name,slug) VALUES ($1,$2,$3)")
+            .bind(fixture.workspace_id)
+            .bind(format!("Acceptance {}", fixture.name))
+            .bind(format!("acceptance-{}", fixture.name))
+            .execute(&upgrade_pool)
+            .await
+            .expect("insert workspace fixture");
+        sqlx::query(
+            "INSERT INTO environments (id,workspace_id,kind,name)
+             VALUES ($1,$2,'test','Test')",
+        )
+        .bind(fixture.environment_id)
+        .bind(fixture.workspace_id)
+        .execute(&upgrade_pool)
+        .await
+        .expect("insert environment fixture");
+        sqlx::query(
+            "INSERT INTO agents
+             (id,workspace_id,environment_id,name,installation_id,os,architecture,version,protocol_version)
+             VALUES ($1,$2,$3,'Node',$4,'linux','x86_64','test',1)",
+        )
+        .bind(fixture.agent_id)
+        .bind(fixture.workspace_id)
+        .bind(fixture.environment_id)
+        .bind(format!("install-accept-{}", fixture.name))
+        .execute(&upgrade_pool)
+        .await
+        .expect("insert agent fixture");
+        sqlx::query(
+            "INSERT INTO node_installations (id,installation_key,public_key)
+             VALUES ($1,$2,$3)",
+        )
+        .bind(format!("ninst_accept_{}", fixture.name))
+        .bind(format!("installation-key-{}", fixture.name))
+        .bind(vec![7_u8; 32])
+        .execute(&upgrade_pool)
+        .await
+        .expect("insert node installation fixture");
+        sqlx::query(
+            "INSERT INTO node_connectors
+             (id,installation_id,workspace_id,environment_id,agent_id,revoked_at)
+             VALUES ($1,$2,$3,$4,$5,CASE WHEN $6 THEN now() ELSE NULL END)",
+        )
+        .bind(format!("ncon_accept_{}", fixture.name))
+        .bind(format!("ninst_accept_{}", fixture.name))
+        .bind(fixture.workspace_id)
+        .bind(fixture.environment_id)
+        .bind(fixture.agent_id)
+        .bind(fixture.revoked)
+        .execute(&upgrade_pool)
+        .await
+        .expect("insert active or revoked connector fixture");
+        sqlx::query(
+            "INSERT INTO printers
+             (id,workspace_id,environment_id,agent_id,native_id,name,state)
+             VALUES ($1,$2,$3,$4,$5,'Printer','online')",
+        )
+        .bind(fixture.printer_id)
+        .bind(fixture.workspace_id)
+        .bind(fixture.environment_id)
+        .bind(fixture.agent_id)
+        .bind(format!("native-accept-{}", fixture.name))
+        .execute(&upgrade_pool)
+        .await
+        .expect("insert printer fixture");
+        sqlx::query(
+            "INSERT INTO physical_destinations
+             (workspace_id,environment_id,id,name,state)
+             VALUES ($1,$2,$3,'Destination','available')",
+        )
+        .bind(fixture.workspace_id)
+        .bind(fixture.environment_id)
+        .bind(format!("pdst_accept_{}", fixture.name))
+        .execute(&upgrade_pool)
+        .await
+        .expect("insert physical destination fixture");
+        sqlx::query(
+            "INSERT INTO printer_routes
+             (workspace_id,environment_id,id,destination_id,printer_id,agent_id,
+              native_queue_id,state,role,priority,enabled)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,'available','primary',0,true)",
+        )
+        .bind(fixture.workspace_id)
+        .bind(fixture.environment_id)
+        .bind(format!("rte_accept_{}", fixture.name))
+        .bind(format!("pdst_accept_{}", fixture.name))
+        .bind(fixture.printer_id)
+        .bind(fixture.agent_id)
+        .bind(format!("native-accept-{}", fixture.name))
+        .execute(&upgrade_pool)
+        .await
+        .expect("insert printer route fixture");
+        sqlx::query(
+            "INSERT INTO jobs
+             (id,workspace_id,environment_id,printer_id,agent_id,payload,state,
+              state_sequence,per_printer_sequence,expires_at,destination_id,route_id)
+             VALUES ($1,$2,$3,$4,$5,'{}',$6,3,1,
+                     now()+interval '1 hour',$7,$8)",
+        )
+        .bind(fixture.job_id)
+        .bind(fixture.workspace_id)
+        .bind(fixture.environment_id)
+        .bind(fixture.printer_id)
+        .bind(fixture.agent_id)
+        .bind(fixture.job_state)
+        .bind(format!("pdst_accept_{}", fixture.name))
+        .bind(format!("rte_accept_{}", fixture.name))
+        .execute(&upgrade_pool)
+        .await
+        .expect("insert accepted job fixture");
+        let fencing_token = format!("fence-{}", fixture.name);
+        let fencing_token_hash = format!("{:x}", Sha256::digest(fencing_token.as_bytes()));
+        sqlx::query(
+            "INSERT INTO delivery_attempts
+             (workspace_id,environment_id,id,job_id,destination_id,route_id,generation,
+              fencing_token_hash,state,lease_until,accepted_at)
+             VALUES ($1,$2,$3,$4,$5,$6,7,$7,$8,
+                     now()+interval '1 hour',now())",
+        )
+        .bind(fixture.workspace_id)
+        .bind(fixture.environment_id)
+        .bind(format!("datt_accept_{}", fixture.name))
+        .bind(fixture.job_id)
+        .bind(format!("pdst_accept_{}", fixture.name))
+        .bind(format!("rte_accept_{}", fixture.name))
+        .bind(&fencing_token_hash)
+        .bind(fixture.attempt_state)
+        .execute(&upgrade_pool)
+        .await
+        .expect("insert delivery attempt fixture");
+        sqlx::query(
+            "INSERT INTO route_reservations
+             (workspace_id,environment_id,id,route_id,destination_id,job_id,attempt_id,
+              generation,fencing_token_hash,state,lease_until)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,7,$8,'active',now()+interval '1 hour')",
+        )
+        .bind(fixture.workspace_id)
+        .bind(fixture.environment_id)
+        .bind(format!("rrsv_accept_{}", fixture.name))
+        .bind(format!("rte_accept_{}", fixture.name))
+        .bind(format!("pdst_accept_{}", fixture.name))
+        .bind(fixture.job_id)
+        .bind(format!("datt_accept_{}", fixture.name))
+        .bind(fencing_token_hash)
+        .execute(&upgrade_pool)
+        .await
+        .expect("insert route reservation fixture");
+        let lease_token = format!("lease-token-{}", fixture.name);
+        sqlx::query(
+            "INSERT INTO job_acceptances
+             (job_id,workspace_id,environment_id,agent_id,lease_id,lease_token_hash,
+              content_sha256,local_sequence)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,41)",
+        )
+        .bind(fixture.job_id)
+        .bind(fixture.workspace_id)
+        .bind(fixture.environment_id)
+        .bind(fixture.agent_id)
+        .bind(Uuid::parse_str(fixture.lease_id).expect("valid fixture lease UUID"))
+        .bind(Sha256::digest(lease_token.as_bytes()).to_vec())
+        .bind(format!("content-{}", fixture.name))
+        .execute(&upgrade_pool)
+        .await
+        .expect("insert legacy acceptance fixture");
+    }
+    sqlx::query(
+        "UPDATE job_acceptances
+         SET workspace_id=$1,environment_id=$2
+         WHERE job_id=$3",
+    )
+    .bind(fixtures[0].workspace_id)
+    .bind(fixtures[0].environment_id)
+    .bind(fixtures[4].job_id)
+    .execute(&upgrade_pool)
+    .await
+    .expect("forge a pre-0045 cross-tenant acceptance probe");
+
+    PostgresStore::from_pool(upgrade_pool.clone())
+        .migrate()
+        .await
+        .expect("upgrade version 44 to acceptance route reconciliation");
+
+    let store = PostgresStore::from_pool(upgrade_pool.clone());
+    let exact_proof: (Option<String>, Option<i64>, Option<Vec<u8>>, Option<i64>) = sqlx::query_as(
+        "SELECT route_reservation_id,route_generation,route_fencing_token_hash,
+                    connector_generation
+             FROM job_acceptances
+             WHERE job_id=$1",
+    )
+    .bind(fixtures[0].job_id)
+    .fetch_one(&upgrade_pool)
+    .await
+    .expect("read exact tenant acceptance proof");
+    let active_fence = Sha256::digest(b"fence-active").to_vec();
+    assert_eq!(
+        exact_proof,
+        (
+            Some("rrsv_accept_active".into()),
+            Some(7),
+            Some(active_fence.clone()),
+            Some(1)
+        )
+    );
+    let cross_tenant_proof: (Option<String>, Option<i64>, Option<Vec<u8>>, Option<i64>) =
+        sqlx::query_as(
+            "SELECT route_reservation_id,route_generation,route_fencing_token_hash,
+                    connector_generation
+             FROM job_acceptances
+             WHERE job_id=$1",
+        )
+        .bind(fixtures[4].job_id)
+        .fetch_one(&upgrade_pool)
+        .await
+        .expect("read cross-tenant legacy acceptance");
+    assert_eq!(cross_tenant_proof, (None, None, None, None));
+    let cross_tenant_key_change =
+        sqlx::query("UPDATE job_acceptances SET environment_id=$1 WHERE job_id=$2")
+            .bind(fixtures[1].environment_id)
+            .bind(fixtures[4].job_id)
+            .execute(&upgrade_pool)
+            .await;
+    assert!(
+        cross_tenant_key_change.is_err(),
+        "post-upgrade tenant-key writes must satisfy the composite job and agent fences"
+    );
+    let tenant_fences: Vec<(String, bool)> = sqlx::query_as(
+        "SELECT conname,convalidated FROM pg_constraint
+         WHERE conrelid='job_acceptances'::regclass
+           AND conname IN ('job_acceptances_job_tenant_fk','job_acceptances_agent_tenant_fk')
+         ORDER BY conname",
+    )
+    .fetch_all(&upgrade_pool)
+    .await
+    .expect("inspect acceptance tenant foreign keys");
+    assert_eq!(
+        tenant_fences,
+        vec![
+            ("job_acceptances_agent_tenant_fk".into(), false),
+            ("job_acceptances_job_tenant_fk".into(), false),
+        ]
+    );
+
+    for fixture in [fixtures[1], fixtures[2]] {
+        let projection: (String, i64, bool, bool, String, bool, String, bool, String) =
+            sqlx::query_as(
+                "SELECT job.state,job.state_sequence,job.final_at IS NOT NULL,
+                        job.delivery_uncertain_since IS NOT NULL,
+                        attempt.state,attempt.final_at IS NOT NULL,
+                        reservation.state,reservation.released_at IS NOT NULL,
+                        destination.state
+                 FROM jobs AS job
+                 JOIN delivery_attempts AS attempt
+                   ON attempt.workspace_id=job.workspace_id
+                  AND attempt.environment_id=job.environment_id
+                  AND attempt.job_id=job.id
+                 JOIN route_reservations AS reservation
+                   ON reservation.workspace_id=attempt.workspace_id
+                  AND reservation.environment_id=attempt.environment_id
+                  AND reservation.attempt_id=attempt.id
+                 JOIN physical_destinations AS destination
+                   ON destination.workspace_id=attempt.workspace_id
+                  AND destination.environment_id=attempt.environment_id
+                  AND destination.id=attempt.destination_id
+                 WHERE job.id=$1 AND job.workspace_id=$2 AND job.environment_id=$3",
+            )
+            .bind(fixture.job_id)
+            .bind(fixture.workspace_id)
+            .bind(fixture.environment_id)
+            .fetch_one(&upgrade_pool)
+            .await
+            .expect("read historical revoked acceptance projections");
+        assert_eq!(
+            projection,
+            (
+                "delivery_uncertain".into(),
+                4,
+                true,
+                true,
+                "delivery_uncertain".into(),
+                true,
+                "released".into(),
+                true,
+                "attention".into(),
+            ),
+            "revoked {} fixture must be terminalized consistently",
+            fixture.name
+        );
+        let generation: Option<i64> =
+            sqlx::query_scalar("SELECT connector_generation FROM job_acceptances WHERE job_id=$1")
+                .bind(fixture.job_id)
+                .fetch_one(&upgrade_pool)
+                .await
+                .expect("read revoked acceptance connector generation");
+        assert_eq!(generation, Some(1));
+        let event_payload: serde_json::Value = sqlx::query_scalar(
+            "SELECT payload FROM job_events
+             WHERE workspace_id=$1 AND environment_id=$2 AND job_id=$3",
+        )
+        .bind(fixture.workspace_id)
+        .bind(fixture.environment_id)
+        .bind(fixture.job_id)
+        .fetch_one(&upgrade_pool)
+        .await
+        .expect("read historical uncertainty event payload");
+        serde_json::from_value::<EventId>(event_payload["id"].clone())
+            .expect("migration emitted a serde-compatible event ID");
+        serde_json::from_value::<JobId>(event_payload["job_id"].clone())
+            .expect("migration preserved a serde-compatible job ID");
+        serde_json::from_value::<AgentId>(event_payload["agent_id"].clone())
+            .expect("migration preserved a serde-compatible agent ID");
+        let events = store
+            .list_job_events(
+                fixture
+                    .workspace_id
+                    .parse()
+                    .expect("valid workspace fixture ID"),
+                fixture
+                    .environment_id
+                    .parse()
+                    .expect("valid environment fixture ID"),
+                fixture.job_id.parse().expect("valid job fixture ID"),
+            )
+            .await
+            .expect("migration event deserializes through PostgresStore");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].state, JobState::DeliveryUncertain);
+        assert_eq!(events[0].reason, Some(JobFailureReason::AmbiguousHandoff));
+        assert_eq!(
+            events[0].agent_id.map(|id| id.to_string()),
+            Some(fixture.agent_id.into())
+        );
+    }
+    let active_projection: (String, bool, String, bool, String) = sqlx::query_as(
+        "SELECT job.state,job.final_at IS NOT NULL,attempt.state,
+                attempt.final_at IS NOT NULL,reservation.state
+         FROM jobs AS job
+         JOIN delivery_attempts AS attempt
+           ON attempt.workspace_id=job.workspace_id
+          AND attempt.environment_id=job.environment_id
+          AND attempt.job_id=job.id
+         JOIN route_reservations AS reservation
+           ON reservation.workspace_id=attempt.workspace_id
+          AND reservation.environment_id=attempt.environment_id
+          AND reservation.attempt_id=attempt.id
+         WHERE job.id=$1",
+    )
+    .bind(fixtures[0].job_id)
+    .fetch_one(&upgrade_pool)
+    .await
+    .expect("read active connector projection");
+    assert_eq!(
+        active_projection,
+        (
+            "agent_accepted".into(),
+            false,
+            "queued_local".into(),
+            false,
+            "active".into()
+        )
+    );
+
+    let legacy_before: (Option<String>, Option<i64>, Option<Vec<u8>>, Option<i64>) =
+        sqlx::query_as(
+            "SELECT route_reservation_id,route_generation,route_fencing_token_hash,
+                    connector_generation
+             FROM job_acceptances WHERE job_id=$1",
+        )
+        .bind(fixtures[3].job_id)
+        .fetch_one(&upgrade_pool)
+        .await
+        .expect("read proofless legacy acceptance after migration");
+    assert_eq!(legacy_before, (None, None, None, Some(1)));
+    sqlx::query(
+        "UPDATE job_acceptances SET connector_generation=NULL
+         WHERE job_id=$1",
+    )
+    .bind(fixtures[3].job_id)
+    .execute(&upgrade_pool)
+    .await
+    .expect("restore a fully legacy NULL acceptance shape");
+    let legacy_reconciliation = store
+        .reconcile_agent_acceptance(
+            fixtures[3]
+                .workspace_id
+                .parse()
+                .expect("valid workspace fixture ID"),
+            fixtures[3]
+                .environment_id
+                .parse()
+                .expect("valid environment fixture ID"),
+            fixtures[3]
+                .agent_id
+                .parse()
+                .expect("valid agent fixture ID"),
+            fixtures[3].job_id.parse().expect("valid job fixture ID"),
+            Uuid::parse_str(fixtures[3].lease_id).expect("valid lease fixture UUID"),
+            "lease-token-legacy",
+            "content-legacy",
+            41,
+            DeliveryAttemptProof {
+                reservation_id: "rrsv_accept_legacy",
+                generation: 7,
+                fencing_token: "fence-legacy",
+            },
+        )
+        .await
+        .expect("reconcile exact legacy acceptance proof");
+    assert_eq!(legacy_reconciliation, (true, false, false));
+    let legacy_after: (String, i64, Vec<u8>, i64) = sqlx::query_as(
+        "SELECT route_reservation_id,route_generation,route_fencing_token_hash,
+                connector_generation
+         FROM job_acceptances WHERE job_id=$1",
+    )
+    .bind(fixtures[3].job_id)
+    .fetch_one(&upgrade_pool)
+    .await
+    .expect("read upgraded legacy acceptance proof");
+    assert_eq!(
+        legacy_after,
+        (
+            "rrsv_accept_legacy".into(),
+            7,
+            Sha256::digest(b"fence-legacy").to_vec(),
+            1,
+        )
+    );
+
+    // A post-upgrade N-1 writer still omits connector_generation. Against an
+    // active connector the trigger fills the current generation while holding
+    // the same connector-row lock used by revoke.
+    let active_old_writer_job = "job_01J00000000000000000000105";
+    sqlx::query(
+        "INSERT INTO jobs
+         (id,workspace_id,environment_id,printer_id,agent_id,payload,state,
+          state_sequence,per_printer_sequence,expires_at,destination_id,route_id)
+         VALUES ($1,$2,$3,$4,$5,'{}','waiting_for_agent',2,2,
+                 now()+interval '1 hour',$6,$7)",
+    )
+    .bind(active_old_writer_job)
+    .bind(fixtures[0].workspace_id)
+    .bind(fixtures[0].environment_id)
+    .bind(fixtures[0].printer_id)
+    .bind(fixtures[0].agent_id)
+    .bind("pdst_accept_active")
+    .bind("rte_accept_active")
+    .execute(&upgrade_pool)
+    .await
+    .expect("insert active old-writer job fixture");
+    let mut active_old_writer = upgrade_pool
+        .begin()
+        .await
+        .expect("begin active old-writer transaction");
+    sqlx::query(
+        "INSERT INTO job_acceptances
+         (job_id,workspace_id,environment_id,agent_id,lease_id,lease_token_hash,
+          content_sha256,local_sequence)
+         VALUES ($1,$2,$3,$4,$5,$6,'content-active-old-writer',42)",
+    )
+    .bind(active_old_writer_job)
+    .bind(fixtures[0].workspace_id)
+    .bind(fixtures[0].environment_id)
+    .bind(fixtures[0].agent_id)
+    .bind(Uuid::parse_str("10000000-0000-0000-0000-000000000002").expect("valid lease UUID"))
+    .bind(Sha256::digest(b"lease-token-active-old-writer").to_vec())
+    .execute(&mut *active_old_writer)
+    .await
+    .expect("old-column insert is admitted for active connector");
+    sqlx::query("UPDATE jobs SET state='agent_accepted',state_sequence=3 WHERE id=$1")
+        .bind(active_old_writer_job)
+        .execute(&mut *active_old_writer)
+        .await
+        .expect("simulate N-1 acceptance state transition");
+    active_old_writer
+        .commit()
+        .await
+        .expect("commit active N-1 acceptance");
+    let active_old_writer_generation: Option<i64> =
+        sqlx::query_scalar("SELECT connector_generation FROM job_acceptances WHERE job_id=$1")
+            .bind(active_old_writer_job)
+            .fetch_one(&upgrade_pool)
+            .await
+            .expect("read trigger-filled connector generation");
+    assert_eq!(active_old_writer_generation, Some(1));
+
+    // Insert-first ordering: an N-1 raw revoke must fail closed so it cannot
+    // deny the credential while leaving accepted work stranded. The N path
+    // sets the transaction-local bypass and owns the atomic projection sweep.
+    let insert_first_revoke =
+        sqlx::query("UPDATE node_connectors SET revoked_at=now() WHERE id=$1")
+            .bind("ncon_accept_legacy")
+            .execute(&upgrade_pool)
+            .await;
+    assert!(insert_first_revoke.is_err());
+    let insert_first_unchanged: (bool, String) = sqlx::query_as(
+        "SELECT connector.revoked_at IS NULL,job.state
+         FROM node_connectors AS connector
+         JOIN jobs AS job ON job.agent_id=connector.agent_id
+          AND job.workspace_id=connector.workspace_id
+          AND job.environment_id=connector.environment_id
+         WHERE connector.id=$1 AND job.id=$2",
+    )
+    .bind("ncon_accept_legacy")
+    .bind(fixtures[3].job_id)
+    .fetch_one(&upgrade_pool)
+    .await
+    .expect("old revoke rollback preserves active connector and accepted job");
+    assert_eq!(insert_first_unchanged, (true, "agent_accepted".into()));
+    sqlx::query("DELETE FROM job_acceptances WHERE job_id=$1")
+        .bind(fixtures[3].job_id)
+        .execute(&upgrade_pool)
+        .await
+        .expect("remove completed rolling-upgrade fixture acceptance");
+    sqlx::query("UPDATE jobs SET state='cancelled',final_at=now() WHERE id=$1")
+        .bind(fixtures[3].job_id)
+        .execute(&upgrade_pool)
+        .await
+        .expect("terminalize completed rolling-upgrade fixture job");
+    sqlx::query("UPDATE node_connectors SET revoked_at=now() WHERE id=$1")
+        .bind("ncon_accept_legacy")
+        .execute(&upgrade_pool)
+        .await
+        .expect("old revoke is safe after accepted work is terminal");
+
+    // Revoke-first ordering: the trigger aborts the old INSERT before its
+    // simulated state transition, leaving no acceptance and a pre-accepted job.
+    let revoke_first_job = "job_01J00000000000000000000405";
+    sqlx::query(
+        "INSERT INTO jobs
+         (id,workspace_id,environment_id,printer_id,agent_id,payload,state,
+          state_sequence,per_printer_sequence,expires_at,destination_id,route_id)
+         VALUES ($1,$2,$3,$4,$5,'{}','waiting_for_agent',2,2,
+                 now()+interval '1 hour',$6,$7)",
+    )
+    .bind(revoke_first_job)
+    .bind(fixtures[3].workspace_id)
+    .bind(fixtures[3].environment_id)
+    .bind(fixtures[3].printer_id)
+    .bind(fixtures[3].agent_id)
+    .bind("pdst_accept_legacy")
+    .bind("rte_accept_legacy")
+    .execute(&upgrade_pool)
+    .await
+    .expect("insert revoke-first job fixture");
+    let mut revoked_old_writer = upgrade_pool
+        .begin()
+        .await
+        .expect("begin revoked old-writer transaction");
+    let old_writer_after_revoke = sqlx::query(
+        "INSERT INTO job_acceptances
+         (job_id,workspace_id,environment_id,agent_id,lease_id,lease_token_hash,
+          content_sha256,local_sequence)
+         VALUES ($1,$2,$3,$4,$5,$6,'content-revoke-first',42)",
+    )
+    .bind(revoke_first_job)
+    .bind(fixtures[3].workspace_id)
+    .bind(fixtures[3].environment_id)
+    .bind(fixtures[3].agent_id)
+    .bind(Uuid::parse_str("40000000-0000-0000-0000-000000000002").expect("valid lease UUID"))
+    .bind(Sha256::digest(b"lease-token-revoke-first").to_vec())
+    .execute(&mut *revoked_old_writer)
+    .await;
+    assert!(
+        old_writer_after_revoke.is_err(),
+        "the acceptance trigger must reject an N-1 writer after revocation"
+    );
+    revoked_old_writer
+        .rollback()
+        .await
+        .expect("roll back rejected old-writer transaction");
+    let revoke_first_result: (String, i64) = sqlx::query_as(
+        "SELECT job.state,count(acceptance.job_id)
+         FROM jobs AS job
+         LEFT JOIN job_acceptances AS acceptance ON acceptance.job_id=job.id
+         WHERE job.id=$1 GROUP BY job.state",
+    )
+    .bind(revoke_first_job)
+    .fetch_one(&upgrade_pool)
+    .await
+    .expect("inspect rejected revoke-first acceptance");
+    assert_eq!(revoke_first_result, ("waiting_for_agent".into(), 0));
+
+    let revoked_generation_before: i64 =
+        sqlx::query_scalar("SELECT admission_generation FROM node_connectors WHERE id=$1")
+            .bind("ncon_accept_revoked_agent")
+            .fetch_one(&upgrade_pool)
+            .await
+            .expect("read backfilled revoked connector generation");
+    assert_eq!(revoked_generation_before, 1);
+    sqlx::query("UPDATE node_connectors SET revoked_at=NULL WHERE id=$1")
+        .bind("ncon_accept_revoked_agent")
+        .execute(&upgrade_pool)
+        .await
+        .expect("resurrect an old-style revoked connector");
+    let revoked_generation_after: i64 =
+        sqlx::query_scalar("SELECT admission_generation FROM node_connectors WHERE id=$1")
+            .bind("ncon_accept_revoked_agent")
+            .fetch_one(&upgrade_pool)
+            .await
+            .expect("read advanced connector generation");
+    assert_eq!(revoked_generation_after, 2);
+    let historical_acceptance_generation: Option<i64> =
+        sqlx::query_scalar("SELECT connector_generation FROM job_acceptances WHERE job_id=$1")
+            .bind(fixtures[1].job_id)
+            .fetch_one(&upgrade_pool)
+            .await
+            .expect("read historical acceptance generation after resurrection");
+    assert_eq!(historical_acceptance_generation, Some(1));
+
+    let partial_proof = sqlx::query(
+        "UPDATE job_acceptances
+         SET route_generation=NULL
+         WHERE job_id=$1",
+    )
+    .bind(fixtures[0].job_id)
+    .execute(&upgrade_pool)
+    .await;
+    assert!(
+        partial_proof.is_err(),
+        "all-or-none route proof constraint must reject a missing generation"
+    );
+    let malformed_hash = sqlx::query(
+        "UPDATE job_acceptances
+         SET route_fencing_token_hash=decode(repeat('ff',31),'hex')
+         WHERE job_id=$1",
+    )
+    .bind(fixtures[0].job_id)
+    .execute(&upgrade_pool)
+    .await;
+    assert!(
+        malformed_hash.is_err(),
+        "route proof constraint must reject a tampered fencing hash length"
+    );
+    let invalid_connector_generation =
+        sqlx::query("UPDATE job_acceptances SET connector_generation=0 WHERE job_id=$1")
+            .bind(fixtures[0].job_id)
+            .execute(&upgrade_pool)
+            .await;
+    assert!(
+        invalid_connector_generation.is_err(),
+        "connector generation constraint must reject a non-positive fence"
+    );
+    let preserved_exact_proof: (String, i64, Vec<u8>) = sqlx::query_as(
+        "SELECT route_reservation_id,route_generation,route_fencing_token_hash
+         FROM job_acceptances
+         WHERE job_id=$1",
+    )
+    .bind(fixtures[0].job_id)
+    .fetch_one(&upgrade_pool)
+    .await
+    .expect("failed tampering leaves the exact proof intact");
+    assert_eq!(
+        preserved_exact_proof,
+        ("rrsv_accept_active".into(), 7, active_fence)
+    );
+    let upgraded_latest: i64 =
+        sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations WHERE success")
+            .fetch_one(&upgrade_pool)
+            .await
+            .expect("read upgraded schema version");
+    assert_eq!(upgraded_latest, 45);
+
+    upgrade_pool.close().await;
+    sqlx::query(&format!("DROP SCHEMA {upgrade_schema} CASCADE"))
+        .execute(&admin)
+        .await
+        .expect("drop exact disposable upgrade schema");
+
+    let fresh_schema = format!("piqae_acceptance_fresh_{}", ulid::Ulid::new()).to_ascii_lowercase();
+    sqlx::query(&format!("CREATE SCHEMA {fresh_schema}"))
+        .execute(&admin)
+        .await
+        .expect("create exact disposable fresh schema");
+    let fresh_pool = schema_pool(&database_url, &fresh_schema).await;
+    PostgresStore::from_pool(fresh_pool.clone())
+        .migrate()
+        .await
+        .expect("application startup migrates an empty database to version 45");
+    let fresh_latest: i64 =
+        sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations WHERE success")
+            .fetch_one(&fresh_pool)
+            .await
+            .expect("read fresh schema version");
+    assert_eq!(fresh_latest, 45);
+    let fresh_columns: Vec<(String, String)> = sqlx::query_as(
+        "SELECT column_name,data_type
+         FROM information_schema.columns
+         WHERE table_schema=current_schema()
+           AND table_name='job_acceptances'
+           AND column_name IN (
+               'route_reservation_id','route_generation','route_fencing_token_hash',
+               'connector_generation'
+           )
+         ORDER BY column_name",
+    )
+    .fetch_all(&fresh_pool)
+    .await
+    .expect("inspect fresh acceptance route proof columns");
+    assert_eq!(
+        fresh_columns,
+        vec![
+            ("connector_generation".into(), "bigint".into()),
+            ("route_fencing_token_hash".into(), "bytea".into()),
+            ("route_generation".into(), "bigint".into()),
+            ("route_reservation_id".into(), "text".into()),
+        ]
+    );
+    let admission_generation: (String, String) = sqlx::query_as(
+        "SELECT data_type,column_default
+         FROM information_schema.columns
+         WHERE table_schema=current_schema()
+           AND table_name='node_connectors'
+           AND column_name='admission_generation'",
+    )
+    .fetch_one(&fresh_pool)
+    .await
+    .expect("inspect fresh connector admission generation");
+    assert_eq!(admission_generation.0, "bigint");
+    assert_eq!(admission_generation.1, "1");
+    let fresh_constraints: Vec<(String, String)> = sqlx::query_as(
+        "SELECT conname,pg_get_constraintdef(oid)
+         FROM pg_constraint
+         WHERE conrelid='job_acceptances'::regclass
+           AND conname IN (
+               'job_acceptances_route_proof_complete',
+               'job_acceptances_connector_generation_valid'
+           )
+         ORDER BY conname",
+    )
+    .fetch_all(&fresh_pool)
+    .await
+    .expect("inspect fresh acceptance fencing constraints");
+    assert_eq!(fresh_constraints.len(), 2);
+    assert!(fresh_constraints.iter().any(|(name, definition)| {
+        name == "job_acceptances_route_proof_complete"
+            && definition.contains("octet_length(route_fencing_token_hash) = 32")
+    }));
+    assert!(fresh_constraints.iter().any(|(name, definition)| {
+        name == "job_acceptances_connector_generation_valid"
+            && definition.contains("connector_generation > 0")
+    }));
+    let fresh_trigger_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM pg_trigger
+         WHERE tgrelid='node_connectors'::regclass
+           AND tgname='node_connectors_advance_admission_generation'
+           AND NOT tgisinternal",
+    )
+    .fetch_one(&fresh_pool)
+    .await
+    .expect("inspect fresh connector generation trigger");
+    assert_eq!(fresh_trigger_count, 1);
+
+    fresh_pool.close().await;
+    sqlx::query(&format!("DROP SCHEMA {fresh_schema} CASCADE"))
+        .execute(&admin)
+        .await
+        .expect("drop exact disposable fresh schema");
 }
 
 #[tokio::test]
@@ -440,7 +1315,7 @@ async fn postgres_reported_complete_billing_upgrades_from_previous_schema() {
         .fetch_one(&pool)
         .await
         .expect("read latest schema version");
-    assert_eq!(latest, 44);
+    assert_eq!(latest, 45);
     let billable_index: Option<String> =
         sqlx::query_scalar("SELECT to_regclass('usage_one_billable_print_per_job_idx')::text")
             .fetch_one(&pool)
@@ -652,7 +1527,7 @@ async fn documents_migrate_and_enforce_tenant_scoped_references() {
         .fetch_one(&pool)
         .await
         .expect("read schema version");
-    assert_eq!(latest, 44);
+    assert_eq!(latest, 45);
     pool.close().await;
     sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
         .execute(&admin)
@@ -1046,7 +1921,7 @@ async fn agent_health_migrates_empty_and_previous_schemas_with_tenant_fencing() 
         .fetch_one(&empty_pool)
         .await
         .expect("read empty-database schema version");
-    assert_eq!(latest, 44);
+    assert_eq!(latest, 45);
     empty_pool.close().await;
     sqlx::query(&format!("DROP SCHEMA {empty_schema} CASCADE"))
         .execute(&admin)
@@ -1195,7 +2070,7 @@ async fn content_encryption_key_algorithm_migrates_fresh_and_legacy_schemas() {
         .fetch_one(&empty_pool)
         .await
         .expect("read empty-database schema version");
-    assert_eq!(empty_latest, 44);
+    assert_eq!(empty_latest, 45);
     empty_pool.close().await;
     sqlx::query(&format!("DROP SCHEMA {empty_schema} CASCADE"))
         .execute(&admin)
@@ -1263,7 +2138,7 @@ async fn content_encryption_key_algorithm_migrates_fresh_and_legacy_schemas() {
         .fetch_one(&upgrade_pool)
         .await
         .expect("read upgraded schema version");
-    assert_eq!(latest, 44);
+    assert_eq!(latest, 45);
     let reference_guard_config: Vec<String> = sqlx::query_scalar(
         "SELECT coalesce(proconfig, ARRAY[]::text[])
          FROM pg_proc JOIN pg_namespace ON pg_namespace.oid = pg_proc.pronamespace
