@@ -42,6 +42,11 @@ impl From<ClientError> for CloudWorkerError {
             ClientError::Unauthorized { .. } => "unauthorized",
             ClientError::Signing => "signing_failed",
             ClientError::Http(_) => "transport_failed",
+            ClientError::Status { status, .. }
+                if matches!(status, 408 | 425 | 429) || status >= 500 =>
+            {
+                "server_retryable"
+            }
             ClientError::Status { .. } => "server_rejected",
             ClientError::ResponseTooLarge => "response_too_large",
             ClientError::DeviceAuthorization => "authorization_failed",

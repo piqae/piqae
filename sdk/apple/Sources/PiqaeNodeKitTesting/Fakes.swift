@@ -22,12 +22,16 @@ public actor PiqaeFakeEmbeddedRuntime: PiqaeEmbeddedNodeRuntime {
     private var nextOperationDelayNanoseconds: UInt64
     private var nativeObservationDelayNanoseconds: UInt64 = 0
     private var reconcileFailuresRemaining = 0
+    private var reconcileOutcomeValue = PiqaeCloudReconcileOutcome.noCloud
+    private var reconcileOutcomes: [PiqaeCloudReconcileOutcome] = []
+    private var reconcileDelayNanoseconds: UInt64 = 0
     private var reconcileCallCountValue = 0
     private var workAvailableHandler: (@Sendable () -> Void)?
     private var operationsByAdapter: [String: [PiqaeRuntimeAdapterOperation]] = [:]
     private var observationsByAdapter: [String: [PiqaeRuntimeAdapterOperation]] = [:]
     private var nextOperationCallCountValue = 0
     private var nativeObservationCallCountValue = 0
+    private var completionStatesValue: [String] = []
     private var activeNextOperationCalls = 0
     private var maximumConcurrentNextOperationCallsValue = 0
     public private(set) var startCount = 0
@@ -53,18 +57,55 @@ public actor PiqaeFakeEmbeddedRuntime: PiqaeEmbeddedNodeRuntime {
         workAvailableHandler = handler
     }
 
-    public func reconcileCloud(timeoutMilliseconds: UInt64) async throws -> Bool {
+    public func reconcileCloud(
+        timeoutMilliseconds: UInt64
+    ) async throws -> Bool {
+        let outcome = try await reconcileCloudOutcome(timeoutMilliseconds: timeoutMilliseconds)
+        return outcome.loopCompleted && outcome.failedCount == 0
+    }
+
+    public func reconcileCloudOutcome(
+        timeoutMilliseconds: UInt64
+    ) async throws -> PiqaeCloudReconcileOutcome {
         reconcileCallCountValue += 1
-        guard timeoutMilliseconds > 0 else { return false }
+        if reconcileDelayNanoseconds > 0 {
+            try await Task.sleep(nanoseconds: reconcileDelayNanoseconds)
+        }
+        guard timeoutMilliseconds > 0 else {
+            return PiqaeCloudReconcileOutcome(
+                cloudConfigured: true,
+                loopCompleted: false,
+                connectorCount: 0,
+                succeededCount: 0,
+                failedCount: 0,
+                allSucceeded: false,
+                partialSuccess: false,
+                retryable: true,
+                failureClass: .transient
+            )
+        }
         if reconcileFailuresRemaining > 0 {
             reconcileFailuresRemaining -= 1
             throw ReconcileFailure.requested
         }
-        return true
+        if !reconcileOutcomes.isEmpty { return reconcileOutcomes.removeFirst() }
+        return reconcileOutcomeValue
     }
 
     public func failNextCloudReconciliations(_ count: Int) {
         reconcileFailuresRemaining = max(0, count)
+    }
+
+    public func setCloudReconcileOutcome(_ outcome: PiqaeCloudReconcileOutcome) {
+        reconcileOutcomeValue = outcome
+    }
+
+    public func setCloudReconcileOutcomes(_ outcomes: [PiqaeCloudReconcileOutcome]) {
+        reconcileOutcomes = outcomes
+    }
+
+    public func setCloudReconcileDelayNanoseconds(_ value: UInt64) {
+        reconcileDelayNanoseconds = value
     }
 
     public func reconcileCallCount() -> Int { reconcileCallCountValue }
@@ -169,6 +210,7 @@ public actor PiqaeFakeEmbeddedRuntime: PiqaeEmbeddedNodeRuntime {
             }
             state = "queued"
         }
+        completionStatesValue.append(state)
         return PiqaeRuntimeAdapterAcknowledgement(
             operationID: operation.operationID,
             jobID: operation.jobID,
@@ -211,6 +253,7 @@ public actor PiqaeFakeEmbeddedRuntime: PiqaeEmbeddedNodeRuntime {
 
     public func nextOperationCallCount() -> Int { nextOperationCallCountValue }
     public func nativeObservationCallCount() -> Int { nativeObservationCallCountValue }
+    public func completionStates() -> [String] { completionStatesValue }
 
     public func maximumConcurrentNextOperationCalls() -> Int {
         maximumConcurrentNextOperationCallsValue
@@ -271,6 +314,7 @@ public actor PiqaeFakePrinterAdapter: PiqaePrinterAdapter {
     private var observationsByNativeJobID: [String: [PiqaeNativeJobObservation]] = [:]
     private var observationCountsByNativeJobID: [String: Int] = [:]
     private var nativeObservationDelayNanoseconds: UInt64 = 0
+    private var submissionDelayNanoseconds: UInt64 = 0
     private let now: Date
 
     public init(
@@ -302,6 +346,9 @@ public actor PiqaeFakePrinterAdapter: PiqaePrinterAdapter {
         to printer: PiqaePrinter
     ) async throws -> PiqaeJobReceipt {
         submissionCountValue += 1
+        if submissionDelayNanoseconds > 0 {
+            try await Task.sleep(nanoseconds: submissionDelayNanoseconds)
+        }
         if submissionBehavior == .throwAfterHandoff { throw SubmissionFailure.requested }
         return PiqaeJobReceipt(
             jobID: .init(rawValue: "job_fake_\(submissionCountValue)"),
@@ -361,6 +408,10 @@ public actor PiqaeFakePrinterAdapter: PiqaePrinterAdapter {
 
     public func setNativeObservationDelayNanoseconds(_ value: UInt64) {
         nativeObservationDelayNanoseconds = value
+    }
+
+    public func setSubmissionDelayNanoseconds(_ value: UInt64) {
+        submissionDelayNanoseconds = value
     }
 
     public func nativeObservationCount(for nativeJobID: String) -> Int {

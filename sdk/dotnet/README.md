@@ -39,7 +39,11 @@ node.Start();
 // Windows and grants no print authority.
 node.ApplyLifecycle(LifecycleEvent.Woke);
 node.ApplyLifecycle(LifecycleEvent.NetworkAvailable);
-_ = node.ReconcileCloud(TimeSpan.FromSeconds(5));
+var reconciliation = await node.ReconcileCloudAsync(
+    TimeSpan.FromSeconds(5),
+    CancellationToken.None);
+// LoopCompleted is not sufficient by itself: inspect FailedCount, Retryable,
+// and FailureClass. Counts/classes contain no connector or tenant identity.
 
 var prepared = node.PrepareConnectorInvitation();
 // Send prepared.PublicKeyBase64 to the trusted UI that issued the invitation,

@@ -23,7 +23,7 @@ use piqae_protocol::agent::{
     InventoryProjectionAcknowledgement, JobOffer, PrinterGrant,
 };
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     sync::{
         Arc, Condvar, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -59,6 +59,7 @@ pub trait WorkAvailableNotifier: std::fmt::Debug + Send + Sync {
 #[derive(Debug)]
 pub struct EmbeddedCloudSupervisor {
     stop: Arc<AtomicBool>,
+    stop_notify: Arc<tokio::sync::Notify>,
     reconcile: Arc<ReconcileControl>,
     thread: Option<JoinHandle<()>>,
 }
@@ -70,19 +71,72 @@ pub struct EmbeddedCloudReconcileRequest {
 }
 
 impl EmbeddedCloudReconcileRequest {
+    #[must_use]
+    pub const fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// Returns the exact generation's result without blocking a host executor.
+    #[must_use]
+    pub fn poll(&self) -> Option<EmbeddedCloudReconcileOutcome> {
+        self.control.poll(self.generation)
+    }
+
     /// Waits until the supervisor has completed a connector pass which began
     /// after this request was issued.
     #[must_use]
-    pub fn wait(self, timeout: Duration) -> bool {
+    pub fn wait(self, timeout: Duration) -> Option<EmbeddedCloudReconcileOutcome> {
         self.control.wait(self.generation, timeout)
     }
+}
+
+/// Privacy-safe result for one explicitly requested supervisor generation.
+/// Counts never identify a connector, workspace, job, printer or document.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
+pub struct EmbeddedCloudReconcileOutcome {
+    pub generation: u64,
+    pub loop_completed: bool,
+    pub connector_count: usize,
+    pub succeeded_count: usize,
+    pub failed_count: usize,
+    pub success_scope: EmbeddedCloudSuccessScope,
+    pub retryable: bool,
+    pub failure_class: EmbeddedCloudFailureClass,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EmbeddedCloudSuccessScope {
+    None,
+    Partial,
+    All,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EmbeddedCloudFailureClass {
+    None,
+    Transient,
+    Authentication,
+    Configuration,
+    LocalState,
+    Protocol,
+    Mixed,
+    Stopped,
 }
 
 #[derive(Debug, Default)]
 struct ReconcileControl {
     requested_generation: AtomicU64,
-    completed_generation: Mutex<u64>,
+    state: Mutex<ReconcileState>,
     completed: Condvar,
+}
+
+#[derive(Debug, Default)]
+struct ReconcileState {
+    completed_generation: u64,
+    outcomes: VecDeque<EmbeddedCloudReconcileOutcome>,
+    stopped: bool,
 }
 
 impl ReconcileControl {
@@ -97,35 +151,65 @@ impl ReconcileControl {
         (requested > completed).then_some(requested)
     }
 
-    fn complete(&self, generation: u64) {
-        let mut completed = self
-            .completed_generation
+    fn complete(&self, outcome: EmbeddedCloudReconcileOutcome) {
+        let mut state = self
+            .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        *completed = (*completed).max(generation);
-        drop(completed);
+        state.completed_generation = state.completed_generation.max(outcome.generation);
+        state.outcomes.push_back(outcome);
+        while state.outcomes.len() > 64 {
+            state.outcomes.pop_front();
+        }
+        drop(state);
         self.completed.notify_all();
+    }
+
+    fn stop(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.stopped = true;
+        drop(state);
+        self.completed.notify_all();
+    }
+
+    fn poll(&self, target: u64) -> Option<EmbeddedCloudReconcileOutcome> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .outcomes
+            .iter()
+            .find(|outcome| outcome.generation >= target)
+            .copied()
     }
 
     // The mutex guard must be moved into `wait_timeout_while`; Clippy cannot
     // follow that move through the condvar result and reports a false positive.
     #[allow(clippy::significant_drop_tightening)]
-    fn wait(&self, target: u64, timeout: Duration) -> bool {
-        let completed = self
-            .completed_generation
+    fn wait(&self, target: u64, timeout: Duration) -> Option<EmbeddedCloudReconcileOutcome> {
+        let state = self
+            .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if *completed >= target {
-            drop(completed);
-            return true;
+        if state.completed_generation >= target || state.stopped {
+            drop(state);
+            return self.poll(target);
         }
-        let (completed, _) = self
+        let (state, _) = self
             .completed
-            .wait_timeout_while(completed, timeout, |completed| *completed < target)
+            .wait_timeout_while(state, timeout, |state| {
+                state.completed_generation < target && !state.stopped
+            })
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let reached_target = *completed >= target;
-        drop(completed);
-        reached_target
+        let outcome = state
+            .outcomes
+            .iter()
+            .find(|outcome| outcome.generation >= target)
+            .copied();
+        drop(state);
+        outcome
     }
 }
 
@@ -144,6 +228,8 @@ impl EmbeddedCloudSupervisor {
     ) -> Result<Self, std::io::Error> {
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = Arc::clone(&stop);
+        let stop_notify = Arc::new(tokio::sync::Notify::new());
+        let thread_stop_notify = Arc::clone(&stop_notify);
         let reconcile = Arc::new(ReconcileControl::default());
         let thread_reconcile = Arc::clone(&reconcile);
         let thread = std::thread::Builder::new()
@@ -161,12 +247,14 @@ impl EmbeddedCloudSupervisor {
                     provider,
                     runtime,
                     thread_stop,
+                    thread_stop_notify,
                     thread_reconcile,
                     work_notifier,
                 ));
             })?;
         Ok(Self {
             stop,
+            stop_notify,
             reconcile,
             thread: Some(thread),
         })
@@ -185,13 +273,24 @@ impl EmbeddedCloudSupervisor {
         }
     }
 
+    /// Polls an earlier request without waiting on the caller's thread.
+    #[must_use]
+    pub fn poll_reconcile(&self, generation: u64) -> Option<EmbeddedCloudReconcileOutcome> {
+        self.reconcile.poll(generation)
+    }
+
     #[must_use]
     pub fn reconcile_now(&self, timeout: Duration) -> bool {
-        self.request_reconcile().wait(timeout)
+        self.request_reconcile().wait(timeout).is_some()
     }
 
     pub fn stop(&mut self) {
         self.stop.store(true, Ordering::Release);
+        // This supervisor has a single consumer. `notify_one` retains a permit
+        // when stop races the consumer registering its next wait, so shutdown
+        // cannot fall through to a full network timeout.
+        self.stop_notify.notify_one();
+        self.reconcile.stop();
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
@@ -245,19 +344,26 @@ impl ConnectorRetrySchedule {
     }
 }
 
+#[allow(
+    clippy::cognitive_complexity,
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "the explicit durable boundaries and interrupt channel stay visible in one supervisor loop"
+)]
 async fn run_supervisor(
     queue: Arc<Mutex<EmbeddedQueue>>,
     registry: Arc<Mutex<ConnectorRegistry>>,
     provider: Arc<dyn SecureConnectorSigner>,
     runtime: Arc<NodeRuntime>,
     stop: Arc<AtomicBool>,
+    stop_notify: Arc<tokio::sync::Notify>,
     reconcile: Arc<ReconcileControl>,
     work_notifier: Option<Arc<dyn WorkAvailableNotifier>>,
 ) {
     let mut retry_schedule = ConnectorRetrySchedule::default();
     let started_at = Utc::now();
     let mut completed_reconcile_generation = 0_u64;
-    while !stop.load(Ordering::Acquire) {
+    'supervisor: while !stop.load(Ordering::Acquire) {
         let forced_generation = reconcile.requested_after(completed_reconcile_generation);
         let pending_revocations = match registry.lock() {
             Ok(registry) => registry
@@ -278,13 +384,16 @@ async fn run_supervisor(
             if !retry_schedule.is_due(&record.connector_id, now) {
                 continue;
             }
-            let outcome = finish_remote_connector_revocation(
-                Arc::clone(&queue),
-                Arc::clone(&registry),
-                &record,
-                Arc::clone(&provider),
-            )
-            .await;
+            let outcome = tokio::select! {
+                biased;
+                () = stop_notify.notified() => break 'supervisor,
+                outcome = finish_remote_connector_revocation(
+                    Arc::clone(&queue),
+                    Arc::clone(&registry),
+                    &record,
+                    Arc::clone(&provider),
+                ) => outcome,
+            };
             let completed_at = tokio::time::Instant::now();
             if outcome.is_ok() {
                 retry_schedule.record_success(&record.connector_id, completed_at, None);
@@ -298,6 +407,9 @@ async fn run_supervisor(
         };
         tracked.extend(records.iter().map(|record| record.connector_id.clone()));
         retry_schedule.retain(&tracked);
+        let connector_count = records.len();
+        let mut succeeded_count = 0_usize;
+        let mut pass_failures = Vec::new();
         for record in records {
             if stop.load(Ordering::Acquire) {
                 break;
@@ -306,48 +418,210 @@ async fn run_supervisor(
             if forced_generation.is_none() && !retry_schedule.is_due(&record.connector_id, now) {
                 continue;
             }
-            let outcome = reconcile_connector(
-                Arc::clone(&queue),
-                Arc::clone(&registry),
-                Arc::clone(&provider),
-                Arc::clone(&runtime),
-                &record,
-                started_at,
-                work_notifier.clone(),
-            )
-            .await;
+            let outcome = tokio::select! {
+                biased;
+                () = stop_notify.notified() => break 'supervisor,
+                outcome = reconcile_connector(
+                    Arc::clone(&queue),
+                    Arc::clone(&registry),
+                    Arc::clone(&provider),
+                    Arc::clone(&runtime),
+                    &record,
+                    started_at,
+                    work_notifier.clone(),
+                ) => outcome,
+            };
             let completed_at = tokio::time::Instant::now();
-            if let Ok(delay) = outcome {
-                retry_schedule.record_success(&record.connector_id, completed_at, Some(delay));
-            } else {
-                retry_schedule.record_failure(&record.connector_id, completed_at);
+            match outcome {
+                Ok(delay) => {
+                    succeeded_count = succeeded_count.saturating_add(1);
+                    retry_schedule.record_success(&record.connector_id, completed_at, Some(delay));
+                }
+                Err(error) => {
+                    pass_failures.push(classify_failure(error));
+                    retry_schedule.record_failure(&record.connector_id, completed_at);
+                }
             }
         }
         if !stop.load(Ordering::Acquire)
             && let Some(generation) = forced_generation
         {
             completed_reconcile_generation = generation;
-            reconcile.complete(generation);
+            let failed_count = pass_failures.len();
+            reconcile.complete(EmbeddedCloudReconcileOutcome {
+                generation,
+                loop_completed: true,
+                connector_count,
+                succeeded_count,
+                failed_count,
+                success_scope: if failed_count == 0 {
+                    EmbeddedCloudSuccessScope::All
+                } else if succeeded_count > 0 {
+                    EmbeddedCloudSuccessScope::Partial
+                } else {
+                    EmbeddedCloudSuccessScope::None
+                },
+                retryable: !pass_failures.is_empty()
+                    && pass_failures.iter().all(|failure| failure.retryable),
+                failure_class: combined_failure_class(&pass_failures),
+            });
         }
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        tokio::select! {
+            () = stop_notify.notified() => break,
+            () = tokio::time::sleep(Duration::from_millis(250)) => {}
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ClassifiedFailure {
+    class: EmbeddedCloudFailureClass,
+    retryable: bool,
+}
+
+fn classify_failure(error: CloudWorkerError) -> ClassifiedFailure {
+    let (class, retryable) = match error.code {
+        "transport_failed" | "server_retryable" | "lease_renewal_timeout" => {
+            (EmbeddedCloudFailureClass::Transient, true)
+        }
+        "unauthorized"
+        | "signing_failed"
+        | "authorization_failed"
+        | "invalid_signature"
+        | "connector_admission_revoked"
+        | "secure_connector_key_missing" => (EmbeddedCloudFailureClass::Authentication, false),
+        "connector_origin_invalid"
+        | "connector_identity_invalid"
+        | "request_invalid"
+        | "embedded_content_invalid"
+        | "embedded_content_too_large"
+        | "embedded_content_unsupported"
+        | "embedded_content_key_required"
+        | "content_invalid"
+        | "embedded_pending_accept_invalid"
+        | "embedded_route_reservation_missing"
+        | "embedded_route_reservation_invalid" => (EmbeddedCloudFailureClass::Configuration, false),
+        "server_rejected" | "response_too_large" | "inventory_projection_unacknowledged" => {
+            (EmbeddedCloudFailureClass::Protocol, false)
+        }
+        "durable_write_failed"
+        | "embedded_queue_unavailable"
+        | "embedded_registry_unavailable"
+        | "embedded_event_ack_failed"
+        | "embedded_pending_accept_failed"
+        | "embedded_accept_prepare_failed"
+        | "embedded_accept_activate_failed"
+        | "embedded_accept_abandon_failed" => (EmbeddedCloudFailureClass::LocalState, true),
+        // New failure codes are not retryable until their safety has been
+        // classified explicitly. This keeps host wake loops fail-closed.
+        _ => (EmbeddedCloudFailureClass::LocalState, false),
+    };
+    ClassifiedFailure { class, retryable }
+}
+
+fn combined_failure_class(failures: &[ClassifiedFailure]) -> EmbeddedCloudFailureClass {
+    let Some(first) = failures.first() else {
+        return EmbeddedCloudFailureClass::None;
+    };
+    if failures.iter().all(|failure| failure.class == first.class) {
+        first.class
+    } else {
+        EmbeddedCloudFailureClass::Mixed
     }
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, reason = "test fixtures fail loudly")]
 mod reconcile_control_tests {
-    use super::ReconcileControl;
-    use std::{sync::Arc, time::Duration};
+    use super::{
+        CloudWorkerError, EmbeddedCloudFailureClass, EmbeddedCloudReconcileOutcome,
+        EmbeddedCloudSuccessScope, EmbeddedCloudSupervisor, ReconcileControl, classify_failure,
+    };
+    use crate::{
+        AvailabilityClass, ConnectorKeyError, EmbeddedQueue, GeneratedConnectorKey,
+        HostCapabilities, HostKind, NodeRuntime, NodeRuntimeMode, PrinterTransport,
+        RuntimeConfiguration, SecureConnectorSigner, SecureKeyHandle,
+        connector_registry::ConnectorRegistry,
+    };
+    use piqae_support_packs::SupportPackRegistry;
+    use std::{collections::BTreeSet, sync::Arc, time::Duration};
+
+    #[derive(Debug)]
+    struct UnusedSigner;
+
+    impl SecureConnectorSigner for UnusedSigner {
+        fn generate(&self, _scope: &str) -> Result<GeneratedConnectorKey, ConnectorKeyError> {
+            Err(ConnectorKeyError::Unavailable)
+        }
+
+        fn sign(
+            &self,
+            _handle: &SecureKeyHandle,
+            _message: &[u8],
+        ) -> Result<[u8; 64], ConnectorKeyError> {
+            Err(ConnectorKeyError::Unavailable)
+        }
+
+        fn delete(&self, _handle: &SecureKeyHandle) -> Result<(), ConnectorKeyError> {
+            Err(ConnectorKeyError::Unavailable)
+        }
+    }
 
     #[test]
     fn exact_request_generation_does_not_complete_early() {
         let control = Arc::new(ReconcileControl::default());
         let first = control.request();
         let second = control.request();
-        control.complete(first);
-        assert!(control.wait(first, Duration::ZERO));
-        assert!(!control.wait(second, Duration::from_millis(1)));
-        control.complete(second);
-        assert!(control.wait(second, Duration::ZERO));
+        control.complete(success(first));
+        assert_eq!(control.wait(first, Duration::ZERO), Some(success(first)));
+        assert_eq!(control.wait(second, Duration::from_millis(1)), None);
+        control.complete(success(second));
+        assert_eq!(control.wait(second, Duration::ZERO), Some(success(second)));
+    }
+
+    #[test]
+    fn request_arriving_mid_pass_requires_a_later_generation() {
+        let control = ReconcileControl::default();
+        let first = control.request();
+        let pass_generation = control.requested_after(0).unwrap();
+        assert_eq!(pass_generation, first);
+
+        // This request arrives after the supervisor captured its pass fence.
+        let mid_pass = control.request();
+        control.complete(success(pass_generation));
+
+        assert_eq!(control.poll(first), Some(success(first)));
+        assert_eq!(control.poll(mid_pass), None);
+        assert_eq!(control.requested_after(pass_generation), Some(mid_pass));
+    }
+
+    #[test]
+    fn partial_failure_outcome_never_contains_connector_identity() {
+        let outcome = EmbeddedCloudReconcileOutcome {
+            generation: 7,
+            loop_completed: true,
+            connector_count: 3,
+            succeeded_count: 2,
+            failed_count: 1,
+            success_scope: EmbeddedCloudSuccessScope::Partial,
+            retryable: true,
+            failure_class: EmbeddedCloudFailureClass::Transient,
+        };
+        let encoded = serde_json::to_string(&outcome).unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&encoded).unwrap()["failed_count"],
+            1
+        );
+        assert!(!encoded.contains("connector_id"));
+        assert!(!encoded.contains("workspace"));
+    }
+
+    #[test]
+    fn only_explicitly_classified_failures_are_retryable() {
+        assert!(classify_failure(CloudWorkerError::new("transport_failed")).retryable);
+        assert!(classify_failure(CloudWorkerError::new("embedded_queue_unavailable")).retryable);
+        assert!(!classify_failure(CloudWorkerError::new("invalid_signature")).retryable);
+        assert!(!classify_failure(CloudWorkerError::new("new_unclassified_code")).retryable);
     }
 
     #[test]
@@ -357,8 +631,79 @@ mod reconcile_control_tests {
         let second = control.request();
         assert!(second > first);
         assert_eq!(control.requested_after(0), Some(second));
-        control.complete(second);
+        control.complete(success(second));
         assert!(control.requested_after(second).is_none());
+    }
+
+    #[test]
+    fn stop_wakes_waiters_without_claiming_completion() {
+        let control = Arc::new(ReconcileControl::default());
+        let generation = control.request();
+        let waiter = {
+            let control = Arc::clone(&control);
+            std::thread::spawn(move || control.wait(generation, Duration::from_secs(30)))
+        };
+        control.stop();
+        assert_eq!(waiter.join().unwrap(), None);
+    }
+
+    #[test]
+    fn real_supervisor_completes_empty_cloud_generation_and_stops_promptly() {
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(
+            NodeRuntime::start(RuntimeConfiguration {
+                data_directory: directory.path().join("runtime"),
+                mode: NodeRuntimeMode::CloudCapable,
+                host: HostCapabilities {
+                    host_kind: HostKind::EmbeddedApplication,
+                    availability: AvailabilityClass::BackgroundOpportunistic,
+                    secure_storage: true,
+                    local_ipc_broker: false,
+                    can_prevent_idle_sleep_during_handoff: false,
+                    can_receive_remote_wake_hint: true,
+                    printer_transports: BTreeSet::<PrinterTransport>::new(),
+                },
+            })
+            .unwrap(),
+        );
+        let queue = Arc::new(std::sync::Mutex::new(
+            EmbeddedQueue::open(
+                directory.path().join("embedded"),
+                SupportPackRegistry::default(),
+            )
+            .unwrap(),
+        ));
+        let registry = Arc::new(std::sync::Mutex::new(
+            ConnectorRegistry::load(directory.path().join("embedded")).unwrap(),
+        ));
+        let mut supervisor =
+            EmbeddedCloudSupervisor::start(queue, registry, Arc::new(UnusedSigner), runtime, None)
+                .unwrap();
+
+        let request = supervisor.request_reconcile();
+        let generation = request.generation();
+        let outcome = request.wait(Duration::from_secs(2)).unwrap();
+        assert_eq!(outcome.generation, generation);
+        assert!(outcome.loop_completed);
+        assert_eq!(outcome.connector_count, 0);
+        assert_eq!(outcome.success_scope, EmbeddedCloudSuccessScope::All);
+
+        let started = std::time::Instant::now();
+        supervisor.stop();
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    const fn success(generation: u64) -> EmbeddedCloudReconcileOutcome {
+        EmbeddedCloudReconcileOutcome {
+            generation,
+            loop_completed: true,
+            connector_count: 0,
+            succeeded_count: 0,
+            failed_count: 0,
+            success_scope: EmbeddedCloudSuccessScope::All,
+            retryable: false,
+            failure_class: EmbeddedCloudFailureClass::None,
+        }
     }
 }
 

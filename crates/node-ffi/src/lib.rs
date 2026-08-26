@@ -326,6 +326,10 @@ pub enum NativeCommand {
     ReconcileCloud {
         timeout_ms: u64,
     },
+    ReconcileCloudRequest,
+    ReconcileCloudPoll {
+        generation: u64,
+    },
     ApplyLifecycle {
         event: LifecycleEvent,
     },
@@ -937,12 +941,61 @@ pub extern "C" fn piqae_node_command(handle: u64, data: *const u8, length: usize
                 request
             };
             let cloud_configured = request.is_some();
-            let completed = request
-                .is_none_or(|request| request.wait(std::time::Duration::from_millis(*timeout_ms)));
+            let outcome = request
+                .and_then(|request| request.wait(std::time::Duration::from_millis(*timeout_ms)));
             return Ok(json!({
                 "handle": handle,
                 "cloud_configured": cloud_configured,
-                "completed": completed
+                "completed": outcome.is_some() || !cloud_configured,
+                "outcome": outcome
+            }));
+        }
+        if matches!(command, NativeCommand::ReconcileCloudRequest) {
+            let (generation, _in_flight) = {
+                let instances = lock_instances()?;
+                let instance = instances.get(&handle).ok_or(FfiError::InvalidHandle)?;
+                let in_flight = instance.in_flight.begin()?;
+                if instance.runtime.is_none() {
+                    return Err(FfiError::NotStarted);
+                }
+                let generation = instance
+                    .cloud_supervisor
+                    .as_ref()
+                    .map(|supervisor| supervisor.request_reconcile().generation());
+                drop(instances);
+                (generation, in_flight)
+            };
+            return Ok(json!({
+                "handle": handle,
+                "cloud_configured": generation.is_some(),
+                "generation": generation
+            }));
+        }
+        if let NativeCommand::ReconcileCloudPoll { generation } = &command {
+            if *generation == 0 {
+                return Err(FfiError::InvalidCommand);
+            }
+            let (configured, outcome, _in_flight) = {
+                let instances = lock_instances()?;
+                let instance = instances.get(&handle).ok_or(FfiError::InvalidHandle)?;
+                let in_flight = instance.in_flight.begin()?;
+                if instance.runtime.is_none() {
+                    return Err(FfiError::NotStarted);
+                }
+                let outcome = instance
+                    .cloud_supervisor
+                    .as_ref()
+                    .and_then(|supervisor| supervisor.poll_reconcile(*generation));
+                let configured = instance.cloud_supervisor.is_some();
+                drop(instances);
+                (configured, outcome, in_flight)
+            };
+            return Ok(json!({
+                "handle": handle,
+                "cloud_configured": configured,
+                "generation": generation,
+                "pending": configured && outcome.is_none(),
+                "outcome": outcome
             }));
         }
         let (
@@ -985,7 +1038,11 @@ pub extern "C" fn piqae_node_command(handle: u64, data: *const u8, length: usize
             // The reconcile arm returns before the instance borrow above. If
             // that routing is ever changed, fail closed instead of panicking
             // across the FFI boundary.
-            NativeCommand::ReconcileCloud { .. } => return Err(FfiError::InvalidCommand),
+            NativeCommand::ReconcileCloud { .. }
+            | NativeCommand::ReconcileCloudRequest
+            | NativeCommand::ReconcileCloudPoll { .. } => {
+                return Err(FfiError::InvalidCommand);
+            }
             NativeCommand::ApplyLifecycle { event } => {
                 let _ = runtime.apply_lifecycle(event);
             }
@@ -1621,6 +1678,9 @@ mod tests {
         let reconcile = command(handle, json!({"type":"reconcile_cloud","timeout_ms":1_000}));
         assert_eq!(reconcile["data"]["cloud_configured"], false);
         assert_eq!(reconcile["data"]["completed"], true);
+        let requested = command(handle, json!({"type":"reconcile_cloud_request"}));
+        assert_eq!(requested["data"]["cloud_configured"], false);
+        assert!(requested["data"]["generation"].is_null());
         let stopped = read_and_free(piqae_node_stop(handle));
         assert_eq!(stopped["data"]["started"], false);
         let _ = read_and_free(piqae_node_destroy(handle));
@@ -2050,6 +2110,17 @@ mod tests {
             command(handle, json!({"type":"snapshot"}))["error"]["code"],
             "runtime_transition_in_progress"
         );
+        assert_eq!(
+            command(handle, json!({"type":"reconcile_cloud_request"}))["error"]["code"],
+            "runtime_transition_in_progress"
+        );
+        assert_eq!(
+            command(
+                handle,
+                json!({"type":"reconcile_cloud_poll","generation":1})
+            )["error"]["code"],
+            "runtime_transition_in_progress"
+        );
         assert!(
             stopped_receive
                 .recv_timeout(std::time::Duration::from_millis(30))
@@ -2097,13 +2168,16 @@ mod tests {
     }
 
     #[test]
-    fn durable_adapter_command_fixtures_pin_the_v1_schema() {
+    fn native_command_fixtures_pin_the_v1_schema() {
         for fixture in [
             include_bytes!("../../../contracts/node-sdk/v1/adapter-register.json").as_slice(),
             include_bytes!("../../../contracts/node-sdk/v1/adapter-enqueue.json").as_slice(),
             include_bytes!("../../../contracts/node-sdk/v1/adapter-next.json").as_slice(),
             include_bytes!("../../../contracts/node-sdk/v1/adapter-begin-handoff.json").as_slice(),
             include_bytes!("../../../contracts/node-sdk/v1/adapter-complete.json").as_slice(),
+            include_bytes!("../../../contracts/node-sdk/v1/reconcile-cloud-request.json")
+                .as_slice(),
+            include_bytes!("../../../contracts/node-sdk/v1/reconcile-cloud-poll.json").as_slice(),
         ] {
             serde_json::from_slice::<NativeCommand>(fixture).unwrap();
         }

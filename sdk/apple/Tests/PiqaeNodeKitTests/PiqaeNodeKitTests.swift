@@ -37,8 +37,9 @@ final class PiqaeNodeKitTests: XCTestCase {
             canonicalIdentity: Data("printer-fixture".utf8)
         )
         XCTAssertTrue(opaque.hasPrefix("pid_"))
-        let reconciled = try await runtime.reconcileCloud(timeoutMilliseconds: 1_000)
-        XCTAssertTrue(reconciled)
+        let reconciliation = try await runtime.reconcileCloudOutcome(timeoutMilliseconds: 1_000)
+        XCTAssertTrue(reconciliation.loopCompleted)
+        XCTAssertFalse(reconciliation.cloudConfigured)
         try await runtime.stop()
         XCTAssertEqual(workSignals.value, 0)
     }
@@ -842,7 +843,11 @@ final class PiqaeNodeKitTests: XCTestCase {
 
     func testWakeHintRetriesCloudReconciliationWithinBound() async throws {
         let runtime = PiqaeFakeEmbeddedRuntime()
-        await runtime.failNextCloudReconciliations(2)
+        await runtime.setCloudReconcileOutcomes([
+            cloudOutcome(failed: 1, succeeded: 0, retryable: true, failure: .transient),
+            cloudOutcome(failed: 1, succeeded: 0, retryable: true, failure: .transient),
+            cloudOutcome(failed: 0, succeeded: 1, retryable: false, failure: .none),
+        ])
         let node = PiqaeNode(
             .localOnly(
                 startupMode: .embedded,
@@ -875,6 +880,158 @@ final class PiqaeNodeKitTests: XCTestCase {
         XCTAssertEqual(result, .reconciled)
         let reconcileCalls = await runtime.reconcileCallCount()
         XCTAssertEqual(reconcileCalls, 3)
+    }
+
+    func testLegacyBoolOnlyRuntimeAdaptsWithoutInventingConnectorIdentity() async throws {
+        let runtime = LegacyBoolReconcileRuntime()
+        let outcome = try await runtime.reconcileCloudOutcome(timeoutMilliseconds: 1_000)
+
+        XCTAssertTrue(outcome.cloudConfigured)
+        XCTAssertTrue(outcome.loopCompleted)
+        XCTAssertEqual(outcome.connectorCount, 0)
+        XCTAssertEqual(outcome.failedCount, 0)
+    }
+
+    func testWakeHintDoesNotRetryUnclassifiedRuntimeFailure() async throws {
+        let runtime = PiqaeFakeEmbeddedRuntime()
+        await runtime.failNextCloudReconciliations(2)
+        let node = wakeTestNode(runtime: runtime, id: "ins_wake_unclassified")
+        try await node.start()
+        defer { Task { await node.stop() } }
+
+        let result = await node.handleWakeHint(
+            try PiqaeWakeHint(collapseID: "unclassified", source: .backgroundPush),
+            context: .init(phase: .background, source: .backgroundPush, remainingSeconds: 10)
+        )
+
+        guard case .deferred = result else {
+            XCTFail("An unclassified runtime failure must defer")
+            return
+        }
+        let reconcileCalls = await runtime.reconcileCallCount()
+        XCTAssertEqual(reconcileCalls, 1)
+    }
+
+    func testWakeHintDoesNotRetryNonRetryableConnectorFailure() async throws {
+        let runtime = PiqaeFakeEmbeddedRuntime()
+        await runtime.setCloudReconcileOutcome(
+            cloudOutcome(failed: 1, succeeded: 0, retryable: false, failure: .authentication)
+        )
+        let node = wakeTestNode(runtime: runtime, id: "ins_wake_nonretryable")
+        try await node.start()
+        defer { Task { await node.stop() } }
+
+        let result = await node.handleWakeHint(
+            try PiqaeWakeHint(collapseID: "auth-failure", source: .backgroundPush),
+            context: .init(phase: .background, source: .backgroundPush, remainingSeconds: 10)
+        )
+
+        guard case .deferred = result else {
+            XCTFail("A non-retryable supervisor outcome must defer")
+            return
+        }
+        let reconcileCalls = await runtime.reconcileCallCount()
+        XCTAssertEqual(reconcileCalls, 1)
+    }
+
+    func testWakeHintRetriesPrivacySafePartialTransientOutcome() async throws {
+        let runtime = PiqaeFakeEmbeddedRuntime()
+        await runtime.setCloudReconcileOutcomes([
+            cloudOutcome(failed: 1, succeeded: 1, retryable: true, failure: .transient),
+            cloudOutcome(failed: 0, succeeded: 2, retryable: false, failure: .none),
+        ])
+        let node = wakeTestNode(runtime: runtime, id: "ins_wake_partial")
+        try await node.start()
+        defer { Task { await node.stop() } }
+
+        let result = await node.handleWakeHint(
+            try PiqaeWakeHint(collapseID: "partial", source: .backgroundPush),
+            context: .init(phase: .background, source: .backgroundPush, remainingSeconds: 10)
+        )
+
+        XCTAssertEqual(result, .reconciled)
+        let reconcileCalls = await runtime.reconcileCallCount()
+        XCTAssertEqual(reconcileCalls, 2)
+    }
+
+    func testConcurrentDuplicateCollapseIDsShareOneReconciliation() async throws {
+        let runtime = PiqaeFakeEmbeddedRuntime()
+        await runtime.setCloudReconcileDelayNanoseconds(100_000_000)
+        let node = wakeTestNode(runtime: runtime, id: "ins_wake_collapse")
+        try await node.start()
+        defer { Task { await node.stop() } }
+        let hint = try PiqaeWakeHint(collapseID: "same-hint", source: .backgroundPush)
+        let context = PiqaeExecutionContext(
+            phase: .background,
+            source: .backgroundPush,
+            remainingSeconds: 10
+        )
+
+        async let first = node.handleWakeHint(hint, context: context)
+        async let second = node.handleWakeHint(hint, context: context)
+        let results = await [first, second]
+
+        XCTAssertEqual(results, [.reconciled, .reconciled])
+        let reconcileCalls = await runtime.reconcileCallCount()
+        XCTAssertEqual(reconcileCalls, 1)
+    }
+
+    func testCancellingOneDuplicateWakeCallerDoesNotCancelSharedReconciliation() async throws {
+        let runtime = PiqaeFakeEmbeddedRuntime()
+        await runtime.setCloudReconcileDelayNanoseconds(100_000_000)
+        let node = wakeTestNode(runtime: runtime, id: "ins_wake_collapse_cancel")
+        try await node.start()
+        defer { Task { await node.stop() } }
+        let hint = try PiqaeWakeHint(collapseID: "shared-hint", source: .backgroundPush)
+        let context = PiqaeExecutionContext(
+            phase: .background,
+            source: .backgroundPush,
+            remainingSeconds: 10
+        )
+
+        let first = Task { await node.handleWakeHint(hint, context: context) }
+        let started = await eventually { await runtime.reconcileCallCount() == 1 }
+        XCTAssertTrue(started)
+        let second = Task { await node.handleWakeHint(hint, context: context) }
+        try await Task.sleep(nanoseconds: 10_000_000)
+        second.cancel()
+
+        guard case .deferred = await second.value else {
+            XCTFail("The cancelled joiner must detach promptly")
+            return
+        }
+        let firstResult = await first.value
+        XCTAssertEqual(firstResult, .reconciled)
+        let reconcileCalls = await runtime.reconcileCallCount()
+        XCTAssertEqual(reconcileCalls, 1)
+    }
+
+    func testWakeCancellationReturnsPromptlyWhileCloudPassIsPending() async throws {
+        let runtime = PiqaeFakeEmbeddedRuntime()
+        await runtime.setCloudReconcileDelayNanoseconds(30_000_000_000)
+        let node = wakeTestNode(runtime: runtime, id: "ins_wake_cancel")
+        try await node.start()
+        defer { Task { await node.stop() } }
+        let task = Task {
+            await node.handleWakeHint(
+                try! PiqaeWakeHint(collapseID: "cancel", source: .backgroundPush),
+                context: .init(
+                    phase: .background,
+                    source: .backgroundPush,
+                    remainingSeconds: 30
+                )
+            )
+        }
+        let reconcileStarted = await eventually { await runtime.reconcileCallCount() == 1 }
+        XCTAssertTrue(reconcileStarted)
+
+        let started = ContinuousClock.now
+        task.cancel()
+        guard case .deferred = await task.value else {
+            XCTFail("Cancellation must defer the wake pass")
+            return
+        }
+        XCTAssertLessThan(started.duration(to: .now), .milliseconds(500))
     }
 
     func testWakeHintDoesNotRetryPastBackgroundBudget() async throws {
@@ -915,6 +1072,47 @@ final class PiqaeNodeKitTests: XCTestCase {
         }
         let reconcileCalls = await runtime.reconcileCallCount()
         XCTAssertEqual(reconcileCalls, 0)
+    }
+
+    func testSynchronousExpirationFencePreventsTheNextNativeHandoff() async throws {
+        let fixture = try automaticDrainFixture("expiration-before-handoff")
+        defer { try? FileManager.default.removeItem(at: fixture.contentURL) }
+        try await fixture.node.start()
+        defer { Task { await fixture.node.stop() } }
+        await fixture.runtime.setNextOperationDelayNanoseconds(150_000_000)
+        let callsBeforeActivation = await fixture.runtime.nextOperationCallCount()
+
+        await fixture.runtime.activateRemoteOperation(fixture.operation)
+        let operationRequested = await eventually {
+            await fixture.runtime.nextOperationCallCount() > callsBeforeActivation
+        }
+        XCTAssertTrue(operationRequested)
+        fixture.node.expireExecutionSynchronously()
+        try await Task.sleep(nanoseconds: 250_000_000)
+
+        let submissionCount = await fixture.adapter.submissionCount()
+        XCTAssertEqual(submissionCount, 0)
+    }
+
+    func testExpirationAfterHandoffIntentPreservesAmbiguousOutcome() async throws {
+        let fixture = try automaticDrainFixture("expiration-after-intent")
+        defer { try? FileManager.default.removeItem(at: fixture.contentURL) }
+        await fixture.adapter.setSubmissionDelayNanoseconds(30_000_000_000)
+        try await fixture.node.start()
+        defer { Task { await fixture.node.stop() } }
+
+        await fixture.runtime.activateRemoteOperation(fixture.operation)
+        let submissionStarted = await eventually {
+            await fixture.adapter.submissionCount() == 1
+        }
+        XCTAssertTrue(submissionStarted)
+        fixture.node.expireExecutionSynchronously()
+        await fixture.node.updateExecutionContext(
+            .init(phase: .suspended, source: .backgroundPush)
+        )
+
+        let completionStates = await fixture.runtime.completionStates()
+        XCTAssertTrue(completionStates.contains("delivery_uncertain"))
     }
 
     func testRemoteQueueActivationDrainsWithoutManualRefresh() async throws {
@@ -1409,6 +1607,47 @@ final class PiqaeNodeKitTests: XCTestCase {
         )
     }
 
+    private func wakeTestNode(
+        runtime: PiqaeFakeEmbeddedRuntime,
+        id: String
+    ) -> PiqaeNode {
+        PiqaeNode(
+            .localOnly(
+                startupMode: .embedded,
+                availability: .backgroundOpportunistic,
+                identityStore: PiqaeMemoryInstallationIdentityStore(id: .init(rawValue: id)),
+                embeddedRuntime: runtime,
+                wakeRetryPolicy: .init(
+                    maximumAttempts: 4,
+                    initialDelaySeconds: 0.001,
+                    maximumDelaySeconds: 0.001,
+                    executionSafetyMarginSeconds: 0.25,
+                    cloudCycleTimeoutSeconds: 1
+                )
+            )
+        )
+    }
+
+    private func cloudOutcome(
+        failed: Int,
+        succeeded: Int,
+        retryable: Bool,
+        failure: PiqaeCloudReconcileFailureClass
+    ) -> PiqaeCloudReconcileOutcome {
+        PiqaeCloudReconcileOutcome(
+            generation: 1,
+            cloudConfigured: true,
+            loopCompleted: true,
+            connectorCount: failed + succeeded,
+            succeededCount: succeeded,
+            failedCount: failed,
+            allSucceeded: failed == 0,
+            partialSuccess: failed > 0 && succeeded > 0,
+            retryable: retryable,
+            failureClass: failure
+        )
+    }
+
     private func attachedSnapshot() -> PiqaeNodeSnapshot {
         let printer = PiqaeFakePrinterAdapter.printer(id: "prn_attached")
         return PiqaeNodeSnapshot(
@@ -1431,6 +1670,17 @@ final class PiqaeNodeKitTests: XCTestCase {
             enabled: true
         )
     }
+}
+
+private actor LegacyBoolReconcileRuntime: PiqaeEmbeddedNodeRuntime {
+    func report(_ event: PiqaeHostLifecycleEvent) async throws {}
+
+    func reconcileCloud(timeoutMilliseconds: UInt64) async throws -> Bool {
+        timeoutMilliseconds > 0
+    }
+
+    func start() async throws {}
+    func stop() async throws {}
 }
 
 private extension XCTestCase {

@@ -19,7 +19,11 @@ Piqae applies the following order for one job and one physical destination:
 3. **Bounded retry.** The durable webhook/outbox retries transport failures with
    bounded backoff. The application coalesces the hint and asks its embedded
    cloud supervisor for an immediate generation-fenced sync. A mobile host
-   stops retrying before its OS execution budget expires.
+   stops retrying before its OS execution budget expires. The supervisor result
+   reports whether that exact generation's loop completed, counts of connector
+   successes and failures, an identity-free failure class, and whether every
+   failure is retryable. A completed loop with a failed connector is never
+   reported as successful.
 4. **Alternate eligible route.** The control plane may select another route to
    the same confirmed physical destination only while there is no native
    handoff which might have succeeded. A single destination reservation and
@@ -69,6 +73,16 @@ not make the route eligible. Reliable unattended iPad deployments require a
 powered supervised kiosk, a reviewed accessory-specific background topology, a
 directly reachable certified printer, or an always-awake gateway.
 
+NodeKit coalesces concurrent copies of the same opaque APNs collapse ID. Native
+reconciliation uses request/poll rather than blocking Swift's cooperative
+executor, so cancellation and expiration return promptly while a network pass
+is pending. The UIKit expiration callback closes the shared execution
+generation synchronously before actor cleanup. Drain, accepted-job observation,
+and wake reconciliation all use that gate: no later handoff can begin after
+expiration. If expiration races a native call which may already have crossed
+the boundary, its accepted or ambiguous result is retained and never rewritten
+as a safe retry.
+
 Official Apple sources:
 
 - [Choosing Background Strategies for Your App](https://developer.apple.com/documentation/backgroundtasks/choosing-background-strategies-for-your-app)
@@ -106,6 +120,12 @@ The Windows service or embedding host reports suspend before sleep and requests
 immediate reconciliation on automatic resume and network recovery. A tray is a
 disposable UI and never owns this responsibility. Piqae does not keep a machine
 awake while it is idle.
+
+The .NET SDK exposes cancellable request/poll reconciliation with the same
+generation-bound aggregate result. Its synchronous compatibility call also
+polls without holding the native ABI across network work. Neither API wakes
+Windows: resume, WNS, a scheduled task, or a site relay must first cause the
+durable service or embedding host to run.
 
 Modern Standby does not make arbitrary desktop services continuously reachable:
 Windows can place third-party services in network quiet mode. WNS and hardware

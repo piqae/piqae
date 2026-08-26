@@ -3,6 +3,7 @@ import Foundation
 
 public final class PiqaeNode: @unchecked Sendable {
     private let engine: PiqaeNodeEngine
+    private let executionFence: PiqaeExecutionFence
 
     public let connections: PiqaeConnectionsService
     public let printers: PiqaePrintersService
@@ -11,8 +12,10 @@ public final class PiqaeNode: @unchecked Sendable {
     public let remoteNotifications: PiqaeRemoteNotificationsService
 
     public init(_ configuration: PiqaeNodeConfiguration) {
-        let engine = PiqaeNodeEngine(configuration: configuration)
+        let executionFence = PiqaeExecutionFence()
+        let engine = PiqaeNodeEngine(configuration: configuration, executionFence: executionFence)
         self.engine = engine
+        self.executionFence = executionFence
         connections = PiqaeConnectionsService(engine: engine)
         printers = PiqaePrintersService(engine: engine)
         jobs = PiqaeJobsService(engine: engine)
@@ -49,6 +52,13 @@ public final class PiqaeNode: @unchecked Sendable {
         context: PiqaeExecutionContext
     ) async -> PiqaeWakeHintResult {
         await engine.handleWakeHint(hint, context: context)
+    }
+
+    /// Closes handoff admission synchronously from an OS expiration callback.
+    /// Actor cleanup follows asynchronously, but no later generation can begin
+    /// a native handoff after this returns.
+    func expireExecutionSynchronously() {
+        executionFence.suspend()
     }
 }
 
@@ -203,12 +213,91 @@ private actor PiqaeProcessRuntimeRegistry {
     }
 }
 
+fileprivate final class PiqaeExecutionFence: @unchecked Sendable {
+    private let lock = NSLock()
+    private var generation: UInt64 = 1
+    private var open = true
+
+    @discardableResult
+    func resume() -> UInt64 {
+        lock.withLock {
+            if !open {
+                generation &+= 1
+                open = true
+            }
+            return generation
+        }
+    }
+
+    @discardableResult
+    func suspend() -> UInt64 {
+        lock.withLock {
+            if open {
+                generation &+= 1
+                open = false
+            }
+            return generation
+        }
+    }
+
+    func permits(_ expectedGeneration: UInt64) -> Bool {
+        lock.withLock { open && generation == expectedGeneration }
+    }
+
+    func currentGeneration() -> UInt64 {
+        lock.withLock { generation }
+    }
+}
+
 private enum PiqaeWakeReconciliationError: Error {
-    case cloudCycleTimedOut
+    case failed(retryable: Bool)
+
+    var retryable: Bool {
+        switch self {
+        case let .failed(retryable): retryable
+        }
+    }
+}
+
+/// Lets one caller detach from a coalesced wake pass without cancelling the
+/// shared work still awaited by another background task or foreground caller.
+private final class PiqaeWakeTaskWaiter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<PiqaeWakeHintResult, Never>?
+    private var resolved: PiqaeWakeHintResult?
+
+    func wait(for task: Task<PiqaeWakeHintResult, Never>) async -> PiqaeWakeHintResult {
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                let immediate = lock.withLock { () -> PiqaeWakeHintResult? in
+                    if let resolved { return resolved }
+                    self.continuation = continuation
+                    return nil
+                }
+                if let immediate { continuation.resume(returning: immediate) }
+                Task { [weak self] in
+                    self?.resolve(await task.value)
+                }
+            }
+        } onCancel: {
+            resolve(.deferred(reason: "The host execution budget expired."))
+        }
+    }
+
+    private func resolve(_ result: PiqaeWakeHintResult) {
+        let pending = lock.withLock { () -> CheckedContinuation<PiqaeWakeHintResult, Never>? in
+            guard resolved == nil else { return nil }
+            resolved = result
+            defer { continuation = nil }
+            return continuation
+        }
+        pending?.resume(returning: result)
+    }
 }
 
 actor PiqaeNodeEngine {
     private let configuration: PiqaeNodeConfiguration
+    private let executionFence: PiqaeExecutionFence
     private let admissionPolicy = PiqaeBackgroundAdmissionPolicy()
     private var started = false
     private var ownsEmbeddedRuntime = false
@@ -220,16 +309,24 @@ actor PiqaeNodeEngine {
     private var adaptersByID: [String: any PiqaePrinterAdapter] = [:]
     private var localPrintersByLogicalID: [PiqaePrinterID: PiqaePrinter] = [:]
     private var executingAdapters: Set<String> = []
-    private var automaticDrainGeneration: UInt64 = 0
     private var automaticDrainRequested = false
     private var automaticDrainTask: Task<Void, Never>?
     private var nativeObservationRequested = false
     private var nativeObservationTask: Task<Void, Never>?
+    private struct WakeTask {
+        let token: UUID
+        let task: Task<PiqaeWakeHintResult, Never>
+    }
+    private var wakeTasks: [String: WakeTask] = [:]
     private var observers: [UUID: AsyncStream<PiqaeNodeSnapshot>.Continuation] = [:]
     private var snapshotValue: PiqaeNodeSnapshot
 
-    init(configuration: PiqaeNodeConfiguration) {
+    fileprivate init(
+        configuration: PiqaeNodeConfiguration,
+        executionFence: PiqaeExecutionFence
+    ) {
         self.configuration = configuration
+        self.executionFence = executionFence
         let hostMode: PiqaeNodeHostMode = configuration.startupMode == .attach
             ? .attachedClient : .embeddedApplication
         snapshotValue = PiqaeNodeSnapshot(
@@ -246,6 +343,7 @@ actor PiqaeNodeEngine {
     func start() async throws {
         guard !started else { throw PiqaeNodeError.alreadyStarted }
         setPhase(.starting)
+        executionFence.resume()
 
         do {
             #if os(iOS)
@@ -593,6 +691,11 @@ actor PiqaeNodeEngine {
 
     func updateExecutionContext(_ context: PiqaeExecutionContext) async {
         executionContext = context
+        if context.phase == .suspended {
+            executionFence.suspend()
+        } else {
+            executionFence.resume()
+        }
         if context.phase == .background, let remaining = context.remainingSeconds {
             executionDeadline = Date().addingTimeInterval(max(0, remaining))
         } else {
@@ -604,7 +707,9 @@ actor PiqaeNodeEngine {
             snapshotValue = replacingSnapshot(phase: .ready, statusMessage: nil)
         }
         emit()
-        if !canObserveNativeStatus(), let task = nativeObservationTask {
+        if context.phase == .suspended {
+            await cancelRuntimeWork(closeFence: false)
+        } else if !canObserveNativeStatus(), let task = nativeObservationTask {
             nativeObservationTask = nil
             task.cancel()
             await task.value
@@ -669,7 +774,6 @@ actor PiqaeNodeEngine {
         _ hint: PiqaeWakeHint,
         context: PiqaeExecutionContext
     ) async -> PiqaeWakeHintResult {
-        _ = hint // The opaque ID is intentionally never interpreted as job metadata.
         guard started else { return .deferred(reason: "The node has not started.") }
         guard !Task.isCancelled else {
             return .deferred(reason: "The host execution budget expired.")
@@ -677,12 +781,39 @@ actor PiqaeNodeEngine {
         guard context.phase != .suspended else {
             return .deferred(reason: "The host application is suspended.")
         }
+        if let existing = wakeTasks[hint.collapseID] {
+            return await PiqaeWakeTaskWaiter().wait(for: existing.task)
+        }
+        let token = UUID()
+        let task = Task<PiqaeWakeHintResult, Never> { [weak self] in
+            guard let self else {
+                return PiqaeWakeHintResult.deferred(reason: "The node stopped.")
+            }
+            let result = await self.performWakeHint(context: context)
+            await self.removeWakeTask(collapseID: hint.collapseID, token: token)
+            return result
+        }
+        wakeTasks[hint.collapseID] = WakeTask(token: token, task: task)
+        return await PiqaeWakeTaskWaiter().wait(for: task)
+    }
+
+    private func removeWakeTask(collapseID: String, token: UUID) {
+        if wakeTasks[collapseID]?.token == token {
+            wakeTasks.removeValue(forKey: collapseID)
+        }
+    }
+
+    private func performWakeHint(context: PiqaeExecutionContext) async -> PiqaeWakeHintResult {
         await updateExecutionContext(context)
+        let generation = executionFence.currentGeneration()
         let policy = configuration.wakeRetryPolicy
         var attempt = 0
         while attempt < policy.maximumAttempts {
             attempt += 1
             do {
+                guard executionFence.permits(generation) else {
+                    return .deferred(reason: "The host execution budget expired.")
+                }
                 if selectedIPC == nil, let runtime = configuration.embeddedRuntime {
                     let available = effectiveExecutionContext.remainingSeconds.map {
                         max(0, $0 - policy.executionSafetyMarginSeconds)
@@ -697,18 +828,29 @@ actor PiqaeNodeEngine {
                     let milliseconds = UInt64(
                         min(timeout * 1_000, Double(UInt64.max))
                     )
-                    guard try await runtime.reconcileCloud(timeoutMilliseconds: milliseconds) else {
-                        throw PiqaeWakeReconciliationError.cloudCycleTimedOut
+                    let outcome = try await runtime.reconcileCloudOutcome(
+                        timeoutMilliseconds: milliseconds
+                    )
+                    guard outcome.loopCompleted, outcome.failedCount == 0 else {
+                        throw PiqaeWakeReconciliationError.failed(
+                            retryable: outcome.retryable
+                        )
                     }
                 }
+                guard executionFence.permits(generation) else {
+                    return .deferred(reason: "The host execution budget expired.")
+                }
                 try await refresh()
-                guard !Task.isCancelled else {
+                guard !Task.isCancelled, executionFence.permits(generation) else {
                     return .deferred(reason: "The host execution budget expired.")
                 }
                 return .reconciled
             } catch is CancellationError {
                 return .deferred(reason: "The host execution budget expired.")
-            } catch {
+            } catch let error as PiqaeWakeReconciliationError {
+                guard error.retryable else {
+                    return .deferred(reason: "Reconciliation requires operator attention.")
+                }
                 let delay = policy.delay(
                     after: attempt,
                     remainingSeconds: effectiveExecutionContext.remainingSeconds
@@ -721,6 +863,11 @@ actor PiqaeNodeEngine {
                 } catch {
                     return .deferred(reason: "The host execution budget expired.")
                 }
+            } catch {
+                // Only a generation outcome can safely classify a connector
+                // failure as transient. Unknown runtime/ABI errors fail closed
+                // instead of consuming the execution budget with blind retries.
+                return .deferred(reason: "Reconciliation is temporarily unavailable.")
             }
         }
         return .deferred(reason: "Reconciliation is temporarily unavailable.")
@@ -734,10 +881,8 @@ actor PiqaeNodeEngine {
         ownsEmbeddedRuntime = true
         acquiredInstallationID = installationID
         if let runtime = configuration.embeddedRuntime {
-            automaticDrainGeneration &+= 1
-            let generation = automaticDrainGeneration
             try await runtime.setWorkAvailableHandler { [weak self] in
-                Task { await self?.workBecameAvailable(generation: generation) }
+                Task { await self?.workBecameAvailable() }
             }
             try await runtime.start()
             embeddedRuntimeStarted = true
@@ -912,15 +1057,21 @@ actor PiqaeNodeEngine {
         _ adapterID: String,
         runtime: any PiqaeEmbeddedNodeRuntime
     ) async throws -> AdapterDrainResult {
+        let generation = executionFence.currentGeneration()
+        guard executionFence.permits(generation) else { return .deferred }
         guard executingAdapters.insert(adapterID).inserted else { return .alreadyExecuting }
         defer { executingAdapters.remove(adapterID) }
         for _ in 0..<32 {
             try Task.checkCancellation()
-            guard canExecuteDurableHandoff() else { return .deferred }
+            guard executionFence.permits(generation), canExecuteDurableHandoff() else {
+                return .deferred
+            }
             guard let operation = try await runtime.nextOperation(adapterID: adapterID) else {
                 return .empty
             }
-            guard !Task.isCancelled, canExecuteDurableHandoff() else {
+            guard !Task.isCancelled, executionFence.permits(generation),
+                canExecuteDurableHandoff()
+            else {
                 _ = try await runtime.complete(
                     operation,
                     outcome: .rejectedBeforeHandoff(
@@ -947,7 +1098,7 @@ actor PiqaeNodeEngine {
                     outcome: .ambiguous(code: "recovered_after_handoff")
                 )
             case .claimed:
-                try await executeClaimed(operation, runtime: runtime)
+                try await executeClaimed(operation, runtime: runtime, generation: generation)
             }
         }
         return .capped
@@ -978,8 +1129,8 @@ actor PiqaeNodeEngine {
         )
     }
 
-    private func workBecameAvailable(generation: UInt64) {
-        guard generation == automaticDrainGeneration, ownsEmbeddedRuntime else { return }
+    private func workBecameAvailable() {
+        guard ownsEmbeddedRuntime else { return }
         automaticDrainRequested = true
         startAutomaticDrainIfPossible()
     }
@@ -1001,7 +1152,7 @@ actor PiqaeNodeEngine {
             automaticDrainRequested, automaticDrainTask == nil,
             canExecuteDurableHandoff()
         else { return }
-        let generation = automaticDrainGeneration
+        let generation = executionFence.currentGeneration()
         automaticDrainTask = Task { [weak self] in
             await self?.runAutomaticDrain(generation: generation)
         }
@@ -1009,7 +1160,7 @@ actor PiqaeNodeEngine {
 
     private func runAutomaticDrain(generation: UInt64) async {
         while !Task.isCancelled,
-            generation == automaticDrainGeneration,
+            executionFence.permits(generation),
             started,
             automaticDrainRequested,
             canExecuteDurableHandoff(),
@@ -1035,7 +1186,7 @@ actor PiqaeNodeEngine {
                 break
             }
         }
-        guard generation == automaticDrainGeneration else { return }
+        guard executionFence.permits(generation) else { return }
         automaticDrainTask = nil
         startAutomaticDrainIfPossible()
     }
@@ -1045,7 +1196,7 @@ actor PiqaeNodeEngine {
             nativeObservationRequested, nativeObservationTask == nil,
             canObserveNativeStatus()
         else { return }
-        let generation = automaticDrainGeneration
+        let generation = executionFence.currentGeneration()
         nativeObservationTask = Task { [weak self] in
             await self?.runNativeObservation(generation: generation)
         }
@@ -1054,7 +1205,7 @@ actor PiqaeNodeEngine {
     private func runNativeObservation(generation: UInt64) async {
         var delayNanoseconds: UInt64 = 50_000_000
         while !Task.isCancelled,
-            generation == automaticDrainGeneration,
+            executionFence.permits(generation),
             started,
             nativeObservationRequested,
             canObserveNativeStatus(),
@@ -1099,7 +1250,7 @@ actor PiqaeNodeEngine {
                 delayNanoseconds = min(delayNanoseconds * 2, 1_000_000_000)
             }
         }
-        guard generation == automaticDrainGeneration else { return }
+        guard executionFence.permits(generation) else { return }
         nativeObservationTask = nil
         startNativeObservationIfPossible()
     }
@@ -1142,18 +1293,22 @@ actor PiqaeNodeEngine {
         return canObserveNativeStatus()
     }
 
-    private func cancelRuntimeWork() async {
-        automaticDrainGeneration &+= 1
+    private func cancelRuntimeWork(closeFence: Bool = true) async {
+        if closeFence { executionFence.suspend() }
         automaticDrainRequested = false
         nativeObservationRequested = false
+        let pendingWakeTasks = wakeTasks.values.map(\.task)
+        wakeTasks.removeAll(keepingCapacity: true)
         let drainTask = automaticDrainTask
         let observationTask = nativeObservationTask
         automaticDrainTask = nil
         nativeObservationTask = nil
         drainTask?.cancel()
         observationTask?.cancel()
+        for task in pendingWakeTasks { task.cancel() }
         await drainTask?.value
         await observationTask?.value
+        for task in pendingWakeTasks { _ = await task.value }
     }
 
     private func reconcileAccepted(
@@ -1186,8 +1341,16 @@ actor PiqaeNodeEngine {
 
     private func executeClaimed(
         _ operation: PiqaeRuntimeAdapterOperation,
-        runtime: any PiqaeEmbeddedNodeRuntime
+        runtime: any PiqaeEmbeddedNodeRuntime,
+        generation: UInt64
     ) async throws {
+        guard executionFence.permits(generation) else {
+            _ = try await runtime.complete(
+                operation,
+                outcome: .rejectedBeforeHandoff(code: "host_execution_ended", retryable: true)
+            )
+            return
+        }
         guard let adapter = adaptersByID[operation.adapterID],
             let printer = localPrintersByLogicalID[PiqaePrinterID(rawValue: operation.printerID)]
         else {
@@ -1215,6 +1378,16 @@ actor PiqaeNodeEngine {
             _ = try await runtime.complete(
                 operation,
                 outcome: .rejectedBeforeHandoff(code: "handoff_deadline_elapsed", retryable: true)
+            )
+            return
+        }
+        guard executionFence.permits(generation), !Task.isCancelled else {
+            // The durable handoff intent exists but the native API was not
+            // called. Preserve the ambiguity boundary rather than making a
+            // later generation guess whether the adapter saw the request.
+            _ = try await runtime.complete(
+                started,
+                outcome: .ambiguous(code: "handoff_execution_expired")
             )
             return
         }
