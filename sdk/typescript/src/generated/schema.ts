@@ -2165,6 +2165,28 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/agent/connectors/{connector_id}/revoke": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                connector_id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Revoke the calling connector's authority grant
+         * @description Performs the connector's final signed authority request. Exact retries remain authenticated only for this revocation operation so a node can recover if the local durable confirmation failed after server commit.
+         */
+        post: operations["revokeAgentConnector"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/agent/content-encryption-key": {
         parameters: {
             query?: never;
@@ -8139,6 +8161,37 @@ export interface operations {
             };
             400: components["responses"]["Error"];
             401: components["responses"]["Error"];
+        };
+    };
+    revokeAgentConnector: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                connector_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": Record<string, never>;
+            };
+        };
+        responses: {
+            /** @description Connector authority grant is revoked. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @constant */
+                        revoked: true;
+                    };
+                };
+            };
+            401: components["responses"]["Error"];
+            404: components["responses"]["Error"];
         };
     };
     registerAgentContentEncryptionKey: {

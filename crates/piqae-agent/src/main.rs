@@ -1449,9 +1449,11 @@ async fn connect_installed_invitation(
         registry.add(record)
     };
     if let Err(error) = persist {
-        if created_key {
-            let _ = std::fs::remove_file(&connector_key_path);
-        }
+        // The authority accepts an exact retry of the same short-lived
+        // invitation, installation identity, public key and grant. Preserve
+        // the deterministic pending key after remote success so a process
+        // restart can safely replay enrolment and durably activate the same
+        // connector instead of orphaning a live remote grant.
         return Err(error).context("persist authenticated attached connector");
     }
     Ok(result)
@@ -2159,6 +2161,7 @@ async fn connector_supervisor_loop(
     node_runtime: Arc<NodeRuntime>,
 ) {
     let mut workers = std::collections::BTreeMap::<String, ConnectorWorker>::new();
+    retry_installed_revocations(&data_dir).await;
     if let Err(error) =
         retire_legacy_cloud_worker_if_needed(&data_dir, &mut legacy_cloud_worker).await
     {
@@ -2210,6 +2213,7 @@ async fn connector_supervisor_loop(
                 continue;
             }
             _ = recovery.tick() => {
+                retry_installed_revocations(&data_dir).await;
                 if let Err(error) = retire_legacy_cloud_worker_if_needed(&data_dir, &mut legacy_cloud_worker).await {
                     warn!(%error, "periodic legacy cloud worker retirement deferred");
                     continue;
@@ -2291,10 +2295,28 @@ async fn connector_supervisor_loop(
             } => {
                 let result = async {
                     let mut registry = connector_runtime::ConnectorRegistry::load(&data_dir)?;
-                    if !registry.revoke(&connector_id)? {
-                        anyhow::bail!("connector was not active");
+                    let record = registry
+                        .records()
+                        .find(|record| record.connector_id == connector_id)
+                        .cloned()
+                        .context("connector was not found")?;
+                    let authority_confirmed = registry
+                        .remotely_revoked()
+                        .any(|record| record.connector_id == connector_id);
+                    if record.enabled {
+                        registry.revoke(&connector_id)?;
                     }
+                    drop(registry);
                     stop_connector_worker(&mut workers, &connector_id, &connections).await?;
+                    if authority_confirmed {
+                        let relative_key = record
+                            .device_key_file
+                            .as_ref()
+                            .context("installed connector has no device key")?;
+                        remove_connector_file_key(&data_dir.join(relative_key))?;
+                    } else {
+                        revoke_installed_authority(&record, &data_dir).await?;
+                    }
                     Ok(())
                 }
                 .await
@@ -2424,6 +2446,61 @@ async fn connector_supervisor_loop(
         if let Err(error) = stop_connector_worker(&mut workers, &id, &connections).await {
             warn!(connector_id = %id, %error, "connector worker shutdown was forced");
         }
+    }
+}
+
+async fn revoke_installed_authority(
+    record: &connector_runtime::ConnectorRecord,
+    data_dir: &Path,
+) -> Result<()> {
+    let relative_key = record
+        .device_key_file
+        .as_ref()
+        .context("installed connector has no device key")?;
+    let key_path = data_dir.join(relative_key);
+    let identity = read_device_identity(&record.agent_id, &key_path)
+        .context("read connector identity for remote revocation")?;
+    AgentClient::new(record.control_plane_url.clone())?
+        .revoke_connector(&identity, &record.connector_id)
+        .await
+        .context("revoke connector authority grant")?;
+    let mut registry = connector_runtime::ConnectorRegistry::load(data_dir)?;
+    registry.confirm_remote_revocation(&record.connector_id)?;
+    remove_connector_file_key(&key_path)?;
+    Ok(())
+}
+
+async fn retry_installed_revocations(data_dir: &Path) {
+    let Ok(registry) = connector_runtime::ConnectorRegistry::load(data_dir) else {
+        return;
+    };
+    let pending = registry
+        .pending_remote_revocations()
+        .filter(|record| record.device_key_file.is_some())
+        .cloned()
+        .collect::<Vec<_>>();
+    let remotely_revoked = registry
+        .remotely_revoked()
+        .filter_map(|record| record.device_key_file.clone())
+        .collect::<Vec<_>>();
+    drop(registry);
+    for record in pending {
+        if let Err(error) = revoke_installed_authority(&record, data_dir).await {
+            warn!(connector.id = %record.connector_id, %error, "connector authority revocation remains pending");
+        }
+    }
+    for relative_key in remotely_revoked {
+        if let Err(error) = remove_connector_file_key(&data_dir.join(relative_key)) {
+            warn!(%error, "remotely revoked connector key cleanup remains pending");
+        }
+    }
+}
+
+fn remove_connector_file_key(path: &Path) -> Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("delete {}", path.display())),
     }
 }
 
@@ -4305,6 +4382,7 @@ struct InstalledOfferAcceptor {
     stores: Arc<Mutex<InstalledConnectorStores>>,
     route_coordinator: Arc<Mutex<route_coordinator::RouteCoordinator>>,
     connector_id: String,
+    admission: StopSignal,
 }
 
 impl std::fmt::Debug for InstalledOfferAcceptor {
@@ -4315,6 +4393,10 @@ impl std::fmt::Debug for InstalledOfferAcceptor {
 
 #[async_trait]
 impl DurableOfferAcceptor<InstalledMaterializedOffer> for InstalledOfferAcceptor {
+    async fn admission_valid(&mut self) -> Result<bool, CloudWorkerError> {
+        Ok(!self.admission.is_stopped())
+    }
+
     async fn pending(&mut self) -> Result<Vec<PendingCloudAcceptance>, CloudWorkerError> {
         let intents = self
             .stores
@@ -4410,6 +4492,10 @@ impl DurableOfferAcceptor<InstalledMaterializedOffer> for InstalledOfferAcceptor
     }
 
     async fn activate(&mut self, job_id: JobId) -> Result<(), CloudWorkerError> {
+        if !self.admission_valid().await? {
+            self.abandon(job_id).await?;
+            return Err(CloudWorkerError::new("connector_admission_revoked"));
+        }
         self.stores
             .lock()
             .await
@@ -4417,6 +4503,15 @@ impl DurableOfferAcceptor<InstalledMaterializedOffer> for InstalledOfferAcceptor
             .activate_cloud_job(&job_id.to_string(), Utc::now().timestamp_millis())
             .map(|_| ())
             .map_err(|_| CloudWorkerError::new("durable_accept_activate_failed"))
+    }
+
+    async fn abandon(&mut self, job_id: JobId) -> Result<(), CloudWorkerError> {
+        self.stores
+            .lock()
+            .await
+            .queue
+            .abandon_cloud_accept(&job_id.to_string(), Utc::now().timestamp_millis())
+            .map_err(|_| CloudWorkerError::new("durable_accept_abandon_failed"))
     }
 
     async fn has_durable_intent(&mut self, job_id: JobId) -> Result<bool, CloudWorkerError> {
@@ -4731,6 +4826,7 @@ async fn run_cloud_sync_loop(
         stores: Arc::clone(&stores),
         route_coordinator,
         connector_id: cloud.connector_id,
+        admission: stop.clone(),
     };
     let wake = InstalledWakeAdapter {
         inventory_dirty: Arc::clone(&printer_inventory_dirty),

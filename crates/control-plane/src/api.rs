@@ -8,7 +8,7 @@
 use crate::{
     AppState,
     authentication::TenantContext,
-    device_auth::authenticate_agent,
+    device_auth::{authenticate_agent, authenticate_agent_for_revocation},
     error::AppError,
     repository::{CreateResult, RepositoryError},
 };
@@ -504,6 +504,31 @@ pub async fn revoke_node_connector(
         )
         .await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Lets a connector revoke its own server grant with its final signed request.
+///
+/// The exact agent, tenant and connector tuple must match; after commit the
+/// same credential is rejected by all agent-authenticated routes.
+pub async fn revoke_agent_connector(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(connector_id): Path<String>,
+    body: Bytes,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let path = format!("/v1/agent/connectors/{connector_id}/revoke");
+    let identity =
+        authenticate_agent_for_revocation(&state, &headers, "POST", &path, &body).await?;
+    state
+        .repository
+        .revoke_node_connector(
+            identity.tenant.workspace_id,
+            identity.tenant.environment_id,
+            identity.agent_id,
+            &connector_id,
+        )
+        .await?;
+    Ok(Json(serde_json::json!({"revoked": true})))
 }
 
 #[derive(Debug, Deserialize)]

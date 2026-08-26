@@ -2866,6 +2866,7 @@ dependencies = [
  "chrono",
  "ed25519-dalek",
  "fs2",
+ "futures",
  "hex",
  "piqae-agent-client",
  "piqae-agent-storage",

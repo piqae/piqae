@@ -123,6 +123,10 @@ struct ConnectorRegistryDocument {
     prepared_keys: Vec<PreparedConnectorKey>,
     #[serde(default)]
     key_cleanup: Vec<SecureKeyHandle>,
+    /// Connector ids whose authority grant has been durably revoked. Disabled
+    /// ids absent here retain their credential for authenticated retry.
+    #[serde(default)]
+    remote_revoked: Vec<String>,
     #[serde(default)]
     installation_identity: Option<InstallationSigningIdentity>,
 }
@@ -161,6 +165,7 @@ pub struct ConnectorRegistry {
     records: BTreeMap<String, ConnectorRecord>,
     prepared_keys: Vec<PreparedConnectorKey>,
     key_cleanup: Vec<SecureKeyHandle>,
+    remote_revoked: BTreeSet<String>,
     installation_identity: Option<InstallationSigningIdentity>,
     #[cfg(test)]
     fail_next_persist: bool,
@@ -179,6 +184,7 @@ impl ConnectorRegistry {
                     connectors: Vec::new(),
                     prepared_keys: Vec::new(),
                     key_cleanup: Vec::new(),
+                    remote_revoked: Vec::new(),
                     installation_identity: None,
                 }
             }
@@ -205,11 +211,20 @@ impl ConnectorRegistry {
             }
         }
         validate_key_state(&records, &document.prepared_keys, &document.key_cleanup)?;
+        let remote_revoked = document.remote_revoked.into_iter().collect::<BTreeSet<_>>();
+        if remote_revoked.iter().any(|connector_id| {
+            records
+                .get(connector_id)
+                .is_none_or(|record| record.enabled)
+        }) {
+            bail!("remote revocation state does not match a disabled connector");
+        }
         Ok(Self {
             root,
             records,
             prepared_keys: document.prepared_keys,
             key_cleanup: document.key_cleanup,
+            remote_revoked,
             installation_identity: document.installation_identity,
             #[cfg(test)]
             fail_next_persist: false,
@@ -222,6 +237,11 @@ impl ConnectorRegistry {
 
     pub fn records(&self) -> impl Iterator<Item = &ConnectorRecord> {
         self.records.values()
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn inject_next_persist_failure(&mut self) {
+        self.fail_next_persist = true;
     }
 
     #[must_use]
@@ -245,6 +265,7 @@ impl ConnectorRegistry {
             &self.records.clone(),
             &self.prepared_keys.clone(),
             &self.key_cleanup.clone(),
+            &self.remote_revoked.clone(),
             Some(identity.clone()),
         )?;
         self.installation_identity = Some(identity);
@@ -357,6 +378,51 @@ impl ConnectorRegistry {
         &self.key_cleanup
     }
 
+    pub fn pending_remote_revocations(&self) -> impl Iterator<Item = &ConnectorRecord> {
+        self.records
+            .values()
+            .filter(|record| !record.enabled && !self.remote_revoked.contains(&record.connector_id))
+    }
+
+    pub fn remotely_revoked(&self) -> impl Iterator<Item = &ConnectorRecord> {
+        self.records
+            .values()
+            .filter(|record| self.remote_revoked.contains(&record.connector_id))
+    }
+
+    /// Commits authority-side denial before making the credential eligible
+    /// for provider deletion.
+    pub fn confirm_remote_revocation(&mut self, connector_id: &str) -> Result<bool> {
+        let record = self
+            .records
+            .get(connector_id)
+            .context("connector was not found")?;
+        if record.enabled {
+            bail!("active connector cannot confirm remote revocation");
+        }
+        if self.remote_revoked.contains(connector_id) {
+            return Ok(false);
+        }
+        let mut revoked = self.remote_revoked.clone();
+        revoked.insert(connector_id.to_owned());
+        let mut cleanup = self.key_cleanup.clone();
+        if let Some(handle) = &record.secure_key_handle
+            && !cleanup.contains(handle)
+        {
+            cleanup.push(handle.clone());
+        }
+        self.persist_all(
+            &self.records.clone(),
+            &self.prepared_keys.clone(),
+            &cleanup,
+            &revoked,
+            self.installation_identity.clone(),
+        )?;
+        self.remote_revoked = revoked;
+        self.key_cleanup = cleanup;
+        Ok(true)
+    }
+
     #[must_use]
     pub fn prepared_key(&self, handle: &SecureKeyHandle) -> Option<&PreparedConnectorKey> {
         self.prepared_keys
@@ -439,15 +505,12 @@ impl ConnectorRegistry {
         if let Some(record) = candidate.get_mut(connector_id) {
             record.enabled = false;
         }
-        let mut cleanup = self.key_cleanup.clone();
-        if let Some(handle) = record.secure_key_handle.as_ref()
-            && !cleanup.contains(handle)
-        {
-            cleanup.push(handle.clone());
-        }
-        self.persist_state(&candidate, &self.prepared_keys.clone(), &cleanup)?;
+        self.persist_state(
+            &candidate,
+            &self.prepared_keys.clone(),
+            &self.key_cleanup.clone(),
+        )?;
         self.records = candidate;
-        self.key_cleanup = cleanup;
         Ok(true)
     }
 
@@ -466,12 +529,17 @@ impl ConnectorRegistry {
             .context("connector was not found")?;
         let mut candidate = self.records.clone();
         candidate.insert(record.connector_id.clone(), record);
-        self.persist_state(
+        let mut remote_revoked = self.remote_revoked.clone();
+        remote_revoked.remove(&previous.connector_id);
+        self.persist_all(
             &candidate,
             &self.prepared_keys.clone(),
             &self.key_cleanup.clone(),
+            &remote_revoked,
+            self.installation_identity.clone(),
         )?;
         self.records = candidate;
+        self.remote_revoked = remote_revoked;
         Ok(previous)
     }
 
@@ -501,6 +569,7 @@ impl ConnectorRegistry {
             records,
             prepared_keys,
             key_cleanup,
+            &self.remote_revoked.clone(),
             self.installation_identity.clone(),
         )
     }
@@ -514,8 +583,20 @@ impl ConnectorRegistry {
         records: &BTreeMap<String, ConnectorRecord>,
         prepared_keys: &[PreparedConnectorKey],
         key_cleanup: &[SecureKeyHandle],
+        remote_revoked: &BTreeSet<String>,
         installation_identity: Option<InstallationSigningIdentity>,
     ) -> Result<()> {
+        if records.len() > MAX_CONNECTORS {
+            bail!("connector registry exceeds the {MAX_CONNECTORS} connector limit");
+        }
+        validate_key_state(records, prepared_keys, key_cleanup)?;
+        if remote_revoked.iter().any(|connector_id| {
+            records
+                .get(connector_id)
+                .is_none_or(|record| record.enabled)
+        }) {
+            bail!("remote revocation state does not match a disabled connector");
+        }
         #[cfg(test)]
         if std::mem::take(&mut self.fail_next_persist) {
             bail!("injected connector registry replacement failure");
@@ -526,6 +607,7 @@ impl ConnectorRegistry {
             connectors: records.values().cloned().collect(),
             prepared_keys: prepared_keys.to_vec(),
             key_cleanup: key_cleanup.to_vec(),
+            remote_revoked: remote_revoked.iter().cloned().collect(),
             installation_identity,
         };
         let bytes = serde_json::to_vec_pretty(&document)?;
@@ -799,6 +881,61 @@ mod tests {
     }
 
     #[test]
+    fn mutation_bounds_never_persist_an_unopenable_key_registry() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut registry = ConnectorRegistry::load(dir.path()).unwrap();
+        let now = Utc::now().timestamp_millis();
+        for index in 0..MAX_CONNECTORS {
+            registry
+                .register_prepared_key(
+                    SecureKeyHandle::new(format!("prepared-{index}")).unwrap(),
+                    [u8::try_from(index).unwrap_or_default(); 32],
+                    now.saturating_add(60_000),
+                )
+                .unwrap();
+        }
+        assert!(
+            registry
+                .register_prepared_key(
+                    SecureKeyHandle::new("prepared-overflow".into()).unwrap(),
+                    [255; 32],
+                    now.saturating_add(60_000),
+                )
+                .is_err()
+        );
+        drop(registry);
+        let mut registry = ConnectorRegistry::load(dir.path()).unwrap();
+        assert_eq!(registry.prepared_keys.len(), MAX_CONNECTORS);
+
+        for index in 0..MAX_CONNECTORS {
+            registry
+                .cancel_prepared_key(&SecureKeyHandle::new(format!("prepared-{index}")).unwrap())
+                .unwrap();
+        }
+        for index in 0..MAX_CONNECTORS {
+            let handle = SecureKeyHandle::new(format!("second-{index}")).unwrap();
+            registry
+                .register_prepared_key(
+                    handle.clone(),
+                    [u8::try_from(index).unwrap_or_default(); 32],
+                    now.saturating_add(60_000),
+                )
+                .unwrap();
+            registry.cancel_prepared_key(&handle).unwrap();
+        }
+        let overflow = SecureKeyHandle::new("cleanup-overflow".into()).unwrap();
+        registry
+            .register_prepared_key(overflow.clone(), [254; 32], now.saturating_add(60_000))
+            .unwrap();
+        assert!(registry.cancel_prepared_key(&overflow).is_err());
+        assert!(registry.prepared_key(&overflow).is_some());
+        drop(registry);
+        let restarted = ConnectorRegistry::load(dir.path()).unwrap();
+        assert_eq!(restarted.key_cleanup.len(), MAX_CONNECTORS * 2);
+        assert!(restarted.prepared_key(&overflow).is_some());
+    }
+
+    #[test]
     fn embedded_connector_persists_only_an_opaque_secure_key_handle() {
         let dir = tempfile::tempdir().unwrap();
         let mut registry = ConnectorRegistry::load(dir.path()).unwrap();
@@ -995,6 +1132,17 @@ mod tests {
         connector.secure_key_handle = Some(handle.clone());
         registry.complete_prepared(connector).unwrap();
         assert!(registry.revoke("ncon_child_secure").unwrap());
+        assert!(registry.key_cleanup().is_empty());
+        assert_eq!(
+            registry
+                .pending_remote_revocations()
+                .map(|record| record.connector_id.as_str())
+                .collect::<Vec<_>>(),
+            ["ncon_child_secure"]
+        );
+        registry
+            .confirm_remote_revocation("ncon_child_secure")
+            .unwrap();
         assert_eq!(registry.key_cleanup(), &[handle.clone()]);
         drop(registry);
 

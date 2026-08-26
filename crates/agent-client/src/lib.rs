@@ -438,6 +438,40 @@ impl AgentClient {
             .await
     }
 
+    /// Durably revokes this connector's server-side grant using its final
+    /// signed request. A successful response means the credential is denied
+    /// by subsequent agent authentication and may be deleted locally.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the connector id is malformed, request signing
+    /// fails, the authority cannot be reached, or the authority rejects the
+    /// exact connector credential.
+    pub async fn revoke_connector(
+        &self,
+        identity: &dyn DeviceRequestSigner,
+        connector_id: &str,
+    ) -> Result<(), ClientError> {
+        if !connector_id.starts_with("ncon_")
+            || connector_id.len() > 128
+            || !connector_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        {
+            return Err(ClientError::Status {
+                status: 400,
+                body: "invalid connector id".into(),
+            });
+        }
+        self.post_json::<_, serde_json::Value>(
+            &format!("v1/agent/connectors/{connector_id}/revoke"),
+            &serde_json::json!({}),
+            Some(identity),
+        )
+        .await
+        .map(|_| ())
+    }
+
     /// Registers this node's public content-encryption key using device authentication.
     ///
     /// # Errors

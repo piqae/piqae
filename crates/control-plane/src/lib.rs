@@ -500,6 +500,10 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/events/stream", get(api::stream_events))
         .route("/v1/agent/sync", post(api::agent_sync))
         .route(
+            "/v1/agent/connectors/{connector_id}/revoke",
+            post(api::revoke_agent_connector),
+        )
+        .route(
             "/v1/agent/jobs/{job_id}/accept",
             post(api::accept_agent_job),
         )

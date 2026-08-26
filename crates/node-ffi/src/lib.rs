@@ -14,11 +14,11 @@ use base64::Engine as _;
 use piqae_node_runtime::connector_registry::ConnectorRegistry;
 use piqae_node_runtime::{
     AdapterOperationOutcome, AvailabilityClass, ConnectorInvitationExchange, ConnectorKeyError,
-    EmbeddedAdapterRegistration, EmbeddedJobRequest, EmbeddedPrinterObservation, EmbeddedQueue,
-    GeneratedConnectorKey, HostCapabilities, HostKeyError, HostKeyProvider, HostKind,
-    LifecycleEvent, NodeRuntime, NodeRuntimeMode, PrinterTransport, RuntimeConfiguration,
-    SecureConnectorSigner, SecureKeyHandle, ensure_installation_identity,
-    exchange_connector_invitation, prepare_connector_identity,
+    EmbeddedAdapterRegistration, EmbeddedCloudSupervisor, EmbeddedJobRequest,
+    EmbeddedPrinterObservation, EmbeddedQueue, GeneratedConnectorKey, HostCapabilities,
+    HostKeyError, HostKeyProvider, HostKind, LifecycleEvent, NodeRuntime, NodeRuntimeMode,
+    PrinterTransport, RuntimeConfiguration, SecureConnectorSigner, SecureKeyHandle,
+    ensure_installation_identity, exchange_connector_invitation, prepare_connector_identity,
 };
 use piqae_protocol::agent::PrinterGrant;
 use piqae_support_packs::SupportPackRegistry;
@@ -29,7 +29,7 @@ use std::{
     path::{Component, Path},
     sync::{
         Condvar, Mutex, OnceLock,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
 use thiserror::Error;
@@ -110,6 +110,63 @@ impl std::fmt::Debug for PiqaeConnectorKeyProvider {
 }
 unsafe impl Send for PiqaeConnectorKeyProvider {}
 unsafe impl Sync for PiqaeConnectorKeyProvider {}
+
+pub type PiqaeWorkAvailableCallback = unsafe extern "C" fn(*mut core::ffi::c_void);
+
+/// Coalesced notification that the host should drain adapter operations.
+///
+/// The context and callback must remain valid and thread-safe until the
+/// instance is destroyed. The callback carries no job, connector, document or
+/// credential data and may run on the embedded cloud worker thread.
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub struct PiqaeWorkAvailableProvider {
+    pub context: *mut core::ffi::c_void,
+    pub notify: Option<PiqaeWorkAvailableCallback>,
+}
+
+impl std::fmt::Debug for PiqaeWorkAvailableProvider {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("PiqaeWorkAvailableProvider(<opaque host context>)")
+    }
+}
+
+unsafe impl Send for PiqaeWorkAvailableProvider {}
+unsafe impl Sync for PiqaeWorkAvailableProvider {}
+
+#[derive(Debug)]
+struct FfiWorkAvailableNotifier {
+    provider: PiqaeWorkAvailableProvider,
+    pending: AtomicBool,
+}
+
+impl FfiWorkAvailableNotifier {
+    const fn new(provider: PiqaeWorkAvailableProvider) -> Self {
+        Self {
+            provider,
+            pending: AtomicBool::new(false),
+        }
+    }
+}
+
+impl piqae_node_runtime::WorkAvailableNotifier for FfiWorkAvailableNotifier {
+    fn notify(&self) {
+        if self
+            .pending
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+        if let Some(callback) = self.provider.notify {
+            unsafe { callback(self.provider.context) };
+        }
+    }
+
+    fn clear(&self) {
+        self.pending.store(false, Ordering::Release);
+    }
+}
 
 impl SecureConnectorSigner for PiqaeConnectorKeyProvider {
     fn generate(&self, scope: &str) -> Result<GeneratedConnectorKey, ConnectorKeyError> {
@@ -399,8 +456,11 @@ struct Instance {
     runtime: Option<std::sync::Arc<NodeRuntime>>,
     host_key_provider: Option<PiqaeHostKeyProvider>,
     connector_key_provider: Option<PiqaeConnectorKeyProvider>,
+    work_available_provider: Option<PiqaeWorkAvailableProvider>,
+    work_notifier: Option<std::sync::Arc<FfiWorkAvailableNotifier>>,
     embedded_queue: Option<std::sync::Arc<Mutex<EmbeddedQueue>>>,
     connector_registry: Option<std::sync::Arc<Mutex<ConnectorRegistry>>>,
+    cloud_supervisor: Option<EmbeddedCloudSupervisor>,
     in_flight: std::sync::Arc<InFlight>,
     stopping: bool,
 }
@@ -502,8 +562,11 @@ pub extern "C" fn piqae_node_create(data: *const u8, length: usize) -> PiqaeBuff
                 runtime: None,
                 host_key_provider: None,
                 connector_key_provider: None,
+                work_available_provider: None,
+                work_notifier: None,
                 embedded_queue: None,
                 connector_registry: None,
+                cloud_supervisor: None,
                 in_flight: std::sync::Arc::new(InFlight::default()),
                 stopping: false,
             },
@@ -532,6 +595,29 @@ pub extern "C" fn piqae_node_set_connector_key_provider(
         instance.connector_key_provider = Some(provider);
         drop(instances);
         Ok(json!({"handle":handle,"connector_key_provider":"configured"}))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn piqae_node_set_work_available_provider(
+    handle: u64,
+    provider: PiqaeWorkAvailableProvider,
+) -> PiqaeBuffer {
+    ffi_entry(|| {
+        if provider.notify.is_none() {
+            return Err(FfiError::InvalidInput);
+        }
+        let mut instances = lock_instances()?;
+        let instance = instances.get_mut(&handle).ok_or(FfiError::InvalidHandle)?;
+        if instance.stopping {
+            return Err(FfiError::RuntimeTransition);
+        }
+        if instance.runtime.is_some() || instance.work_available_provider.is_some() {
+            return Err(FfiError::ProviderLocked);
+        }
+        instance.work_available_provider = Some(provider);
+        drop(instances);
+        Ok(json!({"handle":handle,"work_available_provider":"configured"}))
     })
 }
 
@@ -603,9 +689,41 @@ pub extern "C" fn piqae_node_start(handle: u64) -> PiqaeBuffer {
                     .map_err(|_| FfiError::ConnectorOperation)?;
                 retry_connector_key_cleanup(&mut connectors, provider);
             }
-            instance.runtime = Some(std::sync::Arc::new(runtime));
-            instance.embedded_queue = Some(std::sync::Arc::new(Mutex::new(queue)));
-            instance.connector_registry = Some(std::sync::Arc::new(Mutex::new(connectors)));
+            let runtime = std::sync::Arc::new(runtime);
+            let queue = std::sync::Arc::new(Mutex::new(queue));
+            let connectors = std::sync::Arc::new(Mutex::new(connectors));
+            let work_notifier = instance
+                .work_available_provider
+                .map(FfiWorkAvailableNotifier::new)
+                .map(std::sync::Arc::new);
+            let cloud_supervisor = if instance.configuration.local_only {
+                None
+            } else {
+                let provider: std::sync::Arc<dyn SecureConnectorSigner> = std::sync::Arc::new(
+                    *instance
+                        .connector_key_provider
+                        .as_ref()
+                        .ok_or(FfiError::SecureConnectorProviderRequired)?,
+                );
+                Some(
+                    EmbeddedCloudSupervisor::start(
+                        std::sync::Arc::clone(&queue),
+                        std::sync::Arc::clone(&connectors),
+                        provider,
+                        std::sync::Arc::clone(&runtime),
+                        work_notifier.clone().map(|notifier| {
+                            notifier
+                                as std::sync::Arc<dyn piqae_node_runtime::WorkAvailableNotifier>
+                        }),
+                    )
+                    .map_err(|_| FfiError::StartFailed)?,
+                )
+            };
+            instance.runtime = Some(runtime);
+            instance.embedded_queue = Some(queue);
+            instance.connector_registry = Some(connectors);
+            instance.cloud_supervisor = cloud_supervisor;
+            instance.work_notifier = work_notifier;
         }
         let snapshot = instance_snapshot(handle, instance);
         drop(instances);
@@ -670,11 +788,25 @@ pub extern "C" fn piqae_node_stop(handle: u64) -> PiqaeBuffer {
             in_flight
         };
         in_flight.wait_until_idle()?;
+        let mut supervisor = {
+            let mut instances = lock_instances()?;
+            let instance = instances.get_mut(&handle).ok_or(FfiError::InvalidHandle)?;
+            let supervisor = instance.cloud_supervisor.take();
+            drop(instances);
+            supervisor
+        };
+        if let Some(supervisor) = supervisor.as_mut() {
+            supervisor.stop();
+        }
         let mut instances = lock_instances()?;
         let instance = instances.get_mut(&handle).ok_or(FfiError::InvalidHandle)?;
         instance.runtime = None;
         instance.embedded_queue = None;
         instance.connector_registry = None;
+        if let Some(notifier) = &instance.work_notifier {
+            piqae_node_runtime::WorkAvailableNotifier::clear(notifier.as_ref());
+        }
+        instance.work_notifier = None;
         instance.stopping = false;
         instance.in_flight.open_admission()?;
         let snapshot = instance_snapshot(handle, instance);
@@ -758,7 +890,15 @@ pub extern "C" fn piqae_node_command(handle: u64, data: *const u8, length: usize
         let bytes = input_bytes(data, length)?;
         let command =
             serde_json::from_slice::<NativeCommand>(bytes).map_err(|_| FfiError::InvalidCommand)?;
-        let (runtime, provider, connector_provider, embedded_queue, connector_registry, _in_flight) = {
+        let (
+            runtime,
+            provider,
+            connector_provider,
+            embedded_queue,
+            connector_registry,
+            work_notifier,
+            _in_flight,
+        ) = {
             let instances = lock_instances()?;
             let instance = instances.get(&handle).ok_or(FfiError::InvalidHandle)?;
             let runtime = instance.runtime.clone().ok_or(FfiError::NotStarted)?;
@@ -772,6 +912,7 @@ pub extern "C" fn piqae_node_command(handle: u64, data: *const u8, length: usize
                 .connector_registry
                 .clone()
                 .ok_or(FfiError::NotStarted)?;
+            let work_notifier = instance.work_notifier.clone();
             let in_flight = instance.in_flight.begin()?;
             drop(instances);
             (
@@ -780,6 +921,7 @@ pub extern "C" fn piqae_node_command(handle: u64, data: *const u8, length: usize
                 connector_provider,
                 embedded_queue,
                 connector_registry,
+                work_notifier,
                 in_flight,
             )
         };
@@ -875,9 +1017,19 @@ pub extern "C" fn piqae_node_command(handle: u64, data: *const u8, length: usize
                 return Ok(json!({ "handle": handle, "job": accepted }));
             }
             NativeCommand::NextAdapterOperation { adapter_id } => {
-                let operation = lock_embedded(&embedded_queue)?
-                    .next_operation(&adapter_id)
-                    .map_err(|_| FfiError::AdapterOperation)?;
+                let operation = {
+                    let mut queue = lock_embedded(&embedded_queue)?;
+                    let operation = queue
+                        .next_operation(&adapter_id)
+                        .map_err(|_| FfiError::AdapterOperation)?;
+                    if operation.is_none()
+                        && let Some(notifier) = &work_notifier
+                    {
+                        piqae_node_runtime::WorkAvailableNotifier::clear(notifier.as_ref());
+                    }
+                    drop(queue);
+                    operation
+                };
                 return Ok(json!({ "handle": handle, "operation": operation }));
             }
             NativeCommand::BeginAdapterHandoff {
@@ -1044,7 +1196,7 @@ pub extern "C" fn piqae_node_command(handle: u64, data: *const u8, length: usize
 #[unsafe(no_mangle)]
 pub extern "C" fn piqae_node_destroy(handle: u64) -> PiqaeBuffer {
     ffi_entry(|| {
-        let removed = {
+        let mut removed = {
             let mut instances = lock_instances()?;
             let instance = instances.get_mut(&handle).ok_or(FfiError::InvalidHandle)?;
             instance.stopping = true;
@@ -1052,6 +1204,9 @@ pub extern "C" fn piqae_node_destroy(handle: u64) -> PiqaeBuffer {
             instances.remove(&handle).ok_or(FfiError::InvalidHandle)?
         };
         removed.in_flight.wait_until_idle()?;
+        if let Some(supervisor) = removed.cloud_supervisor.as_mut() {
+            supervisor.stop();
+        }
         Ok(json!({ "handle": handle, "destroyed": true }))
     })
 }
@@ -1322,6 +1477,30 @@ mod tests {
         // SAFETY: the test caller supplies a live 32-byte output buffer.
         unsafe { std::slice::from_raw_parts_mut(output, output_length).fill(7) };
         0
+    }
+
+    unsafe extern "C" fn test_work_available(context: *mut core::ffi::c_void) {
+        let counter = context.cast::<std::sync::atomic::AtomicUsize>();
+        if let Some(counter) = unsafe { counter.as_ref() } {
+            counter.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    #[test]
+    fn work_available_callback_is_coalesced_until_the_host_clears_it() {
+        let counter = std::sync::atomic::AtomicUsize::new(0);
+        let notifier = FfiWorkAvailableNotifier::new(PiqaeWorkAvailableProvider {
+            context: std::ptr::from_ref(&counter)
+                .cast_mut()
+                .cast::<core::ffi::c_void>(),
+            notify: Some(test_work_available),
+        });
+        piqae_node_runtime::WorkAvailableNotifier::notify(&notifier);
+        piqae_node_runtime::WorkAvailableNotifier::notify(&notifier);
+        assert_eq!(counter.load(Ordering::Acquire), 1);
+        piqae_node_runtime::WorkAvailableNotifier::clear(&notifier);
+        piqae_node_runtime::WorkAvailableNotifier::notify(&notifier);
+        assert_eq!(counter.load(Ordering::Acquire), 2);
     }
 
     #[test]

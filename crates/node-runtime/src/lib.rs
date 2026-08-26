@@ -14,6 +14,7 @@ pub mod connector_enrollment;
 pub mod connector_registry;
 mod durable_file;
 pub mod embedded;
+pub mod embedded_cloud;
 pub mod installation;
 pub mod route_coordinator;
 pub mod runtime;
@@ -28,6 +29,7 @@ pub use cloud_worker::*;
 pub use command::*;
 pub use connector_enrollment::*;
 pub use embedded::*;
+pub use embedded_cloud::*;
 pub use installation::{
     AttachPolicy, BrokerEndpoint, InstallationGuard, InstallationLockError, RuntimeDisposition,
     RuntimeSelectionError, select_runtime,
