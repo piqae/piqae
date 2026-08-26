@@ -1289,6 +1289,10 @@ paths:
   /v1/jobs/{job_id}/resolve-uncertain:
     parameters:
       - $ref: "#/components/parameters/JobId"
+      - name: Idempotency-Key
+        in: header
+        required: true
+        schema: { type: string, minLength: 8, maxLength: 255 }
     post:
       summary: Resolve an uncertain delivery with an explicit operator decision
       description: |
@@ -1304,7 +1308,12 @@ paths:
             schema: { $ref: "#/components/schemas/ResolveUncertainDelivery" }
       responses:
         "200":
-          description: Updated job or linked reprint result.
+          description: The node acknowledged the exact local fence release and the decision is final.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UncertainDeliveryResolution" }
+        "202":
+          description: The exact node fence resolution command is durably queued but not yet acknowledged.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/UncertainDeliveryResolution" }
@@ -5489,20 +5498,23 @@ components:
       additionalProperties: false
       required: [resolution, note]
       properties:
-        resolution: { type: string, enum: [acknowledge_printed, acknowledge_missing, reprint] }
+        resolution: { type: string, enum: [acknowledge_printed, acknowledge_missing, cancelled, reprint] }
         note: { type: string, minLength: 1, maxLength: 2000 }
     UncertainDeliveryResolution:
       type: object
       additionalProperties: false
-      required: [job, resolution, resolved_at]
+      required: [job, resolution, state, request_id, created_at]
       properties:
         job: { $ref: "#/components/schemas/Job" }
-        resolution: { type: string, enum: [acknowledge_printed, acknowledge_missing, reprint] }
+        resolution: { type: string, enum: [acknowledge_printed, acknowledge_missing, cancelled, reprint] }
+        state: { type: string, enum: [pending_node_ack, resolved] }
+        request_id: { type: string, minLength: 1, maxLength: 200 }
         replacement_job:
           oneOf:
             - { $ref: "#/components/schemas/Job" }
             - { type: "null" }
-        resolved_at: { type: string, format: date-time }
+        created_at: { type: string, format: date-time }
+        resolved_at: { type: [string, "null"], format: date-time }
     CreateTarget:
       type: object
       additionalProperties: false
