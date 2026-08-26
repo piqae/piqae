@@ -44,6 +44,31 @@ public enum AdapterOperationOutcomeKind
     Ambiguous
 }
 
+public enum PiqaePrinterGrant { SelectedPrinters, AllLocalPrinters }
+
+/// <summary>A prepared, short-lived connector identity. The key handle is opaque and non-secret.</summary>
+public sealed record PreparedConnectorInvitation(
+    string KeyHandle,
+    string PublicKeyBase64,
+    long ExpiresUnixMs);
+
+/// <summary>
+/// Inputs required to redeem an authority-issued invitation. Connector identity
+/// and ownership metadata are returned only by the pinned control plane.
+/// </summary>
+public sealed record PiqaeConnectorInvitation(
+    Uri ControlPlaneUrl,
+    string InvitationToken,
+    string ConnectorKeyHandle,
+    PiqaePrinterGrant PrinterGrant,
+    IReadOnlyList<string> AllowedPrinterIds,
+    string NodeName,
+    string Hostname)
+{
+    public override string ToString() =>
+        $"PiqaeConnectorInvitation {{ ControlPlaneUrl = {ControlPlaneUrl}, InvitationToken = [REDACTED], ConnectorKeyHandle = {ConnectorKeyHandle}, PrinterGrant = {PrinterGrant}, NodeName = {NodeName}, Hostname = {Hostname} }}";
+}
+
 public sealed class PiqaeNode : IDisposable
 {
     private static readonly JsonSerializerOptions JsonOptions = new()
@@ -53,6 +78,7 @@ public sealed class PiqaeNode : IDisposable
     };
 
     private readonly object _gate = new();
+    private readonly string _applicationId;
     private ulong _handle;
     private bool _disposed;
     private GCHandle? _hostKeyHandle;
@@ -65,6 +91,9 @@ public sealed class PiqaeNode : IDisposable
     public PiqaeNode(PiqaeNodeOptions options, IPiqaeConnectorKeyProvider? connectorKeyProvider = null)
     {
         ArgumentNullException.ThrowIfNull(options);
+        if (string.IsNullOrWhiteSpace(options.ApplicationId))
+            throw new ArgumentException("An application ID is required.", nameof(options));
+        _applicationId = options.ApplicationId;
         var descriptor = NativeMethods.piqae_node_abi_descriptor();
         EnsureCompatibleAbi(descriptor);
         var payload = JsonSerializer.SerializeToUtf8Bytes(new
@@ -230,6 +259,65 @@ public sealed class PiqaeNode : IDisposable
 
     public JsonElement ConnectorSnapshots() => Command(new { type = "connector_snapshots" });
 
+    /// <summary>Creates a short-lived connector key using this node's application scope.</summary>
+    public PreparedConnectorInvitation PrepareConnectorInvitation()
+    {
+        var result = Command(new
+        {
+            type = "prepare_connector_key",
+            application_scope = _applicationId
+        });
+        return new(
+            RequiredString(result, "key_handle"),
+            RequiredString(result, "public_key_base64"),
+            RequiredInt64(result, "expires_unix_ms"));
+    }
+
+    /// <summary>Cancels a prepared key. Durable native cleanup safely retries deletion.</summary>
+    public bool CancelPreparedConnectorInvitation(string keyHandle)
+    {
+        ValidateOpaqueKeyHandle(keyHandle);
+        var result = Command(new
+        {
+            type = "cancel_prepared_connector_key",
+            key_handle = keyHandle
+        });
+        return RequiredBoolean(result, "cancelled");
+    }
+
+    /// <summary>
+    /// Redeems an invitation through the native authority exchange. The caller
+    /// cannot supply a connector record or override authority-owned metadata.
+    /// </summary>
+    public JsonElement Connect(PiqaeConnectorInvitation invitation)
+    {
+        ArgumentNullException.ThrowIfNull(invitation);
+        if (!invitation.ControlPlaneUrl.IsAbsoluteUri
+            || invitation.ControlPlaneUrl.Scheme != Uri.UriSchemeHttps
+            || !string.IsNullOrEmpty(invitation.ControlPlaneUrl.UserInfo)
+            || !string.IsNullOrEmpty(invitation.ControlPlaneUrl.Fragment))
+            throw new ArgumentException("The connector control plane must be an absolute HTTPS URL.", nameof(invitation));
+        if (string.IsNullOrWhiteSpace(invitation.InvitationToken))
+            throw new ArgumentException("An invitation token is required.", nameof(invitation));
+        ValidateOpaqueKeyHandle(invitation.ConnectorKeyHandle);
+        if (string.IsNullOrWhiteSpace(invitation.NodeName) || string.IsNullOrWhiteSpace(invitation.Hostname))
+            throw new ArgumentException("Node and host names are required.", nameof(invitation));
+        ArgumentNullException.ThrowIfNull(invitation.AllowedPrinterIds);
+
+        var result = CommandSensitive(new
+        {
+            type = "connect_invitation",
+            control_plane_url = invitation.ControlPlaneUrl.AbsoluteUri,
+            invitation_token = invitation.InvitationToken,
+            connector_key_handle = invitation.ConnectorKeyHandle,
+            printer_grant = invitation.PrinterGrant,
+            allowed_printer_ids = invitation.AllowedPrinterIds,
+            node_name = invitation.NodeName,
+            hostname = invitation.Hostname
+        });
+        return RequiredObject(result, "connector");
+    }
+
     public JsonElement RevokeConnector(string connectorId) => Command(new
     {
         type = "revoke_connector",
@@ -372,6 +460,67 @@ public sealed class PiqaeNode : IDisposable
         }
     }
 
+    private JsonElement CommandSensitive(object command)
+    {
+        lock (_gate)
+        {
+            ThrowIfDisposed();
+            var payload = JsonSerializer.SerializeToUtf8Bytes(command, JsonOptions);
+            try
+            {
+                using var response = NativeResponse.Call(_handle, payload, NativeMethods.piqae_node_command);
+                return response.Data.Clone();
+            }
+            finally { CryptographicOperations.ZeroMemory(payload); }
+        }
+    }
+
+    private static string RequiredString(JsonElement element, string propertyName)
+    {
+        if (!element.TryGetProperty(propertyName, out var value)
+            || value.ValueKind != JsonValueKind.String
+            || string.IsNullOrEmpty(value.GetString()))
+            throw InvalidNativeResponse();
+        return value.GetString()!;
+    }
+
+    private static long RequiredInt64(JsonElement element, string propertyName)
+    {
+        if (!element.TryGetProperty(propertyName, out var value)
+            || value.ValueKind != JsonValueKind.Number
+            || !value.TryGetInt64(out var number))
+            throw InvalidNativeResponse();
+        return number;
+    }
+
+    private static bool RequiredBoolean(JsonElement element, string propertyName)
+    {
+        if (!element.TryGetProperty(propertyName, out var value)
+            || value.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+            throw InvalidNativeResponse();
+        return value.GetBoolean();
+    }
+
+    private static JsonElement RequiredObject(JsonElement element, string propertyName)
+    {
+        if (!element.TryGetProperty(propertyName, out var value)
+            || value.ValueKind != JsonValueKind.Object)
+            throw InvalidNativeResponse();
+        return value.Clone();
+    }
+
+    private static PiqaeNodeException InvalidNativeResponse() => new(
+        "invalid_native_response",
+        "The native runtime response was incomplete.");
+
+    private static void ValidateOpaqueKeyHandle(string keyHandle)
+    {
+        if (string.IsNullOrWhiteSpace(keyHandle)
+            || keyHandle.Length > 256
+            || keyHandle.Any(character => !char.IsAsciiLetterOrDigit(character) && character is not '.' and not '-' and not '_'))
+            throw new ArgumentException("The connector key handle is invalid.", nameof(keyHandle));
+    }
+
     private void ThrowIfDisposed() => ObjectDisposedException.ThrowIf(_disposed, this);
 
     internal static void EnsureCompatibleAbi(NativeAbiDescriptor descriptor)
@@ -431,13 +580,33 @@ public sealed class PiqaeNode : IDisposable
             var scopeBytes = new byte[(int)scopeLength];
             Marshal.Copy(scope, scopeBytes, 0, scopeBytes.Length);
             PiqaeGeneratedConnectorKey generated;
-            try { generated = provider.Generate(new UTF8Encoding(false, true).GetString(scopeBytes)); }
+            string scopeValue;
+            try
+            {
+                scopeValue = new UTF8Encoding(false, true).GetString(scopeBytes);
+                generated = provider.Generate(scopeValue);
+            }
             finally { CryptographicOperations.ZeroMemory(scopeBytes); }
+            if (generated is null) return 1;
+            var validHandle = !string.IsNullOrWhiteSpace(generated.Handle)
+                && generated.Handle.Length <= 256
+                && generated.Handle.All(character =>
+                    char.IsAsciiLetterOrDigit(character) || character is '.' or '-' or '_');
+            if (!validHandle || generated.PublicKey is null || generated.PublicKey.Length != 32)
+            {
+                CleanupRejectedGeneratedConnectorKey(provider, scopeValue, generated.Handle);
+                if (generated.PublicKey is not null)
+                    CryptographicOperations.ZeroMemory(generated.PublicKey);
+                return 1;
+            }
             var handleBytes = Encoding.UTF8.GetBytes(generated.Handle);
             try
             {
-                if (handleBytes.Length == 0 || (nuint)handleBytes.Length > handleCapacity
-                    || generated.PublicKey.Length != 32) return 1;
+                if (handleBytes.Length == 0 || (nuint)handleBytes.Length > handleCapacity)
+                {
+                    CleanupRejectedGeneratedConnectorKey(provider, scopeValue, generated.Handle);
+                    return 1;
+                }
                 Marshal.Copy(handleBytes, 0, handleOutput, handleBytes.Length);
                 Marshal.WriteIntPtr(handleLengthOutput, (IntPtr)handleBytes.Length);
                 Marshal.Copy(generated.PublicKey, 0, publicKeyOutput, generated.PublicKey.Length);
@@ -450,6 +619,19 @@ public sealed class PiqaeNode : IDisposable
             }
         }
         catch { return 1; }
+    }
+
+    private static void CleanupRejectedGeneratedConnectorKey(
+        IPiqaeConnectorKeyProvider provider,
+        string scope,
+        string handle)
+    {
+        // Rust cannot durably schedule cleanup until it receives a valid
+        // handle. Best-effort cleanup avoids orphaning a newly generated
+        // invitation key while preserving installation keys.
+        if (!scope.StartsWith("connector/", StringComparison.Ordinal)) return;
+        try { provider.Delete(handle); }
+        catch { /* Callback failures remain redacted at the ABI. */ }
     }
 
     private static int SignConnector(
@@ -590,6 +772,11 @@ internal static class NativeMethods
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)] internal static extern NativeBuffer piqae_node_snapshot(ulong handle);
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)] internal static extern NativeBuffer piqae_node_command(ulong handle, byte[] data, nuint length);
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)] internal static extern NativeBuffer piqae_node_destroy(ulong handle);
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)] internal static extern NativeBuffer piqae_node_broker_execute(
+        byte[] endpointData, nuint endpointLength,
+        byte[] credentialJson, nuint credentialLength,
+        byte[] capabilityJson, nuint capabilityLength,
+        byte[] operationJson, nuint operationLength);
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)] internal static extern void piqae_node_free(NativeBuffer buffer);
 }
 
@@ -597,6 +784,7 @@ internal sealed class NativeResponse : IDisposable
 {
     private NativeBuffer _buffer;
     private JsonDocument _document = null!;
+    private byte[]? _managedBytes;
 
     private NativeResponse(NativeBuffer buffer, bool throwOnError)
     {
@@ -607,6 +795,7 @@ internal sealed class NativeResponse : IDisposable
                 throw new PiqaeNodeException("invalid_native_response", "The native runtime returned an invalid response.");
             var bytes = new byte[(int)buffer.Length];
             Marshal.Copy(buffer.Data, bytes, 0, bytes.Length);
+            _managedBytes = bytes;
             _document = JsonDocument.Parse(bytes);
             var root = _document.RootElement;
             if (throwOnError && (!root.TryGetProperty("ok", out var ok) || !ok.GetBoolean()))
@@ -622,6 +811,8 @@ internal sealed class NativeResponse : IDisposable
             if (_buffer.Data != IntPtr.Zero) NativeMethods.piqae_node_free(_buffer);
             _buffer = default;
             _document?.Dispose();
+            if (_managedBytes is not null) CryptographicOperations.ZeroMemory(_managedBytes);
+            _managedBytes = null;
             throw;
         }
     }
@@ -638,10 +829,26 @@ internal sealed class NativeResponse : IDisposable
         new(operation(handle, provider), true);
     internal static NativeResponse Call(ulong handle, byte[] payload, Func<ulong, byte[], nuint, NativeBuffer> operation) =>
         new(operation(handle, payload, (nuint)payload.Length), true);
+    internal static NativeResponse CallBroker(
+        byte[] endpoint,
+        byte[] credentialJson,
+        byte[] capabilityJson,
+        byte[] operationJson) => new(
+            NativeMethods.piqae_node_broker_execute(
+                endpoint, (nuint)endpoint.Length,
+                credentialJson, (nuint)credentialJson.Length,
+                capabilityJson, (nuint)capabilityJson.Length,
+                operationJson, (nuint)operationJson.Length),
+            true);
 
     public void Dispose()
     {
         _document.Dispose();
+        if (_managedBytes is not null)
+        {
+            CryptographicOperations.ZeroMemory(_managedBytes);
+            _managedBytes = null;
+        }
         if (_buffer.Data != IntPtr.Zero)
         {
             NativeMethods.piqae_node_free(_buffer);

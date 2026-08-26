@@ -187,8 +187,10 @@ public sealed class WindowsCredentialConnectorKeyProvider : IPiqaeConnectorKeyPr
 
     private static string KeyKind(string scope)
     {
-        if (scope.StartsWith("installation/", StringComparison.Ordinal)) return "installation";
-        if (scope.StartsWith("connector/", StringComparison.Ordinal)) return "connector";
+        if (scope.StartsWith("installation/", StringComparison.Ordinal)
+            && scope.Length > "installation/".Length) return "installation";
+        if (scope.StartsWith("connector/", StringComparison.Ordinal)
+            && scope.Length > "connector/".Length) return "connector";
         throw new ArgumentException("The connector key scope is unsupported.", nameof(scope));
     }
 

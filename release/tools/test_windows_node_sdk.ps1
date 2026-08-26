@@ -17,7 +17,7 @@ $env:PATH = "$(Split-Path $native);$env:PATH"
 if ($LASTEXITCODE -ne 0) { throw "C ABI smoke consumer failed at runtime" }
 
 $env:PIQAE_NODE_NATIVE_TEST = "1"
-dotnet test sdk/dotnet/tests/Piqae.Node.Tests/Piqae.Node.Tests.csproj --configuration Release
+dotnet test sdk/dotnet/tests/Piqae.Node.Tests/Piqae.Node.Tests.csproj --configuration Release /p:TreatWarningsAsErrors=true
 if ($LASTEXITCODE -ne 0) { throw ".NET node SDK tests failed" }
 dotnet pack sdk/dotnet/src/Piqae.Node/Piqae.Node.csproj --configuration Release --output artifacts/dotnet /p:PiqaeNativeLibrary="$native"
 if ($LASTEXITCODE -ne 0) { throw ".NET node SDK package build failed" }
