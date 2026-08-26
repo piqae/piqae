@@ -131,6 +131,15 @@ resource "google_cloud_run_v2_service" "server_secondary" {
           }
         }
       }
+      env {
+        name = "PIQAE_DESTINATION_IDENTITY_KEY"
+        value_source {
+          secret_key_ref {
+            secret  = google_secret_manager_secret.destination_identity_key.secret_id
+            version = google_secret_manager_secret_version.destination_identity_key.version
+          }
+        }
+      }
 
       startup_probe {
         failure_threshold = 12

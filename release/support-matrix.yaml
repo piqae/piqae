@@ -27,10 +27,16 @@ features:
     reason: lease expiry and reconnect paths are tested, but long-running fleet evidence is incomplete
   primary_standby_target_routing:
     tier: preview
-    reason: new jobs select a ready binding, but already-waiting jobs are not automatically reassigned
+    reason: new and waiting jobs can select a fresh compatible route before native handoff, but physical-printer redundancy and fleet duplicate-prevention soak evidence are incomplete
   automatic_waiting_job_reassignment:
     tier: preview
-    reason: atomic pre-acceptance reassignment is implemented, but PostgreSQL fault injection and fleet duplicate-prevention soak evidence are incomplete
+    reason: atomic fenced pre-handoff reassignment is implemented for compatible direct and target jobs, but physical fault injection and fleet duplicate-prevention soak evidence are incomplete
+  physical_destination_route_coordination:
+    tier: preview
+    reason: tenant-scoped destinations, multi-node routes, fenced handoff reservations, reversible identity decisions, and the node-local coordinator have PostgreSQL and non-physical evidence; physical redundancy, upgrade-fleet, and cross-authority soak gates remain open
+  live_route_telemetry:
+    tier: preview
+    reason: authenticated freshness-bounded route health and privacy-safe spooler occupancy are exposed, but vendor status accuracy, long-running reconciliation, and physical stock/profile evidence remain incomplete
   compose_self_hosting:
     tier: preview
     reason: configuration renders locally but backup, restore, and upgrade drills are operator-owned

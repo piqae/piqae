@@ -70,26 +70,31 @@ The default policy should be:
 - if acceptance cannot be proved or disproved, transition to
   `delivery_uncertain`;
 - do not automatically retry an uncertain job;
-- let a workspace choose an explicit at-most-once or at-least-once bias by
-  printer/job class.
+- require an explicit, audited operator resolution; authorizing another output
+  creates a separate linked job and never reuses the uncertain attempt.
 
 This is more reliable than silently claiming exactly-once.
 
-## Per-printer scheduling
+## Physical-destination scheduling
 
-Each logical printer has a serial submission worker:
+An installed OS queue is a route, not necessarily a unique physical printer.
+For routes grouped under one tenant-scoped physical destination:
 
-- one job crosses the native handoff boundary at a time;
-- FIFO order is based on agent-accepted sequence, not WebSocket arrival timing;
-- different printers may process concurrently;
+- one fenced reservation crosses the native handoff boundary at a time;
+- eligible control-plane work is selected in stable `(created_at, job_id)`
+  order across routes;
+- different physical destinations may process concurrently;
 - a configurable concurrency limiter bounds total PDF rendering;
 - RAW `qty` submissions are serialized and individually tracked;
 - a paused application queue does not pause or mutate the OS queue unless the
   operator asks separately.
 
-Sequential API calls that wait for each create response receive monotonically
-ordered per-printer sequence numbers. Concurrent creates have no implied order
-unless the native API supplies an explicit ordering key.
+The durable node still allocates a route-local acceptance sequence. A shared
+installation coordinator serializes handoff from several tenant connectors
+without exposing their job data. It cannot create one global FIFO or automatic
+failover ledger across independent hosted and self-hosted control planes. Jobs
+submitted directly to the OS spooler are visible only as privacy-safe occupancy
+and remain outside Piqae ordering and idempotency.
 
 ## Native job state model
 

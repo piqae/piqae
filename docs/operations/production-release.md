@@ -96,8 +96,10 @@ highly available and does not support a 99.95% claim. See
 
 1. Build and attest immutable server, migration, web, macOS, and Windows
    candidates from the same reviewed commit.
-2. Verify SBOMs, checksums, repository-bound provenance, code signatures, update
-   metadata, protocol N/N-1, and the support matrix.
+2. Verify SBOMs, checksums, repository-bound provenance, code signatures,
+   update metadata, the declared server/schema compatibility matrix, the
+   fail-closed node projection behavior, and the support matrix. N/N-1 is not a
+   blanket native-handoff promise.
 3. Back up PostgreSQL and object storage and prove the restore checkpoint is
    readable.
 4. Run backward-compatible migrations exactly once with the migration image.
@@ -114,7 +116,9 @@ highly available and does not support a 99.95% claim. See
    worker revisions. PostgreSQL outbox leases remain the duplicate-processing
    boundary while both regions are available.
 9. Promote the web only after the API contract is healthy. Then release a small
-   signed node canary cohort and widen only after its rollback window.
+   signed node canary cohort. Require current route projection health and fresh
+   route telemetry; widening while jobs are held with
+   `node_upgrade_required` is a failed gate, not a reason to bypass fencing.
 10. Record the exact commit, digests, six prior and six promoted Cloud Run
    revisions, configuration revision, migration version,
    evidence links, approver, and observation window.
@@ -133,6 +137,12 @@ It must not run down-migrations automatically. Every migration must remain
 compatible with N and N-1 server versions throughout the rollout. If a schema
 change cannot be expanded and contracted safely, stop the release and schedule
 a separately rehearsed maintenance operation.
+
+When a release adds destination-route reservations, older nodes may continue
+to report presence and inventory but must not receive new handoffs until they
+publish a current route projection. Existing locally accepted work remains on
+its original node. A rollback plan must preserve that safe hold and must never
+reroute an ambiguous post-spooler attempt merely to restore throughput.
 
 During regional database promotion, fence the old writer before accepting
 writes in the secondary region. Reconcile jobs near the recovery point by

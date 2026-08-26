@@ -5,6 +5,13 @@ S3-compatible storage. It does not install stateful databases or object stores.
 Supply immutable image digests and either an existing runtime Secret or an
 External Secrets Operator store.
 
+That runtime Secret must contain `PIQAE_DESTINATION_IDENTITY_KEY` as the
+canonical Base64 encoding of exactly 32 random bytes. Keep it distinct from the
+webhook and document-encryption keys and stable across service URL, workspace
+name, and ordinary credential changes. Rotation requires a versioned identity
+evidence migration and route reprojection; changing it in place can leave jobs
+safely held because existing physical-destination evidence no longer matches.
+
 The current server binary is a safe combined process: every instance exposes
 HTTP/agent-sync routes and runs PostgreSQL-leased background work. The chart
 separates `api`, `sync`, and `worker` pools for independent scaling, network
