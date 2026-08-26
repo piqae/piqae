@@ -479,6 +479,38 @@ final class PiqaeNodeKitTests: XCTestCase {
         XCTAssertEqual(restartedSnapshot.phase, .ready)
     }
 
+    func testFailedEmbeddedRuntimeStartReleasesProcessOwnership() async throws {
+        let identity = PiqaeMemoryInstallationIdentityStore(
+            id: .init(rawValue: "ins_failed_runtime_ownership")
+        )
+        let failedRuntime = PiqaeFakeEmbeddedRuntime(failsToStart: true)
+        let failed = PiqaeNode(
+            .localOnly(
+                startupMode: .embedded,
+                identityStore: identity,
+                embeddedRuntime: failedRuntime
+            )
+        )
+
+        await XCTAssertThrowsErrorAsync(try await failed.start())
+
+        let replacementRuntime = PiqaeFakeEmbeddedRuntime()
+        let replacement = PiqaeNode(
+            .localOnly(
+                startupMode: .embedded,
+                identityStore: identity,
+                embeddedRuntime: replacementRuntime
+            )
+        )
+        try await replacement.start()
+        await replacement.stop()
+
+        let startCount = await replacementRuntime.startCount
+        let stopCount = await replacementRuntime.stopCount
+        XCTAssertEqual(startCount, 1)
+        XCTAssertEqual(stopCount, 1)
+    }
+
     func testAdmissionPolicyOnlyFinishesWorkThatMayAlreadyHaveCrossedBoundary() {
         let policy = PiqaeBackgroundAdmissionPolicy(safetyMarginSeconds: 5)
         let shortBudget = PiqaeExecutionContext(

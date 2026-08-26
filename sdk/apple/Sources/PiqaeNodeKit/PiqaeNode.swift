@@ -171,6 +171,7 @@ actor PiqaeNodeEngine {
     private let admissionPolicy = PiqaeBackgroundAdmissionPolicy()
     private var started = false
     private var ownsEmbeddedRuntime = false
+    private var acquiredInstallationID: PiqaeInstallationID?
     private var embeddedRuntimeStarted = false
     private var executionContext = PiqaeExecutionContext.foreground
     private var selectedIPC: (any PiqaeInstalledNodeIPC)?
@@ -240,9 +241,10 @@ actor PiqaeNodeEngine {
                 try? await configuration.embeddedRuntime?.stop()
                 embeddedRuntimeStarted = false
             }
-            if ownsEmbeddedRuntime, let id = snapshotValue.installationID {
+            if ownsEmbeddedRuntime, let id = acquiredInstallationID {
                 await PiqaeProcessRuntimeRegistry.shared.release(id)
                 ownsEmbeddedRuntime = false
+                acquiredInstallationID = nil
             }
             started = false
             selectedIPC = nil
@@ -261,10 +263,11 @@ actor PiqaeNodeEngine {
             try? await configuration.embeddedRuntime?.stop()
             embeddedRuntimeStarted = false
         }
-        if ownsEmbeddedRuntime, let id = snapshotValue.installationID {
+        if ownsEmbeddedRuntime, let id = acquiredInstallationID {
             await PiqaeProcessRuntimeRegistry.shared.release(id)
         }
         ownsEmbeddedRuntime = false
+        acquiredInstallationID = nil
         selectedIPC = nil
         started = false
         snapshotValue = replacingSnapshot(phase: .stopped, statusMessage: nil)
@@ -496,6 +499,7 @@ actor PiqaeNodeEngine {
             throw PiqaeNodeError.nodeAlreadyRunning
         }
         ownsEmbeddedRuntime = true
+        acquiredInstallationID = installationID
         if let runtime = configuration.embeddedRuntime {
             try await runtime.start()
             embeddedRuntimeStarted = true
