@@ -168,6 +168,19 @@ Cleanup is deliberately split by ownership instead of being one ambiguous
 - **Revoke one connection** when a hosted workspace, managed child account, or
   self-hosted authority should stop using the installation. Other connectors,
   the installation identity, local profiles, and the local queue remain.
+  Pending durable acceptances require an authority with exact reconciliation
+  and compensation support (v0.1.22 or newer). Against an older authority the
+  node keeps the key and queue evidence and reports
+  `connector_authority_upgrade_required`; a connection with no pending
+  acceptance can still be revoked normally.
+- **Accept work only with a current authority fence.** A v0.1.22 node may
+  discover an older hosted or self-hosted authority while reconciling a
+  prepared acceptance. It can replay the exact accept request to learn that
+  the job was already terminalized, but a legacy `AgentAccepted` response is
+  not proof against a revoke committing immediately afterwards. The node keeps
+  the job non-runnable and reports `connector_authority_upgrade_required`
+  until the authority exposes exact reconciliation. Inventory, events,
+  commands, and independent pending jobs continue syncing meanwhile.
 - **Revoke an application capability** when an attached desktop app should no
   longer use the installed node. The app loses broker access without rotating
   cloud connector or device keys.

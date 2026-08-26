@@ -60,6 +60,19 @@ impl ClientError {
         matches!(self, Self::Unauthorized { .. })
     }
 
+    /// Reports that an additive recovery endpoint is unavailable on an N-1
+    /// or older self-hosted authority.
+    #[must_use]
+    pub const fn is_endpoint_unsupported(&self) -> bool {
+        matches!(
+            self,
+            Self::Status {
+                status: 404 | 405,
+                ..
+            }
+        )
+    }
+
     /// The control-plane error code for a rejected node request.
     #[must_use]
     pub const fn unauthorized_code(&self) -> Option<&str> {
@@ -470,6 +483,45 @@ impl AgentClient {
         )
         .await
         .map(|_| ())
+    }
+
+    /// Reconciles one exact durable local acceptance against authority state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when signing, transport, status validation, or decoding fails.
+    pub async fn reconcile_acceptance(
+        &self,
+        identity: &dyn DeviceRequestSigner,
+        job_id: piqae_domain::JobId,
+        request: &piqae_protocol::agent::AgentAcceptJobRequest,
+    ) -> Result<piqae_protocol::agent::AgentAcceptanceReconciliationResponse, ClientError> {
+        self.post_json::<_, piqae_protocol::agent::AgentAcceptanceReconciliationResponse>(
+            &format!("v1/agent/jobs/{job_id}/acceptance/reconcile"),
+            request,
+            Some(identity),
+        )
+        .await
+    }
+
+    /// Compensates one exact accepted job before local queue activation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when signing, transport, status validation, or decoding fails.
+    pub async fn abandon_acceptance(
+        &self,
+        identity: &dyn DeviceRequestSigner,
+        job_id: piqae_domain::JobId,
+        request: &piqae_protocol::agent::AgentAcceptJobRequest,
+    ) -> Result<bool, ClientError> {
+        self.post_json::<_, piqae_protocol::agent::AgentAcceptanceAbandonResponse>(
+            &format!("v1/agent/jobs/{job_id}/acceptance/abandon"),
+            request,
+            Some(identity),
+        )
+        .await
+        .map(|response| response.abandoned)
     }
 
     /// Registers this node's public content-encryption key using device authentication.

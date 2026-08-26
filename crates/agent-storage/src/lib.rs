@@ -315,6 +315,27 @@ pub struct CloudAcceptIntent {
     pub route_reservation_id: Option<String>,
     pub route_generation: Option<u64>,
     pub route_fencing_token: Option<String>,
+    pub remote_accept_confirmed: bool,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct CloudReleaseCleanup {
+    pub job_id: String,
+    pub lease_id: String,
+    pub lease_token: String,
+    pub reason: String,
+}
+
+impl std::fmt::Debug for CloudReleaseCleanup {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CloudReleaseCleanup")
+            .field("job_id", &self.job_id)
+            .field("lease_id", &self.lease_id)
+            .field("lease_token", &"[REDACTED]")
+            .field("reason", &self.reason)
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -364,6 +385,7 @@ impl std::fmt::Debug for CloudAcceptIntent {
             .field("route_reservation_id", &self.route_reservation_id)
             .field("route_generation", &self.route_generation)
             .field("route_fencing_token", &"[REDACTED]")
+            .field("remote_accept_confirmed", &self.remote_accept_confirmed)
             .finish()
     }
 }
@@ -632,6 +654,10 @@ impl AgentStore {
             ("route_reservation_id", "TEXT"),
             ("route_generation", "INTEGER"),
             ("route_fencing_token", "TEXT"),
+            (
+                "acceptance_state",
+                "TEXT NOT NULL DEFAULT 'prepared' CHECK (acceptance_state IN ('prepared', 'remote_accept_confirmed'))",
+            ),
         ] {
             ensure_column(&connection, "cloud_accept_intents", name, definition)?;
         }
@@ -2706,11 +2732,152 @@ impl AgentStore {
         let mut statement = self.connection.prepare(
             "SELECT job_id, lease_id, lease_token, lease_expires_unix_ms,
                     content_sha256, local_sequence, route_reservation_id,
-                    route_generation, route_fencing_token
+                    route_generation, route_fencing_token, acceptance_state
              FROM cloud_accept_intents ORDER BY prepared_unix_ms, job_id",
         )?;
         let rows = statement.query_map([], row_to_cloud_accept_intent)?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Marks a durable prepared intent after the authority has accepted it.
+    /// This is the crash boundary between remote ownership and local activation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the intent is absent or the durable update fails.
+    pub fn confirm_cloud_accept(
+        &self,
+        job_id: &str,
+        observed_unix_ms: i64,
+    ) -> Result<(), StorageError> {
+        let changed = self.connection.execute(
+            "UPDATE cloud_accept_intents
+             SET acceptance_state = 'remote_accept_confirmed', prepared_unix_ms = ?2
+             WHERE job_id = ?1 AND acceptance_state IN ('prepared', 'remote_accept_confirmed')",
+            params![job_id, observed_unix_ms],
+        )?;
+        if changed != 1 {
+            return Err(StorageError::InvalidLocalEvent(format!(
+                "cloud job {job_id} has no acceptance intent to confirm"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Quarantines every proofless legacy intent before any best-effort remote
+    /// cleanup. The separate cleanup row cannot make the queue runnable and a
+    /// stale lease response can never block ordinary synchronization.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the quarantine transaction cannot be read or committed.
+    pub fn quarantine_invalid_cloud_accepts(
+        &mut self,
+        observed_unix_ms: i64,
+    ) -> Result<Vec<CloudReleaseCleanup>, StorageError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        loop {
+            let rows = {
+                let mut statement = transaction.prepare(
+                    "SELECT job_id, lease_id, lease_token
+                     FROM cloud_accept_intents
+                     WHERE route_reservation_id IS NULL OR route_reservation_id = ''
+                        OR route_generation IS NULL OR route_generation <= 0
+                        OR route_fencing_token IS NULL OR route_fencing_token = ''
+                     ORDER BY prepared_unix_ms, job_id LIMIT 256",
+                )?;
+                statement
+                    .query_map([], |row| {
+                        Ok(CloudReleaseCleanup {
+                            job_id: row.get(0)?,
+                            lease_id: row.get(1)?,
+                            lease_token: row.get(2)?,
+                            reason: "route_reservation_required".into(),
+                        })
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?
+            };
+            if rows.is_empty() {
+                break;
+            }
+            for cleanup in &rows {
+                transaction.execute(
+                    "INSERT INTO cloud_release_cleanups
+                     (job_id, lease_id, lease_token, reason, quarantined_unix_ms)
+                     VALUES (?1, ?2, ?3, ?4, ?5)
+                     ON CONFLICT(job_id) DO NOTHING",
+                    params![
+                        cleanup.job_id,
+                        cleanup.lease_id,
+                        cleanup.lease_token,
+                        cleanup.reason,
+                        observed_unix_ms
+                    ],
+                )?;
+                transaction.execute(
+                    "DELETE FROM cloud_accept_intents WHERE job_id = ?1",
+                    [&cleanup.job_id],
+                )?;
+                transaction.execute(
+                    "UPDATE jobs SET state = 'cancelled', updated_unix_ms = ?2
+                     WHERE job_id = ?1 AND state = 'cloud_accept_pending'",
+                    params![cleanup.job_id, observed_unix_ms],
+                )?;
+            }
+        }
+        transaction.commit()?;
+        self.pending_cloud_release_cleanups()
+    }
+
+    /// Returns bounded, durable legacy-release cleanup work.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if cleanup rows cannot be read or decoded.
+    pub fn pending_cloud_release_cleanups(&self) -> Result<Vec<CloudReleaseCleanup>, StorageError> {
+        let mut statement = self.connection.prepare(
+            "SELECT job_id, lease_id, lease_token, reason
+             FROM cloud_release_cleanups ORDER BY quarantined_unix_ms, job_id LIMIT 256",
+        )?;
+        statement
+            .query_map([], |row| {
+                Ok(CloudReleaseCleanup {
+                    job_id: row.get(0)?,
+                    lease_id: row.get(1)?,
+                    lease_token: row.get(2)?,
+                    reason: row.get(3)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    /// Removes one cleanup only after the authority has reached a safe disposition.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the durable delete fails.
+    pub fn complete_cloud_release_cleanup(&self, job_id: &str) -> Result<(), StorageError> {
+        self.connection.execute(
+            "DELETE FROM cloud_release_cleanups WHERE job_id = ?1",
+            [job_id],
+        )?;
+        Ok(())
+    }
+
+    /// Clears every proofless cleanup after an authoritative connector revoke.
+    /// The set-based delete avoids a data-sized application loop while the
+    /// per-connector database keeps the scope exact.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the durable delete fails.
+    pub fn complete_all_cloud_release_cleanups(&self) -> Result<(), StorageError> {
+        self.connection
+            .execute("DELETE FROM cloud_release_cleanups", [])?;
+        Ok(())
     }
 
     /// Returns the bounded set of content paths durably referenced by this queue.
@@ -2784,16 +2951,17 @@ impl AgentStore {
                 job.state
             )));
         }
-        let has_intent: bool = transaction.query_row(
+        let confirmed: bool = transaction.query_row(
             "SELECT EXISTS (
-               SELECT 1 FROM cloud_accept_intents WHERE job_id = ?1
+               SELECT 1 FROM cloud_accept_intents
+               WHERE job_id = ?1 AND acceptance_state = 'remote_accept_confirmed'
              )",
             [job_id],
             |row| row.get(0),
         )?;
-        if !has_intent {
+        if !confirmed {
             return Err(StorageError::InvalidLocalEvent(format!(
-                "cloud job {job_id} has no acceptance intent"
+                "cloud job {job_id} has no remotely confirmed acceptance intent"
             )));
         }
         transaction.execute(
@@ -2821,10 +2989,11 @@ impl AgentStore {
             .ok_or_else(|| StorageError::JobNotFound(job_id.to_owned()))
     }
 
-    /// Fail-closed rollback for a durable cloud acceptance intent whose
-    /// connector lost admission before remote confirmation could be safely
-    /// activated. The terminal row remains as audit evidence and its content
-    /// follows normal retention/reclamation policy.
+    /// Fail-closed local rollback for a durable cloud acceptance intent whose
+    /// authority-side acceptance was already compensated or force-fenced.
+    /// This intentionally emits no cloud event: replaying a synthetic local
+    /// cancellation against the authority's terminal state would poison the
+    /// connector outbox after re-enrolment.
     ///
     /// # Errors
     ///
@@ -2835,13 +3004,31 @@ impl AgentStore {
         job_id: &str,
         observed_unix_ms: i64,
     ) -> Result<(), StorageError> {
-        self.terminalize_prepared_cloud_job(
-            job_id,
-            "cancelled",
-            "connector_revoked",
-            "Connector admission ended before cloud acceptance completed",
-            observed_unix_ms,
-        )
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current = query_job(&transaction, job_id)?
+            .ok_or_else(|| StorageError::JobNotFound(job_id.to_owned()))?;
+        if current.state == "cancelled" {
+            transaction.commit()?;
+            return Ok(());
+        }
+        if current.state != "cloud_accept_pending" {
+            return Err(StorageError::InvalidLocalEvent(format!(
+                "cloud job {job_id} cannot abandon from {}",
+                current.state
+            )));
+        }
+        transaction.execute(
+            "DELETE FROM cloud_accept_intents WHERE job_id = ?1",
+            [job_id],
+        )?;
+        transaction.execute(
+            "UPDATE jobs SET state = 'cancelled', updated_unix_ms = ?2 WHERE job_id = ?1",
+            params![job_id, observed_unix_ms],
+        )?;
+        transaction.commit()?;
+        Ok(())
     }
 
     /// Looks up one locally durable job.
@@ -3352,11 +3539,14 @@ impl AgentStore {
         let Some(job) = self.get_job(job_id)? else {
             return Err(StorageError::JobNotFound(job_id.to_owned()));
         };
-        if matches!(
-            job.state.as_str(),
-            "cloud_accept_pending" | "queued_local" | "failed_retryable"
-        ) {
+        if matches!(job.state.as_str(), "queued_local" | "failed_retryable") {
             return self.cancel_before_handoff(job_id, observed_unix_ms);
+        }
+        // A prepared cloud acceptance may already have committed remotely
+        // even when its HTTP response was lost. Only the exact authority
+        // reconciliation/abandon workflow may discard that proof.
+        if job.state == "cloud_accept_pending" {
+            return Ok(false);
         }
         if !matches!(
             job.state.as_str(),
@@ -3540,14 +3730,7 @@ impl AgentStore {
             return Err(StorageError::JobNotFound(job_id.to_owned()));
         };
         if job.state == "cloud_accept_pending" {
-            self.terminalize_prepared_cloud_job(
-                job_id,
-                "cancelled",
-                "cancelled_by_server",
-                "Cancelled by the control plane before cloud acceptance",
-                observed_unix_ms,
-            )?;
-            return Ok(true);
+            return Ok(false);
         }
         if !matches!(job.state.as_str(), "queued_local" | "failed_retryable") {
             return Ok(false);
@@ -3582,9 +3765,7 @@ impl AgentStore {
         let job_ids = {
             let mut statement = self.connection.prepare(
                 "SELECT job_id FROM jobs
-                 WHERE state IN (
-                    'cloud_accept_pending', 'queued_local', 'failed_retryable'
-                 )
+                 WHERE state IN ('queued_local', 'failed_retryable')
                    AND expires_unix_ms IS NOT NULL
                    AND expires_unix_ms <= ?1",
             )?;
@@ -3592,19 +3773,6 @@ impl AgentStore {
             rows.collect::<Result<Vec<_>, _>>()?
         };
         for job_id in &job_ids {
-            if self
-                .get_job(job_id)?
-                .is_some_and(|job| job.state == "cloud_accept_pending")
-            {
-                self.terminalize_prepared_cloud_job(
-                    job_id,
-                    "expired",
-                    "expired_before_handoff",
-                    "Job expired before cloud acceptance",
-                    now_unix_ms,
-                )?;
-                continue;
-            }
             let sequence: i64 = self.connection.query_row(
                 "SELECT COALESCE(MAX(job_sequence), 0) + 1 FROM job_events WHERE job_id = ?1",
                 [job_id],
@@ -3622,48 +3790,6 @@ impl AgentStore {
             )?;
         }
         Ok(job_ids.len())
-    }
-
-    fn terminalize_prepared_cloud_job(
-        &mut self,
-        job_id: &str,
-        state: &str,
-        reason: &str,
-        message: &str,
-        observed_unix_ms: i64,
-    ) -> Result<(), StorageError> {
-        let transaction = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let current = query_job(&transaction, job_id)?
-            .ok_or_else(|| StorageError::JobNotFound(job_id.to_owned()))?;
-        if current.state != "cloud_accept_pending" {
-            return Err(StorageError::InvalidLocalEvent(format!(
-                "cloud job {job_id} cannot terminate from {}",
-                current.state
-            )));
-        }
-        transaction.execute(
-            "DELETE FROM cloud_accept_intents WHERE job_id = ?1",
-            [job_id],
-        )?;
-        transaction.execute(
-            "UPDATE jobs SET state = ?2, updated_unix_ms = ?3 WHERE job_id = ?1",
-            params![job_id, state, observed_unix_ms],
-        )?;
-        append_event_tx(
-            &transaction,
-            &EventId::new().to_string(),
-            job_id,
-            1,
-            state,
-            Some(reason),
-            Some(message),
-            "{}",
-            observed_unix_ms,
-        )?;
-        transaction.commit()?;
-        Ok(())
     }
 }
 
@@ -3992,8 +4118,8 @@ fn upsert_cloud_accept_intent(
         "INSERT INTO cloud_accept_intents (
             job_id, lease_id, lease_token, lease_expires_unix_ms,
             content_sha256, local_sequence, route_reservation_id,
-            route_generation, route_fencing_token, prepared_unix_ms
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            route_generation, route_fencing_token, acceptance_state, prepared_unix_ms
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'prepared', ?10)
          ON CONFLICT(job_id) DO UPDATE SET
             lease_id = excluded.lease_id,
             lease_token = excluded.lease_token,
@@ -4003,6 +4129,11 @@ fn upsert_cloud_accept_intent(
             route_reservation_id = excluded.route_reservation_id,
             route_generation = excluded.route_generation,
             route_fencing_token = excluded.route_fencing_token,
+            acceptance_state = CASE
+              WHEN cloud_accept_intents.acceptance_state = 'remote_accept_confirmed'
+                THEN 'remote_accept_confirmed'
+              ELSE excluded.acceptance_state
+            END,
             prepared_unix_ms = excluded.prepared_unix_ms",
         params![
             job.job_id,
@@ -4053,6 +4184,7 @@ fn row_to_cloud_accept_intent(
             })
             .transpose()?,
         route_fencing_token: row.get(8)?,
+        remote_accept_confirmed: row.get::<_, String>(9)? == "remote_accept_confirmed",
     })
 }
 
@@ -4114,8 +4246,23 @@ mod tests {
 
     #[test]
     fn legacy_cloud_accept_rows_upgrade_without_fabricating_route_proof() {
-        let connection = Connection::open_in_memory().unwrap();
-        connection.execute_batch(SCHEMA).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("legacy.sqlite");
+        let mut legacy_job = job("job-legacy", "p1", 1);
+        legacy_job.cloud_managed = true;
+        {
+            let mut store = AgentStore::open(&database).unwrap();
+            store
+                .prepare_cloud_job(
+                    &legacy_job,
+                    "lease-legacy",
+                    "redacted",
+                    10,
+                    &cloud_route_proof(),
+                )
+                .unwrap();
+        }
+        let connection = Connection::open(&database).unwrap();
         for column in [
             "route_reservation_id",
             "route_generation",
@@ -4129,26 +4276,18 @@ mod tests {
                 .unwrap();
         }
         connection
-            .execute_batch("PRAGMA foreign_keys = OFF;")
-            .unwrap();
-        connection
             .execute(
-                "INSERT INTO cloud_accept_intents (
-                    job_id, lease_id, lease_token, lease_expires_unix_ms,
-                    content_sha256, local_sequence, prepared_unix_ms
-                 ) VALUES ('job-legacy', 'lease-legacy', 'redacted', 10,
-                           'sha-legacy', 1, 1)",
+                "ALTER TABLE cloud_accept_intents DROP COLUMN acceptance_state",
                 [],
             )
             .unwrap();
-        connection
-            .execute_batch("PRAGMA foreign_keys = ON;")
-            .unwrap();
+        drop(connection);
 
-        let store = AgentStore::configure(connection).unwrap();
+        let mut store = AgentStore::open(&database).unwrap();
         let intents = store.pending_cloud_accepts().unwrap();
         assert_eq!(intents.len(), 1);
         assert!(intents[0].route_proof().is_none());
+        assert!(!intents[0].remote_accept_confirmed);
         for column in [
             "route_reservation_id",
             "route_generation",
@@ -4164,6 +4303,86 @@ mod tests {
                 .unwrap();
             assert!(present);
         }
+        let cleanup = store.quarantine_invalid_cloud_accepts(2).unwrap();
+        assert_eq!(cleanup.len(), 1);
+        assert_eq!(
+            store.get_job("job-legacy").unwrap().unwrap().state,
+            "cancelled"
+        );
+        assert!(
+            store.pending_cloud_events(0, 10).unwrap().is_empty(),
+            "proofless quarantine must not create a remote cancellation event"
+        );
+        drop(store);
+
+        let mut restarted = AgentStore::open(&database).unwrap();
+        assert!(restarted.pending_cloud_accepts().unwrap().is_empty());
+        assert!(restarted.runnable_heads(3).unwrap().is_empty());
+        assert_eq!(restarted.pending_cloud_release_cleanups().unwrap().len(), 1);
+        restarted
+            .complete_cloud_release_cleanup("job-legacy")
+            .unwrap();
+        let mut later = job("job-later", "p1", 4);
+        later.cloud_managed = true;
+        restarted
+            .prepare_cloud_job(
+                &later,
+                "lease-later",
+                "redacted-later",
+                30,
+                &cloud_route_proof(),
+            )
+            .unwrap();
+        restarted.confirm_cloud_accept("job-later", 5).unwrap();
+        restarted.activate_cloud_job("job-later", 6).unwrap();
+        assert_eq!(restarted.runnable_heads(7).unwrap().len(), 1);
+        let events = restarted.pending_cloud_events(0, 10).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].job_id, "job-later");
+    }
+
+    #[test]
+    fn proofless_quarantine_drains_more_than_one_page_before_reconciliation() {
+        let mut store = AgentStore::in_memory().unwrap();
+        for index in 0..300 {
+            let job_id = format!("legacy-page-{index:03}");
+            let mut accepted = job(&job_id, "p1", i64::from(index));
+            accepted.cloud_managed = true;
+            store
+                .prepare_cloud_job(
+                    &accepted,
+                    &format!("lease-{index}"),
+                    "redacted",
+                    10_000,
+                    &cloud_route_proof(),
+                )
+                .unwrap();
+        }
+        store
+            .connection
+            .execute(
+                "UPDATE cloud_accept_intents SET route_reservation_id=NULL,
+                 route_generation=NULL,route_fencing_token=NULL",
+                [],
+            )
+            .unwrap();
+        let first_cleanup_page = store.quarantine_invalid_cloud_accepts(20_000).unwrap();
+        assert_eq!(first_cleanup_page.len(), 256);
+        assert!(store.pending_cloud_accepts().unwrap().is_empty());
+        let mut completed = 0;
+        loop {
+            let page = store.pending_cloud_release_cleanups().unwrap();
+            if page.is_empty() {
+                break;
+            }
+            completed += page.len();
+            for cleanup in page {
+                store
+                    .complete_cloud_release_cleanup(&cleanup.job_id)
+                    .unwrap();
+            }
+        }
+        assert_eq!(completed, 300);
     }
 
     fn job(id: &str, printer: &str, accepted: i64) -> AcceptedJob {
@@ -4278,10 +4497,14 @@ mod tests {
         );
         drop(restarted_before_accept);
 
-        // Model a crash after the server durably accepted the exact intent but
-        // before the client could activate its local queue.
-        let mut restarted = AgentStore::open(&database).unwrap();
+        // Persist the exact server outcome, then model a second crash before
+        // the client can activate its local queue.
+        let restarted = AgentStore::open(&database).unwrap();
         assert_eq!(restarted.pending_cloud_accepts().unwrap(), intents);
+        restarted.confirm_cloud_accept("cloud", 19).unwrap();
+        drop(restarted);
+        let mut restarted = AgentStore::open(&database).unwrap();
+        assert!(restarted.pending_cloud_accepts().unwrap()[0].remote_accept_confirmed);
         restarted.activate_cloud_job("cloud", 20).unwrap();
         restarted.activate_cloud_job("cloud", 21).unwrap();
         assert_eq!(restarted.runnable_heads(30).unwrap().len(), 1);
@@ -4317,8 +4540,10 @@ mod tests {
     }
 
     #[test]
-    fn cancel_and_expiry_terminalize_prepared_cloud_jobs_once() {
-        let mut store = AgentStore::in_memory().unwrap();
+    fn cancel_and_expiry_retain_prepared_cloud_proof_across_restart() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("pending-cancel.sqlite");
+        let mut store = AgentStore::open(&database).unwrap();
         let mut cancelled = job("cancelled", "p1", 10);
         cancelled.cloud_managed = true;
         store
@@ -4330,10 +4555,10 @@ mod tests {
                 &cloud_route_proof(),
             )
             .unwrap();
-        assert!(store.request_cancel("cancelled", 20).unwrap());
+        assert!(!store.request_cancel("cancelled", 20).unwrap());
         assert_eq!(
             store.get_job("cancelled").unwrap().unwrap().state,
-            "cancelled"
+            "cloud_accept_pending"
         );
 
         let mut expired = job("expired", "p2", 11);
@@ -4348,17 +4573,20 @@ mod tests {
                 &cloud_route_proof(),
             )
             .unwrap();
-        assert_eq!(store.expire_waiting(26).unwrap(), 1);
-        assert_eq!(store.get_job("expired").unwrap().unwrap().state, "expired");
-        assert!(store.pending_cloud_accepts().unwrap().is_empty());
+        assert_eq!(store.expire_waiting(26).unwrap(), 0);
+        assert_eq!(
+            store.get_job("expired").unwrap().unwrap().state,
+            "cloud_accept_pending"
+        );
+        let intents = store.pending_cloud_accepts().unwrap();
+        assert_eq!(intents.len(), 2);
         assert!(store.runnable_heads(30).unwrap().is_empty());
+        assert!(store.pending_events(0, 10).unwrap().is_empty());
+        drop(store);
 
-        let events = store.pending_events(0, 10).unwrap();
-        assert_eq!(events.len(), 2);
-        assert_eq!(events[0].state, "cancelled");
-        assert_eq!(events[0].reason.as_deref(), Some("cancelled_by_server"));
-        assert_eq!(events[1].state, "expired");
-        assert_eq!(events[1].reason.as_deref(), Some("expired_before_handoff"));
+        let restarted = AgentStore::open(&database).unwrap();
+        assert_eq!(restarted.pending_cloud_accepts().unwrap(), intents);
+        assert!(restarted.runnable_heads(30).unwrap().is_empty());
     }
 
     #[test]

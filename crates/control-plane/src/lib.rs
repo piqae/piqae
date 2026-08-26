@@ -247,6 +247,41 @@ impl AppState {
         });
         Ok(())
     }
+
+    /// Persists an idempotent tenant event and broadcasts its time-sortable ID
+    /// to live subscribers. Transactional repository paths use the same key to
+    /// replay an already-committed outbox event without a duplicate delivery.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the event cannot be serialized or persisted.
+    pub async fn publish_idempotently(
+        &self,
+        idempotency_key: &str,
+        tenant: TenantContext,
+        event_type: &str,
+        data: &(impl Serialize + Sync),
+    ) -> Result<(), repository::RepositoryError> {
+        let data = serde_json::to_value(data)
+            .map_err(|error| repository::RepositoryError::Persistence(error.to_string()))?;
+        let id = self
+            .repository
+            .enqueue_webhook_event_idempotently(
+                idempotency_key,
+                tenant.workspace_id,
+                tenant.environment_id,
+                event_type,
+                &data,
+            )
+            .await?;
+        let _ = self.events.send(PublishedEvent {
+            id,
+            tenant,
+            event_type: event_type.into(),
+            data,
+        });
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -510,6 +545,14 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/v1/agent/jobs/{job_id}/accept",
             post(api::accept_agent_job),
+        )
+        .route(
+            "/v1/agent/jobs/{job_id}/acceptance/reconcile",
+            post(api::reconcile_agent_acceptance),
+        )
+        .route(
+            "/v1/agent/jobs/{job_id}/acceptance/abandon",
+            post(api::abandon_agent_acceptance),
         )
         .route(
             "/v1/agent/jobs/{job_id}/lease",
@@ -3996,6 +4039,32 @@ mod tests {
             .await
             .expect("retry accept response");
         assert_eq!(retry.status(), StatusCode::OK);
+        let mut mismatched_route = accept.clone();
+        mismatched_route.route_reservation_id = Some(uuid::Uuid::new_v4());
+        let route_rejected = application
+            .router
+            .clone()
+            .oneshot(signed_request(
+                &application,
+                "POST",
+                &path,
+                serde_json::to_vec(&mismatched_route).expect("mismatched route accept JSON"),
+            ))
+            .await
+            .expect("mismatched route response");
+        assert_eq!(route_rejected.status(), StatusCode::CONFLICT);
+        let exact_after_route_conflict = application
+            .router
+            .clone()
+            .oneshot(signed_request(
+                &application,
+                "POST",
+                &path,
+                serde_json::to_vec(&accept).expect("exact accept JSON"),
+            ))
+            .await
+            .expect("exact accept after route conflict");
+        assert_eq!(exact_after_route_conflict.status(), StatusCode::OK);
         let mut mismatched = accept.clone();
         mismatched.lease_token.push('x');
         let rejected = application
@@ -4036,5 +4105,92 @@ mod tests {
             .await
             .expect("accepted job");
         assert_eq!(stored.state, piqae_domain::JobState::AgentAccepted);
+        let reservation_id = accept
+            .route_reservation_id
+            .expect("accepted route reservation")
+            .to_string();
+        let generation = accept.route_generation.expect("accepted route generation");
+        let fencing_token = accept
+            .route_fencing_token
+            .as_deref()
+            .expect("accepted route fence");
+        let before_revoke = application
+            .repository
+            .reconcile_agent_acceptance(
+                application.tenant.workspace_id,
+                application.tenant.environment_id,
+                application.agent_id,
+                offer.job.id,
+                accept.lease_id,
+                &accept.lease_token,
+                &accept.content_sha256,
+                accept.local_sequence,
+                piqae_storage_postgres::DeliveryAttemptProof {
+                    reservation_id: &reservation_id,
+                    generation,
+                    fencing_token,
+                },
+            )
+            .await
+            .expect("memory acceptance reconciliation");
+        assert_eq!(before_revoke, (true, false, false));
+        application
+            .repository
+            .revoke_node_connector(
+                application.tenant.workspace_id,
+                application.tenant.environment_id,
+                application.agent_id,
+                &format!("ncon_{}", application.agent_id),
+            )
+            .await
+            .expect("memory connector revoke");
+        application
+            .repository
+            .reactivate_connector_for_test(
+                application.tenant.workspace_id,
+                application.tenant.environment_id,
+                application.agent_id,
+            )
+            .await;
+        let after_reactivation = application
+            .repository
+            .reconcile_agent_acceptance(
+                application.tenant.workspace_id,
+                application.tenant.environment_id,
+                application.agent_id,
+                offer.job.id,
+                accept.lease_id,
+                &accept.lease_token,
+                &accept.content_sha256,
+                accept.local_sequence,
+                piqae_storage_postgres::DeliveryAttemptProof {
+                    reservation_id: &reservation_id,
+                    generation,
+                    fencing_token,
+                },
+            )
+            .await
+            .expect("memory reactivated reconciliation");
+        assert_eq!(after_reactivation, (false, false, true));
+        let foreign_scope = application
+            .repository
+            .reconcile_agent_acceptance(
+                WorkspaceId::new(),
+                EnvironmentId::new(),
+                application.agent_id,
+                offer.job.id,
+                accept.lease_id,
+                &accept.lease_token,
+                &accept.content_sha256,
+                accept.local_sequence,
+                piqae_storage_postgres::DeliveryAttemptProof {
+                    reservation_id: &reservation_id,
+                    generation,
+                    fencing_token,
+                },
+            )
+            .await
+            .expect("cross-tenant reconciliation is privacy safe");
+        assert_eq!(foreign_scope, (false, false, false));
     }
 }

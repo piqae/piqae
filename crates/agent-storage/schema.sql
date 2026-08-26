@@ -298,7 +298,17 @@ CREATE TABLE IF NOT EXISTS cloud_accept_intents (
   route_reservation_id TEXT,
   route_generation INTEGER,
   route_fencing_token TEXT,
+  acceptance_state TEXT NOT NULL DEFAULT 'prepared'
+    CHECK (acceptance_state IN ('prepared', 'remote_accept_confirmed')),
   prepared_unix_ms INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS cloud_release_cleanups (
+  job_id TEXT PRIMARY KEY REFERENCES jobs(job_id) ON DELETE CASCADE,
+  lease_id TEXT NOT NULL,
+  lease_token TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  quarantined_unix_ms INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS job_submissions (

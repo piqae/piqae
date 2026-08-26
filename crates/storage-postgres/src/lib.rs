@@ -59,6 +59,38 @@ pub struct PostgresStore {
     pool: PgPool,
 }
 
+/// Returns the stable outbox idempotency key used when connector revocation
+/// fences an accepted job.
+///
+/// The persisted event keeps a normal time-sortable `EventId`; retries recover
+/// that ID through this key instead of creating a second durable event.
+#[must_use]
+pub fn acceptance_revocation_webhook_idempotency_key(
+    workspace_id: WorkspaceId,
+    environment_id: EnvironmentId,
+    job_id: JobId,
+    event_type: &str,
+) -> String {
+    let digest = Sha256::digest(
+        format!("{workspace_id}\n{environment_id}\n{job_id}\n{event_type}").as_bytes(),
+    );
+    format!("acceptance-revocation:{digest:x}")
+}
+
+/// Returns the stable outbox key for the durable `AgentAccepted` transition.
+///
+/// The event row is committed in the same transaction as the acceptance, so a
+/// lost HTTP response or process crash cannot leave tenant consumers behind.
+#[must_use]
+pub fn agent_acceptance_webhook_idempotency_key(
+    workspace_id: WorkspaceId,
+    environment_id: EnvironmentId,
+    job_id: JobId,
+) -> String {
+    let digest = Sha256::digest(format!("{workspace_id}\n{environment_id}\n{job_id}").as_bytes());
+    format!("agent-acceptance:{digest:x}")
+}
+
 #[derive(Clone, Debug)]
 pub enum CreateJobResult {
     Created(Job),
@@ -3697,7 +3729,24 @@ impl PostgresStore {
         workspace_id: WorkspaceId,
         environment_id: EnvironmentId,
         agent_id: AgentId,
-    ) -> Result<(), StorageError> {
+    ) -> Result<Vec<Job>, StorageError> {
+        let connector_ids = sqlx::query_scalar::<_, String>(
+            "SELECT id FROM node_connectors
+             WHERE workspace_id=$1 AND environment_id=$2 AND agent_id=$3
+               AND revoked_at IS NULL ORDER BY created_at,id",
+        )
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(agent_id.to_string())
+        .fetch_all(&self.pool)
+        .await?;
+        let mut acceptance_affected_jobs = Vec::new();
+        for connector_id in connector_ids {
+            acceptance_affected_jobs.extend(
+                self.revoke_node_connector(workspace_id, environment_id, agent_id, &connector_id)
+                    .await?,
+            );
+        }
         let mut transaction = self.pool.begin().await?;
         // Revocation is the serialization boundary for every topology write
         // made on behalf of this node. Route projection takes a key-share lock
@@ -3717,6 +3766,10 @@ impl PostgresStore {
         if active_agent.is_none() {
             return Err(StorageError::NotFound);
         }
+        acceptance_affected_jobs.extend(
+            terminalize_agent_acceptances(&mut transaction, workspace_id, environment_id, agent_id)
+                .await?,
+        );
         let route_ids: Vec<String> = sqlx::query_scalar(
             "SELECT id FROM printer_routes
              WHERE agent_id = $1 AND workspace_id = $2 AND environment_id = $3
@@ -3892,7 +3945,7 @@ impl PostgresStore {
         .execute(&mut *transaction)
         .await?;
         transaction.commit().await?;
-        Ok(())
+        Ok(acceptance_affected_jobs)
     }
 
     pub async fn list_node_connectors(
@@ -3921,8 +3974,11 @@ impl PostgresStore {
         environment_id: EnvironmentId,
         agent_id: AgentId,
         connector_id: &str,
-    ) -> Result<(), StorageError> {
+    ) -> Result<Vec<Job>, StorageError> {
         let mut transaction = self.pool.begin().await?;
+        sqlx::query("SELECT set_config('piqae.acceptance_aware_revoke','on',true)")
+            .execute(&mut *transaction)
+            .await?;
         let affected = sqlx::query(
             "UPDATE node_connectors SET revoked_at = now(), updated_at = now()
              WHERE id = $1 AND agent_id = $2 AND workspace_id = $3
@@ -3953,8 +4009,11 @@ impl PostgresStore {
                 return Err(StorageError::NotFound);
             }
         }
+        let affected_jobs =
+            terminalize_agent_acceptances(&mut transaction, workspace_id, environment_id, agent_id)
+                .await?;
         transaction.commit().await?;
-        Ok(())
+        Ok(affected_jobs)
     }
 
     pub async fn get_node_update(
@@ -5652,55 +5711,37 @@ impl PostgresStore {
         payload: &serde_json::Value,
     ) -> Result<String, StorageError> {
         let mut transaction = self.pool.begin().await?;
-        let event_id = EventId::new().to_string();
-        sqlx::query(
-            "INSERT INTO webhook_events (
-                id, workspace_id, environment_id, event_type, payload, occurred_at
-             ) VALUES ($1,$2,$3,$4,$5,now())",
+        let event_id = enqueue_webhook_event_in_transaction(
+            &mut transaction,
+            None,
+            workspace_id,
+            environment_id,
+            event_type,
+            payload,
         )
-        .bind(&event_id)
-        .bind(workspace_id.to_string())
-        .bind(environment_id.to_string())
-        .bind(event_type)
-        .bind(payload)
-        .execute(&mut *transaction)
         .await?;
-        let endpoints = sqlx::query(
-            // A trailing `.*` subscribes to a family, which is what the
-            // dashboard has always offered. Matching was exact, so every
-            // endpoint created there received nothing at all. `starts_with`
-            // rather than LIKE, so an underscore in an event name cannot act
-            // as a wildcard and over-match.
-            "SELECT id, url FROM webhook_endpoints
-             WHERE workspace_id = $1 AND environment_id = $2 AND enabled = true
-               AND (
-                 $3 = ANY(subscribed_events)
-                 OR EXISTS (
-                   SELECT 1 FROM unnest(subscribed_events) AS pattern
-                   WHERE pattern LIKE '%.*'
-                     AND starts_with($3, left(pattern, length(pattern) - 1))
-                 )
-               )
-             FOR SHARE",
+        transaction.commit().await?;
+        Ok(event_id)
+    }
+
+    pub async fn enqueue_webhook_event_idempotently(
+        &self,
+        idempotency_key: &str,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        event_type: &str,
+        payload: &serde_json::Value,
+    ) -> Result<String, StorageError> {
+        let mut transaction = self.pool.begin().await?;
+        let event_id = enqueue_webhook_event_in_transaction(
+            &mut transaction,
+            Some(idempotency_key),
+            workspace_id,
+            environment_id,
+            event_type,
+            payload,
         )
-        .bind(workspace_id.to_string())
-        .bind(environment_id.to_string())
-        .bind(event_type)
-        .fetch_all(&mut *transaction)
         .await?;
-        for endpoint in endpoints {
-            sqlx::query(
-                "INSERT INTO webhook_deliveries (
-                    id, endpoint_id, event_id, destination_url, next_attempt_at
-                 ) VALUES ($1,$2,$3,$4,now())",
-            )
-            .bind(format!("whd_{}", ulid::Ulid::new()))
-            .bind(endpoint.try_get::<String, _>("id")?)
-            .bind(&event_id)
-            .bind(endpoint.try_get::<String, _>("url")?)
-            .execute(&mut *transaction)
-            .await?;
-        }
         transaction.commit().await?;
         Ok(event_id)
     }
@@ -5739,6 +5780,52 @@ impl PostgresStore {
         &self,
         limit: i64,
     ) -> Result<Vec<WebhookDeliveryWork>, StorageError> {
+        let limit = limit.clamp(1, WEBHOOK_MAX_CLAIM_BATCH);
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query(
+            "WITH missing_deliveries AS MATERIALIZED (
+                SELECT endpoint.id AS endpoint_id, event.id AS event_id,
+                       endpoint.url AS destination_url
+                FROM webhook_events AS event
+                JOIN webhook_endpoints AS endpoint
+                 ON endpoint.workspace_id = event.workspace_id
+                 AND endpoint.environment_id = event.environment_id
+                 AND endpoint.enabled = true
+                 AND event.occurred_at >= endpoint.created_at
+                 AND (
+                   event.event_type = ANY(endpoint.subscribed_events)
+                   OR EXISTS (
+                     SELECT 1 FROM unnest(endpoint.subscribed_events) AS pattern
+                     WHERE pattern LIKE '%.*'
+                       AND starts_with(
+                         event.event_type,
+                         left(pattern, length(pattern) - 1)
+                       )
+                   )
+                 )
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM webhook_deliveries AS existing
+                    WHERE existing.endpoint_id = endpoint.id
+                      AND existing.event_id = event.id
+                )
+                ORDER BY event.occurred_at, event.id, endpoint.id
+                LIMIT $1
+             ), materialized AS (
+                INSERT INTO webhook_deliveries (
+                    id, endpoint_id, event_id, destination_url, next_attempt_at
+                )
+                SELECT 'whd_0' || substring(
+                           md5(endpoint_id || ':' || event_id) from 1 for 25
+                       ), endpoint_id, event_id, destination_url, now()
+                FROM missing_deliveries
+                ON CONFLICT (id) DO NOTHING
+                RETURNING id
+             )
+             SELECT count(*) FROM materialized",
+        )
+        .bind(limit)
+        .fetch_one(&mut *transaction)
+        .await?;
         let rows = sqlx::query(
             "WITH candidates AS (
                 SELECT id FROM webhook_deliveries
@@ -5758,11 +5845,12 @@ impl PostgresStore {
                        delivery.attempt, endpoint.secret_ciphertext,
                        event.event_type, event.payload, event.occurred_at",
         )
-        .bind(limit.clamp(1, WEBHOOK_MAX_CLAIM_BATCH))
+        .bind(limit)
         .bind(WEBHOOK_CLAIM_TTL_SECONDS)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *transaction)
         .await?;
-        rows.into_iter()
+        let result = rows
+            .into_iter()
             .map(|row| {
                 Ok(WebhookDeliveryWork {
                     id: row.try_get("id")?,
@@ -5775,7 +5863,9 @@ impl PostgresStore {
                     attempt: row.try_get("attempt")?,
                 })
             })
-            .collect()
+            .collect();
+        transaction.commit().await?;
+        result
     }
 
     pub async fn record_webhook_attempt(
@@ -8015,7 +8105,11 @@ impl PostgresStore {
         .await
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[allow(
+        clippy::cognitive_complexity,
+        clippy::too_many_arguments,
+        reason = "acceptance keeps lease, route, connector, job, and tenant-outbox locks in one auditable transaction"
+    )]
     async fn accept_agent_job_transactional(
         &self,
         workspace_id: WorkspaceId,
@@ -8029,6 +8123,36 @@ impl PostgresStore {
         delivery_proof: Option<DeliveryAttemptProof<'_>>,
     ) -> Result<Job, StorageError> {
         let mut transaction = self.pool.begin().await?;
+        let active_agent: Option<String> = sqlx::query_scalar(
+            "SELECT id FROM agents
+             WHERE id=$1 AND workspace_id=$2 AND environment_id=$3
+               AND revoked_at IS NULL
+             FOR UPDATE",
+        )
+        .bind(agent_id.to_string())
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .fetch_optional(&mut *transaction)
+        .await?;
+        if active_agent.is_none() {
+            return Err(StorageError::NotFound);
+        }
+        let connector_generation: i64 = sqlx::query_scalar(
+            "SELECT COALESCE((
+               SELECT CASE WHEN revoked_at IS NULL THEN admission_generation ELSE 0 END
+               FROM node_connectors
+               WHERE workspace_id=$1 AND environment_id=$2 AND agent_id=$3
+               ORDER BY created_at DESC LIMIT 1 FOR UPDATE
+             ), 1)",
+        )
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(agent_id.to_string())
+        .fetch_one(&mut *transaction)
+        .await?;
+        if connector_generation <= 0 {
+            return Err(StorageError::NotFound);
+        }
         let token_hash = Sha256::digest(lease_token.as_bytes()).to_vec();
         let destination_id: Option<String> = sqlx::query_scalar(
             "SELECT destination_id FROM jobs
@@ -8096,7 +8220,9 @@ impl PostgresStore {
             return Err(StorageError::ConcurrentStateChange);
         }
         if let Some(row) = sqlx::query(
-            "SELECT lease_id, lease_token_hash, content_sha256, local_sequence
+            "SELECT lease_id, lease_token_hash, content_sha256, local_sequence,
+                    route_reservation_id, route_generation, route_fencing_token_hash,
+                    connector_generation
              FROM job_acceptances
              WHERE job_id = $1 AND workspace_id = $2 AND environment_id = $3 AND agent_id = $4
              FOR UPDATE",
@@ -8112,9 +8238,31 @@ impl PostgresStore {
             let stored_sequence: i64 = row.try_get("local_sequence")?;
             let stored_lease_id: Uuid = row.try_get("lease_id")?;
             let stored_token_hash: Option<Vec<u8>> = row.try_get("lease_token_hash")?;
+            let stored_reservation_id: Option<String> = row.try_get("route_reservation_id")?;
+            let stored_generation: Option<i64> = row.try_get("route_generation")?;
+            let stored_fence_hash: Option<Vec<u8>> = row.try_get("route_fencing_token_hash")?;
+            let stored_connector_generation: Option<i64> = row.try_get("connector_generation")?;
             if stored_lease_id != lease_id
                 || stored_sha.as_deref() != content_sha256
                 || stored_sequence != i64::try_from(local_sequence).unwrap_or(i64::MAX)
+            {
+                return Err(StorageError::IdempotencyConflict);
+            }
+            let expected_reservation_id = delivery_proof
+                .as_ref()
+                .map(|proof| proof.reservation_id.to_owned());
+            let expected_generation = delivery_proof
+                .as_ref()
+                .map(|proof| i64::try_from(proof.generation))
+                .transpose()
+                .map_err(|_| StorageError::ConcurrentStateChange)?;
+            let expected_fence_hash = delivery_proof
+                .as_ref()
+                .map(|proof| Sha256::digest(proof.fencing_token.as_bytes()).to_vec());
+            if stored_reservation_id != expected_reservation_id
+                || stored_generation != expected_generation
+                || stored_fence_hash != expected_fence_hash
+                || stored_connector_generation != Some(connector_generation)
             {
                 return Err(StorageError::IdempotencyConflict);
             }
@@ -8150,6 +8298,29 @@ impl PostgresStore {
             {
                 return Err(StorageError::IdempotencyConflict);
             }
+            let payload: serde_json::Value = sqlx::query_scalar(
+                "SELECT payload FROM jobs
+                 WHERE id=$1 AND workspace_id=$2 AND environment_id=$3 AND agent_id=$4",
+            )
+            .bind(job_id.to_string())
+            .bind(workspace_id.to_string())
+            .bind(environment_id.to_string())
+            .bind(agent_id.to_string())
+            .fetch_one(&mut *transaction)
+            .await?;
+            enqueue_webhook_event_in_transaction(
+                &mut transaction,
+                Some(&agent_acceptance_webhook_idempotency_key(
+                    workspace_id,
+                    environment_id,
+                    job_id,
+                )),
+                workspace_id,
+                environment_id,
+                "job.updated",
+                &payload,
+            )
+            .await?;
             transaction.commit().await?;
             return self.get_job(workspace_id, environment_id, job_id).await;
         }
@@ -8233,11 +8404,24 @@ impl PostgresStore {
         .bind(sequence)
         .execute(&mut *transaction)
         .await?;
+        let route_reservation_id = delivery_proof
+            .as_ref()
+            .map(|proof| proof.reservation_id.to_owned());
+        let route_generation = delivery_proof
+            .as_ref()
+            .map(|proof| i64::try_from(proof.generation))
+            .transpose()
+            .map_err(|_| StorageError::ConcurrentStateChange)?;
+        let route_fencing_token_hash = delivery_proof
+            .as_ref()
+            .map(|proof| Sha256::digest(proof.fencing_token.as_bytes()).to_vec());
         sqlx::query(
             "INSERT INTO job_acceptances (
                 job_id, workspace_id, environment_id, agent_id, lease_id,
-                lease_token_hash, content_sha256, local_sequence
-             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
+                lease_token_hash, content_sha256, local_sequence,
+                route_reservation_id, route_generation, route_fencing_token_hash
+                , connector_generation
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)",
         )
         .bind(job_id.to_string())
         .bind(workspace_id.to_string())
@@ -8249,6 +8433,10 @@ impl PostgresStore {
         .bind(i64::try_from(local_sequence).map_err(|error| {
             StorageError::InvalidData(format!("local sequence overflow: {error}"))
         })?)
+        .bind(route_reservation_id)
+        .bind(route_generation)
+        .bind(route_fencing_token_hash)
+        .bind(connector_generation)
         .execute(&mut *transaction)
         .await?;
         if let Some(attempt_id) = delivery_attempt_id {
@@ -8267,8 +8455,360 @@ impl PostgresStore {
                 return Err(StorageError::ConcurrentStateChange);
             }
         }
+        enqueue_webhook_event_in_transaction(
+            &mut transaction,
+            Some(&agent_acceptance_webhook_idempotency_key(
+                workspace_id,
+                environment_id,
+                job_id,
+            )),
+            workspace_id,
+            environment_id,
+            "job.updated",
+            &serde_json::to_value(&job)?,
+        )
+        .await?;
         transaction.commit().await?;
         Ok(job)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn reconcile_agent_acceptance(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        job_id: JobId,
+        lease_id: Uuid,
+        lease_token: &str,
+        content_sha256: &str,
+        local_sequence: u64,
+        proof: DeliveryAttemptProof<'_>,
+    ) -> Result<(bool, bool, bool), StorageError> {
+        let mut transaction = self.pool.begin().await?;
+        // Full-node revoke and connectorless legacy agents serialize on the
+        // agent row. Without this lock, reconciliation could report an
+        // acceptance as runnable after full-node revocation had committed.
+        let agent = sqlx::query_scalar::<_, bool>(
+            "SELECT revoked_at IS NOT NULL
+             FROM agents
+             WHERE id=$1 AND workspace_id=$2 AND environment_id=$3
+             FOR UPDATE",
+        )
+        .bind(agent_id.to_string())
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let Some(agent_revoked) = agent else {
+            transaction.commit().await?;
+            return Ok((false, false, false));
+        };
+        let connector = sqlx::query(
+            "SELECT revoked_at IS NOT NULL AS revoked, admission_generation
+             FROM node_connectors
+             WHERE workspace_id=$1 AND environment_id=$2 AND agent_id=$3
+             ORDER BY created_at DESC LIMIT 1 FOR UPDATE",
+        )
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(agent_id.to_string())
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let connector_revoked = agent_revoked
+            || connector
+                .as_ref()
+                .is_some_and(|row| row.get::<bool, _>("revoked"));
+        let current_connector_generation = connector
+            .as_ref()
+            .map_or(1, |row| row.get::<i64, _>("admission_generation"));
+        let generation =
+            i64::try_from(proof.generation).map_err(|_| StorageError::ConcurrentStateChange)?;
+        let token_hash = Sha256::digest(lease_token.as_bytes()).to_vec();
+        let fence_hash = Sha256::digest(proof.fencing_token.as_bytes()).to_vec();
+        let sequence =
+            i64::try_from(local_sequence).map_err(|_| StorageError::ConcurrentStateChange)?;
+        let legacy_acceptance = sqlx::query_scalar::<_, i32>(
+            "SELECT 1 FROM job_acceptances
+             WHERE job_id=$1 AND workspace_id=$2 AND environment_id=$3 AND agent_id=$4
+               AND lease_id=$5 AND lease_token_hash=$6
+               AND content_sha256=$7 AND local_sequence=$8
+               AND route_reservation_id IS NULL AND route_generation IS NULL
+               AND route_fencing_token_hash IS NULL
+               AND (connector_generation IS NULL OR connector_generation=$9)
+             FOR UPDATE",
+        )
+        .bind(job_id.to_string())
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(agent_id.to_string())
+        .bind(lease_id)
+        .bind(&token_hash)
+        .bind(content_sha256)
+        .bind(sequence)
+        .bind(current_connector_generation)
+        .fetch_optional(&mut *transaction)
+        .await?
+        .is_some();
+        if legacy_acceptance {
+            let topology_proves_route = sqlx::query_scalar::<_, i32>(
+                "SELECT 1
+                   FROM jobs AS job
+                   JOIN delivery_attempts AS attempt
+                     ON attempt.workspace_id=job.workspace_id
+                    AND attempt.environment_id=job.environment_id
+                    AND attempt.job_id=job.id
+                   JOIN route_reservations AS reservation
+                     ON reservation.workspace_id=attempt.workspace_id
+                    AND reservation.environment_id=attempt.environment_id
+                    AND reservation.attempt_id=attempt.id
+                   JOIN printer_routes AS route
+                     ON route.workspace_id=attempt.workspace_id
+                    AND route.environment_id=attempt.environment_id
+                    AND route.id=attempt.route_id
+                  WHERE job.id=$1 AND job.workspace_id=$2 AND job.environment_id=$3
+                    AND job.agent_id=$4 AND job.state='agent_accepted'
+                    AND reservation.id=$5 AND reservation.generation=$6
+                    AND reservation.fencing_token_hash=$7 AND reservation.state='active'
+                    AND attempt.generation=$6 AND attempt.fencing_token_hash=$7
+                    AND attempt.state IN ('accepted_by_node','queued_local')
+                    AND route.agent_id=$4
+                  FOR UPDATE OF job,attempt,reservation",
+            )
+            .bind(job_id.to_string())
+            .bind(workspace_id.to_string())
+            .bind(environment_id.to_string())
+            .bind(agent_id.to_string())
+            .bind(proof.reservation_id)
+            .bind(generation)
+            .bind(format!(
+                "{:x}",
+                Sha256::digest(proof.fencing_token.as_bytes())
+            ))
+            .fetch_optional(&mut *transaction)
+            .await?
+            .is_some();
+            if topology_proves_route {
+                sqlx::query(
+                    "UPDATE job_acceptances
+                     SET route_reservation_id=$9, route_generation=$10,
+                         route_fencing_token_hash=$11, connector_generation=$12
+                     WHERE job_id=$1 AND workspace_id=$2 AND environment_id=$3 AND agent_id=$4
+                       AND lease_id=$5 AND lease_token_hash=$6
+                       AND content_sha256=$7 AND local_sequence=$8
+                       AND route_reservation_id IS NULL AND route_generation IS NULL
+                       AND route_fencing_token_hash IS NULL
+                       AND (connector_generation IS NULL OR connector_generation=$12)",
+                )
+                .bind(job_id.to_string())
+                .bind(workspace_id.to_string())
+                .bind(environment_id.to_string())
+                .bind(agent_id.to_string())
+                .bind(lease_id)
+                .bind(&token_hash)
+                .bind(content_sha256)
+                .bind(sequence)
+                .bind(proof.reservation_id)
+                .bind(generation)
+                .bind(&fence_hash)
+                .bind(current_connector_generation)
+                .execute(&mut *transaction)
+                .await?;
+            }
+        }
+        let evidence = sqlx::query(
+            "SELECT acceptance.connector_generation, job.state
+               FROM job_acceptances AS acceptance
+               JOIN jobs AS job
+                 ON job.id=acceptance.job_id
+                AND job.workspace_id=acceptance.workspace_id
+                AND job.environment_id=acceptance.environment_id
+               WHERE acceptance.job_id=$1 AND acceptance.workspace_id=$2
+                 AND acceptance.environment_id=$3 AND acceptance.agent_id=$4
+                 AND acceptance.lease_id=$5 AND acceptance.lease_token_hash=$6
+                 AND acceptance.content_sha256=$7 AND acceptance.local_sequence=$8
+                 AND acceptance.route_reservation_id=$9 AND acceptance.route_generation=$10
+                 AND acceptance.route_fencing_token_hash=$11
+             ",
+        )
+        .bind(job_id.to_string())
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(agent_id.to_string())
+        .bind(lease_id)
+        .bind(token_hash)
+        .bind(content_sha256)
+        .bind(sequence)
+        .bind(proof.reservation_id)
+        .bind(generation)
+        .bind(fence_hash)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let accepted = !agent_revoked
+            && evidence.as_ref().is_some_and(|row| {
+                row.get::<Option<i64>, _>("connector_generation")
+                    == Some(current_connector_generation)
+                    && row.get::<String, _>("state") == "agent_accepted"
+            });
+        let fenced = evidence.is_some() && !accepted;
+        transaction.commit().await?;
+        Ok((accepted, connector_revoked, fenced))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn abandon_agent_acceptance(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        job_id: JobId,
+        lease_id: Uuid,
+        lease_token: &str,
+        content_sha256: &str,
+        local_sequence: u64,
+        proof: DeliveryAttemptProof<'_>,
+    ) -> Result<bool, StorageError> {
+        let mut transaction = self.pool.begin().await?;
+        let connector_active: bool = sqlx::query_scalar(
+            "SELECT COALESCE((
+               SELECT revoked_at IS NULL FROM node_connectors
+               WHERE workspace_id=$1 AND environment_id=$2 AND agent_id=$3
+               ORDER BY created_at DESC LIMIT 1 FOR UPDATE
+             ), true)",
+        )
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(agent_id.to_string())
+        .fetch_one(&mut *transaction)
+        .await?;
+        if !connector_active {
+            return Err(StorageError::ConcurrentStateChange);
+        }
+        let exact: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+               SELECT 1 FROM job_acceptances
+               WHERE job_id=$1 AND workspace_id=$2 AND environment_id=$3 AND agent_id=$4
+                 AND lease_id=$5 AND lease_token_hash=$6
+                 AND content_sha256=$7 AND local_sequence=$8
+                 AND route_reservation_id=$9 AND route_generation=$10
+                 AND route_fencing_token_hash=$11
+             )",
+        )
+        .bind(job_id.to_string())
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(agent_id.to_string())
+        .bind(lease_id)
+        .bind(Sha256::digest(lease_token.as_bytes()).to_vec())
+        .bind(content_sha256)
+        .bind(i64::try_from(local_sequence).map_err(|_| StorageError::ConcurrentStateChange)?)
+        .bind(proof.reservation_id)
+        .bind(i64::try_from(proof.generation).map_err(|_| StorageError::ConcurrentStateChange)?)
+        .bind(Sha256::digest(proof.fencing_token.as_bytes()).to_vec())
+        .fetch_one(&mut *transaction)
+        .await?;
+        if !exact {
+            transaction.commit().await?;
+            return Ok(false);
+        }
+        let row = sqlx::query(
+            "SELECT payload,state,state_sequence FROM jobs
+             WHERE id=$1 AND workspace_id=$2 AND environment_id=$3 AND agent_id=$4
+             FOR UPDATE",
+        )
+        .bind(job_id.to_string())
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(agent_id.to_string())
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(StorageError::NotFound)?;
+        let state: String = row.try_get("state")?;
+        if state == "cancelled" {
+            transaction.commit().await?;
+            return Ok(true);
+        }
+        if !matches!(state.as_str(), "agent_accepted" | "cancel_requested") {
+            return Err(StorageError::ConcurrentStateChange);
+        }
+        let mut job = job_from_row(row.try_get("payload")?, &state)?;
+        let now = Utc::now();
+        let current_sequence = row.try_get::<i64, _>("state_sequence")?;
+        let sequence = if state == "agent_accepted" {
+            let requested_sequence = current_sequence + 1;
+            job.state = JobState::CancelRequested;
+            insert_event(
+                &mut transaction,
+                &job,
+                &JobEvent {
+                    id: EventId::new(),
+                    job_id,
+                    sequence: u64::try_from(requested_sequence).map_err(|error| {
+                        StorageError::InvalidData(format!("event sequence overflow: {error}"))
+                    })?,
+                    state: JobState::CancelRequested,
+                    reason: None,
+                    message: Some("Connector requested pre-activation compensation".into()),
+                    agent_id: Some(agent_id),
+                    native_job_id: None,
+                    occurred_at: now,
+                },
+            )
+            .await?;
+            requested_sequence + 1
+        } else {
+            current_sequence + 1
+        };
+        job.state = JobState::Cancelled;
+        let event = JobEvent {
+            id: EventId::new(),
+            job_id,
+            sequence: u64::try_from(sequence).map_err(|error| {
+                StorageError::InvalidData(format!("event sequence overflow: {error}"))
+            })?,
+            state: JobState::Cancelled,
+            reason: Some(piqae_domain::JobFailureReason::CancelledByUser),
+            message: Some("Connector disconnected before local queue activation".into()),
+            agent_id: Some(agent_id),
+            native_job_id: None,
+            occurred_at: now,
+        };
+        insert_event(&mut transaction, &job, &event).await?;
+        sqlx::query(
+            "UPDATE jobs SET payload=$2,state='cancelled',state_sequence=$3,
+                final_at=COALESCE(final_at,$4),updated_at=now()
+             WHERE id=$1 AND workspace_id=$5 AND environment_id=$6",
+        )
+        .bind(job_id.to_string())
+        .bind(serde_json::to_value(&job)?)
+        .bind(sequence)
+        .bind(now)
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "UPDATE delivery_attempts SET state='cancelled',final_at=COALESCE(final_at,$4),updated_at=$4
+             WHERE workspace_id=$1 AND environment_id=$2 AND job_id=$3 AND final_at IS NULL",
+        )
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(job_id.to_string())
+        .bind(now)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "UPDATE route_reservations SET state='cancelled',released_at=COALESCE(released_at,$4),updated_at=$4
+             WHERE workspace_id=$1 AND environment_id=$2 AND job_id=$3 AND state='active'",
+        )
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(job_id.to_string())
+        .bind(now)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(true)
     }
 
     pub async fn create_document_template(
@@ -10405,6 +10945,185 @@ async fn insert_event(
     Ok(())
 }
 
+async fn enqueue_webhook_event_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    idempotency_key: Option<&str>,
+    workspace_id: WorkspaceId,
+    environment_id: EnvironmentId,
+    event_type: &str,
+    payload: &serde_json::Value,
+) -> Result<String, StorageError> {
+    let proposed_event_id = EventId::new().to_string();
+    let inserted = sqlx::query_scalar::<_, String>(
+        "INSERT INTO webhook_events (
+            id, workspace_id, environment_id, event_type, payload, occurred_at,
+            idempotency_key
+         ) VALUES ($1,$2,$3,$4,$5,now(),$6)
+         ON CONFLICT (workspace_id, environment_id, idempotency_key)
+             WHERE idempotency_key IS NOT NULL DO NOTHING
+         RETURNING id",
+    )
+    .bind(&proposed_event_id)
+    .bind(workspace_id.to_string())
+    .bind(environment_id.to_string())
+    .bind(event_type)
+    .bind(payload)
+    .bind(idempotency_key)
+    .fetch_optional(&mut **transaction)
+    .await?;
+    let Some(event_id) = inserted else {
+        let idempotency_key = idempotency_key.ok_or_else(|| {
+            StorageError::InvalidData("non-idempotent webhook event conflicted".into())
+        })?;
+        return sqlx::query_scalar(
+            "SELECT id FROM webhook_events
+             WHERE workspace_id=$1 AND environment_id=$2 AND idempotency_key=$3",
+        )
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(idempotency_key)
+        .fetch_one(&mut **transaction)
+        .await
+        .map_err(Into::into);
+    };
+    Ok(event_id)
+}
+
+async fn terminalize_agent_acceptances(
+    transaction: &mut Transaction<'_, Postgres>,
+    workspace_id: WorkspaceId,
+    environment_id: EnvironmentId,
+    agent_id: AgentId,
+) -> Result<Vec<Job>, StorageError> {
+    let mut affected_jobs = Vec::new();
+    loop {
+        let rows = sqlx::query(
+            "SELECT job.id,job.payload,job.state,job.state_sequence
+             FROM jobs AS job
+             JOIN job_acceptances AS acceptance
+               ON acceptance.job_id=job.id
+              AND acceptance.workspace_id=job.workspace_id
+              AND acceptance.environment_id=job.environment_id
+              AND acceptance.agent_id=$3
+             WHERE job.workspace_id=$1 AND job.environment_id=$2 AND job.agent_id=$3
+               AND job.final_at IS NULL
+             ORDER BY job.created_at,job.id LIMIT 256 FOR UPDATE OF job",
+        )
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(agent_id.to_string())
+        .fetch_all(&mut **transaction)
+        .await?;
+        if rows.is_empty() {
+            break;
+        }
+        for row in rows {
+            let job_id_text: String = row.try_get("id")?;
+            let job_id: JobId = job_id_text.parse().map_err(|error| {
+                StorageError::InvalidData(format!("invalid accepted job id: {error}"))
+            })?;
+            let state: String = row.try_get("state")?;
+            let mut job = job_from_row(row.try_get("payload")?, &state)?;
+            let now = Utc::now();
+            let sequence = row.try_get::<i64, _>("state_sequence")? + 1;
+            job.state = JobState::DeliveryUncertain;
+            job.delivery_uncertain_since = Some(now);
+            insert_event(
+                transaction,
+                &job,
+                &JobEvent {
+                    id: EventId::new(),
+                    job_id,
+                    sequence: u64::try_from(sequence).map_err(|error| {
+                        StorageError::InvalidData(format!("event sequence overflow: {error}"))
+                    })?,
+                    state: JobState::DeliveryUncertain,
+                    reason: Some(piqae_domain::JobFailureReason::AmbiguousHandoff),
+                    message: Some(
+                        "Node access revoked with accepted work and unreported delivery".into(),
+                    ),
+                    agent_id: Some(agent_id),
+                    native_job_id: None,
+                    occurred_at: now,
+                },
+            )
+            .await?;
+            sqlx::query(
+                "UPDATE jobs SET payload=$2,state='delivery_uncertain',state_sequence=$3,
+                final_at=$4,delivery_uncertain_since=COALESCE(delivery_uncertain_since,$4),
+                updated_at=$4 WHERE id=$1 AND workspace_id=$5 AND environment_id=$6",
+            )
+            .bind(&job_id_text)
+            .bind(serde_json::to_value(&job)?)
+            .bind(sequence)
+            .bind(now)
+            .bind(workspace_id.to_string())
+            .bind(environment_id.to_string())
+            .execute(&mut **transaction)
+            .await?;
+            sqlx::query(
+                "UPDATE physical_destinations SET state='attention',updated_at=$4
+             WHERE workspace_id=$1 AND environment_id=$2 AND id IN (
+               SELECT destination_id FROM delivery_attempts
+               WHERE workspace_id=$1 AND environment_id=$2 AND job_id=$3 AND final_at IS NULL
+             )",
+            )
+            .bind(workspace_id.to_string())
+            .bind(environment_id.to_string())
+            .bind(&job_id_text)
+            .bind(now)
+            .execute(&mut **transaction)
+            .await?;
+            sqlx::query(
+                "UPDATE delivery_attempts SET state='delivery_uncertain',final_at=$4,updated_at=$4
+             WHERE workspace_id=$1 AND environment_id=$2 AND job_id=$3 AND final_at IS NULL",
+            )
+            .bind(workspace_id.to_string())
+            .bind(environment_id.to_string())
+            .bind(&job_id_text)
+            .bind(now)
+            .execute(&mut **transaction)
+            .await?;
+            sqlx::query(
+                "UPDATE route_reservations SET state='released',released_at=$4,updated_at=$4
+             WHERE workspace_id=$1 AND environment_id=$2 AND job_id=$3 AND state='active'",
+            )
+            .bind(workspace_id.to_string())
+            .bind(environment_id.to_string())
+            .bind(&job_id_text)
+            .bind(now)
+            .execute(&mut **transaction)
+            .await?;
+            let payload = serde_json::to_value(&job)?;
+            for event_type in ["job.updated", "job.delivery_uncertain"] {
+                let idempotency_key = acceptance_revocation_webhook_idempotency_key(
+                    workspace_id,
+                    environment_id,
+                    job_id,
+                    event_type,
+                );
+                enqueue_webhook_event_in_transaction(
+                    transaction,
+                    Some(&idempotency_key),
+                    workspace_id,
+                    environment_id,
+                    event_type,
+                    &payload,
+                )
+                .await?;
+            }
+            // Live publication is advisory; durable job events are the source
+            // of truth and webhook events above are the durable tenant outbox.
+            // Bound response memory so a hostile backlog cannot prevent
+            // credential revocation from committing.
+            if affected_jobs.len() < 256 {
+                affected_jobs.push(job);
+            }
+        }
+    }
+    Ok(affected_jobs)
+}
+
 fn stuck_uncertain_from_row(row: &PgRow) -> Result<StuckUncertainJob, StorageError> {
     let id = row.try_get::<String, _>("id")?;
     let workspace_id = row.try_get::<String, _>("workspace_id")?;
@@ -10540,7 +11259,13 @@ async fn upsert_node_connector(
              (id, installation_id, workspace_id, environment_id, agent_id)
          VALUES ($1,$2,$3,$4,$5)
          ON CONFLICT (workspace_id, environment_id, agent_id) DO UPDATE
-         SET installation_id = EXCLUDED.installation_id, revoked_at = NULL, updated_at = now()
+         SET installation_id = EXCLUDED.installation_id, revoked_at = NULL,
+             admission_generation = CASE
+                 WHEN node_connectors.revoked_at IS NOT NULL
+                 THEN node_connectors.admission_generation + 1
+                 ELSE node_connectors.admission_generation
+             END,
+             updated_at = now()
          RETURNING id",
     )
     .bind(connector_id)

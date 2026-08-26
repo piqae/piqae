@@ -632,7 +632,45 @@ impl EmbeddedQueue {
             route_reservation_id: Some(route_proof.reservation_id),
             route_generation: Some(route_proof.generation),
             route_fencing_token: Some(route_proof.fencing_token),
+            remote_accept_confirmed: false,
         })
+    }
+
+    pub fn confirm_connector_offer(&mut self, connector_id: &str, job_id: JobId) -> Result<()> {
+        self.store_for_scope_mut(connector_id)?
+            .confirm_cloud_accept(&job_id.to_string(), Utc::now().timestamp_millis())?;
+        Ok(())
+    }
+
+    pub fn quarantine_invalid_connector_offers(
+        &mut self,
+        connector_id: &str,
+    ) -> Result<Vec<piqae_agent_storage::CloudReleaseCleanup>> {
+        Ok(self
+            .store_for_scope_mut(connector_id)?
+            .quarantine_invalid_cloud_accepts(Utc::now().timestamp_millis())?)
+    }
+
+    pub fn complete_connector_release_cleanup(
+        &mut self,
+        connector_id: &str,
+        job_id: JobId,
+    ) -> Result<()> {
+        self.store_for_scope_mut(connector_id)?
+            .complete_cloud_release_cleanup(&job_id.to_string())?;
+        Ok(())
+    }
+
+    /// Resolves proofless quarantine rows only after the authority has durably
+    /// revoked the connector, which is their terminal remote compensation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the connector queue cannot be opened or updated.
+    pub fn complete_all_connector_release_cleanups(&mut self, connector_id: &str) -> Result<()> {
+        self.store_for_scope_mut(connector_id)?
+            .complete_all_cloud_release_cleanups()?;
+        Ok(())
     }
 
     pub fn activate_connector_offer(&mut self, connector_id: &str, job_id: JobId) -> Result<()> {
@@ -1803,10 +1841,16 @@ mod tests {
             .prepare_connector_offer("ncon_first", &first, b"first connector fixture", None)
             .unwrap();
         queue
+            .confirm_connector_offer("ncon_first", first_id)
+            .unwrap();
+        queue
             .activate_connector_offer("ncon_first", first_id)
             .unwrap();
         queue
             .prepare_connector_offer("ncon_second", &second, b"second connector fixture", None)
+            .unwrap();
+        queue
+            .confirm_connector_offer("ncon_second", second_id)
             .unwrap();
         queue
             .activate_connector_offer("ncon_second", second_id)
@@ -1976,6 +2020,9 @@ mod tests {
         let offer = cloud_offer(&printer, job_id, content);
         queue
             .prepare_connector_offer("ncon_second_adapter", &offer, content, None)
+            .unwrap();
+        queue
+            .confirm_connector_offer("ncon_second_adapter", job_id)
             .unwrap();
         queue
             .activate_connector_offer("ncon_second_adapter", job_id)

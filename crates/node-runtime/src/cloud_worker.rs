@@ -11,7 +11,7 @@ use crate::NodeRuntime;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use piqae_agent_client::{AgentClient, ClientError, DeviceRequestSigner};
-use piqae_domain::{EventId, JobId};
+use piqae_domain::{EventId, JobId, JobState};
 use piqae_protocol::agent::{
     AgentAcceptJobRequest, AgentCommand, AgentReleaseLeaseRequest, AgentRenewLeaseRequest,
     AgentSyncRequest, AgentSyncResponse, InventoryProjectionAcknowledgement, JobOffer,
@@ -73,7 +73,41 @@ pub trait ConnectorAuthority: fmt::Debug + Send + Sync {
         &self,
         job_id: JobId,
         request: &AgentAcceptJobRequest,
-    ) -> Result<(), CloudWorkerError>;
+    ) -> Result<AcceptanceReconciliation, CloudWorkerError>;
+    async fn cleanup_release(
+        &self,
+        job_id: JobId,
+        request: &AgentReleaseLeaseRequest,
+    ) -> Result<ReleaseCleanupDisposition, CloudWorkerError> {
+        self.release(job_id, request).await?;
+        Ok(ReleaseCleanupDisposition::Complete)
+    }
+    async fn reconcile_acceptance(
+        &self,
+        _job_id: JobId,
+        _request: &AgentAcceptJobRequest,
+    ) -> Result<AcceptanceReconciliation, CloudWorkerError> {
+        Ok(AcceptanceReconciliation::Pending)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReleaseCleanupDisposition {
+    Complete,
+    Retry,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AcceptanceReconciliation {
+    Accepted,
+    AcceptedAfterRevocation,
+    AbsentAfterRevocation,
+    /// The authority predates exact acceptance reconciliation. An exact
+    /// accept replay may recover terminal evidence, but can never prove that
+    /// revocation did not commit immediately after its response. The worker
+    /// therefore retains the durable intent and fails closed until upgrade.
+    Unsupported,
+    Pending,
 }
 
 /// Production signed HTTPS authority used by every runtime host.
@@ -139,11 +173,75 @@ impl ConnectorAuthority for AgentClientAuthority {
         &self,
         job_id: JobId,
         request: &AgentAcceptJobRequest,
-    ) -> Result<(), CloudWorkerError> {
+    ) -> Result<AcceptanceReconciliation, CloudWorkerError> {
         self.client
             .accept_job(self.signer.as_ref(), job_id, request)
             .await
-            .map(|_| ())
+            .map(|response| match response.state {
+                JobState::AgentAccepted => AcceptanceReconciliation::Accepted,
+                state if state.is_terminal() || state == JobState::CancelRequested => {
+                    AcceptanceReconciliation::AcceptedAfterRevocation
+                }
+                _ => AcceptanceReconciliation::Pending,
+            })
+            .map_err(Into::into)
+    }
+
+    async fn cleanup_release(
+        &self,
+        job_id: JobId,
+        request: &AgentReleaseLeaseRequest,
+    ) -> Result<ReleaseCleanupDisposition, CloudWorkerError> {
+        match self
+            .client
+            .release_lease(self.signer.as_ref(), job_id, request)
+            .await
+        {
+            Ok(_) => Ok(ReleaseCleanupDisposition::Complete),
+            // Authentication failures are not proof that the authority has
+            // released or terminalized this lease. Keep the cleanup durable;
+            // a later successful connector revoke may clear it explicitly.
+            Err(ClientError::Unauthorized { .. }) => Ok(ReleaseCleanupDisposition::Retry),
+            Err(ClientError::Status { status, .. })
+                if (400..500).contains(&status)
+                    && status != 408
+                    && status != 409
+                    && status != 429 =>
+            {
+                Ok(ReleaseCleanupDisposition::Complete)
+            }
+            Err(ClientError::Http(_) | ClientError::Status { .. }) => {
+                Ok(ReleaseCleanupDisposition::Retry)
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    async fn reconcile_acceptance(
+        &self,
+        job_id: JobId,
+        request: &AgentAcceptJobRequest,
+    ) -> Result<AcceptanceReconciliation, CloudWorkerError> {
+        self.client
+            .reconcile_acceptance(self.signer.as_ref(), job_id, request)
+            .await
+            .map(|response| {
+                if response.fenced || response.accepted && response.connector_revoked {
+                    AcceptanceReconciliation::AcceptedAfterRevocation
+                } else if response.accepted {
+                    AcceptanceReconciliation::Accepted
+                } else if response.connector_revoked {
+                    AcceptanceReconciliation::AbsentAfterRevocation
+                } else {
+                    AcceptanceReconciliation::Pending
+                }
+            })
+            .or_else(|error| match error {
+                ClientError::Status {
+                    status: 404 | 405, ..
+                } => Ok(AcceptanceReconciliation::Unsupported),
+                other => Err(other),
+            })
             .map_err(Into::into)
     }
 }
@@ -200,6 +298,7 @@ pub trait ContentMaterializer: fmt::Debug + Send + Sync {
 pub struct PendingCloudAcceptance {
     pub job_id: JobId,
     pub request: AgentAcceptJobRequest,
+    pub remote_accept_confirmed: bool,
 }
 
 /// A legacy or corrupt local intent which cannot prove its physical route.
@@ -221,12 +320,16 @@ pub trait DurableOfferAcceptor<M>: fmt::Debug + Send + Sync {
     async fn invalid_pending(&mut self) -> Result<Vec<PendingCloudRelease>, CloudWorkerError> {
         Ok(Vec::new())
     }
+    async fn complete_release_cleanup(&mut self, _job_id: JobId) -> Result<(), CloudWorkerError> {
+        Ok(())
+    }
     async fn prepare(
         &mut self,
         offer: &JobOffer,
         content: M,
     ) -> Result<PendingCloudAcceptance, CloudWorkerError>;
     async fn activate(&mut self, job_id: JobId) -> Result<(), CloudWorkerError>;
+    async fn confirm_remote_accept(&mut self, job_id: JobId) -> Result<(), CloudWorkerError>;
     async fn abandon(&mut self, _job_id: JobId) -> Result<(), CloudWorkerError> {
         Ok(())
     }
@@ -336,7 +439,11 @@ where
     /// acknowledgement, command application, materialisation or acceptance
     /// cannot complete safely.
     pub async fn reconcile_once(&mut self) -> Result<CloudCycleOutcome, CloudWorkerError> {
-        self.resume_pending_acceptances().await?;
+        // One poisoned or temporarily unreachable acceptance must not starve
+        // inventory, event acknowledgement, commands, or sibling work. Keep
+        // its exact proof durable, finish the bounded cycle, then surface the
+        // first redacted error so the supervisor can back off and report it.
+        let mut deferred_error = self.resume_pending_acceptances().await.err();
         let request = self.inventory.snapshot(self.refresh_inventory).await?;
         let inventory_submitted = request.printers.is_some();
         let submitted_revision = request.printer_revision;
@@ -375,36 +482,127 @@ where
             .await?;
         let offers_seen = response.candidate_jobs.len();
         for offer in response.candidate_jobs {
-            self.process_offer(offer).await?;
+            if let Err(error) = self.process_offer(offer).await
+                && deferred_error.is_none()
+            {
+                deferred_error = Some(error);
+            }
         }
-        Ok(CloudCycleOutcome {
+        let outcome = CloudCycleOutcome {
             next_poll_after: Duration::from_millis(response.next_poll_after_ms.clamp(250, 60_000)),
             inventory_submitted,
             offers_seen,
-        })
+        };
+        deferred_error.map_or(Ok(outcome), Err)
     }
 
     async fn resume_pending_acceptances(&mut self) -> Result<(), CloudWorkerError> {
         for invalid in self.acceptor.invalid_pending().await? {
-            self.authority
-                .release(invalid.job_id, &invalid.request)
-                .await?;
-            self.acceptor.abandon(invalid.job_id).await?;
-        }
-        for pending in self.acceptor.pending().await? {
-            if !self.acceptor.admission_valid().await? {
-                self.acceptor.abandon(pending.job_id).await?;
-                continue;
+            if matches!(
+                self.authority
+                    .cleanup_release(invalid.job_id, &invalid.request)
+                    .await,
+                Ok(ReleaseCleanupDisposition::Complete)
+            ) {
+                self.acceptor
+                    .complete_release_cleanup(invalid.job_id)
+                    .await?;
             }
-            self.authority
-                .accept(pending.job_id, &pending.request)
-                .await?;
-            // Authority acceptance transfers durable responsibility to this
-            // installation. A concurrent connector revoke prevents new work,
-            // but must never erase or strand work already accepted remotely.
-            self.acceptor.activate(pending.job_id).await?;
         }
-        Ok(())
+        let mut first_error = None;
+        for pending in self.acceptor.pending().await? {
+            if let Err(error) = self.resume_pending_acceptance(pending).await
+                && first_error.is_none()
+            {
+                first_error = Some(error);
+            }
+        }
+        first_error.map_or(Ok(()), Err)
+    }
+
+    async fn resume_pending_acceptance(
+        &mut self,
+        pending: PendingCloudAcceptance,
+    ) -> Result<(), CloudWorkerError> {
+        let reconciliation = self
+            .authority
+            .reconcile_acceptance(pending.job_id, &pending.request)
+            .await?;
+        match reconciliation {
+            AcceptanceReconciliation::Accepted => {
+                self.acceptor.confirm_remote_accept(pending.job_id).await?;
+                return self.acceptor.activate(pending.job_id).await;
+            }
+            AcceptanceReconciliation::AcceptedAfterRevocation
+            | AcceptanceReconciliation::AbsentAfterRevocation => {
+                return self.acceptor.abandon(pending.job_id).await;
+            }
+            AcceptanceReconciliation::Unsupported => {
+                if pending.remote_accept_confirmed || !self.acceptor.admission_valid().await? {
+                    return Err(CloudWorkerError::new(
+                        "connector_authority_upgrade_required",
+                    ));
+                }
+                // Exact replay against an older authority can recover a
+                // terminal result, but AgentAccepted is not a current fence:
+                // an external revoke may commit immediately after the 200.
+                let replay = self
+                    .authority
+                    .accept(pending.job_id, &pending.request)
+                    .await?;
+                match replay {
+                    AcceptanceReconciliation::Accepted => {}
+                    AcceptanceReconciliation::AcceptedAfterRevocation
+                    | AcceptanceReconciliation::AbsentAfterRevocation => {
+                        return self.acceptor.abandon(pending.job_id).await;
+                    }
+                    AcceptanceReconciliation::Unsupported | AcceptanceReconciliation::Pending => {
+                        return Ok(());
+                    }
+                }
+                self.acceptor.confirm_remote_accept(pending.job_id).await?;
+                return Err(CloudWorkerError::new(
+                    "connector_authority_upgrade_required",
+                ));
+            }
+            AcceptanceReconciliation::Pending => {}
+        }
+        if pending.remote_accept_confirmed || !self.acceptor.admission_valid().await? {
+            return Ok(());
+        }
+        let accepted = self
+            .authority
+            .accept(pending.job_id, &pending.request)
+            .await?;
+        match accepted {
+            AcceptanceReconciliation::Accepted => {}
+            AcceptanceReconciliation::AcceptedAfterRevocation
+            | AcceptanceReconciliation::AbsentAfterRevocation => {
+                return self.acceptor.abandon(pending.job_id).await;
+            }
+            AcceptanceReconciliation::Unsupported | AcceptanceReconciliation::Pending => {
+                return Ok(());
+            }
+        }
+        self.acceptor.confirm_remote_accept(pending.job_id).await?;
+        // Close accept-versus-revoke after the authority commit and before the
+        // first runnable local transition. Revoke serializes against this
+        // exact acceptance and turns the outcome into a fenced local abandon.
+        match self
+            .authority
+            .reconcile_acceptance(pending.job_id, &pending.request)
+            .await?
+        {
+            AcceptanceReconciliation::Accepted => self.acceptor.activate(pending.job_id).await,
+            AcceptanceReconciliation::AcceptedAfterRevocation
+            | AcceptanceReconciliation::AbsentAfterRevocation => {
+                self.acceptor.abandon(pending.job_id).await
+            }
+            AcceptanceReconciliation::Unsupported => Err(CloudWorkerError::new(
+                "connector_authority_upgrade_required",
+            )),
+            AcceptanceReconciliation::Pending => Ok(()),
+        }
     }
 
     async fn process_offer(&mut self, offer: JobOffer) -> Result<(), CloudWorkerError> {
@@ -448,7 +646,7 @@ where
             }
         })
         .await;
-        let pending = match result {
+        let _pending = match result {
             Ok(pending) => pending,
             Err(error) => {
                 if self.acceptor.has_durable_intent(job_id).await == Ok(false) {
@@ -464,11 +662,7 @@ where
                 .await;
             return Err(CloudWorkerError::new("connector_admission_revoked"));
         }
-        self.authority.accept(job_id, &pending.request).await?;
-        // Once the authority confirms acceptance, local activation is the
-        // required compensation even if connector admission was revoked in
-        // the same race window. Revocation fences later offers and signing.
-        self.acceptor.activate(job_id).await
+        self.resume_pending_acceptances().await
     }
 
     async fn release_offer(
@@ -536,6 +730,7 @@ mod tests {
     use base64::{Engine as _, engine::general_purpose::STANDARD};
     use chrono::TimeDelta;
     use ed25519_dalek::{Signature, Signer as _, SigningKey, Verifier as _};
+    use piqae_agent_client::DeviceIdentity;
     use piqae_domain::{
         AgentId, ContentKind, ContentSource, EnvironmentId, Job, JobId, JobOptions, JobState,
         PrinterId, WorkspaceId,
@@ -553,6 +748,7 @@ mod tests {
             atomic::{AtomicBool, Ordering},
         },
     };
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     type Log = Arc<Mutex<Vec<&'static str>>>;
 
@@ -600,8 +796,13 @@ mod tests {
         signer: Arc<dyn DeviceRequestSigner>,
         verifying_key: ed25519_dalek::VerifyingKey,
         responses: Mutex<VecDeque<Result<AgentSyncResponse, CloudWorkerError>>>,
-        accepted: Mutex<BTreeSet<JobId>>,
+        accepted: Arc<Mutex<BTreeSet<JobId>>>,
         released: Mutex<Vec<JobId>>,
+        cleanup_retries: Mutex<usize>,
+        accept_failures_after_commit: Mutex<usize>,
+        accept_outcome: Option<AcceptanceReconciliation>,
+        reconciliation_supported: bool,
+        reconciliation_errors: Mutex<BTreeSet<JobId>>,
         revoke_after_accept: Option<Arc<AtomicBool>>,
         log: Log,
     }
@@ -651,17 +852,84 @@ mod tests {
             Ok(())
         }
 
+        async fn cleanup_release(
+            &self,
+            job_id: JobId,
+            request: &AgentReleaseLeaseRequest,
+        ) -> Result<ReleaseCleanupDisposition, CloudWorkerError> {
+            let retry = {
+                let mut retries = self.cleanup_retries.lock().unwrap();
+                let retry = *retries > 0;
+                if retry {
+                    *retries -= 1;
+                }
+                retry
+            };
+            if retry {
+                self.log.lock().unwrap().push("cleanup_retry");
+                return Ok(ReleaseCleanupDisposition::Retry);
+            }
+            self.release(job_id, request).await?;
+            Ok(ReleaseCleanupDisposition::Complete)
+        }
+
         async fn accept(
             &self,
             job_id: JobId,
             _request: &AgentAcceptJobRequest,
-        ) -> Result<(), CloudWorkerError> {
+        ) -> Result<AcceptanceReconciliation, CloudWorkerError> {
             self.log.lock().unwrap().push("remote_accept");
             self.accepted.lock().unwrap().insert(job_id);
             if let Some(admission) = &self.revoke_after_accept {
                 admission.store(false, Ordering::Release);
             }
-            Ok(())
+            let fail_after_commit = {
+                let mut failures = self.accept_failures_after_commit.lock().unwrap();
+                let should_fail = *failures > 0;
+                if should_fail {
+                    *failures -= 1;
+                }
+                should_fail
+            };
+            if fail_after_commit {
+                return Err(CloudWorkerError::new("accept_response_lost"));
+            }
+            Ok(self.accept_outcome.unwrap_or_else(|| {
+                if self
+                    .revoke_after_accept
+                    .as_ref()
+                    .is_some_and(|admission| !admission.load(Ordering::Acquire))
+                {
+                    AcceptanceReconciliation::AcceptedAfterRevocation
+                } else {
+                    AcceptanceReconciliation::Accepted
+                }
+            }))
+        }
+
+        async fn reconcile_acceptance(
+            &self,
+            job_id: JobId,
+            _request: &AgentAcceptJobRequest,
+        ) -> Result<AcceptanceReconciliation, CloudWorkerError> {
+            self.log.lock().unwrap().push("reconcile_acceptance");
+            if self.reconciliation_errors.lock().unwrap().contains(&job_id) {
+                return Err(CloudWorkerError::new("acceptance_reconcile_unavailable"));
+            }
+            if !self.reconciliation_supported {
+                return Ok(AcceptanceReconciliation::Unsupported);
+            }
+            let accepted = self.accepted.lock().unwrap().contains(&job_id);
+            let revoked = self
+                .revoke_after_accept
+                .as_ref()
+                .is_some_and(|admission| !admission.load(Ordering::Acquire));
+            Ok(match (accepted, revoked) {
+                (true, true) => AcceptanceReconciliation::AcceptedAfterRevocation,
+                (true, false) => AcceptanceReconciliation::Accepted,
+                (false, true) => AcceptanceReconciliation::AbsentAfterRevocation,
+                (false, false) => AcceptanceReconciliation::Pending,
+            })
         }
     }
 
@@ -750,6 +1018,8 @@ mod tests {
     #[derive(Debug, serde::Serialize, serde::Deserialize, Default)]
     struct DurableDocument {
         pending: BTreeMap<JobId, AgentAcceptJobRequest>,
+        confirmed: BTreeSet<JobId>,
+        release_cleanups: BTreeMap<JobId, AgentReleaseLeaseRequest>,
         active: BTreeSet<JobId>,
         handoffs: BTreeSet<JobId>,
     }
@@ -802,6 +1072,7 @@ mod tests {
                 .map(|(job_id, request)| PendingCloudAcceptance {
                     job_id: *job_id,
                     request: request.clone(),
+                    remote_accept_confirmed: self.document.confirmed.contains(job_id),
                 })
                 .collect())
         }
@@ -820,16 +1091,31 @@ mod tests {
                 .collect::<Vec<_>>();
             let mut releases = Vec::with_capacity(invalid.len());
             for (job_id, request) in invalid {
+                let cleanup = AgentReleaseLeaseRequest {
+                    lease_id: request.lease_id,
+                    lease_token: request.lease_token,
+                    reason: "route_reservation_required".into(),
+                };
+                self.document.pending.remove(&job_id);
+                self.document.release_cleanups.insert(job_id, cleanup);
+                self.log.lock().unwrap().push("quarantine");
+            }
+            self.persist()?;
+            for (job_id, request) in &self.document.release_cleanups {
                 releases.push(PendingCloudRelease {
-                    job_id,
-                    request: AgentReleaseLeaseRequest {
-                        lease_id: request.lease_id,
-                        lease_token: request.lease_token,
-                        reason: "route_reservation_required".into(),
-                    },
+                    job_id: *job_id,
+                    request: request.clone(),
                 });
             }
             Ok(releases)
+        }
+
+        async fn complete_release_cleanup(
+            &mut self,
+            job_id: JobId,
+        ) -> Result<(), CloudWorkerError> {
+            self.document.release_cleanups.remove(&job_id);
+            self.persist()
         }
 
         async fn prepare(
@@ -866,12 +1152,18 @@ mod tests {
             Ok(PendingCloudAcceptance {
                 job_id: offer.job.id,
                 request,
+                remote_accept_confirmed: false,
             })
         }
 
         async fn activate(&mut self, job_id: JobId) -> Result<(), CloudWorkerError> {
             self.log.lock().unwrap().push("activate");
             self.document.active.insert(job_id);
+            self.persist()
+        }
+
+        async fn confirm_remote_accept(&mut self, job_id: JobId) -> Result<(), CloudWorkerError> {
+            self.document.confirmed.insert(job_id);
             self.persist()
         }
 
@@ -1056,8 +1348,13 @@ mod tests {
             signer,
             verifying_key,
             responses: Mutex::new(responses.into()),
-            accepted: Mutex::new(BTreeSet::new()),
+            accepted: Arc::new(Mutex::new(BTreeSet::new())),
             released: Mutex::new(Vec::new()),
+            cleanup_retries: Mutex::new(0),
+            accept_failures_after_commit: Mutex::new(0),
+            accept_outcome: None,
+            reconciliation_supported: true,
+            reconciliation_errors: Mutex::new(BTreeSet::new()),
             revoke_after_accept: None,
             log,
         }
@@ -1246,7 +1543,7 @@ mod tests {
             authority(
                 identity,
                 ed25519_dalek::VerifyingKey::from_bytes(&generated.public_key).unwrap(),
-                vec![Ok(empty_response())],
+                vec![Ok(empty_response()), Ok(empty_response())],
                 Arc::clone(&log),
             ),
             &log,
@@ -1269,11 +1566,338 @@ mod tests {
             },
         );
         worker.acceptor.persist().unwrap();
+        *worker.authority.cleanup_retries.lock().unwrap() = 1;
+        worker.reconcile_once().await.unwrap();
+        assert!(
+            worker
+                .acceptor
+                .document
+                .release_cleanups
+                .contains_key(&job_id)
+        );
         worker.reconcile_once().await.unwrap();
         let entries = log.lock().unwrap();
-        assert!(entries.contains(&"abandon"));
+        assert!(entries.contains(&"quarantine"));
+        assert!(entries.contains(&"cleanup_retry"));
         assert!(entries.contains(&"remote_release"));
+        assert!(entries.contains(&"signed_sync"));
         assert!(!entries.contains(&"remote_accept"));
+        drop(entries);
+    }
+
+    #[tokio::test]
+    async fn cleanup_authentication_failure_stays_durable_for_retry() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = vec![0_u8; 16 * 1024];
+            let _ = stream.read(&mut request).await.unwrap();
+            let body = br#"{"error":{"code":"invalid_agent_signature"}}"#;
+            stream
+                .write_all(
+                    format!(
+                        "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            stream.write_all(body).await.unwrap();
+        });
+        let identity: Arc<dyn DeviceRequestSigner> = Arc::new(DeviceIdentity::from_secret_bytes(
+            AgentId::new(),
+            &[29_u8; 32],
+        ));
+        let authority = AgentClientAuthority::new(
+            AgentClient::new(url::Url::parse(&format!("http://{address}/")).unwrap()).unwrap(),
+            identity,
+        );
+        let disposition = authority
+            .cleanup_release(
+                JobId::new(),
+                &AgentReleaseLeaseRequest {
+                    lease_id: uuid::Uuid::new_v4(),
+                    lease_token: "redacted-cleanup-capability".into(),
+                    reason: "route_reservation_required".into(),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(disposition, ReleaseCleanupDisposition::Retry);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn n_minus_one_authority_retains_exact_accept_after_response_loss_and_restart() {
+        let directory = tempfile::tempdir().unwrap();
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let provider = Arc::new(FakeSecureStore {
+            key: SigningKey::from_bytes(&[31; 32]),
+            deleted: Mutex::new(false),
+        });
+        let generated = provider.generate("com.example.pos").unwrap();
+        let identity: Arc<dyn DeviceRequestSigner> = Arc::new(HostBackedDeviceIdentity::new(
+            AgentId::new(),
+            generated.handle,
+            provider,
+        ));
+        let job_id = JobId::new();
+        let mut response = empty_response();
+        response.candidate_jobs.push(offer(job_id));
+        let state = directory.path().join("n-minus-one-restart.json");
+        let runtime = runtime(&directory.path().join("runtime"));
+        let mut first = worker(
+            authority(
+                Arc::clone(&identity),
+                ed25519_dalek::VerifyingKey::from_bytes(&generated.public_key).unwrap(),
+                vec![Ok(response)],
+                Arc::clone(&log),
+            ),
+            &log,
+            &state,
+            Arc::clone(&runtime),
+            false,
+        );
+        first.authority.reconciliation_supported = false;
+        *first.authority.accept_failures_after_commit.lock().unwrap() = 1;
+        assert_eq!(
+            first.reconcile_once().await.unwrap_err().code,
+            "accept_response_lost"
+        );
+        assert!(first.acceptor.document.pending.contains_key(&job_id));
+        assert!(!first.acceptor.document.confirmed.contains(&job_id));
+        assert!(!first.acceptor.document.active.contains(&job_id));
+        let remote_acceptances = Arc::clone(&first.authority.accepted);
+        drop(first);
+
+        let mut restarted = worker(
+            authority(
+                identity,
+                ed25519_dalek::VerifyingKey::from_bytes(&generated.public_key).unwrap(),
+                vec![Ok(empty_response())],
+                Arc::clone(&log),
+            ),
+            &log,
+            &state,
+            runtime,
+            false,
+        );
+        restarted.authority.reconciliation_supported = false;
+        restarted.authority.accepted = remote_acceptances;
+        assert_eq!(
+            restarted.reconcile_once().await.unwrap_err().code,
+            "connector_authority_upgrade_required"
+        );
+        assert!(restarted.acceptor.document.confirmed.contains(&job_id));
+        assert!(restarted.acceptor.document.pending.contains_key(&job_id));
+        assert!(!restarted.acceptor.document.active.contains(&job_id));
+        let (handoffs, accepts) = {
+            let entries = log.lock().unwrap();
+            (
+                entries
+                    .iter()
+                    .filter(|entry| **entry == "durable_handoff")
+                    .count(),
+                entries
+                    .iter()
+                    .filter(|entry| **entry == "remote_accept")
+                    .count(),
+            )
+        };
+        assert_eq!(handoffs, 1);
+        assert_eq!(accepts, 2);
+        assert!(log.lock().unwrap().contains(&"signed_sync"));
+    }
+
+    #[tokio::test]
+    async fn unresolved_confirmed_acceptance_does_not_block_other_work_or_sync() {
+        let directory = tempfile::tempdir().unwrap();
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let provider = Arc::new(FakeSecureStore {
+            key: SigningKey::from_bytes(&[33; 32]),
+            deleted: Mutex::new(false),
+        });
+        let generated = provider.generate("com.example.pos").unwrap();
+        let identity: Arc<dyn DeviceRequestSigner> = Arc::new(HostBackedDeviceIdentity::new(
+            AgentId::new(),
+            generated.handle,
+            provider,
+        ));
+        let mut worker = worker(
+            authority(
+                identity,
+                ed25519_dalek::VerifyingKey::from_bytes(&generated.public_key).unwrap(),
+                vec![Ok(empty_response())],
+                Arc::clone(&log),
+            ),
+            &log,
+            &directory.path().join("isolated-pending.json"),
+            runtime(&directory.path().join("runtime-isolated-pending")),
+            false,
+        );
+        let unresolved_job = JobId::new();
+        let accepted_job = JobId::new();
+        worker
+            .acceptor
+            .prepare(&offer(unresolved_job), b"fixture".to_vec())
+            .await
+            .unwrap();
+        worker
+            .acceptor
+            .confirm_remote_accept(unresolved_job)
+            .await
+            .unwrap();
+        worker
+            .acceptor
+            .prepare(&offer(accepted_job), b"fixture".to_vec())
+            .await
+            .unwrap();
+        worker
+            .authority
+            .accepted
+            .lock()
+            .unwrap()
+            .insert(accepted_job);
+
+        worker.reconcile_once().await.unwrap();
+        assert!(
+            worker
+                .acceptor
+                .document
+                .pending
+                .contains_key(&unresolved_job)
+        );
+        assert!(!worker.acceptor.document.active.contains(&unresolved_job));
+        assert!(worker.acceptor.document.active.contains(&accepted_job));
+        assert!(log.lock().unwrap().contains(&"signed_sync"));
+    }
+
+    #[tokio::test]
+    async fn reconcile_error_on_one_acceptance_does_not_block_sibling_or_sync() {
+        let directory = tempfile::tempdir().unwrap();
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let provider = Arc::new(FakeSecureStore {
+            key: SigningKey::from_bytes(&[34; 32]),
+            deleted: Mutex::new(false),
+        });
+        let generated = provider.generate("com.example.pos").unwrap();
+        let identity: Arc<dyn DeviceRequestSigner> = Arc::new(HostBackedDeviceIdentity::new(
+            AgentId::new(),
+            generated.handle,
+            provider,
+        ));
+        let mut worker = worker(
+            authority(
+                identity,
+                ed25519_dalek::VerifyingKey::from_bytes(&generated.public_key).unwrap(),
+                vec![Ok(empty_response())],
+                Arc::clone(&log),
+            ),
+            &log,
+            &directory.path().join("isolated-error.json"),
+            runtime(&directory.path().join("runtime-isolated-error")),
+            false,
+        );
+        let poisoned_job = JobId::new();
+        let accepted_job = JobId::new();
+        worker
+            .acceptor
+            .prepare(&offer(poisoned_job), b"fixture".to_vec())
+            .await
+            .unwrap();
+        worker
+            .acceptor
+            .prepare(&offer(accepted_job), b"fixture".to_vec())
+            .await
+            .unwrap();
+        worker
+            .authority
+            .reconciliation_errors
+            .lock()
+            .unwrap()
+            .insert(poisoned_job);
+        worker
+            .authority
+            .accepted
+            .lock()
+            .unwrap()
+            .insert(accepted_job);
+
+        assert_eq!(
+            worker.reconcile_once().await.unwrap_err().code,
+            "acceptance_reconcile_unavailable"
+        );
+        assert!(worker.acceptor.document.pending.contains_key(&poisoned_job));
+        assert!(!worker.acceptor.document.active.contains(&poisoned_job));
+        assert!(worker.acceptor.document.active.contains(&accepted_job));
+        assert!(log.lock().unwrap().contains(&"signed_sync"));
+    }
+
+    #[tokio::test]
+    async fn n_minus_one_terminal_accept_response_is_fenced_without_activation() {
+        let directory = tempfile::tempdir().unwrap();
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let provider = Arc::new(FakeSecureStore {
+            key: SigningKey::from_bytes(&[35; 32]),
+            deleted: Mutex::new(false),
+        });
+        let generated = provider.generate("com.example.pos").unwrap();
+        let identity: Arc<dyn DeviceRequestSigner> = Arc::new(HostBackedDeviceIdentity::new(
+            AgentId::new(),
+            generated.handle,
+            provider,
+        ));
+        let job_id = JobId::new();
+        let mut response = empty_response();
+        response.candidate_jobs.push(offer(job_id));
+        let state = directory.path().join("n-minus-one-terminal.json");
+        let runtime = runtime(&directory.path().join("runtime-terminal"));
+        let mut initial_worker = worker(
+            authority(
+                Arc::clone(&identity),
+                ed25519_dalek::VerifyingKey::from_bytes(&generated.public_key).unwrap(),
+                vec![Ok(response)],
+                Arc::clone(&log),
+            ),
+            &log,
+            &state,
+            Arc::clone(&runtime),
+            false,
+        );
+        initial_worker.authority.reconciliation_supported = false;
+        initial_worker.authority.accept_outcome =
+            Some(AcceptanceReconciliation::AcceptedAfterRevocation);
+        initial_worker.reconcile_once().await.unwrap();
+        assert!(!initial_worker.acceptor.document.active.contains(&job_id));
+        assert!(
+            !initial_worker
+                .acceptor
+                .document
+                .pending
+                .contains_key(&job_id)
+        );
+        drop(initial_worker);
+
+        let mut restarted = worker(
+            authority(
+                identity,
+                ed25519_dalek::VerifyingKey::from_bytes(&generated.public_key).unwrap(),
+                vec![Ok(empty_response())],
+                Arc::clone(&log),
+            ),
+            &log,
+            &state,
+            runtime,
+            false,
+        );
+        restarted.authority.reconciliation_supported = false;
+        restarted.reconcile_once().await.unwrap();
+        assert!(!restarted.acceptor.document.active.contains(&job_id));
+        let entries = log.lock().unwrap();
+        assert!(entries.contains(&"abandon"));
+        assert!(!entries.contains(&"activate"));
         drop(entries);
     }
 
@@ -1313,7 +1937,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn revoke_after_remote_accept_keeps_durable_local_responsibility() {
+    async fn revoke_after_remote_accept_fences_local_activation() {
         let directory = tempfile::tempdir().unwrap();
         let log = Arc::new(Mutex::new(Vec::new()));
         let provider = Arc::new(FakeSecureStore {
@@ -1346,8 +1970,8 @@ mod tests {
         worker.reconcile_once().await.unwrap();
         let entries = log.lock().unwrap();
         assert!(entries.contains(&"remote_accept"));
-        assert!(!entries.contains(&"abandon"));
-        assert!(entries.contains(&"activate"));
+        assert!(entries.contains(&"abandon"));
+        assert!(!entries.contains(&"activate"));
         drop(entries);
     }
 }

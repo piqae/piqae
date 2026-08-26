@@ -2249,6 +2249,50 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/agent/jobs/{job_id}/acceptance/reconcile": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                job_id: components["parameters"]["JobId"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Reconcile an exact durable acceptance after a crash
+         * @description Evidence-only recovery for the crash window after the authority committed an acceptance but before the node persisted its response. The request must exactly match the stored lease, content, local sequence, and physical-route proof. During a mixed-version rollout the authority may durably backfill appended proof columns after validating the live route under lock. The node may activate only when accepted is true and fenced is false; fenced is always a terminal local-abandon instruction even after a connector has been re-enrolled.
+         */
+        post: operations["reconcileAgentAcceptance"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/agent/jobs/{job_id}/acceptance/abandon": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                job_id: components["parameters"]["JobId"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Abandon an exact accepted job before local queue activation
+         * @description Compensates the narrow crash boundary where the authority committed an acceptance but the node has not activated durable local work. The connector must still be active and the complete lease, content, local sequence, and physical-route proof must match. This operation cannot cancel work after local activation.
+         */
+        post: operations["abandonAgentAcceptance"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/agent/jobs/{job_id}/lease": {
         parameters: {
             query?: never;
@@ -3416,6 +3460,19 @@ export interface components {
             content_sha256: components["schemas"]["Sha256"];
             /** Format: int64 */
             local_sequence: number;
+            /** Format: uuid */
+            route_reservation_id?: string;
+            /** Format: int64 */
+            route_generation?: number;
+            route_fencing_token?: string;
+        };
+        /** @description Complete durable lease and physical-route evidence used only for exact crash reconciliation or pre-activation compensation. */
+        AgentExactAcceptanceRequest: components["schemas"]["AgentAcceptRequest"] & {
+            /** Format: uuid */
+            route_reservation_id: string;
+            /** Format: int64 */
+            route_generation: number;
+            route_fencing_token: string;
         };
         AgentAcceptResponse: {
             /** Format: date-time */
@@ -8272,6 +8329,70 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["AgentAcceptResponse"];
+                };
+            };
+            401: components["responses"]["Error"];
+            409: components["responses"]["Error"];
+        };
+    };
+    reconcileAgentAcceptance: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                job_id: components["parameters"]["JobId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AgentExactAcceptanceRequest"];
+            };
+        };
+        responses: {
+            /** @description Exact durable acceptance evidence and revocation stability. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        accepted: boolean;
+                        /** @description Admission for this connector or its owning node has been revoked. When true, an acceptance absent from the exact evidence set must not become runnable locally. */
+                        connector_revoked: boolean;
+                        /** @description The exact acceptance belongs to a revoked or superseded connector incarnation, or its job is already terminal; the node must abandon local pending work. */
+                        fenced: boolean;
+                    };
+                };
+            };
+            401: components["responses"]["Error"];
+            409: components["responses"]["Error"];
+        };
+    };
+    abandonAgentAcceptance: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                job_id: components["parameters"]["JobId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AgentExactAcceptanceRequest"];
+            };
+        };
+        responses: {
+            /** @description Whether the exact accepted job was safely abandoned. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        abandoned: boolean;
+                    };
                 };
             };
             401: components["responses"]["Error"];
