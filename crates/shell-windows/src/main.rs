@@ -746,32 +746,6 @@ mod windows_shell {
         }
     }
 
-    #[cfg(test)]
-    mod refresh_tests {
-        use super::assemble_snapshot;
-        use piqae_local_ipc::{ConnectionState, LocalStatus, PendingBrokerAuthorization};
-
-        #[test]
-        fn supplementary_failure_does_not_discard_primary_refresh_data() {
-            let status = LocalStatus {
-                agent_id: Some("agent-test".into()),
-                workspace_name: Some("Workspace".into()),
-                version: "test".into(),
-                connection: ConnectionState::Connected,
-                queued_jobs: 2,
-                active_jobs: 1,
-                printer_warnings: 0,
-                paused: false,
-            };
-            let pending: Result<Vec<PendingBrokerAuthorization>, &str> =
-                Err("supplementary endpoint unavailable");
-            let snapshot = assemble_snapshot(status.clone(), Vec::new(), pending);
-            assert_eq!(snapshot.status, status);
-            assert!(snapshot.printers.is_empty());
-            assert!(snapshot.pending_authorizations.is_empty());
-        }
-    }
-
     fn open_dashboard(window: HWND) {
         let url = SHELL_STATE
             .get()
@@ -881,6 +855,32 @@ mod windows_shell {
 
     fn wide(value: &str) -> Vec<u16> {
         value.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    #[cfg(test)]
+    mod refresh_tests {
+        use super::assemble_snapshot;
+        use piqae_local_ipc::{ConnectionState, LocalStatus, PendingBrokerAuthorization};
+
+        #[test]
+        fn supplementary_failure_does_not_discard_primary_refresh_data() {
+            let status = LocalStatus {
+                agent_id: Some("agent-test".into()),
+                workspace_name: Some("Workspace".into()),
+                version: "test".into(),
+                connection: ConnectionState::Connected,
+                queued_jobs: 2,
+                active_jobs: 1,
+                printer_warnings: 0,
+                paused: false,
+            };
+            let pending: Result<Vec<PendingBrokerAuthorization>, &str> =
+                Err("supplementary endpoint unavailable");
+            let snapshot = assemble_snapshot(status.clone(), Vec::new(), pending);
+            assert_eq!(snapshot.status, status);
+            assert!(snapshot.printers.is_empty());
+            assert!(snapshot.pending_authorizations.is_empty());
+        }
     }
 }
 
