@@ -6,6 +6,11 @@
 //! share printer discovery and the native executor, but those resources are
 //! reached only after the connector-specific store has admitted a job.
 
+#![allow(
+    clippy::missing_errors_doc,
+    reason = "durable compatibility API was moved intact and preserves existing anyhow error context"
+)]
+
 use anyhow::{Context, Result, bail};
 use piqae_protocol::agent::PrinterGrant;
 use serde::{Deserialize, Serialize};
@@ -20,7 +25,9 @@ use url::Url;
 const REGISTRY_VERSION: u16 = 1;
 const MAX_CONNECTORS: usize = 128;
 
-/// Identifies connectors whose allowed local queues share a physical
+/// Identifies connectors that share a cross-authority physical group.
+///
+/// Connectors whose allowed local queues share a physical
 /// serialization group across independent control-plane origins. This is a
 /// diagnostic only: the node serializes their native handoffs locally, but it
 /// cannot promise global exactly-once scheduling or fail over work between
@@ -125,7 +132,7 @@ pub struct ConnectorRegistry {
 }
 
 impl ConnectorRegistry {
-    pub(crate) fn load(root: impl AsRef<Path>) -> Result<Self> {
+    pub fn load(root: impl AsRef<Path>) -> Result<Self> {
         let root = root.as_ref().to_path_buf();
         let path = root.join("connectors.json");
         let document = match std::fs::read(&path) {
@@ -162,16 +169,17 @@ impl ConnectorRegistry {
         Ok(Self { root, records })
     }
 
-    pub(crate) fn enabled(&self) -> impl Iterator<Item = &ConnectorRecord> {
+    pub fn enabled(&self) -> impl Iterator<Item = &ConnectorRecord> {
         self.records.values().filter(|record| record.enabled)
     }
 
-    pub(crate) fn contains(&self, connector_id: &str) -> bool {
+    #[must_use]
+    pub fn contains(&self, connector_id: &str) -> bool {
         self.records.contains_key(connector_id)
     }
 
     #[allow(dead_code, reason = "consumed by the staged connector supervisor")]
-    pub(crate) fn paths(&self, connector_id: &str) -> Result<ConnectorRuntimePaths> {
+    pub fn paths(&self, connector_id: &str) -> Result<ConnectorRuntimePaths> {
         let record = self
             .records
             .get(connector_id)
@@ -189,7 +197,7 @@ impl ConnectorRegistry {
         dead_code,
         reason = "called by the native consent IPC in the next integration slice"
     )]
-    pub(crate) fn add(&mut self, mut record: ConnectorRecord) -> Result<()> {
+    pub fn add(&mut self, mut record: ConnectorRecord) -> Result<()> {
         validate_record(&record)?;
         record.allowed_printer_ids.sort();
         if self.records.len() >= MAX_CONNECTORS {
@@ -207,7 +215,7 @@ impl ConnectorRegistry {
         dead_code,
         reason = "called by the native consent IPC in the next integration slice"
     )]
-    pub(crate) fn revoke(&mut self, connector_id: &str) -> Result<bool> {
+    pub fn revoke(&mut self, connector_id: &str) -> Result<bool> {
         let Some(record) = self.records.get_mut(connector_id) else {
             return Ok(false);
         };
@@ -224,7 +232,7 @@ impl ConnectorRegistry {
     /// while deliberately returning the same connector id; retaining the old
     /// local key in that case strands the connector with
     /// `invalid_agent_signature`.
-    pub(crate) fn replace(&mut self, mut record: ConnectorRecord) -> Result<ConnectorRecord> {
+    pub fn replace(&mut self, mut record: ConnectorRecord) -> Result<ConnectorRecord> {
         validate_record(&record)?;
         record.allowed_printer_ids.sort();
         let previous = self

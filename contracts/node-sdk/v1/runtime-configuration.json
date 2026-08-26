@@ -1,0 +1,8 @@
+{
+  "contract": 1,
+  "host_mode": "embedded_application",
+  "availability": "foreground_only",
+  "local_only": true,
+  "application_id": "com.example.piqae-pos",
+  "data_directory": "application-support/piqae"
+}
