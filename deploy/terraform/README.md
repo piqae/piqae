@@ -4,9 +4,14 @@ This module deploys the Piqae control plane to Cloud Run in Sydney. By default,
 PostgreSQL and S3 remain separately managed services and their credentials are
 passed to Secret Manager.
 
-`webhook_master_key_secret` must be a base64-encoded 32-byte random key. The
-module stores it, the Neon connection URL, and both R2 credentials in Secret
-Manager; none are emitted as Terraform outputs.
+`webhook_master_key_secret`, `destination_identity_key_secret`, and
+`document_master_key_secret` must be separate base64-encoded 32-byte random
+keys. The destination-identity key pseudonymises physical-printer evidence and
+must remain stable across hostname, webhook-key, and ordinary application
+credential rotations. Changing it prevents new evidence from matching existing
+tenant-scoped destinations; rotate it only with a versioned evidence migration.
+The module stores these keys, the database URL, and object-store credentials in
+Secret Manager; none are emitted as Terraform outputs.
 
 Production uses three always-allocated instances so API, agent long-polling,
 outbox workers, and webhook delivery continue without a cold start. PostgreSQL

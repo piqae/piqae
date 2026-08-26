@@ -156,6 +156,16 @@ characters each. Keep secrets and personal print data out of it.
 `GET /v1/platform/accounts/{external_id}` retrieves one account and
 `GET /v1/platform/accounts` lists accounts owned by that platform identity.
 
+`GET /v1/platform/operations` provides the owner-scoped operations projection
+for an integrator dashboard. It returns bounded, cursor-paginated customer
+rows, and each node, printer route, physical destination, and job retains its
+customer/account and Test-or-Live environment envelope. Where the deployment
+advertises the destination-routing capability, route rows include the latest
+privacy-safe observation and its timestamps; `live` means only that
+`fresh_until` has not passed. The endpoint does not perform cross-tenant joins
+or reveal connector peers, job content, hardware evidence, or another
+platform identity's accounts.
+
 ## Test and Live
 
 Every account has both environments:

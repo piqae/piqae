@@ -1,13 +1,12 @@
 # Uncertain delivery response
 
-**Status:** the `delivery_uncertain` state, its node-side producers, signed
-webhook delivery with retries and replay, and the tenant event stream are
-implemented. The dedicated `job.delivery_uncertain` event, the unresolved
-sweep, `PIQAE_DELIVERY_UNCERTAIN_ALERT_SECONDS`, and the
-`delivery_uncertain_since` / `delivery_uncertain_alerted_at` columns land with
-`feat/uncertain-delivery-event` (PR #141) and are not on `main` yet. Routing,
-triage, and physical reconciliation are operator-owned and manual. Nothing here
-produces proof that ink reached paper.
+**Status:** the `delivery_uncertain` state, its node-side producers, dedicated
+and unresolved events, signed webhook delivery, tenant event stream, dashboard
+age/filter surface, and operator reconciliation are implemented. The
+route-coordinated two-phase resolution and linked reprint path remain Preview
+until node/server rolling-upgrade, restart, and physical-printer evidence is
+recorded in the support matrix. Triage and the physical decision remain
+operator-owned. Nothing here produces proof that ink reached paper.
 
 This is the runbook
 [`reliability-and-job-lifecycle.md`](reliability-and-job-lifecycle.md) names as
@@ -24,9 +23,10 @@ complete, and uncertain is a product invariant, not an implementation detail;
 see [`jobs-and-statuses.md`](../printing/jobs-and-statuses.md) and
 [ADR-0001](../architecture/adr-0001-rust-postgres-durable-edges.md).
 
-The state is terminal. `JobState::is_terminal` includes it and the transition
-table in `crates/domain/src/job.rs` has no edge out of it, so nothing in Piqae
-will move the job again. Only a human decides what happens next.
+The delivery attempt is terminal. `JobState::is_terminal` includes it and the
+transition table in `crates/domain/src/job.rs` has no edge out of it. An
+operator resolution is a separate audited record; it never rewrites the
+attempt's physical evidence or automatically moves the original job again.
 
 ### How a job gets there
 
@@ -129,12 +129,10 @@ back.
 
 Three details decide whether this works:
 
-- **Event names are matched exactly.** The outbox selects endpoints with
-  `$3 = ANY(subscribed_events)`. There is no wildcard expansion anywhere in the
-  path, so `job.*` matches nothing. The dashboard's "event families" checkboxes
-  currently submit the literal values `job.*`, `agent.*`, and `printer.*`, so an
-  endpoint created through the settings dialog receives no deliveries. Create
-  these subscriptions through the API or the SDK with full event names.
+- **Stored event names are matched exactly.** The API and SDK accept full event
+  names. The dashboard's family controls expand `job`, `agent`, and `printer`
+  families into those exact supported names before saving; the outbox does not
+  interpret wildcard strings such as `job.*`.
 - **Endpoints are scoped to one workspace and one environment.** An endpoint
   created with a Test key never sees Live events. Subscribe in both, or accept
   that you are only watching one.
@@ -345,12 +343,35 @@ mistake that turns a recoverable ambiguity into a customer-visible one.
 
 ### 4. Reprint, if that is the decision
 
-There is no server-side reprint of an uncertain job. Two paths exist.
+The server-side resolution is explicit and two phase:
+
+```http
+POST /v1/jobs/{job_id}/resolve-uncertain
+Idempotency-Key: reconcile-<stable-operation-id>
+Content-Type: application/json
+
+{"resolution":"reprint","note":"Printer inspected; no label present"}
+```
+
+The accepted resolutions are `acknowledge_printed`, `acknowledge_missing`,
+`cancelled`, and `reprint`. The note is required. HTTP 202 means the command is
+pending at the owning node; do not act as though it were resolved. HTTP 200 is
+returned only after that exact node command cursor is acknowledged. Every
+choice records the actor, note, decision, and acknowledgement; none releases
+the original attempt for an automatic retry.
+
+Two reprint paths remain:
 
 - **Re-issue from the system that created the job.** Submit a new job through
   your integration with a *new* idempotency key and metadata naming the
   original job ID. Reusing the original key returns the original job instead of
   printing, which is correct behaviour and not what you want here.
+- **Resolve with `reprint`.** After node acknowledgement, the control plane
+  creates a separate linked cloud job when retained Base64/upload content is
+  available. URI and encrypted content cannot be cloned safely and require a
+  fresh authorized submission from the originating system. The original job
+  remains terminal and points to the audit resolution and replacement when one
+  was created.
 - **Reprint retained content on the node.** The node's local queue view offers
   a confirmed reprint for terminal attempts, including `delivery_uncertain`,
   when the printer is still present and the content file is still retained. It
@@ -361,13 +382,14 @@ There is no server-side reprint of an uncertain job. Two paths exist.
   not appear in `GET /v1/jobs`. Reaching it is described in
   [`local-agent-control.md`](../architecture/local-agent-control.md).
 
-### 5. Close the loop yourself
+### 5. Verify the audited resolution
 
-Nothing in Piqae records that a human resolved an uncertain job. The job stays
-`delivery_uncertain` permanently, and `delivery_uncertain_alerted_at` is an
-idempotency fence — it guarantees the sweep surfaces a job once — not a
-resolution flag. Your tracker is the system of record for the decision, the
-evidence behind it, and who made it.
+Confirm the API resolution shows the intended actor, note, decision, exact node
+acknowledgement, and linked replacement job where applicable. The original job
+stays `delivery_uncertain`; `delivery_uncertain_alerted_at` remains the sweep's
+idempotency fence, not evidence of resolution or output. Keep the downstream
+business reconciliation in the system that can detect a duplicate label,
+numbered form, or shipment.
 
 ## Configuration
 
@@ -390,11 +412,6 @@ to look until the ticket exists.
 
 Stated plainly, because assuming any of these work would cost a document.
 
-- The dashboard's uncertain surface is a state filter, a per-job note, and a
-  count on the overview computed from the most recent 100 jobs only. There is
-  no age, no unresolved marker, and no workspace-wide total, so it will not
-  tell you that a job has been uncertain since this morning. Reconciliation is
-  `GET /v1/jobs?state=delivery_uncertain`, paginated with `after`.
 - The signal depends on the node reconnecting. A node that is handed a job and
   then never syncs again leaves the control plane holding the last state it
   reported, which is node hardware loss rather than uncertain delivery, and a
@@ -402,9 +419,10 @@ Stated plainly, because assuming any of these work would cost a document.
 - A local-only node has no control plane, so it has no webhooks and no event
   stream. Its queue view is the only surface, and this whole alerting path does
   not apply.
-- There is no server-side reprint and no recorded link from a reprinted job
-  back to the uncertain one beyond metadata you set yourself.
-- Nothing marks an uncertain job resolved.
+- Server-side linked reprint requires retained Base64/upload content. URI and
+  encrypted jobs require a fresh authorized submission.
+- A submitted resolution remains pending until the owning node acknowledges
+  the exact durable command cursor; operators must monitor that pending state.
 - A job is surfaced as unresolved once. If your receiver was down for the full
   ~31-hour retry window and the dead-lettered delivery was never replayed,
   nothing re-surfaces it. Run the reconciliation query on a schedule.

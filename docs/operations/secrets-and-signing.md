@@ -170,6 +170,23 @@ documents use a different bucket and credentials. Railway production and
 staging variables must remain isolated even when they refer to services in the
 same project.
 
+### Destination identity pseudonymization
+
+`PIQAE_DESTINATION_IDENTITY_KEY` is a deployment runtime trust-domain key. Set
+it to the canonical Base64 encoding of exactly 32 random bytes, keep it stable
+for the life of the destination-identity namespace, and never reuse webhook,
+document-encryption, API, or session key material. Nodes report bounded hashed
+identity evidence; the control plane uses this key to derive tenant-scoped
+pseudonyms. Raw hardware evidence and derived digests must not appear in logs,
+metrics, API responses, support bundles, or analytics.
+
+Changing the key is not an ordinary secret refresh: previously projected
+evidence no longer matches. Rotate only through a versioned overlap and route
+reprojection procedure, and retain the old key under controlled recovery until
+every active route has been verified. A missing, malformed, or unexpectedly
+changed key must fail closed rather than falling back to names, drivers, queue
+labels, or a global unsalted digest.
+
 ## Confidential printing keys
 
 Release signing, hosted authentication, tenant API keys, node identity, and

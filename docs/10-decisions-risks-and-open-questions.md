@@ -14,9 +14,9 @@
 | PDF engine | Sandboxed PDFium first candidate | Validate in spike |
 | Windows printing | Winspool/PrintTicket plus GDI/XPS evaluated in spike | Open |
 | CUPS printing | Documented CUPS/IPP APIs, native PDF when possible | Proposed |
-| Printer setup model | One OS destination with multiple immutable native profiles | Accepted |
+| Printer setup model | Physical destination with one or more node/OS-queue routes; immutable native profiles remain route-bound | Accepted |
 | Native settings UI | OS/driver panel on the node; no vendor-option clone in the web UI | Accepted |
-| Production routing | Stable target resolves to a node-specific profile revision | Accepted |
+| Production routing | Stable target resolves to one compatible fenced route and immutable profile revision; no post-handoff automatic failover | Accepted |
 | Stock mismatch | Hold before native handoff and require device/operator confirmation | Accepted |
 | Completion semantics | Honest observer-attributed states | Proposed |
 | Ambiguous handoff | No automatic retry by default | Proposed |
