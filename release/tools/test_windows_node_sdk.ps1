@@ -40,11 +40,20 @@ try {
         }
     }
 
+    $dependencyPackage = Join-Path $temporaryRoot "BouncyCastle.Cryptography.$DependencyVersion.nupkg"
+    Invoke-WebRequest -UseBasicParsing -Uri "https://api.nuget.org/v3-flatcontainer/bouncycastle.cryptography/$DependencyVersion/bouncycastle.cryptography.$DependencyVersion.nupkg" -OutFile $dependencyPackage
+    $python = Get-Command python -ErrorAction SilentlyContinue
+    if (-not $python) { $python = Get-Command python3 -ErrorAction SilentlyContinue }
+    if (-not $python) { throw "Python is required for Windows SDK package and SBOM validation" }
+    $thirdPartyLicenses = Join-Path $temporaryRoot "THIRD_PARTY_LICENSES.json"
+    & $python.Source release/tools/windows_sdk_release.py generate-third-party-licenses --dependency-package $dependencyPackage --output $thirdPartyLicenses --repository-root $PWD
+    if ($LASTEXITCODE -ne 0) { throw "Windows SDK third-party licence generation failed" }
+
     New-Item -ItemType Directory -Force $OutputDirectory | Out-Null
     $OutputDirectory = (Resolve-Path $OutputDirectory).Path
     $expectedPackage = Join-Path $OutputDirectory "Piqae.Node.$PackageVersion.nupkg"
     if (Test-Path $expectedPackage) { throw "Refusing to replace an existing staged NuGet package: $expectedPackage" }
-    dotnet pack sdk/dotnet/src/Piqae.Node/Piqae.Node.csproj --configuration Release /p:PackageOutputPath="$OutputDirectory" /p:PiqaeNativeLibrary="$native" /p:PackageVersion="$PackageVersion"
+    dotnet pack sdk/dotnet/src/Piqae.Node/Piqae.Node.csproj --configuration Release /p:PackageOutputPath="$OutputDirectory" /p:PiqaeNativeLibrary="$native" /p:PiqaeThirdPartyLicenses="$thirdPartyLicenses" /p:PackageVersion="$PackageVersion"
     if ($LASTEXITCODE -ne 0) { throw ".NET node SDK package build failed" }
     if (-not (Test-Path $expectedPackage -PathType Leaf)) { throw "The exact Piqae.Node $PackageVersion package was not produced" }
     $unexpectedPackages = @(Get-ChildItem $OutputDirectory -Filter "Piqae.Node.*.nupkg" | Where-Object { $_.FullName -ne (Get-Item $expectedPackage).FullName })
@@ -53,12 +62,7 @@ try {
     $localFeed = Join-Path $temporaryRoot "feed"
     New-Item -ItemType Directory -Force $localFeed | Out-Null
     Copy-Item $expectedPackage $localFeed
-    $dependencyPackage = Join-Path $localFeed "BouncyCastle.Cryptography.$DependencyVersion.nupkg"
-    Invoke-WebRequest -UseBasicParsing -Uri "https://api.nuget.org/v3-flatcontainer/bouncycastle.cryptography/$DependencyVersion/bouncycastle.cryptography.$DependencyVersion.nupkg" -OutFile $dependencyPackage
-
-    $python = Get-Command python -ErrorAction SilentlyContinue
-    if (-not $python) { $python = Get-Command python3 -ErrorAction SilentlyContinue }
-    if (-not $python) { throw "Python is required for Windows SDK package and SBOM validation" }
+    Copy-Item $dependencyPackage $localFeed
     & $python.Source release/tools/windows_sdk_release.py validate-package --package $expectedPackage --dependency-package $dependencyPackage --version $PackageVersion
     if ($LASTEXITCODE -ne 0) { throw "The staged NuGet package contract is invalid" }
 

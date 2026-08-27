@@ -26,6 +26,31 @@ class CiReleaseContractTest(unittest.TestCase):
         self.assertIn("for source in Config Resources Sources Tests", script)
         self.assertIn("project-only|linked-simulator", script)
 
+    def test_native_sdk_archives_generate_licence_evidence_before_packaging(self) -> None:
+        workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        windows = workflow.split("\n  windows_sdk:", 1)[1].split("\n  linux:", 1)[0]
+        self.assertLess(
+            windows.index("generate-license-report"),
+            windows.index("Compress-Archive"),
+        )
+
+        apple = (ROOT / "sdk/apple/scripts/build-xcframework.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertLess(
+            apple.index("generate-license-report"),
+            apple.index('zip -X -q "$archive"'),
+        )
+
+        windows_pack = (ROOT / "release/tools/test_windows_node_sdk.ps1").read_text(
+            encoding="utf-8"
+        )
+        self.assertLess(
+            windows_pack.index("generate-third-party-licenses"),
+            windows_pack.index("dotnet pack"),
+        )
+        self.assertIn("/p:PiqaeThirdPartyLicenses=", windows_pack)
+
 
 if __name__ == "__main__":
     unittest.main()

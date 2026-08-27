@@ -22,9 +22,12 @@ except ModuleNotFoundError:  # Direct script execution uses release/tools as sys
 SEMVER = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$")
 DEPENDENCY_ID = "BouncyCastle.Cryptography"
 DEPENDENCY_VERSION = "2.6.2"
+DEPENDENCY_LICENSE_EXPRESSION = "MIT"
+DEPENDENCY_LICENSE_ENTRY = "LICENSE.md"
 MANAGED_ENTRY = "lib/net8.0/Piqae.Node.dll"
 NATIVE_ENTRY = "runtimes/win-x64/native/piqae_node_ffi.dll"
 LICENSE_ENTRIES = {"LICENSE", "NOTICE"}
+THIRD_PARTY_LICENSES_ENTRY = native_cargo_sbom.THIRD_PARTY_LICENSES_FILENAME
 NATIVE_ARCHIVE_ENTRIES = {
     "LICENSE",
     "NOTICE",
@@ -32,6 +35,7 @@ NATIVE_ARCHIVE_ENTRIES = {
     "piqae_node.h",
     "piqae_node_ffi.dll",
     "piqae_node_ffi.dll.lib",
+    THIRD_PARTY_LICENSES_ENTRY,
 }
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 WINDOWS_RUST_TARGET = "x86_64-pc-windows-msvc"
@@ -62,6 +66,13 @@ def child_text(parent: ElementTree.Element, name: str) -> str:
         if local_name(element) == name and element.text:
             return element.text.strip()
     raise ReleaseError(f"NuGet metadata field {name!r} is missing")
+
+
+def child(parent: ElementTree.Element, name: str) -> ElementTree.Element | None:
+    return next(
+        (element for element in parent.iter() if local_name(element) == name),
+        None,
+    )
 
 
 def nuspec(archive: zipfile.ZipFile) -> ElementTree.Element:
@@ -104,7 +115,7 @@ def validate_package(package: Path, dependency_package: Path, version: str) -> d
             raise ReleaseError("staged NuGet package ID is not Piqae.Node")
         if child_text(metadata, "version") != version:
             raise ReleaseError("staged NuGet package version does not match the release")
-        required = {MANAGED_ENTRY, NATIVE_ENTRY} | LICENSE_ENTRIES
+        required = {MANAGED_ENTRY, NATIVE_ENTRY, THIRD_PARTY_LICENSES_ENTRY} | LICENSE_ENTRIES
         if not required.issubset(entries):
             raise ReleaseError("staged NuGet is missing the managed facade or win-x64 runtime")
         if archive.read("LICENSE") != (REPOSITORY_ROOT / "LICENSE").read_bytes() or archive.read(
@@ -133,6 +144,7 @@ def validate_package(package: Path, dependency_package: Path, version: str) -> d
             )
         managed = archive.read(MANAGED_ENTRY)
         native = archive.read(NATIVE_ENTRY)
+        third_party_licenses = archive.read(THIRD_PARTY_LICENSES_ENTRY)
 
     with zipfile.ZipFile(dependency_package) as dependency_archive:
         safe_entries(dependency_archive)
@@ -141,6 +153,16 @@ def validate_package(package: Path, dependency_package: Path, version: str) -> d
             raise ReleaseError("dependency package ID is not BouncyCastle.Cryptography")
         if child_text(dependency_metadata, "version") != DEPENDENCY_VERSION:
             raise ReleaseError("dependency package version does not match the audited pin")
+
+    try:
+        native_cargo_sbom.validate_third_party_license_report(
+            third_party_licenses,
+            REPOSITORY_ROOT,
+            (WINDOWS_RUST_TARGET,),
+            (managed_dependency_license_package(dependency_package),),
+        )
+    except native_cargo_sbom.NativeCargoSbomError as error:
+        raise ReleaseError(str(error)) from error
 
     return {
         "version": version,
@@ -167,6 +189,14 @@ def validate_native_archive(archive_path: Path, version: str) -> list[dict[str, 
             "NOTICE"
         ) != (REPOSITORY_ROOT / "NOTICE").read_bytes():
             raise ReleaseError("Windows native SDK archive LICENSE or NOTICE does not match the repository")
+        try:
+            native_cargo_sbom.validate_third_party_license_report(
+                archive.read(THIRD_PARTY_LICENSES_ENTRY),
+                REPOSITORY_ROOT,
+                (WINDOWS_RUST_TARGET,),
+            )
+        except native_cargo_sbom.NativeCargoSbomError as error:
+            raise ReleaseError(str(error)) from error
         return [
             {
                 "name": name,
@@ -175,6 +205,55 @@ def validate_native_archive(archive_path: Path, version: str) -> list[dict[str, 
             }
             for name in sorted(files)
         ]
+
+
+def managed_dependency_license_package(dependency_package: Path) -> dict[str, object]:
+    with zipfile.ZipFile(dependency_package) as archive:
+        entries = safe_entries(archive)
+        metadata = nuspec(archive)
+        if child_text(metadata, "id") != DEPENDENCY_ID:
+            raise ReleaseError("dependency package ID is not BouncyCastle.Cryptography")
+        if child_text(metadata, "version") != DEPENDENCY_VERSION:
+            raise ReleaseError("dependency package version does not match the audited pin")
+        license_element = child(metadata, "license")
+        if (
+            license_element is None
+            or license_element.attrib.get("type") != "expression"
+            or (license_element.text or "").strip() != DEPENDENCY_LICENSE_EXPRESSION
+        ):
+            raise ReleaseError("managed dependency licence declaration does not match the audited pin")
+        if DEPENDENCY_LICENSE_ENTRY not in entries:
+            raise ReleaseError(
+                f"managed dependency package has no exact bundled {DEPENDENCY_LICENSE_ENTRY} text"
+            )
+        try:
+            license_text = archive.read(DEPENDENCY_LICENSE_ENTRY).decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise ReleaseError("managed dependency licence text must be UTF-8") from error
+        if not license_text:
+            raise ReleaseError("managed dependency licence text is empty")
+        return {
+            "name": DEPENDENCY_ID,
+            "version": DEPENDENCY_VERSION,
+            "source": f"https://www.nuget.org/packages/{DEPENDENCY_ID}/{DEPENDENCY_VERSION}",
+            "purl": f"pkg:nuget/{DEPENDENCY_ID}@{DEPENDENCY_VERSION}",
+            "package_sha256": file_digest(dependency_package),
+            "license_declared": DEPENDENCY_LICENSE_EXPRESSION,
+            "license_files": [{"path": DEPENDENCY_LICENSE_ENTRY, "text": license_text}],
+        }
+
+
+def generate_windows_third_party_license_report(
+    dependency_package: Path,
+    output: Path,
+    repository_root: Path = REPOSITORY_ROOT,
+) -> None:
+    native_cargo_sbom.write_third_party_license_report(
+        output,
+        repository_root,
+        (WINDOWS_RUST_TARGET,),
+        (managed_dependency_license_package(dependency_package),),
+    )
 
 
 def generate_native_sbom(
@@ -315,7 +394,9 @@ def generate_sbom(package: Path, dependency_package: Path, version: str, output:
             license_concluded = "Apache-2.0"
         elif name == NATIVE_ENTRY:
             spdx_id = "SPDXRef-File-NativeRuntime"
-            license_concluded = "Apache-2.0"
+            # The native DLL statically links the target-resolved Cargo graph;
+            # its companion native SBOM records those mixed declarations.
+            license_concluded = "NOASSERTION"
         else:
             spdx_id = f"SPDXRef-File-NuGet-{index}-{str(entry['sha256'])[:16]}"
             license_concluded = "NOASSERTION"
@@ -360,7 +441,7 @@ def generate_sbom(package: Path, dependency_package: Path, version: str, output:
                     "packageVerificationCodeValue": package_verification
                 },
                 "checksums": [{"algorithm": "SHA256", "checksumValue": evidence["package_sha256"]}],
-                "licenseConcluded": "Apache-2.0",
+                "licenseConcluded": "NOASSERTION",
                 "licenseDeclared": "Apache-2.0",
                 "copyrightText": "NOASSERTION",
                 "externalRefs": [
@@ -399,7 +480,7 @@ def generate_sbom(package: Path, dependency_package: Path, version: str, output:
                     "packageVerificationCodeValue": verification_code(str(evidence["native_sha1"]))
                 },
                 "checksums": [{"algorithm": "SHA256", "checksumValue": evidence["native_sha256"]}],
-                "licenseConcluded": "Apache-2.0",
+                "licenseConcluded": "NOASSERTION",
                 "licenseDeclared": "Apache-2.0",
                 "copyrightText": "NOASSERTION",
             },
@@ -440,6 +521,20 @@ def validate_sbom(path: Path, package: Path, version: str) -> None:
     }
     if not required_packages.issubset(packages):
         raise ReleaseError("Windows SDK SBOM omits the facade, dependency, or native runtime")
+    packages_by_id = {
+        package.get("SPDXID"): package for package in document.get("packages", [])
+    }
+    piqae_package = packages_by_id.get("SPDXRef-Package-PiqaeNode")
+    native_package = packages_by_id.get("SPDXRef-Package-PiqaeNodeNative")
+    if (
+        not isinstance(piqae_package, dict)
+        or piqae_package.get("licenseConcluded") != "NOASSERTION"
+        or not isinstance(native_package, dict)
+        or native_package.get("licenseConcluded") != "NOASSERTION"
+    ):
+        raise ReleaseError(
+            "Windows SDK mixed-license aggregate and native conclusions must be NOASSERTION"
+        )
     with zipfile.ZipFile(package) as archive:
         archive_names = {
             name for name in safe_entries(archive) if not name.endswith("/")
@@ -464,6 +559,9 @@ def validate_sbom(path: Path, package: Path, version: str) -> None:
     file_entries = {entry.get("SPDXID"): entry for entry in document_files if entry.get("SPDXID")}
     if len(file_entries) != len(document_files):
         raise ReleaseError("Windows SDK SBOM file identifiers must be present and unique")
+    native_file = file_entries.get("SPDXRef-File-NativeRuntime")
+    if not isinstance(native_file, dict) or native_file.get("licenseConcluded") != "NOASSERTION":
+        raise ReleaseError("Windows SDK native runtime conclusion must be NOASSERTION")
     contained = {
         relationship.get("relatedSpdxElement")
         for relationship in document.get("relationships", [])
@@ -483,9 +581,6 @@ def validate_sbom(path: Path, package: Path, version: str) -> None:
             raise ReleaseError("Windows SDK SBOM NuGet file checksum is inconsistent")
         sha1_values.append(checksums["SHA1"])
     expected_verification = digest("".join(sorted(sha1_values)).encode("ascii"), "sha1")
-    piqae_package = next(
-        package for package in document["packages"] if package.get("SPDXID") == "SPDXRef-Package-PiqaeNode"
-    )
     actual_verification = piqae_package.get("packageVerificationCode", {}).get(
         "packageVerificationCodeValue"
     )
@@ -525,6 +620,10 @@ def main() -> int:
     native_validate.add_argument("--input", type=Path, required=True)
     native_validate.add_argument("--version", required=True)
     native_validate.add_argument("--repository-root", type=Path, default=REPOSITORY_ROOT)
+    licenses = subparsers.add_parser("generate-third-party-licenses")
+    licenses.add_argument("--dependency-package", type=Path, required=True)
+    licenses.add_argument("--output", type=Path, required=True)
+    licenses.add_argument("--repository-root", type=Path, default=REPOSITORY_ROOT)
     for name in ("generate-sdk-manifest", "validate-sdk-manifest"):
         manifest_command = subparsers.add_parser(name)
         manifest_command.add_argument("--package", type=Path, required=True)
@@ -551,6 +650,12 @@ def main() -> int:
             validate_native_sbom(args.archive, args.output, args.version, args.repository_root)
         elif args.command == "validate-native-sbom":
             validate_native_sbom(args.archive, args.input, args.version, args.repository_root)
+        elif args.command == "generate-third-party-licenses":
+            generate_windows_third_party_license_report(
+                args.dependency_package,
+                args.output,
+                args.repository_root,
+            )
         elif args.command == "generate-sdk-manifest":
             generate_sdk_manifest(
                 args.package,

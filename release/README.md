@@ -27,7 +27,13 @@ licence, and `DEPENDS_ON` edges. Validation recomputes the target graph and
 fails for an omitted package, forged checksum, or changed relationship. Because
 the compiled archive aggregates third-party code, its SPDX
 `licenseConcluded` deliberately remains `NOASSERTION`; the exact repository
-`LICENSE` and `NOTICE` still travel inside each archive.
+`LICENSE` and `NOTICE` still travel inside each archive. Every native archive
+also contains deterministic `THIRD_PARTY_LICENSES.json`: it binds each reachable
+package to the exact target set and locked checksum, includes deduplicated exact
+licence/attribution text from the package source, and is regenerated during
+validation. Missing text, stale graphs, or tampering fail the release. The
+Windows NuGet copy additionally binds the exact pinned managed dependency
+package and its bundled licence text.
 
 ## Local audit
 
