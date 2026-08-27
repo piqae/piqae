@@ -197,8 +197,8 @@ mod tests {
         assert!(validate_pipe_name(r"\\.\pipe\piqae-node-valid123").is_ok());
     }
 
-    #[test]
-    fn first_instance_collision_fails_closed() {
+    #[tokio::test]
+    async fn first_instance_collision_fails_closed() {
         let name = format!(r"\\.\pipe\piqae-node-{}", uuid::Uuid::new_v4().simple());
         let Ok(first) = create_current_user_server(&name, true) else {
             panic!("first owner-only pipe could not be created");
