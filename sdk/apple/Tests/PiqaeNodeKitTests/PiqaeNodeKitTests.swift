@@ -7,6 +7,41 @@ import PiqaeNodeKitTesting
 private enum LinkedRuntimeRequired: Error { case unavailable }
 
 final class PiqaeNodeKitTests: XCTestCase {
+    func testApplicationIdentifiersMatchSharedContractFixture() throws {
+        let fixtureURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("sdk/contracts/fixtures/node-host-application-ids.json")
+        let fixture = try JSONDecoder().decode(
+            ApplicationIDFixture.self,
+            from: Data(contentsOf: fixtureURL)
+        )
+        let identity = try PiqaeNodeIdentityConfiguration(displayName: "Fixture node")
+        let policy = PiqaeConnectionPolicy.standaloneUserManaged
+
+        for applicationID in fixture.valid {
+            XCTAssertNoThrow(try PiqaeHostConfiguration(
+                product: .standalone,
+                applicationID: applicationID,
+                identity: identity,
+                installedHostPolicy: .isolatedApplication,
+                connectionPolicy: policy
+            ))
+        }
+        for applicationID in fixture.invalid {
+            XCTAssertThrowsError(try PiqaeHostConfiguration(
+                product: .standalone,
+                applicationID: applicationID,
+                identity: identity,
+                installedHostPolicy: .isolatedApplication,
+                connectionPolicy: policy
+            ))
+        }
+    }
+
     func testPortableHostConfigurationIsBoundedAndSnakeCase() throws {
         let identity = try PiqaeNodeIdentityConfiguration(
             displayName: "Dispatch iPad",
@@ -36,6 +71,22 @@ final class PiqaeNodeKitTests: XCTestCase {
         XCTAssertThrowsError(try policy.validateAuthority(
             XCTUnwrap(URL(string: "https://other.example"))
         ))
+        for invalid in [".com.example", "-com.example", "éxample.com"] {
+            XCTAssertThrowsError(try PiqaeHostConfiguration(
+                product: .embedded,
+                applicationID: invalid,
+                identity: identity,
+                installedHostPolicy: .preferInstalled,
+                connectionPolicy: policy
+            ))
+        }
+        XCTAssertThrowsError(try PiqaeHostConfiguration(
+            product: .standalone,
+            applicationID: "com.example.standalone",
+            identity: identity,
+            installedHostPolicy: .isolatedApplication,
+            connectionPolicy: policy
+        ))
     }
 
     func testStandaloneAndEmbeddedConnectionPoliciesDoNotImposeSingleConnectorLimit() throws {
@@ -53,9 +104,18 @@ final class PiqaeNodeKitTests: XCTestCase {
             management: .userManaged,
             allowsMultiple: false
         ))
+        XCTAssertThrowsError(try PiqaeConnectionPolicy.integratorManaged(
+            allowedAuthorityOrigins: [
+                XCTUnwrap(URL(string: "https://api.piqae.com")),
+                XCTUnwrap(URL(string: "https://api.piqae.com/")),
+            ]
+        ))
         XCTAssertThrowsError(try PiqaeNodeIdentityConfiguration(
             displayName: "Node",
             labels: ["duplicate", "duplicate"]
+        ))
+        XCTAssertThrowsError(try PiqaeNodeIdentityConfiguration(
+            displayName: "Node\u{0000}hidden"
         ))
     }
 
@@ -109,6 +169,41 @@ final class PiqaeNodeKitTests: XCTestCase {
         let remainingConnections = try await restarted.connections.list()
         XCTAssertEqual(remainingConnections.map(\.id.rawValue), ["ncon_two"])
         await restarted.stop()
+    }
+
+    func testNodeIdentityEditIsRevisionFencedWithoutChangingRuntimeIdentity() async throws {
+        let runtime = PiqaeFakeEmbeddedRuntime()
+        let node = PiqaeNode(.localOnly(
+            startupMode: .embedded,
+            identityStore: PiqaeMemoryInstallationIdentityStore(
+                id: .init(rawValue: "ins_identity_edit")
+            ),
+            embeddedRuntime: runtime
+        ))
+        try await node.start()
+        defer { Task { await node.stop() } }
+        let identity = try PiqaeNodeIdentityConfiguration(
+            displayName: "Kitchen iPad",
+            site: "Main",
+            location: "Pass",
+            labels: ["receipts"]
+        )
+
+        let updated = try await node.identity.update(.init(
+            expectedRevision: 1,
+            identity: identity
+        ))
+        XCTAssertEqual(updated.revision, 2)
+        XCTAssertEqual(updated.identity, identity)
+        do {
+            _ = try await node.identity.update(.init(
+                expectedRevision: 1,
+                identity: identity
+            ))
+            XCTFail("A stale identity edit must fail closed")
+        } catch let PiqaeNativeRuntimeError.nodeIdentityRevisionConflict(currentRevision) {
+            XCTAssertEqual(currentRevision, 2)
+        }
     }
 
     func testLinkedNativeRuntimeArtifactStartsWhenPresent() async throws {
@@ -1823,6 +1918,11 @@ final class PiqaeNodeKitTests: XCTestCase {
             enabled: true
         )
     }
+}
+
+private struct ApplicationIDFixture: Decodable {
+    let valid: [String]
+    let invalid: [String]
 }
 
 private actor LegacyBoolReconcileRuntime: PiqaeEmbeddedNodeRuntime {

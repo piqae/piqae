@@ -16,6 +16,7 @@ final class StandaloneNodeStore {
         static let site = "standalone.site"
         static let location = "standalone.location"
         static let labels = "standalone.labels"
+        static let identityRevision = "standalone.identity.revision"
         static let printers = "standalone.airprint.urls"
     }
 
@@ -26,6 +27,10 @@ final class StandaloneNodeStore {
     }
 
     var isConfigured: Bool { defaults.bool(forKey: Key.configured) }
+    var identityRevision: UInt64 {
+        let value = defaults.object(forKey: Key.identityRevision) as? NSNumber
+        return max(1, value?.uint64Value ?? 1)
+    }
 
     func load() -> StandaloneNodeSettings {
         StandaloneNodeSettings(
@@ -49,6 +54,19 @@ final class StandaloneNodeStore {
         defaults.set(identity.labels, forKey: Key.labels)
         defaults.set(true, forKey: Key.configured)
         return identity
+    }
+
+    func save(_ identity: PiqaeNodeIdentityConfiguration, revision: UInt64) {
+        defaults.set(identity.displayName, forKey: Key.name)
+        defaults.set(identity.site, forKey: Key.site)
+        defaults.set(identity.location, forKey: Key.location)
+        defaults.set(identity.labels, forKey: Key.labels)
+        defaults.set(max(1, revision), forKey: Key.identityRevision)
+        defaults.set(true, forKey: Key.configured)
+    }
+
+    func saveIdentityRevision(_ revision: UInt64) {
+        defaults.set(max(1, revision), forKey: Key.identityRevision)
     }
 
     func printerURLs() -> [URL] {

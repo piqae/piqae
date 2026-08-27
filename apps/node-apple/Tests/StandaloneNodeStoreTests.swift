@@ -5,6 +5,29 @@ import XCTest
 
 @MainActor
 final class StandaloneNodeStoreTests: XCTestCase {
+    func testStandaloneBundleContainsAValidPrivacyManifest() throws {
+        let manifestURL = try XCTUnwrap(
+            Bundle.main.url(forResource: "PrivacyInfo", withExtension: "xcprivacy")
+        )
+        let data = try Data(contentsOf: manifestURL)
+        var format = PropertyListSerialization.PropertyListFormat.xml
+        let value = try XCTUnwrap(
+            PropertyListSerialization.propertyList(
+                from: data,
+                options: [],
+                format: &format
+            ) as? [String: Any]
+        )
+
+        XCTAssertEqual(value["NSPrivacyTracking"] as? Bool, false)
+        XCTAssertFalse((value["NSPrivacyCollectedDataTypes"] as? [[String: Any]] ?? []).isEmpty)
+        let accessed = value["NSPrivacyAccessedAPITypes"] as? [[String: Any]] ?? []
+        XCTAssertTrue(accessed.contains {
+            $0["NSPrivacyAccessedAPIType"] as? String
+                == "NSPrivacyAccessedAPICategoryUserDefaults"
+        })
+    }
+
     func testColdLaunchWakeIsBufferedUntilTheModelStarts() async {
         let delegate = PiqaeNodeAppDelegate(
             wakeDeadlineSeconds: 1,
@@ -123,6 +146,17 @@ final class StandaloneNodeStoreTests: XCTestCase {
         XCTAssertTrue(store.isConfigured)
         XCTAssertEqual(identity.displayName, "Kitchen iPad")
         XCTAssertEqual(store.load().labels, ["receipts", "labels"])
+        XCTAssertEqual(store.identityRevision, 1)
+
+        let renamed = try PiqaeNodeIdentityConfiguration(
+            displayName: "Kitchen pass iPad",
+            site: "Central",
+            location: "Pass",
+            labels: ["receipts"]
+        )
+        store.save(renamed, revision: 7)
+        XCTAssertEqual(store.identityRevision, 7)
+        XCTAssertEqual(store.load().name, "Kitchen pass iPad")
     }
 
     func testPrinterURLPersistenceRemovesCredentialsQueryAndFragment() throws {

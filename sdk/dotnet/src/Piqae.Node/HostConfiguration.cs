@@ -77,7 +77,8 @@ public sealed record NodeIdentityConfiguration
     {
         ArgumentNullException.ThrowIfNull(value);
         var trimmed = value.Trim();
-        if (trimmed.Length == 0 || System.Text.Encoding.UTF8.GetByteCount(trimmed) > maximum)
+        if (trimmed.Length == 0 || System.Text.Encoding.UTF8.GetByteCount(trimmed) > maximum
+            || trimmed.Any(char.IsControl))
             throw new ArgumentException($"{field} must contain 1 to {maximum} UTF-8 bytes.");
         return trimmed;
     }
@@ -87,7 +88,8 @@ public sealed record NodeIdentityConfiguration
         if (value is null) return null;
         var trimmed = value.Trim();
         if (trimmed.Length == 0) return null;
-        if (System.Text.Encoding.UTF8.GetByteCount(trimmed) > maximum)
+        if (System.Text.Encoding.UTF8.GetByteCount(trimmed) > maximum
+            || trimmed.Any(char.IsControl))
             throw new ArgumentException($"{field} must contain at most {maximum} UTF-8 bytes.");
         return trimmed;
     }
@@ -114,11 +116,14 @@ public sealed record ConnectionPolicy
                 nameof(allowsMultiple));
         var normalized = (allowedAuthorityOrigins ?? Array.Empty<Uri>())
             .Select(ExactHttpsOrigin)
-            .Distinct()
             .ToArray();
         if (normalized.Length > 32)
             throw new ArgumentException(
                 "A connection policy can allow at most 32 authority origins.",
+                nameof(allowedAuthorityOrigins));
+        if (normalized.Distinct().Count() != normalized.Length)
+            throw new ArgumentException(
+                "Connection authority origins must be unique.",
                 nameof(allowedAuthorityOrigins));
         if (management == ConnectionManagement.HostManaged && normalized.Length == 0)
             throw new ArgumentException(
@@ -182,20 +187,33 @@ public sealed record HostConfiguration
     {
         if (contract != 1) throw new ArgumentOutOfRangeException(nameof(contract));
         ArgumentException.ThrowIfNullOrWhiteSpace(applicationId);
+        static bool IsAsciiAlphaNumeric(char character) =>
+            character is >= 'A' and <= 'Z' or >= 'a' and <= 'z' or >= '0' and <= '9';
+        var segments = applicationId.Split('.', StringSplitOptions.None);
+        var validSegments = segments.Length > 0 && segments.All(segment =>
+            segment.Length is > 0 and <= 63
+            && IsAsciiAlphaNumeric(segment[0])
+            && IsAsciiAlphaNumeric(segment[^1])
+            && segment.All(character => IsAsciiAlphaNumeric(character) || character == '-'));
         if (applicationId.Length is < 3 or > 255
-            || applicationId.Any(character => !char.IsLetterOrDigit(character)
-                && character != '.' && character != '-'))
+            || !validSegments)
         {
             throw new ArgumentException(
                 "Application IDs must be bounded reverse-DNS identifiers.",
                 nameof(applicationId));
         }
+        ArgumentNullException.ThrowIfNull(connectionPolicy);
+        if (product == NodeHostProduct.Standalone
+            && connectionPolicy.Management != ConnectionManagement.UserManaged)
+            throw new ArgumentException(
+                "Standalone nodes require user-managed connections.",
+                nameof(connectionPolicy));
         Contract = contract;
         Product = product;
         ApplicationId = applicationId;
         Identity = identity ?? throw new ArgumentNullException(nameof(identity));
         InstalledHostPolicy = installedHostPolicy;
-        ConnectionPolicy = connectionPolicy ?? throw new ArgumentNullException(nameof(connectionPolicy));
+        ConnectionPolicy = connectionPolicy;
     }
 
     public HostConfiguration(

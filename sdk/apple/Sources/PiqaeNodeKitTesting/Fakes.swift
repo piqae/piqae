@@ -20,6 +20,7 @@ public actor PiqaeFakeEmbeddedRuntime: PiqaeEmbeddedNodeRuntime {
     private let failsToConnect: Bool
     private var connectorQueue: [PiqaeRuntimeConnectorSnapshot]
     private var connectedConnectors: [PiqaeRuntimeConnectorSnapshot] = []
+    private var identitySnapshot: PiqaeNodeIdentitySnapshot?
     private var historyPage = PiqaeJobHistoryPage(jobs: [], nextOffset: nil)
     private var nextOperationDelayNanoseconds: UInt64
     private var nativeObservationDelayNanoseconds: UInt64 = 0
@@ -279,6 +280,27 @@ public actor PiqaeFakeEmbeddedRuntime: PiqaeEmbeddedNodeRuntime {
 
     public func connectors() async throws -> [PiqaeRuntimeConnectorSnapshot] {
         connectedConnectors
+    }
+
+    public func updateNodeIdentity(_ request: PiqaeNodeIdentityUpdateRequest) async throws
+        -> PiqaeNodeIdentitySnapshot
+    {
+        let currentRevision = identitySnapshot?.revision ?? 1
+        guard request.expectedRevision == currentRevision else {
+            throw PiqaeNativeRuntimeError.nodeIdentityRevisionConflict(
+                currentRevision: currentRevision
+            )
+        }
+        let (nextRevision, overflow) = currentRevision.addingReportingOverflow(1)
+        guard !overflow else {
+            throw PiqaeNodeError.invalidConfiguration("Node identity revision exhausted.")
+        }
+        let updated = PiqaeNodeIdentitySnapshot(
+            revision: nextRevision,
+            identity: request.identity
+        )
+        identitySnapshot = updated
+        return updated
     }
 
     public func revokeConnector(id: PiqaeConnectionID) async throws {

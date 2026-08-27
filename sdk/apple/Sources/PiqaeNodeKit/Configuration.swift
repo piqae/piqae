@@ -229,6 +229,8 @@ public protocol PiqaeEmbeddedNodeRuntime: PiqaeHostLifecycleReporter, Sendable {
         expectedRevision: UInt64
     ) async throws
     func connectors() async throws -> [PiqaeRuntimeConnectorSnapshot]
+    func updateNodeIdentity(_ request: PiqaeNodeIdentityUpdateRequest) async throws
+        -> PiqaeNodeIdentitySnapshot
     func connectInvitation(_ request: PiqaeEnrollmentRequest) async throws
         -> PiqaeRuntimeConnectorSnapshot
     func revokeConnector(id: PiqaeConnectionID) async throws
@@ -306,6 +308,13 @@ public extension PiqaeEmbeddedNodeRuntime {
         throw PiqaeNodeError.unsupportedOperation("The embedded runtime does not expose profiles.")
     }
     func connectors() async throws -> [PiqaeRuntimeConnectorSnapshot] { [] }
+    func updateNodeIdentity(_ request: PiqaeNodeIdentityUpdateRequest) async throws
+        -> PiqaeNodeIdentitySnapshot
+    {
+        throw PiqaeNodeError.unsupportedOperation(
+            "The embedded runtime does not expose node identity editing."
+        )
+    }
     func connectInvitation(_ request: PiqaeEnrollmentRequest) async throws
         -> PiqaeRuntimeConnectorSnapshot
     {
@@ -341,6 +350,8 @@ public protocol PiqaeInstalledNodeIPC: Sendable {
     func submit(_ request: PiqaePrintRequest) async throws -> PiqaeJobReceipt
     func profiles(for printerID: PiqaePrinterID) async throws -> [PiqaePrintProfile]
     func jobHistory(offset: Int, limit: Int) async throws -> PiqaeJobHistoryPage
+    func updateNodeIdentity(_ request: PiqaeNodeIdentityUpdateRequest) async throws
+        -> PiqaeNodeIdentitySnapshot
 }
 
 public extension PiqaeInstalledNodeIPC {
@@ -364,6 +375,13 @@ public extension PiqaeInstalledNodeIPC {
     func jobHistory(offset: Int, limit: Int) async throws -> PiqaeJobHistoryPage {
         throw PiqaeNodeError.unsupportedOperation(
             "The installed node broker does not expose print history."
+        )
+    }
+    func updateNodeIdentity(_ request: PiqaeNodeIdentityUpdateRequest) async throws
+        -> PiqaeNodeIdentitySnapshot
+    {
+        throw PiqaeNodeError.unsupportedOperation(
+            "The installed node broker does not expose node identity editing."
         )
     }
 }

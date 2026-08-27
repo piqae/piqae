@@ -23,6 +23,14 @@ logged-in user, contacts, postal address, advertising identifier, device serial
 number, or Apple user-assigned device name. Apple requires a special entitlement
 for the latter on iOS 16 and later; Piqae intentionally does not request it.
 
+The checked-in `Resources/PrivacyInfo.xcprivacy` is bundled in every app build.
+It declares no tracking, but does declare the app-scoped installation ID,
+operator/printer configuration, and diagnostics that a configured connection
+sends to its selected Piqae authority for app functionality. It also declares
+the app-only `UserDefaults` use and the runtime's app-container file metadata
+access. Release owners must keep App Store privacy answers aligned with the
+manifest and with the enabled deployment configuration.
+
 ## Generate and build
 
 XcodeGen 2.46 or newer is required to regenerate the checked-in project:
@@ -77,5 +85,7 @@ See Apple's
 [background strategy](https://developer.apple.com/documentation/backgroundtasks/choosing-background-strategies-for-your-app),
 [background notification](https://developer.apple.com/documentation/usernotifications/pushing-background-updates-to-your-app),
 [device-name entitlement](https://developer.apple.com/documentation/BundleResources/Entitlements/com.apple.developer.device-information.user-assigned-device-name),
+[privacy manifests](https://developer.apple.com/documentation/bundleresources/privacy-manifest-files),
+[required-reason APIs](https://developer.apple.com/documentation/bundleresources/describing-use-of-required-reason-api),
 and [TestFlight](https://developer.apple.com/help/app-store-connect/test-a-beta-version/testflight-overview)
 documentation.

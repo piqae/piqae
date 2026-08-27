@@ -20,7 +20,7 @@
       "type": "string",
       "minLength": 3,
       "maxLength": 255,
-      "pattern": "^[A-Za-z0-9][A-Za-z0-9.-]*$"
+      "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$"
     },
     "identity": { "$ref": "#/$defs/identity" },
     "installed_host_policy": {
@@ -28,20 +28,32 @@
     },
     "connection_policy": { "$ref": "#/$defs/connection_policy" }
   },
+  "allOf": [
+    {
+      "if": { "properties": { "product": { "const": "standalone" } } },
+      "then": {
+        "properties": {
+          "connection_policy": {
+            "properties": { "management": { "const": "user_managed" } }
+          }
+        }
+      }
+    }
+  ],
   "$defs": {
     "identity": {
       "type": "object",
       "additionalProperties": false,
       "required": ["display_name", "labels"],
       "properties": {
-        "display_name": { "type": "string", "minLength": 1, "maxLength": 120 },
-        "site": { "type": ["string", "null"], "minLength": 1, "maxLength": 120 },
-        "location": { "type": ["string", "null"], "minLength": 1, "maxLength": 120 },
+        "display_name": { "type": "string", "minLength": 1, "maxLength": 120, "pattern": "^[^\\u0000-\\u001F\\u007F]+$" },
+        "site": { "type": ["string", "null"], "minLength": 1, "maxLength": 120, "pattern": "^[^\\u0000-\\u001F\\u007F]+$" },
+        "location": { "type": ["string", "null"], "minLength": 1, "maxLength": 120, "pattern": "^[^\\u0000-\\u001F\\u007F]+$" },
         "labels": {
           "type": "array",
           "maxItems": 16,
           "uniqueItems": true,
-          "items": { "type": "string", "minLength": 1, "maxLength": 64 }
+          "items": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[^\\u0000-\\u001F\\u007F]+$" }
         }
       }
     },
@@ -62,7 +74,17 @@
           "uniqueItems": true,
           "items": { "type": "string", "format": "uri", "maxLength": 2048 }
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "management": { "const": "host_managed" } } },
+          "then": {
+            "properties": {
+              "allowed_authority_origins": { "minItems": 1 }
+            }
+          }
+        }
+      ]
     }
   }
 }

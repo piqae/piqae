@@ -1,0 +1,17 @@
+{
+  "valid": [
+    "com.piqae.node",
+    "com.example.production-labels",
+    "A1.example"
+  ],
+  "invalid": [
+    ".com.example",
+    "-com.example",
+    "com..example",
+    "com.example-",
+    "com.-example",
+    " com.example",
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.example",
+    "éxample.com"
+  ]
+}

@@ -298,6 +298,14 @@ private struct ConnectionsView: View {
                             .font(.caption).foregroundStyle(.secondary)
                         Text(connection.state.rawValue.replacingOccurrences(of: "_", with: " ").capitalized)
                             .font(.caption)
+                        if let conflict = connection.nodeIdentityConflictRevision {
+                            Label(
+                                "Node details conflict at server revision \(conflict)",
+                                systemImage: "exclamationmark.triangle"
+                            )
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                        }
                         if connection.state != .localOnly {
                             Button("Disconnect", role: .destructive) {
                                 Task { await model.disconnect(connection) }
@@ -361,6 +369,15 @@ private struct NodeSettingsView: View {
     var body: some View {
         Form {
             IdentityFields(settings: $model.settings)
+            if let revision = model.identityConflictRevision {
+                Section("Review required") {
+                    Label(
+                        "Node details changed elsewhere at revision \(revision). Review the fields, then save again to replace that revision.",
+                        systemImage: "exclamationmark.triangle"
+                    )
+                    .foregroundStyle(.orange)
+                }
+            }
             Section("Runtime diagnostics") {
                 LabeledContent("Host product", value: "Standalone")
                 LabeledContent("Queue authority", value: "Shared Rust runtime")

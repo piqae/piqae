@@ -10,6 +10,7 @@ public final class PiqaeNode: @unchecked Sendable {
     public let jobs: PiqaeJobsService
     public let profiles: PiqaeProfilesService
     public let remoteNotifications: PiqaeRemoteNotificationsService
+    public let identity: PiqaeNodeIdentityService
 
     public init(_ configuration: PiqaeNodeConfiguration) {
         let executionFence = PiqaeExecutionFence()
@@ -21,6 +22,7 @@ public final class PiqaeNode: @unchecked Sendable {
         jobs = PiqaeJobsService(engine: engine)
         profiles = PiqaeProfilesService(engine: engine)
         remoteNotifications = PiqaeRemoteNotificationsService(engine: engine)
+        identity = PiqaeNodeIdentityService(engine: engine)
     }
 
     public func start() async throws {
@@ -59,6 +61,17 @@ public final class PiqaeNode: @unchecked Sendable {
     /// a native handoff after this returns.
     func expireExecutionSynchronously() {
         executionFence.suspend()
+    }
+}
+
+public final class PiqaeNodeIdentityService: @unchecked Sendable {
+    private let engine: PiqaeNodeEngine
+    fileprivate init(engine: PiqaeNodeEngine) { self.engine = engine }
+
+    public func update(_ request: PiqaeNodeIdentityUpdateRequest) async throws
+        -> PiqaeNodeIdentitySnapshot
+    {
+        try await engine.updateNodeIdentity(request)
     }
 }
 
@@ -453,6 +466,19 @@ actor PiqaeNodeEngine {
     func connections() throws -> [PiqaeConnection] {
         try requireStarted()
         return snapshotValue.connections.isEmpty ? [.localOnly] : snapshotValue.connections
+    }
+
+    func updateNodeIdentity(_ request: PiqaeNodeIdentityUpdateRequest) async throws
+        -> PiqaeNodeIdentitySnapshot
+    {
+        try requireStarted()
+        if let selectedIPC { return try await selectedIPC.updateNodeIdentity(request) }
+        guard let runtime = configuration.embeddedRuntime else {
+            throw PiqaeNodeError.unsupportedOperation(
+                "Node identity editing requires the durable native runtime."
+            )
+        }
+        return try await runtime.updateNodeIdentity(request)
     }
 
     func printers() throws -> [PiqaePrinter] {
@@ -1557,7 +1583,9 @@ actor PiqaeNodeEngine {
             id: .init(rawValue: snapshot.connectorID),
             authorityURL: snapshot.controlPlaneURL,
             workspaceName: snapshot.workspaceName ?? snapshot.displayName,
-            state: snapshot.enabled ? .connected : .offline
+            state: snapshot.enabled ? .connected : .offline,
+            nodeIdentityRevision: snapshot.nodeIdentityRevision,
+            nodeIdentityConflictRevision: snapshot.nodeIdentityConflictRevision
         )
     }
 

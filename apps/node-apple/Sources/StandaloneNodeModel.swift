@@ -10,6 +10,7 @@ final class StandaloneNodeModel: ObservableObject {
     @Published private(set) var profiles: [PiqaePrinterID: [PiqaePrintProfile]] = [:]
     @Published private(set) var started = false
     @Published private(set) var backgroundMaintenanceStatus: String
+    @Published private(set) var identityConflictRevision: UInt64?
     @Published var settings: StandaloneNodeSettings
     @Published var search = ""
     @Published var notice: String?
@@ -26,11 +27,13 @@ final class StandaloneNodeModel: ObservableObject {
     private let maintenance: PiqaeUIKitMaintenanceScheduler?
     private let maintenanceRegistered: Bool
     private var observationTask: Task<Void, Never>?
+    private var identityRevision: UInt64
 
     init(store: StandaloneNodeStore = StandaloneNodeStore()) {
         let loadedSettings = store.load()
         self.store = store
         settings = loadedSettings
+        identityRevision = store.identityRevision
         isOnboardingPresented = !store.isConfigured
         backgroundMaintenanceStatus = "Not registered"
         let identity = (try? PiqaeNodeIdentityConfiguration(
@@ -120,10 +123,33 @@ final class StandaloneNodeModel: ObservableObject {
 
     func saveIdentity() async {
         do {
-            let identity = try store.save(settings)
-            try await runtime.updateEnrollmentNodeName(identity.displayName)
+            let identity = try PiqaeNodeIdentityConfiguration(
+                displayName: settings.name,
+                site: settings.site,
+                location: settings.location,
+                labels: settings.labels
+            )
+            if started {
+                let updated = try await node.identity.update(.init(
+                    expectedRevision: identityRevision,
+                    identity: identity
+                ))
+                try await runtime.updateEnrollmentNodeName(updated.identity.displayName)
+                identityRevision = updated.revision
+                identityConflictRevision = nil
+                store.save(updated.identity, revision: updated.revision)
+            } else {
+                try await runtime.updateEnrollmentNodeName(identity.displayName)
+                store.save(identity, revision: identityRevision)
+            }
             isOnboardingPresented = false
-            notice = "Node details saved locally. Each new connection uses this node name."
+            notice = started
+                ? "Node details saved. Connected workspaces will reconcile independently."
+                : "Node details saved locally. Each new connection uses this node name."
+        } catch let PiqaeNativeRuntimeError.nodeIdentityRevisionConflict(currentRevision) {
+            identityRevision = currentRevision
+            identityConflictRevision = currentRevision
+            store.saveIdentityRevision(currentRevision)
         } catch {
             errorMessage = Self.message(error)
         }
