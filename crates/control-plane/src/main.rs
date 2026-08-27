@@ -16,6 +16,7 @@ use piqae_control_plane::{
     billing_usage_worker::BillingUsageWorker,
     document_render_worker::DocumentRenderWorker,
     identity::LocalIdentityState,
+    job_expiry::JobExpiryWorker,
     repository::Repository,
     router,
     wake_hint_worker::WakeHintWorker,
@@ -302,6 +303,9 @@ async fn run() -> Result<()> {
     let _uncertain_delivery_worker = service_role
         .runs_workers()
         .then(|| spawn_uncertain_delivery_sweep(store.clone(), application.clone()));
+    let _job_expiry_worker = service_role
+        .runs_workers()
+        .then(|| spawn_job_expiry_worker(JobExpiryWorker::new(application.clone())));
     let _document_render_worker = if service_role.runs_workers() {
         let worker_id = format!("document-renderer-{}", uuid::Uuid::new_v4());
         let concurrency = product_env("PIQAE_DOCUMENT_RENDER_CONCURRENCY")
@@ -395,6 +399,21 @@ fn spawn_wake_hint_worker(worker: WakeHintWorker) -> tokio::task::JoinHandle<()>
                 Err(error) => {
                     tracing::error!(error.type = "node_wake_hint_dispatch", %error);
                 }
+            }
+        }
+    })
+}
+
+fn spawn_job_expiry_worker(worker: JobExpiryWorker) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            match worker.run_once(50).await {
+                Ok(0) => {}
+                Ok(count) => tracing::debug!(count, "expired pre-handoff print jobs"),
+                Err(error) => tracing::error!(error.type = "job_expiry", %error),
             }
         }
     })

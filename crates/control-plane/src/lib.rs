@@ -14,6 +14,7 @@ pub mod document_render_worker;
 pub mod documents;
 pub mod error;
 pub mod identity;
+pub mod job_expiry;
 pub mod pairing;
 pub mod platform;
 pub mod print_intents;

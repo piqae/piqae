@@ -261,6 +261,7 @@ impl EmbeddedQueue {
         };
         queue.reconcile_content_for_scope("local")?;
         queue.open_persisted_connector_scopes()?;
+        queue.expire_waiting_across_scopes(Utc::now().timestamp_millis())?;
         queue.repair_after_restart()?;
         Ok(queue)
     }
@@ -430,6 +431,8 @@ impl EmbeddedQueue {
         runtime: &crate::NodeRuntime,
     ) -> Result<AgentSyncRequest> {
         self.ensure_connector_queue(connector_id)?;
+        self.store_for_scope_mut(connector_id)?
+            .expire_waiting(Utc::now().timestamp_millis())?;
         let printers = if refresh_inventory {
             let snapshots = self
                 .printer_snapshots()?
@@ -800,6 +803,7 @@ impl EmbeddedQueue {
         if !self.document.adapters.contains_key(adapter_id) {
             bail!("adapter is not registered");
         }
+        self.expire_waiting_across_scopes(Utc::now().timestamp_millis())?;
         if let Some(operation) = self.document.operations.values().find(|operation| {
             operation.adapter_id == adapter_id && operation.phase != AdapterOperationPhase::Accepted
         }) {
@@ -1188,6 +1192,14 @@ impl EmbeddedQueue {
                 .then_with(|| left.0.cmp(&right.0))
         });
         Ok(jobs)
+    }
+
+    fn expire_waiting_across_scopes(&mut self, now: i64) -> Result<usize> {
+        let mut expired = self.store.expire_waiting(now)?;
+        for store in self.connector_stores.values_mut() {
+            expired = expired.saturating_add(store.expire_waiting(now)?);
+        }
+        Ok(expired)
     }
 
     fn store_for_scope_mut(&mut self, scope: &str) -> Result<&mut AgentStore> {
@@ -1940,6 +1952,58 @@ mod tests {
             .connector_sync_snapshot("ncon_presence", agent_id, started_at, false, None, &runtime)
             .unwrap();
         assert_eq!(third.runtime.unwrap().sequence, 3);
+    }
+
+    #[test]
+    fn restart_expires_waiting_local_and_connector_jobs_without_adapter_handoff() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut queue, printer) = prepare(root.path());
+        let mut local_request = request(&printer);
+        local_request.expires_unix_ms = Some(Utc::now().timestamp_millis() - 1);
+        let local = queue.enqueue(local_request).unwrap();
+
+        let connector_job_id = JobId::new();
+        let mut offer = cloud_offer(&printer, connector_job_id, b"expired connector fixture");
+        offer.job.expires_at = Utc::now() - chrono::TimeDelta::seconds(1);
+        queue
+            .prepare_connector_offer("ncon_expiry", &offer, b"expired connector fixture", None)
+            .unwrap();
+        queue
+            .confirm_connector_offer("ncon_expiry", connector_job_id)
+            .unwrap();
+        queue
+            .activate_connector_offer("ncon_expiry", connector_job_id)
+            .unwrap();
+        drop(queue);
+
+        let mut restarted =
+            EmbeddedQueue::open(root.path(), SupportPackRegistry::default()).unwrap();
+        assert_eq!(
+            restarted.job(&local.job_id).unwrap().unwrap().state,
+            "expired"
+        );
+        assert_eq!(
+            restarted
+                .job(&connector_job_id.to_string())
+                .unwrap()
+                .unwrap()
+                .state,
+            "expired"
+        );
+        assert!(
+            restarted
+                .next_operation("com.example.pos.airprint")
+                .unwrap()
+                .is_none()
+        );
+        let connector_events = restarted
+            .store_for_scope("ncon_expiry")
+            .unwrap()
+            .pending_cloud_events(0, 20)
+            .unwrap();
+        assert!(connector_events.iter().any(|event| {
+            event.job_id == connector_job_id.to_string() && event.state == "expired"
+        }));
     }
 
     #[test]

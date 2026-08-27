@@ -783,3 +783,217 @@ async fn prehandoff_transitions_finalize_only_unaccepted_route_leases() {
         .await
         .expect("drop schema");
 }
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn expiry_is_bounded_restart_safe_and_preserves_local_responsibility() {
+    let Some(database_url) = env::var("PIQAE_TEST_DATABASE_URL").ok() else {
+        eprintln!("skipped: set PIQAE_TEST_DATABASE_URL for expiry evidence");
+        return;
+    };
+    let schema = format!("piqae_safe_expiry_{}", ulid::Ulid::new()).to_ascii_lowercase();
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&database_url)
+        .await
+        .expect("connect PostgreSQL");
+    sqlx::query(&format!("CREATE SCHEMA {schema}"))
+        .execute(&admin)
+        .await
+        .expect("create schema");
+    let pool = schema_pool(&database_url, &schema).await;
+    let store = PostgresStore::from_pool(pool.clone());
+    store.migrate().await.expect("migrations");
+    let (workspace, environment, agent, printer) = seed_tenant(&pool).await;
+    seed_topology(&pool, workspace, environment, agent, printer).await;
+    let base = Utc::now() - chrono::Duration::minutes(2);
+
+    let mut safe = job(workspace, environment, printer, "safe expiry", base);
+    safe.expires_at = base + chrono::Duration::seconds(1);
+    store
+        .create_job(&safe, agent, None, b"safe expiry")
+        .await
+        .expect("safe job");
+    seed_active_attempt(
+        &pool,
+        workspace,
+        environment,
+        safe.id,
+        "safe_expiry",
+        "route_leased",
+    )
+    .await;
+
+    let mut unsafe_job = job(
+        workspace,
+        environment,
+        printer,
+        "unsafe expiry",
+        base + chrono::Duration::seconds(2),
+    );
+    unsafe_job.expires_at = base + chrono::Duration::seconds(3);
+    store
+        .create_job(&unsafe_job, agent, None, b"unsafe expiry")
+        .await
+        .expect("unsafe job");
+    let mut blocked = job(
+        workspace,
+        environment,
+        printer,
+        "blocked expiry",
+        base + chrono::Duration::seconds(4),
+    );
+    blocked.expires_at = Utc::now() + chrono::Duration::minutes(5);
+    store
+        .create_job(&blocked, agent, None, b"blocked expiry")
+        .await
+        .expect("blocked job");
+    let lease = store
+        .claim_jobs(workspace, environment, agent, "expiry-block", 1)
+        .await
+        .expect("blocked lease")
+        .pop()
+        .expect("blocked lease exists");
+    assert_eq!(lease.job.id, blocked.id);
+    assert!(matches!(
+        store
+            .block_agent_lease_for_node_update(
+                workspace,
+                environment,
+                agent,
+                blocked.id,
+                lease.lease_id,
+                &lease.lease_token,
+            )
+            .await
+            .expect("capability block"),
+        PreHandoffTransitionOutcome::Transitioned(_)
+    ));
+    let blocked_expiry = base + chrono::Duration::seconds(5);
+    sqlx::query(
+        "UPDATE jobs SET expires_at=$4,
+             payload=jsonb_set(payload,'{expires_at}',to_jsonb($5::text))
+         WHERE workspace_id=$1 AND environment_id=$2 AND id=$3",
+    )
+    .bind(workspace.to_string())
+    .bind(environment.to_string())
+    .bind(blocked.id.to_string())
+    .bind(blocked_expiry)
+    .bind(blocked_expiry.to_rfc3339())
+    .execute(&pool)
+    .await
+    .expect("age capability block");
+
+    let first = store
+        .expire_jobs_before_handoff(1)
+        .await
+        .expect("first bounded expiry");
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0].transition.job.id, safe.id);
+    seed_active_attempt(
+        &pool,
+        workspace,
+        environment,
+        unsafe_job.id,
+        "unsafe_expiry",
+        "accepted_by_node",
+    )
+    .await;
+    assert_eq!(
+        store
+            .get_job(workspace, environment, unsafe_job.id)
+            .await
+            .expect("unsafe job unchanged")
+            .state,
+        JobState::FailedRetryable
+    );
+    let unsafe_attempt: (String, bool) =
+        sqlx::query_as("SELECT state,final_at IS NULL FROM delivery_attempts WHERE job_id=$1")
+            .bind(unsafe_job.id.to_string())
+            .fetch_one(&pool)
+            .await
+            .expect("unsafe attempt remains fenced");
+    assert_eq!(unsafe_attempt, ("accepted_by_node".into(), true));
+    drop(store);
+    pool.close().await;
+
+    let restarted_pool = schema_pool(&database_url, &schema).await;
+    let restarted = PostgresStore::from_pool(restarted_pool.clone());
+    let second = restarted
+        .expire_jobs_before_handoff(1)
+        .await
+        .expect("expiry after restart");
+    assert_eq!(second.len(), 1);
+    assert_eq!(second[0].transition.job.id, blocked.id);
+    assert!(
+        restarted
+            .expire_jobs_before_handoff(100)
+            .await
+            .expect("idempotent expiry")
+            .is_empty()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM job_events
+             WHERE workspace_id=$1 AND environment_id=$2
+               AND state='expired' AND job_id=ANY($3)",
+        )
+        .bind(workspace.to_string())
+        .bind(environment.to_string())
+        .bind(vec![safe.id.to_string(), blocked.id.to_string()])
+        .fetch_one(&restarted_pool)
+        .await
+        .expect("expired lifecycle events"),
+        2
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM webhook_events
+             WHERE workspace_id=$1 AND environment_id=$2
+               AND event_type='job.updated' AND payload->>'state'='expired'",
+        )
+        .bind(workspace.to_string())
+        .bind(environment.to_string())
+        .fetch_one(&restarted_pool)
+        .await
+        .expect("expiry outbox events"),
+        2
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM node_capability_recovery_checks
+             WHERE workspace_id=$1 AND environment_id=$2 AND job_id=$3",
+        )
+        .bind(workspace.to_string())
+        .bind(environment.to_string())
+        .bind(blocked.id.to_string())
+        .fetch_one(&restarted_pool)
+        .await
+        .expect("capability recovery cleanup"),
+        0
+    );
+    let safe_projection: (String, bool, String, bool) = sqlx::query_as(
+        "SELECT attempt.state,attempt.final_at IS NOT NULL,
+                reservation.state,reservation.released_at IS NOT NULL
+         FROM delivery_attempts AS attempt
+         JOIN route_reservations AS reservation
+           ON reservation.attempt_id=attempt.id
+          AND reservation.workspace_id=attempt.workspace_id
+          AND reservation.environment_id=attempt.environment_id
+         WHERE attempt.job_id=$1",
+    )
+    .bind(safe.id.to_string())
+    .fetch_one(&restarted_pool)
+    .await
+    .expect("safe expiry route cleanup");
+    assert_eq!(
+        safe_projection,
+        ("superseded".into(), true, "superseded".into(), true)
+    );
+
+    restarted_pool.close().await;
+    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+        .execute(&admin)
+        .await
+        .expect("drop schema");
+}
