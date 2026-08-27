@@ -72,6 +72,30 @@ var connector = node.Connect(new PiqaeConnectorInvitation(
     Environment.MachineName));
 ```
 
+The same embedded runtime exposes typed, offline PrintPacket validation and
+durable submission. It defaults to the portable PDF profile and does not create
+a managed renderer or a second queue:
+
+```csharp
+var packet = PrintPacket.Parse(templateJson, orderJson, new Dictionary<string, byte[]>
+{
+    ["logo.png"] = logoBytes,
+});
+var validation = node.ValidatePrintPacket(packet);
+var submission = node.EnqueuePrintPacket(
+    adapterId: printerAdapterId,
+    idempotencyKey: "order-1042-label-1",
+    printerId: printerId,
+    title: "Order 1042",
+    packet: packet);
+```
+
+Validation has no queue side effect. Enqueue renders with the shared bounded
+native PrintPacket implementation and durably stores the output before native
+handoff. Retrying the same content with the same idempotency key returns the
+existing job. A `PrinterNative` target fails closed until its exact language and
+profile renderer is available and certified.
+
 If the user abandons the flow, call
 `CancelPreparedConnectorInvitation(prepared.KeyHandle)`. Pending-key expiry,
 cancel cleanup, and deletion retry are durable native-runtime operations. The

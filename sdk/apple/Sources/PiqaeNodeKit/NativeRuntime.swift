@@ -371,6 +371,32 @@ public actor PiqaeNativeRuntime: PiqaeEmbeddedNodeRuntime, PiqaeOpaqueIdentityPr
         return response.job
     }
 
+    public func validatePrintPacket(_ packet: PiqaePrintPacket) async throws
+        -> PiqaePrintPacketValidation
+    {
+        var payload = try Self.printPacketPayload(packet)
+        payload["type"] = "validate_print_packet"
+        let data = try JSONSerialization.data(withJSONObject: payload)
+        return try commandResponse(data, as: PiqaePrintPacketValidation.self)
+    }
+
+    public func enqueuePrintPacket(_ request: PiqaePrintPacketSubmissionRequest) async throws
+        -> PiqaePrintPacketSubmission
+    {
+        var payload = try Self.printPacketPayload(request.packet)
+        payload["type"] = "enqueue_print_packet"
+        payload["adapter_id"] = request.adapterID
+        payload["printer_id"] = request.printerID.rawValue
+        payload["idempotency_key"] = request.idempotencyKey
+        payload["title"] = request.title
+        payload["options_json"] = request.optionsJSON
+        payload["expires_unix_ms"] = request.expiresAt.map {
+            Int64($0.timeIntervalSince1970 * 1_000)
+        } ?? NSNull()
+        let data = try JSONSerialization.data(withJSONObject: payload)
+        return try commandResponse(data, as: PiqaePrintPacketSubmission.self)
+    }
+
     public func nextOperation(adapterID: String) async throws -> PiqaeRuntimeAdapterOperation? {
         try commandResponse(
             AdapterIDCommand(type: "next_adapter_operation", adapterID: adapterID),
@@ -575,6 +601,36 @@ public actor PiqaeNativeRuntime: PiqaeEmbeddedNodeRuntime, PiqaeOpaqueIdentityPr
             )
         }
         return try Self.unwrap(library.command(handle, try JSONEncoder().encode(request)))
+    }
+
+    private func commandResponse<Response: Decodable>(_ request: Data, as type: Response.Type)
+        throws -> Response
+    {
+        guard let library, let handle else {
+            throw PiqaeNativeRuntimeError.rejected(
+                code: "runtime_not_started",
+                message: "The native runtime has not started."
+            )
+        }
+        return try Self.unwrap(library.command(handle, request))
+    }
+
+    private static func printPacketPayload(_ packet: PiqaePrintPacket) throws -> [String: Any] {
+        guard
+            let specification = try JSONSerialization.jsonObject(with: packet.templateJSON)
+                as? [String: Any]
+        else {
+            throw PiqaeNodeError.invalidConfiguration(
+                "The PrintPacket template must be a JSON object."
+            )
+        }
+        let data = try JSONSerialization.jsonObject(with: packet.dataJSON, options: .fragmentsAllowed)
+        return [
+            "specification": specification,
+            "data": data,
+            "output_target": packet.outputTarget.jsonObject,
+            "resources_base64": packet.resources.mapValues { $0.base64EncodedString() },
+        ]
     }
 
     private static func unwrap<Response: Decodable>(_ data: Data) throws -> Response {

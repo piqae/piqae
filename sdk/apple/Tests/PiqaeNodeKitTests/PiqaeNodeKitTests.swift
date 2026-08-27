@@ -380,6 +380,94 @@ final class PiqaeNodeKitTests: XCTestCase {
         XCTAssertEqual(submissionCount, 1)
     }
 
+    func testPrintPacketValueDefaultsToPortablePDFAndOwnsResourceData() throws {
+        var resource = Data([1, 2, 3])
+        let packet = try PiqaePrintPacket(
+            templateJSON: Data(
+                #"{"format":"printpacket/v1","media":{"kind":"continuous","width_mm":80},"body":[]}"#.utf8
+            ),
+            resources: ["logo": resource]
+        )
+        resource[0] = 99
+
+        XCTAssertEqual(packet.outputTarget, .pdf())
+        XCTAssertEqual(packet.resources["logo"], Data([1, 2, 3]))
+        XCTAssertThrowsError(try PiqaePrintPacket(templateJSON: Data("[]".utf8)))
+    }
+
+    func testPrintPacketFacadeValidatesReceiptAndLabelAndSubmitsIdempotentlyOffline() async throws {
+        try requireLinkedRuntime()
+        let fixture = nativeFixture("printpacket")
+        let runtime = PiqaeNativeRuntime(
+            configuration: fixture.configuration,
+            keyStore: PiqaeFixedHostKeyStore()
+        )
+        let adapter = PiqaeFakePrinterAdapter(
+            printers: [PiqaeFakePrinterAdapter.printer()]
+        )
+        let node = PiqaeNode(
+            .localOnly(
+                startupMode: .embedded,
+                identityStore: PiqaeMemoryInstallationIdentityStore(
+                    id: .init(rawValue: fixture.applicationID)
+                ),
+                embeddedRuntime: runtime,
+                printerAdapters: [adapter]
+            )
+        )
+        addTeardownBlock {
+            await node.stop()
+            try? FileManager.default.removeItem(at: fixture.stateDirectory)
+        }
+        try await node.start()
+        let printers = try await node.printers.list()
+        let printer = try XCTUnwrap(printers.first)
+        let receipt = try printPacketFixture("receipt-80mm")
+        let label = try printPacketFixture("production-label-100x50")
+
+        let receiptValidation = try await node.printPackets.validate(receipt)
+        let labelValidation = try await node.printPackets.validate(label)
+        XCTAssertEqual(receiptValidation.manifest.specificationVersion, "printpacket/v1")
+        XCTAssertEqual(receiptValidation.output.mediaType, "application/pdf")
+        XCTAssertEqual(labelValidation.output.mediaType, "application/pdf")
+        XCTAssertNotEqual(receiptValidation.cacheKey, labelValidation.cacheKey)
+
+        let request = try PiqaePrintPacketSubmissionRequest(
+            adapterID: adapter.descriptor.id,
+            printerID: printer.id,
+            idempotencyKey: "receipt-1042-copy-1",
+            title: "Receipt 1042",
+            packet: receipt
+        )
+        let first = try await node.printPackets.submit(request)
+        let second = try await node.printPackets.submit(request)
+        XCTAssertEqual(first.job.jobID, second.job.jobID)
+        XCTAssertEqual(first.output.sha256, second.output.sha256)
+        XCTAssertEqual(first.output.mediaType, "application/pdf")
+        let job = try await node.jobs.status(.init(rawValue: first.job.jobID))
+        XCTAssertEqual(job.state, "completed_reported")
+        _ = await eventually { await adapter.submissionCount() >= 1 }
+        let submissionCount = await adapter.submissionCount()
+        XCTAssertEqual(submissionCount, 1, "job state: \(job.state)")
+
+        let nativePacket = try PiqaePrintPacket(
+            templateJSON: receipt.templateJSON,
+            dataJSON: receipt.dataJSON,
+            outputTarget: .printerNative(
+                language: "zpl",
+                profile: "zpl-raster/v1",
+                dpi: 203,
+                printableWidthDots: 812
+            )
+        )
+        await XCTAssertThrowsErrorAsync(try await node.printPackets.validate(nativePacket)) { error in
+            guard case let PiqaeNativeRuntimeError.rejected(code, _) = error else {
+                return XCTFail("Expected the native runtime to reject an unsupported target.")
+            }
+            XCTAssertEqual(code, "printpacket_invalid_or_unsupported")
+        }
+    }
+
     func testLinkedRuntimeDrainsSecondPrinterWhileFirstAwaitsNativeStatus() async throws {
         try requireLinkedRuntime()
         let fixture = nativeFixture("observation-liveness")
@@ -1747,6 +1835,29 @@ final class PiqaeNodeKitTests: XCTestCase {
                 localOnly: true
             ),
             stateDirectory
+        )
+    }
+
+    private func printPacketFixture(_ name: String) throws -> PiqaePrintPacket {
+        let repositoryRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let url = repositoryRoot
+            .appendingPathComponent("standards/printpacket/conformance", isDirectory: true)
+            .appendingPathComponent("\(name).json")
+        let object = try JSONSerialization.jsonObject(with: Data(contentsOf: url))
+        guard let fixture = object as? [String: Any],
+            let template = fixture["template"],
+            let data = fixture["data"]
+        else {
+            throw PiqaeNodeError.invalidConfiguration("The PrintPacket fixture is invalid.")
+        }
+        return try PiqaePrintPacket(
+            templateJSON: JSONSerialization.data(withJSONObject: template),
+            dataJSON: JSONSerialization.data(withJSONObject: data)
         )
     }
 

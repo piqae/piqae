@@ -156,6 +156,97 @@ public sealed class NodeTests
     }
 
     [Fact]
+    public void PrintPacketDefaultsToPortablePdfAndOwnsItsJsonAndResources()
+    {
+        var bytes = new byte[] { 1, 2, 3 };
+        var packet = PrintPacket.Parse(
+            """{"format":"printpacket/v1","media":{"kind":"continuous","width_mm":80},"body":[]}"""u8,
+            "{}"u8,
+            new Dictionary<string, byte[]> { ["logo"] = bytes });
+        bytes[0] = 99;
+
+        Assert.IsType<PrintPacketOutputTarget.Pdf>(packet.OutputTarget);
+        Assert.Equal(1, packet.Resources["logo"][0]);
+        Assert.Equal("printpacket/v1", packet.Template.GetProperty("format").GetString());
+    }
+
+    [Fact]
+    public void NativePrintPacketFacadeValidatesReceiptAndLabelAndSubmitsIdempotentlyOffline()
+    {
+        if (!OperatingSystem.IsWindows() || Environment.GetEnvironmentVariable("PIQAE_NODE_NATIVE_TEST") != "1") return;
+        var unique = $"printpacket-{Guid.NewGuid():N}";
+        using var node = new PiqaeNode(new(
+            HostMode.EmbeddedApplication,
+            AvailabilityClass.ForegroundOnly,
+            true,
+            "com.piqae.tests.printpacket",
+            unique));
+        node.Start();
+        using var capabilities = JsonDocument.Parse("""{"document_kinds":["pdf"]}""");
+        node.RegisterAdapter(new AdapterRegistration(
+            new AdapterFingerprint(
+                "windows",
+                "com.piqae.tests.fake-printer",
+                "1.0.0",
+                "test",
+                null),
+            capabilities.RootElement.Clone()));
+        using var nativeOptions = JsonDocument.Parse("{}");
+        var inventory = node.ObservePrinterInventory(
+            "com.piqae.tests.fake-printer",
+            [new PrinterObservation(
+                "virtual://printpacket",
+                "Virtual PrintPacket printer",
+                "available",
+                true,
+                nativeOptions.RootElement.Clone())]);
+        var printerId = inventory.GetProperty("printers")[0].GetProperty("printer_id").GetString();
+        Assert.False(string.IsNullOrEmpty(printerId));
+
+        var receipt = ReadPrintPacketFixture("receipt-80mm");
+        var label = ReadPrintPacketFixture("production-label-100x50");
+        var receiptValidation = node.ValidatePrintPacket(receipt);
+        var labelValidation = node.ValidatePrintPacket(label);
+        Assert.Equal("printpacket/v1", receiptValidation.Manifest.SpecificationVersion);
+        Assert.Equal("application/pdf", receiptValidation.Output.MediaType);
+        Assert.Equal("application/pdf", labelValidation.Output.MediaType);
+        Assert.NotEqual(receiptValidation.CacheKey, labelValidation.CacheKey);
+
+        var first = node.EnqueuePrintPacket(
+            "com.piqae.tests.fake-printer",
+            "receipt-1042-copy-1",
+            printerId!,
+            "Receipt 1042",
+            receipt);
+        var second = node.EnqueuePrintPacket(
+            "com.piqae.tests.fake-printer",
+            "receipt-1042-copy-1",
+            printerId!,
+            "Receipt 1042",
+            receipt);
+        Assert.Equal(first.Job.JobId, second.Job.JobId);
+        Assert.Equal(first.Output.Sha256, second.Output.Sha256);
+        var operation = node.NextAdapterOperation("com.piqae.tests.fake-printer");
+        Assert.Equal("pdf", operation.GetProperty("operation").GetProperty("content_kind").GetString());
+        Assert.Equal(
+            JsonValueKind.Null,
+            node.NextAdapterOperation("com.piqae.tests.fake-printer")
+                .GetProperty("operation")
+                .ValueKind);
+
+        var unsupported = new PrintPacket(
+            receipt.Template,
+            receipt.Data,
+            outputTarget: new PrintPacketOutputTarget.PrinterNative(
+                "zpl",
+                "zpl-raster/v1",
+                203,
+                812));
+        var exception = Assert.Throws<PiqaeNodeException>(() => node.ValidatePrintPacket(unsupported));
+        Assert.Equal("printpacket_invalid_or_unsupported", exception.Code);
+    }
+
+    [Fact]
     public void NativeAndPortableApplicationIdentifiersMustMatch()
     {
         var hostConfiguration = new HostConfiguration(
@@ -171,6 +262,23 @@ public sealed class NodeTests
             "com.example.two",
             "state",
             hostConfiguration)));
+    }
+
+    private static PrintPacket ReadPrintPacketFixture(string name)
+    {
+        var directory = new DirectoryInfo(AppContext.BaseDirectory);
+        while (directory is not null && !Directory.Exists(Path.Combine(directory.FullName, "standards")))
+            directory = directory.Parent;
+        Assert.NotNull(directory);
+        using var fixture = JsonDocument.Parse(File.ReadAllBytes(Path.Combine(
+            directory!.FullName,
+            "standards",
+            "printpacket",
+            "conformance",
+            $"{name}.json")));
+        return new PrintPacket(
+            fixture.RootElement.GetProperty("template"),
+            fixture.RootElement.GetProperty("data"));
     }
 
     [Fact]

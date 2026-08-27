@@ -11,6 +11,7 @@ public final class PiqaeNode: @unchecked Sendable {
     public let profiles: PiqaeProfilesService
     public let remoteNotifications: PiqaeRemoteNotificationsService
     public let identity: PiqaeNodeIdentityService
+    public let printPackets: PiqaePrintPacketsService
 
     public init(_ configuration: PiqaeNodeConfiguration) {
         let executionFence = PiqaeExecutionFence()
@@ -23,6 +24,7 @@ public final class PiqaeNode: @unchecked Sendable {
         profiles = PiqaeProfilesService(engine: engine)
         remoteNotifications = PiqaeRemoteNotificationsService(engine: engine)
         identity = PiqaeNodeIdentityService(engine: engine)
+        printPackets = PiqaePrintPacketsService(engine: engine)
     }
 
     public func start() async throws {
@@ -61,6 +63,25 @@ public final class PiqaeNode: @unchecked Sendable {
     /// a native handoff after this returns.
     func expireExecutionSynchronously() {
         executionFence.suspend()
+    }
+}
+
+/// Direct, offline-capable PrintPacket validation/rendering and durable
+/// submission through the node's existing queue.
+public final class PiqaePrintPacketsService: @unchecked Sendable {
+    private let engine: PiqaeNodeEngine
+    fileprivate init(engine: PiqaeNodeEngine) { self.engine = engine }
+
+    public func validate(_ packet: PiqaePrintPacket) async throws
+        -> PiqaePrintPacketValidation
+    {
+        try await engine.validatePrintPacket(packet)
+    }
+
+    public func submit(_ request: PiqaePrintPacketSubmissionRequest) async throws
+        -> PiqaePrintPacketSubmission
+    {
+        try await engine.enqueuePrintPacket(request)
     }
 }
 
@@ -479,6 +500,51 @@ actor PiqaeNodeEngine {
             )
         }
         return try await runtime.updateNodeIdentity(request)
+    }
+
+    func validatePrintPacket(_ packet: PiqaePrintPacket) async throws
+        -> PiqaePrintPacketValidation
+    {
+        try requireStarted()
+        guard selectedIPC == nil, let runtime = configuration.embeddedRuntime else {
+            throw PiqaeNodeError.unsupportedOperation(
+                "The attached installed node does not expose direct PrintPacket rendering."
+            )
+        }
+        return try await runtime.validatePrintPacket(packet)
+    }
+
+    func enqueuePrintPacket(_ request: PiqaePrintPacketSubmissionRequest) async throws
+        -> PiqaePrintPacketSubmission
+    {
+        try requireStarted()
+        guard selectedIPC == nil, let runtime = configuration.embeddedRuntime else {
+            throw PiqaeNodeError.unsupportedOperation(
+                "The attached installed node does not expose direct PrintPacket rendering."
+            )
+        }
+        guard let printer = snapshotValue.printers.first(where: { $0.id == request.printerID }) else {
+            throw PiqaeNodeError.printerNotFound(request.printerID)
+        }
+        guard printer.adapterID == request.adapterID else {
+            throw PiqaeNodeError.adapterUnavailable(request.adapterID)
+        }
+        let submission = try await runtime.enqueuePrintPacket(request)
+        let handoff = PiqaePendingHandoff(
+            payloadIsDurable: true,
+            estimatedSecondsToNativeAcceptance: 10
+        )
+        switch admissionPolicy.evaluate(
+            handoff,
+            context: effectiveExecutionContext,
+            availability: snapshotValue.availability
+        ) {
+        case .admit, .finishAlreadyStarted:
+            _ = try await drainAdapter(request.adapterID, runtime: runtime)
+        case .deferUntilForeground:
+            break
+        }
+        return submission
     }
 
     func printers() throws -> [PiqaePrinter] {
