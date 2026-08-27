@@ -1,5 +1,4 @@
 export const PRINTPACKET_V1 = "printpacket/v1" as const;
-export const LEGACY_PIQAE_DOCUMENT_V1 = "piqae.business-document/v1" as const;
 export const PDF_BASE14_V1 = "printpacket.pdf-base14/v1" as const;
 export const CONFORMANCE_CORE_V1 = "printpacket.conformance/core-v1" as const;
 
@@ -57,7 +56,7 @@ export type Media =
   | { kind: "label"; width_mm: number; height_mm: number; margins?: Edges };
 export type Edges = { top_mm: number; right_mm: number; bottom_mm: number; left_mm: number };
 export type PrintPacketV1 = {
-  format: typeof PRINTPACKET_V1 | typeof LEGACY_PIQAE_DOCUMENT_V1;
+  format: typeof PRINTPACKET_V1;
   media: Media;
   theme?: { font_size_pt?: number; line_height?: number; text_color?: { red: number; green: number; blue: number } };
   resources?: Record<string, { type: "image"; digest: `sha256:${string}`; media_type: "image/jpeg"; byte_length: number }>;
@@ -83,8 +82,8 @@ export type TemplateManifest = {
 export function definePacket<const T extends PrintPacketV1>(packet: T): T { return packet; }
 export function defineData<const T extends JsonObject>(data: T): T { return data; }
 
-export function normalizeFormat(format: PrintPacketV1["format"]): typeof PRINTPACKET_V1 {
-  if (format !== PRINTPACKET_V1 && format !== LEGACY_PIQAE_DOCUMENT_V1) throw new Error("Unsupported PrintPacket format");
+export function normalizeFormat(format: string): typeof PRINTPACKET_V1 {
+  if (format !== PRINTPACKET_V1) throw new Error("Unsupported PrintPacket format");
   return PRINTPACKET_V1;
 }
 
@@ -129,16 +128,110 @@ export function requiredFeatures(packet: PrintPacketV1): Feature[] {
       if (node.type === "table") walk(node.empty ?? []);
     }
   };
-  walk(packet.body);
+  walk([
+    ...(packet.header?.first ?? []),
+    ...(packet.header?.default ?? []),
+    ...packet.body,
+    ...(packet.footer?.default ?? []),
+    ...(packet.footer?.last ?? [])
+  ]);
   return [...features].sort();
 }
 
-function sortedJson(value: JsonValue): JsonValue {
-  if (Array.isArray(value)) return value.map(sortedJson);
-  if (value !== null && typeof value === "object") return Object.fromEntries(Object.keys(value).sort().map((key) => [key, sortedJson(value[key] as JsonValue)]));
-  return value;
+const encoder = new TextEncoder();
+const decoder = new TextDecoder();
+const MAX_CANONICAL_DATA_BYTES = 4 * 1024 * 1024;
+const MAX_CANONICAL_DATA_DEPTH = 128;
+
+function scalarAt(value: string, index: number): readonly [number, number] {
+    const first = value.charCodeAt(index);
+    if (first >= 0xd800 && first <= 0xdbff) {
+      const second = value.charCodeAt(index + 1);
+      if (!(second >= 0xdc00 && second <= 0xdfff)) throw new Error("PrintPacket strings must contain valid Unicode scalar values");
+      return [0x10000 + ((first - 0xd800) << 10) + (second - 0xdc00), index + 2];
+    }
+    if (first >= 0xdc00 && first <= 0xdfff) throw new Error("PrintPacket strings must contain valid Unicode scalar values");
+    return [first, index + 1];
 }
-export function canonicalData(data: JsonObject): string { return JSON.stringify(sortedJson(data)); }
+
+function utf8Length(value: string): number {
+  let length = 0;
+  for (let index = 0; index < value.length;) {
+    const [scalar, next] = scalarAt(value, index);
+    length += scalar <= 0x7f ? 1 : scalar <= 0x7ff ? 2 : scalar <= 0xffff ? 3 : 4;
+    index = next;
+  }
+  return length;
+}
+
+function compareUtf8(left: string, right: string): number {
+  let leftIndex = 0;
+  let rightIndex = 0;
+  while (leftIndex < left.length && rightIndex < right.length) {
+    const [leftScalar, leftNext] = scalarAt(left, leftIndex);
+    const [rightScalar, rightNext] = scalarAt(right, rightIndex);
+    const difference = leftScalar - rightScalar;
+    if (difference !== 0) return difference;
+    leftIndex = leftNext;
+    rightIndex = rightNext;
+  }
+  return (left.length - leftIndex) - (right.length - rightIndex);
+}
+
+function canonicalNumber(value: number): string {
+  if (!Number.isFinite(value)) throw new Error("PrintPacket data numbers must be finite");
+  if (Number.isInteger(value) && Math.abs(value) > Number.MAX_SAFE_INTEGER) {
+    throw new Error("PrintPacket integral data numbers must be JavaScript-safe integers");
+  }
+  const normalized = Object.is(value, -0) ? 0 : value;
+  const buffer = new ArrayBuffer(8);
+  new DataView(buffer).setFloat64(0, normalized, false);
+  return [...new Uint8Array(buffer)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+/**
+ * Produce the versioned, typed PrintPacket data encoding used in render cache
+ * identities. It is deliberately not JSON text: binary64 number bits and
+ * UTF-8 key ordering make the result identical in Rust and JavaScript.
+ */
+export function canonicalDataBytes(data: JsonObject): Uint8Array {
+  const chunks: string[] = ["printpacket.canonical-data/v1\0"];
+  let bytes = encoder.encode(chunks[0] ?? "").byteLength;
+  const push = (value: string, encodedLength = utf8Length(value)): void => {
+    bytes += encodedLength;
+    if (bytes > MAX_CANONICAL_DATA_BYTES) throw new Error("PrintPacket canonical data exceeds 4 MiB");
+    chunks.push(value);
+  };
+  const string = (value: string): void => {
+    const length = utf8Length(value);
+    push(`s${length}:${value}`, 2 + String(length).length + length);
+  };
+  const visit = (value: JsonValue, depth: number): void => {
+    if (depth > MAX_CANONICAL_DATA_DEPTH) throw new Error("PrintPacket data exceeds 128 levels");
+    if (value === null) { push("n"); return; }
+    if (value === false) { push("f"); return; }
+    if (value === true) { push("t"); return; }
+    if (typeof value === "string") { string(value); return; }
+    if (typeof value === "number") { push(`d${canonicalNumber(value)}`); return; }
+    if (Array.isArray(value)) {
+      push(`a${value.length}:`);
+      for (const item of value) visit(item, depth + 1);
+      return;
+    }
+    const keys = Object.keys(value).sort(compareUtf8);
+    push(`o${keys.length}:`);
+    for (const key of keys) {
+      string(key);
+      visit(value[key] as JsonValue, depth + 1);
+    }
+  };
+  visit(data, 0);
+  return encoder.encode(chunks.join(""));
+}
+
+export function canonicalData(data: JsonObject): string {
+  return decoder.decode(canonicalDataBytes(data));
+}
 function hex(bytes: ArrayBuffer): string { return [...new Uint8Array(bytes)].map((byte) => byte.toString(16).padStart(2, "0")).join(""); }
 function canonicalTarget(target: OutputTarget): string {
   return target.kind === "pdf"
@@ -146,6 +239,10 @@ function canonicalTarget(target: OutputTarget): string {
     : JSON.stringify({ kind: target.kind, language: target.language, profile: target.profile, dpi: target.dpi, printable_width_dots: target.printable_width_dots });
 }
 export async function renderCacheKey(manifest: TemplateManifest, data: JsonObject, target: OutputTarget = { kind: "pdf", profile: PDF_BASE14_V1 }): Promise<string> {
-  const input = `printpacket.render-cache/v1\0${manifest.canonical_sha256}\0${CONFORMANCE_CORE_V1}\0${canonicalTarget(target)}\0${canonicalData(data)}`;
-  return hex(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(input)));
+  const prefix = encoder.encode(`printpacket.render-cache/v1\0${manifest.canonical_sha256}\0${CONFORMANCE_CORE_V1}\0${canonicalTarget(target)}\0`);
+  const dataBytes = canonicalDataBytes(data);
+  const input = new Uint8Array(prefix.byteLength + dataBytes.byteLength);
+  input.set(prefix);
+  input.set(dataBytes, prefix.byteLength);
+  return hex(await crypto.subtle.digest("SHA-256", input));
 }

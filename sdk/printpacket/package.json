@@ -16,8 +16,8 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "check": "tsc --noEmit",
-    "generate": "node scripts/sync-schema.mjs",
-    "generate:check": "node scripts/sync-schema.mjs --check",
+    "generate": "node scripts/sync-schema.mjs && node scripts/sync-license.mjs",
+    "generate:check": "node scripts/sync-schema.mjs --check && node scripts/sync-license.mjs --check",
     "test": "vitest run",
     "prepack": "pnpm generate:check && pnpm build"
   },

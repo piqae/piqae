@@ -14,8 +14,36 @@ describe("PrintPacket developer contract", () => {
     expect(PDF_BASE14_V1).toBe("printpacket.pdf-base14/v1");
   });
 
+  it("negotiates features used only in page regions", () => {
+    const packet = definePacket({
+      format: "printpacket/v1",
+      media: { kind: "paged", size: "a4" },
+      header: {
+        first: [{ type: "qr", value: { type: "literal", value: "first" }, size_mm: 12 }],
+        default: [{ type: "grid", columns: [1], children: [] }]
+      },
+      body: [],
+      footer: {
+        default: [{ type: "barcode", value: { type: "literal", value: "ABC" }, symbology: "code128", width_mm: 30, height_mm: 10 }],
+        last: [{ type: "keep_together", children: [] }]
+      }
+    });
+    expect(requiredFeatures(packet)).toEqual(expect.arrayContaining([
+      "layout_regions", "layout_grid", "layout_keep_together", "barcode_qr", "barcode_code128"
+    ]));
+  });
+
   it("canonicalizes data independently of object insertion order", () => {
     expect(canonicalData({ b: 2, a: { d: 4, c: 3 } })).toBe(canonicalData({ a: { c: 3, d: 4 }, b: 2 }));
+  });
+
+  it("canonicalizes binary64 numbers and UTF-8 keys without runtime spelling", () => {
+    const canonical = canonicalData({ "\u{10000}": -0, "\ue000": 1.5 });
+    expect(canonical).toContain("d0000000000000000");
+    expect(canonical).toContain("d3ff8000000000000");
+    expect(canonical.indexOf("\ue000")).toBeLessThan(canonical.indexOf("\u{10000}"));
+    expect(() => canonicalData({ unsafe: 9_007_199_254_740_992 })).toThrow("safe integers");
+    expect(() => canonicalData({ invalid: "\ud800" })).toThrow("Unicode scalar");
   });
 
   it("matches the Rust reference receipt cache identity", async () => {
@@ -31,7 +59,7 @@ describe("PrintPacket developer contract", () => {
     }, {
       lines: [{ name: "Flat white", total: "$5.50" }, { name: "Bagel", total: "$8.00" }],
       receipt_url: "https://example.invalid/r/R-1042"
-    })).resolves.toBe("511ba47dd2e29e4df9c5d116ae58f6c3fa5ebc0ec1feb06c9430b78743f1dc19");
+    })).resolves.toBe("67ee0fdf2f856773a6fd7ef05af4823ac98884db695ea2073fe4b5be07a09eb9");
   });
 
   it("rejects excessive nesting before an API or SDK call", () => {
