@@ -82,7 +82,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, OnceLock,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Duration,
 };
@@ -276,6 +276,7 @@ struct SharedRuntimeExecutor {
     runtime: Arc<Mutex<RuntimeExecutor>>,
     coordinator: Arc<Mutex<route_coordinator::RouteCoordinator>>,
     observation_cache: Arc<Mutex<RouteObservationCache>>,
+    native_binding_session: Arc<PrinterNativeBindingSession>,
     connector_id: String,
 }
 
@@ -501,6 +502,7 @@ impl SharedRuntimeExecutor {
             runtime: Arc::clone(&self.runtime),
             coordinator: Arc::clone(&self.coordinator),
             observation_cache: Arc::clone(&self.observation_cache),
+            native_binding_session: Arc::clone(&self.native_binding_session),
             connector_id: connector_id.into(),
         }
     }
@@ -620,6 +622,8 @@ enum PrinterDiscovery {
     Disabled,
     Fake,
     Process(SupervisedExecutor),
+    #[cfg(test)]
+    Failing,
 }
 
 impl RuntimeExecutor {
@@ -687,6 +691,8 @@ impl PrinterDiscovery {
         match self {
             Self::Disabled => Ok(piqae_domain::PrinterState::Unknown),
             Self::Fake => Ok(piqae_domain::PrinterState::Online),
+            #[cfg(test)]
+            Self::Failing => anyhow::bail!("fixture printer discovery failed"),
             Self::Process(executor) => match executor
                 .execute_operation(
                     ExecutorOperation::GetPrinterState {
@@ -709,6 +715,8 @@ impl PrinterDiscovery {
     ) -> Result<Vec<piqae_protocol::executor::NativeQueueJob>> {
         match self {
             Self::Disabled | Self::Fake => Ok(Vec::new()),
+            #[cfg(test)]
+            Self::Failing => anyhow::bail!("fixture printer discovery failed"),
             Self::Process(executor) => match executor
                 .execute_operation(
                     ExecutorOperation::ListJobs {
@@ -850,7 +858,7 @@ async fn main() -> Result<()> {
     )?;
     let _ = node_runtime.apply_lifecycle(LifecycleEvent::Started);
     let database_path = arguments.data_dir.join("agent.sqlite3");
-    let store = AgentStore::open(&database_path)
+    let mut store = AgentStore::open(&database_path)
         .with_context(|| format!("open {}", database_path.display()))?;
     if !store.integrity_check()? {
         anyhow::bail!("agent database integrity check failed");
@@ -871,6 +879,17 @@ async fn main() -> Result<()> {
         pinned_digest_hex: arguments.support_pack_digests.clone(),
         ed25519_public_key_hex: arguments.support_pack_trust_keys.clone(),
     }).context("load trusted driver support packs")?);
+    let native_binding_session = Arc::new(PrinterNativeBindingSession::new());
+    if let Err(error) = persist_printer_native_binding_envelope(
+        &mut store,
+        &native_binding_session,
+        native_binding_session.current_generation(),
+        &[],
+    ) {
+        // The in-memory process-session mismatch still quarantines any prior
+        // envelope. A binding-specific write fault must not disable PDF sync.
+        warn!(%error, "prior printer-native binding evidence could not be quarantined on startup");
+    }
 
     let challenge = load_or_create_private_token(&arguments.data_dir.join("local.token"))?;
     let content_store = ContentStore::open(arguments.data_dir.join("content")).await?;
@@ -903,6 +922,7 @@ async fn main() -> Result<()> {
         runtime: Arc::new(Mutex::new(executor)),
         coordinator: Arc::new(Mutex::new(route_coordinator)),
         observation_cache: Arc::new(Mutex::new(RouteObservationCache::default())),
+        native_binding_session,
         connector_id: "local".into(),
     };
     let engine = AgentEngine::new(store, executor.clone(), SystemClock);
@@ -959,6 +979,7 @@ async fn main() -> Result<()> {
             printer_discovery.clone(),
             Arc::clone(&executor.coordinator),
             Arc::clone(&executor.observation_cache),
+            Arc::clone(&executor.native_binding_session),
             Arc::clone(&support_packs),
             Arc::clone(&connection),
             Arc::clone(&paused),
@@ -2884,6 +2905,7 @@ async fn start_connector_worker(
     let connector_executor = executor.for_connector(record.connector_id.clone());
     let route_coordinator = Arc::clone(&executor.coordinator);
     let observation_cache = Arc::clone(&executor.observation_cache);
+    let native_binding_session = Arc::clone(&executor.native_binding_session);
     let scheduler = tokio::spawn(connector_scheduler_loop(
         record.connector_id.clone(),
         AgentEngine::new(store, connector_executor, SystemClock),
@@ -2904,6 +2926,7 @@ async fn start_connector_worker(
         printer_discovery,
         route_coordinator,
         observation_cache,
+        native_binding_session,
         support_packs,
         Arc::clone(&connector_connection),
         paused,
@@ -3115,20 +3138,30 @@ async fn handle_control_request(
             }
             let _ = respond_to.send(result);
         }
-        ControlRequest::Printers { respond_to } => match refresh_local_printers(engine).await {
-            Ok(printers) => {
-                if let Err(error) =
-                    connector_supervisor.try_send(ConnectorSupervisorCommand::RefreshPrinters)
-                {
-                    reject_connector_supervisor_command(error);
+        ControlRequest::Printers { respond_to } => {
+            let native_binding_session = Arc::clone(&engine.executor_mut().native_binding_session);
+            let _native_binding_refresh = native_binding_session.refresh_lock.lock().await;
+            let generation = native_binding_session.begin_refresh();
+            withdraw_printer_native_bindings(
+                engine.store_mut(),
+                &native_binding_session,
+                generation,
+            );
+            match refresh_local_printers(engine).await {
+                Ok(printers) => {
+                    if let Err(error) =
+                        connector_supervisor.try_send(ConnectorSupervisorCommand::RefreshPrinters)
+                    {
+                        reject_connector_supervisor_command(error);
+                    }
+                    let _ = respond_to.send(printers);
                 }
-                let _ = respond_to.send(printers);
+                Err(error) => {
+                    warn!(code = %error.code, message = %error.message, "printer discovery failed");
+                    let _ = respond_to.send(Vec::new());
+                }
             }
-            Err(error) => {
-                warn!(code = %error.code, message = %error.message, "printer discovery failed");
-                let _ = respond_to.send(Vec::new());
-            }
-        },
+        }
         ControlRequest::SetPrinterExposure {
             printer_id,
             exposed,
@@ -4494,6 +4527,7 @@ fn inventory_projection_confirmed(
 struct InstalledConnectorStores {
     queue: AgentStore,
     inventory: AgentStore,
+    native_binding_session: Arc<PrinterNativeBindingSession>,
 }
 
 #[derive(Clone)]
@@ -4527,7 +4561,11 @@ impl InventorySnapshotProvider for InstalledInventoryAdapter {
     async fn snapshot(&mut self, refresh: bool) -> Result<AgentSyncRequest, CloudWorkerError> {
         let refresh = refresh || self.inventory_dirty.swap(false, Ordering::AcqRel);
         let mut stores = self.stores.lock().await;
-        let InstalledConnectorStores { queue, inventory } = &mut *stores;
+        let InstalledConnectorStores {
+            queue,
+            inventory,
+            native_binding_session,
+        } = &mut *stores;
         prepare_sync_request(
             queue,
             inventory,
@@ -4542,6 +4580,7 @@ impl InventorySnapshotProvider for InstalledInventoryAdapter {
             refresh,
             self.allowed_printer_ids.as_ref(),
             &self.node_runtime,
+            native_binding_session,
         )
         .await
         .map_err(|_| CloudWorkerError::new("inventory_snapshot_failed"))
@@ -4975,23 +5014,13 @@ async fn materialize_installed_offer(
         if !printer.present {
             return Err(CloudWorkerError::new("printer_not_present"));
         }
-        if offer.job.content_kind == ContentKind::Raw {
-            let bindings = stores
-                .inventory
-                .setting(PRINTER_NATIVE_BINDINGS_SETTING)
-                .map_err(|_| CloudWorkerError::new("printer_native_binding_unavailable"))?
-                .map(|encoded| {
-                    serde_json::from_str::<Vec<LocalPrinterNativeBinding>>(&encoded)
-                        .map_err(|_| CloudWorkerError::new("printer_native_binding_unavailable"))
-                })
-                .transpose()?
-                .unwrap_or_default();
-            if !bindings.iter().any(|binding| {
-                printer_native_offer_matches(&offer.job.metadata, &logical_printer_id, binding)
-            }) {
-                return Err(CloudWorkerError::new("printer_native_binding_stale"));
-            }
-        }
+        validate_current_printer_native_offer(
+            offer.job.content_kind,
+            &stores.inventory,
+            &stores.native_binding_session,
+            &offer.job.metadata,
+            &logical_printer_id,
+        )?;
         let mut uses_current_printer_defaults = false;
         if let Some(pin) = &profile_pin {
             let profile = stores
@@ -5059,6 +5088,7 @@ async fn cloud_sync_loop(
     printer_discovery: PrinterDiscovery,
     route_coordinator: Arc<Mutex<route_coordinator::RouteCoordinator>>,
     observation_cache: Arc<Mutex<RouteObservationCache>>,
+    native_binding_session: Arc<PrinterNativeBindingSession>,
     support_packs: Arc<SupportPackRegistry>,
     connection: Arc<RwLock<ConnectionState>>,
     paused: Arc<AtomicBool>,
@@ -5099,6 +5129,7 @@ async fn cloud_sync_loop(
         printer_discovery,
         route_coordinator,
         observation_cache,
+        native_binding_session,
         support_packs,
         connection,
         paused,
@@ -5126,6 +5157,7 @@ async fn run_cloud_sync_loop(
     printer_discovery: PrinterDiscovery,
     route_coordinator: Arc<Mutex<route_coordinator::RouteCoordinator>>,
     observation_cache: Arc<Mutex<RouteObservationCache>>,
+    native_binding_session: Arc<PrinterNativeBindingSession>,
     support_packs: Arc<SupportPackRegistry>,
     connection: Arc<RwLock<ConnectionState>>,
     paused: Arc<AtomicBool>,
@@ -5174,6 +5206,7 @@ async fn run_cloud_sync_loop(
     let stores = Arc::new(Mutex::new(InstalledConnectorStores {
         queue: store,
         inventory: inventory_store,
+        native_binding_session,
     }));
     let started_at = Utc::now();
     let authority = AgentClientAuthority::new(cloud.client.clone(), Arc::clone(&cloud.identity));
@@ -5405,6 +5438,73 @@ fn sweep_confidential_files(store: &AgentStore) {
 
 #[allow(
     clippy::too_many_arguments,
+    reason = "native binding publication spans the connector revision and shared node inventory stores"
+)]
+async fn refresh_cloud_printer_inventory(
+    store: &mut AgentStore,
+    inventory_store: &mut AgentStore,
+    printer_discovery: &PrinterDiscovery,
+    route_coordinator: &Arc<Mutex<route_coordinator::RouteCoordinator>>,
+    support_packs: &SupportPackRegistry,
+    inventory_revision: &mut u64,
+    allowed_printer_ids: Option<&std::collections::BTreeSet<String>>,
+    native_binding_session: &PrinterNativeBindingSession,
+) -> Result<Option<Vec<PrinterSnapshot>>> {
+    let _native_binding_refresh = native_binding_session.refresh_lock.lock().await;
+    let next = inventory_revision.saturating_add(1);
+    // Advancing before discovery immediately invalidates the prior envelope,
+    // including when the withdrawal write itself fails.
+    let native_binding_generation = native_binding_session.begin_refresh();
+    let discovery = discover_cloud_printers(
+        inventory_store,
+        printer_discovery,
+        route_coordinator,
+        support_packs,
+        next,
+    )
+    .await;
+    let (mut printers, native_bindings) = match discovery {
+        Ok(discovery) => discovery,
+        Err(error) => {
+            warn!(%error, "native printer inventory refresh failed");
+            withdraw_printer_native_bindings(
+                inventory_store,
+                native_binding_session,
+                native_binding_generation,
+            );
+            return Ok(None);
+        }
+    };
+    printers.retain(|printer| printer_is_allowed(allowed_printer_ids, &printer.id.to_string()));
+    if let Err(error) = store.set_setting("printer_inventory_revision", &next.to_string()) {
+        withdraw_printer_native_bindings(
+            inventory_store,
+            native_binding_session,
+            native_binding_generation,
+        );
+        return Err(error.into());
+    }
+    *inventory_revision = next;
+    if let Err(error) = persist_printer_native_binding_envelope(
+        inventory_store,
+        native_binding_session,
+        native_binding_generation,
+        &native_bindings,
+    ) {
+        // Printer inventory/PDF operation remains usable. Native output stays
+        // withdrawn until a later complete refresh.
+        warn!(%error, "fresh printer-native binding evidence could not be persisted");
+        withdraw_printer_native_bindings(
+            inventory_store,
+            native_binding_session,
+            native_binding_generation,
+        );
+    }
+    Ok(Some(printers))
+}
+
+#[allow(
+    clippy::too_many_arguments,
     reason = "queue and node-inventory stores are separate connector security boundaries"
 )]
 async fn prepare_sync_request(
@@ -5421,39 +5521,24 @@ async fn prepare_sync_request(
     refresh_printers: bool,
     allowed_printer_ids: Option<&std::collections::BTreeSet<String>>,
     node_runtime: &NodeRuntime,
+    native_binding_session: &PrinterNativeBindingSession,
 ) -> Result<AgentSyncRequest> {
     let mut inventory_revision = store
         .setting("printer_inventory_revision")?
         .and_then(|revision| revision.parse::<u64>().ok())
         .unwrap_or(0);
     let printers = if refresh_printers {
-        let next = inventory_revision.saturating_add(1);
-        match discover_cloud_printers(
+        refresh_cloud_printer_inventory(
+            store,
             inventory_store,
             printer_discovery,
             route_coordinator,
             support_packs,
-            next,
+            &mut inventory_revision,
+            allowed_printer_ids,
+            native_binding_session,
         )
-        .await
-        {
-            Ok((mut printers, native_bindings)) => {
-                printers.retain(|printer| {
-                    printer_is_allowed(allowed_printer_ids, &printer.id.to_string())
-                });
-                inventory_store.set_setting(
-                    PRINTER_NATIVE_BINDINGS_SETTING,
-                    &serde_json::to_string(&native_bindings)?,
-                )?;
-                store.set_setting("printer_inventory_revision", &next.to_string())?;
-                inventory_revision = next;
-                Some(printers)
-            }
-            Err(error) => {
-                warn!(%error, "native printer inventory refresh failed");
-                None
-            }
-        }
+        .await?
     } else {
         None
     };
@@ -5483,11 +5568,7 @@ async fn prepare_sync_request(
         )
     };
     let mut request = sync_request(store, agent_id, started_at, paused, printers)?;
-    let native_bindings = inventory_store
-        .setting(PRINTER_NATIVE_BINDINGS_SETTING)?
-        .map(|encoded| serde_json::from_str::<Vec<LocalPrinterNativeBinding>>(&encoded))
-        .transpose()?
-        .unwrap_or_default()
+    let native_bindings = current_printer_native_bindings(inventory_store, native_binding_session)
         .into_iter()
         .filter(|binding| printer_is_allowed(allowed_printer_ids, &binding.printer_id))
         .collect::<Vec<_>>();
@@ -6281,6 +6362,52 @@ fn print_packet_feature_id(feature: &printpacket::Feature) -> String {
 }
 
 const PRINTER_NATIVE_BINDINGS_SETTING: &str = "printer_native_bindings_v2";
+const PRINTER_NATIVE_BINDING_ENVELOPE_VERSION: u8 = 1;
+
+#[derive(Debug)]
+struct PrinterNativeBindingSession {
+    process_session_id: String,
+    generation: AtomicU64,
+    refresh_lock: Mutex<()>,
+}
+
+impl PrinterNativeBindingSession {
+    fn new() -> Self {
+        Self {
+            process_session_id: uuid::Uuid::new_v4().simple().to_string(),
+            generation: AtomicU64::new(0),
+            refresh_lock: Mutex::new(()),
+        }
+    }
+
+    #[cfg(test)]
+    fn fixture(process_session_id: &str) -> Self {
+        Self {
+            process_session_id: process_session_id.to_owned(),
+            generation: AtomicU64::new(0),
+            refresh_lock: Mutex::new(()),
+        }
+    }
+
+    fn begin_refresh(&self) -> u64 {
+        self.generation
+            .fetch_add(1, Ordering::AcqRel)
+            .saturating_add(1)
+    }
+
+    fn current_generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
+    }
+}
+
+#[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct LocalPrinterNativeBindingEnvelope {
+    version: u8,
+    process_session_id: String,
+    generation: u64,
+    bindings: Vec<LocalPrinterNativeBinding>,
+}
 
 #[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
 #[serde(deny_unknown_fields)]
@@ -6288,6 +6415,82 @@ struct LocalPrinterNativeBinding {
     printer_id: String,
     output_profile_id: String,
     language_profile: piqae_protocol::agent::PrinterNativeLanguageProfile,
+}
+
+fn persist_printer_native_binding_envelope(
+    store: &mut AgentStore,
+    session: &PrinterNativeBindingSession,
+    generation: u64,
+    bindings: &[LocalPrinterNativeBinding],
+) -> Result<()> {
+    let envelope = LocalPrinterNativeBindingEnvelope {
+        version: PRINTER_NATIVE_BINDING_ENVELOPE_VERSION,
+        process_session_id: session.process_session_id.clone(),
+        generation,
+        bindings: bindings.to_vec(),
+    };
+    store.set_setting(
+        PRINTER_NATIVE_BINDINGS_SETTING,
+        &serde_json::to_string(&envelope)?,
+    )?;
+    Ok(())
+}
+
+fn current_printer_native_bindings(
+    store: &AgentStore,
+    session: &PrinterNativeBindingSession,
+) -> Vec<LocalPrinterNativeBinding> {
+    let envelope = match store.setting(PRINTER_NATIVE_BINDINGS_SETTING) {
+        Ok(Some(encoded)) => serde_json::from_str::<LocalPrinterNativeBindingEnvelope>(&encoded),
+        Ok(None) => return Vec::new(),
+        Err(error) => {
+            warn!(%error, "printer-native binding evidence could not be read; withdrawing native output");
+            return Vec::new();
+        }
+    };
+    let Ok(envelope) = envelope else {
+        warn!("printer-native binding evidence was invalid; withdrawing native output");
+        return Vec::new();
+    };
+    if envelope.version != PRINTER_NATIVE_BINDING_ENVELOPE_VERSION
+        || envelope.process_session_id != session.process_session_id
+        || envelope.generation != session.current_generation()
+    {
+        return Vec::new();
+    }
+    envelope.bindings
+}
+
+fn withdraw_printer_native_bindings(
+    store: &mut AgentStore,
+    session: &PrinterNativeBindingSession,
+    generation: u64,
+) {
+    if let Err(error) = persist_printer_native_binding_envelope(store, session, generation, &[]) {
+        // Generation advances in memory before discovery starts, so even a
+        // failed quarantine write cannot make the previous envelope current.
+        warn!(%error, "printer-native binding evidence could not be durably withdrawn");
+    }
+}
+
+fn validate_current_printer_native_offer(
+    content_kind: ContentKind,
+    store: &AgentStore,
+    session: &PrinterNativeBindingSession,
+    metadata: &std::collections::BTreeMap<String, String>,
+    printer_id: &str,
+) -> Result<(), CloudWorkerError> {
+    if content_kind != ContentKind::Raw {
+        return Ok(());
+    }
+    if current_printer_native_bindings(store, session)
+        .iter()
+        .any(|binding| printer_native_offer_matches(metadata, printer_id, binding))
+    {
+        Ok(())
+    } else {
+        Err(CloudWorkerError::new("printer_native_binding_stale"))
+    }
 }
 
 fn printer_native_offer_matches(
@@ -6737,6 +6940,8 @@ async fn run_printer_discovery(discovery: &PrinterDiscovery) -> Result<Vec<Disco
             driver_fingerprint: None,
             identity_evidence: Vec::new(),
         }],
+        #[cfg(test)]
+        PrinterDiscovery::Failing => anyhow::bail!("fixture printer discovery failed"),
         PrinterDiscovery::Process(executor) => match executor
             .execute_operation(
                 ExecutorOperation::DiscoverPrinters,
@@ -7514,6 +7719,7 @@ mod tests {
                     .expect("route coordinator"),
             )),
             observation_cache: Arc::new(Mutex::new(RouteObservationCache::default())),
+            native_binding_session: Arc::new(PrinterNativeBindingSession::new()),
             connector_id: "test".into(),
         };
         let node_runtime = Arc::new(
@@ -7992,9 +8198,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn stale_or_forged_printer_native_offer_is_rejected_against_local_binding() {
-        let binding = LocalPrinterNativeBinding {
+    fn test_printer_native_binding() -> LocalPrinterNativeBinding {
+        LocalPrinterNativeBinding {
             printer_id: "ptr_fixture".into(),
             output_profile_id: "escpos.example/v1".into(),
             language_profile: piqae_protocol::agent::PrinterNativeLanguageProfile {
@@ -8007,8 +8212,13 @@ mod tests {
                 support_pack_digest_sha256: "b".repeat(64),
                 printer_ids: vec!["ptr_fixture".into()],
             },
-        };
-        let mut metadata = std::collections::BTreeMap::from([
+        }
+    }
+
+    fn test_printer_native_metadata(
+        binding: &LocalPrinterNativeBinding,
+    ) -> std::collections::BTreeMap<String, String> {
+        std::collections::BTreeMap::from([
             (
                 "piqae.printer_native.output_profile".into(),
                 binding.output_profile_id.clone(),
@@ -8045,7 +8255,45 @@ mod tests {
                 "piqae.printer_native.printer_id".into(),
                 binding.printer_id.clone(),
             ),
-        ]);
+        ])
+    }
+
+    async fn sync_after_failing_printer_discovery(
+        inventory: &mut AgentStore,
+        native_binding_session: &PrinterNativeBindingSession,
+    ) -> AgentSyncRequest {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let coordinator = Arc::new(Mutex::new(
+            route_coordinator::RouteCoordinator::open(directory.path().join("routes"))
+                .expect("route coordinator"),
+        ));
+        let observation_cache = Arc::new(Mutex::new(RouteObservationCache::default()));
+        let node_runtime = test_node_runtime(directory.path());
+        let mut queue = AgentStore::in_memory().expect("queue");
+        prepare_sync_request(
+            &mut queue,
+            inventory,
+            &PrinterDiscovery::Failing,
+            &coordinator,
+            &observation_cache,
+            &SupportPackRegistry::default(),
+            "failing-discovery",
+            AgentId::new(),
+            Utc::now(),
+            false,
+            true,
+            None,
+            &node_runtime,
+            native_binding_session,
+        )
+        .await
+        .expect("PDF sync survives failed native discovery")
+    }
+
+    #[test]
+    fn stale_or_forged_printer_native_offer_is_rejected_against_local_binding() {
+        let binding = test_printer_native_binding();
+        let mut metadata = test_printer_native_metadata(&binding);
         assert!(printer_native_offer_matches(
             &metadata,
             "ptr_fixture",
@@ -8070,6 +8318,141 @@ mod tests {
             "ptr_fixture",
             &binding
         ));
+    }
+
+    #[tokio::test]
+    async fn stale_restart_binding_is_not_advertised_and_pdf_remains_available() {
+        let mut store = AgentStore::in_memory().expect("store");
+        let binding = test_printer_native_binding();
+        let metadata = test_printer_native_metadata(&binding);
+
+        let prior_process = PrinterNativeBindingSession::fixture("prior-process");
+        let prior_generation = prior_process.begin_refresh();
+        persist_printer_native_binding_envelope(
+            &mut store,
+            &prior_process,
+            prior_generation,
+            std::slice::from_ref(&binding),
+        )
+        .expect("persist stale prior-process binding");
+
+        let current_process = PrinterNativeBindingSession::fixture("current-process");
+        assert!(current_printer_native_bindings(&store, &current_process).is_empty());
+        let request = sync_after_failing_printer_discovery(&mut store, &current_process).await;
+        let packet = request
+            .document_render
+            .print_packet
+            .as_ref()
+            .expect("PrintPacket PDF capability");
+        assert!(packet.native_language_profiles.is_empty());
+        assert!(packet.output_profiles.iter().any(|profile| matches!(
+            profile,
+            piqae_protocol::agent::PrintPacketOutputProfile::Pdf { .. }
+        )));
+        assert!(
+            validate_current_printer_native_offer(
+                ContentKind::Raw,
+                &store,
+                &current_process,
+                &metadata,
+                "ptr_fixture",
+            )
+            .is_err()
+        );
+        assert!(
+            validate_current_printer_native_offer(
+                ContentKind::Pdf,
+                &store,
+                &current_process,
+                &metadata,
+                "ptr_fixture",
+            )
+            .is_ok(),
+            "stale native evidence must not disable PDF"
+        );
+    }
+
+    #[tokio::test]
+    async fn successful_refresh_restores_native_and_later_failure_withdraws_it() {
+        let mut store = AgentStore::in_memory().expect("store");
+        let binding = test_printer_native_binding();
+        let metadata = test_printer_native_metadata(&binding);
+        let current_process = PrinterNativeBindingSession::fixture("current-process");
+        let successful_generation = current_process.begin_refresh();
+        persist_printer_native_binding_envelope(
+            &mut store,
+            &current_process,
+            successful_generation,
+            std::slice::from_ref(&binding),
+        )
+        .expect("publish current successful discovery");
+        assert_eq!(
+            current_printer_native_bindings(&store, &current_process).len(),
+            1
+        );
+        let mut restored = sync_request(&store, AgentId::new(), Utc::now(), false, None)
+            .expect("restored sync request");
+        apply_printer_native_bindings(
+            &mut restored,
+            &current_printer_native_bindings(&store, &current_process),
+        );
+        assert_eq!(
+            restored
+                .document_render
+                .print_packet
+                .expect("PrintPacket capabilities")
+                .native_language_profiles
+                .len(),
+            1,
+            "a successful current-process discovery restores native advertisement"
+        );
+        assert!(
+            validate_current_printer_native_offer(
+                ContentKind::Raw,
+                &store,
+                &current_process,
+                &metadata,
+                "ptr_fixture",
+            )
+            .is_ok()
+        );
+
+        let failed_request =
+            sync_after_failing_printer_discovery(&mut store, &current_process).await;
+        assert!(
+            current_printer_native_bindings(&store, &current_process).is_empty(),
+            "beginning a later refresh must withdraw the prior generation before I/O"
+        );
+        let failed_packet = failed_request
+            .document_render
+            .print_packet
+            .expect("PDF remains advertised after failed native discovery");
+        assert!(failed_packet.native_language_profiles.is_empty());
+        assert!(failed_packet.output_profiles.iter().any(|profile| matches!(
+            profile,
+            piqae_protocol::agent::PrintPacketOutputProfile::Pdf { .. }
+        )));
+        assert!(
+            validate_current_printer_native_offer(
+                ContentKind::Raw,
+                &store,
+                &current_process,
+                &metadata,
+                "ptr_fixture",
+            )
+            .is_err(),
+            "a failed refresh must not retain the prior successful generation"
+        );
+        assert!(
+            validate_current_printer_native_offer(
+                ContentKind::Pdf,
+                &store,
+                &current_process,
+                &metadata,
+                "ptr_fixture",
+            )
+            .is_ok()
+        );
     }
 
     #[test]
@@ -8177,6 +8560,7 @@ mod tests {
         ));
         let observation_cache = Arc::new(Mutex::new(RouteObservationCache::default()));
         let node_runtime = test_node_runtime(coordinator_dir.path());
+        let native_binding_session = PrinterNativeBindingSession::fixture("connector-sync");
         // Initial discovery creates the node-owned stable printer identity.
         let initial = discover_cloud_printers(
             &mut node_inventory,
@@ -8211,6 +8595,7 @@ mod tests {
             true,
             None,
             &node_runtime,
+            &native_binding_session,
         )
         .await
         .expect("connector sync");
@@ -8256,6 +8641,7 @@ mod tests {
             true,
             Some(&selected),
             &node_runtime,
+            &native_binding_session,
         )
         .await
         .expect("selected connector sync");
@@ -8272,6 +8658,7 @@ mod tests {
         ));
         let observation_cache = Arc::new(Mutex::new(RouteObservationCache::default()));
         let node_runtime = test_node_runtime(directory.path());
+        let native_binding_session = PrinterNativeBindingSession::fixture("restart-sync");
         let expected_printer_id = {
             let mut node_inventory = AgentStore::open(&inventory_path).expect("node inventory");
             discover_cloud_printers(
@@ -8312,6 +8699,7 @@ mod tests {
                 true,
                 None,
                 &node_runtime,
+                &native_binding_session,
             )
             .await
             .expect("connector sync");

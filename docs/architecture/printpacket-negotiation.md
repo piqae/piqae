@@ -40,6 +40,10 @@ fingerprint, support-pack digest, and printer ID. The complete tuple must match
 the current authenticated report before reoffer and the node's latest local
 support-pack/driver evidence before content materialization. Capability drift
 or ID reuse therefore causes the server or node to withhold the offer.
+Persisted native evidence is quarantined at every node process start and before
+every inventory refresh. Only a complete successful discovery may atomically
+publish a process-session/generation-bound profile set; a failed refresh or
+binding-store fault withdraws RAW capability without disabling PDF delivery.
 
 Every API surface requires this binding for printer-native bytes. A generic RAW
 fallback is never substituted for a missing pinned profile.
