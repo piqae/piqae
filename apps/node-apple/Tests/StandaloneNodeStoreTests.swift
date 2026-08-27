@@ -181,6 +181,9 @@ final class StandaloneNodeStoreTests: XCTestCase {
         XCTAssertEqual(identity.displayName, "Kitchen iPad")
         XCTAssertEqual(store.load().labels, ["receipts", "labels"])
         XCTAssertEqual(store.identityRevision, 1)
+        XCTAssertFalse(store.isIdentityUpdatePending)
+        store.markIdentityUpdatePending(true)
+        XCTAssertTrue(store.isIdentityUpdatePending)
 
         let renamed = try PiqaeNodeIdentityConfiguration(
             displayName: "Kitchen pass iPad",
@@ -189,7 +192,9 @@ final class StandaloneNodeStoreTests: XCTestCase {
             labels: ["receipts"]
         )
         store.save(renamed, revision: 7)
+        store.markIdentityUpdatePending(false)
         XCTAssertEqual(store.identityRevision, 7)
+        XCTAssertFalse(store.isIdentityUpdatePending)
         XCTAssertEqual(store.load().name, "Kitchen pass iPad")
     }
 

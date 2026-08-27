@@ -115,6 +115,7 @@ final class StandaloneNodeModel: ObservableObject {
                     self?.snapshot = snapshot
                 }
             }
+            await reconcilePendingIdentityUpdate()
             await refreshAll()
         } catch {
             errorMessage = Self.message(error)
@@ -138,9 +139,11 @@ final class StandaloneNodeModel: ObservableObject {
                 identityRevision = updated.revision
                 identityConflictRevision = nil
                 store.save(updated.identity, revision: updated.revision)
+                store.markIdentityUpdatePending(false)
             } else {
                 try await runtime.updateEnrollmentNodeName(identity.displayName)
                 store.save(identity, revision: identityRevision)
+                store.markIdentityUpdatePending(true)
             }
             isOnboardingPresented = false
             notice = started
@@ -219,6 +222,32 @@ final class StandaloneNodeModel: ObservableObject {
 
     func handleBackgroundPush(collapseID: String) async -> Bool {
         await lifecycle.handleBackgroundPush(collapseID: collapseID) == .reconciled
+    }
+
+    private func reconcilePendingIdentityUpdate() async {
+        guard store.isIdentityUpdatePending else { return }
+        do {
+            let identity = try PiqaeNodeIdentityConfiguration(
+                displayName: settings.name,
+                site: settings.site,
+                location: settings.location,
+                labels: settings.labels
+            )
+            let updated = try await node.identity.update(.init(
+                expectedRevision: identityRevision,
+                identity: identity
+            ))
+            identityRevision = updated.revision
+            identityConflictRevision = nil
+            store.save(updated.identity, revision: updated.revision)
+            store.markIdentityUpdatePending(false)
+        } catch let PiqaeNativeRuntimeError.nodeIdentityRevisionConflict(currentRevision) {
+            identityRevision = currentRevision
+            identityConflictRevision = currentRevision
+            store.saveIdentityRevision(currentRevision)
+        } catch {
+            errorMessage = Self.message(error)
+        }
     }
 
     var visibleHistory: [PiqaeJobHistoryEntry] {
