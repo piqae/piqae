@@ -2742,6 +2742,7 @@ dependencies = [
  "piqae-protocol",
  "thiserror",
  "tokio",
+ "ulid",
  "uuid",
 ]
 
@@ -2764,6 +2765,7 @@ dependencies = [
 name = "piqae-fake-executor"
 version = "0.1.22"
 dependencies = [
+ "piqae-agent-core",
  "piqae-domain",
  "piqae-executor-protocol",
  "piqae-executor-supervisor",
