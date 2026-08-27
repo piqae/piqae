@@ -1395,6 +1395,7 @@ mod disconnect_compatibility_tests {
     use piqae_support_packs::SupportPackRegistry;
     use std::{
         collections::BTreeSet,
+        path::Path,
         sync::{Arc, Mutex},
         time::Duration,
     };
@@ -1654,6 +1655,41 @@ mod disconnect_compatibility_tests {
         assert!(!schedule.next_due.contains_key("removed"));
     }
 
+    fn prepare_pending_embedded_accept(root: &Path, connector_id: &str) {
+        let mut store = AgentStore::open(
+            root.join("connectors")
+                .join(connector_id)
+                .join("agent.sqlite3"),
+        )
+        .unwrap();
+        store
+            .prepare_cloud_job(
+                &AcceptedJob {
+                    job_id: JobId::new().to_string(),
+                    submission_id: "sub_upgrade".into(),
+                    printer_id: "prn_upgrade".into(),
+                    printer_native_id: "fake:upgrade".into(),
+                    title: "Upgrade fence".into(),
+                    content_sha256: "0".repeat(64),
+                    content_path: root.join("fixture.pdf").to_string_lossy().into(),
+                    content_kind: "pdf".into(),
+                    options_json: "{}".into(),
+                    expires_unix_ms: None,
+                    accepted_unix_ms: Utc::now().timestamp_millis(),
+                    cloud_managed: true,
+                },
+                &uuid::Uuid::new_v4().to_string(),
+                "redacted-lease-token",
+                Utc::now().timestamp_millis() + 60_000,
+                &CloudRouteProof {
+                    reservation_id: uuid::Uuid::new_v4().to_string(),
+                    generation: 1,
+                    fencing_token: "redacted-route-fence".into(),
+                },
+            )
+            .unwrap();
+    }
+
     #[tokio::test]
     async fn embedded_n_minus_one_disconnect_retains_registry_key_and_pending_queue() {
         let directory = tempfile::tempdir().unwrap();
@@ -1693,46 +1729,7 @@ mod disconnect_compatibility_tests {
         let mut queue =
             EmbeddedQueue::open(directory.path(), SupportPackRegistry::default()).unwrap();
         queue.ensure_connector_queue(connector_id).unwrap();
-        let job_id = JobId::new();
-        let mut store = AgentStore::open(
-            directory
-                .path()
-                .join("connectors")
-                .join(connector_id)
-                .join("agent.sqlite3"),
-        )
-        .unwrap();
-        store
-            .prepare_cloud_job(
-                &AcceptedJob {
-                    job_id: job_id.to_string(),
-                    submission_id: "sub_upgrade".into(),
-                    printer_id: "prn_upgrade".into(),
-                    printer_native_id: "fake:upgrade".into(),
-                    title: "Upgrade fence".into(),
-                    content_sha256: "0".repeat(64),
-                    content_path: directory
-                        .path()
-                        .join("fixture.pdf")
-                        .to_string_lossy()
-                        .into(),
-                    content_kind: "pdf".into(),
-                    options_json: "{}".into(),
-                    expires_unix_ms: None,
-                    accepted_unix_ms: Utc::now().timestamp_millis(),
-                    cloud_managed: true,
-                },
-                &uuid::Uuid::new_v4().to_string(),
-                "redacted-lease-token",
-                Utc::now().timestamp_millis() + 60_000,
-                &CloudRouteProof {
-                    reservation_id: uuid::Uuid::new_v4().to_string(),
-                    generation: 1,
-                    fencing_token: "redacted-route-fence".into(),
-                },
-            )
-            .unwrap();
-        drop(store);
+        prepare_pending_embedded_accept(directory.path(), connector_id);
         let queue = Arc::new(Mutex::new(queue));
         let provider: Arc<dyn SecureConnectorSigner> =
             Arc::new(TestSigner(SigningKey::from_bytes(&[9; 32])));
