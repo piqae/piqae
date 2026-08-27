@@ -423,6 +423,82 @@ pub struct DocumentRenderCapabilities {
     /// tenant/node sync and must never be exposed to another tenant.
     #[serde(default)]
     pub cached_resource_digests: Vec<String>,
+    /// Exact V2 print-packet capability intersection. Missing is an explicit
+    /// rolling-upgrade signal: the node is old/unsupported, even when legacy
+    /// renderer ABI strings happen to match.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub print_packet: Option<PrintPacketCapabilitiesV2>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PrintPacketCapabilitiesV2 {
+    pub negotiation_version: u16,
+    pub supported_packet_versions: Vec<String>,
+    pub feature_ids: Vec<String>,
+    pub conformance_profiles: Vec<String>,
+    pub output_profiles: Vec<PrintPacketOutputProfile>,
+    pub deterministic: bool,
+    pub limits: PrintPacketLimits,
+    pub resource_types: Vec<String>,
+    pub direct_offline: bool,
+    pub native_language_profiles: Vec<PrinterNativeLanguageProfile>,
+    /// Display-only diagnostic. Negotiation must use the exact facts above,
+    /// never ordering or assumptions derived from this value.
+    pub implementation_version: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PrintPacketLimits {
+    pub max_input_bytes: u64,
+    pub max_output_bytes: u64,
+    pub max_pages: u32,
+    pub max_resource_count: u32,
+    pub max_resource_bytes: u64,
+    pub max_total_resource_bytes: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PrintPacketOutputProfile {
+    Pdf {
+        id: String,
+        media_type: String,
+    },
+    PrinterNative {
+        id: String,
+        media_type: String,
+        language_profile_id: String,
+    },
+}
+
+impl PrintPacketOutputProfile {
+    #[must_use]
+    pub fn id(&self) -> &str {
+        match self {
+            Self::Pdf { id, .. } | Self::PrinterNative { id, .. } => id,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PrinterNativeLanguageProfile {
+    pub id: String,
+    pub language: String,
+    pub version: String,
+    pub media_type: String,
+    /// Public Piqae printer IDs for which this exact language/profile pair was
+    /// authenticated. A node-wide language claim is intentionally invalid.
+    pub printer_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PrinterNativeJobDescriptor {
+    pub output_profile_id: String,
+    pub language_profile_id: String,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -444,6 +520,16 @@ pub struct BusinessDocumentResourceDescriptor {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct BusinessDocumentNodeRender {
+    #[serde(default)]
+    pub negotiation_version: u16,
+    #[serde(default)]
+    pub packet_version: String,
+    #[serde(default)]
+    pub required_feature_ids: Vec<String>,
+    #[serde(default)]
+    pub conformance_profile: String,
+    #[serde(default)]
+    pub output_profile: String,
     pub renderer_abi: String,
     pub resource_abi: String,
     pub specification: serde_json::Value,

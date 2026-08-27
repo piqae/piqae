@@ -264,6 +264,10 @@
     };
   };
   const humanise = (value: string) => value.replaceAll('_', ' ');
+  const printPacketSummary = (node: (typeof data.agents)[number]) =>
+    node.printPacket?.status === 'ready'
+      ? `Ready${node.printPacket.implementationVersion ? ` · ${node.printPacket.implementationVersion}` : ''}`
+      : 'Node update required';
   const admissionSummary = (runtime: (typeof data.runtimeObservations)[number] | null) => {
     if (!runtime) return 'No runtime evidence';
     if (runtime.freshness === 'stale') return 'Blocked · stale observation';
@@ -795,6 +799,7 @@
           {#if aggregateCustomers}<th>Customer</th>{/if}
           <th>Runtime</th>
           <th>Cloud admission</th>
+          <th>PrintPacket</th>
           <th>Printers</th>
           <th>Privacy-safe queue</th>
           <th class="right">Last seen</th>
@@ -824,6 +829,11 @@
                 {admissionSummary(runtime)}
               </span>
             </td>
+            <td>
+              <span class:admission-ok={node.printPacket?.status === 'ready'} class="admission">
+                {printPacketSummary(node)}
+              </span>
+            </td>
             <td class="numeric">{node.printerCount}</td>
             <td>
               {#if queue}
@@ -838,7 +848,7 @@
             <td class="right muted numeric"><RelativeTime value={node.lastSeenAt} /></td>
           </tr>
         {:else}
-          <tr><td colspan={aggregateCustomers ? 7 : 6}><EmptyState message="No nodes match this view." compact /></td></tr>
+          <tr><td colspan={aggregateCustomers ? 8 : 7}><EmptyState message="No nodes match this view." compact /></td></tr>
         {/each}
       </tbody>
     </table>
@@ -1130,6 +1140,8 @@
         { term: 'Platform', value: `${detail.node.os} · ${detail.node.architecture}` },
         { term: 'Node version', value: `v${detail.node.version}`, mono: true },
         { term: 'Protocol', value: detail.node.protocolVersion, mono: true },
+        { term: 'PrintPacket', value: printPacketSummary(detail.node) },
+        { term: 'Direct offline', value: detail.node.printPacket?.directOffline ? 'Supported' : 'Not reported' },
         { term: 'Reported queue', value: runtimeQueue ? `${runtimeQueue.total} jobs · ${runtimeQueue.active} active` : 'Not reported' },
         { term: 'Site', value: detail.node.site ?? null },
         { term: 'Location', value: detail.node.location ?? null },

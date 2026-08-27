@@ -66,6 +66,7 @@ piqae-domain.workspace = true
 printpacket-renderer.workspace = true
 piqae-object-store = { path = "../object-store", version = "0.1.2" }
 piqae-protocol.workspace = true
+printpacket.workspace = true
 piqae-auth = { path = "../auth", version = "0.1.2" }
 piqae-storage-postgres = { path = "../storage-postgres", version = "0.1.2" }
 piqae-webhooks = { path = "../webhooks", version = "0.1.2" }

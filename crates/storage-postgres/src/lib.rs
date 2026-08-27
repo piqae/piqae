@@ -463,6 +463,7 @@ pub struct StoredAgent {
     pub sqlite_integrity_ok: Option<bool>,
     pub executor_crashes: u64,
     pub last_error_code: Option<String>,
+    pub document_render: piqae_protocol::agent::DocumentRenderCapabilities,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -3685,7 +3686,7 @@ impl PostgresStore {
             "SELECT id, name, identity_site, identity_location, identity_labels,
                     identity_revision, os, state, version, COALESCE(last_seen_at, created_at) AS last_seen_at,
                     health_started_at, health_observed_at, sqlite_integrity_ok,
-                    executor_crashes, last_error_code
+                    executor_crashes, last_error_code, document_render_capabilities
              FROM agents
              WHERE workspace_id = $1 AND environment_id = $2 AND revoked_at IS NULL
              ORDER BY created_at DESC, id DESC",
@@ -3707,7 +3708,7 @@ impl PostgresStore {
             "SELECT id, name, identity_site, identity_location, identity_labels,
                     identity_revision, os, state, version, COALESCE(last_seen_at, created_at) AS last_seen_at,
                     health_started_at, health_observed_at, sqlite_integrity_ok,
-                    executor_crashes, last_error_code
+                    executor_crashes, last_error_code, document_render_capabilities
              FROM agents
              WHERE id = $1 AND workspace_id = $2 AND environment_id = $3
                AND revoked_at IS NULL",
@@ -3741,7 +3742,7 @@ impl PostgresStore {
                        identity_revision, os, state, version,
                        COALESCE(last_seen_at, created_at) AS last_seen_at,
                        health_started_at, health_observed_at, sqlite_integrity_ok,
-                       executor_crashes, last_error_code",
+                       executor_crashes, last_error_code, document_render_capabilities",
         )
         .bind(agent_id.to_string())
         .bind(workspace_id.to_string())
@@ -11561,6 +11562,7 @@ fn agent_from_row(row: &PgRow) -> Result<StoredAgent, StorageError> {
         executor_crashes: u64::try_from(row.try_get::<i64, _>("executor_crashes")?)
             .map_err(|error| StorageError::InvalidData(format!("executor crash count: {error}")))?,
         last_error_code: row.try_get("last_error_code")?,
+        document_render: serde_json::from_value(row.try_get("document_render_capabilities")?)?,
     })
 }
 

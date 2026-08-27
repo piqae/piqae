@@ -322,6 +322,7 @@ export interface Agent {
   sqlite_integrity_ok?: boolean | null;
   executor_crashes?: number;
   last_error_code?: string | null;
+  document_render?: components['schemas']['DocumentRenderCapabilities'];
 }
 
 export interface UpdateNodeDetails {
@@ -752,7 +753,6 @@ export type JobContent =
 export interface CreateJobBase {
   title: string;
   source?: string | null;
-  content_type: 'pdf' | 'raw';
   content: JobContent;
   options?: JobOptions;
   deliveries?: number;
@@ -762,10 +762,19 @@ export interface CreateJobBase {
   resolved_ticket_digest?: string;
 }
 
+export interface PrinterNativeJobDescriptor {
+  output_profile_id: string;
+  language_profile_id: string;
+}
+
 export type CreateJob = CreateJobBase &
   (
     | { printer_id: PiqaeId; target_id?: never }
     | { target_id: PiqaeId; printer_id?: never }
+  ) &
+  (
+    | { content_type: 'pdf'; printer_native?: never }
+    | { content_type: 'raw'; printer_native: PrinterNativeJobDescriptor }
   );
 
 export interface Job {

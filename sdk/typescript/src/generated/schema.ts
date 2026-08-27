@@ -3361,6 +3361,59 @@ export interface components {
             image_media_types?: "image/jpeg"[];
             font_media_types?: string[];
             cached_resource_digests?: components["schemas"]["Sha256Hex"][];
+            /** @description Version 2 print-packet negotiation. Missing means the node predates print-packet negotiation and is treated as unsupported_old_node; legacy renderer fields never imply support for this contract. */
+            print_packet?: components["schemas"]["PrintPacketCapabilitiesV2"] | null;
+        };
+        PrintPacketCapabilitiesV2: {
+            /** @constant */
+            negotiation_version: 2;
+            supported_packet_versions: string[];
+            feature_ids: string[];
+            conformance_profiles: string[];
+            output_profiles: components["schemas"]["PrintPacketOutputProfile"][];
+            /** @description True only when the declared deterministic output profile is byte-stable. */
+            deterministic: boolean;
+            limits: components["schemas"]["PrintPacketLimits"];
+            resource_types: string[];
+            /** @description Diagnostic fact; it does not authorize cloud delivery or background execution. */
+            direct_offline: boolean;
+            native_language_profiles: components["schemas"]["PrinterNativeLanguageProfile"][];
+            /** @description Display-only implementation/build diagnostic; never used instead of exact capability intersection. */
+            implementation_version: string;
+        };
+        PrintPacketLimits: {
+            /** Format: int64 */
+            max_input_bytes: number;
+            /** Format: int64 */
+            max_output_bytes: number;
+            /** Format: int64 */
+            max_pages: number;
+            /** Format: int64 */
+            max_resource_count: number;
+            /** Format: int64 */
+            max_resource_bytes: number;
+            /** Format: int64 */
+            max_total_resource_bytes: number;
+        };
+        PrintPacketOutputProfile: {
+            id: string;
+            /** @constant */
+            kind: "pdf";
+            /** @constant */
+            media_type: "application/pdf";
+        } | {
+            id: string;
+            /** @constant */
+            kind: "printer_native";
+            media_type: string;
+            language_profile_id: string;
+        };
+        PrinterNativeLanguageProfile: {
+            id: string;
+            language: string;
+            version: string;
+            media_type: string;
+            printer_ids: string[];
         };
         AgentSyncResponse: {
             /** Format: date-time */
@@ -3434,6 +3487,15 @@ export interface components {
             policy: components["schemas"]["BusinessDocumentRenderPolicy"];
             render: {
                 /** @constant */
+                negotiation_version: 2;
+                /** @constant */
+                packet_version: "printpacket/v1";
+                required_feature_ids: string[];
+                /** @constant */
+                conformance_profile: "printpacket.conformance/core-v1";
+                /** @constant */
+                output_profile: "printpacket.pdf-base14/v1";
+                /** @constant */
                 renderer_abi: "piqae.business-document-pdf/v1";
                 /** @constant */
                 resource_abi: "piqae.document-resources/v1";
@@ -3445,6 +3507,8 @@ export interface components {
                 expected_pdf_sha256: components["schemas"]["Sha256Hex"];
                 /** Format: int64 */
                 expected_pdf_bytes: number;
+                /** Format: int64 */
+                expected_pages: number;
             };
             fallback: components["schemas"]["ContentDescriptor"];
             fallback_allowed: boolean;
@@ -3536,6 +3600,8 @@ export interface components {
             source?: string | null;
             /** @enum {string} */
             content_type: "pdf" | "raw";
+            /** @description Required for native RAW jobs and rejected for PDF jobs. Both identifiers must exactly match a printer-bound capability reported by the destination node; application/octet-stream alone is never a language claim. */
+            printer_native?: components["schemas"]["PrinterNativeJobDescriptor"];
             content: {
                 /** @constant */
                 type: "upload";
@@ -3566,6 +3632,10 @@ export interface components {
             /** @description Digest returned by resolvePrintIntent. Required when submitting a resolved professional workflow. */
             resolved_ticket_digest?: components["schemas"]["Sha256Hex"];
         } & (unknown | unknown);
+        PrinterNativeJobDescriptor: {
+            output_profile_id: string;
+            language_profile_id: string;
+        };
         /** @description A dedicated node content-encryption public key. This is not, and must never be substituted with, the node's Ed25519 authentication/signing key. Recipient discovery and encrypted-job submission are Preview contracts; the plaintext job endpoint does not accept this object. */
         EncryptedJobRecipientKey: {
             key_id: string;
@@ -4373,6 +4443,8 @@ export interface components {
              */
             executor_crashes?: number;
             last_error_code?: string | null;
+            /** @description Last authenticated print-packet capability report; missing on legacy API deployments. */
+            document_render?: components["schemas"]["DocumentRenderCapabilities"];
         };
         Webhook: {
             id: string;
@@ -4665,8 +4737,11 @@ export interface components {
             last?: components["schemas"]["BusinessDocumentNode"][];
         };
         BusinessDocumentV1: {
-            /** @constant */
-            format: "piqae.business-document/v1";
+            /**
+             * @description New documents use printpacket/v1. The Piqae identifier is a frozen lossless input alias.
+             * @enum {string}
+             */
+            format: "printpacket/v1" | "piqae.business-document/v1";
             media: {
                 /** @constant */
                 kind: "paged";
@@ -4739,7 +4814,10 @@ export interface components {
             template_id: string;
             specification: components["schemas"]["BusinessDocumentV1"];
             revision: number;
-            /** @constant */
+            /**
+             * @description Frozen persistence-era renderer profile identifier; packet negotiation uses the specification and conformance fields.
+             * @constant
+             */
             renderer_profile: "piqae.business-document/v1";
             /** Format: date-time */
             created_at: string;
@@ -4804,10 +4882,17 @@ export interface components {
             requested_policy: components["schemas"]["BusinessDocumentRenderPolicy"];
             /** @enum {string} */
             selected_mode: "cloud_pdf" | "node_render";
+            /** @enum {string} */
+            status: "ready" | "fallback_ready" | "node_update_required";
             reason: string;
+            /** @description True only when the immutable completed PDF may be delivered under the requested policy. */
+            approved_pdf_fallback: boolean;
             destination: {
                 supported: boolean;
                 ready: boolean;
+                missing_features: string[];
+                supported_packet_versions: string[];
+                current_implementation: string | null;
                 missing_resources: components["schemas"]["Sha256Hex"][];
                 reason: string | null;
             };

@@ -4953,6 +4953,18 @@ async fn materialize_installed_offer(
     if !printer_is_allowed(cloud.allowed_printer_ids.as_ref(), &logical_printer_id) {
         return Err(CloudWorkerError::new("printer_not_granted"));
     }
+    if offer.job.content_kind == ContentKind::Raw
+        && (!offer
+            .job
+            .metadata
+            .contains_key("piqae.printer_native.output_profile")
+            || !offer
+                .job
+                .metadata
+                .contains_key("piqae.printer_native.language_profile"))
+    {
+        return Err(CloudWorkerError::new("printer_native_descriptor_required"));
+    }
     let profile_pin = profile_pin_metadata(&offer.job.metadata)
         .map_err(|_| CloudWorkerError::new("profile_pin_invalid"))?;
     if matches!(&offer.content, ContentDescriptor::EncryptedDownload { .. })
@@ -5884,7 +5896,25 @@ async fn materialize_descriptor(
             fallback_allowed,
             decision_reason: _,
         } => {
-            let rendered = if render.renderer_abi == RENDERER_ABI
+            let neutral = printpacket::RendererCapabilities::reference_pdf();
+            let supported_features = neutral
+                .features
+                .iter()
+                .map(print_packet_feature_id)
+                .collect::<Vec<_>>();
+            let rendered = if render.negotiation_version == 2
+                && matches!(
+                    render.packet_version.as_str(),
+                    printpacket::DOCUMENT_V1 | printpacket::LEGACY_PIQAE_DOCUMENT_V1
+                )
+                && render
+                    .required_feature_ids
+                    .iter()
+                    .all(|required| supported_features.contains(required))
+                && render.conformance_profile == printpacket::CONFORMANCE_CORE_V1
+                && render.output_profile == printpacket::PDF_BASE14_V1
+                && render.expected_page_count > 0
+                && render.renderer_abi == RENDERER_ABI
                 && render.resource_abi == RESOURCE_ABI
             {
                 let specification: printpacket_renderer::PrintPacketV1 =
@@ -6199,6 +6229,13 @@ fn redacted_sync_error_code(error: &ClientError) -> Option<String> {
     error.unauthorized_code().map(str::to_owned)
 }
 
+fn print_packet_feature_id(feature: &printpacket::Feature) -> String {
+    serde_json::to_value(feature)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_else(|| "invalid_feature_serialization".into())
+}
+
 fn sync_request(
     store: &AgentStore,
     agent_id: AgentId,
@@ -6253,6 +6290,45 @@ fn sync_request(
             // independently authorized connectors. Never disclose membership
             // across those tenant boundaries; offers still get local hits.
             cached_resource_digests: Vec::new(),
+            print_packet: Some({
+                let local = NodeDocumentCapabilities::local();
+                let neutral = printpacket::RendererCapabilities::reference_pdf();
+                piqae_protocol::agent::PrintPacketCapabilitiesV2 {
+                    negotiation_version: 2,
+                    supported_packet_versions: vec![
+                        printpacket::DOCUMENT_V1.into(),
+                        // Frozen compatibility alias for already-published
+                        // templates. New requirements use printpacket/v1.
+                        printpacket::LEGACY_PIQAE_DOCUMENT_V1.into(),
+                    ],
+                    feature_ids: neutral
+                        .features
+                        .iter()
+                        .map(print_packet_feature_id)
+                        .collect(),
+                    conformance_profiles: neutral.conformance_suites.into_iter().collect(),
+                    output_profiles: vec![piqae_protocol::agent::PrintPacketOutputProfile::Pdf {
+                        id: printpacket::PDF_BASE14_V1.into(),
+                        media_type: "application/pdf".into(),
+                    }],
+                    deterministic: local.deterministic,
+                    limits: piqae_protocol::agent::PrintPacketLimits {
+                        max_input_bytes: neutral.limits.max_data_bytes,
+                        max_output_bytes: neutral.limits.max_output_bytes,
+                        max_pages: neutral.limits.max_pages,
+                        max_resource_count: neutral.limits.max_resources,
+                        max_resource_bytes: neutral.limits.max_resource_bytes,
+                        max_total_resource_bytes: neutral.limits.max_total_resource_bytes,
+                    },
+                    resource_types: neutral.resource_media_types.into_iter().collect(),
+                    direct_offline: neutral.direct_offline_rendering,
+                    // Native languages are printer/driver specific. The node
+                    // does not claim one until a reviewed support pack binds
+                    // it to exact printer IDs.
+                    native_language_profiles: Vec::new(),
+                    implementation_version: neutral.implementation_version,
+                }
+            }),
         },
         capabilities: piqae_protocol::agent::AgentProtocolCapabilities {
             features: vec![

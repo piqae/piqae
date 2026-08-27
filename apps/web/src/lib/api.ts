@@ -274,7 +274,22 @@ export function createLiveApi(
     lastSeenAt: agent.last_seen_at,
     queueDepth: 0,
     printerCount: 0,
-    labels: agent.labels ?? []
+    labels: agent.labels ?? [],
+    printPacket: (() => {
+      const capability = agent.document_render?.print_packet;
+      const ready = capability?.negotiation_version === 2
+        && capability.supported_packet_versions.includes('printpacket/v1')
+        && capability.deterministic
+        && capability.output_profiles.some(
+          (profile) => profile.kind === 'pdf' && profile.media_type === 'application/pdf'
+        );
+      return {
+        status: ready ? 'ready' : 'node_update_required',
+        supportedPacketVersions: capability?.supported_packet_versions ?? [],
+        implementationVersion: capability?.implementation_version ?? null,
+        directOffline: capability?.direct_offline ?? false
+      };
+    })()
   });
 
   const toRuntimeObservation = (

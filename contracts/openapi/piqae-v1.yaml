@@ -4803,6 +4803,116 @@ components:
           maxItems: 256
           uniqueItems: true
           items: { $ref: "#/components/schemas/Sha256Hex" }
+        print_packet:
+          description: >-
+            Version 2 print-packet negotiation. Missing means the node predates
+            print-packet negotiation and is treated as unsupported_old_node;
+            legacy renderer fields never imply support for this contract.
+          oneOf:
+            - { $ref: "#/components/schemas/PrintPacketCapabilitiesV2" }
+            - { type: "null" }
+    PrintPacketCapabilitiesV2:
+      type: object
+      additionalProperties: false
+      required:
+        - negotiation_version
+        - supported_packet_versions
+        - feature_ids
+        - conformance_profiles
+        - output_profiles
+        - deterministic
+        - limits
+        - resource_types
+        - direct_offline
+        - native_language_profiles
+        - implementation_version
+      properties:
+        negotiation_version: { type: integer, const: 2 }
+        supported_packet_versions:
+          type: array
+          minItems: 1
+          maxItems: 16
+          uniqueItems: true
+          items: { type: string, minLength: 1, maxLength: 128 }
+        feature_ids:
+          type: array
+          maxItems: 256
+          uniqueItems: true
+          items: { type: string, pattern: '^[a-z][a-z0-9._-]{0,127}$' }
+        conformance_profiles:
+          type: array
+          maxItems: 32
+          uniqueItems: true
+          items: { type: string, pattern: '^[a-z][a-z0-9._/-]{0,127}$' }
+        output_profiles:
+          type: array
+          minItems: 1
+          maxItems: 32
+          items: { $ref: "#/components/schemas/PrintPacketOutputProfile" }
+        deterministic:
+          type: boolean
+          description: True only when the declared deterministic output profile is byte-stable.
+        limits: { $ref: "#/components/schemas/PrintPacketLimits" }
+        resource_types:
+          type: array
+          maxItems: 32
+          uniqueItems: true
+          items: { type: string, minLength: 1, maxLength: 64 }
+        direct_offline:
+          type: boolean
+          description: Diagnostic fact; it does not authorize cloud delivery or background execution.
+        native_language_profiles:
+          type: array
+          maxItems: 32
+          items: { $ref: "#/components/schemas/PrinterNativeLanguageProfile" }
+        implementation_version:
+          type: string
+          minLength: 1
+          maxLength: 128
+          description: Display-only implementation/build diagnostic; never used instead of exact capability intersection.
+    PrintPacketLimits:
+      type: object
+      additionalProperties: false
+      required: [max_input_bytes, max_output_bytes, max_pages, max_resource_count, max_resource_bytes, max_total_resource_bytes]
+      properties:
+        max_input_bytes: { type: integer, format: int64, minimum: 1, maximum: 52428800 }
+        max_output_bytes: { type: integer, format: int64, minimum: 1, maximum: 524288000 }
+        max_pages: { type: integer, format: int64, minimum: 1, maximum: 100000 }
+        max_resource_count: { type: integer, format: int64, minimum: 0, maximum: 1000 }
+        max_resource_bytes: { type: integer, format: int64, minimum: 1, maximum: 52428800 }
+        max_total_resource_bytes: { type: integer, format: int64, minimum: 1, maximum: 524288000 }
+    PrintPacketOutputProfile:
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [id, kind, media_type]
+          properties:
+            id: { type: string, pattern: '^[a-z][a-z0-9._/-]{0,127}$' }
+            kind: { const: pdf }
+            media_type: { const: application/pdf }
+        - type: object
+          additionalProperties: false
+          required: [id, kind, media_type, language_profile_id]
+          properties:
+            id: { type: string, pattern: '^[a-z][a-z0-9._/-]{0,127}$' }
+            kind: { const: printer_native }
+            media_type: { type: string, minLength: 1, maxLength: 64 }
+            language_profile_id: { type: string, pattern: '^[a-z][a-z0-9._/-]{0,127}$' }
+    PrinterNativeLanguageProfile:
+      type: object
+      additionalProperties: false
+      required: [id, language, version, media_type, printer_ids]
+      properties:
+        id: { type: string, pattern: '^[a-z][a-z0-9._/-]{0,127}$' }
+        language: { type: string, pattern: '^[a-z][a-z0-9._-]{0,63}$' }
+        version: { type: string, minLength: 1, maxLength: 64 }
+        media_type: { type: string, minLength: 1, maxLength: 64 }
+        printer_ids:
+          type: array
+          minItems: 1
+          maxItems: 256
+          uniqueItems: true
+          items: { type: string, minLength: 1, maxLength: 128 }
     AgentSyncResponse:
       type: object
       required:
@@ -4917,8 +5027,17 @@ components:
             render:
               type: object
               additionalProperties: false
-              required: [renderer_abi, resource_abi, specification, input, resources, expected_pdf_sha256, expected_pdf_bytes]
+              required: [negotiation_version, packet_version, required_feature_ids, conformance_profile, output_profile, renderer_abi, resource_abi, specification, input, resources, expected_pdf_sha256, expected_pdf_bytes, expected_page_count]
               properties:
+                negotiation_version: { type: integer, const: 2 }
+                packet_version: { type: string, const: printpacket/v1 }
+                required_feature_ids:
+                  type: array
+                  maxItems: 256
+                  uniqueItems: true
+                  items: { type: string, pattern: '^[a-z][a-z0-9._-]{0,127}$' }
+                conformance_profile: { type: string, const: printpacket.conformance/core-v1 }
+                output_profile: { type: string, const: printpacket.pdf-base14/v1 }
                 renderer_abi: { type: string, const: piqae.business-document-pdf/v1 }
                 resource_abi: { type: string, const: piqae.document-resources/v1 }
                 specification: { $ref: "#/components/schemas/BusinessDocumentV1" }
@@ -4929,6 +5048,7 @@ components:
                   items: { $ref: "#/components/schemas/BusinessDocumentResourceDescriptor" }
                 expected_pdf_sha256: { $ref: "#/components/schemas/Sha256Hex" }
                 expected_pdf_bytes: { type: integer, format: int64, minimum: 1 }
+                expected_page_count: { type: integer, format: int64, minimum: 1, maximum: 100000 }
             fallback: { $ref: "#/components/schemas/ContentDescriptor" }
             fallback_allowed: { type: boolean }
             decision_reason: { type: string, maxLength: 128 }
@@ -5124,6 +5244,12 @@ components:
         content_type:
           type: string
           enum: [pdf, raw]
+        printer_native:
+          description: >-
+            Required for native RAW jobs and rejected for PDF jobs. Both identifiers
+            must exactly match a printer-bound capability reported by the destination
+            node; application/octet-stream alone is never a language claim.
+          $ref: "#/components/schemas/PrinterNativeJobDescriptor"
         content:
           oneOf:
             - type: object
@@ -5181,6 +5307,13 @@ components:
         resolved_ticket_digest:
           $ref: "#/components/schemas/Sha256Hex"
           description: Digest returned by resolvePrintIntent. Required when submitting a resolved professional workflow.
+    PrinterNativeJobDescriptor:
+      type: object
+      additionalProperties: false
+      required: [output_profile_id, language_profile_id]
+      properties:
+        output_profile_id: { type: string, pattern: '^[a-z][a-z0-9._/-]{0,127}$' }
+        language_profile_id: { type: string, pattern: '^[a-z][a-z0-9._/-]{0,127}$' }
     EncryptedJobRecipientKey:
       type: object
       additionalProperties: false
@@ -6493,6 +6626,9 @@ components:
         sqlite_integrity_ok: { type: [boolean, "null"] }
         executor_crashes: { type: integer, format: int64, minimum: 0, default: 0 }
         last_error_code: { type: [string, "null"] }
+        document_render:
+          $ref: "#/components/schemas/DocumentRenderCapabilities"
+          description: Last authenticated print-packet capability report; missing on legacy API deployments.
     Webhook:
       type: object
       required: [id, url, events, enabled, created_at]
@@ -6639,7 +6775,10 @@ components:
       additionalProperties: false
       required: [format, media, body]
       properties:
-        format: { const: piqae.business-document/v1 }
+        format:
+          type: string
+          enum: [printpacket/v1, piqae.business-document/v1]
+          description: New documents use printpacket/v1. The Piqae identifier is a frozen lossless input alias.
         media:
           oneOf:
             - { type: object, additionalProperties: false, required: [kind, size], properties: { kind: { const: paged }, size: { enum: [a4, a5, letter] }, orientation: { enum: [portrait, landscape], default: portrait }, margins: { $ref: "#/components/schemas/BusinessDocumentEdges" } } }
@@ -6699,7 +6838,10 @@ components:
         template_id: { type: string }
         specification: { $ref: "#/components/schemas/BusinessDocumentV1" }
         revision: { type: integer, minimum: 1 }
-        renderer_profile: { type: string, const: piqae.business-document/v1 }
+        renderer_profile:
+          type: string
+          const: piqae.business-document/v1
+          description: Frozen persistence-era renderer profile identifier; packet negotiation uses the specification and conformance fields.
         created_at: { type: string, format: date-time }
     CreateBusinessDocumentRender:
       type: object
@@ -6773,18 +6915,33 @@ components:
     BusinessDocumentRenderReadiness:
       type: object
       additionalProperties: false
-      required: [requested_policy, selected_mode, reason, destination, estimates]
+      required: [requested_policy, selected_mode, status, reason, approved_pdf_fallback, destination, estimates]
       properties:
         requested_policy: { $ref: "#/components/schemas/BusinessDocumentRenderPolicy" }
         selected_mode: { type: string, enum: [cloud_pdf, node_render] }
+        status: { type: string, enum: [ready, fallback_ready, node_update_required] }
         reason: { type: string, maxLength: 128 }
+        approved_pdf_fallback:
+          type: boolean
+          description: True only when the immutable completed PDF may be delivered under the requested policy.
         destination:
           type: object
           additionalProperties: false
-          required: [supported, ready, missing_resources, reason]
+          required: [supported, ready, missing_features, supported_packet_versions, current_implementation, missing_resources, reason]
           properties:
             supported: { type: boolean }
             ready: { type: boolean }
+            missing_features:
+              type: array
+              maxItems: 256
+              uniqueItems: true
+              items: { type: string, pattern: '^[a-z][a-z0-9._-]{0,127}$' }
+            supported_packet_versions:
+              type: array
+              maxItems: 16
+              uniqueItems: true
+              items: { type: string, minLength: 1, maxLength: 128 }
+            current_implementation: { type: [string, "null"], maxLength: 128 }
             missing_resources:
               type: array
               maxItems: 64

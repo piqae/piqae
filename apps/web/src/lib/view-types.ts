@@ -46,6 +46,12 @@ export interface DashboardAgent {
   queueDepth: number;
   printerCount: number;
   labels: string[];
+  printPacket?: {
+    status: 'ready' | 'node_update_required';
+    supportedPacketVersions: string[];
+    implementationVersion: string | null;
+    directOffline: boolean;
+  };
 }
 
 export type DashboardNodeHostMode =

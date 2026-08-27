@@ -1813,6 +1813,9 @@ pub struct CreateJobRequest {
     pub title: String,
     pub source: Option<String>,
     pub content_type: ContentKind,
+    /// Required language/output binding for printer-native bytes. Plain
+    /// `raw` is not a language and is never routed without this descriptor.
+    pub printer_native: Option<piqae_protocol::agent::PrinterNativeJobDescriptor>,
     pub content: ContentSource,
     #[serde(default)]
     pub options: JobOptions,
@@ -1921,6 +1924,8 @@ async fn create_job_impl(
     let tenant = authenticate_native(&state, &headers, Scope::JobsWrite).await?;
     validate_create(&request, allow_reserved_metadata)?;
     let destination = resolve_job_destination(&state, tenant, &request).await?;
+    let printer_native_metadata =
+        validate_printer_native_job(&state, tenant, &request, &destination).await?;
     let resolved_ticket = validate_resolved_ticket(&state, tenant, &request, &destination).await?;
     validate_encrypted_job(&state, tenant, &request, &destination).await?;
     let request_bytes = serde_json::to_vec(&request)?;
@@ -1929,6 +1934,7 @@ async fn create_job_impl(
         persist_job_content(&state, tenant, request.content_type, request.content).await?;
     let mut metadata = request.metadata;
     metadata.extend(destination.metadata);
+    metadata.extend(printer_native_metadata);
     if let Some(ticket) = resolved_ticket {
         metadata.insert(
             "piqae.capability_revision".into(),
@@ -3076,6 +3082,28 @@ pub async fn agent_sync(
     };
     let mut candidate_jobs = Vec::with_capacity(leases.len());
     for lease in leases {
+        if lease.job.content_kind == ContentKind::Raw
+            && !supports_printer_native_offer(
+                &request.document_render,
+                &lease.job.metadata,
+                &lease.job.printer_id.to_string(),
+            )
+        {
+            // Capabilities can change after registration. Never offer opaque
+            // native bytes after the exact printer/language binding disappears.
+            state
+                .repository
+                .release_agent_lease(
+                    tenant.workspace_id,
+                    tenant.environment_id,
+                    request.agent_id,
+                    lease.job.id,
+                    lease.lease_id,
+                    &lease.lease_token,
+                )
+                .await?;
+            continue;
+        }
         let route_reservation = match crate::destination_topology::reserve_job_route(
             &state,
             tenant,
@@ -3255,6 +3283,44 @@ pub async fn agent_sync(
                 render_id,
             )
             .await?;
+            if !supports_business_document_offer(&request.document_render, &render) {
+                if fallback_allowed {
+                    // Capability changed after registration. Preserve the
+                    // already-approved PDF without leaking a descriptor to a
+                    // legacy or now-incompatible node.
+                    candidate_jobs.push(JobOffer {
+                        expected_capability_revision: lease
+                            .job
+                            .metadata
+                            .get("piqae.capability_revision")
+                            .and_then(|revision| revision.parse().ok()),
+                        resolved_ticket_digest: lease
+                            .job
+                            .metadata
+                            .get("piqae.resolved_ticket_digest")
+                            .cloned(),
+                        job: lease.job,
+                        lease_id: lease.lease_id,
+                        lease_token: lease.lease_token,
+                        lease_expires_at: lease.lease_until,
+                        content,
+                        route_reservation,
+                    });
+                    continue;
+                }
+                state
+                    .repository
+                    .release_agent_lease(
+                        tenant.workspace_id,
+                        tenant.environment_id,
+                        request.agent_id,
+                        lease.job.id,
+                        lease.lease_id,
+                        &lease.lease_token,
+                    )
+                    .await?;
+                continue;
+            }
             content = ContentDescriptor::BusinessDocument {
                 policy,
                 render: Box::new(render),
@@ -3308,6 +3374,90 @@ pub async fn agent_sync(
     }))
 }
 
+fn supports_business_document_offer(
+    capabilities: &piqae_protocol::agent::DocumentRenderCapabilities,
+    render: &piqae_protocol::agent::BusinessDocumentNodeRender,
+) -> bool {
+    let Some(packet) = capabilities.print_packet.as_ref() else {
+        return false;
+    };
+    let input_bytes = serde_json::to_vec(&render.input)
+        .ok()
+        .and_then(|value| u64::try_from(value.len()).ok())
+        .unwrap_or(u64::MAX);
+    let resource_count = u32::try_from(render.resources.len()).unwrap_or(u32::MAX);
+    let total_resource_bytes = render.resources.iter().fold(0_u64, |total, resource| {
+        total.saturating_add(resource.byte_length)
+    });
+    packet.negotiation_version == render.negotiation_version
+        && packet
+            .supported_packet_versions
+            .contains(&render.packet_version)
+        && render
+            .required_feature_ids
+            .iter()
+            .all(|feature| packet.feature_ids.contains(feature))
+        && packet
+            .conformance_profiles
+            .contains(&render.conformance_profile)
+        && packet.output_profiles.iter().any(|profile| {
+            matches!(
+                profile,
+                piqae_protocol::agent::PrintPacketOutputProfile::Pdf { id, media_type }
+                    if id == &render.output_profile && media_type == "application/pdf"
+            )
+        })
+        && packet.deterministic
+        && capabilities.renderer_abi.as_deref() == Some(render.renderer_abi.as_str())
+        && capabilities.resource_abi.as_deref() == Some(render.resource_abi.as_str())
+        && input_bytes <= packet.limits.max_input_bytes
+        && render.expected_pdf_bytes <= packet.limits.max_output_bytes
+        && render.expected_page_count > 0
+        && render.expected_page_count <= packet.limits.max_pages
+        && resource_count <= packet.limits.max_resource_count
+        && total_resource_bytes <= packet.limits.max_total_resource_bytes
+        && render.resources.iter().all(|resource| {
+            resource.byte_length <= packet.limits.max_resource_bytes
+                && packet.resource_types.contains(&resource.media_type)
+                && capabilities
+                    .image_media_types
+                    .contains(&resource.media_type)
+        })
+}
+
+fn supports_printer_native_offer(
+    capabilities: &piqae_protocol::agent::DocumentRenderCapabilities,
+    metadata: &BTreeMap<String, String>,
+    printer_id: &str,
+) -> bool {
+    let (Some(output_id), Some(language_id), Some(packet)) = (
+        metadata.get("piqae.printer_native.output_profile"),
+        metadata.get("piqae.printer_native.language_profile"),
+        capabilities.print_packet.as_ref(),
+    ) else {
+        return false;
+    };
+    let language = packet.native_language_profiles.iter().find(|profile| {
+        profile.id == *language_id
+            && profile
+                .printer_ids
+                .iter()
+                .any(|supported| supported == printer_id)
+    });
+    packet.output_profiles.iter().any(|profile| {
+        matches!(
+            profile,
+            piqae_protocol::agent::PrintPacketOutputProfile::PrinterNative {
+                id,
+                media_type,
+                language_profile_id,
+            } if id == output_id
+                && language_profile_id == language_id
+                && language.is_some_and(|language| &language.media_type == media_type)
+        )
+    })
+}
+
 fn validate_document_render_capabilities(
     value: &piqae_protocol::agent::DocumentRenderCapabilities,
 ) -> Result<&piqae_protocol::agent::DocumentRenderCapabilities, AppError> {
@@ -3319,6 +3469,96 @@ fn validate_document_render_capabilities(
     let valid_media = |values: &[String]| {
         values.len() <= 16 && values.iter().all(|v| v.len() <= 64 && v.is_ascii())
     };
+    let valid_id = |value: &str, slash: bool| {
+        !value.is_empty()
+            && value.len() <= 128
+            && value.bytes().enumerate().all(|(index, byte)| {
+                byte.is_ascii_lowercase()
+                    || byte.is_ascii_digit()
+                    || (index > 0 && matches!(byte, b'.' | b'_' | b'-'))
+                    || (slash && index > 0 && byte == b'/')
+            })
+            && value.as_bytes()[0].is_ascii_lowercase()
+    };
+    let unique = |values: &[String]| values.iter().collect::<BTreeSet<_>>().len() == values.len();
+    let valid_packet = value.print_packet.as_ref().is_none_or(|packet| {
+        let output_ids = packet
+            .output_profiles
+            .iter()
+            .map(piqae_protocol::agent::PrintPacketOutputProfile::id)
+            .collect::<BTreeSet<_>>();
+        let language_ids = packet
+            .native_language_profiles
+            .iter()
+            .map(|profile| profile.id.as_str())
+            .collect::<BTreeSet<_>>();
+        packet.negotiation_version == 2
+            && (1..=16).contains(&packet.supported_packet_versions.len())
+            && unique(&packet.supported_packet_versions)
+            && packet
+                .supported_packet_versions
+                .iter()
+                .all(|version| !version.is_empty() && version.len() <= 128 && version.is_ascii())
+            && packet.feature_ids.len() <= 256
+            && unique(&packet.feature_ids)
+            && packet.feature_ids.iter().all(|id| valid_id(id, false))
+            && packet.conformance_profiles.len() <= 32
+            && unique(&packet.conformance_profiles)
+            && packet
+                .conformance_profiles
+                .iter()
+                .all(|id| valid_id(id, true))
+            && (1..=32).contains(&packet.output_profiles.len())
+            && output_ids.len() == packet.output_profiles.len()
+            && packet.output_profiles.iter().all(|profile| match profile {
+                piqae_protocol::agent::PrintPacketOutputProfile::Pdf { id, media_type } => {
+                    valid_id(id, true) && media_type == "application/pdf"
+                }
+                piqae_protocol::agent::PrintPacketOutputProfile::PrinterNative {
+                    id,
+                    media_type,
+                    language_profile_id,
+                } => {
+                    valid_id(id, true)
+                        && valid_media_type(media_type)
+                        && valid_id(language_profile_id, true)
+                        && language_ids.contains(language_profile_id.as_str())
+                }
+            })
+            && packet.limits.max_input_bytes <= 52_428_800
+            && packet.limits.max_input_bytes > 0
+            && packet.limits.max_output_bytes <= 524_288_000
+            && packet.limits.max_output_bytes > 0
+            && (1..=100_000).contains(&packet.limits.max_pages)
+            && packet.limits.max_resource_count <= 1_000
+            && (1..=52_428_800).contains(&packet.limits.max_resource_bytes)
+            && (1..=524_288_000).contains(&packet.limits.max_total_resource_bytes)
+            && packet.limits.max_resource_bytes <= packet.limits.max_total_resource_bytes
+            && packet.resource_types.len() <= 32
+            && unique(&packet.resource_types)
+            && packet
+                .resource_types
+                .iter()
+                .all(|media| media == "image/jpeg")
+            && packet.native_language_profiles.len() <= 32
+            && language_ids.len() == packet.native_language_profiles.len()
+            && packet.native_language_profiles.iter().all(|profile| {
+                valid_id(&profile.id, true)
+                    && valid_id(&profile.language, false)
+                    && !profile.version.is_empty()
+                    && profile.version.len() <= 64
+                    && profile.version.is_ascii()
+                    && valid_media_type(&profile.media_type)
+                    && (1..=256).contains(&profile.printer_ids.len())
+                    && unique(&profile.printer_ids)
+                    && profile.printer_ids.iter().all(|id| {
+                        !id.is_empty() && id.len() <= 128 && id.is_ascii() && id.starts_with("ptr_")
+                    })
+            })
+            && !packet.implementation_version.is_empty()
+            && packet.implementation_version.len() <= 128
+            && packet.implementation_version.is_ascii()
+    });
     if !valid_text(&value.renderer_abi)
         || !valid_text(&value.resource_abi)
         || !valid_media(&value.image_media_types)
@@ -3334,6 +3574,7 @@ fn validate_document_render_capabilities(
                 || !digest.bytes().all(|b| b.is_ascii_hexdigit())
                 || digest != &digest.to_ascii_lowercase()
         })
+        || !valid_packet
     {
         return Err(AppError::invalid(
             "invalid_document_render_capabilities",
@@ -3341,6 +3582,20 @@ fn validate_document_render_capabilities(
         ));
     }
     Ok(value)
+}
+
+fn valid_media_type(value: &str) -> bool {
+    let Some((kind, subtype)) = value.split_once('/') else {
+        return false;
+    };
+    !kind.is_empty()
+        && !subtype.is_empty()
+        && value.len() <= 64
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase()
+                || byte.is_ascii_digit()
+                || matches!(byte, b'/' | b'.' | b'+' | b'-')
+        })
 }
 
 fn adaptive_poll_after_ms(request: &AgentSyncRequest, has_immediate_work: bool) -> u64 {
@@ -3383,8 +3638,65 @@ fn adaptive_poll_with_jitter(uptime_seconds: i64, has_immediate_work: bool, seed
     reason = "adaptive polling tests stay adjacent to the private policy helper"
 )]
 mod adaptive_poll_tests {
-    use super::{adaptive_poll_with_jitter, validate_document_render_capabilities};
-    use piqae_protocol::agent::DocumentRenderCapabilities;
+    use super::{
+        adaptive_poll_with_jitter, supports_printer_native_offer,
+        validate_document_render_capabilities,
+    };
+    use piqae_protocol::agent::{
+        DocumentRenderCapabilities, PrintPacketCapabilitiesV2, PrintPacketLimits,
+        PrintPacketOutputProfile, PrinterNativeLanguageProfile,
+    };
+
+    fn packet_capabilities() -> DocumentRenderCapabilities {
+        DocumentRenderCapabilities {
+            renderer_abi: Some("piqae.business-document-pdf/v1".into()),
+            resource_abi: Some("piqae.document-resources/v1".into()),
+            persistent_cache: true,
+            font_rendering: false,
+            image_media_types: vec!["image/jpeg".into()],
+            font_media_types: vec![],
+            cached_resource_digests: vec!["a".repeat(64)],
+            print_packet: Some(PrintPacketCapabilitiesV2 {
+                negotiation_version: 2,
+                supported_packet_versions: vec![
+                    "printpacket/v1".into(),
+                    "piqae.business-document/v1".into(),
+                ],
+                feature_ids: vec!["typography_base14_windows1252".into()],
+                conformance_profiles: vec!["printpacket.conformance/core-v1".into()],
+                output_profiles: vec![
+                    PrintPacketOutputProfile::Pdf {
+                        id: "printpacket.pdf-base14/v1".into(),
+                        media_type: "application/pdf".into(),
+                    },
+                    PrintPacketOutputProfile::PrinterNative {
+                        id: "escpos.generic/v1".into(),
+                        media_type: "application/vnd.escpos".into(),
+                        language_profile_id: "escpos.generic/v1".into(),
+                    },
+                ],
+                deterministic: true,
+                limits: PrintPacketLimits {
+                    max_input_bytes: 1024,
+                    max_output_bytes: 4096,
+                    max_pages: 2,
+                    max_resource_count: 1,
+                    max_resource_bytes: 1024,
+                    max_total_resource_bytes: 1024,
+                },
+                resource_types: vec!["image/jpeg".into()],
+                direct_offline: true,
+                native_language_profiles: vec![PrinterNativeLanguageProfile {
+                    id: "escpos.generic/v1".into(),
+                    language: "escpos".into(),
+                    version: "1".into(),
+                    media_type: "application/vnd.escpos".into(),
+                    printer_ids: vec!["ptr_fixture".into()],
+                }],
+                implementation_version: "0.1.22".into(),
+            }),
+        }
+    }
 
     #[test]
     fn document_renderer_capabilities_are_truthful_and_bounded() {
@@ -3396,6 +3708,7 @@ mod adaptive_poll_tests {
             image_media_types: vec!["image/jpeg".into()],
             font_media_types: vec![],
             cached_resource_digests: vec!["a".repeat(64)],
+            print_packet: None,
         };
         assert!(validate_document_render_capabilities(&supported).is_ok());
         let mut unsupported = supported.clone();
@@ -3405,6 +3718,48 @@ mod adaptive_poll_tests {
         let mut unsupported = supported;
         unsupported.image_media_types = vec!["image/png".into()];
         assert!(validate_document_render_capabilities(&unsupported).is_err());
+    }
+
+    #[test]
+    fn print_packet_capabilities_are_exact_bounded_and_printer_scoped() {
+        let supported = packet_capabilities();
+        assert!(validate_document_render_capabilities(&supported).is_ok());
+
+        let metadata = std::collections::BTreeMap::from([
+            (
+                "piqae.printer_native.output_profile".into(),
+                "escpos.generic/v1".into(),
+            ),
+            (
+                "piqae.printer_native.language_profile".into(),
+                "escpos.generic/v1".into(),
+            ),
+        ]);
+        assert!(supports_printer_native_offer(
+            &supported,
+            &metadata,
+            "ptr_fixture"
+        ));
+        assert!(!supports_printer_native_offer(
+            &supported,
+            &metadata,
+            "ptr_other"
+        ));
+
+        let mut duplicate = supported.clone();
+        if let Some(packet) = &mut duplicate.print_packet {
+            packet.feature_ids = vec![
+                "typography_base14_windows1252".into(),
+                "typography_base14_windows1252".into(),
+            ];
+        }
+        assert!(validate_document_render_capabilities(&duplicate).is_err());
+
+        let mut unbound = supported;
+        if let Some(packet) = &mut unbound.print_packet {
+            packet.native_language_profiles.clear();
+        }
+        assert!(validate_document_render_capabilities(&unbound).is_err());
     }
 
     #[test]
@@ -4031,7 +4386,104 @@ fn validate_create(
             "Native RAW jobs cannot include driver options.",
         ));
     }
+    match (request.content_type, request.printer_native.as_ref()) {
+        (ContentKind::Raw, None) => {
+            return Err(AppError::invalid(
+                "printer_native_descriptor_required",
+                "Native RAW jobs require an exact printer-native output and language profile.",
+            ));
+        }
+        (ContentKind::Pdf, Some(_)) => {
+            return Err(AppError::invalid(
+                "printer_native_descriptor_not_allowed",
+                "A printer-native descriptor cannot be attached to a PDF job.",
+            ));
+        }
+        (ContentKind::Raw, Some(_)) | (ContentKind::Pdf, None) => {}
+    }
     Ok(())
+}
+
+async fn validate_printer_native_job(
+    state: &AppState,
+    tenant: TenantContext,
+    request: &CreateJobRequest,
+    destination: &ResolvedJobDestination,
+) -> Result<BTreeMap<String, String>, AppError> {
+    let Some(descriptor) = request.printer_native.as_ref() else {
+        return Ok(BTreeMap::new());
+    };
+    if matches!(request.content, ContentSource::EncryptedUpload { .. }) {
+        return Err(AppError::invalid(
+            "encrypted_printer_native_unsupported",
+            "Encrypted job v3 does not bind printer-native language profiles.",
+        ));
+    }
+    let capabilities = match state
+        .repository
+        .document_render_capabilities_for_printer(
+            tenant.workspace_id,
+            tenant.environment_id,
+            destination.printer_id,
+        )
+        .await
+    {
+        Ok(capabilities) => capabilities,
+        Err(RepositoryError::NotFound) => {
+            return Err(AppError::conflict(
+                "printer_native_capability_unavailable",
+                "The destination node must be online with a current printer-native capability report.",
+            ));
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let packet = capabilities.print_packet.as_ref().ok_or_else(|| {
+        AppError::conflict(
+            "node_update_required",
+            "The destination node predates language-bound printer-native jobs.",
+        )
+    })?;
+    let output = packet
+        .output_profiles
+        .iter()
+        .find_map(|profile| match profile {
+            piqae_protocol::agent::PrintPacketOutputProfile::PrinterNative {
+                id,
+                media_type,
+                language_profile_id,
+            } if id == &descriptor.output_profile_id
+                && language_profile_id == &descriptor.language_profile_id =>
+            {
+                Some(media_type)
+            }
+            _ => None,
+        });
+    let language = packet.native_language_profiles.iter().find(|profile| {
+        profile.id == descriptor.language_profile_id
+            && profile
+                .printer_ids
+                .iter()
+                .any(|printer_id| printer_id == &destination.printer_id.to_string())
+    });
+    if output.is_none()
+        || language.is_none()
+        || output != language.map(|profile| &profile.media_type)
+    {
+        return Err(AppError::conflict(
+            "printer_native_profile_unsupported",
+            "The exact printer/output/language profile is not currently advertised by this destination.",
+        ));
+    }
+    Ok(BTreeMap::from([
+        (
+            "piqae.printer_native.output_profile".into(),
+            descriptor.output_profile_id.clone(),
+        ),
+        (
+            "piqae.printer_native.language_profile".into(),
+            descriptor.language_profile_id.clone(),
+        ),
+    ]))
 }
 
 async fn validate_resolved_ticket(

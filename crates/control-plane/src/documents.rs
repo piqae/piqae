@@ -94,7 +94,9 @@ struct RenderReadinessRequest {
 struct RenderReadinessResponse {
     requested_policy: RenderPolicy,
     selected_mode: &'static str,
+    status: &'static str,
     reason: &'static str,
+    approved_pdf_fallback: bool,
     destination: DestinationReadiness,
     estimates: RenderEstimates,
 }
@@ -102,6 +104,9 @@ struct RenderReadinessResponse {
 struct DestinationReadiness {
     supported: bool,
     ready: bool,
+    missing_features: Vec<String>,
+    supported_packet_versions: Vec<String>,
+    current_implementation: Option<String>,
     missing_resources: Vec<String>,
     reason: Option<&'static str>,
 }
@@ -114,6 +119,17 @@ struct RenderEstimates {
 const MAX_DOCUMENT_BYTES: usize = 1024 * 1024;
 const MAX_JSON_DEPTH: usize = 64;
 const MAX_JSON_NODES: usize = 50_000;
+const PRINT_PACKET_NEGOTIATION_VERSION: u16 = 2;
+const PRINT_PACKET_VERSION: &str = printpacket::DOCUMENT_V1;
+const PRINT_PACKET_CONFORMANCE_PROFILE: &str = printpacket::CONFORMANCE_CORE_V1;
+const PRINT_PACKET_OUTPUT_PROFILE: &str = printpacket::PDF_BASE14_V1;
+
+fn print_packet_feature_id(feature: &printpacket::Feature) -> String {
+    serde_json::to_value(feature)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_else(|| "invalid_feature_serialization".into())
+}
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -270,6 +286,8 @@ async fn create_template(
     let idempotency_key = required_idempotency_key(&headers)?;
     validate_name(&request.name)?;
     let plaintext = validate_document_spec(&request.specification)?;
+    let normalized_specification = serde_json::from_slice(&plaintext)
+        .map_err(|_| AppError::service_unavailable("invalid_normalized_document"))?;
     let id = stable_id(
         "dtpl",
         &tenant.workspace_id.to_string(),
@@ -308,7 +326,7 @@ async fn create_template(
             name: stored.name,
             state: stored.state,
             published_revision_id: stored.published_revision_id,
-            specification: request.specification,
+            specification: normalized_specification,
             created_at: stored.created_at,
             updated_at: stored.updated_at,
         }),
@@ -647,12 +665,72 @@ async fn evaluate_readiness(
         pdf_bytes: payload.expected_pdf_bytes,
         input_bytes,
     };
+    let packet = capabilities.print_packet.as_ref();
+    let supported_packet_versions = packet
+        .map(|packet| packet.supported_packet_versions.clone())
+        .unwrap_or_default();
+    let current_implementation = packet.map(|packet| packet.implementation_version.clone());
+    let missing_features = payload
+        .required_feature_ids
+        .iter()
+        .filter(|feature| {
+            packet.is_none_or(|packet| {
+                !packet
+                    .feature_ids
+                    .iter()
+                    .any(|supported| supported == *feature)
+            })
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let negotiation_supported =
+        packet.is_some_and(|packet| packet.negotiation_version == PRINT_PACKET_NEGOTIATION_VERSION);
+    let packet_version_supported = packet.is_some_and(|packet| {
+        packet
+            .supported_packet_versions
+            .iter()
+            .any(|version| version == &payload.packet_version)
+    });
+    let conformance_supported = packet.is_some_and(|packet| {
+        packet
+            .conformance_profiles
+            .iter()
+            .any(|profile| profile == &payload.conformance_profile)
+    });
+    let output_supported = packet.is_some_and(|packet| {
+        packet.output_profiles.iter().any(|profile| {
+            matches!(
+                profile,
+                piqae_protocol::agent::PrintPacketOutputProfile::Pdf { id, media_type }
+                    if id == &payload.output_profile && media_type == "application/pdf"
+            )
+        })
+    });
+    let deterministic = packet.is_some_and(|packet| packet.deterministic);
     let abi_supported = capabilities.renderer_abi.as_deref() == Some(payload.renderer_abi.as_str())
         && capabilities.resource_abi.as_deref() == Some(payload.resource_abi.as_str());
-    let media_supported = payload.resources.iter().all(|resource| {
-        capabilities
-            .image_media_types
-            .contains(&resource.media_type)
+    let media_supported = packet.is_some_and(|packet| {
+        payload.resources.iter().all(|resource| {
+            packet.resource_types.contains(&resource.media_type)
+                && capabilities
+                    .image_media_types
+                    .contains(&resource.media_type)
+        })
+    });
+    let resource_count = u32::try_from(payload.resources.len()).unwrap_or(u32::MAX);
+    let total_resource_bytes = payload.resources.iter().fold(0_u64, |total, resource| {
+        total.saturating_add(resource.byte_length)
+    });
+    let limits_supported = packet.is_some_and(|packet| {
+        input_bytes <= packet.limits.max_input_bytes
+            && payload.expected_pdf_bytes <= packet.limits.max_output_bytes
+            && payload.expected_page_count <= packet.limits.max_pages
+            && resource_count <= packet.limits.max_resource_count
+            && total_resource_bytes <= packet.limits.max_total_resource_bytes
+            && payload
+                .resources
+                .iter()
+                .all(|resource| resource.byte_length <= packet.limits.max_resource_bytes)
     });
     let missing_resources = payload
         .resources
@@ -666,16 +744,30 @@ async fn evaluate_readiness(
         .collect::<Vec<_>>();
     // Missing cache entries are downloadable through the authenticated lease;
     // they mean a cold/warming node, not an incompatible node.
-    let ready = abi_supported && media_supported;
+    let supported = negotiation_supported
+        && packet_version_supported
+        && missing_features.is_empty()
+        && conformance_supported
+        && output_supported
+        && deterministic
+        && abi_supported
+        && media_supported
+        && limits_supported;
+    let ready = supported;
     let (mut selected_mode, mut reason) =
         if measured.page_count == 0 && matches!(policy, RenderPolicy::Automatic) {
             ("cloud_pdf", "automatic_missing_authoritative_page_count")
         } else {
             render_decision(policy, Some(&measured))
         };
-    if selected_mode == "node_render" && !ready && !matches!(policy, RenderPolicy::RequireNode) {
+    let approved_pdf_fallback = !matches!(policy, RenderPolicy::RequireNode);
+    if selected_mode == "node_render" && !ready && approved_pdf_fallback {
         selected_mode = "cloud_pdf";
-        reason = "node_not_ready_pdf_fallback";
+        reason = if packet.is_none() {
+            "unsupported_old_node_pdf_fallback"
+        } else {
+            "node_not_ready_pdf_fallback"
+        };
     }
     let (cloud_ms, node_ms) = Some(&measured).map_or((0, 0), |value| {
         (
@@ -686,24 +778,58 @@ async fn evaluate_readiness(
                 .saturating_add(u64::from(value.document_count).saturating_mul(2)),
         )
     });
-    let destination_reason = if ready && missing_resources.is_empty() {
-        None
-    } else if ready {
-        Some("resources_warming")
+    let destination_reason = if packet.is_none() {
+        Some("unsupported_old_node")
+    } else if !negotiation_supported {
+        Some("negotiation_version_unsupported")
+    } else if !packet_version_supported {
+        Some("packet_version_unsupported")
+    } else if !missing_features.is_empty() {
+        Some("packet_features_unsupported")
+    } else if !conformance_supported {
+        Some("conformance_profile_unsupported")
+    } else if !output_supported {
+        Some("output_profile_unsupported")
+    } else if !deterministic {
+        Some("deterministic_output_unavailable")
     } else if !abi_supported {
         Some("renderer_abi_unavailable")
     } else if !media_supported {
         Some("resource_media_type_unsupported")
+    } else if !limits_supported {
+        Some("packet_limits_exceeded")
+    } else if ready && missing_resources.is_empty() {
+        None
+    } else if ready {
+        Some("resources_warming")
     } else {
         Some("resources_not_cached")
+    };
+    let requires_node_update = packet.is_none()
+        || !negotiation_supported
+        || !packet_version_supported
+        || !missing_features.is_empty()
+        || !conformance_supported
+        || !output_supported;
+    let status = if ready {
+        "ready"
+    } else if requires_node_update || !approved_pdf_fallback {
+        "node_update_required"
+    } else {
+        "fallback_ready"
     };
     Ok(RenderReadinessResponse {
         requested_policy: policy,
         selected_mode,
+        status,
         reason,
+        approved_pdf_fallback,
         destination: DestinationReadiness {
-            supported: abi_supported && media_supported,
+            supported,
             ready,
+            missing_features,
+            supported_packet_versions,
+            current_implementation,
             missing_resources,
             reason: destination_reason,
         },
@@ -990,6 +1116,7 @@ async fn print_render(
             title: request.title,
             source: Some("piqae.documents".into()),
             content_type: ContentKind::Pdf,
+            printer_native: None,
             content: ContentSource::Upload { upload_id },
             options: request.options,
             deliveries: request.deliveries,
@@ -1356,6 +1483,14 @@ pub(crate) async fn node_render_payload(
         })
         .collect::<Result<Vec<_>, AppError>>()?;
     Ok(BusinessDocumentNodeRender {
+        negotiation_version: PRINT_PACKET_NEGOTIATION_VERSION,
+        packet_version: PRINT_PACKET_VERSION.into(),
+        required_feature_ids: printpacket::required_features(&specification)
+            .iter()
+            .map(print_packet_feature_id)
+            .collect(),
+        conformance_profile: PRINT_PACKET_CONFORMANCE_PROFILE.into(),
+        output_profile: PRINT_PACKET_OUTPUT_PROFILE.into(),
         renderer_abi: "piqae.business-document-pdf/v1".into(),
         resource_abi: "piqae.document-resources/v1".into(),
         specification: serde_json::from_slice(&spec_bytes)

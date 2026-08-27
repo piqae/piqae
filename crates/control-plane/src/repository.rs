@@ -3701,6 +3701,7 @@ impl MemoryRepository {
                     sqlite_integrity_ok: None,
                     executor_crashes: 0,
                     last_error_code: None,
+                    document_render: Default::default(),
                 },
             ),
         );
@@ -4649,6 +4650,7 @@ impl Repository for MemoryRepository {
         agent.sqlite_integrity_ok = Some(health.sqlite_integrity_ok);
         agent.executor_crashes = health.executor_crashes;
         agent.last_error_code.clone_from(&health.last_error_code);
+        agent.document_render.clone_from(document_render);
         state
             .document_render_capabilities
             .insert(agent_id, document_render.clone());
@@ -4692,7 +4694,7 @@ impl Repository for MemoryRepository {
             .printers
             .get(&(workspace_id, environment_id, printer_id))
             .ok_or(RepositoryError::NotFound)?;
-        let _agent = state
+        let (_, _, agent) = state
             .agents
             .get(&printer.agent_id)
             .ok_or(RepositoryError::NotFound)?;
@@ -4700,7 +4702,7 @@ impl Repository for MemoryRepository {
             .document_render_capabilities
             .get(&printer.agent_id)
             .cloned()
-            .unwrap_or_default())
+            .unwrap_or_else(|| agent.document_render.clone()))
     }
     async fn register_business_document_resource(
         &self,
@@ -5985,6 +5987,7 @@ impl Repository for MemoryRepository {
             sqlite_integrity_ok: None,
             executor_crashes: 0,
             last_error_code: None,
+            document_render: Default::default(),
         };
         state
             .agents
@@ -6069,6 +6072,7 @@ impl Repository for MemoryRepository {
                     sqlite_integrity_ok: None,
                     executor_crashes: 0,
                     last_error_code: None,
+                    document_render: Default::default(),
                 },
             ),
         );
@@ -8112,6 +8116,7 @@ mod routing_repository_tests {
                     sqlite_integrity_ok: None,
                     executor_crashes: 0,
                     last_error_code: None,
+                    document_render: Default::default(),
                 },
             ),
         );
@@ -8709,6 +8714,7 @@ mod routing_repository_tests {
                     sqlite_integrity_ok: None,
                     executor_crashes: 0,
                     last_error_code: None,
+                    document_render: Default::default(),
                 },
             ),
         );
@@ -8805,6 +8811,7 @@ mod routing_repository_tests {
                         sqlite_integrity_ok: None,
                         executor_crashes: 0,
                         last_error_code: None,
+                        document_render: Default::default(),
                     },
                 ),
             );
@@ -8994,6 +9001,7 @@ mod routing_repository_tests {
                     sqlite_integrity_ok: None,
                     executor_crashes: 0,
                     last_error_code: None,
+                    document_render: Default::default(),
                 },
             ),
         );
