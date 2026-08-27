@@ -273,6 +273,12 @@ CREATE TABLE IF NOT EXISTS jobs (
   loaded_media_snapshot_json TEXT CHECK (
     loaded_media_snapshot_json IS NULL OR json_valid(loaded_media_snapshot_json)
   ),
+  profile_snapshot_json TEXT CHECK (
+    profile_snapshot_json IS NULL OR json_valid(profile_snapshot_json)
+  ),
+  printer_native_binding_json TEXT CHECK (
+    printer_native_binding_json IS NULL OR json_valid(printer_native_binding_json)
+  ),
   UNIQUE (printer_id, printer_sequence)
 );
 

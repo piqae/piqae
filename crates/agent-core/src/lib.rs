@@ -5,7 +5,9 @@
 //! handoff policy around a replaceable [`Executor`].
 
 use async_trait::async_trait;
-use piqae_agent_storage::{AcceptedJob, AgentStore, LocalJob, StorageError};
+use piqae_agent_storage::{
+    AcceptedJob, AgentStore, JobPersistenceFacts, LocalJob, PrinterNativeBindingPin, StorageError,
+};
 use piqae_domain::{
     DriverFingerprint, EventId, JobOptions, JobState, NativeProfileKind, SafeProfileOverride,
     validate_transition,
@@ -48,14 +50,24 @@ pub enum AgentError {
 pub struct LocalSubmission {
     pub job_id: String,
     pub submission_id: String,
+    pub printer_id: String,
     pub printer_native_id: String,
     pub title: String,
     pub content_path: PathBuf,
     pub content_kind: String,
     pub options: JobOptions,
     pub native_profile: Option<NativeProfilePayload>,
+    pub printer_native_binding: Option<PrinterNativeBindingPin>,
     pub deadline_unix_ms: i64,
     pub route_fence: Option<piqae_protocol::executor::LocalRouteFence>,
+}
+
+/// Executor-ready profile data stored atomically with cloud responsibility.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum DurableProfileSnapshot {
+    Portable { profile_id: String, revision: u64 },
+    Native { payload: Box<NativeProfilePayload> },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -361,6 +373,19 @@ impl<E: Executor, C: Clock> AgentEngine<E, C> {
         Ok(self.store.accept_job(job)?)
     }
 
+    /// Durably accepts responsibility together with all immutable execution facts.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the atomic local acceptance fails or conflicts.
+    pub fn accept_with_facts(
+        &mut self,
+        job: &AcceptedJob,
+        facts: &JobPersistenceFacts,
+    ) -> Result<LocalJob, AgentError> {
+        Ok(self.store.accept_job_with_facts(job, facts)?)
+    }
+
     pub const fn store(&self) -> &AgentStore {
         &self.store
     }
@@ -442,12 +467,14 @@ impl<E: Executor, C: Clock> AgentEngine<E, C> {
         let submission = LocalSubmission {
             job_id: job.job_id.clone(),
             submission_id: job.submission_id,
+            printer_id: job.printer_id,
             printer_native_id: job.printer_native_id,
             title: job.title,
             content_path: Path::new(&job.content_path).to_path_buf(),
             content_kind: job.content_kind,
             options,
             native_profile,
+            printer_native_binding: job.printer_native_binding,
             deadline_unix_ms: self.clock.unix_ms() + self.execution_deadline_ms,
             route_fence: None,
         };
@@ -588,6 +615,7 @@ impl<E: Executor, C: Clock> AgentEngine<E, C> {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     fn native_profile_for_job(
         &self,
         job: &LocalJob,
@@ -602,6 +630,36 @@ impl<E: Executor, C: Clock> AgentEngine<E, C> {
                 )));
             }
         };
+        if let Some(encoded) = &job.profile_snapshot_json {
+            let snapshot =
+                serde_json::from_str::<DurableProfileSnapshot>(encoded).map_err(|error| {
+                    AgentError::InvalidNativeProfile(format!(
+                        "job {} has an invalid durable profile snapshot: {error}",
+                        job.job_id
+                    ))
+                })?;
+            return match snapshot {
+                DurableProfileSnapshot::Portable {
+                    profile_id: snapshot_id,
+                    revision: snapshot_revision,
+                } if snapshot_id == *profile_id && snapshot_revision == revision => Ok(None),
+                DurableProfileSnapshot::Native { payload }
+                    if payload.profile_id == *profile_id && payload.revision == revision =>
+                {
+                    Ok(Some(*payload))
+                }
+                _ => Err(AgentError::InvalidNativeProfile(format!(
+                    "job {} durable profile snapshot does not match its revision pin",
+                    job.job_id
+                ))),
+            };
+        }
+        if job.cloud_managed {
+            return Err(AgentError::InvalidNativeProfile(format!(
+                "job {} is missing its durable profile snapshot",
+                job.job_id
+            )));
+        }
         let metadata = self
             .store
             .named_profile_revision(&job.printer_id, profile_id, revision)?
@@ -1028,6 +1086,25 @@ mod tests {
         }
     }
 
+    fn raw_facts() -> JobPersistenceFacts {
+        JobPersistenceFacts {
+            printer_native_binding: Some(PrinterNativeBindingPin {
+                process_session_id: "virtual-session".into(),
+                generation: 1,
+                printer_id: "printer".into(),
+                output_profile_id: "virtual/raw-v1".into(),
+                language_profile_id: "virtual/raw-v1".into(),
+                language: "virtual".into(),
+                language_version: "1".into(),
+                profile_version: "1.0.0".into(),
+                media_type: "application/vnd.piqae.virtual-raw".into(),
+                driver_fingerprint_sha256: "a".repeat(64),
+                support_pack_digest_sha256: "b".repeat(64),
+            }),
+            ..JobPersistenceFacts::default()
+        }
+    }
+
     fn observation(state: NativeJobState) -> NativeJobObservation {
         NativeJobObservation {
             state,
@@ -1291,7 +1368,9 @@ mod tests {
         };
         let store = AgentStore::in_memory().expect("store");
         let mut engine = AgentEngine::new(store, executor, FixedClock(10));
-        engine.accept(&accepted("job", "raw")).expect("accept");
+        engine
+            .accept_with_facts(&accepted("job", "raw"), &raw_facts())
+            .expect("accept");
         engine.run_once().await.expect("run");
         assert_eq!(
             engine
@@ -1381,7 +1460,9 @@ mod tests {
         };
         let store = AgentStore::in_memory().expect("store");
         let mut engine = AgentEngine::new(store, executor, FixedClock(10));
-        engine.accept(&accepted("job", "raw")).expect("accept");
+        engine
+            .accept_with_facts(&accepted("job", "raw"), &raw_facts())
+            .expect("accept");
         engine.run_once().await.expect("submit");
 
         let (store, executor, _) = engine.into_parts();
@@ -1419,7 +1500,9 @@ mod tests {
         let database = directory.path().join("agent.sqlite3");
         let store = AgentStore::open(&database).expect("store");
         let mut engine = AgentEngine::new(store, FakeExecutor::default(), FixedClock(10));
-        engine.accept(&accepted("job", "raw")).expect("accept");
+        engine
+            .accept_with_facts(&accepted("job", "raw"), &raw_facts())
+            .expect("accept");
         engine.run_once().await.expect("submit");
         drop(engine);
 
@@ -1449,7 +1532,9 @@ mod tests {
         };
         let store = AgentStore::in_memory().expect("store");
         let mut engine = AgentEngine::new(store, executor, FixedClock(10));
-        engine.accept(&accepted("job", "raw")).expect("accept");
+        engine
+            .accept_with_facts(&accepted("job", "raw"), &raw_facts())
+            .expect("accept");
         engine.run_once().await.expect("submit");
         let (store, executor, _) = engine.into_parts();
         let deadline = 10 + AgentEngine::<FakeExecutor, FixedClock>::DEFAULT_UNCERTAINTY_AFTER_MS;
@@ -1470,7 +1555,9 @@ mod tests {
     async fn active_cancellation_runs_through_executor() {
         let store = AgentStore::in_memory().expect("store");
         let mut engine = AgentEngine::new(store, FakeExecutor::default(), FixedClock(10));
-        engine.accept(&accepted("job", "raw")).expect("accept");
+        engine
+            .accept_with_facts(&accepted("job", "raw"), &raw_facts())
+            .expect("accept");
         engine.run_once().await.expect("submit");
         engine
             .store_mut()
